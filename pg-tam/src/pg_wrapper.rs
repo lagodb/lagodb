@@ -1,5 +1,6 @@
 use pgrx::PgTryBuilder;
 use pgrx::pg_sys;
+use pgrx::varlena;
 use std::ffi::CStr;
 use std::panic::AssertUnwindSafe;
 use thiserror::Error;
@@ -11,6 +12,15 @@ pub enum PgWrapperError {
 
     #[error("Postgres error: {0}")]
     PostgresError(String),
+}
+
+/// Result of a catalog tuple update operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogUpdateResult {
+    /// The update succeeded.
+    Success,
+    /// The update failed due to a concurrent modification (optimistic lock conflict).
+    Conflict,
 }
 
 pub struct PgWrapper;
@@ -179,6 +189,47 @@ impl PgWrapper {
         }
     }
 
+    pub fn catalog_tuple_update_optimistic(
+        relation: pg_sys::Relation,
+        otid: *mut pg_sys::ItemPointerData,
+        tuple: pg_sys::HeapTuple,
+    ) -> Result<CatalogUpdateResult, PgWrapperError> {
+        let relation = AssertUnwindSafe(relation);
+        let otid = AssertUnwindSafe(otid);
+        let tuple = AssertUnwindSafe(tuple);
+        unsafe {
+            PgTryBuilder::new(move || {
+                // CatalogTupleUpdate is exported and correctly handles index updates.
+                // It calls simple_heap_update which may throw an ERROR.
+                pg_sys::CatalogTupleUpdate(*relation, *otid, *tuple);
+                Ok(CatalogUpdateResult::Success)
+            })
+            .catch_others(|err| {
+                // Use the CaughtError provided by PgTryBuilder instead of calling CopyErrorData again.
+                // Extract the error message from the caught error.
+                let error_msg = format!("{:?}", err);
+
+                // From simple_heap_update:
+                // TM_Updated -> elog(ERROR, "tuple concurrently updated");
+                let is_conflict = error_msg.contains("tuple concurrently updated");
+
+                // According to pgrx source code documentation:
+                // "This should be called by an error handler after it's done processing
+                // the error... You are not 'out' of the error subsystem until you have done this."
+                //
+                // CRITICAL: We must call FlushErrorState() when we handle the error without rethrowing.
+                pg_sys::FlushErrorState();
+
+                if is_conflict {
+                    Ok(CatalogUpdateResult::Conflict)
+                } else {
+                    Err(PgWrapperError::PostgresError(error_msg))
+                }
+            })
+            .execute()
+        }
+    }
+
     pub fn search_sys_cache_copy(
         cache_id: i32,
         key1: pg_sys::Datum,
@@ -315,6 +366,90 @@ impl PgWrapper {
             })
             .execute()
         }
+    }
+
+    /// Rust wrapper for the C macro `ReleaseTupleDesc`.
+    ///
+    /// Releases a tuple descriptor reference. Equivalent to:
+    /// ```c
+    /// #define ReleaseTupleDesc(tupdesc) \
+    ///     do { \
+    ///         if ((tupdesc)->tdrefcount >= 0) \
+    ///             DecrTupleDescRefCount(tupdesc); \
+    ///     } while (0)
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `tupdesc` is a valid pointer to a TupleDescData.
+    pub unsafe fn release_tuple_desc(tupdesc: pg_sys::TupleDesc) {
+        unsafe {
+            if (*tupdesc).tdrefcount >= 0 {
+                pg_sys::DecrTupleDescRefCount(tupdesc);
+            }
+        }
+    }
+
+    /// Rust wrapper for the C macro `DatumGetHeapTupleHeader`.
+    ///
+    /// Equivalent to:
+    /// ```c
+    /// #define DatumGetHeapTupleHeader(X)  ((HeapTupleHeader) PG_DETOAST_DATUM(X))
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `datum` is a valid pointer to a composite type.
+    pub unsafe fn datum_get_heap_tuple_header(
+        datum: pg_sys::Datum,
+    ) -> pg_sys::HeapTupleHeader {
+        unsafe {
+            pg_sys::pg_detoast_datum(datum.cast_mut_ptr()) as pg_sys::HeapTupleHeader
+        }
+    }
+
+    /// Rust wrapper for the C macro `HeapTupleHeaderGetTypeId`.
+    pub unsafe fn heap_tuple_header_get_type_id(
+        header: pg_sys::HeapTupleHeader,
+    ) -> pg_sys::Oid {
+        unsafe { (*header).t_choice.t_datum.datum_typeid }
+    }
+
+    /// Rust wrapper for the C macro `HeapTupleHeaderGetTypMod`.
+    pub unsafe fn heap_tuple_header_get_typmod(
+        header: pg_sys::HeapTupleHeader,
+    ) -> i32 {
+        unsafe { (*header).t_choice.t_datum.datum_typmod }
+    }
+
+    /// Rust wrapper for the C macro `HeapTupleHeaderGetDatumLength`.
+    pub unsafe fn heap_tuple_header_get_datum_length(
+        header: pg_sys::HeapTupleHeader,
+    ) -> u32 {
+        unsafe { varlena::varsize(header as *const pg_sys::varlena) as u32 }
+    }
+
+    /// Encodes precision and scale into a PostgreSQL NUMERIC type modifier.
+    ///
+    /// The encoding follows the PostgreSQL convention:
+    /// `((precision << 16) | scale) + VARHDRSZ`
+    pub fn numeric_typmod(precision: u32, scale: u32) -> i32 {
+        (((precision as i32) << 16) | ((scale as i32) & 0x7FF))
+            + pg_sys::VARHDRSZ as i32
+    }
+
+    /// Decodes precision and scale from a PostgreSQL NUMERIC type modifier.
+    ///
+    /// Returns `None` if the typmod is less than 0 (e.g., -1 when not specified).
+    pub fn numeric_precision_scale(typmod: i32) -> Option<(u32, u32)> {
+        if typmod < 0 {
+            return None;
+        }
+
+        let adjusted = (typmod - pg_sys::VARHDRSZ as i32) as u32;
+        let precision = (adjusted >> 16) & 0xFFFF;
+        let scale = adjusted & 0x7FF;
+        Some((precision, scale))
     }
 
     /// Rust wrapper for the C macro `ScanKeyInit`.

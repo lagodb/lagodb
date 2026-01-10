@@ -1,0 +1,132 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_begin s1_insert_l1 s1_savepoint_sp1 s1_insert_l2 s1_savepoint_sp2 s1_insert_l3 s1_rollback_sp2 s1_insert_l2b s1_commit s1_verify s3_count
+step s1_begin: BEGIN;
+step s1_insert_l1: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (1, 's1', 1, 'level1'); 
+
+step s1_savepoint_sp1: SAVEPOINT sp1;
+step s1_insert_l2: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (2, 's1', 2, 'level2'); 
+
+step s1_savepoint_sp2: SAVEPOINT sp2;
+step s1_insert_l3: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (3, 's1', 3, 'level3'); 
+
+step s1_rollback_sp2: ROLLBACK TO sp2;
+step s1_insert_l2b: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (4, 's1', 2, 'level2_after_rollback'); 
+
+step s1_commit: COMMIT;
+step s1_verify: 
+  SELECT id, savepoint_level, value 
+  FROM iceberg_test.savepoint_test 
+  WHERE session_name = 's1'
+  ORDER BY id; 
+
+id|savepoint_level|value                
+--+---------------+---------------------
+ 1|              1|level1               
+ 2|              2|level2               
+ 4|              2|level2_after_rollback
+(3 rows)
+
+step s3_count: 
+  SELECT count(*) as total, count(DISTINCT session_name) as sessions
+  FROM iceberg_test.savepoint_test; 
+
+total|sessions
+-----+--------
+    3|       1
+(1 row)
+
+
+starting permutation: s1_begin s1_insert_l1 s1_savepoint_sp1 s1_insert_l2 s2_begin s2_insert s2_commit s1_savepoint_sp2 s1_insert_l3 s1_rollback_sp2 s1_commit s1_verify s3_count
+step s1_begin: BEGIN;
+step s1_insert_l1: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (1, 's1', 1, 'level1'); 
+
+step s1_savepoint_sp1: SAVEPOINT sp1;
+step s1_insert_l2: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (2, 's1', 2, 'level2'); 
+
+step s2_begin: BEGIN;
+step s2_insert: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (100, 's2', 0, 'concurrent'); 
+
+step s2_commit: COMMIT;
+step s1_savepoint_sp2: SAVEPOINT sp2;
+step s1_insert_l3: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (3, 's1', 3, 'level3'); 
+
+step s1_rollback_sp2: ROLLBACK TO sp2;
+step s1_commit: COMMIT;
+step s1_verify: 
+  SELECT id, savepoint_level, value 
+  FROM iceberg_test.savepoint_test 
+  WHERE session_name = 's1'
+  ORDER BY id; 
+
+id|savepoint_level|value 
+--+---------------+------
+ 1|              1|level1
+ 2|              2|level2
+(2 rows)
+
+step s3_count: 
+  SELECT count(*) as total, count(DISTINCT session_name) as sessions
+  FROM iceberg_test.savepoint_test; 
+
+total|sessions
+-----+--------
+    2|       1
+(1 row)
+
+
+starting permutation: s1_begin s1_insert_l1 s1_savepoint_sp1 s2_begin s2_insert s1_insert_l2 s2_commit s1_commit s1_verify s3_count
+step s1_begin: BEGIN;
+step s1_insert_l1: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (1, 's1', 1, 'level1'); 
+
+step s1_savepoint_sp1: SAVEPOINT sp1;
+step s2_begin: BEGIN;
+step s2_insert: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (100, 's2', 0, 'concurrent'); 
+
+step s1_insert_l2: 
+  INSERT INTO iceberg_test.savepoint_test 
+  VALUES (2, 's1', 2, 'level2'); 
+
+step s2_commit: COMMIT;
+step s1_commit: COMMIT;
+step s1_verify: 
+  SELECT id, savepoint_level, value 
+  FROM iceberg_test.savepoint_test 
+  WHERE session_name = 's1'
+  ORDER BY id; 
+
+id|savepoint_level|value 
+--+---------------+------
+ 1|              1|level1
+ 2|              2|level2
+(2 rows)
+
+step s3_count: 
+  SELECT count(*) as total, count(DISTINCT session_name) as sessions
+  FROM iceberg_test.savepoint_test; 
+
+total|sessions
+-----+--------
+    3|       2
+(1 row)
+

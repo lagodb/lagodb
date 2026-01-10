@@ -6,7 +6,7 @@
 //!
 //! # Background
 //!
-//! This is an implementation of `pg_tam::access::pending_delete::PendingDelete`
+//! This is an implementation of `pg_tam::access::xact::PendingDelete`
 //! tailored for Iceberg. It uses `iceberg_lite::io::FileIO` to physically
 //! remove table directories from storage (Local, S3, GCS, etc.) when
 //! the transaction reaches the appropriate state.
@@ -23,7 +23,7 @@
 
 use crate::storage::ObjectStorage;
 use crate::wal::record::log_delete_directory;
-use pg_tam::access::pending_delete::{PendingDelete, register_pending_delete};
+use pg_tam::access::xact::{PendingDelete, register_pending_delete};
 
 use iceberg_lite::io::FileIO;
 

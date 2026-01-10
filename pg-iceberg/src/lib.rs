@@ -5,7 +5,9 @@ use std::sync::OnceLock;
 
 mod access;
 pub mod catalog;
+pub mod constants;
 pub mod error;
+pub mod gucs;
 pub mod hooks;
 pub mod storage;
 pub mod wal;
@@ -15,9 +17,6 @@ use access::dml::IcebergModify;
 use access::index::IcebergIndex;
 use access::relation::IcebergRelation;
 use access::scan::IcebergScan;
-
-/// The access method name for Iceberg tables.
-pub const ICEBERG_AM_NAME: &str = "iceberg";
 
 /// Wrapper for raw pointer to make it Send + Sync.
 /// SAFETY: The TableAmRoutine pointer is allocated once in TopMemoryContext
@@ -66,8 +65,10 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
     setup_rustls_default_crypto_provider();
+    gucs::init();
     hooks::init_hooks();
     wal::init_wal_rmgr();
+    catalog::init_metadata_tracking();
 }
 
 // ============================================================================

@@ -1,5 +1,6 @@
-use pg_tam::option::tablespace_cache::TablespaceCacheError;
+use crate::catalog::iceberg_metadata::IcebergMetadataError;
 use pg_tam::option::TableOptionError;
+use pg_tam::option::tablespace_cache::TablespaceCacheError;
 use pg_tam::pg_wrapper::PgWrapperError;
 use pg_tam::prelude::{CreateRuntimeError, TablespaceError};
 use pgrx::pg_sys::panic::ErrorReport;
@@ -8,6 +9,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum IcebergError {
+    #[error("metadata error: {0}")]
+    MetadataError(#[from] IcebergMetadataError),
+
     #[error("tablespace error: {0}")]
     TablespaceError(#[from] TablespaceError),
 
@@ -51,7 +55,9 @@ pub enum IcebergError {
     ParseFloatError(#[from] std::num::ParseFloatError),
 
     #[error("datetime conversion error: {0}")]
-    DatetimeConversionError(#[from] pgrx::datum::datetime_support::DateTimeConversionError),
+    DatetimeConversionError(
+        #[from] pgrx::datum::datetime_support::DateTimeConversionError,
+    ),
 
     #[error("datum conversion error: {0}")]
     DatumConversionError(String),
@@ -63,10 +69,16 @@ pub enum IcebergError {
     NumericError(#[from] pgrx::datum::numeric_support::error::Error),
 
     #[error("iceberg error: {0}")]
-    IcebergError(#[from] iceberg_lite::Error),
+    IcebergLiteError(#[from] iceberg_lite::Error),
 
     #[error("arrow error: {0}")]
     ArrowError(#[from] arrow_schema::ArrowError),
+
+    #[error("arrow type mismatch: expected {0}")]
+    ArrowTypeMismatch(String),
+
+    #[error("SPI error: {0}")]
+    SpiError(String),
 
     #[error("json error: {0}")]
     JsonError(#[from] serde_json::Error),
@@ -87,7 +99,9 @@ impl From<IcebergError> for ErrorReport {
             IcebergError::TablespaceError(_)
             | IcebergError::TablespaceCacheError(_)
             | IcebergError::TableOptionError(_)
-            | IcebergError::TablespaceNotFound => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            | IcebergError::TablespaceNotFound => {
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+            }
 
             IcebergError::PgWrapperError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 
@@ -95,13 +109,19 @@ impl From<IcebergError> for ErrorReport {
                 PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
             }
 
-            IcebergError::SchemaBuildError(_) => PgSqlErrorCode::ERRCODE_INVALID_OBJECT_DEFINITION,
+            IcebergError::SchemaBuildError(_) => {
+                PgSqlErrorCode::ERRCODE_INVALID_OBJECT_DEFINITION
+            }
 
-            IcebergError::ColumnNotFound(_) => PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN,
+            IcebergError::ColumnNotFound(_) => {
+                PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN
+            }
 
             IcebergError::UnsupportedColumnType(_)
             | IcebergError::IncompatibleColumnType(_, _)
-            | IcebergError::ImportColumnError(_, _) => PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
+            | IcebergError::ImportColumnError(_, _) => {
+                PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
+            }
 
             IcebergError::DecimalConversionError(_)
             | IcebergError::ParseFloatError(_)
@@ -110,15 +130,24 @@ impl From<IcebergError> for ErrorReport {
             | IcebergError::UuidConversionError(_)
             | IcebergError::NumericError(_) => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
 
-            IcebergError::IcebergError(_)
+            IcebergError::IcebergLiteError(_)
             | IcebergError::ArrowError(_)
-            | IcebergError::JsonError(_) => PgSqlErrorCode::ERRCODE_FDW_ERROR,
+            | IcebergError::ArrowTypeMismatch(_)
+            | IcebergError::JsonError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 
-            IcebergError::CreateRuntimeError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            IcebergError::SpiError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+
+            IcebergError::CreateRuntimeError(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
 
             IcebergError::IoError(_) => PgSqlErrorCode::ERRCODE_IO_ERROR,
 
-            IcebergError::NotImplemented(_) => PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            IcebergError::NotImplemented(_) => {
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+            }
+
+            IcebergError::MetadataError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         };
         ErrorReport::new(error_code, format!("{value}"), "")
     }

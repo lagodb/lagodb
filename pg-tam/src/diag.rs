@@ -110,7 +110,7 @@ pub enum CreateRuntimeError {
 impl From<CreateRuntimeError> for ErrorReport {
     fn from(value: CreateRuntimeError) -> Self {
         let error_message = format!("{value}");
-        ErrorReport::new(PgSqlErrorCode::ERRCODE_FDW_ERROR, error_message, "")
+        ErrorReport::new(PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, error_message, "")
     }
 }
 

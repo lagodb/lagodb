@@ -62,9 +62,9 @@ pub mod catalog;
 
 /// The prelude includes all necessary imports to make pg_tam work
 pub mod prelude {
-    pub use crate::access::pending_delete::{
-        PendingDelete, init_xact_callback, pending_delete_size,
-        register_pending_delete,
+    pub use crate::access::xact::{
+        PendingDelete, TransactionResource, init_xact_callback, pending_delete_size,
+        register_pending_delete, register_resource,
     };
     pub use crate::api::*;
     pub use crate::data::*;

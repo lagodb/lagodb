@@ -15,7 +15,8 @@
 //! ```
 
 use pg_tam::catalog::LAKEHOUSE_SCHEMA;
-use pg_tam::pg_wrapper::PgWrapper;
+use pg_tam::handles::{SysScanGuard, TableGuard};
+use pg_tam::pg_wrapper::{CatalogUpdateResult, PgWrapper};
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
@@ -105,6 +106,9 @@ pub enum IcebergMetadataError {
 
     #[error("failed to read record: {0}")]
     ReadFailed(String),
+
+    #[error("optimistic locking failed: metadata location changed concurrently")]
+    Conflict,
 }
 
 impl From<IcebergMetadataError> for ErrorReport {
@@ -116,6 +120,9 @@ impl From<IcebergMetadataError> for ErrorReport {
             }
             IcebergMetadataError::AlreadyExists(_) => {
                 PgSqlErrorCode::ERRCODE_UNIQUE_VIOLATION
+            }
+            IcebergMetadataError::Conflict => {
+                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
             }
             _ => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         };
@@ -225,10 +232,13 @@ impl IcebergMetadata {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
-        unsafe {
-            let rel = PgWrapper::table_open(table_oid, pg_sys::AccessShareLock as _)
+        // RAII Guards automatically handle resources via Drop trait
+        let table_guard =
+            TableGuard::open(table_oid, pg_sys::AccessShareLock as _)
                 .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
+        let rel = table_guard.as_raw();
 
+        unsafe {
             let mut key: pg_sys::ScanKeyData = std::mem::zeroed();
             PgWrapper::scan_key_init(
                 &mut key,
@@ -248,6 +258,9 @@ impl IcebergMetadata {
             )
             .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
 
+            // Guard the scan to ensure systable_endscan is called
+            let _scan_guard = SysScanGuard::from_raw(scan);
+
             let tuple = PgWrapper::systable_getnext(scan)
                 .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
 
@@ -257,10 +270,7 @@ impl IcebergMetadata {
                 None
             };
 
-            PgWrapper::systable_endscan(scan)
-                .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
-            PgWrapper::table_close(rel, pg_sys::AccessShareLock as _)
-                .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
+            // Guards will automatically close scan and table
 
             Ok(result)
         }
@@ -275,16 +285,23 @@ impl IcebergMetadata {
     }
 
     /// Update this record in the `lakehouse.iceberg_metadata` table.
+    /// Performs an optimistic lock check against `expected_previous_location`.
     ///
-    /// Returns an error if the record does not exist.
-    pub fn update(&self) -> Result<(), IcebergMetadataError> {
+    /// Returns an error if the record does not exist or if the current metadata location
+    /// does not match `expected_previous_location`.
+    pub fn update(
+        &self,
+        expected_previous_location: Option<&str>,
+    ) -> Result<(), IcebergMetadataError> {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
-        unsafe {
-            let rel = PgWrapper::table_open(table_oid, pg_sys::RowExclusiveLock as _)
-                .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
+        // RAII Guards automatically handle resources via Drop trait
+        let table_guard = TableGuard::open(table_oid, pg_sys::RowExclusiveLock as _)
+            .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
+        let rel = table_guard.as_raw();
 
+        unsafe {
             // Find the existing tuple
             let mut key: pg_sys::ScanKeyData = std::mem::zeroed();
             PgWrapper::scan_key_init(
@@ -305,22 +322,29 @@ impl IcebergMetadata {
             )
             .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
 
+            // Guard the scan to ensure systable_endscan is called
+            let _scan_guard = SysScanGuard::from_raw(scan);
+
             let old_tuple = PgWrapper::systable_getnext(scan)
                 .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
 
             let old_tuple = match old_tuple {
                 Some(t) => t,
                 None => {
-                    PgWrapper::systable_endscan(scan).map_err(|e| {
-                        IcebergMetadataError::UpdateFailed(e.to_string())
-                    })?;
-                    PgWrapper::table_close(rel, pg_sys::RowExclusiveLock as _)
-                        .map_err(|e| {
-                            IcebergMetadataError::UpdateFailed(e.to_string())
-                        })?;
+                    // Guards will automatically close scan and table
                     return Err(IcebergMetadataError::NotFound(self.relid));
                 }
             };
+
+            // Optimistic Lock Check (CAS)
+            // Parse existing tuple to check current value
+            let existing_metadata = Self::from_tuple(rel, old_tuple)?;
+            if existing_metadata.metadata_location.as_deref()
+                != expected_previous_location
+            {
+                // Guards will automatically close scan and table
+                return Err(IcebergMetadataError::Conflict);
+            }
 
             // Prepare new values
             let tup_desc = (*rel).rd_att;
@@ -363,14 +387,29 @@ impl IcebergMetadata {
                 repls.as_mut_ptr(),
             );
 
-            PgWrapper::catalog_tuple_update(rel, &mut (*old_tuple).t_self, new_tuple)
-                .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
-
-            pg_sys::heap_freetuple(new_tuple);
-            PgWrapper::systable_endscan(scan)
-                .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
-            PgWrapper::table_close(rel, pg_sys::RowExclusiveLock as _)
-                .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
+            // Handle physical-level concurrent modification (PostgreSQL tuple version conflict)
+            // This complements the logical CAS check above - even if metadata_location matched
+            // our expectation, another transaction might have committed between our read and write.
+            // In this case, heap_update returns TM_Updated/TM_Deleted, and we return Conflict
+            // to trigger the retry/rebase logic in metadata_tracking.rs.
+            match PgWrapper::catalog_tuple_update_optimistic(
+                rel,
+                &mut (*old_tuple).t_self,
+                new_tuple,
+            ) {
+                Ok(CatalogUpdateResult::Success) => {
+                    pg_sys::heap_freetuple(new_tuple);
+                }
+                Ok(CatalogUpdateResult::Conflict) => {
+                    pg_sys::heap_freetuple(new_tuple);
+                    return Err(IcebergMetadataError::Conflict);
+                }
+                Err(e) => {
+                    pg_sys::heap_freetuple(new_tuple);
+                    return Err(IcebergMetadataError::UpdateFailed(e.to_string()));
+                }
+            }
+            // Guards will automatically close scan and table upon scope exit
         }
 
         Ok(())

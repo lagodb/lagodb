@@ -7,7 +7,6 @@ use iceberg_lite::catalog::{Catalog, NamespaceIdent, TableCreation};
 use iceberg_lite::spec::{FormatVersion, SortOrder, UnboundPartitionSpec};
 use pg_tam::handles::RelationHandle;
 use pg_tam::option::AmCache;
-use pg_tam::pg_wrapper::PgWrapper;
 use pgrx::pg_sys;
 
 use super::IcebergCatalog;
@@ -73,15 +72,13 @@ pub fn generate_table_location(
 pub fn init_table_storage_metadata(rel: &RelationHandle) -> IcebergResult<String> {
     let spc_oid = rel.tablespace_oid();
     let rel_namespace = rel.namespace_oid();
-    let rel_name = rel.relation_name();
 
     // Create storage context based on tablespace type
     let ctx = create_storage_context(spc_oid)?;
 
     let location = generate_table_location(rel, &ctx.base_path, ctx.is_distributed);
 
-    let nsp_name = PgWrapper::get_namespace_name(rel_namespace)?
-        .ok_or(IcebergError::NamespaceNull)?;
+    let nsp_name = rel_namespace.to_string();
 
     let schema = unsafe {
         let tup_desc = (*rel.as_raw()).rd_att;
@@ -97,9 +94,11 @@ pub fn init_table_storage_metadata(rel: &RelationHandle) -> IcebergResult<String
         _ => FormatVersion::V2,
     };
 
+    let rel_num = unsafe { (*rel.as_raw()).rd_locator.relNumber };
+
     // Build TableCreation with all required fields
     let creation = TableCreation::builder()
-        .name(rel_name)
+        .name(rel_num.to_string())
         .location(location.clone())
         .schema(schema)
         .properties(properties)
@@ -109,7 +108,7 @@ pub fn init_table_storage_metadata(rel: &RelationHandle) -> IcebergResult<String
         .build();
 
     // Create table in catalog and get the metadata location
-    let catalog = IcebergCatalog::new("PostgreSQL", ctx.file_io.clone());
+    let catalog = IcebergCatalog::new_pg(ctx.file_io.clone());
     let namespace = NamespaceIdent::new(nsp_name);
 
     let table = catalog.create_table(&namespace, creation)?;

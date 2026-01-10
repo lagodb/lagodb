@@ -1,0 +1,212 @@
+Parsed test spec with 5 sessions
+
+starting permutation: s1_insert_batch s2_insert_batch s1_commit s2_commit s1_verify s2_verify s5_final_verify
+step s1_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 1, 'session1_row_' || i 
+  FROM generate_series(1, 100) i; 
+
+step s2_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 2, 'session2_row_' || i 
+  FROM generate_series(1001, 1100) i; 
+
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+step s1_verify: 
+  SELECT session_id, count(*) as row_count 
+  FROM iceberg_test.txn_test 
+  GROUP BY session_id 
+  ORDER BY session_id; 
+
+session_id|row_count
+----------+---------
+         1|      100
+         2|      100
+(2 rows)
+
+step s2_verify: 
+  SELECT session_id, count(*) as row_count 
+  FROM iceberg_test.txn_test 
+  GROUP BY session_id 
+  ORDER BY session_id; 
+
+session_id|row_count
+----------+---------
+         1|      100
+         2|      100
+(2 rows)
+
+step s5_final_verify: 
+  SELECT 
+    count(*) as total_rows,
+    count(DISTINCT session_id) as unique_sessions,
+    min(id) as min_id,
+    max(id) as max_id
+  FROM iceberg_test.txn_test;
+
+total_rows|unique_sessions|min_id|max_id
+----------+---------------+------+------
+       200|              2|     1|  1100
+(1 row)
+
+
+starting permutation: s1_insert_batch s2_insert_batch s3_insert_batch s4_insert_batch s1_commit s2_commit s3_commit s4_commit s5_final_verify
+s3: WARNING:  there is already a transaction in progress
+s4: WARNING:  there is already a transaction in progress
+step s1_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 1, 'session1_row_' || i 
+  FROM generate_series(1, 100) i; 
+
+step s2_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 2, 'session2_row_' || i 
+  FROM generate_series(1001, 1100) i; 
+
+step s3_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 3, 'session3_row_' || i 
+  FROM generate_series(2001, 2100) i; 
+
+step s4_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 4, 'session4_row_' || i 
+  FROM generate_series(3001, 3100) i; 
+
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+step s3_commit: COMMIT;
+step s4_commit: COMMIT;
+step s5_final_verify: 
+  SELECT 
+    count(*) as total_rows,
+    count(DISTINCT session_id) as unique_sessions,
+    min(id) as min_id,
+    max(id) as max_id
+  FROM iceberg_test.txn_test;
+
+total_rows|unique_sessions|min_id|max_id
+----------+---------------+------+------
+       400|              4|     1|  3100
+(1 row)
+
+
+starting permutation: s1_insert_batch s1_commit s2_insert_batch s2_commit s3_insert_batch s3_commit s5_final_verify
+step s1_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 1, 'session1_row_' || i 
+  FROM generate_series(1, 100) i; 
+
+step s1_commit: COMMIT;
+step s2_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 2, 'session2_row_' || i 
+  FROM generate_series(1001, 1100) i; 
+
+step s2_commit: COMMIT;
+step s3_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 3, 'session3_row_' || i 
+  FROM generate_series(2001, 2100) i; 
+
+step s3_commit: COMMIT;
+step s5_final_verify: 
+  SELECT 
+    count(*) as total_rows,
+    count(DISTINCT session_id) as unique_sessions,
+    min(id) as min_id,
+    max(id) as max_id
+  FROM iceberg_test.txn_test;
+
+total_rows|unique_sessions|min_id|max_id
+----------+---------------+------+------
+       300|              3|     1|  2100
+(1 row)
+
+
+starting permutation: s1_insert_batch s2_insert_batch s3_insert_batch s1_commit s5_count s2_commit s5_count s3_commit s5_final_verify
+s4: WARNING:  there is already a transaction in progress
+step s1_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 1, 'session1_row_' || i 
+  FROM generate_series(1, 100) i; 
+
+step s2_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 2, 'session2_row_' || i 
+  FROM generate_series(1001, 1100) i; 
+
+step s3_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 3, 'session3_row_' || i 
+  FROM generate_series(2001, 2100) i; 
+
+step s1_commit: COMMIT;
+step s5_count: SELECT count(*) as total_rows FROM iceberg_test.txn_test;
+total_rows
+----------
+       100
+(1 row)
+
+step s2_commit: COMMIT;
+step s5_count: SELECT count(*) as total_rows FROM iceberg_test.txn_test;
+total_rows
+----------
+       200
+(1 row)
+
+step s3_commit: COMMIT;
+step s5_final_verify: 
+  SELECT 
+    count(*) as total_rows,
+    count(DISTINCT session_id) as unique_sessions,
+    min(id) as min_id,
+    max(id) as max_id
+  FROM iceberg_test.txn_test;
+
+total_rows|unique_sessions|min_id|max_id
+----------+---------------+------+------
+       300|              3|     1|  2100
+(1 row)
+
+
+starting permutation: s1_insert_batch s1_commit s2_insert_batch s2_commit s3_insert_batch s3_commit s4_insert_batch s4_commit s5_final_verify
+s4: WARNING:  there is already a transaction in progress
+step s1_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 1, 'session1_row_' || i 
+  FROM generate_series(1, 100) i; 
+
+step s1_commit: COMMIT;
+step s2_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 2, 'session2_row_' || i 
+  FROM generate_series(1001, 1100) i; 
+
+step s2_commit: COMMIT;
+step s3_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 3, 'session3_row_' || i 
+  FROM generate_series(2001, 2100) i; 
+
+step s3_commit: COMMIT;
+step s4_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 4, 'session4_row_' || i 
+  FROM generate_series(3001, 3100) i; 
+
+step s4_commit: COMMIT;
+step s5_final_verify: 
+  SELECT 
+    count(*) as total_rows,
+    count(DISTINCT session_id) as unique_sessions,
+    min(id) as min_id,
+    max(id) as max_id
+  FROM iceberg_test.txn_test;
+
+total_rows|unique_sessions|min_id|max_id
+----------+---------------+------+------
+       400|              4|     1|  3100
+(1 row)
+

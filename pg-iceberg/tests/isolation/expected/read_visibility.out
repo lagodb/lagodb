@@ -1,0 +1,63 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_begin s1_insert s2_select s1_commit s2_select
+step s1_begin: BEGIN;
+step s1_insert: INSERT INTO visibility_test.read_viz VALUES (1, 's1_inserted');
+step s2_select: SELECT * FROM visibility_test.read_viz ORDER BY id;
+id|value
+--+-----
+(0 rows)
+
+step s1_commit: COMMIT;
+step s2_select: SELECT * FROM visibility_test.read_viz ORDER BY id;
+id|value      
+--+-----------
+ 1|s1_inserted
+(1 row)
+
+
+starting permutation: s3_insert_1 s2_select s3_insert_2 s2_select s3_commit s2_select
+s3: WARNING:  there is already a transaction in progress
+step s3_insert_1: INSERT INTO visibility_test.read_viz VALUES (10, 's3_v1');
+step s2_select: SELECT * FROM visibility_test.read_viz ORDER BY id;
+id|value
+--+-----
+(0 rows)
+
+step s3_insert_2: INSERT INTO visibility_test.read_viz VALUES (20, 's3_v2');
+step s2_select: SELECT * FROM visibility_test.read_viz ORDER BY id;
+id|value
+--+-----
+(0 rows)
+
+step s3_commit: COMMIT;
+step s2_select: SELECT * FROM visibility_test.read_viz ORDER BY id;
+id|value
+--+-----
+10|s3_v1
+20|s3_v2
+(2 rows)
+
+
+starting permutation: s3_insert_1 s1_begin s1_insert s1_commit s3_select s3_insert_2 s3_commit s3_select
+step s3_insert_1: INSERT INTO visibility_test.read_viz VALUES (10, 's3_v1');
+step s1_begin: BEGIN;
+step s1_insert: INSERT INTO visibility_test.read_viz VALUES (1, 's1_inserted');
+step s1_commit: COMMIT;
+step s3_select: SELECT * FROM visibility_test.read_viz ORDER BY id;
+id|value      
+--+-----------
+ 1|s1_inserted
+10|s3_v1      
+(2 rows)
+
+step s3_insert_2: INSERT INTO visibility_test.read_viz VALUES (20, 's3_v2');
+step s3_commit: COMMIT;
+step s3_select: SELECT * FROM visibility_test.read_viz ORDER BY id;
+id|value      
+--+-----------
+ 1|s1_inserted
+10|s3_v1      
+20|s3_v2      
+(3 rows)
+

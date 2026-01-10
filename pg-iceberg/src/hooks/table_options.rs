@@ -1,6 +1,6 @@
-use crate::ICEBERG_AM_NAME;
 use crate::catalog::iceberg_metadata::IcebergMetadata;
 use crate::catalog::init_table_storage_metadata;
+use crate::constants::ICEBERG_AM_NAME;
 use pg_tam::option::{OptionKind, StorageCategory, TamOptionDef};
 use pg_tam::pg_wrapper::PgWrapper;
 use pg_tam::prelude::*;

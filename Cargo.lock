@@ -194,7 +194,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "chrono",
  "num-traits",
 ]
@@ -208,7 +208,7 @@ dependencies = [
  "ahash 0.8.12",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "chrono",
  "half 2.7.1",
  "hashbrown 0.16.1",
@@ -239,7 +239,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-data",
  "arrow-ord",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "arrow-select",
  "atoi",
  "base64",
@@ -257,7 +257,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05738f3d42cb922b9096f7786f606fcb8669260c2640df8490533bb2fa38c9d3"
 dependencies = [
  "arrow-buffer",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "half 2.7.1",
  "num-integer",
  "num-traits",
@@ -272,7 +272,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "arrow-select",
  "flatbuffers",
 ]
@@ -286,15 +286,9 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "arrow-select",
 ]
-
-[[package]]
-name = "arrow-schema"
-version = "52.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e972cd1ff4a4ccd22f86d3e53e835c2ed92e0eea6a3e8eadb72b4f1ac802cf8"
 
 [[package]]
 name = "arrow-schema"
@@ -312,7 +306,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "num-traits",
 ]
 
@@ -325,7 +319,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "arrow-select",
  "memchr",
  "num-traits",
@@ -2395,7 +2389,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-cast",
  "arrow-ord",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "arrow-select",
  "arrow-string",
  "as-any",
@@ -3405,7 +3399,7 @@ dependencies = [
  "arrow-cast",
  "arrow-data",
  "arrow-ipc",
- "arrow-schema 57.1.0",
+ "arrow-schema",
  "arrow-select",
  "base64",
  "brotli",
@@ -3465,10 +3459,13 @@ dependencies = [
 name = "pg-iceberg"
 version = "0.1.0"
 dependencies = [
- "arrow-schema 52.2.0",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
  "bytes",
  "iceberg-lite",
  "libc",
+ "parquet",
  "pg-tam",
  "pgrx",
  "pgrx-tests",
@@ -3487,6 +3484,7 @@ dependencies = [
  "pg-tam-macros",
  "pgrx",
  "pgrx-tests",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "uuid",

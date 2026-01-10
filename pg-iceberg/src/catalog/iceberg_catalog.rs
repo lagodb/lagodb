@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::{Arc, RwLock};
 
 use iceberg_lite::catalog::{
     Catalog, MetadataLocation, Namespace, NamespaceIdent, TableCommit, TableCreation,
@@ -19,32 +20,62 @@ use iceberg_lite::{Error, ErrorKind, Result};
 ///
 /// This catalog stores Iceberg table metadata in PostgreSQL system catalogs,
 /// allowing seamless integration between PostgreSQL and Iceberg tables.
+///
+/// For transaction commits, the catalog maintains a cache of the current table
+/// being modified to support `load_table` and `update_table` operations.
 #[derive(Debug, Clone)]
 pub struct IcebergCatalog {
     /// The name of this catalog
     name: String,
     /// File IO
     file_io: FileIO,
+    /// Cached table for current transaction
+    table: Arc<RwLock<Option<Table>>>,
 }
 
 impl Default for IcebergCatalog {
     fn default() -> Self {
         Self {
-            name: Default::default(),
+            name: crate::constants::DEFAULT_CATALOG_NAME.to_string(),
             file_io: FileIO::memory(),
+            table: Arc::new(RwLock::new(None)),
         }
     }
 }
 
 impl IcebergCatalog {
-    pub fn new(
-        name: impl Into<String>,
-        file_io: FileIO,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, file_io: FileIO) -> Self {
         Self {
             name: name.into(),
             file_io,
+            table: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Create a new IcebergCatalog with the default "PostgreSQL" name.
+    pub fn new_pg(file_io: FileIO) -> Self {
+        Self::new(crate::constants::DEFAULT_CATALOG_NAME, file_io)
+    }
+
+    /// Create a catalog with a pre-registered table.
+    ///
+    /// This is used during transaction commits where the table is already loaded
+    /// and we need the catalog to recognize it for `load_table` and `update_table`.
+    pub fn with_table(
+        name: impl Into<String>,
+        file_io: FileIO,
+        table: &Table,
+    ) -> Result<Self> {
+        Ok(Self {
+            name: name.into(),
+            file_io,
+            table: Arc::new(RwLock::new(Some(table.clone()))),
+        })
+    }
+
+    /// Create a catalog with a pre-registered table using the default "PostgreSQL" name.
+    pub fn with_table_pg(file_io: FileIO, table: &Table) -> Result<Self> {
+        Self::with_table(crate::constants::DEFAULT_CATALOG_NAME, file_io, table)
     }
 
     pub fn name(&self) -> &str {
@@ -64,7 +95,7 @@ pub(crate) fn validate_namespace(namespace: &NamespaceIdent) -> Result<String> {
         return Err(Error::new(
             ErrorKind::DataInvalid,
             format!(
-                "Invalid database name: {namespace:?}, hierarchical namespaces are not supported"
+                "Invalid namespaces name: {namespace:?}, hierarchical namespaces are not supported"
             ),
         ));
     }
@@ -74,7 +105,7 @@ pub(crate) fn validate_namespace(namespace: &NamespaceIdent) -> Result<String> {
     if name.is_empty() {
         return Err(Error::new(
             ErrorKind::DataInvalid,
-            "Invalid database, provided namespace is empty.",
+            "Invalid namespaces, provided namespace is empty.",
         ));
     }
 
@@ -126,7 +157,7 @@ impl Catalog for IcebergCatalog {
         namespace: &NamespaceIdent,
         creation: TableCreation,
     ) -> Result<Table> {
-        let db_name = validate_namespace(namespace)?;
+        let namespace_name = validate_namespace(namespace)?;
         let table_name = creation.name.clone();
 
         // Location is required - the catalog only manages metadata,
@@ -152,20 +183,39 @@ impl Catalog for IcebergCatalog {
             .file_io(self.file_io.clone())
             .metadata_location(metadata_location)
             .metadata(metadata)
-            .identifier(TableIdent::new(NamespaceIdent::new(db_name), table_name))
+            .identifier(TableIdent::new(
+                NamespaceIdent::new(namespace_name),
+                table_name,
+            ))
             .build()
     }
 
-    fn load_table(&self, _table: &TableIdent) -> Result<Table> {
-        todo!("load_table not yet implemented")
+    fn load_table(&self, table_ident: &TableIdent) -> Result<Table> {
+        let table = self.table.read().map_err(|_| {
+            Error::new(ErrorKind::Unexpected, "Failed to acquire read lock on table")
+        })?;
+        table.as_ref().cloned().ok_or_else(|| {
+            Error::new(ErrorKind::DataInvalid,
+                format!("Table {} not found in catalog", table_ident))
+        })
     }
 
     fn drop_table(&self, _table: &TableIdent) -> Result<()> {
         todo!("drop_table not yet implemented")
     }
 
-    fn table_exists(&self, _table: &TableIdent) -> Result<bool> {
-        todo!("table_exists not yet implemented")
+    fn table_exists(&self, table_ident: &TableIdent) -> Result<bool> {
+        let table = self.table.read().map_err(|_| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "Failed to acquire read lock on table",
+            )
+        })?;
+
+        Ok(table
+            .as_ref()
+            .map(|t| t.identifier() == table_ident)
+            .unwrap_or(false))
     }
 
     fn rename_table(&self, _src: &TableIdent, _dest: &TableIdent) -> Result<()> {
@@ -180,8 +230,33 @@ impl Catalog for IcebergCatalog {
         todo!("register_table not yet implemented")
     }
 
-    fn update_table(&self, _commit: TableCommit) -> Result<Table> {
-        todo!("update_table not yet implemented")
+    fn update_table(&self, commit: TableCommit) -> Result<Table> {
+        // Load current table from cache
+        let current_table = {
+            let table = self.table.read().map_err(|_| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "Failed to acquire read lock on table",
+                )
+            })?;
+            table.as_ref().cloned().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Table {} not found in catalog", commit.identifier()),
+                )
+            })?
+        };
+
+        // Apply the commit to get the staged table with new metadata
+        let staged_table = commit.apply(current_table)?;
+
+        // Write the new metadata to storage
+        staged_table.metadata().write_to(
+            staged_table.file_io(),
+            staged_table.metadata_location_result()?,
+        )?;
+
+        Ok(staged_table)
     }
 }
 
@@ -191,8 +266,7 @@ mod tests {
 
     #[test]
     fn test_iceberg_catalog_new() {
-        let catalog =
-            IcebergCatalog::new("test_catalog", FileIO::memory());
+        let catalog = IcebergCatalog::new("test_catalog", FileIO::memory());
 
         assert_eq!(catalog.name(), "test_catalog");
     }
@@ -203,8 +277,7 @@ mod tests {
         props.insert("key1".to_string(), "value1".to_string());
         props.insert("key2".to_string(), "value2".to_string());
 
-        let catalog =
-            IcebergCatalog::new("test_catalog", FileIO::memory());
+        let catalog = IcebergCatalog::new("test_catalog", FileIO::memory());
 
         assert_eq!(catalog.name(), "test_catalog");
     }

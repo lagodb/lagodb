@@ -335,8 +335,8 @@ unsafe extern "C-unwind" fn rmgr_identify_trampoline(
     // PostgreSQL calls this after looking up the rmgr, so we need to track context.
     // For simplicity, we'll return a generic response.
     // A more complete implementation would use thread-local storage.
-    static UNKNOWN: &[u8] = b"UNKNOWN\0";
-    UNKNOWN.as_ptr() as *const std::ffi::c_char
+    static GENERIC: &[u8] = b"Generic\0";
+    GENERIC.as_ptr() as *const std::ffi::c_char
 }
 
 #[pg_guard]

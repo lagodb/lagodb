@@ -638,3 +638,33 @@ impl Drop for TableGuard<'_> {
         let _ = PgWrapper::table_close(self.rel, self.lock_mode);
     }
 }
+
+/// RAII guard for system table scan - automatically ends scan when dropped.
+#[derive(Debug)]
+pub struct SysScanGuard<'a> {
+    scan: pg_sys::SysScanDesc,
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> SysScanGuard<'a> {
+    /// Create a new guard from a raw scan descriptor.
+    /// The guard takes ownership of the scan descriptor and will close it on drop.
+    pub unsafe fn from_raw(scan: pg_sys::SysScanDesc) -> Self {
+        Self {
+            scan,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Get the raw scan descriptor.
+    #[inline]
+    pub fn as_raw(&self) -> pg_sys::SysScanDesc {
+        self.scan
+    }
+}
+
+impl Drop for SysScanGuard<'_> {
+    fn drop(&mut self) {
+        let _ = PgWrapper::systable_endscan(self.scan);
+    }
+}

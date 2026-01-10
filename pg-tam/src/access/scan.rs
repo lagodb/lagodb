@@ -45,6 +45,7 @@ impl<T> ScanState<T> {
         unsafe {
             let tup_desc = (*slot).tts_tupleDescriptor;
             let natts = (*tup_desc).natts as usize;
+            let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
 
             // Use the slot's own pre-allocated buffers
             let slot_values = std::slice::from_raw_parts_mut((*slot).tts_values, natts);
@@ -55,8 +56,14 @@ impl<T> ScanState<T> {
                     let cell = self.row.cells.get_unchecked_mut(i);
                     match cell.take() {
                         Some(cell) => {
+                            // Get target type information from TupleDesc
+                            let attr = &attrs[i];
+                            let typoid = attr.atttypid;
+                            let typmod = attr.atttypmod;
+
+                            // Use into_datum_typed to handle composite types correctly
                             slot_values[i] = cell
-                                .into_datum()
+                                .into_datum_typed(typoid, typmod)
                                 .expect("Failed to convert cell to datum");
                             slot_nulls[i] = false;
                         }
