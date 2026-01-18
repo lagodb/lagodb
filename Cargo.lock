@@ -3456,7 +3456,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-iceberg"
+name = "pg-am-iceberg"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
@@ -3466,7 +3466,7 @@ dependencies = [
  "iceberg-lite",
  "libc",
  "parquet",
- "pg-tam",
+ "pg-lakehouse-core",
  "pgrx",
  "pgrx-tests",
  "rust_decimal",
@@ -3478,10 +3478,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-tam"
+name = "pg-lakehouse-core"
 version = "0.1.0"
 dependencies = [
- "pg-tam-macros",
+ "pg-lakehouse-macros",
  "pgrx",
  "pgrx-tests",
  "serde_json",
@@ -3491,7 +3491,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-tam-macros"
+name = "pg-lakehouse-macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",

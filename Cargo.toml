@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "pg-tam",
-    "pg-tam-macros",
-    "pg-iceberg",
+    "pg-lakehouse-core",
+    "pg-lakehouse-macros",
+    "pg-am-iceberg",
     "iceberg-lite",
 ]
 resolver = "2"

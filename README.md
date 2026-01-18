@@ -1,48 +1,67 @@
-# pg-tam
+# pg-lakehouse
 
 [![Build Status](https://github.com/robertmu/pg-lakehouse/workflows/CI/badge.svg)](https://github.com/robertmu/pg-lakehouse/actions)
-[![Rust](https://img.shields.io/badge/rust-1.85.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-14%20%7C%2015%20%7C%2016-blue.svg)](https://www.postgresql.org)
+[![Rust](https://img.shields.io/badge/rust-1.90.0%2B-blue.svg)](https://www.rust-lang.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Crates.io](https://img.shields.io/crates/v/pg-tam.svg)](https://crates.io/crates/pg-tam)
+[![Crates.io](https://img.shields.io/crates/v/pg-lakehouse-core.svg)](https://crates.io/crates/pg-lakehouse-core)
 
-**A PostgreSQL Table Access Method (TAM) framework in Rust**
+**The Unified Data Lakehouse Extension Suite for PostgreSQL.**
 
-`pg-tam` is a PostgreSQL extension framework built with [pgrx](https://github.com/tcdi/pgrx) that simplifies the development of custom Table Access Methods (TAM). The framework provides safe abstractions and boilerplate reduction for integrating deep into PostgreSQL's storage engine.
+`pg-lakehouse` is an ambitious project aimed at making PostgreSQL a first-class citizen in the modern Data Lakehouse ecosystem. By implementing high-performance **Table Access Methods (TAM)** and **Foreign Data Wrappers (FDW)** in Rust, it allows PostgreSQL to query and manage open table formats with native-like performance and semantics.
 
-## Table of Contents
+## The Vision
 
-- [Overview](#overview)
-- [Key Features](#key-features)
+The goal of `pg-lakehouse` is to be the **one-stop Data Lakehouse solution** for PostgreSQL, enabling it to seamlessly interact with the broader big data ecosystem. Our roadmap includes:
 
-## Overview
+- **Universal Table Format Support**: In addition to Apache Iceberg, we plan to provide native support for **Apache Hudi** and **Delta Lake**.
+- **Hadoop Ecosystem Integration**: Support for accessing and managing data within the Hadoop ecosystem, including HDFS and various Hadoop-based data warehouses.
+- **Cloud-Native Storage**: Transparent access to data stored in S3, GCS, Azure Blob Storage, and other object stores.
+- **Native-Like Experience**: Providing a "PostgreSQL-native" experience for big data, supporting standard SQL (DML/DDL) and maintaining transactional integrity.
 
-pg-tam provides a framework for building PostgreSQL table access methods. The framework consists of three main components:
+## Project Structure
 
-- **pg-tam**: Core framework library providing access method abstractions and utilities
-- **pg-tam-macros**: Procedural macro library for simplifying access method development  
-- **pg-iceberg**: Apache Iceberg access method implementation as a reference example
+The project consists of the following components:
 
-### Key Benefits
-
-pg-tam leverages PostgreSQL's access method interface to provide:
-
-- **Native Integration**: Direct integration with PostgreSQL's storage and query execution engine
-- **High Performance**: Optimized data access patterns with minimal overhead
-- **Safe Abstractions**: Rust traits that map to PostgreSQL's internal C structures
-- **Extensible Architecture**: Simple framework for implementing custom storage engines
+- **[pg-lakehouse-core](./pg-lakehouse-core)**: Core framework library providing abstractions for TAM and FDW development.
+- **[pg-lakehouse-macros](./pg-lakehouse-macros)**: Procedural macros to reduce boilerplate when implementing access methods.
+- **[pg-am-iceberg](./pg-am-iceberg)**: A reference implementation of an Apache Iceberg Table Access Method.
+- **iceberg-lite**: A synchronous, PostgreSQL-friendly fork of [iceberg-rust](https://github.com/apache/iceberg-rust).
 
 ## Key Features
 
-**High Performance**
-- Native PostgreSQL access method integration
-- Support for custom scan strategies
-- Helper functions for memory management and transactions
+- **Unified Development Model**: A consistent, trait-based API for implementing both native Table Access Methods and Foreign Data Wrappers.
+- **Deep PostgreSQL Integration**: Direct hooks into PostgreSQL's scan, DML, and DDL paths for maximum performance.
+- **Crash Recovery**: Support for custom WAL resource managers to ensure metadata consistency across PostgreSQL restarts.
+- **Safe Abstractions**: High-level Rust handles and types that wrap complex PostgreSQL C structures, preventing memory safety issues.
+- **Reference Implementation**: Includes `pg-am-iceberg` as a production-grade example of a Table Access Method.
 
-**Developer Experience**  
-- Simple trait-based architecture (`TableAccessMethod` trait)
-- Procedural macros (`#[pg_table_am]`) for reducing boilerplate code
-- Comprehensive error handling and logging utilities
+## Getting Started
 
-**Reference Implementation**
-- See `pg-iceberg` for a real-world usage example
+### Prerequisites
+
+- Rust 1.90.0 or later
+- PostgreSQL 16 or 17
+- `cargo-pgrx` (`cargo install --locked cargo-pgrx`)
+
+### Building
+
+1. Initialize `pgrx`:
+   ```bash
+   cargo pgrx init --pg17=/path/to/pg_config
+   ```
+
+2. Compile all workspace members:
+   ```bash
+   cargo build
+   ```
+
+## Documentation
+
+For detailed information on each component, please refer to their respective README files:
+- [Core Framework Guide](./pg-lakehouse-core/README.md)
+- [Iceberg Access Method Guide](./pg-am-iceberg/README.md)
+
+## License
+
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

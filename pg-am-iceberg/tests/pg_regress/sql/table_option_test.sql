@@ -1,0 +1,115 @@
+-- Test custom table options for Iceberg access method.
+-- This test verifies that the IcebergTableHook correctly extracts and persists
+-- table options defined in table_options.rs.
+
+-- Clean slate: drop and recreate extension
+DROP EXTENSION IF EXISTS pg_am_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_am_iceberg;
+
+-- ============================================================================
+-- Test 1: Create table with default options (no custom options specified)
+-- ============================================================================
+CREATE TABLE iceberg_default_test (
+    id integer,
+    name text
+) USING iceberg;
+
+-- Verify: No options should be stored (or empty options)
+SELECT relid::regclass::text AS table_name, options
+FROM lakehouse.table_options
+WHERE relid = 'iceberg_default_test'::regclass;
+
+DROP TABLE iceberg_default_test;
+
+-- ============================================================================
+-- Test 2: Create table with format-version option
+-- ============================================================================
+CREATE TABLE iceberg_format_test (
+    id integer,
+    value double precision
+) USING iceberg WITH (
+    "format-version" = 1
+);
+
+-- Verify the option is stored
+SELECT relid::regclass::text AS table_name, options
+FROM lakehouse.table_options
+WHERE relid = 'iceberg_format_test'::regclass;
+
+DROP TABLE iceberg_format_test;
+
+-- ============================================================================
+-- Test 3: Create table with multiple custom options
+-- ============================================================================
+CREATE TABLE iceberg_multi_opts_test (
+    id integer,
+    data jsonb
+) USING iceberg WITH (
+    "format-version" = 2,
+    "write.parquet.compression-codec" = 'zstd',
+    "write.format.default" = 'orc'
+);
+
+-- Verify all options are stored correctly
+SELECT relid::regclass::text AS table_name, options
+FROM lakehouse.table_options
+WHERE relid = 'iceberg_multi_opts_test'::regclass;
+
+DROP TABLE iceberg_multi_opts_test;
+
+-- ============================================================================
+-- Test 4: Create table with different compression codec
+-- ============================================================================
+CREATE TABLE iceberg_compression_test (
+    id integer,
+    payload bytea
+) USING iceberg WITH (
+    "write.parquet.compression-codec" = 'snappy'
+);
+
+-- Verify the compression option
+SELECT relid::regclass::text AS table_name, options
+FROM lakehouse.table_options
+WHERE relid = 'iceberg_compression_test'::regclass;
+
+DROP TABLE iceberg_compression_test;
+
+-- ============================================================================
+-- Test 5: Create table with enum option
+-- ============================================================================
+CREATE TABLE iceberg_enum_opt_test (
+    id integer
+) USING iceberg WITH (
+    "write.format.default" = 'avro'
+);
+
+-- Verify the enum option
+SELECT relid::regclass::text AS table_name, options
+FROM lakehouse.table_options
+WHERE relid = 'iceberg_enum_opt_test'::regclass;
+
+DROP TABLE iceberg_enum_opt_test;
+
+-- ============================================================================
+-- Test 6: Create table in a specific schema
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS test_schema;
+
+CREATE TABLE test_schema.iceberg_schema_test (
+    id integer
+) USING iceberg WITH (
+    "format-version" = 2
+);
+
+-- Verify the option is stored with correct schema-qualified name
+SELECT relid::regclass::text AS table_name, options
+FROM lakehouse.table_options
+WHERE relid = 'test_schema.iceberg_schema_test'::regclass;
+
+DROP TABLE test_schema.iceberg_schema_test;
+DROP SCHEMA test_schema;
+
+-- ============================================================================
+-- Clean up: Verify no orphaned entries remain
+-- ============================================================================
+SELECT COUNT(*) AS orphan_count FROM lakehouse.table_options;

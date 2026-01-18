@@ -1,0 +1,50 @@
+[package]
+name = "pg-am-iceberg"
+version = { workspace = true }
+publish = false
+homepage = "https://github.com/robertmu/pg-lakehouse"
+repository = "https://github.com/robertmu/pg-lakehouse"
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pgrx_embed_pg_am_iceberg"
+path = "./src/bin/pgrx_embed.rs"
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrx_embed)'] }
+
+[features]
+default = ["pg17"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakehouse-core/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakehouse-core/pg17"]
+pg_test = []
+
+[dependencies]
+pgrx = { workspace = true }
+pg-lakehouse-core = { path = "../pg-lakehouse-core" }
+iceberg-lite = { path = "../iceberg-lite" }
+thiserror = "1.0"
+serde_json = "1.0"
+arrow-schema = "57"
+arrow-array = "57"
+parquet = { version = "57", default-features = false, features = ["arrow"] }
+tempfile = "3.10"
+bytes = "1.10.1"
+
+# Rustls is shared by some other dependencies but not directly used by pg-am-iceberg.
+# Since Rustls 0.22, it is required to choose the provider of the cryptographic
+# primitives at start.
+# ref: https://docs.rs/rustls/latest/rustls/index.html#cryptography-providers
+rustls = "0.23.27"
+
+uuid = { version = "1.16.0" }
+
+rust_decimal = { version = "1.37.1" }
+libc = "0.2.179"
+arrow-buffer = "57"
+
+[dev-dependencies]
+pgrx-tests = { workspace = true }
