@@ -74,47 +74,11 @@ pub(crate) fn iceberg_type_to_arrow_type(
             )]));
             Ok(DataType::List(Arc::new(element_field)))
         }
-        Type::Struct(struct_type) => {
-            let fields: Vec<Field> = struct_type
-                .fields()
-                .iter()
-                .map(|f| {
-                    let dt = iceberg_type_to_arrow_type(&f.field_type)?;
-                    let mut field = Field::new(&f.name, dt, !f.required);
-                    field.set_metadata(HashMap::from([(
-                        PARQUET_FIELD_ID_META_KEY.to_string(),
-                        f.id.to_string(),
-                    )]));
-                    Ok(field)
-                })
-                .collect::<IcebergResult<Vec<_>>>()?;
-            Ok(DataType::Struct(fields.into()))
-        }
-        Type::Map(map) => {
-            let key_type = iceberg_type_to_arrow_type(&map.key_field.field_type)?;
-            let value_type = iceberg_type_to_arrow_type(&map.value_field.field_type)?;
-
-            let mut key_field = Field::new("key", key_type, false);
-            key_field.set_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                map.key_field.id.to_string(),
-            )]));
-
-            let mut value_field =
-                Field::new("value", value_type, !map.value_field.required);
-            value_field.set_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                map.value_field.id.to_string(),
-            )]));
-
-            Ok(DataType::Map(
-                Arc::new(Field::new(
-                    "entries",
-                    DataType::Struct(vec![key_field, value_field].into()),
-                    false,
-                )),
-                false,
-            ))
-        }
+        Type::Struct(_) => Err(crate::error::IcebergError::UnsupportedColumnType(
+            "Struct type is not supported".to_string(),
+        )),
+        Type::Map(_) => Err(crate::error::IcebergError::UnsupportedColumnType(
+            "Map type is not supported".to_string(),
+        )),
     }
 }

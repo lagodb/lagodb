@@ -4,8 +4,8 @@
 //! All unsafe operations are handled here, keeping the AmDdl trait implementation safe.
 
 use crate::api::AmDdl;
-use crate::handles::{RelFileLocator, RelationHandle};
 use crate::diag::ReportableError;
+use crate::handles::{RelFileLocator, RelationHandle};
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 

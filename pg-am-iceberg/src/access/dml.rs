@@ -27,7 +27,9 @@ use pg_lakehouse_core::handles::RelationHandle;
 use pg_lakehouse_core::prelude::*;
 use pgrx::pg_sys;
 
-use crate::access::rows_to_record_batch;
+use crate::access::{
+    iceberg_schema_to_arrow_schema, rows_to_record_batch_with_schema,
+};
 use crate::catalog::{
     get_or_rebase_metadata_location, process_new_data_files,
     register_table_for_tracking,
@@ -61,6 +63,8 @@ pub struct IcebergModify {
     data_files: Vec<DataFile>,
     /// Iceberg schema for the table
     iceberg_schema: Option<Arc<IcebergSchema>>,
+    /// Arrow schema for the table
+    arrow_schema: Option<Arc<arrow_schema::Schema>>,
     /// File IO for writing
     file_io: Option<FileIO>,
     /// Whether the modify operation has been initialized
@@ -81,6 +85,7 @@ impl AmDml<IcebergError> for IcebergModify {
             current_buffer_size: 0,
             data_files: Vec::new(),
             iceberg_schema: None,
+            arrow_schema: None,
             file_io: None,
             initialized: false,
             writer: None,
@@ -120,8 +125,10 @@ impl AmDml<IcebergError> for IcebergModify {
         let table_metadata =
             TableMetadata::read_from(&ctx.file_io, &metadata_location)?;
         let schema = table_metadata.current_schema().clone();
+        let arrow_schema = Arc::new(iceberg_schema_to_arrow_schema(&schema)?);
 
         self.iceberg_schema = Some(schema);
+        self.arrow_schema = Some(arrow_schema);
         self.file_io = Some(ctx.file_io);
         self.initialize_writer(&table_metadata)?;
         self.initialized = true;
@@ -343,13 +350,19 @@ impl IcebergModify {
             .as_ref()
             .ok_or(IcebergError::NotImplemented("schema not initialized"))?;
 
+        let arrow_schema = self
+            .arrow_schema
+            .as_ref()
+            .ok_or(IcebergError::NotImplemented("arrow_schema not initialized"))?;
+
         // Extract rows and reset size tracking immediately.
         // This ensures the buffer is cleared even if subsequent steps fail.
         let rows = std::mem::take(&mut self.row_buffer);
         self.current_buffer_size = 0;
 
-        // Convert rows to Arrow RecordBatch
-        let record_batch = rows_to_record_batch(&rows, schema)?;
+        // Convert rows to Arrow RecordBatch using cached schema
+        let record_batch =
+            rows_to_record_batch_with_schema(&rows, schema, arrow_schema.clone())?;
 
         // Write the batch
         if let Some(writer) = &mut self.writer {

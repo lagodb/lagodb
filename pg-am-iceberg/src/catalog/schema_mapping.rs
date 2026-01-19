@@ -4,13 +4,13 @@
 //! and Iceberg types. The design follows Rust best practices:
 //!
 //! - **Direct mapping**: Type mappings are handled via pattern matching on OIDs.
-//! - **Trait-based conversion**: Uses `ToIcebergType` and `ToPgType` traits.
+//! - **Trait-based conversion**: Uses `ToIcebergType` trait.
 //! - **Recursive handling**: Supports nested types (List, Map, Struct).
 //!
 //! # Architecture
 //!
 //! ```text
-//! PostgreSQL Type <-> PgType <-> Iceberg Type
+//! PostgreSQL Type -> PgType -> Iceberg Type
 //! ```
 //!
 //! The `PgType` struct encapsulates PostgreSQL type information (OID + typemod),
@@ -18,7 +18,7 @@
 
 use crate::error::{IcebergError, IcebergResult};
 use iceberg_lite::spec::{
-    ListType, NestedField, NestedFieldRef, PrimitiveType, Schema, StructType, Type,
+    ListType, NestedField, NestedFieldRef, PrimitiveType, Schema, Type,
 };
 use pg_lakehouse_core::pg_wrapper::PgWrapper;
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
@@ -104,11 +104,6 @@ impl PgType {
             None
         }
     }
-
-    /// Checks if this type is a composite (struct) type.
-    pub fn is_composite(&self) -> bool {
-        unsafe { pg_sys::get_typtype(self.oid) == b'c' as i8 }
-    }
 }
 
 /// Converts PostgreSQL NUMERIC type to Iceberg Decimal.
@@ -122,9 +117,10 @@ fn convert_numeric_type(pg_type: &PgType) -> IcebergResult<Type> {
 
     // Validate precision is within Iceberg limits
     if precision > MAX_DECIMAL_PRECISION {
-        // For very large precision, fall back to string representation
-        // (similar to C implementation's behavior)
-        return Ok(Type::Primitive(PrimitiveType::String));
+        return Err(IcebergError::UnsupportedColumnType(format!(
+            "numeric({}, {}) precision exceeds maximum supported precision ({})",
+            precision, scale, MAX_DECIMAL_PRECISION
+        )));
     }
 
     Ok(Type::Primitive(PrimitiveType::Decimal { precision, scale }))
@@ -137,7 +133,7 @@ fn convert_numeric_type(pg_type: &PgType) -> IcebergResult<Type> {
 /// Trait for converting PostgreSQL types to Iceberg types.
 ///
 /// This trait provides the core type conversion functionality, supporting
-/// both primitive types and complex nested types (arrays, composites).
+/// both primitive types and complex nested types (arrays).
 pub trait ToIcebergType {
     /// Converts to an Iceberg Type.
     fn to_iceberg_type(&self) -> IcebergResult<Type>;
@@ -175,7 +171,7 @@ impl ToIcebergType for PgType {
 /// Converts a PostgreSQL type to Iceberg type with proper field ID allocation.
 ///
 /// This is the core conversion function used by both `ToIcebergType::to_iceberg_type()`
-/// and `SchemaBuilder`. It handles primitive types, arrays, and composite types,
+/// and `SchemaBuilder`. It handles primitive types and arrays,
 /// allocating globally unique field IDs for nested structures.
 ///
 /// Similar to the C implementation's `PostgresTypeToIcebergField` function which
@@ -184,21 +180,7 @@ fn convert_pg_type_with_field_ids(
     pg_type: &PgType,
     next_field_id: &mut i32,
 ) -> IcebergResult<Type> {
-    // Try primitive conversion first.
-    // This handles most standard types and avoids catalog lookups for them,
-    // which is essential for pure Rust unit tests without a running PostgreSQL backend.
-    match convert_primitive_type(pg_type) {
-        Ok(ty) => return Ok(ty),
-        Err(e) => {
-            // If it's not a primitive we recognize, continue to check for array/composite.
-            // Only fall through if it's an UnsupportedColumnType error.
-            if !matches!(e, IcebergError::UnsupportedColumnType(_)) {
-                return Err(e);
-            }
-        }
-    }
-
-    // Check for array types
+    // Check for array types first.
     if let Some(elem_oid) = pg_type.element_type_oid() {
         return convert_array_type_with_field_ids(
             elem_oid,
@@ -207,20 +189,10 @@ fn convert_pg_type_with_field_ids(
         );
     }
 
-    // Check for composite types
-    if pg_type.is_composite() {
-        return convert_composite_type_with_field_ids(
-            pg_type.oid,
-            pg_type.type_mod,
-            next_field_id,
-        );
-    }
-
-    // Fall back to the original error if it's neither an array nor a composite
-    Err(IcebergError::UnsupportedColumnType(format!(
-        "PostgreSQL OID {}",
-        u32::from(pg_type.oid)
-    )))
+    // Try primitive conversion.
+    // Known types with invalid parameters will return specific error messages.
+    // Unknown types will return "PostgreSQL OID XXX".
+    convert_primitive_type(pg_type)
 }
 
 /// Converts a PostgreSQL primitive type to Iceberg type.
@@ -261,12 +233,12 @@ fn convert_primitive_type(pg_type: &PgType) -> IcebergResult<Type> {
         PgOid::BuiltIn(PgBuiltInOids::TEXTOID)
         | PgOid::BuiltIn(PgBuiltInOids::VARCHAROID)
         | PgOid::BuiltIn(PgBuiltInOids::BPCHAROID)
-        | PgOid::BuiltIn(PgBuiltInOids::NAMEOID)
         | PgOid::BuiltIn(PgBuiltInOids::JSONOID)
-        | PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => {
+        | PgOid::BuiltIn(PgBuiltInOids::NAMEOID) => {
             Ok(Type::Primitive(PrimitiveType::String))
         }
-        PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => {
+        PgOid::BuiltIn(PgBuiltInOids::BYTEAOID)
+        | PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => {
             Ok(Type::Primitive(PrimitiveType::Binary))
         }
         PgOid::BuiltIn(PgBuiltInOids::UUIDOID) => {
@@ -309,164 +281,6 @@ fn convert_array_type_with_field_ids(
     Ok(Type::List(ListType::new(Arc::new(element_field))))
 }
 
-/// Converts a PostgreSQL composite type to Iceberg Struct type with field ID allocation.
-fn convert_composite_type_with_field_ids(
-    type_oid: pg_sys::Oid,
-    type_mod: i32,
-    next_field_id: &mut i32,
-) -> IcebergResult<Type> {
-    unsafe {
-        let tuple_desc = pg_sys::lookup_rowtype_tupdesc(type_oid, type_mod);
-        if tuple_desc.is_null() {
-            return Err(IcebergError::UnsupportedColumnType(
-                "Failed to lookup composite type".to_string(),
-            ));
-        }
-
-        let natts = (*tuple_desc).natts as usize;
-        let attrs = std::slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts);
-
-        let mut fields: Vec<NestedFieldRef> = Vec::with_capacity(natts);
-
-        for attr in attrs.iter() {
-            if attr.attisdropped {
-                continue;
-            }
-
-            // Allocate field ID first (like C implementation)
-            let field_id = allocate_field_id(next_field_id);
-
-            let name_ptr = attr.attname.data.as_ptr();
-            let name = CStr::from_ptr(name_ptr).to_string_lossy().to_string();
-
-            // Recursively convert field type
-            let field_pg_type = PgType::new(attr.atttypid, attr.atttypmod);
-            let field_type =
-                convert_pg_type_with_field_ids(&field_pg_type, next_field_id)?;
-
-            let required = attr.attnotnull;
-
-            let field = if required {
-                NestedField::required(field_id, name, field_type)
-            } else {
-                NestedField::optional(field_id, name, field_type)
-            };
-
-            fields.push(Arc::new(field));
-        }
-
-        PgWrapper::release_tuple_desc(tuple_desc);
-
-        Ok(Type::Struct(StructType::new(fields)))
-    }
-}
-
-// ============================================================================
-// Iceberg to PostgreSQL Type Conversion
-// ============================================================================
-
-/// Trait for converting Iceberg types back to PostgreSQL types.
-///
-/// This provides the reverse mapping, useful when reading Iceberg tables
-/// and creating corresponding PostgreSQL types.
-pub trait ToPgType {
-    /// Converts to a PostgreSQL type OID.
-    fn to_pg_oid(&self) -> IcebergResult<pg_sys::Oid>;
-
-    /// Converts to a full PgType including type modifier.
-    fn to_pg_type(&self) -> IcebergResult<PgType>;
-}
-
-impl ToPgType for PrimitiveType {
-    fn to_pg_oid(&self) -> IcebergResult<pg_sys::Oid> {
-        let oid = match self {
-            PrimitiveType::Boolean => PgBuiltInOids::BOOLOID,
-            PrimitiveType::Int => PgBuiltInOids::INT4OID,
-            PrimitiveType::Long => PgBuiltInOids::INT8OID,
-            PrimitiveType::Float => PgBuiltInOids::FLOAT4OID,
-            PrimitiveType::Double => PgBuiltInOids::FLOAT8OID,
-            PrimitiveType::Decimal { .. } => PgBuiltInOids::NUMERICOID,
-            PrimitiveType::Date => PgBuiltInOids::DATEOID,
-            PrimitiveType::Time => PgBuiltInOids::TIMEOID,
-            PrimitiveType::Timestamp | PrimitiveType::TimestampNs => {
-                PgBuiltInOids::TIMESTAMPOID
-            }
-            PrimitiveType::Timestamptz | PrimitiveType::TimestamptzNs => {
-                PgBuiltInOids::TIMESTAMPTZOID
-            }
-            PrimitiveType::String => PgBuiltInOids::TEXTOID,
-            PrimitiveType::Uuid => PgBuiltInOids::UUIDOID,
-            PrimitiveType::Binary | PrimitiveType::Fixed(_) => {
-                PgBuiltInOids::BYTEAOID
-            }
-        };
-        Ok(pg_sys::Oid::from(oid.value()))
-    }
-
-    fn to_pg_type(&self) -> IcebergResult<PgType> {
-        let oid = self.to_pg_oid()?;
-
-        let type_mod = match self {
-            PrimitiveType::Decimal { precision, scale } => {
-                PgWrapper::numeric_typmod(*precision, *scale)
-            }
-            _ => -1,
-        };
-
-        Ok(PgType::new(oid, type_mod))
-    }
-}
-
-impl ToPgType for Type {
-    fn to_pg_oid(&self) -> IcebergResult<pg_sys::Oid> {
-        match self {
-            Type::Primitive(p) => p.to_pg_oid(),
-            Type::List(list) => {
-                // Get the array type OID for the element type
-                let elem_oid = list.element_field.field_type.to_pg_oid()?;
-                let array_oid = unsafe { pg_sys::get_array_type(elem_oid) };
-                if array_oid == pg_sys::InvalidOid {
-                    Err(IcebergError::UnsupportedColumnType(format!(
-                        "No array type for element OID {}",
-                        u32::from(elem_oid)
-                    )))
-                } else {
-                    Ok(array_oid)
-                }
-            }
-            Type::Struct(_) => {
-                // Struct types require special handling - they need to be
-                // created as composite types in PostgreSQL
-                Err(IcebergError::NotImplemented(
-                    "Struct type to PostgreSQL conversion requires type creation",
-                ))
-            }
-            Type::Map(_) => {
-                // Map types don't have a direct PostgreSQL equivalent
-                Err(IcebergError::NotImplemented(
-                    "Map type to PostgreSQL conversion is not supported",
-                ))
-            }
-        }
-    }
-
-    fn to_pg_type(&self) -> IcebergResult<PgType> {
-        match self {
-            Type::Primitive(p) => p.to_pg_type(),
-            Type::List(list) => {
-                let oid = self.to_pg_oid()?;
-                // For arrays, we might want to preserve element type's typemod
-                let elem_pg_type = list.element_field.field_type.to_pg_type()?;
-                Ok(PgType::new(oid, elem_pg_type.type_mod))
-            }
-            _ => {
-                let oid = self.to_pg_oid()?;
-                Ok(PgType::from_oid(oid))
-            }
-        }
-    }
-}
-
 // ============================================================================
 // Schema Builder
 // ============================================================================
@@ -498,7 +312,7 @@ impl SchemaBuilder {
     /// Adds a field from PostgreSQL attribute.
     ///
     /// This method allocates a globally unique field ID for the top-level field
-    /// and any nested fields within arrays or composite types.
+    /// and any nested fields within arrays.
     pub fn add_field(
         &mut self,
         name: impl Into<String>,
@@ -546,7 +360,7 @@ impl Default for SchemaBuilder {
 /// Converts a PostgreSQL type OID to an Iceberg Type.
 ///
 /// This is the main entry point for type conversion. It handles both
-/// primitive types and complex types (arrays, composites).
+/// primitive types and complex types (arrays).
 ///
 /// # Arguments
 ///
@@ -569,21 +383,6 @@ pub fn pg_type_to_iceberg_type(
 ) -> IcebergResult<Type> {
     let pg_type = PgType::new(type_oid, type_mod);
     pg_type.to_iceberg_type()
-}
-
-/// Converts an Iceberg Type to a PostgreSQL type OID.
-///
-/// This provides reverse mapping from Iceberg types back to PostgreSQL.
-///
-/// # Arguments
-///
-/// * `iceberg_type` - The Iceberg Type to convert
-///
-/// # Returns
-///
-/// The corresponding PostgreSQL type OID, or an error if not supported.
-pub fn iceberg_type_to_pg_oid(iceberg_type: &Type) -> IcebergResult<pg_sys::Oid> {
-    iceberg_type.to_pg_oid()
 }
 
 /// Converts a PostgreSQL TupleDesc to an Iceberg Schema.
@@ -674,59 +473,6 @@ mod tests {
         let pg_type =
             PgType::new(pg_sys::Oid::from(PgBuiltInOids::NUMERICOID.value()), -1);
         assert!(pg_type.numeric_precision_scale().is_none());
-    }
-
-    // Tests for reverse conversion (Iceberg -> PostgreSQL)
-    // These don't call pg_sys functions that require PostgreSQL runtime
-
-    #[test]
-    fn test_primitive_to_pg_oid_int() {
-        let result = PrimitiveType::Int.to_pg_oid();
-        assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            pg_sys::Oid::from(PgBuiltInOids::INT4OID.value())
-        );
-    }
-
-    #[test]
-    fn test_primitive_to_pg_oid_long() {
-        let result = PrimitiveType::Long.to_pg_oid();
-        assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            pg_sys::Oid::from(PgBuiltInOids::INT8OID.value())
-        );
-    }
-
-    #[test]
-    fn test_primitive_to_pg_oid_string() {
-        let result = PrimitiveType::String.to_pg_oid();
-        assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            pg_sys::Oid::from(PgBuiltInOids::TEXTOID.value())
-        );
-    }
-
-    #[test]
-    fn test_primitive_to_pg_type_decimal() {
-        let decimal = PrimitiveType::Decimal {
-            precision: 10,
-            scale: 2,
-        };
-        let result = decimal.to_pg_type();
-        assert!(result.is_ok());
-        let pg_type = result.unwrap();
-        assert_eq!(
-            pg_type.oid,
-            pg_sys::Oid::from(PgBuiltInOids::NUMERICOID.value())
-        );
-
-        // Verify type_mod encodes precision/scale correctly
-        let (precision, scale) = pg_type.numeric_precision_scale().unwrap();
-        assert_eq!(precision, 10);
-        assert_eq!(scale, 2);
     }
 
     #[test]

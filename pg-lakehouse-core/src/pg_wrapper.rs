@@ -1,6 +1,4 @@
-use pgrx::PgTryBuilder;
-use pgrx::pg_sys;
-use pgrx::varlena;
+use pgrx::{PgTryBuilder, pg_sys, varlena};
 use std::ffi::CStr;
 use std::panic::AssertUnwindSafe;
 use thiserror::Error;
@@ -470,6 +468,69 @@ impl PgWrapper {
             (*entry).sk_collation = pg_sys::InvalidOid;
             (*entry).sk_argument = argument;
             pg_sys::fmgr_info(procedure, &mut (*entry).sk_func);
+        }
+    }
+
+    /// Converts raw bytes to a PostgreSQL JSON Datum.
+    ///
+    /// This is a high-performance version of `json_in` that accepts a byte slice
+    /// instead of a null-terminated C string, avoiding redundant allocations
+    /// and extra copies.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `ptr` points to `len` bytes of valid memory.
+    pub unsafe fn json_in_from_bytes(
+        ptr: *const u8,
+        len: usize,
+    ) -> Result<pg_sys::Datum, PgWrapperError> {
+        unsafe {
+            PgTryBuilder::new(move || {
+                let text_ptr = pg_sys::cstring_to_text_with_len(
+                    ptr as *const std::os::raw::c_char,
+                    len as i32,
+                );
+
+                // Note: The internal representation of JSON in PostgreSQL is the same as TEXT.
+                // json_in usually validates the JSON content. Since we are coming from
+                // a trusted source (Parquet via Lakehouse), we skip explicit validation
+                // here for maximum performance. If validation is required, one would call
+                // makeJsonLexContext and pg_parse_json here if the symbols are available.
+                Ok(pg_sys::Datum::from(text_ptr))
+            })
+            .catch_others(|err| {
+                Err(PgWrapperError::PostgresError(format!("{:?}", err)))
+            })
+            .execute()
+        }
+    }
+
+    /// Converts raw bytes to a PostgreSQL JSONB Datum.
+    ///
+    /// This function assumes the input bytes are already a valid PostgreSQL JSONB `varlena`
+    /// (including the header). It allocates memory in the PostgreSQL memory context
+    /// and performs a direct copy.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `ptr` points to `len` bytes of valid memory
+    /// representing a valid JSONB varlena.
+    pub unsafe fn jsonb_in_from_bytes(
+        ptr: *const u8,
+        len: usize,
+    ) -> Result<pg_sys::Datum, PgWrapperError> {
+        unsafe {
+            PgTryBuilder::new(move || {
+                // The bytes are already in PostgreSQL's internal JSONB binary format (varlena).
+                // We simply allocate memory in the current PostgreSQL memory context and copy.
+                let new_ptr = pg_sys::palloc(len);
+                std::ptr::copy_nonoverlapping(ptr, new_ptr as *mut u8, len);
+                Ok(pg_sys::Datum::from(new_ptr))
+            })
+            .catch_others(|err| {
+                Err(PgWrapperError::PostgresError(format!("{:?}", err)))
+            })
+            .execute()
         }
     }
 }

@@ -17,7 +17,7 @@ use pg_lakehouse_core::pg_wrapper::PgWrapper;
 use pg_lakehouse_core::prelude::*;
 use pgrx::pg_sys;
 
-use crate::access::data_extraction::extract_row_from_batch;
+use crate::access::conversion::extract_row_from_batch;
 use crate::catalog::get_or_rebase_metadata_location;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::create_storage_context;
