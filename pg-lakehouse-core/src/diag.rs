@@ -101,6 +101,16 @@ pub fn report_error(code: PgSqlErrorCode, msg: &str) {
     ereport!(PgLogLevel::ERROR, code, msg, "pg_lakehouse_core");
 }
 
+/// Report panic to Postgres using `ereport!`
+///
+/// A simple wrapper of Postgres's `ereport!` function to emit panic message and
+/// cause the database server to crash. This is typically used for testing or
+/// catastrophic failures.
+#[inline]
+pub fn report_panic(code: PgSqlErrorCode, msg: &str) {
+    ereport!(PgLogLevel::PANIC, code, msg, "pg_lakehouse_core");
+}
+
 #[derive(Error, Debug)]
 pub enum CreateRuntimeError {
     #[error("failed to create async runtime: {0}")]

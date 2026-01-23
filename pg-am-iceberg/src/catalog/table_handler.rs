@@ -40,7 +40,7 @@ pub fn generate_table_location(
             let base = base_path.trim_end_matches('/');
             // For distributed storage, we keep a cleaner hierarchy but still
             // use the OID structure to avoid collisions.
-            format!("{}/{}/{}/{}", base, spc_oid, db_oid, rel_num)
+            format!("{}/{}/{}/{}_iceberg", base, spc_oid, db_oid, rel_num)
         } else {
             // Local storage: Follow PostgreSQL's internal directory structure exactly.
             // Use pg_sys constants instead of hardcoded OID values.
@@ -49,13 +49,13 @@ pub fn generate_table_location(
 
             // Use relative paths from DataDir for local storage
             if spc_oid == default_tblspc {
-                format!("base/{}/{}", db_oid, rel_num)
+                format!("base/{}/{}_iceberg", db_oid, rel_num)
             } else if spc_oid == global_tblspc {
-                format!("global/{}", rel_num)
+                format!("global/{}_iceberg", rel_num)
             } else {
                 let version_dir = get_tablespace_version_directory();
                 format!(
-                    "pg_tblspc/{}/{}/{}/{}",
+                    "pg_tblspc/{}/{}/{}/{}_iceberg",
                     spc_oid, version_dir, db_oid, rel_num
                 )
             }

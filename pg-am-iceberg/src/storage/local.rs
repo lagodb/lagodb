@@ -10,6 +10,8 @@
 //! - **VFD Pool Management**: PostgreSQL's VFD system manages file descriptor limits
 //!   transparently, automatically closing/reopening files as needed.
 //! - **Consistent Error Handling**: Uses PostgreSQL's error reporting mechanisms.
+//! - **WAL Support**: Optional Write-Ahead Logging for crash consistency on local
+//!   file systems (see [`LocalStorageWithWal`]).
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -25,13 +27,61 @@ use pgrx::pg_sys;
 
 use iceberg_lite::Result;
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, Storage};
+use pg_lakehouse_core::diag;
+
+use crate::wal::log_write_file;
 
 /// Local file storage implementation using PostgreSQL's VFD system.
 ///
 /// This implementation wraps PostgreSQL's internal file I/O functions to provide
 /// seamless integration with PostgreSQL's resource management infrastructure.
+///
+/// # WAL Support
+///
+/// By default, `LocalStorage` does not enable WAL logging. Use [`LocalStorage::with_wal`]
+/// to create a storage instance that logs writes to WAL for crash recovery.
+///
+/// ```ignore
+/// // Without WAL (default)
+/// let storage = LocalStorage::default();
+///
+/// // With WAL enabled
+/// let storage = LocalStorage::with_wal(true);
+/// ```
 #[derive(Debug, Default)]
-pub struct LocalStorage;
+pub struct LocalStorage {
+    /// Whether WAL logging is enabled for write operations
+    needs_wal: bool,
+}
+
+impl LocalStorage {
+    /// Create a new LocalStorage with default settings (no WAL).
+    pub fn new() -> Self {
+        Self { needs_wal: true }
+    }
+
+    /// Create a new LocalStorage with WAL support configured.
+    ///
+    /// # Arguments
+    /// * `needs_wal` - Whether to enable WAL logging for write operations
+    ///
+    /// # Example
+    /// ```ignore
+    /// use pg_am_iceberg::storage::LocalStorage;
+    ///
+    /// // Enable WAL for crash recovery
+    /// let storage = LocalStorage::with_wal(true);
+    /// ```
+    pub fn with_wal(needs_wal: bool) -> Self {
+        Self { needs_wal }
+    }
+
+    /// Check if WAL logging is enabled.
+    #[inline]
+    pub fn needs_wal(&self) -> bool {
+        self.needs_wal
+    }
+}
 
 impl Storage for LocalStorage {
     fn exists(&self, path: &str) -> Result<bool> {
@@ -77,7 +127,8 @@ impl Storage for LocalStorage {
                 fs::create_dir_all(parent)?;
             }
         }
-        let writer = PgFileWrite::open(path)?;
+        // Create writer with WAL support if enabled
+        let writer = PgFileWrite::open_with_wal(path, self.needs_wal)?;
         Ok(Box::new(writer))
     }
 
@@ -294,13 +345,27 @@ impl Seek for PgFileRead {
 /// Wraps a PostgreSQL virtual file descriptor for writing operations. The file
 /// handle is automatically registered with the current ResourceOwner and will
 /// be closed when the ResourceOwner is released.
+///
+/// # WAL Support
+///
+/// When `needs_wal` is true, the writer will log all write operations to the
+/// PostgreSQL WAL (Write-Ahead Log) for crash recovery. Following PostgreSQL's
+/// convention, the write is performed first, and then the WAL record is written.
+/// This order ensures that:
+/// - If the write fails (e.g., disk full), no WAL record is created
+/// - During crash recovery, the WAL record can be replayed to restore the file
+///
+/// Note: WAL is only needed for local file systems. Distributed storage (S3, etc.)
+/// provides its own durability guarantees.
 pub struct PgFileWrite {
-    /// Path to the file (for error reporting)
+    /// Path to the file (for error reporting and WAL logging)
     path: String,
     /// PostgreSQL virtual file descriptor
     file: pg_sys::File,
     /// Current write position in the file
     position: i64,
+    /// Whether WAL logging is enabled for this writer
+    needs_wal: bool,
 }
 
 // Note: PgFileWrite is intentionally NOT Send/Sync.
@@ -311,6 +376,7 @@ impl PgFileWrite {
     /// Open a file for writing using PostgreSQL's VFD system.
     ///
     /// Creates the file if it doesn't exist and truncates it if it does.
+    /// WAL logging is disabled by default.
     ///
     /// # Arguments
     /// * `path` - Path to the file to open or create
@@ -318,6 +384,20 @@ impl PgFileWrite {
     /// # Returns
     /// A new `PgFileWrite` instance on success, or an error if the file cannot be opened.
     pub fn open(path: &str) -> io::Result<Self> {
+        Self::open_with_wal(path, false)
+    }
+
+    /// Open a file for writing with optional WAL support.
+    ///
+    /// Creates the file if it doesn't exist and truncates it if it does.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the file to open or create
+    /// * `needs_wal` - Whether to log writes to WAL for crash recovery
+    ///
+    /// # Returns
+    /// A new `PgFileWrite` instance on success, or an error if the file cannot be opened.
+    pub fn open_with_wal(path: &str, needs_wal: bool) -> io::Result<Self> {
         let c_path = CString::new(path)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
@@ -342,7 +422,20 @@ impl PgFileWrite {
             path: path.to_string(),
             file,
             position: 0,
+            needs_wal,
         })
+    }
+
+    /// Check if WAL logging is enabled for this writer.
+    #[inline]
+    pub fn needs_wal(&self) -> bool {
+        self.needs_wal
+    }
+
+    /// Enable or disable WAL logging for this writer.
+    #[inline]
+    pub fn set_needs_wal(&mut self, needs_wal: bool) {
+        self.needs_wal = needs_wal;
     }
 }
 
@@ -352,12 +445,18 @@ impl Write for PgFileWrite {
             return Ok(0);
         }
 
+        // Record the position before writing (needed for WAL)
+        let write_position = self.position;
+
+        // Step 1: Write to the file first
+        // Following PostgreSQL's convention: write to file first, then WAL record.
+        // This avoids issues if disk is full - we won't have orphaned WAL records.
         let result = unsafe {
             pg_sys::FileWrite(
                 self.file,
                 buf.as_ptr() as *const std::ffi::c_void,
                 buf.len(),
-                self.position as pg_sys::off_t,
+                write_position as pg_sys::off_t,
                 pg_sys::WaitEventIO::WAIT_EVENT_DATA_FILE_WRITE as u32,
             )
         };
@@ -370,8 +469,27 @@ impl Write for PgFileWrite {
             ));
         }
 
-        self.position += result as i64;
-        Ok(result as usize)
+        let bytes_written = result as usize;
+        self.position += bytes_written as i64;
+
+        // Step 2: Log to WAL after successful write
+        // The WAL record contains the file path, offset, and data written.
+        // During crash recovery, this will be replayed to restore the file.
+        if self.needs_wal && bytes_written > 0 {
+            log_write_file(&self.path, write_position, &buf[..bytes_written]);
+
+            // Injection point for crash recovery testing
+            if crate::gucs::injection_point().as_deref()
+                == Some("panic_after_wal_write")
+            {
+                diag::report_panic(
+                    pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "iceberg: injection point panic_after_wal_write triggered",
+                );
+            }
+        }
+
+        Ok(bytes_written)
     }
 
     fn flush(&mut self) -> io::Result<()> {

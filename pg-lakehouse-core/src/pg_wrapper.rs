@@ -533,6 +533,48 @@ impl PgWrapper {
             .execute()
         }
     }
+
+    /// Check if WAL logging is needed for general operations.
+    ///
+    /// This is equivalent to PostgreSQL's `XLogIsNeeded()` macro.
+    /// Returns true if `wal_level >= WAL_LEVEL_REPLICA`.
+    pub fn xlog_is_needed() -> bool {
+        unsafe {
+            // XLogIsNeeded() checks wal_level >= WAL_LEVEL_REPLICA
+            // In pg_sys, wal_level is an int and the enum values are prefixed.
+            pg_sys::wal_level >= pg_sys::WalLevel::WAL_LEVEL_REPLICA as i32
+        }
+    }
+
+    /// Check if a relation needs WAL logging.
+    ///
+    /// This is equivalent to PostgreSQL's `RelationNeedsWAL(rel)` macro.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `rel` is a valid pointer to a RelationData.
+    pub unsafe fn relation_needs_wal(rel: pg_sys::Relation) -> bool {
+        unsafe {
+            let rd_rel = (*rel).rd_rel;
+            if (*rd_rel).relpersistence != pg_sys::RELPERSISTENCE_PERMANENT as i8 {
+                return false;
+            }
+
+            if Self::xlog_is_needed() {
+                return true;
+            }
+
+            // If we are here, wal_level is minimal.
+            // Check if relation was created or truncated in current transaction.
+            (*rel).rd_createSubid == 0 && (*rel).rd_firstRelfilelocatorSubid == 0
+        }
+    }
+
+    /// True if we are currently performing crash recovery.
+    /// False if we are running standby-mode continuous or archive recovery.
+    pub fn is_crash_recovery_only() -> bool {
+        unsafe { !pg_sys::ArchiveRecoveryRequested && !pg_sys::StandbyMode }
+    }
 }
 
 // Manually declare CacheRegisterSyscacheCallback because it is not in pg_sys

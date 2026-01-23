@@ -2,10 +2,13 @@ use super::record::{
     DeleteDirectoryHeader, DeleteFileHeader, IcebergWalOp, SIZE_OF_DELETE_DIRECTORY,
     SIZE_OF_DELETE_FILE, SIZE_OF_WRITE_FILE, WriteFileHeader,
 };
-use pg_lakehouse_core::diag;
 use pg_lakehouse_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
+use pg_lakehouse_core::{diag, pg_wrapper::PgWrapper};
+
+use pgrx::pg_sys;
 
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -37,7 +40,6 @@ impl WalResourceManager for IcebergRmgr {
     fn name(&self) -> &'static str {
         "iceberg"
     }
-
     fn redo(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
         let op = IcebergWalOp::from_info(record.info()).ok_or_else(|| {
             WalRmgrError::InvalidRecord(format!(
@@ -191,8 +193,19 @@ impl IcebergRmgr {
     /// the file is created (or truncated if it exists), and any missing
     /// parent directories are created automatically.
     fn redo_write_file(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
-        use pgrx::pg_sys;
-        use std::ffi::CString;
+        // Do not perform redo for crash recovery mode. We do not need to
+        // replay Iceberg file write operations in this case because fsync
+        // (FileSync) is performed on file close (see PgFileWrite::close).
+        //
+        // This is safe because:
+        // 1. If the transaction committed, the file is already synced to disk.
+        // 2. If the transaction aborted, we don't care about the file state.
+        //
+        // Note: Archive recovery (standby/PITR) still needs redo as files may
+        // not exist on the target system.
+        if PgWrapper::is_crash_recovery_only() {
+            return Ok(());
+        }
 
         let data = record
             .main_data()

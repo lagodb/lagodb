@@ -26,5 +26,3 @@ SELECT spcname, spcoptions FROM pg_tablespace WHERE spcname = 'iceberg_s3_test';
 
 -- Clean up
 DROP TABLESPACE iceberg_s3_test;
--- Remove the directory
-\! rm -rf /tmp/pg_am_iceberg_regress_spc

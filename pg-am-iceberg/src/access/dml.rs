@@ -35,7 +35,7 @@ use crate::catalog::{
     register_table_for_tracking,
 };
 use crate::error::{IcebergError, IcebergResult};
-use crate::storage::create_storage_context;
+use crate::storage::create_storage_context_for_relation;
 
 /// Default batch size for buffering rows (64MB) before writing.
 const DEFAULT_BATCH_SIZE_IN_MB: usize = 64;
@@ -98,6 +98,13 @@ impl AmDml<IcebergError> for IcebergModify {
     /// 1. Loads the Iceberg metadata from PostgreSQL catalog
     /// 2. Reads the table metadata from storage
     /// 3. Initializes the schema and prepares for writing
+    /// 4. Configures WAL logging based on relation properties
+    ///
+    /// WAL (Write-Ahead Logging) is enabled for local storage when:
+    /// - The PostgreSQL `wal_level` is at least `archive`
+    /// - The relation is not an unlogged or temporary table
+    ///
+    /// This follows PostgreSQL's `XLogIsNeeded() && RelationNeedsWAL(rel)` pattern.
     fn begin_modify(&mut self) -> IcebergResult<()> {
         if self.initialized {
             return Ok(());
@@ -111,9 +118,12 @@ impl AmDml<IcebergError> for IcebergModify {
         // Register table for metadata tracking
         register_table_for_tracking(rel_oid, nsp_oid, rel_num)?;
 
-        // Create storage context for reading/writing
+        // Create storage context for reading/writing with WAL support
+        // The context automatically determines if WAL is needed based on:
+        // - Whether this is local or distributed storage
+        // - The relation's persistence settings (permanent vs unlogged/temp)
         let spc_oid = rel_handle.tablespace_oid();
-        let ctx = create_storage_context(spc_oid)?;
+        let ctx = create_storage_context_for_relation(spc_oid, self.rel)?;
 
         // Get Iceberg metadata location
         // Since we just registered the table for tracking, we ensure we see the latest

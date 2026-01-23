@@ -51,6 +51,15 @@ impl<'a> RelationHandle<'a> {
     pub fn relkind(&self) -> i8 {
         unsafe { (*(*self.inner).rd_rel).relkind }
     }
+
+    /// Check if the relation needs WAL logging.
+    ///
+    /// This is equivalent to PostgreSQL's `RelationNeedsWAL(rel)` macro.
+    /// A relation needs WAL if its persistence is set to permanent.
+    #[inline]
+    pub fn needs_wal(&self) -> bool {
+        unsafe { PgWrapper::relation_needs_wal(self.inner) }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

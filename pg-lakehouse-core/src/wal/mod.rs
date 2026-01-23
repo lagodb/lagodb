@@ -37,6 +37,6 @@ mod rmgr;
 
 pub use record::{WalRecord, WalRecordBuilder, XLogRecPtr, record_flags};
 pub use rmgr::{
-    flush_wal, get_current_lsn, is_in_recovery, register_wal_rmgr, RmgrId, WalRmgrError,
-    WalResourceManager,
+    RmgrId, WalResourceManager, WalRmgrError, flush_wal, get_current_lsn,
+    is_in_recovery, register_wal_rmgr,
 };

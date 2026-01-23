@@ -2892,6 +2892,7 @@ dependencies = [
  "pg-lakehouse-core",
  "pgrx",
  "pgrx-tests",
+ "postgres",
  "rust_decimal",
  "rustls",
  "serde_json",
