@@ -26,6 +26,7 @@ The project consists of the following components:
 - **[pg-lakehouse-core](./pg-lakehouse-core)**: Core framework library providing abstractions for TAM and FDW development.
 - **[pg-lakehouse-macros](./pg-lakehouse-macros)**: Procedural macros to reduce boilerplate when implementing access methods.
 - **[pg-am-iceberg](./pg-am-iceberg)**: A reference implementation of an Apache Iceberg Table Access Method.
+- **[pg-lakehouse-storage](./pg-lakehouse-storage)**: Centralized storage caching server and client, featuring a high-performance single-file image cache synchronized via PostgreSQL latches and shared memory.
 - **iceberg-lite**: A synchronous, PostgreSQL-friendly fork of [iceberg-rust](https://github.com/apache/iceberg-rust).
 
 ## Key Features
@@ -61,6 +62,7 @@ The project consists of the following components:
 For detailed information on each component, please refer to their respective README files:
 - [Core Framework Guide](./pg-lakehouse-core/README.md)
 - [Iceberg Access Method Guide](./pg-am-iceberg/README.md)
+- [Storage Caching Guide](./pg-lakehouse-storage/README.md)
 
 ## License
 

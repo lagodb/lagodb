@@ -4,6 +4,7 @@ members = [
     "pg-lakehouse-macros",
     "pg-am-iceberg",
     "iceberg-lite",
+    "pg-lakehouse-storage",
 ]
 resolver = "2"
 
