@@ -2,8 +2,8 @@
 name = "pg-iceberg-am"
 version = { workspace = true }
 publish = false
-homepage = "https://github.com/robertmu/pg-lakehouse"
-repository = "https://github.com/robertmu/pg-lakehouse"
+homepage = "https://github.com/robertmu/pg-lakebase"
+repository = "https://github.com/robertmu/pg-lakebase"
 edition = { workspace = true }
 rust-version = { workspace = true }
 

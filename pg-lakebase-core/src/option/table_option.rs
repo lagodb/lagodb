@@ -92,7 +92,7 @@ impl TableOptions {
             return Ok(());
         }
 
-        // Get OID of lakehouse.table_options from Catalog cache
+        // Get OID of lakebase.table_options from Catalog cache
         let table_oid = catalog::get_table_options_oid()
             .map_err(|e| TableOptionError::PersistFailed(e.to_string()))?;
 

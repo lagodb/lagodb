@@ -78,7 +78,7 @@ extern "C-unwind" fn _PG_init() {
 #[pg_table_am(
     version = "0.1.0",
     author = "robertmu",
-    website = "https://github.com/robertmu/pg-lakehouse"
+    website = "https://github.com/robertmu/pg-lakebase"
 )]
 pub struct IcebergTableAm;
 

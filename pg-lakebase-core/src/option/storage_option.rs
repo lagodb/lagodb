@@ -24,7 +24,7 @@ pub const DEFAULT_S3_REGION: &str = "us-east-1";
 pub const DEFAULT_ALLOW_HTTP: bool = false;
 
 // ============================================================================
-//  Common Lakehouse Tablespace Option Definitions
+//  Common Lakebase Tablespace Option Definitions
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq)]

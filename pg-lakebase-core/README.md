@@ -6,7 +6,7 @@
 
 **A high-performance framework for building PostgreSQL storage extensions in Rust.**
 
-`pg-lakebase-core` is the foundational library for the `pg-lakehouse` ecosystem. It provides a set of type-safe abstractions and procedural macros that simplify the development of custom **Table Access Methods (TAM)** and **Foreign Data Wrappers (FDW)** within PostgreSQL.
+`pg-lakebase-core` is the foundational library for the `pg-lakebase` ecosystem. It provides a set of type-safe abstractions and procedural macros that simplify the development of custom **Table Access Methods (TAM)** and **Foreign Data Wrappers (FDW)** within PostgreSQL.
 
 By leveraging [pgrx](https://github.com/tcdi/pgrx), the framework bridges the gap between PostgreSQL's C-based storage engine internals and Rust's safety and performance characteristics.
 
@@ -14,7 +14,7 @@ The [pg-iceberg-am](../pg-iceberg-am) project is a prime example of an extension
 
 ## Core Vision
  
-The goal of `pg-lakebase-core` is to provide a unified development framework for building "Lakehouse" architectures on PostgreSQL. We aim to support a wide range of open data standards and storage backends:
+The goal of `pg-lakebase-core` is to provide a unified development framework for building "Lakebase" architectures on PostgreSQL. We aim to support a wide range of open data standards and storage backends:
  
 -**Multi-Format Support**: A single framework for developing access methods for **Apache Iceberg**, **Apache Hudi**, and **Delta Lake**.
 -**Ecosystem Integration**: Built-in abstractions for connecting to the **Hadoop ecosystem** (HDFS, Hive Catalog) and cloud object storage.
@@ -37,7 +37,7 @@ use pg_lakebase_core::prelude::*;
 #[pg_table_am(
     version = "0.1.0",
     author = "Robert Mu",
-    website = "https://github.com/robertmu/pg-lakehouse"
+    website = "https://github.com/robertmu/pg-lakebase"
 )]
 pub struct MyCustomAm;
 

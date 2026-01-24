@@ -1,11 +1,11 @@
-//! IcebergMetadata - CRUD operations for the lakehouse.iceberg_metadata table.
+//! IcebergMetadata - CRUD operations for the lakebase.iceberg_metadata table.
 //!
 //! This module provides functions to manage Iceberg table metadata stored in
-//! the PostgreSQL catalog table `lakehouse.iceberg_metadata`.
+//! the PostgreSQL catalog table `lakebase.iceberg_metadata`.
 //!
 //! Table schema:
 //! ```sql
-//! CREATE TABLE lakehouse.iceberg_metadata (
+//! CREATE TABLE lakebase.iceberg_metadata (
 //!     relid regclass NOT NULL,
 //!     metadata_location text,
 //!     previous_metadata_location text,
@@ -14,7 +14,7 @@
 //! );
 //! ```
 
-use pg_lakebase_core::catalog::LAKEHOUSE_SCHEMA;
+use pg_lakebase_core::catalog::LAKEBASE_SCHEMA;
 use pg_lakebase_core::handles::{SysScanGuard, TableGuard};
 use pg_lakebase_core::pg_wrapper::{CatalogUpdateResult, PgWrapper};
 use pgrx::pg_sys::panic::ErrorReport;
@@ -32,7 +32,7 @@ use thiserror::Error;
 pub const ICEBERG_METADATA_TABLE: &CStr = c"iceberg_metadata";
 pub const ICEBERG_METADATA_PKEY: &CStr = c"iceberg_metadata_pkey";
 
-/// Column numbers in lakehouse.iceberg_metadata (1-based)
+/// Column numbers in lakebase.iceberg_metadata (1-based)
 mod column {
     pub const RELID: i16 = 1;
     pub const METADATA_LOCATION: i16 = 2;
@@ -47,13 +47,13 @@ mod column {
 static ICEBERG_METADATA_OID: OnceLock<pg_sys::Oid> = OnceLock::new();
 static ICEBERG_METADATA_PKEY_OID: OnceLock<pg_sys::Oid> = OnceLock::new();
 
-/// Get the OID of the `lakehouse.iceberg_metadata` table.
+/// Get the OID of the `lakebase.iceberg_metadata` table.
 pub fn get_iceberg_metadata_oid() -> Result<pg_sys::Oid, IcebergMetadataError> {
     if let Some(&oid) = ICEBERG_METADATA_OID.get() {
         return Ok(oid);
     }
 
-    let schema_oid = PgWrapper::get_namespace_oid(LAKEHOUSE_SCHEMA, false)
+    let schema_oid = PgWrapper::get_namespace_oid(LAKEBASE_SCHEMA, false)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
     let oid = PgWrapper::get_relname_relid(ICEBERG_METADATA_TABLE, schema_oid)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
@@ -63,13 +63,13 @@ pub fn get_iceberg_metadata_oid() -> Result<pg_sys::Oid, IcebergMetadataError> {
     Ok(oid)
 }
 
-/// Get the OID of the primary key index on `lakehouse.iceberg_metadata`.
+/// Get the OID of the primary key index on `lakebase.iceberg_metadata`.
 pub fn get_iceberg_metadata_pkey_oid() -> Result<pg_sys::Oid, IcebergMetadataError> {
     if let Some(&oid) = ICEBERG_METADATA_PKEY_OID.get() {
         return Ok(oid);
     }
 
-    let schema_oid = PgWrapper::get_namespace_oid(LAKEHOUSE_SCHEMA, false)
+    let schema_oid = PgWrapper::get_namespace_oid(LAKEBASE_SCHEMA, false)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
     let oid = PgWrapper::get_relname_relid(ICEBERG_METADATA_PKEY, schema_oid)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
@@ -134,7 +134,7 @@ impl From<IcebergMetadataError> for ErrorReport {
 //  IcebergMetadata
 // ============================================================================
 
-/// Represents a record in the `lakehouse.iceberg_metadata` table.
+/// Represents a record in the `lakebase.iceberg_metadata` table.
 #[derive(Debug, Clone, Default)]
 pub struct IcebergMetadata {
     /// The OID of the associated table.
@@ -175,7 +175,7 @@ impl IcebergMetadata {
         self
     }
 
-    /// Insert this record into the `lakehouse.iceberg_metadata` table.
+    /// Insert this record into the `lakebase.iceberg_metadata` table.
     ///
     /// Returns an error if a record with the same relid already exists.
     pub fn insert(&self) -> Result<(), IcebergMetadataError> {
@@ -223,7 +223,7 @@ impl IcebergMetadata {
         Ok(())
     }
 
-    /// Find a record by relid from the `lakehouse.iceberg_metadata` table.
+    /// Find a record by relid from the `lakebase.iceberg_metadata` table.
     ///
     /// Returns `Ok(None)` if no record is found.
     pub fn find_by_relid(
@@ -284,7 +284,7 @@ impl IcebergMetadata {
         Ok(Self::find_by_relid(relid)?.is_some())
     }
 
-    /// Update this record in the `lakehouse.iceberg_metadata` table.
+    /// Update this record in the `lakebase.iceberg_metadata` table.
     /// Performs an optimistic lock check against `expected_previous_location`.
     ///
     /// Returns an error if the record does not exist or if the current metadata location
@@ -415,7 +415,7 @@ impl IcebergMetadata {
         Ok(())
     }
 
-    /// Delete the record for the given relid from the `lakehouse.iceberg_metadata` table.
+    /// Delete the record for the given relid from the `lakebase.iceberg_metadata` table.
     ///
     /// Returns an error if the record does not exist.
     pub fn delete(relid: pg_sys::Oid) -> Result<(), IcebergMetadataError> {

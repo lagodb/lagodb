@@ -493,7 +493,7 @@ impl PgWrapper {
 
                 // Note: The internal representation of JSON in PostgreSQL is the same as TEXT.
                 // json_in usually validates the JSON content. Since we are coming from
-                // a trusted source (Parquet via Lakehouse), we skip explicit validation
+                // a trusted source (Parquet via Lakebase), we skip explicit validation
                 // here for maximum performance. If validation is required, one would call
                 // makeJsonLexContext and pg_parse_json here if the symbols are available.
                 Ok(pg_sys::Datum::from(text_ptr))

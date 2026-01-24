@@ -1,6 +1,6 @@
 # pg-lakebase-macros
 
-**Procedural macros for the pg-lakehouse framework.**
+**Procedural macros for the pg-lakebase framework.**
 
 This crate provides the macro support for `pg-lakebase-core`. Its primary purpose is to reduce the boilerplate required to register custom storage handlers in PostgreSQL.
 
@@ -18,7 +18,7 @@ use pg_lakebase_core::prelude::*;
 #[pg_table_am(
     version = "0.1.0",
     author = "Robert Mu",
-    website = "https://github.com/robertmu/pg-lakehouse"
+    website = "https://github.com/robertmu/pg-lakebase"
 )]
 pub struct MyCustomAm;
 

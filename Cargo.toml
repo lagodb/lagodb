@@ -14,8 +14,8 @@ version = "0.1.0"
 license = "Apache-2.0"
 edition = "2024"
 rust-version = "1.90.0"
-homepage = "https://github.com/robertmu/pg-lakehouse"
-repository = "https://github.com/robertmu/pg-lakehouse"
+homepage = "https://github.com/robertmu/pg-lakebase"
+repository = "https://github.com/robertmu/pg-lakebase"
 
 [workspace.dependencies]
 pgrx = { version = "0.16.0" }

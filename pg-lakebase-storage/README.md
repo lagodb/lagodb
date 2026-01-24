@@ -1,6 +1,6 @@
 # pg-lakebase-storage
 
-Storage caching server for `pg-lakehouse`.
+Storage caching server for `pg-lakebase`.
 
 ## Overview
 

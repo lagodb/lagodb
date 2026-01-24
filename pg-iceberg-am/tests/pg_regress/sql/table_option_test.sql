@@ -16,7 +16,7 @@ CREATE TABLE iceberg_default_test (
 
 -- Verify: No options should be stored (or empty options)
 SELECT relid::regclass::text AS table_name, options
-FROM lakehouse.table_options
+FROM lakebase.table_options
 WHERE relid = 'iceberg_default_test'::regclass;
 
 DROP TABLE iceberg_default_test;
@@ -33,7 +33,7 @@ CREATE TABLE iceberg_format_test (
 
 -- Verify the option is stored
 SELECT relid::regclass::text AS table_name, options
-FROM lakehouse.table_options
+FROM lakebase.table_options
 WHERE relid = 'iceberg_format_test'::regclass;
 
 DROP TABLE iceberg_format_test;
@@ -52,7 +52,7 @@ CREATE TABLE iceberg_multi_opts_test (
 
 -- Verify all options are stored correctly
 SELECT relid::regclass::text AS table_name, options
-FROM lakehouse.table_options
+FROM lakebase.table_options
 WHERE relid = 'iceberg_multi_opts_test'::regclass;
 
 DROP TABLE iceberg_multi_opts_test;
@@ -69,7 +69,7 @@ CREATE TABLE iceberg_compression_test (
 
 -- Verify the compression option
 SELECT relid::regclass::text AS table_name, options
-FROM lakehouse.table_options
+FROM lakebase.table_options
 WHERE relid = 'iceberg_compression_test'::regclass;
 
 DROP TABLE iceberg_compression_test;
@@ -85,7 +85,7 @@ CREATE TABLE iceberg_enum_opt_test (
 
 -- Verify the enum option
 SELECT relid::regclass::text AS table_name, options
-FROM lakehouse.table_options
+FROM lakebase.table_options
 WHERE relid = 'iceberg_enum_opt_test'::regclass;
 
 DROP TABLE iceberg_enum_opt_test;
@@ -103,7 +103,7 @@ CREATE TABLE test_schema.iceberg_schema_test (
 
 -- Verify the option is stored with correct schema-qualified name
 SELECT relid::regclass::text AS table_name, options
-FROM lakehouse.table_options
+FROM lakebase.table_options
 WHERE relid = 'test_schema.iceberg_schema_test'::regclass;
 
 DROP TABLE test_schema.iceberg_schema_test;
@@ -112,4 +112,4 @@ DROP SCHEMA test_schema;
 -- ============================================================================
 -- Clean up: Verify no orphaned entries remain
 -- ============================================================================
-SELECT COUNT(*) AS orphan_count FROM lakehouse.table_options;
+SELECT COUNT(*) AS orphan_count FROM lakebase.table_options;

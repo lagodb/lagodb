@@ -1,18 +1,18 @@
-# pg-lakehouse
+# pg-lakebase
 
-[![Build Status](https://github.com/robertmu/pg-lakehouse/workflows/CI/badge.svg)](https://github.com/robertmu/pg-lakehouse/actions)
+[![Build Status](https://github.com/robertmu/pg-lakebase/workflows/CI/badge.svg)](https://github.com/robertmu/pg-lakebase/actions)
 [![Rust](https://img.shields.io/badge/rust-1.90.0%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/pg-lakebase-core.svg)](https://crates.io/crates/pg-lakebase-core)
 
-**The Unified Data Lakehouse Extension Suite for PostgreSQL.**
+**The Unified Data Lakebase Extension Suite for PostgreSQL.**
 
-`pg-lakehouse` is an ambitious project aimed at making PostgreSQL a first-class citizen in the modern Data Lakehouse ecosystem. By implementing high-performance **Table Access Methods (TAM)** and **Foreign Data Wrappers (FDW)** in Rust, it allows PostgreSQL to query and manage open table formats with native-like performance and semantics.
+`pg-lakebase` is an ambitious project aimed at making PostgreSQL a first-class citizen in the modern Data Lakebase ecosystem. By implementing high-performance **Table Access Methods (TAM)** and **Foreign Data Wrappers (FDW)** in Rust, it allows PostgreSQL to query and manage open table formats with native-like performance and semantics.
 
 ## The Vision
 
-The goal of `pg-lakehouse` is to be the **one-stop Data Lakehouse solution** for PostgreSQL, enabling it to seamlessly interact with the broader big data ecosystem. Our roadmap includes:
+The goal of `pg-lakebase` is to be the **one-stop Data Lakebase solution** for PostgreSQL, enabling it to seamlessly interact with the broader big data ecosystem. Our roadmap includes:
 
 - **Universal Table Format Support**: In addition to Apache Iceberg, we plan to provide native support for **Apache Hudi** and **Delta Lake**.
 - **Hadoop Ecosystem Integration**: Support for accessing and managing data within the Hadoop ecosystem, including HDFS and various Hadoop-based data warehouses.

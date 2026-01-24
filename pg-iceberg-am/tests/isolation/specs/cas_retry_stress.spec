@@ -40,9 +40,9 @@ step s1_verify {
   GROUP BY session_id 
   ORDER BY session_id; 
 }
-step s1_lock_share { LOCK TABLE lakehouse.iceberg_metadata IN SHARE MODE; }
+step s1_lock_share { LOCK TABLE lakebase.iceberg_metadata IN SHARE MODE; }
 step s1_update_touched {
-  UPDATE lakehouse.iceberg_metadata
+  UPDATE lakebase.iceberg_metadata
   SET previous_metadata_location = previous_metadata_location
   WHERE relid = 'iceberg_test.txn_test'::regclass;
 }

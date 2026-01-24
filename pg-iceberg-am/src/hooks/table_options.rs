@@ -157,7 +157,7 @@ impl UtilityHook for IcebergTableHook {
                 ))
             })?;
 
-        // Insert metadata record into lakehouse.iceberg_metadata catalog table
+        // Insert metadata record into lakebase.iceberg_metadata catalog table
         IcebergMetadata::new(oid)
             .with_metadata_location(metadata_location)
             .with_default_spec_id(0) // New table starts with default spec_id 0

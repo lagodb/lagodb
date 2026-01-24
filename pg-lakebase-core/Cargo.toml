@@ -4,8 +4,8 @@ version = { workspace = true }
 authors = ["Robert Mu. https://github.com/robertmu"]
 license = { workspace = true }
 description = "Postgres Table Access Method framework in Rust."
-homepage = "https://github.com/robertmu/pg-lakehouse"
-repository = "https://github.com/robertmu/pg-lakehouse"
+homepage = "https://github.com/robertmu/pg-lakebase"
+repository = "https://github.com/robertmu/pg-lakebase"
 categories = ["database"]
 keywords = ["database", "postgres", "postgresql", "extension", "access-method"]
 edition = { workspace = true }

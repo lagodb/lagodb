@@ -6,7 +6,7 @@
 
 **Apache Iceberg Table Access Method (TAM) for PostgreSQL**
 
-`pg-iceberg-am` is a PostgreSQL extension implemented in Rust that provides native support for the [Apache Iceberg](https://iceberg.apache.org/) table format. It is built using the [pg-lakebase-core](https://github.com/robertmu/pg-lakehouse) framework and leverages [pgrx](https://github.com/tcdi/pgrx) for deep integration with PostgreSQL's internal engine.
+`pg-iceberg-am` is a PostgreSQL extension implemented in Rust that provides native support for the [Apache Iceberg](https://iceberg.apache.org/) table format. It is built using the [pg-lakebase-core](https://github.com/robertmu/pg-lakebase) framework and leverages [pgrx](https://github.com/tcdi/pgrx) for deep integration with PostgreSQL's internal engine.
 
 ## Table of Contents
 
