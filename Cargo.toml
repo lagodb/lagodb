@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "pg-lakehouse-core",
-    "pg-lakehouse-macros",
-    "pg-am-iceberg",
+    "pg-lakebase-core",
+    "pg-lakebase-macros",
+    "pg-iceberg-am",
     "iceberg-lite",
-    "pg-lakehouse-storage",
+    "pg-lakebase-storage",
 ]
 resolver = "2"
 

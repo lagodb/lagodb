@@ -4,7 +4,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.90.0%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Crates.io](https://img.shields.io/crates/v/pg-lakehouse-core.svg)](https://crates.io/crates/pg-lakehouse-core)
+[![Crates.io](https://img.shields.io/crates/v/pg-lakebase-core.svg)](https://crates.io/crates/pg-lakebase-core)
 
 **The Unified Data Lakehouse Extension Suite for PostgreSQL.**
 
@@ -23,11 +23,11 @@ The goal of `pg-lakehouse` is to be the **one-stop Data Lakehouse solution** for
 
 The project consists of the following components:
 
-- **[pg-lakehouse-core](./pg-lakehouse-core)**: Core framework library providing abstractions for TAM and FDW development.
-- **[pg-lakehouse-macros](./pg-lakehouse-macros)**: Procedural macros to reduce boilerplate when implementing access methods.
-- **[pg-am-iceberg](./pg-am-iceberg)**: A reference implementation of an Apache Iceberg Table Access Method.
-- **[pg-lakehouse-storage](./pg-lakehouse-storage)**: Centralized storage caching server and client, featuring a high-performance single-file image cache synchronized via PostgreSQL latches and shared memory.
-- **iceberg-lite**: A synchronous, PostgreSQL-friendly fork of [iceberg-rust](https://github.com/apache/iceberg-rust).
+- **[pg-lakebase-core](./pg-lakebase-core)**: Core framework library providing abstractions for TAM and FDW development.
+- **[pg-lakebase-macros](./pg-lakebase-macros)**: Procedural macros to reduce boilerplate when implementing access methods.
+- **[pg-iceberg-am](./pg-iceberg-am)**: Native Apache Iceberg Table Access Method implementation.
+- **[pg-lakebase-storage](./pg-lakebase-storage)**: Storage caching server, featuring a high-performance single-file image cache synchronized via PostgreSQL latches and shared memory.
+- **[iceberg-lite](./iceberg-lite)**: A synchronous, PostgreSQL-friendly fork of [iceberg-rust](https://github.com/apache/iceberg-rust).
 
 ## Key Features
 
@@ -35,7 +35,7 @@ The project consists of the following components:
 - **Deep PostgreSQL Integration**: Direct hooks into PostgreSQL's scan, DML, and DDL paths for maximum performance.
 - **Crash Recovery**: Support for custom WAL resource managers to ensure metadata consistency across PostgreSQL restarts.
 - **Safe Abstractions**: High-level Rust handles and types that wrap complex PostgreSQL C structures, preventing memory safety issues.
-- **Reference Implementation**: Includes `pg-am-iceberg` as a production-grade example of a Table Access Method.
+- **Reference Implementation**: Includes `pg-iceberg-am` as a production-grade example of a Table Access Method.
 
 ## Getting Started
 
@@ -60,9 +60,9 @@ The project consists of the following components:
 ## Documentation
 
 For detailed information on each component, please refer to their respective README files:
-- [Core Framework Guide](./pg-lakehouse-core/README.md)
-- [Iceberg Access Method Guide](./pg-am-iceberg/README.md)
-- [Storage Caching Guide](./pg-lakehouse-storage/README.md)
+- [Core Framework Guide](./pg-lakebase-core/README.md)
+- [Iceberg Access Method Guide](./pg-iceberg-am/README.md)
+- [Storage Caching Guide](./pg-lakebase-storage/README.md)
 
 ## License
 

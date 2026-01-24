@@ -1,0 +1,39 @@
+[package]
+name = "pg-lakebase-core"
+version = { workspace = true }
+authors = ["Robert Mu. https://github.com/robertmu"]
+license = { workspace = true }
+description = "Postgres Table Access Method framework in Rust."
+homepage = "https://github.com/robertmu/pg-lakehouse"
+repository = "https://github.com/robertmu/pg-lakehouse"
+categories = ["database"]
+keywords = ["database", "postgres", "postgresql", "extension", "access-method"]
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrx_embed)'] }
+
+[features]
+default = ["pg17"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg_test = []
+
+[dependencies]
+pgrx = { workspace = true}
+thiserror = "1.0.63"
+tokio = { version = "1.43", features = ["rt", "net"] }
+uuid = { version = "1.10.0" }
+pg-lakebase-macros = { version = "0.1.0", path = "../pg-lakebase-macros" }
+serde_json = "1.0"
+bytes = "1.10"
+
+[dev-dependencies]
+pgrx-tests = { workspace = true }
+
+[package.metadata.docs.rs]
+features = ["pg17"]
+no-default-features = true
+# Enable `#[cfg(docsrs)]` (https://docs.rs/about/builds#cross-compiling)
+rustc-args = ["--cfg", "docsrs"]

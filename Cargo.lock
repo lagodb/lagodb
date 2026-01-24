@@ -2969,7 +2969,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-am-iceberg"
+name = "pg-iceberg-am"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
@@ -2979,7 +2979,7 @@ dependencies = [
  "iceberg-lite",
  "libc",
  "parquet",
- "pg-lakehouse-core",
+ "pg-lakebase-core",
  "pgrx",
  "pgrx-tests",
  "postgres",
@@ -2992,11 +2992,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-lakehouse-core"
+name = "pg-lakebase-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "pg-lakehouse-macros",
+ "pg-lakebase-macros",
  "pgrx",
  "pgrx-tests",
  "serde_json",
@@ -3006,7 +3006,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-lakehouse-macros"
+name = "pg-lakebase-macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
@@ -3015,7 +3015,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-lakehouse-storage"
+name = "pg-lakebase-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
