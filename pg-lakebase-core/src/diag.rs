@@ -124,6 +124,15 @@ impl From<CreateRuntimeError> for ErrorReport {
     }
 }
 
+/// Error types that can choose the PostgreSQL SQLSTATE used when reporting.
+pub trait SqlStateError: std::error::Error + Send + Sync + 'static {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+    }
+}
+
+impl SqlStateError for CreateRuntimeError {}
+
 /// Create a Tokio async runtime
 ///
 /// Use this runtime to run async code in `block` mode. Run blocked code is

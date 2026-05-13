@@ -5,8 +5,8 @@ use crate::hooks::table_option_cache::IcebergTableOptionCache;
 use crate::storage::create_storage_context;
 use iceberg_lite::catalog::{Catalog, NamespaceIdent, TableCreation};
 use iceberg_lite::spec::{FormatVersion, SortOrder, UnboundPartitionSpec};
+use pg_lakebase_core::options::AmCache;
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::option::AmCache;
 use pgrx::pg_sys;
 
 use super::IcebergCatalog;

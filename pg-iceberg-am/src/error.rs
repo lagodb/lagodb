@@ -1,6 +1,6 @@
 use crate::catalog::iceberg_metadata::IcebergMetadataError;
-use pg_lakebase_core::option::TableOptionError;
-use pg_lakebase_core::option::tablespace_cache::TablespaceCacheError;
+use pg_lakebase_core::diag::SqlStateError;
+use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
 use pg_lakebase_core::pg_wrapper::PgWrapperError;
 use pg_lakebase_core::prelude::{CreateRuntimeError, TablespaceError};
 use pgrx::pg_sys::panic::ErrorReport;
@@ -20,6 +20,9 @@ pub enum IcebergError {
 
     #[error("table option error: {0}")]
     TableOptionError(#[from] TableOptionError),
+
+    #[error("storage error: {0}")]
+    StorageError(#[from] pg_lakebase_storage::StorageError),
 
     #[error("pg wrapper error: {0}")]
     PgWrapperError(#[from] PgWrapperError),
@@ -93,12 +96,13 @@ pub enum IcebergError {
     NotImplemented(&'static str),
 }
 
-impl From<IcebergError> for ErrorReport {
-    fn from(value: IcebergError) -> Self {
-        let error_code = match &value {
+impl SqlStateError for IcebergError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        match self {
             IcebergError::TablespaceError(_)
             | IcebergError::TablespaceCacheError(_)
             | IcebergError::TableOptionError(_)
+            | IcebergError::StorageError(_)
             | IcebergError::TablespaceNotFound => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
@@ -148,8 +152,13 @@ impl From<IcebergError> for ErrorReport {
             }
 
             IcebergError::MetadataError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-        };
-        ErrorReport::new(error_code, format!("{value}"), "")
+        }
+    }
+}
+
+impl From<IcebergError> for ErrorReport {
+    fn from(value: IcebergError) -> Self {
+        ErrorReport::new(value.sql_error_code(), format!("{value}"), "")
     }
 }
 

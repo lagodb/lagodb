@@ -7,17 +7,13 @@ use std::path::Path;
 
 use bytes::Bytes;
 
-use super::file_io::{FileMetadata, FileRead, FileWrite, Storage};
+use super::file_io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use crate::error::Result;
 
 #[derive(Debug, Default)]
 pub struct LocalStorage;
 
 impl Storage for LocalStorage {
-    fn exists(&self, path: &str) -> Result<bool> {
-        Ok(Path::new(path).exists())
-    }
-
     fn delete(&self, path: &str) -> Result<()> {
         match fs::remove_file(path) {
             Ok(_) => Ok(()),
@@ -38,16 +34,25 @@ impl Storage for LocalStorage {
         Ok(())
     }
 
-    fn metadata(&self, path: &str) -> Result<FileMetadata> {
-        let metadata = fs::metadata(path)?;
-        Ok(FileMetadata {
-            size: metadata.len(),
-        })
+    fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(Some(FileMetadata {
+                size: metadata.len(),
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
-    fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
+    fn open_reader(&self, path: &str) -> Result<OpenedFile> {
         let file = File::open(path)?;
-        Ok(Box::new(LocalFileRead { file }))
+        let metadata = file.metadata()?;
+        Ok(OpenedFile {
+            metadata: FileMetadata {
+                size: metadata.len(),
+            },
+            reader: Box::new(LocalFileRead { file }),
+        })
     }
 
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {

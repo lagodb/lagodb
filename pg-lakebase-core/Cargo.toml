@@ -26,6 +26,7 @@ thiserror = "1.0.63"
 tokio = { version = "1.43", features = ["rt", "net"] }
 uuid = { version = "1.10.0" }
 pg-lakebase-macros = { version = "0.1.0", path = "../pg-lakebase-macros" }
+pg-lakebase-storage = { path = "../pg-lakebase-storage" }
 serde_json = "1.0"
 bytes = "1.10"
 

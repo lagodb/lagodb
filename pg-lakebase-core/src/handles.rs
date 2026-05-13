@@ -677,3 +677,31 @@ impl Drop for SysScanGuard<'_> {
         let _ = PgWrapper::systable_endscan(self.scan);
     }
 }
+
+/// RAII guard for heap tuple - automatically frees tuple when dropped.
+#[derive(Debug)]
+pub struct HeapTupleGuard {
+    tuple: pg_sys::HeapTuple,
+}
+
+impl HeapTupleGuard {
+    /// Create a new guard from a raw heap tuple.
+    /// The guard takes ownership of the tuple and will free it on drop.
+    pub fn new(tuple: pg_sys::HeapTuple) -> Self {
+        Self { tuple }
+    }
+
+    /// Get the raw heap tuple pointer.
+    #[inline]
+    pub fn as_raw(&self) -> pg_sys::HeapTuple {
+        self.tuple
+    }
+}
+
+impl Drop for HeapTupleGuard {
+    fn drop(&mut self) {
+        unsafe {
+            pg_sys::heap_freetuple(self.tuple);
+        }
+    }
+}

@@ -63,6 +63,9 @@ pub enum ErrorKind {
 
     /// Catalog commit failed due to outdated metadata
     CatalogCommitConflicts,
+
+    /// Iceberg IO error.
+    IoError,
 }
 
 impl ErrorKind {
@@ -84,6 +87,7 @@ impl From<ErrorKind> for &'static str {
             ErrorKind::NamespaceNotFound => "NamespaceNotFound",
             ErrorKind::PreconditionFailed => "PreconditionFailed",
             ErrorKind::CatalogCommitConflicts => "CatalogCommitConflicts",
+            ErrorKind::IoError => "IoError",
         }
     }
 }
@@ -424,7 +428,7 @@ define_from_err!(
     "Arrow Schema Error"
 );
 
-define_from_err!(std::io::Error, ErrorKind::Unexpected, "IO Operation failed");
+define_from_err!(std::io::Error, ErrorKind::IoError, "IO Operation failed");
 
 /// Converts a timestamp in milliseconds to `DateTime<Utc>`, handling errors.
 ///

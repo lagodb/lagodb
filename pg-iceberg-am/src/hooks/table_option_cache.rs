@@ -26,7 +26,10 @@ use super::table_options::{
     OPT_COMPRESSION_CODEC, OPT_COMPRESSION_CODEC_DEFAULT, OPT_FORMAT_VERSION,
     OPT_FORMAT_VERSION_DEFAULT, OPT_WRITE_FORMAT, OPT_WRITE_FORMAT_DEFAULT,
 };
-use pg_lakebase_core::option::{AmCacheable, TableOptions, append_string, get_string_at_offset};
+use pg_lakebase_core::options::table::{
+    AmCacheLayout, AmCacheLayoutBuilder, AmCacheStringOffset, AmCacheable,
+    TableOptions,
+};
 use std::collections::HashMap;
 
 /// Iceberg table options cached in rd_amcache.
@@ -37,29 +40,28 @@ use std::collections::HashMap;
 #[derive(Clone, Copy)]
 pub struct IcebergTableOptionCache {
     pub format_version: i32,
-    compression_offset: u32,
-    write_format_offset: u32,
+    compression_offset: AmCacheStringOffset,
+    write_format_offset: AmCacheStringOffset,
 }
 
 // SAFETY: IcebergTableOptionCache is #[repr(C)] and contains only POD types.
 // No heap allocations, no Drop implementations needed.
 unsafe impl AmCacheable for IcebergTableOptionCache {
     fn from_options(opts: &TableOptions) -> (Self, Vec<u8>) {
-        let header_size = std::mem::size_of::<Self>();
-        let mut data = Vec::new();
+        let mut layout = AmCacheLayoutBuilder::for_header::<Self>();
 
         let format_version = opts
             .get_int(OPT_FORMAT_VERSION)
             .unwrap_or(OPT_FORMAT_VERSION_DEFAULT);
         let compression = opts
             .get_str(OPT_COMPRESSION_CODEC)
-            .unwrap_or_else(|| OPT_COMPRESSION_CODEC_DEFAULT.to_string());
+            .unwrap_or(OPT_COMPRESSION_CODEC_DEFAULT);
         let write_format = opts
             .get_str(OPT_WRITE_FORMAT)
-            .unwrap_or_else(|| OPT_WRITE_FORMAT_DEFAULT.to_string());
+            .unwrap_or(OPT_WRITE_FORMAT_DEFAULT);
 
-        let compression_offset = append_string(&mut data, header_size, &compression);
-        let write_format_offset = append_string(&mut data, header_size, &write_format);
+        let compression_offset = layout.push_str(compression);
+        let write_format_offset = layout.push_str(write_format);
 
         (
             Self {
@@ -67,18 +69,15 @@ unsafe impl AmCacheable for IcebergTableOptionCache {
                 compression_offset,
                 write_format_offset,
             },
-            data,
+            layout.into_bytes(),
         )
     }
 
     fn default_options() -> (Self, Vec<u8>) {
-        let header_size = std::mem::size_of::<Self>();
-        let mut data = Vec::new();
+        let mut layout = AmCacheLayoutBuilder::for_header::<Self>();
 
-        let compression_offset =
-            append_string(&mut data, header_size, OPT_COMPRESSION_CODEC_DEFAULT);
-        let write_format_offset =
-            append_string(&mut data, header_size, OPT_WRITE_FORMAT_DEFAULT);
+        let compression_offset = layout.push_str(OPT_COMPRESSION_CODEC_DEFAULT);
+        let write_format_offset = layout.push_str(OPT_WRITE_FORMAT_DEFAULT);
 
         (
             Self {
@@ -86,18 +85,28 @@ unsafe impl AmCacheable for IcebergTableOptionCache {
                 compression_offset,
                 write_format_offset,
             },
-            data,
+            layout.into_bytes(),
         )
     }
 }
 
 impl IcebergTableOptionCache {
     pub fn compression(&self) -> &str {
-        unsafe { get_string_at_offset(self as *const _ as *const u8, self.compression_offset) }
+        unsafe {
+            AmCacheLayout::str_at_offset(
+                self as *const _ as *const u8,
+                self.compression_offset,
+            )
+        }
     }
 
     pub fn write_format(&self) -> &str {
-        unsafe { get_string_at_offset(self as *const _ as *const u8, self.write_format_offset) }
+        unsafe {
+            AmCacheLayout::str_at_offset(
+                self as *const _ as *const u8,
+                self.write_format_offset,
+            )
+        }
     }
 
     /// Convert cached options to Iceberg table properties HashMap.

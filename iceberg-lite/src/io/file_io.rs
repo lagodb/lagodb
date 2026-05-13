@@ -10,23 +10,48 @@ use url::Url;
 
 use super::{LocalStorage, MemoryStorage};
 
+/// Metadata about a file in storage.
+///
+/// Derives `Clone` and `Copy` so callers can read fields (e.g. `size`) before moving the
+/// struct into consumers like `ArrowFileReader::new()`.
+#[derive(Clone, Copy)]
 pub struct FileMetadata {
     pub size: u64,
 }
 
+pub struct OpenedFile {
+    pub metadata: FileMetadata,
+    pub reader: Box<dyn FileRead>,
+}
+
 pub trait Storage: Send + Sync + std::fmt::Debug {
-    fn exists(&self, path: &str) -> Result<bool>;
     fn delete(&self, path: &str) -> Result<()>;
     fn remove_dir_all(&self, path: &str) -> Result<()>;
-    fn metadata(&self, path: &str) -> Result<FileMetadata>;
+    fn status(&self, path: &str) -> Result<Option<FileMetadata>>;
 
-    fn reader(&self, path: &str) -> Result<Box<dyn FileRead>>;
+    fn open_reader(&self, path: &str) -> Result<OpenedFile>;
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>>;
 
     fn initialize(&mut self, props: HashMap<String, String>) -> Result<()>;
 
     fn scheme(&self) -> &str;
     fn as_any(&self) -> &dyn Any;
+
+    /// Resolve a raw URI or path into a storage-relative key.
+    ///
+    /// Returns the byte offset into `uri` where the storage-relative key begins.
+    /// Implementations should validate that the URI targets the correct storage
+    /// namespace (e.g., bucket, container) and reject mismatches.
+    ///
+    /// The default implementation strips the `scheme://` prefix.
+    fn resolve_uri(&self, uri: &str) -> Result<usize> {
+        let prefix = format!("{}://", self.scheme());
+        if uri.starts_with(&prefix) {
+            Ok(prefix.len())
+        } else {
+            Ok(0)
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -98,7 +123,7 @@ impl FileIO {
 
     pub fn new_input(&self, path: impl AsRef<str>) -> Result<InputFile> {
         let path_str = path.as_ref().to_string();
-        let relative_path_pos = self.prefix_len(&path_str);
+        let relative_path_pos = self.storage.resolve_uri(&path_str)?;
         Ok(InputFile {
             op: self.storage.clone(),
             path: path_str,
@@ -108,7 +133,7 @@ impl FileIO {
 
     pub fn new_output(&self, path: impl AsRef<str>) -> Result<OutputFile> {
         let path_str = path.as_ref().to_string();
-        let relative_path_pos = self.prefix_len(&path_str);
+        let relative_path_pos = self.storage.resolve_uri(&path_str)?;
         Ok(OutputFile {
             op: self.storage.clone(),
             path: path_str,
@@ -118,32 +143,25 @@ impl FileIO {
 
     pub fn delete(&self, path: impl AsRef<str>) -> Result<()> {
         let path_str = path.as_ref();
-        let relative_path_pos = self.prefix_len(path_str);
+        let relative_path_pos = self.storage.resolve_uri(path_str)?;
         self.storage.delete(&path_str[relative_path_pos..])
     }
 
     /// Check if a file exists at the given path.
     pub fn exists(&self, path: impl AsRef<str>) -> Result<bool> {
         let path_str = path.as_ref();
-        let relative_path_pos = self.prefix_len(path_str);
-        self.storage.exists(&path_str[relative_path_pos..])
+        let relative_path_pos = self.storage.resolve_uri(path_str)?;
+        Ok(self
+            .storage
+            .status(&path_str[relative_path_pos..])?
+            .is_some())
     }
 
     /// Remove a directory and all its contents recursively.
     pub fn remove_dir_all(&self, path: impl AsRef<str>) -> Result<()> {
         let path_str = path.as_ref();
-        let relative_path_pos = self.prefix_len(path_str);
+        let relative_path_pos = self.storage.resolve_uri(path_str)?;
         self.storage.remove_dir_all(&path_str[relative_path_pos..])
-    }
-
-    /// Returns the length of URL prefix (e.g., `scheme://`) to strip from the path.
-    fn prefix_len(&self, path: &str) -> usize {
-        let prefix = format!("{}://", self.storage.scheme());
-        if path.starts_with(&prefix) {
-            prefix.len()
-        } else {
-            0
-        }
     }
 
     /// Get the underlying storage implementation.
@@ -188,21 +206,32 @@ impl InputFile {
     }
 
     pub fn exists(&self) -> crate::Result<bool> {
-        self.op.exists(&self.path[self.relative_path_pos..])
+        Ok(self
+            .op
+            .status(&self.path[self.relative_path_pos..])?
+            .is_some())
     }
 
     pub fn metadata(&self) -> crate::Result<FileMetadata> {
-        self.op.metadata(&self.path[self.relative_path_pos..])
+        let path = &self.path[self.relative_path_pos..];
+        self.op.status(path)?.ok_or_else(|| {
+            Error::new(
+                ErrorKind::IoError,
+                format!("file metadata not found for {path:?}"),
+            )
+        })
+    }
+
+    pub fn open_reader(&self) -> crate::Result<OpenedFile> {
+        self.op.open_reader(&self.path[self.relative_path_pos..])
     }
 
     pub fn read(&self) -> crate::Result<Bytes> {
-        let path = &self.path[self.relative_path_pos..];
-        let reader = self.op.reader(path)?;
-        reader.read_all()
+        self.open_reader()?.reader.read_all()
     }
 
     pub fn reader(&self) -> crate::Result<Box<dyn FileRead>> {
-        self.op.reader(&self.path[self.relative_path_pos..])
+        Ok(self.open_reader()?.reader)
     }
 }
 
@@ -235,7 +264,10 @@ impl OutputFile {
     }
 
     pub fn exists(&self) -> Result<bool> {
-        self.op.exists(&self.path[self.relative_path_pos..])
+        Ok(self
+            .op
+            .status(&self.path[self.relative_path_pos..])?
+            .is_some())
     }
 
     pub fn delete(&self) -> Result<()> {

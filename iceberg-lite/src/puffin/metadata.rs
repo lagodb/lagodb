@@ -285,15 +285,20 @@ impl FileMetadata {
     }
 
     /// Returns the file metadata about a Puffin file
-    /// Returns the file metadata about a Puffin file
     pub(crate) fn read(input_file: &InputFile) -> Result<FileMetadata> {
-        let file_read = input_file.reader()?;
+        let opened_file = input_file.open_reader()?;
+        Self::read_from(opened_file.reader, opened_file.metadata.size)
+    }
 
+    /// Core reader: parses puffin footer from an already-opened file.
+    fn read_from(
+        file_read: Box<dyn FileRead>,
+        input_file_length: u64,
+    ) -> Result<FileMetadata> {
         let first_four_bytes =
             file_read.read_range(0..FileMetadata::MAGIC_LENGTH.into())?;
         FileMetadata::check_magic(&first_four_bytes)?;
 
-        let input_file_length = input_file.metadata()?.size;
         let footer_payload_length =
             FileMetadata::read_footer_payload_length(&*file_read, input_file_length)?;
         let footer_bytes = FileMetadata::read_footer_bytes(
@@ -321,23 +326,24 @@ impl FileMetadata {
     /// Reads file_metadata in puffin file with a prefetch hint
     ///
     /// `prefetch_hint` is used to try to fetch the entire footer in one read. If
-    /// the entire footer isn't fetched in one read the function will call the regular
-    /// read option.
+    /// the entire footer isn't fetched in one read the function will fall back to
+    /// the full read path, reusing the already-opened reader.
     #[allow(dead_code)]
     pub(crate) fn read_with_prefetch(
         input_file: &InputFile,
         prefetch_hint: u8,
     ) -> Result<FileMetadata> {
         if prefetch_hint > 16 {
-            let input_file_length = input_file.metadata()?.size;
-            let file_read = input_file.reader()?;
+            let opened_file = input_file.open_reader()?;
+            let input_file_length = opened_file.metadata.size;
+            let file_read = opened_file.reader;
 
-            // Hint cannot be larger than input file
+            // Hint cannot be larger than input file — fall back to full read
             if prefetch_hint as u64 > input_file_length {
-                return FileMetadata::read(input_file);
+                return Self::read_from(file_read, input_file_length);
             }
 
-            // Read footer based on prefetchi hint
+            // Read footer based on prefetch hint
             let start = input_file_length - prefetch_hint as u64;
             let end = input_file_length;
             let footer_bytes = file_read.read_range(start..end)?;
@@ -353,14 +359,16 @@ impl FileMetadata {
             buf.copy_from_slice(payload_length_bytes);
             let footer_payload_length = u32::from_le_bytes(buf);
 
-            // If the (footer payload length + FOOTER_STRUCT_LENGTH + MAGIC_LENGTH) is greater
-            // than the fetched footer then you can have it read regularly from a read with no
-            // prefetch while passing in the footer_payload_length.
+            // If (footer payload length + FOOTER_STRUCT_LENGTH + MAGIC_LENGTH) exceeds the
+            // prefetched tail window, we do not have the full footer in memory and cannot
+            // finish parsing from this single range read. Fall back to the regular footer
+            // parse (`read_from`), which issues additional range reads against the same
+            // reader instead of opening a second handle.
             let footer_length = (footer_payload_length as usize)
                 + FileMetadata::FOOTER_STRUCT_LENGTH as usize
                 + FileMetadata::MAGIC_LENGTH as usize;
             if footer_length > prefetch_hint as usize {
-                return FileMetadata::read(input_file);
+                return Self::read_from(file_read, input_file_length);
             }
 
             // Read footer bytes
@@ -934,5 +942,31 @@ mod tests {
             FileMetadata::read_with_prefetch(&input_file, 64).unwrap();
 
         assert_eq!(file_metadata, zstd_compressed_metric_file_metadata());
+    }
+
+    #[test]
+    fn test_read_with_prefetch_falls_back_when_footer_exceeds_hint() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Build a payload larger than our prefetch hint (17 bytes, since
+        // prefetch_hint must be > 16 to enter the prefetch branch).
+        let large_payload = r#"{"blobs":[],"properties":{"padding":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}"#;
+        assert!(
+            large_payload.len()
+                + FileMetadata::FOOTER_STRUCT_LENGTH as usize
+                + FileMetadata::MAGIC_LENGTH as usize
+                > 17,
+            "payload + footer overhead must exceed prefetch hint for this test"
+        );
+
+        let input_file = input_file_with_payload(&temp_dir, large_payload);
+
+        let file_metadata =
+            FileMetadata::read_with_prefetch(&input_file, 17).unwrap();
+        assert_eq!(file_metadata.blobs, vec![]);
+        assert_eq!(
+            file_metadata.properties.get("padding").map(String::as_str),
+            Some("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        );
     }
 }

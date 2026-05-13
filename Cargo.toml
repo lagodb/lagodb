@@ -13,13 +13,14 @@ resolver = "2"
 version = "0.1.0"
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.90.0"
+rust-version = "1.95.0"
 homepage = "https://github.com/robertmu/pg-lakebase"
 repository = "https://github.com/robertmu/pg-lakebase"
 
 [workspace.dependencies]
-pgrx = { version = "0.16.0" }
-pgrx-tests = { version = "=0.16.0"}
+pgrx = { version = "0.17.0" }
+pgrx-pg-sys = { version = "0.17.0" }
+pgrx-tests = { version = "=0.17.0"}
 
 # The 'dev' profile is used when you run `cargo build`.
 [profile.dev]

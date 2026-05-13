@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 
-use super::file_io::{FileMetadata, FileRead, FileWrite, Storage};
+use super::file_io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use crate::error::Result;
 use crate::{Error, ErrorKind};
 
@@ -30,14 +30,6 @@ impl Default for MemoryStorage {
 }
 
 impl Storage for MemoryStorage {
-    fn exists(&self, path: &str) -> Result<bool> {
-        let fs = self
-            .fs
-            .read()
-            .map_err(|_| Error::new(ErrorKind::Unexpected, "Lock poisoned"))?;
-        Ok(fs.contains_key(path))
-    }
-
     fn delete(&self, path: &str) -> Result<()> {
         let mut fs = self
             .fs
@@ -61,32 +53,33 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
-    fn metadata(&self, path: &str) -> Result<FileMetadata> {
+    fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
         let fs = self
             .fs
             .read()
             .map_err(|_| Error::new(ErrorKind::Unexpected, "Lock poisoned"))?;
-        if let Some(data) = fs.get(path) {
-            Ok(FileMetadata {
-                size: data.len() as u64,
-            })
-        } else {
-            Err(Error::new(ErrorKind::Unexpected, "File not found"))
-        }
+        Ok(fs.get(path).map(|data| FileMetadata {
+            size: data.len() as u64,
+        }))
     }
 
-    fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
+    fn open_reader(&self, path: &str) -> Result<OpenedFile> {
         let fs = self
             .fs
             .read()
             .map_err(|_| Error::new(ErrorKind::Unexpected, "Lock poisoned"))?;
         if let Some(data) = fs.get(path) {
-            Ok(Box::new(MemoryFileRead {
-                data: data.clone(),
-                position: 0,
-            }))
+            Ok(OpenedFile {
+                metadata: FileMetadata {
+                    size: data.len() as u64,
+                },
+                reader: Box::new(MemoryFileRead {
+                    data: data.clone(),
+                    position: 0,
+                }),
+            })
         } else {
-            Err(Error::new(ErrorKind::Unexpected, "File not found"))
+            Err(Error::new(ErrorKind::IoError, format!("file not found: {path:?}")))
         }
     }
 

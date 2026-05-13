@@ -1,3 +1,4 @@
+use crate::diag::SqlStateError;
 use pgrx::{PgTryBuilder, pg_sys, varlena};
 use std::ffi::CStr;
 use std::panic::AssertUnwindSafe;
@@ -11,6 +12,8 @@ pub enum PgWrapperError {
     #[error("Postgres error: {0}")]
     PostgresError(String),
 }
+
+impl SqlStateError for PgWrapperError {}
 
 /// Result of a catalog tuple update operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

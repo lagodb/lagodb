@@ -15,6 +15,7 @@
 //! ```
 
 use pg_lakebase_core::catalog::LAKEBASE_SCHEMA;
+use pg_lakebase_core::diag::SqlStateError;
 use pg_lakebase_core::handles::{SysScanGuard, TableGuard};
 use pg_lakebase_core::pg_wrapper::{CatalogUpdateResult, PgWrapper};
 use pgrx::pg_sys::panic::ErrorReport;
@@ -111,10 +112,9 @@ pub enum IcebergMetadataError {
     Conflict,
 }
 
-impl From<IcebergMetadataError> for ErrorReport {
-    fn from(value: IcebergMetadataError) -> Self {
-        let error_message = format!("{value}");
-        let code = match &value {
+impl SqlStateError for IcebergMetadataError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        match self {
             IcebergMetadataError::NotFound(_) => {
                 PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
             }
@@ -125,8 +125,13 @@ impl From<IcebergMetadataError> for ErrorReport {
                 PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
             }
             _ => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-        };
-        ErrorReport::new(code, error_message, "")
+        }
+    }
+}
+
+impl From<IcebergMetadataError> for ErrorReport {
+    fn from(value: IcebergMetadataError) -> Self {
+        ErrorReport::new(value.sql_error_code(), format!("{value}"), "")
     }
 }
 

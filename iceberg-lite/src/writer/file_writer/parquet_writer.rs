@@ -322,11 +322,10 @@ impl ParquetWriter {
 
         for file_path in file_paths {
             let input_file = file_io.new_input(&file_path)?;
-            let file_metadata = input_file.metadata()?;
-            let file_size_in_bytes = file_metadata.size as usize;
-            let reader = input_file.reader()?;
+            let opened_file = input_file.open_reader()?;
+            let file_size_in_bytes = opened_file.metadata.size as usize;
 
-            let parquet_reader = ArrowFileReader::new(file_metadata, reader);
+            let parquet_reader = ArrowFileReader::new(opened_file.metadata, opened_file.reader);
             let reader_builder =
                 ParquetRecordBatchReaderBuilder::try_new(parquet_reader).map_err(|err| {
                     Error::new(

@@ -5,11 +5,10 @@ pub use local::LocalStorage;
 pub use object::ObjectStorage;
 
 use crate::error::{IcebergError, IcebergResult};
-use iceberg_lite::io::{FileIO, Storage};
+use iceberg_lite::io::FileIO;
+use pg_lakebase_core::options::get_tablespace;
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::option::tablespace_cache::{
-    get_tablespace, is_distributed_tablespace,
-};
+use pg_lakebase_storage::StorageClient;
 use pgrx::pg_sys;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -70,46 +69,67 @@ pub fn create_storage_context_with_wal(
     spc_oid: pg_sys::Oid,
     relation_needs_wal: bool,
 ) -> IcebergResult<StorageContext> {
-    let is_distributed = is_distributed_tablespace(spc_oid);
+    if get_tablespace(spc_oid)?.is_some() {
+        // TODO: This should not error out once we have a global StorageClient/Registry.
+        // The plan is to register all distributed stores during server startup and
+        // maintain them via syscache invalidation callbacks, rather than registering
+        // them here on-demand which is inefficient for per-file operations.
+        return Err(IcebergError::NotImplemented(
+            "distributed storage requires a pg_lakebase_storage::StorageClient",
+        ));
+    }
 
-    if is_distributed {
-        // Distributed storage (S3, Azure, etc.) doesn't need WAL
-        // These systems provide their own durability guarantees
-        let opts =
-            get_tablespace(spc_oid)?.ok_or(IcebergError::TablespaceNotFound)?;
-        let mut storage = ObjectStorage::new(opts.storage.protocol());
-        let props = opts.storage.to_props();
+    create_local_storage_context(relation_needs_wal)
+}
 
-        // Initialize the storage with properties (e.g., credentials, region)
-        storage.initialize(props)?;
+pub fn create_storage_context_with_client(
+    spc_oid: pg_sys::Oid,
+    relation_needs_wal: bool,
+    storage_client: StorageClient,
+) -> IcebergResult<StorageContext> {
+    if let Some(opts) = get_tablespace(spc_oid)? {
+        let store_id = opts.store_id();
+        let object_namespace = opts.object_namespace();
+        let storage = ObjectStorage::new(
+            opts.url_scheme(),
+            store_id,
+            object_namespace,
+            storage_client,
+        )?;
 
-        let base_url = opts.storage.to_base_url();
+        // TODO: Integration with global StoreRegistry.
+        // We shouldn't call register_store here on-demand. Instead, the registry
+        // should already have this store configured from startup or syscache updates.
+        // storage_client.register_store(store_id, opts.store_config())?;
 
         Ok(StorageContext {
             file_io: FileIO::new(Arc::new(storage)),
-            base_path: base_url,
+            base_path: opts.base_url(),
             is_distributed: true,
             needs_wal: false,
         })
     } else {
-        // Local storage - determine if WAL is needed
-        // WAL is needed only if:
-        // 1. The relation needs WAL (not unlogged/temp table)
-        let needs_wal = relation_needs_wal;
-
-        let data_dir = unsafe {
-            CStr::from_ptr(pg_sys::DataDir)
-                .to_string_lossy()
-                .to_string()
-        };
-
-        Ok(StorageContext {
-            file_io: FileIO::new(Arc::new(LocalStorage::with_wal(needs_wal))),
-            base_path: data_dir,
-            is_distributed: false,
-            needs_wal,
-        })
+        create_local_storage_context(relation_needs_wal)
     }
+}
+
+fn create_local_storage_context(
+    relation_needs_wal: bool,
+) -> IcebergResult<StorageContext> {
+    let needs_wal = relation_needs_wal;
+
+    let data_dir = unsafe {
+        CStr::from_ptr(pg_sys::DataDir)
+            .to_string_lossy()
+            .to_string()
+    };
+
+    Ok(StorageContext {
+        file_io: FileIO::new(Arc::new(LocalStorage::with_wal(needs_wal))),
+        base_path: data_dir,
+        is_distributed: false,
+        needs_wal,
+    })
 }
 
 /// Create a StorageContext for a specific relation, automatically determining WAL requirements.

@@ -39,8 +39,8 @@ pub mod access;
 /// Registration logic for Table Access Method routines
 pub mod registry;
 
-/// Storage and table options handling
-pub mod option;
+/// PostgreSQL catalog option extraction, persistence, and caches
+pub mod options;
 
 /// PostgreSQL hooks framework (utility, object access, etc.)
 pub mod hooks;
@@ -67,6 +67,9 @@ pub mod prelude {
         register_pending_delete, register_resource,
     };
     pub use crate::api::*;
+    pub use crate::options::{
+        TableOptionError, TableOptions, TablespaceError, TablespaceOptions,
+    };
     pub use crate::data::*;
     pub use crate::diag::{
         CreateRuntimeError, create_async_runtime, log_debug1, report_error,
@@ -83,9 +86,6 @@ pub mod prelude {
     };
     pub use crate::hooks::{
         UtilityHook, UtilityHookError, UtilityNode, register_utility_hook,
-    };
-    pub use crate::option::{
-        TableOptionError, TableOptions, TablespaceError, TablespaceOptions,
     };
     pub use crate::pg_table_am;
     pub use crate::registry::make_table_am_routine;

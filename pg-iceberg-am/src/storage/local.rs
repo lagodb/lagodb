@@ -26,7 +26,7 @@ use bytes::Bytes;
 use pgrx::pg_sys;
 
 use iceberg_lite::Result;
-use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, Storage};
+use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use pg_lakebase_core::diag;
 
 use crate::wal::log_write_file;
@@ -84,10 +84,6 @@ impl LocalStorage {
 }
 
 impl Storage for LocalStorage {
-    fn exists(&self, path: &str) -> Result<bool> {
-        Ok(Path::new(path).exists())
-    }
-
     fn delete(&self, path: &str) -> Result<()> {
         match fs::remove_file(path) {
             Ok(_) => Ok(()),
@@ -108,16 +104,25 @@ impl Storage for LocalStorage {
         Ok(())
     }
 
-    fn metadata(&self, path: &str) -> Result<FileMetadata> {
-        let metadata = fs::metadata(path)?;
-        Ok(FileMetadata {
-            size: metadata.len(),
-        })
+    fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(Some(FileMetadata {
+                size: metadata.len(),
+            })),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
-    fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
+    fn open_reader(&self, path: &str) -> Result<OpenedFile> {
         let reader = PgFileRead::open(path)?;
-        Ok(Box::new(reader))
+        let metadata = FileMetadata {
+            size: reader.size as u64,
+        };
+        Ok(OpenedFile {
+            metadata,
+            reader: Box::new(reader),
+        })
     }
 
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {

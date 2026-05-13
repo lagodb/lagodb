@@ -450,9 +450,8 @@ impl ArrowReader {
         // Get the metadata for the Parquet file we need to read and build
         // a reader for the data within
         let parquet_file = file_io.new_input(data_file_path)?;
-        let parquet_metadata = parquet_file.metadata()?;
-        let parquet_reader = parquet_file.reader()?;
-        let parquet_file_reader = ArrowFileReader::new(parquet_metadata, parquet_reader)
+        let opened_file = parquet_file.open_reader()?;
+        let parquet_file_reader = ArrowFileReader::new(opened_file.metadata, opened_file.reader)
             .with_page_index(should_load_page_index);
 
         // Create the record batch stream builder with options derived from the file reader
