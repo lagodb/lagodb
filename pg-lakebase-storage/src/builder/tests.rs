@@ -2,13 +2,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use object_store::ObjectStoreExt;
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectStorePath;
-use object_store::ObjectStoreExt;
 
 use crate::cache::InMemoryCacheIndex;
-use crate::client::StorageClient;
 use crate::client::SeekFrom;
+use crate::client::StorageClient;
 use crate::config::StorageServerConfig;
 use crate::error::{StorageError, StorageErrorKind};
 use crate::object::ObjectLocation;
@@ -19,7 +19,10 @@ use super::*;
 async fn builder_starts_redb_backed_object_store_server() {
     let store = Arc::new(InMemory::new());
     store
-        .put(&ObjectStorePath::from("dir/file.txt"), b"hello builder".as_ref().into())
+        .put(
+            &ObjectStorePath::from("dir/file.txt"),
+            b"hello builder".as_ref().into(),
+        )
         .await
         .unwrap();
 
@@ -66,7 +69,10 @@ async fn builder_starts_redb_backed_object_store_server() {
 async fn builder_allows_dynamic_store_registration_after_bind() {
     let store = Arc::new(InMemory::new());
     store
-        .put(&ObjectStorePath::from("dir/file.txt"), b"dynamic store".as_ref().into())
+        .put(
+            &ObjectStorePath::from("dir/file.txt"),
+            b"dynamic store".as_ref().into(),
+        )
         .await
         .unwrap();
 
@@ -103,7 +109,10 @@ async fn builder_allows_dynamic_store_registration_after_bind() {
 async fn builder_applies_open_handle_limit_per_connection() {
     let store = Arc::new(InMemory::new());
     store
-        .put(&ObjectStorePath::from("dir/file.txt"), b"handle limit".as_ref().into())
+        .put(
+            &ObjectStorePath::from("dir/file.txt"),
+            b"handle limit".as_ref().into(),
+        )
         .await
         .unwrap();
 
@@ -111,7 +120,9 @@ async fn builder_applies_open_handle_limit_per_connection() {
     let socket = test_root("socket-handle-limit.sock");
     let server = StorageServerBuilder::new(&socket, &root)
         .with_service_config(StorageServiceConfig::default().with_cache_limits(4, 4))
-        .with_server_config(StorageServerConfig::default().with_max_open_handles_per_connection(1))
+        .with_server_config(
+            StorageServerConfig::default().with_max_open_handles_per_connection(1),
+        )
         .bind()
         .await
         .unwrap();
@@ -129,7 +140,9 @@ async fn builder_applies_open_handle_limit_per_connection() {
         let client = StorageClient::connect(&client_socket).unwrap();
         let first = client.open("default", "bucket", "dir/file.txt").unwrap();
         let error = match client.open("default", "bucket", "dir/file.txt") {
-            Ok(_) => panic!("expected second open to exceed the connection handle limit"),
+            Ok(_) => {
+                panic!("expected second open to exceed the connection handle limit")
+            }
             Err(error) => error,
         };
         assert_eq!(error.kind(), StorageErrorKind::ResourceExhausted);
@@ -162,7 +175,9 @@ async fn second_bind_fails_when_unix_socket_already_listening() {
         .await;
 
     match dup {
-        Err(StorageError::Io { source, .. }) => assert_eq!(source.kind(), io::ErrorKind::AddrInUse),
+        Err(StorageError::Io { source, .. }) => {
+            assert_eq!(source.kind(), io::ErrorKind::AddrInUse)
+        }
         Err(other) => panic!("expected Io AddrInUse, got {other:?}"),
         Ok(_) => panic!("expected second bind to fail"),
     }
@@ -174,7 +189,10 @@ async fn second_bind_fails_when_unix_socket_already_listening() {
 async fn builder_can_bind_with_custom_cache_index() {
     let store = Arc::new(InMemory::new());
     store
-        .put(&ObjectStorePath::from("dir/file.txt"), b"custom index".as_ref().into())
+        .put(
+            &ObjectStorePath::from("dir/file.txt"),
+            b"custom index".as_ref().into(),
+        )
         .await
         .unwrap();
 
@@ -212,7 +230,8 @@ async fn builder_can_bind_with_custom_cache_index() {
 }
 
 #[tokio::test]
-async fn builder_wipes_staging_tree_on_startup_so_crashed_client_bytes_do_not_persist() {
+async fn builder_wipes_staging_tree_on_startup_so_crashed_client_bytes_do_not_persist()
+ {
     use crate::staging::StagingPathResolver;
 
     let root = test_root("staging-boot-cache");
@@ -224,7 +243,9 @@ async fn builder_wipes_staging_tree_on_startup_so_crashed_client_bytes_do_not_pe
     if let Some(parent) = stale_path.parent() {
         tokio::fs::create_dir_all(parent).await.unwrap();
     }
-    tokio::fs::write(&stale_path, b"crashed bytes").await.unwrap();
+    tokio::fs::write(&stale_path, b"crashed bytes")
+        .await
+        .unwrap();
 
     let server = StorageServerBuilder::new(&socket, &root)
         .with_service_config(StorageServiceConfig::default().with_cache_limits(4, 4))
@@ -238,6 +259,9 @@ async fn builder_wipes_staging_tree_on_startup_so_crashed_client_bytes_do_not_pe
 }
 
 fn test_root(name: &str) -> PathBuf {
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     PathBuf::from("/tmp").join(format!("lfsb-{}-{stamp}-{name}", std::process::id()))
 }

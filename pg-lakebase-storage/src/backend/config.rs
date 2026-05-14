@@ -13,14 +13,14 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
+use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
-use object_store::ObjectStore;
 
+use super::ObjectBackend;
 use super::object_store::ObjectStoreBackend;
 use super::secret::SecretString;
-use super::ObjectBackend;
 use crate::error::{StorageError, StorageResult};
 use crate::object::{ListEntry, ObjectInfo, ObjectLocation};
 
@@ -96,7 +96,10 @@ impl StoreConfig {
     }
 
     /// Instantiate an [`ObjectStore`] client for `bucket` using this provider config.
-    pub(super) fn build_store(&self, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
+    pub(super) fn build_store(
+        &self,
+        bucket: &str,
+    ) -> StorageResult<Arc<dyn ObjectStore>> {
         match self {
             Self::S3(config) => build_s3_store(config, bucket),
             Self::S3Compatible(config) => build_s3_compatible_store(config, bucket),
@@ -112,21 +115,33 @@ impl StoreConfig {
 
 fn validate_s3(config: &S3StoreConfig) -> StorageResult<()> {
     validate_optional_secret("S3 access_key_id", config.access_key_id.as_ref())?;
-    validate_optional_secret("S3 secret_access_key", config.secret_access_key.as_ref())?;
+    validate_optional_secret(
+        "S3 secret_access_key",
+        config.secret_access_key.as_ref(),
+    )?;
     validate_optional_secret("S3 token", config.token.as_ref())?;
     Ok(())
 }
 
 fn validate_s3_compatible(config: &S3CompatibleStoreConfig) -> StorageResult<()> {
     validate_non_empty("S3-compatible endpoint", &config.endpoint)?;
-    validate_optional_secret("S3-compatible access_key_id", config.access_key_id.as_ref())?;
-    validate_optional_secret("S3-compatible secret_access_key", config.secret_access_key.as_ref())?;
+    validate_optional_secret(
+        "S3-compatible access_key_id",
+        config.access_key_id.as_ref(),
+    )?;
+    validate_optional_secret(
+        "S3-compatible secret_access_key",
+        config.secret_access_key.as_ref(),
+    )?;
     validate_optional_secret("S3-compatible token", config.token.as_ref())?;
     Ok(())
 }
 
 fn validate_gcs(config: &GcsStoreConfig) -> StorageResult<()> {
-    validate_optional_secret("GCS service_account_key", config.service_account_key.as_ref())?;
+    validate_optional_secret(
+        "GCS service_account_key",
+        config.service_account_key.as_ref(),
+    )?;
     let credential_sources = usize::from(config.service_account_path.is_some())
         + usize::from(config.service_account_key.is_some())
         + usize::from(config.application_credentials_path.is_some());
@@ -155,14 +170,21 @@ fn validate_azure(config: &AzureStoreConfig) -> StorageResult<()> {
 
 fn validate_non_empty(name: &str, value: &str) -> StorageResult<()> {
     if value.trim().is_empty() {
-        return Err(StorageError::configuration(format!("{name} must not be empty")));
+        return Err(StorageError::configuration(format!(
+            "{name} must not be empty"
+        )));
     }
     Ok(())
 }
 
-fn validate_optional_secret(name: &str, value: Option<&SecretString>) -> StorageResult<()> {
+fn validate_optional_secret(
+    name: &str,
+    value: Option<&SecretString>,
+) -> StorageResult<()> {
     if matches!(value.map(SecretString::expose_secret), Some("")) {
-        return Err(StorageError::configuration(format!("{name} must not be empty")));
+        return Err(StorageError::configuration(format!(
+            "{name} must not be empty"
+        )));
     }
     Ok(())
 }
@@ -182,7 +204,10 @@ fn finish_store_build<O: ObjectStore>(
         .map_err(|error| StorageError::configuration(format!("failed to build {provider} store for {resource_label} {resource_name}: {error}")))
 }
 
-fn build_s3_store(config: &S3StoreConfig, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
+fn build_s3_store(
+    config: &S3StoreConfig,
+    bucket: &str,
+) -> StorageResult<Arc<dyn ObjectStore>> {
     let mut builder = AmazonS3Builder::new().with_bucket_name(bucket.to_string());
     if let Some(region) = &config.region {
         builder = builder.with_region(region);
@@ -211,7 +236,10 @@ fn build_s3_store(config: &S3StoreConfig, bucket: &str) -> StorageResult<Arc<dyn
     finish_store_build(builder.build(), "S3", "bucket", bucket)
 }
 
-fn build_s3_compatible_store(config: &S3CompatibleStoreConfig, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
+fn build_s3_compatible_store(
+    config: &S3CompatibleStoreConfig,
+    bucket: &str,
+) -> StorageResult<Arc<dyn ObjectStore>> {
     let mut builder = AmazonS3Builder::new()
         .with_bucket_name(bucket.to_string())
         .with_endpoint(&config.endpoint);
@@ -239,8 +267,12 @@ fn build_s3_compatible_store(config: &S3CompatibleStoreConfig, bucket: &str) -> 
     finish_store_build(builder.build(), "S3-compatible", "bucket", bucket)
 }
 
-fn build_gcs_store(config: &GcsStoreConfig, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
-    let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(bucket.to_string());
+fn build_gcs_store(
+    config: &GcsStoreConfig,
+    bucket: &str,
+) -> StorageResult<Arc<dyn ObjectStore>> {
+    let mut builder =
+        GoogleCloudStorageBuilder::new().with_bucket_name(bucket.to_string());
     if let Some(base_url) = &config.base_url {
         builder = builder.with_base_url(base_url);
     }
@@ -248,7 +280,8 @@ fn build_gcs_store(config: &GcsStoreConfig, bucket: &str) -> StorageResult<Arc<d
         builder = builder.with_service_account_path(service_account_path);
     }
     if let Some(service_account_key) = &config.service_account_key {
-        builder = builder.with_service_account_key(service_account_key.expose_secret());
+        builder =
+            builder.with_service_account_key(service_account_key.expose_secret());
     }
     if let Some(application_credentials_path) = &config.application_credentials_path {
         builder = builder.with_application_credentials(application_credentials_path);
@@ -259,8 +292,12 @@ fn build_gcs_store(config: &GcsStoreConfig, bucket: &str) -> StorageResult<Arc<d
     finish_store_build(builder.build(), "GCS", "bucket", bucket)
 }
 
-fn build_azure_store(config: &AzureStoreConfig, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
-    let mut builder = MicrosoftAzureBuilder::new().with_container_name(bucket.to_string());
+fn build_azure_store(
+    config: &AzureStoreConfig,
+    bucket: &str,
+) -> StorageResult<Arc<dyn ObjectStore>> {
+    let mut builder =
+        MicrosoftAzureBuilder::new().with_container_name(bucket.to_string());
     if let Some(account) = &config.account {
         builder = builder.with_account(account);
     }
@@ -271,12 +308,17 @@ fn build_azure_store(config: &AzureStoreConfig, bucket: &str) -> StorageResult<A
         builder = builder.with_access_key(access_key.expose_secret());
     }
     if let Some(bearer_token) = &config.bearer_token {
-        builder = builder.with_bearer_token_authorization(bearer_token.expose_secret());
+        builder =
+            builder.with_bearer_token_authorization(bearer_token.expose_secret());
     }
     if let (Some(client_id), Some(client_secret), Some(tenant_id)) =
         (&config.client_id, &config.client_secret, &config.tenant_id)
     {
-        builder = builder.with_client_secret_authorization(client_id, client_secret.expose_secret(), tenant_id);
+        builder = builder.with_client_secret_authorization(
+            client_id,
+            client_secret.expose_secret(),
+            tenant_id,
+        );
     }
     if config.allow_http {
         builder = builder.with_allow_http(true);
@@ -336,12 +378,20 @@ impl ConfiguredObjectBackend {
 impl ObjectBackend for ConfiguredObjectBackend {
     async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
         let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket()).head(key).await
+        ObjectStoreBackend::for_bucket(store, key.bucket())
+            .head(key)
+            .await
     }
 
-    async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
+    async fn get_range(
+        &self,
+        key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
         let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket()).get_range(key, range).await
+        ObjectStoreBackend::for_bucket(store, key.bucket())
+            .get_range(key, range)
+            .await
     }
 
     async fn put_from_file(
@@ -363,14 +413,17 @@ impl ObjectBackend for ConfiguredObjectBackend {
         prefix: Option<&str>,
     ) -> BoxStream<'static, StorageResult<ListEntry>> {
         match self.store_for_bucket(bucket) {
-            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket).list(store_id, bucket, prefix),
+            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket)
+                .list(store_id, bucket, prefix),
             Err(error) => stream::once(async move { Err(error) }).boxed(),
         }
     }
 
     async fn delete(&self, key: &ObjectLocation) -> StorageResult<()> {
         let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket()).delete(key).await
+        ObjectStoreBackend::for_bucket(store, key.bucket())
+            .delete(key)
+            .await
     }
 
     fn delete_stream(
@@ -380,16 +433,19 @@ impl ObjectBackend for ConfiguredObjectBackend {
         keys: BoxStream<'static, StorageResult<String>>,
     ) -> BoxStream<'static, StorageResult<String>> {
         match self.store_for_bucket(bucket) {
-            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket).delete_stream(store_id, bucket, keys),
+            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket)
+                .delete_stream(store_id, bucket, keys),
             Err(error) => {
                 // The bucket cannot be reached at all (build error). Drain the input stream as
                 // failures so callers see a deterministic error per attempted key.
                 let template = error.to_string();
                 keys.map(move |item| {
-                    item.and_then(|_| Err(StorageError::configuration(template.clone())))
+                    item.and_then(|_| {
+                        Err(StorageError::configuration(template.clone()))
+                    })
                 })
                 .boxed()
-            },
+            }
         }
     }
 }
@@ -454,15 +510,18 @@ mod tests {
             ..AzureStoreConfig::default()
         });
 
-        assert!(gcs
-            .validate()
-            .unwrap_err()
-            .wire_message()
-            .contains("at most one credential source"));
-        assert!(azure
-            .validate()
-            .unwrap_err()
-            .wire_message()
-            .contains("requires client_id, client_secret and tenant_id"));
+        assert!(
+            gcs.validate()
+                .unwrap_err()
+                .wire_message()
+                .contains("at most one credential source")
+        );
+        assert!(
+            azure
+                .validate()
+                .unwrap_err()
+                .wire_message()
+                .contains("requires client_id, client_secret and tenant_id")
+        );
     }
 }

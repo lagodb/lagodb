@@ -58,7 +58,7 @@ impl<'a> ListIter<'a> {
             ListIterState::Open(cursor) => Some(cursor),
             ListIterState::Exhausted | ListIterState::Failed => {
                 unreachable!("refill called in terminal state")
-            },
+            }
         };
         let page = self.client.list_page(
             self.store_id.clone(),
@@ -86,12 +86,14 @@ impl Iterator for ListIter<'_> {
             }
             match &self.state {
                 ListIterState::Exhausted | ListIterState::Failed => return None,
-                ListIterState::BeforeFirstPage | ListIterState::Open(_) => match self.refill() {
-                    Ok(()) => continue,
-                    Err(error) => {
-                        return Some(Err(error));
-                    },
-                },
+                ListIterState::BeforeFirstPage | ListIterState::Open(_) => {
+                    match self.refill() {
+                        Ok(()) => continue,
+                        Err(error) => {
+                            return Some(Err(error));
+                        }
+                    }
+                }
             }
         }
     }

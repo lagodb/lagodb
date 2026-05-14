@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::{make_array, ArrayRef, RecordBatch, StructArray};
+use arrow_array::{ArrayRef, RecordBatch, StructArray, make_array};
 use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
@@ -92,7 +92,8 @@ impl RecordBatchProjector {
         iceberg_schema: Arc<IcebergSchema>,
         target_field_ids: &[i32],
     ) -> Result<Self> {
-        let arrow_schema_with_ids = Arc::new(schema_to_arrow_schema(&iceberg_schema)?);
+        let arrow_schema_with_ids =
+            Arc::new(schema_to_arrow_schema(&iceberg_schema)?);
 
         let field_id_fetch_func = |field: &Field| -> Result<Option<i64>> {
             if let Some(value) = field.metadata().get(PARQUET_FIELD_ID_META_KEY) {
@@ -179,7 +180,10 @@ impl RecordBatchProjector {
             .collect::<Result<Vec<_>>>()
     }
 
-    fn get_column_by_field_index(batch: &[ArrayRef], field_index: &[usize]) -> Result<ArrayRef> {
+    fn get_column_by_field_index(
+        batch: &[ArrayRef],
+        field_index: &[usize],
+    ) -> Result<ArrayRef> {
         let mut rev_iterator = field_index.iter().rev();
         let mut array = batch[*rev_iterator.next().unwrap()].clone();
         let mut null_buffer = array.logical_nulls();
@@ -193,7 +197,10 @@ impl RecordBatchProjector {
                 ))?
                 .column(*idx)
                 .clone();
-            null_buffer = NullBuffer::union(null_buffer.as_ref(), array.logical_nulls().as_ref());
+            null_buffer = NullBuffer::union(
+                null_buffer.as_ref(),
+                array.logical_nulls().as_ref(),
+            );
         }
         Ok(make_array(
             array.to_data().into_builder().nulls(null_buffer).build()?,
@@ -235,9 +242,13 @@ mod test {
             "inner_field2" => Ok(Some(4)),
             _ => Err(Error::new(ErrorKind::Unexpected, "Field id not found")),
         };
-        let projector =
-            RecordBatchProjector::new(schema.clone(), &[1, 3], field_id_fetch_func, |_| true)
-                .unwrap();
+        let projector = RecordBatchProjector::new(
+            schema.clone(),
+            &[1, 3],
+            field_id_fetch_func,
+            |_| true,
+        )
+        .unwrap();
 
         assert_eq!(projector.field_indices.len(), 2);
         assert_eq!(projector.field_indices[0], vec![0]);
@@ -245,7 +256,8 @@ mod test {
 
         let int_array = Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef;
         let inner_int_array = Arc::new(Int32Array::from(vec![4, 5, 6])) as ArrayRef;
-        let inner_string_array = Arc::new(StringArray::from(vec!["x", "y", "z"])) as ArrayRef;
+        let inner_string_array =
+            Arc::new(StringArray::from(vec!["x", "y", "z"])) as ArrayRef;
         let struct_array = Arc::new(StructArray::from(vec![
             (
                 Arc::new(inner_fields[0].clone()),
@@ -256,7 +268,8 @@ mod test {
                 inner_string_array as ArrayRef,
             ),
         ])) as ArrayRef;
-        let batch = RecordBatch::try_new(schema, vec![int_array, struct_array]).unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![int_array, struct_array]).unwrap();
 
         let projected_batch = projector.project_batch(batch).unwrap();
         assert_eq!(projected_batch.num_columns(), 2);
@@ -299,8 +312,12 @@ mod test {
             "inner_field2" => Ok(Some(4)),
             _ => Err(Error::new(ErrorKind::Unexpected, "Field id not found")),
         };
-        let projector =
-            RecordBatchProjector::new(schema.clone(), &[1, 5], field_id_fetch_func, |_| true);
+        let projector = RecordBatchProjector::new(
+            schema.clone(),
+            &[1, 5],
+            field_id_fetch_func,
+            |_| true,
+        );
 
         assert!(projector.is_err());
     }
@@ -329,12 +346,20 @@ mod test {
             "inner_field2" => Ok(Some(4)),
             _ => Err(Error::new(ErrorKind::Unexpected, "Field id not found")),
         };
-        let projector =
-            RecordBatchProjector::new(schema.clone(), &[3], field_id_fetch_func, |_| false);
+        let projector = RecordBatchProjector::new(
+            schema.clone(),
+            &[3],
+            field_id_fetch_func,
+            |_| false,
+        );
         assert!(projector.is_err());
 
-        let projector =
-            RecordBatchProjector::new(schema.clone(), &[3], field_id_fetch_func, |_| true);
+        let projector = RecordBatchProjector::new(
+            schema.clone(),
+            &[3],
+            field_id_fetch_func,
+            |_| true,
+        );
         assert!(projector.is_ok());
     }
 
@@ -343,15 +368,25 @@ mod test {
         let iceberg_schema = IcebergSchema::builder()
             .with_schema_id(0)
             .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(3, "age", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::required(
+                    2,
+                    "name",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::optional(3, "age", Type::Primitive(PrimitiveType::Int))
+                    .into(),
             ])
             .build()
             .unwrap();
 
-        let projector =
-            RecordBatchProjector::from_iceberg_schema(Arc::new(iceberg_schema), &[1, 3]).unwrap();
+        let projector = RecordBatchProjector::from_iceberg_schema(
+            Arc::new(iceberg_schema),
+            &[1, 3],
+        )
+        .unwrap();
 
         assert_eq!(projector.field_indices.len(), 2);
         assert_eq!(projector.projected_schema_ref().fields().len(), 2);

@@ -30,7 +30,9 @@ pub(super) async fn process_connection_with_shutdown<I: CacheIndex + 'static>(
     shutdown: ConnectionShutdown,
 ) -> StorageResult<()> {
     config.validate_for_max_read_size(context.service.max_read_size())?;
-    Connection::new(stream, context, config, shutdown).run().await
+    Connection::new(stream, context, config, shutdown)
+        .run()
+        .await
 }
 
 struct Connection<I: CacheIndex> {
@@ -70,9 +72,15 @@ impl<I: CacheIndex + 'static> Connection<I> {
             client_addr,
             max_read_size,
             request_limiter: Arc::new(Semaphore::new(config.max_in_flight_requests)),
-            response_byte_limiter: ResponseByteLimiter::new(config.max_pending_response_bytes),
+            response_byte_limiter: ResponseByteLimiter::new(
+                config.max_pending_response_bytes,
+            ),
             request_tasks: RequestTasks::new(),
-            writer: ResponseWriter::spawn(writer, config.max_pending_responses, config.response_write_timeout),
+            writer: ResponseWriter::spawn(
+                writer,
+                config.max_pending_responses,
+                config.response_write_timeout,
+            ),
             shutdown,
         }
     }
@@ -81,7 +89,11 @@ impl<I: CacheIndex + 'static> Connection<I> {
         let exit = self.poll_until_exit().await;
         let shutdown_result = self.shutdown_after(exit).await;
         let handles_closed = self.context.handles.len();
-        let close_result = self.context.service.close_all_handles(&self.context.handles).await;
+        let close_result = self
+            .context
+            .service
+            .close_all_handles(&self.context.handles)
+            .await;
         let result = shutdown_result.and(close_result);
         info!(
             client_addr = &*self.client_addr,
@@ -127,21 +139,24 @@ impl<I: CacheIndex + 'static> Connection<I> {
                 warn!(client_addr = &*self.client_addr, error = %error, "storage connection reader failed");
                 self.tear_down().await;
                 Err(error)
-            },
+            }
             ConnectionExit::WriterFinished(result) => {
-                debug!(client_addr = &*self.client_addr, "storage connection writer finished");
+                debug!(
+                    client_addr = &*self.client_addr,
+                    "storage connection writer finished"
+                );
                 self.request_tasks.abort_all().await;
                 self.writer.close_sender();
                 if let Err(error) = &result {
                     warn!(client_addr = &*self.client_addr, error = %error, "storage connection writer failed");
                 }
                 result
-            },
+            }
             ConnectionExit::RequestTaskFailed(error) => {
                 warn!(client_addr = &*self.client_addr, error = %error, "storage connection request task failed");
                 self.tear_down().await;
                 Err(StorageError::from_join_error("request task failed", error))
-            },
+            }
         }
     }
 
@@ -149,7 +164,11 @@ impl<I: CacheIndex + 'static> Connection<I> {
     /// budget rule.
     async fn shutdown_on_inbound_closed(&mut self) -> StorageResult<()> {
         self.shutdown
-            .drain_on_inbound_closed(&mut self.request_tasks, &mut self.writer, &self.client_addr)
+            .drain_on_inbound_closed(
+                &mut self.request_tasks,
+                &mut self.writer,
+                &self.client_addr,
+            )
             .await
     }
 

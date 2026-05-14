@@ -19,19 +19,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::{
-    Array as ArrowArray, ArrayRef, Int32Array, RecordBatch, RecordBatchOptions, RunArray,
+    Array as ArrowArray, ArrayRef, Int32Array, RecordBatch, RecordBatchOptions,
+    RunArray,
 };
 use arrow_cast::cast;
 use arrow_schema::{
-    DataType, Field, FieldRef, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SchemaRef,
+    DataType, Field, FieldRef, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+    SchemaRef,
 };
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
-use crate::arrow::value::{create_primitive_array_repeated, create_primitive_array_single_element};
+use crate::arrow::value::{
+    create_primitive_array_repeated, create_primitive_array_single_element,
+};
 use crate::arrow::{datum_to_arrow_type_with_ree, schema_to_arrow_schema};
 use crate::metadata_columns::get_metadata_field;
 use crate::spec::{
-    Datum, Literal, PartitionSpec, PrimitiveLiteral, Schema as IcebergSchema, Struct, Transform,
+    Datum, Literal, PartitionSpec, PrimitiveLiteral, Schema as IcebergSchema, Struct,
+    Transform,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -60,10 +65,11 @@ fn constants_map(
         // Only identity transforms should use constant values from partition metadata
         if matches!(field.transform, Transform::Identity) {
             // Get the field from schema to extract its type
-            let iceberg_field = schema.field_by_id(field.source_id).ok_or(Error::new(
-                ErrorKind::Unexpected,
-                format!("Field {} not found in schema", field.source_id),
-            ))?;
+            let iceberg_field =
+                schema.field_by_id(field.source_id).ok_or(Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Field {} not found in schema", field.source_id),
+                ))?;
 
             // Ensure the field type is primitive
             let prim_type = match &*iceberg_field.field_type {
@@ -350,9 +356,11 @@ impl RecordBatchTransformer {
         projected_iceberg_field_ids: &[i32],
         constant_fields: &HashMap<i32, Datum>,
     ) -> Result<BatchTransform> {
-        let mapped_unprojected_arrow_schema = Arc::new(schema_to_arrow_schema(snapshot_schema)?);
-        let field_id_to_mapped_schema_map =
-            Self::build_field_id_to_arrow_schema_map(&mapped_unprojected_arrow_schema)?;
+        let mapped_unprojected_arrow_schema =
+            Arc::new(schema_to_arrow_schema(snapshot_schema)?);
+        let field_id_to_mapped_schema_map = Self::build_field_id_to_arrow_schema_map(
+            &mapped_unprojected_arrow_schema,
+        )?;
 
         // Create a new arrow schema by selecting fields from mapped_unprojected,
         // in the order of the field ids in projected_iceberg_field_ids
@@ -365,28 +373,36 @@ impl RecordBatchTransformer {
                     // For partition fields, get name from schema (they exist in schema)
                     if let Ok(iceberg_field) = get_metadata_field(*field_id) {
                         // This is a metadata/virtual field - convert Iceberg field to Arrow
-                        let datum = constant_fields.get(field_id).ok_or(Error::new(
-                            ErrorKind::Unexpected,
-                            "constant field not found",
-                        ))?;
+                        let datum =
+                            constant_fields.get(field_id).ok_or(Error::new(
+                                ErrorKind::Unexpected,
+                                "constant field not found",
+                            ))?;
                         let arrow_type = datum_to_arrow_type_with_ree(datum);
-                        let arrow_field =
-                            Field::new(&iceberg_field.name, arrow_type, !iceberg_field.required)
-                                .with_metadata(HashMap::from([(
-                                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                                    iceberg_field.id.to_string(),
-                                )]));
+                        let arrow_field = Field::new(
+                            &iceberg_field.name,
+                            arrow_type,
+                            !iceberg_field.required,
+                        )
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            iceberg_field.id.to_string(),
+                        )]));
                         Ok(Arc::new(arrow_field))
                     } else {
                         // This is a partition constant field (exists in schema but uses constant value)
                         let field = &field_id_to_mapped_schema_map
                             .get(field_id)
-                            .ok_or(Error::new(ErrorKind::Unexpected, "field not found"))?
+                            .ok_or(Error::new(
+                                ErrorKind::Unexpected,
+                                "field not found",
+                            ))?
                             .0;
-                        let datum = constant_fields.get(field_id).ok_or(Error::new(
-                            ErrorKind::Unexpected,
-                            "constant field not found",
-                        ))?;
+                        let datum =
+                            constant_fields.get(field_id).ok_or(Error::new(
+                                ErrorKind::Unexpected,
+                                "constant field not found",
+                            ))?;
                         let arrow_type = datum_to_arrow_type_with_ree(datum);
                         // Use the type from constant_fields (REE for constants)
                         let constant_field =
@@ -409,7 +425,9 @@ impl RecordBatchTransformer {
 
         match Self::compare_schemas(source_schema, &target_schema) {
             SchemaComparison::Equivalent => Ok(BatchTransform::PassThrough),
-            SchemaComparison::NameChangesOnly => Ok(BatchTransform::ModifySchema { target_schema }),
+            SchemaComparison::NameChangesOnly => {
+                Ok(BatchTransform::ModifySchema { target_schema })
+            }
             SchemaComparison::Different => Ok(BatchTransform::Modify {
                 operations: Self::generate_transform_operations(
                     source_schema,
@@ -493,19 +511,19 @@ impl RecordBatchTransformer {
                     });
                 }
 
-                let (target_field, _) =
-                    field_id_to_mapped_schema_map
-                        .get(field_id)
-                        .ok_or(Error::new(
-                            ErrorKind::Unexpected,
-                            "could not find field in schema",
-                        ))?;
+                let (target_field, _) = field_id_to_mapped_schema_map
+                    .get(field_id)
+                    .ok_or(Error::new(
+                    ErrorKind::Unexpected,
+                    "could not find field in schema",
+                ))?;
                 let target_type = target_field.data_type();
 
-                let iceberg_field = snapshot_schema.field_by_id(*field_id).ok_or(Error::new(
-                    ErrorKind::Unexpected,
-                    "Field not found in snapshot schema",
-                ))?;
+                let iceberg_field =
+                    snapshot_schema.field_by_id(*field_id).ok_or(Error::new(
+                        ErrorKind::Unexpected,
+                        "Field not found in snapshot schema",
+                    ))?;
 
                 // Iceberg spec's "Column Projection" rules (https://iceberg.apache.org/spec/#column-projection).
                 // For fields "not present" in data files:
@@ -549,13 +567,14 @@ impl RecordBatchTransformer {
                     // Rule #2 (name mapping) was already applied in reader.rs if needed.
                     // If field_id is still not found, the column doesn't exist in the Parquet file.
                     // Fall through to rule #3 (initial_default) or rule #4 (null).
-                    let default_value = iceberg_field.initial_default.as_ref().and_then(|lit| {
-                        if let Literal::Primitive(prim) = lit {
-                            Some(prim.clone())
-                        } else {
-                            None
-                        }
-                    });
+                    let default_value =
+                        iceberg_field.initial_default.as_ref().and_then(|lit| {
+                            if let Literal::Primitive(prim) = lit {
+                                Some(prim.clone())
+                            } else {
+                                None
+                            }
+                        });
 
                     ColumnSource::Add {
                         value: default_value,
@@ -572,9 +591,13 @@ impl RecordBatchTransformer {
         source_schema: &SchemaRef,
     ) -> Result<HashMap<i32, (FieldRef, usize)>> {
         let mut field_id_to_source_schema = HashMap::new();
-        for (source_field_idx, source_field) in source_schema.fields.iter().enumerate() {
+        for (source_field_idx, source_field) in
+            source_schema.fields.iter().enumerate()
+        {
             // Check if field has a field ID in metadata
-            if let Some(field_id_str) = source_field.metadata().get(PARQUET_FIELD_ID_META_KEY) {
+            if let Some(field_id_str) =
+                source_field.metadata().get(PARQUET_FIELD_ID_META_KEY)
+            {
                 let this_field_id = field_id_str.parse().map_err(|e| {
                     Error::new(
                         ErrorKind::DataInvalid,
@@ -605,7 +628,9 @@ impl RecordBatchTransformer {
             .iter()
             .map(|op| {
                 Ok(match op {
-                    ColumnSource::PassThrough { source_index } => columns[*source_index].clone(),
+                    ColumnSource::PassThrough { source_index } => {
+                        columns[*source_index].clone()
+                    }
 
                     ColumnSource::Promote {
                         target_type,
@@ -646,8 +671,10 @@ impl RecordBatchTransformer {
             };
 
             // Create the values array using the helper function
-            let values_array =
-                create_primitive_array_single_element(values_field.data_type(), prim_lit)?;
+            let values_array = create_primitive_array_single_element(
+                values_field.data_type(),
+                prim_lit,
+            )?;
 
             // Wrap in Run-End Encoding
             create_ree_array(values_array)
@@ -664,8 +691,8 @@ mod test {
     use std::sync::Arc;
 
     use arrow_array::{
-        Array, Date32Array, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
-        StringArray,
+        Array, Date32Array, Float32Array, Float64Array, Int32Array, Int64Array,
+        RecordBatch, StringArray,
     };
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
@@ -728,7 +755,8 @@ mod test {
         let arrow_schema = arrow_schema_already_same_as_target();
 
         let result =
-            RecordBatchTransformer::build_field_id_to_arrow_schema_map(&arrow_schema).unwrap();
+            RecordBatchTransformer::build_field_id_to_arrow_schema_map(&arrow_schema)
+                .unwrap();
 
         let expected = HashMap::from_iter([
             (10, (arrow_schema.fields()[0].clone(), 0)),
@@ -742,13 +770,16 @@ mod test {
     }
 
     #[test]
-    fn processor_returns_properly_shaped_record_batch_when_no_schema_migration_required() {
+    fn processor_returns_properly_shaped_record_batch_when_no_schema_migration_required()
+     {
         let snapshot_schema = Arc::new(iceberg_table_schema());
         let projected_iceberg_field_ids = [13, 14];
 
-        let mut inst =
-            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_iceberg_field_ids)
-                .build();
+        let mut inst = RecordBatchTransformerBuilder::new(
+            snapshot_schema,
+            &projected_iceberg_field_ids,
+        )
+        .build();
 
         let result = inst
             .process_record_batch(source_record_batch_no_migration_required())
@@ -760,13 +791,16 @@ mod test {
     }
 
     #[test]
-    fn processor_returns_properly_shaped_record_batch_when_schema_migration_required() {
+    fn processor_returns_properly_shaped_record_batch_when_schema_migration_required()
+    {
         let snapshot_schema = Arc::new(iceberg_table_schema());
         let projected_iceberg_field_ids = [10, 11, 12, 14, 15]; // a, b, c, e, f
 
-        let mut inst =
-            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_iceberg_field_ids)
-                .build();
+        let mut inst = RecordBatchTransformerBuilder::new(
+            snapshot_schema,
+            &projected_iceberg_field_ids,
+        )
+        .build();
 
         let result = inst.process_record_batch(source_record_batch()).unwrap();
 
@@ -784,33 +818,52 @@ mod test {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::optional(3, "date_col", Type::Primitive(PrimitiveType::Date))
-                        .into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        3,
+                        "date_col",
+                        Type::Primitive(PrimitiveType::Date),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
         );
         let projected_iceberg_field_ids = [1, 2, 3];
 
-        let mut transformer =
-            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_iceberg_field_ids)
-                .build();
+        let mut transformer = RecordBatchTransformerBuilder::new(
+            snapshot_schema,
+            &projected_iceberg_field_ids,
+        )
+        .build();
 
         let file_schema = Arc::new(ArrowSchema::new(vec![
             simple_field("id", DataType::Int32, false, "1"),
             simple_field("name", DataType::Utf8, true, "2"),
         ]));
 
-        let file_batch = RecordBatch::try_new(file_schema, vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec![
-                Some("Alice"),
-                Some("Bob"),
-                Some("Charlie"),
-            ])),
-        ])
+        let file_batch = RecordBatch::try_new(
+            file_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec![
+                    Some("Alice"),
+                    Some("Bob"),
+                    Some("Charlie"),
+                ])),
+            ],
+        )
         .unwrap();
 
         let result = transformer.process_record_batch(file_batch).unwrap();
@@ -854,8 +907,18 @@ mod test {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "data", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "data",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                     NestedField::optional(
                         3,
                         "struct_col",
@@ -875,19 +938,24 @@ mod test {
         );
         let projected_iceberg_field_ids = [1, 2, 3];
 
-        let mut transformer =
-            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_iceberg_field_ids)
-                .build();
+        let mut transformer = RecordBatchTransformerBuilder::new(
+            snapshot_schema,
+            &projected_iceberg_field_ids,
+        )
+        .build();
 
         let file_schema = Arc::new(ArrowSchema::new(vec![
             simple_field("id", DataType::Int32, false, "1"),
             simple_field("data", DataType::Utf8, false, "2"),
         ]));
 
-        let file_batch = RecordBatch::try_new(file_schema, vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec!["a", "b", "c"])),
-        ])
+        let file_batch = RecordBatch::try_new(
+            file_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
         .unwrap();
 
         let result = transformer.process_record_batch(file_batch).unwrap();
@@ -958,27 +1026,30 @@ mod test {
     }
 
     pub fn expected_record_batch_migration_required() -> RecordBatch {
-        RecordBatch::try_new(arrow_schema_already_same_as_target(), vec![
-            Arc::new(StringArray::from(Vec::<Option<String>>::from([
-                None, None, None,
-            ]))), // a
-            Arc::new(Int64Array::from(vec![Some(1001), Some(1002), Some(1003)])), // b
-            Arc::new(Float64Array::from(vec![
-                Some(12.125),
-                Some(23.375),
-                Some(34.875),
-            ])), // c
-            Arc::new(StringArray::from(vec![
-                Some("Apache"),
-                Some("Iceberg"),
-                Some("Rocks"),
-            ])), // e (d skipped by projection)
-            Arc::new(StringArray::from(vec![
-                Some("(╯°□°）╯"),
-                Some("(╯°□°）╯"),
-                Some("(╯°□°）╯"),
-            ])), // f
-        ])
+        RecordBatch::try_new(
+            arrow_schema_already_same_as_target(),
+            vec![
+                Arc::new(StringArray::from(Vec::<Option<String>>::from([
+                    None, None, None,
+                ]))), // a
+                Arc::new(Int64Array::from(vec![Some(1001), Some(1002), Some(1003)])), // b
+                Arc::new(Float64Array::from(vec![
+                    Some(12.125),
+                    Some(23.375),
+                    Some(34.875),
+                ])), // c
+                Arc::new(StringArray::from(vec![
+                    Some("Apache"),
+                    Some("Iceberg"),
+                    Some("Rocks"),
+                ])), // e (d skipped by projection)
+                Arc::new(StringArray::from(vec![
+                    Some("(╯°□°）╯"),
+                    Some("(╯°□°）╯"),
+                    Some("(╯°□°）╯"),
+                ])), // f
+            ],
+        )
         .unwrap()
     }
 
@@ -986,14 +1057,35 @@ mod test {
         Schema::builder()
             .with_schema_id(2)
             .with_fields(vec![
-                NestedField::optional(10, "a", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(11, "b", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(12, "c", Type::Primitive(PrimitiveType::Double)).into(),
-                NestedField::required(13, "d", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(14, "e", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(15, "f", Type::Primitive(PrimitiveType::String))
-                    .with_initial_default(Literal::string("(╯°□°）╯"))
+                NestedField::optional(
+                    10,
+                    "a",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(11, "b", Type::Primitive(PrimitiveType::Long))
                     .into(),
+                NestedField::required(
+                    12,
+                    "c",
+                    Type::Primitive(PrimitiveType::Double),
+                )
+                .into(),
+                NestedField::required(13, "d", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    14,
+                    "e",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    15,
+                    "f",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .with_initial_default(Literal::string("(╯°□°）╯"))
+                .into(),
             ])
             .build()
             .unwrap()
@@ -1059,15 +1151,32 @@ mod test {
             Schema::builder()
                 .with_schema_id(0)
                 .with_fields(vec![
-                    NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Int))
-                        .with_initial_default(Literal::int(1))
-                        .into(),
-                    NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::optional(3, "dept", Type::Primitive(PrimitiveType::String))
-                        .with_initial_default(Literal::string("hr"))
-                        .into(),
-                    NestedField::optional(4, "subdept", Type::Primitive(PrimitiveType::String))
-                        .into(),
+                    NestedField::optional(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .with_initial_default(Literal::int(1))
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        3,
+                        "dept",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .with_initial_default(Literal::string("hr"))
+                    .into(),
+                    NestedField::optional(
+                        4,
+                        "subdept",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1080,26 +1189,28 @@ mod test {
         // Note: Partition columns (id, dept) are NOT in the Parquet file - they're in directory paths
         use std::collections::HashMap;
         let parquet_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
-                "PARQUET:field_id".to_string(),
-                "2".to_string(),
-            )])),
-            Field::new("subdept", DataType::Utf8, true).with_metadata(HashMap::from([(
-                "PARQUET:field_id".to_string(),
-                "4".to_string(),
-            )])),
+            Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([
+                ("PARQUET:field_id".to_string(), "2".to_string()),
+            ])),
+            Field::new("subdept", DataType::Utf8, true).with_metadata(HashMap::from(
+                [("PARQUET:field_id".to_string(), "4".to_string())],
+            )),
         ]));
 
         let projected_field_ids = [1, 2, 3, 4]; // id, name, dept, subdept
 
         let mut transformer =
-            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_field_ids).build();
+            RecordBatchTransformerBuilder::new(snapshot_schema, &projected_field_ids)
+                .build();
 
         // Create a Parquet RecordBatch with data for: name="John Doe", subdept="communications"
-        let parquet_batch = RecordBatch::try_new(parquet_schema, vec![
-            Arc::new(StringArray::from(vec!["John Doe"])),
-            Arc::new(StringArray::from(vec!["communications"])),
-        ])
+        let parquet_batch = RecordBatch::try_new(
+            parquet_schema,
+            vec![
+                Arc::new(StringArray::from(vec!["John Doe"])),
+                Arc::new(StringArray::from(vec!["communications"])),
+            ],
+        )
         .unwrap();
 
         let result = transformer.process_record_batch(parquet_batch).unwrap();
@@ -1189,8 +1300,18 @@ mod test {
             Schema::builder()
                 .with_schema_id(0)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1226,10 +1347,13 @@ mod test {
 
         // Create a Parquet RecordBatch with actual data
         // The id column MUST be read from here, not treated as a constant
-        let parquet_batch = RecordBatch::try_new(parquet_schema, vec![
-            Arc::new(Int32Array::from(vec![100, 200, 300])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
-        ])
+        let parquet_batch = RecordBatch::try_new(
+            parquet_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![100, 200, 300])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
+            ],
+        )
         .unwrap();
 
         let result = transformer.process_record_batch(parquet_batch).unwrap();
@@ -1310,9 +1434,24 @@ mod test {
             Schema::builder()
                 .with_schema_id(0)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "dept", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::optional(3, "name", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "dept",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        3,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1329,7 +1468,8 @@ mod test {
         );
 
         // Partition data: dept="engineering"
-        let partition_data = Struct::from_iter(vec![Some(Literal::string("engineering"))]);
+        let partition_data =
+            Struct::from_iter(vec![Some(Literal::string("engineering"))]);
 
         // Parquet file contains only id and name (dept is in partition path)
         let parquet_schema = Arc::new(ArrowSchema::new(vec![
@@ -1345,10 +1485,13 @@ mod test {
                 .expect("Failed to add partition constants")
                 .build();
 
-        let parquet_batch = RecordBatch::try_new(parquet_schema, vec![
-            Arc::new(Int32Array::from(vec![100, 200])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob"])),
-        ])
+        let parquet_batch = RecordBatch::try_new(
+            parquet_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![100, 200])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+            ],
+        )
         .unwrap();
 
         let result = transformer.process_record_batch(parquet_batch).unwrap();
@@ -1419,8 +1562,18 @@ mod test {
             Schema::builder()
                 .with_schema_id(0)
                 .with_fields(vec![
-                    NestedField::required(1, "row_id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "row_id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1456,10 +1609,13 @@ mod test {
 
         // Create a Parquet RecordBatch with actual data
         // Despite column rename, data should be read via field_id=1
-        let parquet_batch = RecordBatch::try_new(parquet_schema, vec![
-            Arc::new(Int32Array::from(vec![100, 200, 300])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
-        ])
+        let parquet_batch = RecordBatch::try_new(
+            parquet_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![100, 200, 300])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
+            ],
+        )
         .unwrap();
 
         let result = transformer.process_record_batch(parquet_batch).unwrap();
@@ -1513,18 +1669,41 @@ mod test {
                 .with_schema_id(0)
                 .with_fields(vec![
                     // Field in Parquet by field ID (normal case)
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                     // Rule #1: Identity-partitioned field - should use partition metadata
-                    NestedField::required(2, "dept", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        2,
+                        "dept",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                     // Rule #2: Field resolved by name mapping (ArrowReader already applied)
-                    NestedField::required(3, "data", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        3,
+                        "data",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                     // Rule #3: Field with initial_default
-                    NestedField::optional(4, "category", Type::Primitive(PrimitiveType::String))
-                        .with_initial_default(Literal::string("default_category"))
-                        .into(),
+                    NestedField::optional(
+                        4,
+                        "category",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .with_initial_default(Literal::string("default_category"))
+                    .into(),
                     // Rule #4: Field with no default - should be null
-                    NestedField::optional(5, "notes", Type::Primitive(PrimitiveType::String))
-                        .into(),
+                    NestedField::optional(
+                        5,
+                        "notes",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1541,7 +1720,8 @@ mod test {
         );
 
         // Partition data: dept="engineering"
-        let partition_data = Struct::from_iter(vec![Some(Literal::string("engineering"))]);
+        let partition_data =
+            Struct::from_iter(vec![Some(Literal::string("engineering"))]);
 
         // Parquet schema: simulates post-ArrowReader state where name mapping already applied
         // Has id (field_id=1) and data (field_id=3, assigned by ArrowReader via name mapping)
@@ -1559,10 +1739,13 @@ mod test {
                 .expect("Failed to add partition constants")
                 .build();
 
-        let parquet_batch = RecordBatch::try_new(parquet_schema, vec![
-            Arc::new(Int32Array::from(vec![100, 200])),
-            Arc::new(StringArray::from(vec!["value1", "value2"])),
-        ])
+        let parquet_batch = RecordBatch::try_new(
+            parquet_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![100, 200])),
+                Arc::new(StringArray::from(vec!["value1", "value2"])),
+            ],
+        )
         .unwrap();
 
         let result = transformer.process_record_batch(parquet_batch).unwrap();
@@ -1620,8 +1803,18 @@ mod test {
             Schema::builder()
                 .with_schema_id(0)
                 .with_fields(vec![
-                    NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "data", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "data",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1648,14 +1841,17 @@ mod test {
 
         let projected_field_ids = [1, 2];
 
-        let mut transformer = RecordBatchTransformerBuilder::new(schema, &projected_field_ids)
-            .with_partition(partition_spec, partition_data)
-            .expect("Should handle null partition values")
-            .build();
+        let mut transformer =
+            RecordBatchTransformerBuilder::new(schema, &projected_field_ids)
+                .with_partition(partition_spec, partition_data)
+                .expect("Should handle null partition values")
+                .build();
 
-        let file_batch =
-            RecordBatch::try_new(file_schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))])
-                .unwrap();
+        let file_batch = RecordBatch::try_new(
+            file_schema,
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
 
         let result = transformer.process_record_batch(file_batch).unwrap();
 

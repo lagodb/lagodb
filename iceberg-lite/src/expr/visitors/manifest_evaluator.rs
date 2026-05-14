@@ -18,7 +18,7 @@
 use fnv::FnvHashSet;
 use serde_bytes::ByteBuf;
 
-use crate::expr::visitors::bound_predicate_visitor::{visit, BoundPredicateVisitor};
+use crate::expr::visitors::bound_predicate_visitor::{BoundPredicateVisitor, visit};
 use crate::expr::{BoundPredicate, BoundReference};
 use crate::spec::{Datum, FieldSummary, ManifestFile, PrimitiveLiteral, Type};
 use crate::{Error, ErrorKind, Result};
@@ -72,7 +72,9 @@ pub(crate) struct ManifestEvaluator {
 
 impl ManifestEvaluator {
     /// Creates a new `ManifestEvaluatorBuilder` for building a `ManifestEvaluator`.
-    pub(crate) fn builder(partition_filter: BoundPredicate) -> ManifestEvaluatorBuilder {
+    pub(crate) fn builder(
+        partition_filter: BoundPredicate,
+    ) -> ManifestEvaluatorBuilder {
         ManifestEvaluatorBuilder::new(partition_filter)
     }
 
@@ -371,7 +373,10 @@ impl BoundPredicateVisitor for ManifestFilterVisitor<'_> {
     ) -> crate::Result<bool> {
         let field = self.field_summary_for_reference(reference);
 
-        if field.contains_null || field.lower_bound.is_none() || field.upper_bound.is_none() {
+        if field.contains_null
+            || field.lower_bound.is_none()
+            || field.upper_bound.is_none()
+        {
             return ROWS_MIGHT_MATCH;
         }
 
@@ -457,7 +462,10 @@ impl BoundPredicateVisitor for ManifestFilterVisitor<'_> {
 }
 
 impl ManifestFilterVisitor<'_> {
-    fn field_summary_for_reference(&self, reference: &BoundReference) -> &FieldSummary {
+    fn field_summary_for_reference(
+        &self,
+        reference: &BoundReference,
+    ) -> &FieldSummary {
         let pos = reference.accessor().position();
         &self.partitions[pos]
     }
@@ -479,7 +487,10 @@ impl ManifestFilterVisitor<'_> {
         all_null
     }
 
-    fn datum_as_str<'a>(bound: &'a Datum, err_msg: &str) -> crate::Result<&'a String> {
+    fn datum_as_str<'a>(
+        bound: &'a Datum,
+        err_msg: &str,
+    ) -> crate::Result<&'a String> {
         let PrimitiveLiteral::String(bound) = bound.literal() else {
             return Err(Error::new(ErrorKind::Unexpected, err_msg));
         };
@@ -499,16 +510,16 @@ mod test {
 
     use fnv::FnvHashSet;
 
+    use crate::Result;
     use crate::expr::visitors::manifest_evaluator::ManifestEvaluator;
     use crate::expr::{
-        BinaryExpression, Bind, Predicate, PredicateOperator, Reference, SetExpression,
-        UnaryExpression,
+        BinaryExpression, Bind, Predicate, PredicateOperator, Reference,
+        SetExpression, UnaryExpression,
     };
     use crate::spec::{
-        Datum, FieldSummary, ManifestContentType, ManifestFile, NestedField, PrimitiveType, Schema,
-        SchemaRef, Type,
+        Datum, FieldSummary, ManifestContentType, ManifestFile, NestedField,
+        PrimitiveType, Schema, SchemaRef, Type,
     };
-    use crate::Result;
 
     const INT_MIN_VALUE: i32 = 30;
     const INT_MAX_VALUE: i32 = 79;
@@ -610,15 +621,23 @@ mod test {
             FieldSummary {
                 contains_null: true,
                 contains_nan: None,
-                lower_bound: Some(Datum::string(STRING_MIN_VALUE).to_bytes().unwrap()),
-                upper_bound: Some(Datum::string(STRING_MAX_VALUE).to_bytes().unwrap()),
+                lower_bound: Some(
+                    Datum::string(STRING_MIN_VALUE).to_bytes().unwrap(),
+                ),
+                upper_bound: Some(
+                    Datum::string(STRING_MAX_VALUE).to_bytes().unwrap(),
+                ),
             },
             // no_nulls
             FieldSummary {
                 contains_null: false,
                 contains_nan: None,
-                lower_bound: Some(Datum::string(STRING_MIN_VALUE).to_bytes().unwrap()),
-                upper_bound: Some(Datum::string(STRING_MAX_VALUE).to_bytes().unwrap()),
+                lower_bound: Some(
+                    Datum::string(STRING_MIN_VALUE).to_bytes().unwrap(),
+                ),
+                upper_bound: Some(
+                    Datum::string(STRING_MAX_VALUE).to_bytes().unwrap(),
+                ),
             },
             // float
             FieldSummary {
@@ -673,15 +692,23 @@ mod test {
             FieldSummary {
                 contains_null: true,
                 contains_nan: None,
-                lower_bound: Some(Datum::string(STRING_MIN_VALUE).to_bytes().unwrap()),
-                upper_bound: Some(Datum::string(STRING_MIN_VALUE).to_bytes().unwrap()),
+                lower_bound: Some(
+                    Datum::string(STRING_MIN_VALUE).to_bytes().unwrap(),
+                ),
+                upper_bound: Some(
+                    Datum::string(STRING_MIN_VALUE).to_bytes().unwrap(),
+                ),
             },
             // no_nulls_same_value_a
             FieldSummary {
                 contains_null: false,
                 contains_nan: None,
-                lower_bound: Some(Datum::string(STRING_MIN_VALUE).to_bytes().unwrap()),
-                upper_bound: Some(Datum::string(STRING_MIN_VALUE).to_bytes().unwrap()),
+                lower_bound: Some(
+                    Datum::string(STRING_MIN_VALUE).to_bytes().unwrap(),
+                ),
+                upper_bound: Some(
+                    Datum::string(STRING_MIN_VALUE).to_bytes().unwrap(),
+                ),
             },
         ]
     }
@@ -716,9 +743,11 @@ mod test {
 
         let filter = Predicate::AlwaysTrue.bind(schema.clone(), case_sensitive)?;
 
-        assert!(ManifestEvaluator::builder(filter)
-            .build()
-            .eval(&manifest_file)?);
+        assert!(
+            ManifestEvaluator::builder(filter)
+                .build()
+                .eval(&manifest_file)?
+        );
 
         Ok(())
     }
@@ -732,9 +761,11 @@ mod test {
 
         let filter = Predicate::AlwaysFalse.bind(schema.clone(), case_sensitive)?;
 
-        assert!(!ManifestEvaluator::builder(filter)
-            .build()
-            .eval(&manifest_file)?);
+        assert!(
+            !ManifestEvaluator::builder(filter)
+                .build()
+                .eval(&manifest_file)?
+        );
 
         Ok(())
     }
@@ -760,11 +791,12 @@ mod test {
         );
 
         // all_nulls_missing_nan_float
-        let all_nulls_missing_nan_float_filter = Predicate::Unary(UnaryExpression::new(
-            PredicateOperator::NotNull,
-            Reference::new("all_nulls_missing_nan_float"),
-        ))
-        .bind(schema.clone(), case_sensitive)?;
+        let all_nulls_missing_nan_float_filter =
+            Predicate::Unary(UnaryExpression::new(
+                PredicateOperator::NotNull,
+                Reference::new("all_nulls_missing_nan_float"),
+            ))
+            .bind(schema.clone(), case_sensitive)?;
         assert!(
             ManifestEvaluator::builder(all_nulls_missing_nan_float_filter)
                 .build()
@@ -899,11 +931,12 @@ mod test {
         );
 
         // all_nulls_missing_nan_float
-        let all_nulls_missing_nan_float_filter = Predicate::Unary(UnaryExpression::new(
-            PredicateOperator::IsNan,
-            Reference::new("all_nulls_missing_nan_float"),
-        ))
-        .bind(schema.clone(), case_sensitive)?;
+        let all_nulls_missing_nan_float_filter =
+            Predicate::Unary(UnaryExpression::new(
+                PredicateOperator::IsNan,
+                Reference::new("all_nulls_missing_nan_float"),
+            ))
+            .bind(schema.clone(), case_sensitive)?;
         assert!(
             ManifestEvaluator::builder(all_nulls_missing_nan_float_filter)
                 .build()
@@ -1124,10 +1157,12 @@ mod test {
         ))
         .not()
         .bind(schema.clone(), case_sensitive)?;
-        assert!(ManifestEvaluator::builder(filter)
-            .build()
-            .eval(&manifest_file)
-            .is_err(),);
+        assert!(
+            ManifestEvaluator::builder(filter)
+                .build()
+                .eval(&manifest_file)
+                .is_err(),
+        );
         let filter = Predicate::Binary(BinaryExpression::new(
             PredicateOperator::LessThan,
             Reference::new("id"),
@@ -1150,10 +1185,12 @@ mod test {
         ))
         .not()
         .bind(schema.clone(), case_sensitive)?;
-        assert!(ManifestEvaluator::builder(filter)
-            .build()
-            .eval(&manifest_file)
-            .is_err());
+        assert!(
+            ManifestEvaluator::builder(filter)
+                .build()
+                .eval(&manifest_file)
+                .is_err()
+        );
 
         let filter = Predicate::Binary(BinaryExpression::new(
             PredicateOperator::GreaterThan,

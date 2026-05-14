@@ -35,7 +35,9 @@ pub mod rolling_writer;
 type DefaultOutput = Vec<DataFileBuilder>;
 
 /// File writer builder trait.
-pub trait FileWriterBuilder<O = DefaultOutput>: Clone + Send + Sync + 'static {
+pub trait FileWriterBuilder<O = DefaultOutput>:
+    Clone + Send + Sync + 'static
+{
     /// The associated file writer type.
     type R: FileWriter<O>;
     /// Build file writer.

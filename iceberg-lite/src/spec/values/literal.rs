@@ -79,7 +79,8 @@ impl Literal {
     /// ```
     pub fn bool_from_str<S: AsRef<str>>(s: S) -> Result<Self> {
         let v = s.as_ref().parse::<bool>().map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, "Can't parse string to bool.").with_source(e)
+            Error::new(ErrorKind::DataInvalid, "Can't parse string to bool.")
+                .with_source(e)
         })?;
         Ok(Self::Primitive(PrimitiveLiteral::Boolean(v)))
     }
@@ -188,7 +189,9 @@ impl Literal {
         let t = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
             Error::new(
                 ErrorKind::DataInvalid,
-                format!("Can't create date from year: {year}, month: {month}, day: {day}"),
+                format!(
+                    "Can't create date from year: {year}, month: {month}, day: {day}"
+                ),
             )
         })?;
 
@@ -249,7 +252,12 @@ impl Literal {
     ///
     /// assert_eq!(Literal::time_from_str("22:15:33.000111").unwrap(), t);
     /// ```
-    pub fn time_from_hms_micro(hour: u32, min: u32, sec: u32, micro: u32) -> Result<Self> {
+    pub fn time_from_hms_micro(
+        hour: u32,
+        min: u32,
+        sec: u32,
+        micro: u32,
+    ) -> Result<Self> {
         let t = NaiveTime::from_hms_micro_opt(hour, min, sec, micro)
             .ok_or_else(|| Error::new(
                 ErrorKind::DataInvalid,
@@ -604,87 +612,97 @@ impl Literal {
     /// See [this spec](https://iceberg.apache.org/spec/#json-single-value-serialization) for reference.
     pub fn try_into_json(self, r#type: &Type) -> Result<JsonValue> {
         match (self, r#type) {
-            (Literal::Primitive(prim), Type::Primitive(prim_type)) => match (prim_type, prim) {
-                (PrimitiveType::Boolean, PrimitiveLiteral::Boolean(val)) => {
-                    Ok(JsonValue::Bool(val))
-                }
-                (PrimitiveType::Int, PrimitiveLiteral::Int(val)) => {
-                    Ok(JsonValue::Number((val).into()))
-                }
-                (PrimitiveType::Long, PrimitiveLiteral::Long(val)) => {
-                    Ok(JsonValue::Number((val).into()))
-                }
-                (PrimitiveType::Float, PrimitiveLiteral::Float(val)) => {
-                    match Number::from_f64(val.0 as f64) {
-                        Some(number) => Ok(JsonValue::Number(number)),
-                        None => Ok(JsonValue::Null),
+            (Literal::Primitive(prim), Type::Primitive(prim_type)) => {
+                match (prim_type, prim) {
+                    (PrimitiveType::Boolean, PrimitiveLiteral::Boolean(val)) => {
+                        Ok(JsonValue::Bool(val))
                     }
-                }
-                (PrimitiveType::Double, PrimitiveLiteral::Double(val)) => {
-                    match Number::from_f64(val.0) {
-                        Some(number) => Ok(JsonValue::Number(number)),
-                        None => Ok(JsonValue::Null),
+                    (PrimitiveType::Int, PrimitiveLiteral::Int(val)) => {
+                        Ok(JsonValue::Number((val).into()))
                     }
-                }
-                (PrimitiveType::Date, PrimitiveLiteral::Int(val)) => {
-                    Ok(JsonValue::String(date::days_to_date(val).to_string()))
-                }
-                (PrimitiveType::Time, PrimitiveLiteral::Long(val)) => Ok(JsonValue::String(
-                    time::microseconds_to_time(val).to_string(),
-                )),
-                (PrimitiveType::Timestamp, PrimitiveLiteral::Long(val)) => Ok(JsonValue::String(
-                    timestamp::microseconds_to_datetime(val)
-                        .format("%Y-%m-%dT%H:%M:%S%.f")
-                        .to_string(),
-                )),
-                (PrimitiveType::Timestamptz, PrimitiveLiteral::Long(val)) => Ok(JsonValue::String(
-                    timestamptz::microseconds_to_datetimetz(val)
-                        .format("%Y-%m-%dT%H:%M:%S%.f+00:00")
-                        .to_string(),
-                )),
-                (PrimitiveType::TimestampNs, PrimitiveLiteral::Long(val)) => Ok(JsonValue::String(
-                    timestamp::nanoseconds_to_datetime(val)
-                        .format("%Y-%m-%dT%H:%M:%S%.f")
-                        .to_string(),
-                )),
-                (PrimitiveType::TimestamptzNs, PrimitiveLiteral::Long(val)) => {
-                    Ok(JsonValue::String(
-                        timestamptz::nanoseconds_to_datetimetz(val)
-                            .format("%Y-%m-%dT%H:%M:%S%.f+00:00")
-                            .to_string(),
-                    ))
-                }
-                (PrimitiveType::String, PrimitiveLiteral::String(val)) => {
-                    Ok(JsonValue::String(val.clone()))
-                }
-                (_, PrimitiveLiteral::UInt128(val)) => {
-                    Ok(JsonValue::String(Uuid::from_u128(val).to_string()))
-                }
-                (_, PrimitiveLiteral::Binary(val)) => Ok(JsonValue::String(val.iter().fold(
-                    String::new(),
-                    |mut acc, x| {
-                        acc.push_str(&format!("{x:x}"));
-                        acc
+                    (PrimitiveType::Long, PrimitiveLiteral::Long(val)) => {
+                        Ok(JsonValue::Number((val).into()))
+                    }
+                    (PrimitiveType::Float, PrimitiveLiteral::Float(val)) => {
+                        match Number::from_f64(val.0 as f64) {
+                            Some(number) => Ok(JsonValue::Number(number)),
+                            None => Ok(JsonValue::Null),
+                        }
+                    }
+                    (PrimitiveType::Double, PrimitiveLiteral::Double(val)) => {
+                        match Number::from_f64(val.0) {
+                            Some(number) => Ok(JsonValue::Number(number)),
+                            None => Ok(JsonValue::Null),
+                        }
+                    }
+                    (PrimitiveType::Date, PrimitiveLiteral::Int(val)) => {
+                        Ok(JsonValue::String(date::days_to_date(val).to_string()))
+                    }
+                    (PrimitiveType::Time, PrimitiveLiteral::Long(val)) => {
+                        Ok(JsonValue::String(
+                            time::microseconds_to_time(val).to_string(),
+                        ))
+                    }
+                    (PrimitiveType::Timestamp, PrimitiveLiteral::Long(val)) => {
+                        Ok(JsonValue::String(
+                            timestamp::microseconds_to_datetime(val)
+                                .format("%Y-%m-%dT%H:%M:%S%.f")
+                                .to_string(),
+                        ))
+                    }
+                    (PrimitiveType::Timestamptz, PrimitiveLiteral::Long(val)) => {
+                        Ok(JsonValue::String(
+                            timestamptz::microseconds_to_datetimetz(val)
+                                .format("%Y-%m-%dT%H:%M:%S%.f+00:00")
+                                .to_string(),
+                        ))
+                    }
+                    (PrimitiveType::TimestampNs, PrimitiveLiteral::Long(val)) => {
+                        Ok(JsonValue::String(
+                            timestamp::nanoseconds_to_datetime(val)
+                                .format("%Y-%m-%dT%H:%M:%S%.f")
+                                .to_string(),
+                        ))
+                    }
+                    (PrimitiveType::TimestamptzNs, PrimitiveLiteral::Long(val)) => {
+                        Ok(JsonValue::String(
+                            timestamptz::nanoseconds_to_datetimetz(val)
+                                .format("%Y-%m-%dT%H:%M:%S%.f+00:00")
+                                .to_string(),
+                        ))
+                    }
+                    (PrimitiveType::String, PrimitiveLiteral::String(val)) => {
+                        Ok(JsonValue::String(val.clone()))
+                    }
+                    (_, PrimitiveLiteral::UInt128(val)) => {
+                        Ok(JsonValue::String(Uuid::from_u128(val).to_string()))
+                    }
+                    (_, PrimitiveLiteral::Binary(val)) => Ok(JsonValue::String(
+                        val.iter().fold(String::new(), |mut acc, x| {
+                            acc.push_str(&format!("{x:x}"));
+                            acc
+                        }),
+                    )),
+                    (_, PrimitiveLiteral::Int128(val)) => match r#type {
+                        Type::Primitive(PrimitiveType::Decimal {
+                            precision: _precision,
+                            scale,
+                        }) => {
+                            let decimal =
+                                Decimal::try_from_i128_with_scale(val, *scale)?;
+                            Ok(JsonValue::String(decimal.to_string()))
+                        }
+                        _ => Err(Error::new(
+                            ErrorKind::DataInvalid,
+                            "The iceberg type for decimal literal must be decimal.",
+                        ))?,
                     },
-                ))),
-                (_, PrimitiveLiteral::Int128(val)) => match r#type {
-                    Type::Primitive(PrimitiveType::Decimal {
-                        precision: _precision,
-                        scale,
-                    }) => {
-                        let decimal = Decimal::try_from_i128_with_scale(val, *scale)?;
-                        Ok(JsonValue::String(decimal.to_string()))
-                    }
                     _ => Err(Error::new(
                         ErrorKind::DataInvalid,
-                        "The iceberg type for decimal literal must be decimal.",
-                    ))?,
-                },
-                _ => Err(Error::new(
-                    ErrorKind::DataInvalid,
-                    "The iceberg value doesn't fit to the iceberg type.",
-                )),
-            },
+                        "The iceberg value doesn't fit to the iceberg type.",
+                    )),
+                }
+            }
             (Literal::Struct(s), Type::Struct(struct_type)) => {
                 let mut id_and_value = Vec::with_capacity(struct_type.fields().len());
                 for (value, field) in s.into_iter().zip(struct_type.fields()) {
@@ -699,7 +717,9 @@ impl Literal {
             (Literal::List(list), Type::List(list_type)) => Ok(JsonValue::Array(
                 list.into_iter()
                     .map(|opt| match opt {
-                        Some(literal) => literal.try_into_json(&list_type.element_field.field_type),
+                        Some(literal) => {
+                            literal.try_into_json(&list_type.element_field.field_type)
+                        }
                         None => Ok(JsonValue::Null),
                     })
                     .collect::<Result<Vec<JsonValue>>>()?,
@@ -709,9 +729,12 @@ impl Literal {
                 let mut json_keys = Vec::with_capacity(map.len());
                 let mut json_values = Vec::with_capacity(map.len());
                 for (key, value) in map.into_iter() {
-                    json_keys.push(key.try_into_json(&map_type.key_field.field_type)?);
+                    json_keys
+                        .push(key.try_into_json(&map_type.key_field.field_type)?);
                     json_values.push(match value {
-                        Some(literal) => literal.try_into_json(&map_type.value_field.field_type)?,
+                        Some(literal) => {
+                            literal.try_into_json(&map_type.value_field.field_type)?
+                        }
                         None => JsonValue::Null,
                     });
                 }
@@ -721,7 +744,9 @@ impl Literal {
             }
             (value, r#type) => Err(Error::new(
                 ErrorKind::DataInvalid,
-                format!("The iceberg value {value:?} doesn't fit to the iceberg type {type}."),
+                format!(
+                    "The iceberg value {value:?} doesn't fit to the iceberg type {type}."
+                ),
             )),
         }
     }
@@ -739,7 +764,9 @@ impl Literal {
                 PrimitiveLiteral::String(any) => Box::new(any),
                 PrimitiveLiteral::UInt128(any) => Box::new(any),
                 PrimitiveLiteral::Int128(any) => Box::new(any),
-                PrimitiveLiteral::AboveMax | PrimitiveLiteral::BelowMin => unimplemented!(),
+                PrimitiveLiteral::AboveMax | PrimitiveLiteral::BelowMin => {
+                    unimplemented!()
+                }
             },
             _ => unimplemented!(),
         }

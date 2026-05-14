@@ -31,8 +31,8 @@ use crate::cache::meta::{CacheState, CachedObjectMeta};
 use crate::cache::path::CacheFileKind;
 use crate::cache::store::CacheStore;
 use crate::cache::{
-    BestEffortInvalidateOutcome, CacheDeleteReason, CacheEvictionOutcome, CacheIndex, CacheInvalidateReport,
-    CacheManager, DeleteReport, PhysicalCacheId,
+    BestEffortInvalidateOutcome, CacheDeleteReason, CacheEvictionOutcome, CacheIndex,
+    CacheInvalidateReport, CacheManager, DeleteReport, PhysicalCacheId,
 };
 use crate::error::{StorageError, StorageErrorKind, StorageResult};
 use crate::object::ObjectLocation;
@@ -57,14 +57,21 @@ impl<I: CacheIndex> CacheManager<I> {
     /// janitor delete (see large-fill reaper vs `cleanup()`).
     ///
     /// If unlink fails with an I/O error, the path is registered again so a later pass can retry.
-    pub(crate) async fn delete_file_payload(&self, path: PathBuf) -> StorageResult<DeleteReport> {
+    pub(crate) async fn delete_file_payload(
+        &self,
+        path: PathBuf,
+    ) -> StorageResult<DeleteReport> {
         self.orphan_candidates.clear_file_candidate(&path);
-        match self.file_cache_store().delete_entry(&PhysicalCacheId::Path(path.clone())).await {
+        match self
+            .file_cache_store()
+            .delete_entry(&PhysicalCacheId::Path(path.clone()))
+            .await
+        {
             Ok(report) => Ok(report),
             Err(err) => {
                 self.orphan_candidates.record_file_candidate(path);
                 Err(err)
-            },
+            }
         }
     }
 
@@ -100,18 +107,21 @@ impl<I: CacheIndex> CacheManager<I> {
                 }
                 self.delete_file_payload(path).await?;
                 Ok(Some(OrphanFileDeleted::Complete))
-            },
+            }
             CacheFileKind::Partial => {
                 if state.live_fill_session().is_some() {
                     return Ok(None);
                 }
                 self.delete_file_payload(path).await?;
                 Ok(Some(OrphanFileDeleted::Partial))
-            },
+            }
         }
     }
 
-    pub async fn invalidate_object_cache(&self, key: &ObjectLocation) -> StorageResult<CacheInvalidateReport> {
+    pub async fn invalidate_object_cache(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<CacheInvalidateReport> {
         let state = self.object_state(key);
         let _object_guard = state.lock().await;
         if state.is_active() {
@@ -122,14 +132,20 @@ impl<I: CacheIndex> CacheManager<I> {
         let mut report = CacheInvalidateReport::default();
         if let Some(meta) = self.index.get_meta(key).await? {
             report.removed = true;
-            report.bytes_removed = report.bytes_removed.saturating_add(meta.cached_bytes());
-            self.delete_cached_object_unlocked(meta, CacheDeleteReason::Manual).await?;
+            report.bytes_removed =
+                report.bytes_removed.saturating_add(meta.cached_bytes());
+            self.delete_cached_object_unlocked(meta, CacheDeleteReason::Manual)
+                .await?;
         }
 
         let complete = self.complete_path(key)?;
-        if !self.current_meta_claims_complete_path(key, &complete).await? {
+        if !self
+            .current_meta_claims_complete_path(key, &complete)
+            .await?
+        {
             let complete = self.delete_file_payload(complete).await?;
-            report.bytes_removed = report.bytes_removed.saturating_add(complete.bytes_deleted);
+            report.bytes_removed =
+                report.bytes_removed.saturating_add(complete.bytes_deleted);
             report.removed |= complete.bytes_deleted > 0;
         }
 
@@ -150,7 +166,8 @@ impl<I: CacheIndex> CacheManager<I> {
         }
         state.clear_fill_slot();
         let partial = self.delete_file_payload(self.partial_path(key)?).await?;
-        report.bytes_removed = report.bytes_removed.saturating_add(partial.bytes_deleted);
+        report.bytes_removed =
+            report.bytes_removed.saturating_add(partial.bytes_deleted);
         report.removed |= partial.bytes_deleted > 0;
 
         Ok(report)
@@ -171,32 +188,42 @@ impl<I: CacheIndex> CacheManager<I> {
     ///   not a contract; failing the `delete` API on a cache I/O hiccup would be misleading.
     ///
     /// The returned [`BestEffortInvalidateOutcome`] is observability-only.
-    pub async fn invalidate_object_cache_best_effort(&self, key: &ObjectLocation) -> BestEffortInvalidateOutcome {
+    pub async fn invalidate_object_cache_best_effort(
+        &self,
+        key: &ObjectLocation,
+    ) -> BestEffortInvalidateOutcome {
         if let Err(error) = self.validate_file_cache_paths(key) {
             warn!(key = %key, error = %error, "skipping best-effort cache invalidation: invalid path");
             return BestEffortInvalidateOutcome::Skipped;
         }
         match self.invalidate_object_cache(key).await {
-            Ok(report) if report.removed => BestEffortInvalidateOutcome::Removed { bytes: report.bytes_removed },
+            Ok(report) if report.removed => BestEffortInvalidateOutcome::Removed {
+                bytes: report.bytes_removed,
+            },
             Ok(_) => BestEffortInvalidateOutcome::NotPresent,
             Err(error) => match error.kind() {
                 StorageErrorKind::Busy => {
                     debug!(key = %key, "best-effort cache invalidation skipped: object is active");
                     BestEffortInvalidateOutcome::Skipped
-                },
+                }
                 _ => {
                     warn!(key = %key, error = %error, "best-effort cache invalidation failed");
                     BestEffortInvalidateOutcome::Skipped
-                },
+                }
             },
         }
     }
 
-    async fn current_meta_claims_complete_path(&self, key: &ObjectLocation, path: &Path) -> StorageResult<bool> {
+    async fn current_meta_claims_complete_path(
+        &self,
+        key: &ObjectLocation,
+        path: &Path,
+    ) -> StorageResult<bool> {
         let Some(meta) = self.index.get_meta(key).await? else {
             return Ok(false);
         };
-        Ok(meta.cache_state() == CacheState::CompleteFile && self.complete_path(key)?.as_path() == path)
+        Ok(meta.cache_state() == CacheState::CompleteFile
+            && self.complete_path(key)?.as_path() == path)
     }
 
     pub(crate) async fn evict_meta_if_current(
@@ -219,7 +246,8 @@ impl<I: CacheIndex> CacheManager<I> {
             return Ok(CacheEvictionOutcome::Active);
         }
         let bytes = current.cached_bytes();
-        self.delete_cached_object_unlocked(current, CacheDeleteReason::Capacity).await?;
+        self.delete_cached_object_unlocked(current, CacheDeleteReason::Capacity)
+            .await?;
         debug!(key = %key, bytes, "cache object evicted");
         Ok(CacheEvictionOutcome::Evicted { bytes })
     }
@@ -235,7 +263,7 @@ impl<I: CacheIndex> CacheManager<I> {
         match original_state {
             CacheState::SmallKv => {
                 self.index.delete_meta_and_small(&key).await?;
-            },
+            }
             CacheState::CompleteFile => {
                 let complete = self.complete_path(&key)?;
                 // Metadata is removed before the file payload so the cache stops
@@ -245,7 +273,7 @@ impl<I: CacheIndex> CacheManager<I> {
                 // `record_file_candidate` is needed here.
                 self.index.delete_meta(&key).await?;
                 self.delete_file_payload(complete).await?;
-            },
+            }
         }
 
         Ok(())

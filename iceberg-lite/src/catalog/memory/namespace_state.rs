@@ -50,7 +50,9 @@ fn no_such_table_err<T>(table_ident: &TableIdent) -> Result<T> {
 fn namespace_already_exists_err<T>(namespace_ident: &NamespaceIdent) -> Result<T> {
     Err(Error::new(
         ErrorKind::NamespaceAlreadyExists,
-        format!("Cannot create namespace {namespace_ident:?}. Namespace already exists."),
+        format!(
+            "Cannot create namespace {namespace_ident:?}. Namespace already exists."
+        ),
     ))
 }
 
@@ -63,7 +65,10 @@ fn table_already_exists_err<T>(table_ident: &TableIdent) -> Result<T> {
 
 impl NamespaceState {
     // Returns the state of the given namespace or an error if doesn't exist
-    fn get_namespace(&self, namespace_ident: &NamespaceIdent) -> Result<&NamespaceState> {
+    fn get_namespace(
+        &self,
+        namespace_ident: &NamespaceIdent,
+    ) -> Result<&NamespaceState> {
         let mut acc_name_parts = vec![];
         let mut namespace_state = self;
         for next_name in namespace_ident.iter() {
@@ -119,7 +124,8 @@ impl NamespaceState {
                 let parent_namespace_state = if parent_name_parts.is_empty() {
                     Ok(self)
                 } else {
-                    let parent_namespace_ident = NamespaceIdent::from_strs(parent_name_parts)?;
+                    let parent_namespace_ident =
+                        NamespaceIdent::from_strs(parent_name_parts)?;
                     self.get_mut_namespace(&parent_namespace_ident)
                 }?;
 
@@ -165,7 +171,9 @@ impl NamespaceState {
             .namespaces
             .entry(child_namespace_name)
         {
-            hash_map::Entry::Occupied(_) => namespace_already_exists_err(namespace_ident),
+            hash_map::Entry::Occupied(_) => {
+                namespace_already_exists_err(namespace_ident)
+            }
             hash_map::Entry::Vacant(entry) => {
                 let _ = entry.insert(NamespaceState {
                     properties,
@@ -228,7 +236,10 @@ impl NamespaceState {
     }
 
     // Returns the list of table names under the given namespace
-    pub(crate) fn list_tables(&self, namespace_ident: &NamespaceIdent) -> Result<Vec<&String>> {
+    pub(crate) fn list_tables(
+        &self,
+        namespace_ident: &NamespaceIdent,
+    ) -> Result<Vec<&String>> {
         let table_names = self
             .get_namespace(namespace_ident)?
             .table_metadata_locations
@@ -249,7 +260,10 @@ impl NamespaceState {
     }
 
     // Returns the metadata location of the given table or an error if doesn't exist
-    pub(crate) fn get_existing_table_location(&self, table_ident: &TableIdent) -> Result<&String> {
+    pub(crate) fn get_existing_table_location(
+        &self,
+        table_ident: &TableIdent,
+    ) -> Result<&String> {
         let namespace = self.get_namespace(table_ident.namespace())?;
 
         match namespace.table_metadata_locations.get(table_ident.name()) {
@@ -280,7 +294,10 @@ impl NamespaceState {
     }
 
     // Removes the given table or returns an error if doesn't exist
-    pub(crate) fn remove_existing_table(&mut self, table_ident: &TableIdent) -> Result<String> {
+    pub(crate) fn remove_existing_table(
+        &mut self,
+        table_ident: &TableIdent,
+    ) -> Result<String> {
         let namespace = self.get_mut_namespace(table_ident.namespace())?;
 
         match namespace
@@ -293,8 +310,12 @@ impl NamespaceState {
     }
 
     /// Updates the metadata location of the given table or returns an error if it doesn't exist
-    pub(crate) fn commit_table_update(&mut self, staged_table: Table) -> Result<Table> {
-        let namespace = self.get_mut_namespace(staged_table.identifier().namespace())?;
+    pub(crate) fn commit_table_update(
+        &mut self,
+        staged_table: Table,
+    ) -> Result<Table> {
+        let namespace =
+            self.get_mut_namespace(staged_table.identifier().namespace())?;
 
         let _ = namespace
             .table_metadata_locations

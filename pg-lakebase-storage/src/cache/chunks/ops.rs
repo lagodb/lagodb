@@ -10,11 +10,13 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
 use super::flight::ChunkFillLeader;
-use super::reaper::{run_reaper, ReapRequest};
+use super::reaper::{ReapRequest, run_reaper};
 use super::session::LargeFillSession;
-use crate::cache::{create_parent_dir, CacheIndex, CacheManager, CacheState, CachedObjectMeta};
+use crate::cache::{
+    CacheIndex, CacheManager, CacheState, CachedObjectMeta, create_parent_dir,
+};
 use crate::error::{StorageError, StorageResult};
-use crate::object::{chunk_count, chunk_index, chunk_range, ObjectLocation};
+use crate::object::{ObjectLocation, chunk_count, chunk_index, chunk_range};
 
 impl<I: CacheIndex> CacheManager<I> {
     pub fn chunk_range_for(&self, size: u64, chunk: u64) -> std::ops::Range<u64> {
@@ -41,7 +43,9 @@ impl<I: CacheIndex> CacheManager<I> {
         let committed = {
             let _object = session.state().lock().await;
 
-            if let Err(error) = self.write_large_chunk_unlocked(&session, chunk, data).await {
+            if let Err(error) =
+                self.write_large_chunk_unlocked(&session, chunk, data).await
+            {
                 self.abort_large_fill(&session).await?;
                 return Err(error);
             }
@@ -70,7 +74,12 @@ impl<I: CacheIndex> CacheManager<I> {
         let _object_guard = session.state().lock().await;
         if let Some(meta) = session.complete_meta().await? {
             return self
-                .open_file_range_for_meta(&meta, CacheState::CompleteFile, offset, len)
+                .open_file_range_for_meta(
+                    &meta,
+                    CacheState::CompleteFile,
+                    offset,
+                    len,
+                )
                 .await;
         }
 
@@ -90,7 +99,10 @@ impl<I: CacheIndex> CacheManager<I> {
         len: u32,
     ) -> StorageResult<(tokio::fs::File, u64, u32, bool)> {
         if state != CacheState::CompleteFile {
-            return Err(StorageError::cache(format!("cache state {state:?} is not complete-file for {}", meta.key())));
+            return Err(StorageError::cache(format!(
+                "cache state {state:?} is not complete-file for {}",
+                meta.key()
+            )));
         }
         let start = std::cmp::min(offset, meta.size());
         let end = std::cmp::min(start.saturating_add(len as u64), meta.size());
@@ -98,11 +110,19 @@ impl<I: CacheIndex> CacheManager<I> {
         Ok((file, start, (end - start) as u32, end == meta.size()))
     }
 
-    pub(crate) async fn open_complete_file(&self, key: &ObjectLocation) -> StorageResult<std::fs::File> {
+    pub(crate) async fn open_complete_file(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<std::fs::File> {
         let path = self.complete_path(key)?;
         tokio::task::spawn_blocking(move || std::fs::File::open(path))
             .await
-            .map_err(|error| StorageError::io("open complete cache file task failed", std::io::Error::other(error)))?
+            .map_err(|error| {
+                StorageError::io(
+                    "open complete cache file task failed",
+                    std::io::Error::other(error),
+                )
+            })?
             .map_err(Into::into)
     }
 
@@ -113,7 +133,10 @@ impl<I: CacheIndex> CacheManager<I> {
         data: &[u8],
     ) -> StorageResult<()> {
         if chunk >= chunk_count(session.info.size, self.chunk_size) {
-            return Err(StorageError::cache(format!("chunk {chunk} out of bounds for {}", session.key())));
+            return Err(StorageError::cache(format!(
+                "chunk {chunk} out of bounds for {}",
+                session.key()
+            )));
         }
         session.ensure_filling().await?;
         self.prepare_dirs().await?;
@@ -140,11 +163,15 @@ impl<I: CacheIndex> CacheManager<I> {
         file.seek(std::io::SeekFrom::Start(range.start)).await?;
         file.write_all(data).await?;
         file.flush().await?;
-        self.orphan_candidates.record_file_candidate(path.to_path_buf());
+        self.orphan_candidates
+            .record_file_candidate(path.to_path_buf());
         Ok(())
     }
 
-    async fn commit_large_fill_unlocked(&self, session: Arc<LargeFillSession>) -> StorageResult<CachedObjectMeta> {
+    async fn commit_large_fill_unlocked(
+        &self,
+        session: Arc<LargeFillSession>,
+    ) -> StorageResult<CachedObjectMeta> {
         if let Some(meta) = session.complete_meta().await? {
             return Ok(meta);
         }
@@ -175,11 +202,16 @@ impl<I: CacheIndex> CacheManager<I> {
 
         if let Err(error) = tokio::fs::rename(&partial, &complete).await {
             self.abort_large_fill(&session).await?;
-            return Err(StorageError::io(format!("promote partial cache file for {}", session.key()), error));
+            return Err(StorageError::io(
+                format!("promote partial cache file for {}", session.key()),
+                error,
+            ));
         }
 
-        self.orphan_candidates.record_promotion(&partial, complete.clone());
-        let mut meta = CachedObjectMeta::complete(session.key().clone(), session.info.clone());
+        self.orphan_candidates
+            .record_promotion(&partial, complete.clone());
+        let mut meta =
+            CachedObjectMeta::complete(session.key().clone(), session.info.clone());
         meta.last_access_ns = crate::cache::now_ns();
         let meta = match self.index.put_new_complete(meta).await {
             Ok(meta) => meta,
@@ -187,7 +219,7 @@ impl<I: CacheIndex> CacheManager<I> {
                 session.abort().await;
                 self.orphan_candidates.record_file_candidate(complete);
                 return Err(error);
-            },
+            }
         };
 
         session.mark_complete(meta.clone()).await?;
@@ -201,7 +233,10 @@ impl<I: CacheIndex> CacheManager<I> {
         Ok(meta)
     }
 
-    pub(crate) async fn abort_large_fill(&self, session: &Arc<LargeFillSession>) -> StorageResult<()> {
+    pub(crate) async fn abort_large_fill(
+        &self,
+        session: &Arc<LargeFillSession>,
+    ) -> StorageResult<()> {
         session.abort().await;
         self.orphan_candidates
             .record_file_candidate(session.partial_path().to_path_buf());
@@ -267,7 +302,9 @@ impl<I: CacheIndex + 'static> CacheManager<I> {
     /// The task holds a [`Weak`] reference to `self` so it does not keep the manager alive. When
     /// the last strong reference to the manager is dropped, the reaper's next `upgrade()` fails
     /// and the task exits cleanly.
-    pub(crate) fn spawn_large_fill_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn spawn_large_fill_reaper(
+        self: &Arc<Self>,
+    ) -> tokio::task::JoinHandle<()> {
         let inbox = self
             .reaper_inbox
             .lock()

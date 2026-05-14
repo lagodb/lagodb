@@ -5,20 +5,26 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use super::flight::ChunkFillClaim;
-use super::reaper::{reaper_channel, ReaperInbox};
+use super::reaper::{ReaperInbox, reaper_channel};
 use super::session::LargeFillSession;
 use crate::cache::meta::CachedObjectMeta;
 use crate::cache::object_state::{CacheActivityKind, ObjectStateRegistry};
 use crate::error::StorageError;
 use crate::object::{ObjectInfo, ObjectLocation};
 
-fn test_session(key: ObjectLocation, chunks: usize) -> (Arc<LargeFillSession>, ReaperInbox) {
+fn test_session(
+    key: ObjectLocation,
+    chunks: usize,
+) -> (Arc<LargeFillSession>, ReaperInbox) {
     let (reaper, inbox) = reaper_channel();
     let (registry, _registry_inbox) = ObjectStateRegistry::new();
     let state = registry.get_or_create(&key);
     let session = Arc::new(LargeFillSession::new(
         state,
-        ObjectInfo { size: 8, etag: None },
+        ObjectInfo {
+            size: 8,
+            etag: None,
+        },
         chunks,
         PathBuf::from("/tmp/session-partial"),
         1,
@@ -33,11 +39,15 @@ async fn abort_marks_inflight_chunk_waiters_failed() {
     let (session, _inbox) = test_session(key, 2);
     let leader = match session.claim_chunk(0).await.unwrap() {
         ChunkFillClaim::Leader(leader) => leader,
-        ChunkFillClaim::Complete | ChunkFillClaim::Follower(_) => panic!("expected first claimant to lead"),
+        ChunkFillClaim::Complete | ChunkFillClaim::Follower(_) => {
+            panic!("expected first claimant to lead")
+        }
     };
     let waiter = match session.claim_chunk(0).await.unwrap() {
         ChunkFillClaim::Follower(waiter) => waiter,
-        ChunkFillClaim::Complete | ChunkFillClaim::Leader(_) => panic!("expected second claimant to wait"),
+        ChunkFillClaim::Complete | ChunkFillClaim::Leader(_) => {
+            panic!("expected second claimant to wait")
+        }
     };
     let waiter_task = tokio::spawn(async move { waiter.wait().await });
 
@@ -49,7 +59,10 @@ async fn abort_marks_inflight_chunk_waiters_failed() {
         .expect("waiter task should not panic")
         .unwrap();
     assert!(!waiter_result);
-    assert!(matches!(session.claim_chunk(0).await, Err(StorageError::CacheFillAborted { .. })));
+    assert!(matches!(
+        session.claim_chunk(0).await,
+        Err(StorageError::CacheFillAborted { .. })
+    ));
     drop(leader);
 }
 
@@ -63,7 +76,10 @@ async fn fill_slot_stays_resolvable_while_any_arc_is_held() {
     let session = registry
         .attach_or_join_fill_session(
             &state,
-            ObjectInfo { size: 8, etag: None },
+            ObjectInfo {
+                size: 8,
+                etag: None,
+            },
             2,
             PathBuf::from("/tmp/session-partial"),
         )
@@ -89,7 +105,10 @@ async fn fill_slot_weak_expires_when_last_arc_drops() {
     let session = registry
         .attach_or_join_fill_session(
             &state,
-            ObjectInfo { size: 8, etag: None },
+            ObjectInfo {
+                size: 8,
+                etag: None,
+            },
             2,
             PathBuf::from("/tmp/session-partial"),
         )
@@ -97,7 +116,10 @@ async fn fill_slot_weak_expires_when_last_arc_drops() {
         .unwrap();
 
     drop(session);
-    assert!(state.live_fill_session().is_none(), "stale Weak in the fill slot should no longer upgrade",);
+    assert!(
+        state.live_fill_session().is_none(),
+        "stale Weak in the fill slot should no longer upgrade",
+    );
 }
 
 /// A completed session must **not** send a reap request — promotion already did all the
@@ -108,9 +130,18 @@ async fn completed_session_drop_does_not_enqueue_reap() {
     let (registry, _registry_inbox) = ObjectStateRegistry::new();
     let key = ObjectLocation::new("default", "bucket", "file").unwrap();
     let state = registry.get_or_create(&key);
-    let info = ObjectInfo { size: 8, etag: None };
-    let session =
-        Arc::new(LargeFillSession::new(state, info.clone(), 2, PathBuf::from("/tmp/session-partial"), 1, reaper));
+    let info = ObjectInfo {
+        size: 8,
+        etag: None,
+    };
+    let session = Arc::new(LargeFillSession::new(
+        state,
+        info.clone(),
+        2,
+        PathBuf::from("/tmp/session-partial"),
+        1,
+        reaper,
+    ));
 
     // Simulate a successful promotion: mark_complete flips the completed marker that Drop
     // observes.
@@ -121,7 +152,10 @@ async fn completed_session_drop_does_not_enqueue_reap() {
 
     drop(session);
 
-    assert!(inbox.rx.try_recv().is_err(), "completed session Drop must not enqueue a reap request",);
+    assert!(
+        inbox.rx.try_recv().is_err(),
+        "completed session Drop must not enqueue a reap request",
+    );
 }
 
 /// After the last `Arc` drops and the slot's `Weak` expires, a subsequent
@@ -130,11 +164,19 @@ async fn completed_session_drop_does_not_enqueue_reap() {
 async fn attach_mints_new_session_after_weak_expires() {
     let (registry, _inbox) = ObjectStateRegistry::new();
     let key = ObjectLocation::new("default", "bucket", "file").unwrap();
-    let info = ObjectInfo { size: 8, etag: None };
+    let info = ObjectInfo {
+        size: 8,
+        etag: None,
+    };
     let state = registry.get_or_create(&key);
 
     let first = registry
-        .attach_or_join_fill_session(&state, info.clone(), 2, PathBuf::from("/tmp/p1"))
+        .attach_or_join_fill_session(
+            &state,
+            info.clone(),
+            2,
+            PathBuf::from("/tmp/p1"),
+        )
         .await
         .unwrap();
     let first_nonce = first.nonce();
@@ -144,7 +186,11 @@ async fn attach_mints_new_session_after_weak_expires() {
         .attach_or_join_fill_session(&state, info, 2, PathBuf::from("/tmp/p2"))
         .await
         .unwrap();
-    assert_ne!(second.nonce(), first_nonce, "second attach after Weak expired must mint a fresh session",);
+    assert_ne!(
+        second.nonce(),
+        first_nonce,
+        "second attach after Weak expired must mint a fresh session",
+    );
     assert_eq!(second.partial_path(), PathBuf::from("/tmp/p2").as_path());
 }
 
@@ -155,11 +201,19 @@ async fn attach_mints_new_session_after_weak_expires() {
 async fn clear_fill_slot_if_matches_rejects_stale_nonce() {
     let (registry, _inbox) = ObjectStateRegistry::new();
     let key = ObjectLocation::new("default", "bucket", "file").unwrap();
-    let info = ObjectInfo { size: 8, etag: None };
+    let info = ObjectInfo {
+        size: 8,
+        etag: None,
+    };
     let state = registry.get_or_create(&key);
 
     let first = registry
-        .attach_or_join_fill_session(&state, info.clone(), 2, PathBuf::from("/tmp/p1"))
+        .attach_or_join_fill_session(
+            &state,
+            info.clone(),
+            2,
+            PathBuf::from("/tmp/p1"),
+        )
         .await
         .unwrap();
     let stale_nonce = first.nonce();
@@ -174,8 +228,13 @@ async fn clear_fill_slot_if_matches_rejects_stale_nonce() {
 
     // A reap request carrying the stale nonce must not touch the live slot.
     state.clear_fill_slot_if_matches(stale_nonce);
-    assert!(state.fill_slot_nonce_matches(live_nonce), "live slot must survive stale clear_fill_slot_if_matches");
-    let resolved = state.live_fill_session().expect("live session still registered");
+    assert!(
+        state.fill_slot_nonce_matches(live_nonce),
+        "live slot must survive stale clear_fill_slot_if_matches"
+    );
+    let resolved = state
+        .live_fill_session()
+        .expect("live session still registered");
     assert!(Arc::ptr_eq(&resolved, &second));
 
     // The matching nonce, of course, still removes the slot.
@@ -189,7 +248,10 @@ async fn clear_fill_slot_if_matches_rejects_stale_nonce() {
 async fn clear_fill_slot_unconditional_after_invalidate() {
     let (registry, _inbox) = ObjectStateRegistry::new();
     let key = ObjectLocation::new("default", "bucket", "file").unwrap();
-    let info = ObjectInfo { size: 8, etag: None };
+    let info = ObjectInfo {
+        size: 8,
+        etag: None,
+    };
     let state = registry.get_or_create(&key);
 
     let session = registry
@@ -200,7 +262,10 @@ async fn clear_fill_slot_unconditional_after_invalidate() {
 
     // Invalidation wipes the slot while the session's Arc is still live.
     state.clear_fill_slot();
-    assert!(state.live_fill_session().is_none(), "invalidate clears the slot unconditionally");
+    assert!(
+        state.live_fill_session().is_none(),
+        "invalidate clears the slot unconditionally"
+    );
 
     // The reaper that later fires on the surviving session's Drop must see "nonce does not
     // match" and do nothing.
@@ -214,8 +279,14 @@ async fn claim_partial_bootstrap_is_exactly_once() {
     let key = ObjectLocation::new("default", "bucket", "file").unwrap();
     let (session, _inbox) = test_session(key, 2);
 
-    assert!(session.claim_partial_bootstrap(), "first caller must own the truncate");
-    assert!(!session.claim_partial_bootstrap(), "subsequent chunks must preserve prior writes");
+    assert!(
+        session.claim_partial_bootstrap(),
+        "first caller must own the truncate"
+    );
+    assert!(
+        !session.claim_partial_bootstrap(),
+        "subsequent chunks must preserve prior writes"
+    );
     assert!(!session.claim_partial_bootstrap());
 }
 
@@ -245,7 +316,10 @@ async fn reap_request_pins_per_object_state_after_session_drop() {
     const NONCE: u64 = 7;
     let session = Arc::new(LargeFillSession::new(
         state.clone(),
-        ObjectInfo { size: 8, etag: None },
+        ObjectInfo {
+            size: 8,
+            etag: None,
+        },
         2,
         PathBuf::from("/tmp/session-partial"),
         NONCE,
@@ -263,7 +337,11 @@ async fn reap_request_pins_per_object_state_after_session_drop() {
         .expect("reaper inbox should receive Drop payload")
         .expect("channel still open");
 
-    assert_eq!(Arc::as_ptr(&req.state), state_ptr, "reap request must pin the original state instance",);
+    assert_eq!(
+        Arc::as_ptr(&req.state),
+        state_ptr,
+        "reap request must pin the original state instance",
+    );
     assert_eq!(req.nonce, NONCE);
     // And the slot inside the pinned state still remembers the session identity.
     assert!(req.state.fill_slot_nonce_matches(NONCE));
@@ -281,7 +359,10 @@ async fn object_lock_identity_stable_across_concurrent_lockers() {
 
     // Concurrent locker observes the same state because the Weak is still held.
     let state_b = registry.get_or_create(&key);
-    assert!(Arc::ptr_eq(&state_a, &state_b), "concurrent get_or_create must hand out the same state",);
+    assert!(
+        Arc::ptr_eq(&state_a, &state_b),
+        "concurrent get_or_create must hand out the same state",
+    );
 
     // Drop both Arcs; a fresh get_or_create is allowed to mint a new state.
     drop(state_a);
@@ -291,7 +372,10 @@ async fn object_lock_identity_stable_across_concurrent_lockers() {
     // instance — exercise the activity guard lifetime path.
     let lease = state_c.activity_guard(CacheActivityKind::OpenLease);
     let state_d = registry.get_or_create(&key);
-    assert!(Arc::ptr_eq(&state_c, &state_d), "state lifetime must be extended by live activity guards",);
+    assert!(
+        Arc::ptr_eq(&state_c, &state_d),
+        "state lifetime must be extended by live activity guards",
+    );
     drop(lease);
     drop(state_c);
     drop(state_d);

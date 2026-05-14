@@ -61,19 +61,35 @@ impl PredicateVisitor for RewriteNotVisitor {
         Ok(inner.negate())
     }
 
-    fn is_null(&mut self, _reference: &Reference, predicate: &Predicate) -> Result<Self::T> {
+    fn is_null(
+        &mut self,
+        _reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T> {
         Ok(predicate.clone())
     }
 
-    fn not_null(&mut self, _reference: &Reference, predicate: &Predicate) -> Result<Self::T> {
+    fn not_null(
+        &mut self,
+        _reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T> {
         Ok(predicate.clone())
     }
 
-    fn is_nan(&mut self, _reference: &Reference, predicate: &Predicate) -> Result<Self::T> {
+    fn is_nan(
+        &mut self,
+        _reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T> {
         Ok(predicate.clone())
     }
 
-    fn not_nan(&mut self, _reference: &Reference, predicate: &Predicate) -> Result<Self::T> {
+    fn not_nan(
+        &mut self,
+        _reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T> {
         Ok(predicate.clone())
     }
 
@@ -330,8 +346,18 @@ mod tests {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "foo", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "bar",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "foo",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -373,7 +399,8 @@ mod tests {
         let result = bound_predicate.rewrite_not();
 
         // The result should be bar >= 40
-        let expected_predicate = Reference::new("bar").greater_than_or_equal_to(Datum::int(40));
+        let expected_predicate =
+            Reference::new("bar").greater_than_or_equal_to(Datum::int(40));
         let expected_bound = expected_predicate.bind(schema, true).unwrap();
 
         assert_eq!(result, expected_bound);

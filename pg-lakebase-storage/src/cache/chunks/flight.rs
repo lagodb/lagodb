@@ -101,7 +101,7 @@ impl ChunkFillWaiter {
             match *outcome.borrow() {
                 Some(ChunkFlightOutcome::Succeeded) => return Ok(true),
                 Some(ChunkFlightOutcome::Failed) => return Ok(false),
-                None => {},
+                None => {}
             }
             if outcome.changed().await.is_err() {
                 return Ok(false);

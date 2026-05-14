@@ -23,16 +23,17 @@ use itertools::Itertools;
 use uuid::Uuid;
 
 use super::{
-    Schema, SchemaId, TableMetadataBuilder, ViewFormatVersion, ViewMetadata, ViewRepresentation,
-    ViewVersion, ViewVersionLog, ViewVersionRef, DEFAULT_SCHEMA_ID, INITIAL_VIEW_VERSION_ID,
-    ONE_MINUTE_MS, VIEW_PROPERTY_REPLACE_DROP_DIALECT_ALLOWED,
-    VIEW_PROPERTY_REPLACE_DROP_DIALECT_ALLOWED_DEFAULT, VIEW_PROPERTY_VERSION_HISTORY_SIZE,
-    VIEW_PROPERTY_VERSION_HISTORY_SIZE_DEFAULT,
+    DEFAULT_SCHEMA_ID, INITIAL_VIEW_VERSION_ID, ONE_MINUTE_MS, Schema, SchemaId,
+    TableMetadataBuilder, VIEW_PROPERTY_REPLACE_DROP_DIALECT_ALLOWED,
+    VIEW_PROPERTY_REPLACE_DROP_DIALECT_ALLOWED_DEFAULT,
+    VIEW_PROPERTY_VERSION_HISTORY_SIZE, VIEW_PROPERTY_VERSION_HISTORY_SIZE_DEFAULT,
+    ViewFormatVersion, ViewMetadata, ViewRepresentation, ViewVersion, ViewVersionLog,
+    ViewVersionRef,
 };
+use crate::ViewCreation;
 use crate::catalog::ViewUpdate;
 use crate::error::{Error, ErrorKind, Result};
 use crate::io::is_truthy;
-use crate::ViewCreation;
 
 /// Manipulating view metadata.
 ///
@@ -78,7 +79,7 @@ impl ViewMetadataBuilder {
                 format_version,
                 view_uuid: Uuid::now_v7(),
                 location: "".to_string(), // Overwritten immediately by set_location
-                current_version_id: -1,   // Overwritten immediately by set_current_version,
+                current_version_id: -1, // Overwritten immediately by set_current_version,
                 versions: HashMap::new(), // Overwritten immediately by set_current_version
                 version_log: Vec::new(),
                 schemas: HashMap::new(), // Overwritten immediately by set_current_version
@@ -140,7 +141,10 @@ impl ViewMetadataBuilder {
     ///
     /// # Errors
     /// - Cannot downgrade to older format versions.
-    pub fn upgrade_format_version(self, format_version: ViewFormatVersion) -> Result<Self> {
+    pub fn upgrade_format_version(
+        self,
+        format_version: ViewFormatVersion,
+    ) -> Result<Self> {
         if format_version < self.metadata.format_version {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
@@ -275,12 +279,13 @@ impl ViewMetadataBuilder {
         }
 
         let view_version = if view_version.schema_id() == Self::LAST_ADDED {
-            let last_added_schema_id = self.last_added_schema_id.ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    "Cannot set last added schema: no schema has been added",
-                )
-            })?;
+            let last_added_schema_id =
+                self.last_added_schema_id.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        "Cannot set last added schema: no schema has been added",
+                    )
+                })?;
             view_version.with_schema_id(last_added_schema_id)
         } else {
             view_version
@@ -323,15 +328,16 @@ impl ViewMetadataBuilder {
             .versions
             .insert(version_id, Arc::new(view_version.clone()));
 
-        let view_version = if let Some(last_added_schema_id) = self.last_added_schema_id {
-            if view_version.schema_id() == last_added_schema_id {
-                view_version.with_schema_id(Self::LAST_ADDED)
+        let view_version =
+            if let Some(last_added_schema_id) = self.last_added_schema_id {
+                if view_version.schema_id() == last_added_schema_id {
+                    view_version.with_schema_id(Self::LAST_ADDED)
+                } else {
+                    view_version
+                }
             } else {
                 view_version
-            }
-        } else {
-            view_version
-        };
+            };
         self.changes
             .push(ViewUpdate::AddViewVersion { view_version });
 
@@ -340,7 +346,10 @@ impl ViewMetadataBuilder {
         Ok(version_id)
     }
 
-    fn reuse_or_create_new_view_version_id(&self, new_view_version: &ViewVersion) -> i32 {
+    fn reuse_or_create_new_view_version_id(
+        &self,
+        new_view_version: &ViewVersion,
+    ) -> i32 {
         self.metadata
             .versions
             .iter()
@@ -417,7 +426,10 @@ impl ViewMetadataBuilder {
     }
 
     /// Update properties of the view.
-    pub fn set_properties(mut self, updates: HashMap<String, String>) -> Result<Self> {
+    pub fn set_properties(
+        mut self,
+        updates: HashMap<String, String>,
+    ) -> Result<Self> {
         if updates.is_empty() {
             return Ok(self);
         }
@@ -480,7 +492,10 @@ impl ViewMetadataBuilder {
 
         if let Some(previous) = self.previous_view_version.take() {
             if !allow_replace_drop_dialects(&self.metadata.properties) {
-                require_no_dialect_dropped(&previous, self.metadata.current_version())?;
+                require_no_dialect_dropped(
+                    &previous,
+                    self.metadata.current_version(),
+                )?;
             }
         }
 
@@ -582,7 +597,10 @@ fn allow_replace_drop_dialects(properties: &HashMap<String, String>) -> bool {
         )
 }
 
-fn require_no_dialect_dropped(previous: &ViewVersion, current: &ViewVersion) -> Result<()> {
+fn require_no_dialect_dropped(
+    previous: &ViewVersion,
+    current: &ViewVersion,
+) -> Result<()> {
     let base_dialects = lowercase_sql_dialects_for(previous);
     let updated_dialects = lowercase_sql_dialects_for(current);
 
@@ -612,7 +630,8 @@ fn lowercase_sql_dialects_for(view_version: &ViewVersion) -> HashSet<String> {
 }
 
 pub(super) fn require_unique_dialects(view_version: &ViewVersion) -> Result<()> {
-    let mut seen_dialects = HashSet::with_capacity(view_version.representations().len());
+    let mut seen_dialects =
+        HashSet::with_capacity(view_version.representations().len());
     for repr in view_version.representations().iter() {
         match repr {
             ViewRepresentation::Sql(sql_repr) => {
@@ -635,10 +654,10 @@ pub(super) fn require_unique_dialects(view_version: &ViewVersion) -> Result<()> 
 mod test {
     use super::super::view_metadata::tests::get_test_view_metadata;
     use super::*;
+    use crate::NamespaceIdent;
     use crate::spec::{
         NestedField, PrimitiveType, SqlViewRepresentation, Type, ViewRepresentations,
     };
-    use crate::NamespaceIdent;
 
     fn new_view_version(id: usize, schema_id: SchemaId, sql: &str) -> ViewVersion {
         new_view_version_with_dialect(id, schema_id, sql, vec!["spark"])
@@ -675,7 +694,9 @@ mod test {
     }
 
     fn builder_without_changes() -> ViewMetadataBuilder {
-        ViewMetadataBuilder::new_from_metadata(get_test_view_metadata("ViewMetadataV1Valid.json"))
+        ViewMetadataBuilder::new_from_metadata(get_test_view_metadata(
+            "ViewMetadataV1Valid.json",
+        ))
     }
 
     #[test]
@@ -689,7 +710,8 @@ mod test {
         // Version ID and schema should be re-assigned
         let version = new_view_version(20, 21, "select 1 as count");
         let format_version = ViewFormatVersion::V1;
-        let properties = HashMap::from_iter(vec![("key".to_string(), "value".to_string())]);
+        let properties =
+            HashMap::from_iter(vec![("key".to_string(), "value".to_string())]);
 
         let build_result = ViewMetadataBuilder::new(
             location.clone(),
@@ -721,11 +743,13 @@ mod test {
         let changes = build_result.changes;
         assert_eq!(changes.len(), 5);
         assert!(changes.contains(&ViewUpdate::SetLocation { location }));
-        assert!(changes.contains(&ViewUpdate::AddViewVersion {
-            view_version: version
-                .with_version_id(INITIAL_VIEW_VERSION_ID)
-                .with_schema_id(-1)
-        }));
+        assert!(
+            changes.contains(&ViewUpdate::AddViewVersion {
+                view_version: version
+                    .with_version_id(INITIAL_VIEW_VERSION_ID)
+                    .with_schema_id(-1)
+            })
+        );
         assert!(changes.contains(&ViewUpdate::SetCurrentViewVersion {
             view_version_id: -1
         }));
@@ -751,7 +775,8 @@ mod test {
             .unwrap()
             .add_version(v3)
             .unwrap();
-        let builder_without_changes = builder.clone().build().unwrap().metadata.into_builder();
+        let builder_without_changes =
+            builder.clone().build().unwrap().metadata.into_builder();
 
         // No limit on versions
         let metadata = builder.clone().build().unwrap().metadata;
@@ -974,7 +999,8 @@ mod test {
             .with_fields(vec![])
             .build()
             .unwrap();
-        let build_result = builder.clone().add_schema(schema.clone()).build().unwrap();
+        let build_result =
+            builder.clone().add_schema(schema.clone()).build().unwrap();
         assert_eq!(build_result.metadata.schemas.len(), 2);
         assert_eq!(
             build_result.changes,
@@ -985,7 +1011,8 @@ mod test {
         );
 
         // Add schema again - id is reused
-        let build_result = builder.clone().add_schema(schema.clone()).build().unwrap();
+        let build_result =
+            builder.clone().add_schema(schema.clone()).build().unwrap();
         assert_eq!(build_result.metadata.schemas.len(), 2);
         assert_eq!(
             build_result.changes,
@@ -1146,32 +1173,26 @@ mod test {
     fn test_view_version_and_schema_deduplication() {
         let schema_one = Schema::builder()
             .with_schema_id(5)
-            .with_fields(vec![NestedField::required(
-                1,
-                "x",
-                Type::Primitive(PrimitiveType::Long),
-            )
-            .into()])
+            .with_fields(vec![
+                NestedField::required(1, "x", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+            ])
             .build()
             .unwrap();
         let schema_two = Schema::builder()
             .with_schema_id(7)
-            .with_fields(vec![NestedField::required(
-                1,
-                "y",
-                Type::Primitive(PrimitiveType::Long),
-            )
-            .into()])
+            .with_fields(vec![
+                NestedField::required(1, "y", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+            ])
             .build()
             .unwrap();
         let schema_three = Schema::builder()
             .with_schema_id(9)
-            .with_fields(vec![NestedField::required(
-                1,
-                "z",
-                Type::Primitive(PrimitiveType::Long),
-            )
-            .into()])
+            .with_fields(vec![
+                NestedField::required(1, "z", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+            ])
             .build()
             .unwrap();
 
@@ -1236,20 +1257,24 @@ mod test {
     fn test_error_on_missing_schema() {
         let builder = builder_without_changes();
         // Missing schema
-        assert!(builder
-            .clone()
-            .add_version(new_view_version(0, 10, "SELECT * FROM foo"))
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot add version with unknown schema: 10"));
+        assert!(
+            builder
+                .clone()
+                .add_version(new_view_version(0, 10, "SELECT * FROM foo"))
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot add version with unknown schema: 10")
+        );
 
         // Missing last added schema
-        assert!(builder
-            .clone()
-            .add_version(new_view_version(0, -1, "SELECT * FROM foo"))
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot set last added schema: no schema has been added"));
+        assert!(
+            builder
+                .clone()
+                .add_version(new_view_version(0, -1, "SELECT * FROM foo"))
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot set last added schema: no schema has been added")
+        );
     }
 
     #[test]
@@ -1263,12 +1288,16 @@ mod test {
             .contains(
                 "Cannot set current version id to last added version: no version has been added."
             ));
-        assert!(builder
-            .clone()
-            .set_current_version_id(10)
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot set current version to unknown version with id: 10"));
+        assert!(
+            builder
+                .clone()
+                .set_current_version_id(10)
+                .unwrap_err()
+                .to_string()
+                .contains(
+                    "Cannot set current version to unknown version with id: 10"
+                )
+        );
     }
 
     #[test]
@@ -1292,15 +1321,17 @@ mod test {
     #[test]
     fn test_error_when_setting_negative_version_history_size() {
         let builder = builder_without_changes();
-        assert!(builder
-            .clone()
-            .set_properties(HashMap::from_iter(vec![(
-                VIEW_PROPERTY_VERSION_HISTORY_SIZE.to_string(),
-                "-1".to_string(),
-            )]))
-            .unwrap_err()
-            .to_string()
-            .contains("version.history.num-entries must be positive but was -1"));
+        assert!(
+            builder
+                .clone()
+                .set_properties(HashMap::from_iter(vec![(
+                    VIEW_PROPERTY_VERSION_HISTORY_SIZE.to_string(),
+                    "-1".to_string(),
+                )]))
+                .unwrap_err()
+                .to_string()
+                .contains("version.history.num-entries must be positive but was -1")
+        );
     }
 
     #[test]
@@ -1338,9 +1369,14 @@ mod test {
     fn test_dropping_dialect_fails_by_default() {
         let builder = builder_without_changes();
 
-        let spark = new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
-        let spark_trino =
-            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark", "trino"]);
+        let spark =
+            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
+        let spark_trino = new_view_version_with_dialect(
+            0,
+            0,
+            "SELECT * FROM foo",
+            vec!["spark", "trino"],
+        );
         let schema = Schema::builder()
             .with_schema_id(0)
             .with_fields(vec![])
@@ -1359,18 +1395,24 @@ mod test {
             .build()
             .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("Cannot replace view due to loss of view dialects"));
+        assert!(
+            err.to_string()
+                .contains("Cannot replace view due to loss of view dialects")
+        );
     }
 
     #[test]
     fn test_dropping_dialects_does_not_fail_when_allowed() {
         let builder = builder_without_changes();
 
-        let spark = new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
-        let spark_trino =
-            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark", "trino"]);
+        let spark =
+            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
+        let spark_trino = new_view_version_with_dialect(
+            0,
+            0,
+            "SELECT * FROM foo",
+            vec!["spark", "trino"],
+        );
         let schema = Schema::builder()
             .with_schema_id(0)
             .with_fields(vec![])
@@ -1404,9 +1446,14 @@ mod test {
     fn test_can_add_dialects_by_default() {
         let builder = builder_without_changes();
 
-        let spark = new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
-        let spark_trino =
-            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark", "trino"]);
+        let spark =
+            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
+        let spark_trino = new_view_version_with_dialect(
+            0,
+            0,
+            "SELECT * FROM foo",
+            vec!["spark", "trino"],
+        );
 
         let schema = Schema::builder()
             .with_schema_id(0)
@@ -1436,8 +1483,10 @@ mod test {
     fn test_can_update_dialect_by_default() {
         let builder = builder_without_changes();
 
-        let spark_v1 = new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
-        let spark_v2 = new_view_version_with_dialect(0, 0, "SELECT * FROM bar", vec!["spark"]);
+        let spark_v1 =
+            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
+        let spark_v2 =
+            new_view_version_with_dialect(0, 0, "SELECT * FROM bar", vec!["spark"]);
 
         let schema = Schema::builder()
             .with_schema_id(0)
@@ -1467,8 +1516,10 @@ mod test {
     fn test_dropping_dialects_allowed_and_then_disallowed() {
         let builder = builder_without_changes();
 
-        let spark = new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
-        let trino = new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["trino"]);
+        let spark =
+            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["spark"]);
+        let trino =
+            new_view_version_with_dialect(0, 0, "SELECT * FROM foo", vec!["trino"]);
 
         let schema = Schema::builder()
             .with_schema_id(0)
@@ -1511,9 +1562,10 @@ mod test {
             .build()
             .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("Cannot replace view due to loss of view dialects"));
+        assert!(
+            err.to_string()
+                .contains("Cannot replace view due to loss of view dialects")
+        );
     }
 
     #[test]

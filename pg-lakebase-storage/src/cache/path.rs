@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::StorageResult;
-use crate::object::path_encoding::{build_encoded_object_path, decode_segment, normal_components, validate_portable_path};
 use crate::object::ObjectLocation;
+use crate::object::path_encoding::{
+    build_encoded_object_path, decode_segment, normal_components,
+    validate_portable_path,
+};
 
 /// Which kind of cache file a path represents. The distinction is carried by the file suffix
 /// (`.complete` / `.part`) rather than a directory, so both variants live side-by-side under
@@ -67,7 +70,10 @@ impl CachePathResolver {
     ///
     /// Returns `None` if the path does not live under [`Self::objects_dir`], does not end in one
     /// of the known suffixes, or cannot be decoded back to a valid [`ObjectLocation`].
-    pub fn parse_cache_path(&self, path: &Path) -> Option<(ObjectLocation, CacheFileKind)> {
+    pub fn parse_cache_path(
+        &self,
+        path: &Path,
+    ) -> Option<(ObjectLocation, CacheFileKind)> {
         let relative = path.strip_prefix(self.objects_dir()).ok()?;
         let components = normal_components(relative)?;
         if components.len() < 3 {
@@ -76,9 +82,13 @@ impl CachePathResolver {
 
         let file_name = components.last()?;
         let stem_after_prefix = file_name.strip_prefix(Self::CACHE_FILE_PREFIX)?;
-        let (basename, kind) = if let Some(basename) = stem_after_prefix.strip_suffix(Self::COMPLETE_SUFFIX) {
+        let (basename, kind) = if let Some(basename) =
+            stem_after_prefix.strip_suffix(Self::COMPLETE_SUFFIX)
+        {
             (basename, CacheFileKind::Complete)
-        } else if let Some(basename) = stem_after_prefix.strip_suffix(Self::PARTIAL_SUFFIX) {
+        } else if let Some(basename) =
+            stem_after_prefix.strip_suffix(Self::PARTIAL_SUFFIX)
+        {
             (basename, CacheFileKind::Partial)
         } else {
             return None;
@@ -91,12 +101,19 @@ impl CachePathResolver {
             key_parts.push(decode_segment(component)?);
         }
         key_parts.push(decode_segment(basename)?);
-        let location = ObjectLocation::new(store_id, bucket, key_parts.join("/")).ok()?;
+        let location =
+            ObjectLocation::new(store_id, bucket, key_parts.join("/")).ok()?;
         Some((location, kind))
     }
 
-    fn path_for(&self, key: &ObjectLocation, kind: CacheFileKind) -> StorageResult<PathBuf> {
-        let readable = self.objects_dir().join(Self::relative_path_for(key, kind.suffix()));
+    fn path_for(
+        &self,
+        key: &ObjectLocation,
+        kind: CacheFileKind,
+    ) -> StorageResult<PathBuf> {
+        let readable = self
+            .objects_dir()
+            .join(Self::relative_path_for(key, kind.suffix()));
         validate_portable_path(key, &readable)?;
         Ok(readable)
     }
@@ -116,24 +133,39 @@ mod tests {
     #[test]
     fn resolves_readable_key_derived_paths_and_reverses_them() {
         let resolver = CachePathResolver::new("/tmp/cache-root");
-        let key = ObjectLocation::new("store-a", "bucket-b", "path/to/file.txt").unwrap();
+        let key =
+            ObjectLocation::new("store-a", "bucket-b", "path/to/file.txt").unwrap();
 
         let complete = resolver.complete_path(&key).unwrap();
         let partial = resolver.partial_path(&key).unwrap();
 
         assert_eq!(
             complete,
-            PathBuf::from("/tmp/cache-root/objects/store-a/bucket-b/path/to/pgl-cache.file.txt.complete")
+            PathBuf::from(
+                "/tmp/cache-root/objects/store-a/bucket-b/path/to/pgl-cache.file.txt.complete"
+            )
         );
-        assert_eq!(partial, PathBuf::from("/tmp/cache-root/objects/store-a/bucket-b/path/to/pgl-cache.file.txt.part"));
-        assert_eq!(resolver.parse_cache_path(&complete), Some((key.clone(), CacheFileKind::Complete)));
-        assert_eq!(resolver.parse_cache_path(&partial), Some((key, CacheFileKind::Partial)));
+        assert_eq!(
+            partial,
+            PathBuf::from(
+                "/tmp/cache-root/objects/store-a/bucket-b/path/to/pgl-cache.file.txt.part"
+            )
+        );
+        assert_eq!(
+            resolver.parse_cache_path(&complete),
+            Some((key.clone(), CacheFileKind::Complete))
+        );
+        assert_eq!(
+            resolver.parse_cache_path(&partial),
+            Some((key, CacheFileKind::Partial))
+        );
     }
 
     #[test]
     fn complete_and_partial_share_parent_directory() {
         let resolver = CachePathResolver::new("/tmp/cache-root");
-        let key = ObjectLocation::new("store-a", "bucket-b", "path/to/file.txt").unwrap();
+        let key =
+            ObjectLocation::new("store-a", "bucket-b", "path/to/file.txt").unwrap();
 
         let complete = resolver.complete_path(&key).unwrap();
         let partial = resolver.partial_path(&key).unwrap();
@@ -152,24 +184,43 @@ mod tests {
 
         let complete = resolver.complete_path(&key).unwrap();
 
-        assert!(!complete.components().any(|component| matches!(component, Component::ParentDir)));
+        assert!(
+            !complete
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        );
         assert!(complete.to_string_lossy().contains("%2e%2e"));
-        assert!(complete.to_string_lossy().contains("pgl-cache.a%3fb.complete"));
-        assert_eq!(resolver.parse_cache_path(&complete), Some((key, CacheFileKind::Complete)));
+        assert!(
+            complete
+                .to_string_lossy()
+                .contains("pgl-cache.a%3fb.complete")
+        );
+        assert_eq!(
+            resolver.parse_cache_path(&complete),
+            Some((key, CacheFileKind::Complete))
+        );
     }
 
     #[test]
     fn store_id_partitions_same_bucket_and_object_paths() {
         let resolver = CachePathResolver::new("/tmp/cache-root");
-        let first = ObjectLocation::new("store-a", "bucket", "same/file.txt").unwrap();
-        let second = ObjectLocation::new("store-b", "bucket", "same/file.txt").unwrap();
+        let first =
+            ObjectLocation::new("store-a", "bucket", "same/file.txt").unwrap();
+        let second =
+            ObjectLocation::new("store-b", "bucket", "same/file.txt").unwrap();
 
         let first_path = resolver.complete_path(&first).unwrap();
         let second_path = resolver.complete_path(&second).unwrap();
 
         assert_ne!(first_path, second_path);
-        assert_eq!(resolver.parse_cache_path(&first_path), Some((first, CacheFileKind::Complete)));
-        assert_eq!(resolver.parse_cache_path(&second_path), Some((second, CacheFileKind::Complete)));
+        assert_eq!(
+            resolver.parse_cache_path(&first_path),
+            Some((first, CacheFileKind::Complete))
+        );
+        assert_eq!(
+            resolver.parse_cache_path(&second_path),
+            Some((second, CacheFileKind::Complete))
+        );
     }
 
     #[test]
@@ -186,7 +237,9 @@ mod tests {
     #[test]
     fn parse_cache_path_rejects_unknown_suffix() {
         let resolver = CachePathResolver::new("/tmp/cache-root");
-        let stray = PathBuf::from("/tmp/cache-root/objects/store/bucket/dir/pgl-cache.file.tmp");
+        let stray = PathBuf::from(
+            "/tmp/cache-root/objects/store/bucket/dir/pgl-cache.file.tmp",
+        );
         assert!(resolver.parse_cache_path(&stray).is_none());
     }
 }

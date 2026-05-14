@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 
 use super::{
-    AdmitSmallOutcome, CacheIndex, LogicalCacheUsage, LruScanCursor, LruScanPage, MetaScanCursor, MetaScanPage,
-    OpenHit, SmallCacheEntry, SmallScanCursor, SmallScanPage,
+    AdmitSmallOutcome, CacheIndex, LogicalCacheUsage, LruScanCursor, LruScanPage,
+    MetaScanCursor, MetaScanPage, OpenHit, SmallCacheEntry, SmallScanCursor,
+    SmallScanPage,
 };
 use crate::cache::meta::{CacheState, CachedObjectMeta};
 use crate::cache::should_touch;
@@ -49,14 +50,20 @@ fn store_meta_in_memory(inner: &mut InMemoryCacheState, meta: CachedObjectMeta) 
     add_to_in_memory_tracking(inner, &meta);
 }
 
-fn add_to_in_memory_tracking(inner: &mut InMemoryCacheState, meta: &CachedObjectMeta) {
+fn add_to_in_memory_tracking(
+    inner: &mut InMemoryCacheState,
+    meta: &CachedObjectMeta,
+) {
     if meta.is_cache_resident() {
         inner.cached_bytes = inner.cached_bytes.saturating_add(meta.cached_bytes());
         inner.lru.insert((meta.last_access_ns, meta.key().clone()));
     }
 }
 
-fn remove_from_in_memory_tracking(inner: &mut InMemoryCacheState, meta: &CachedObjectMeta) {
+fn remove_from_in_memory_tracking(
+    inner: &mut InMemoryCacheState,
+    meta: &CachedObjectMeta,
+) {
     inner.lru.remove(&(meta.last_access_ns, meta.key().clone()));
     if meta.is_cache_resident() {
         inner.cached_bytes = inner.cached_bytes.saturating_sub(meta.cached_bytes());
@@ -65,17 +72,26 @@ fn remove_from_in_memory_tracking(inner: &mut InMemoryCacheState, meta: &CachedO
 
 #[async_trait]
 impl CacheIndex for InMemoryCacheIndex {
-    async fn get_meta(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>> {
+    async fn get_meta(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>> {
         Ok(self.lock_inner().meta.get(key).cloned())
     }
 
-    async fn scan_meta_page(&self, cursor: Option<MetaScanCursor>, limit: usize) -> StorageResult<MetaScanPage> {
+    async fn scan_meta_page(
+        &self,
+        cursor: Option<MetaScanCursor>,
+        limit: usize,
+    ) -> StorageResult<MetaScanPage> {
         use std::ops::Bound::{Excluded, Unbounded};
 
         let inner = self.lock_inner();
         let limit = limit.max(1);
         let start = cursor.map(|cursor| cursor.key);
-        let iter: Box<dyn Iterator<Item = (&ObjectLocation, &CachedObjectMeta)> + '_> = match start {
+        let iter: Box<
+            dyn Iterator<Item = (&ObjectLocation, &CachedObjectMeta)> + '_,
+        > = match start {
             Some(start) => Box::new(inner.meta.range((Excluded(start), Unbounded))),
             None => Box::new(inner.meta.iter()),
         };
@@ -94,17 +110,26 @@ impl CacheIndex for InMemoryCacheIndex {
         Ok(MetaScanPage { metas, next_cursor })
     }
 
-    async fn put_new_complete(&self, meta: CachedObjectMeta) -> StorageResult<CachedObjectMeta> {
+    async fn put_new_complete(
+        &self,
+        meta: CachedObjectMeta,
+    ) -> StorageResult<CachedObjectMeta> {
         let meta = meta.normalized();
         if meta.cache_state() != CacheState::CompleteFile {
-            return Err(StorageError::cache(format!("metadata for {} is not complete-file residency", meta.key())));
+            return Err(StorageError::cache(format!(
+                "metadata for {} is not complete-file residency",
+                meta.key()
+            )));
         }
         let mut inner = self.lock_inner();
         store_meta_in_memory(&mut inner, meta.clone());
         Ok(meta)
     }
 
-    async fn delete_meta(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>> {
+    async fn delete_meta(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>> {
         let mut inner = self.lock_inner();
         let old = inner.meta.remove(key);
         if let Some(old) = &old {
@@ -113,12 +138,19 @@ impl CacheIndex for InMemoryCacheIndex {
         Ok(old)
     }
 
-    async fn get_small(&self, key: &ObjectLocation) -> StorageResult<Option<Vec<u8>>> {
+    async fn get_small(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<Vec<u8>>> {
         Ok(self.lock_inner().small.get(key).cloned())
     }
 
     async fn stat_small(&self, key: &ObjectLocation) -> StorageResult<Option<u64>> {
-        Ok(self.lock_inner().small.get(key).map(|data| data.len() as u64))
+        Ok(self
+            .lock_inner()
+            .small
+            .get(key)
+            .map(|data| data.len() as u64))
     }
 
     async fn scan_small_entries_page(
@@ -131,10 +163,13 @@ impl CacheIndex for InMemoryCacheIndex {
         let inner = self.lock_inner();
         let limit = limit.max(1);
         let start = cursor.map(|cursor| cursor.key);
-        let iter: Box<dyn Iterator<Item = (&ObjectLocation, &Vec<u8>)> + '_> = match start {
-            Some(start) => Box::new(inner.small.range((Excluded(start), Unbounded))),
-            None => Box::new(inner.small.iter()),
-        };
+        let iter: Box<dyn Iterator<Item = (&ObjectLocation, &Vec<u8>)> + '_> =
+            match start {
+                Some(start) => {
+                    Box::new(inner.small.range((Excluded(start), Unbounded)))
+                }
+                None => Box::new(inner.small.iter()),
+            };
         let mut entries = Vec::new();
         let mut next_cursor = None;
         for (key, data) in iter {
@@ -150,15 +185,24 @@ impl CacheIndex for InMemoryCacheIndex {
         if entries.len() < limit {
             next_cursor = None;
         }
-        Ok(SmallScanPage { entries, next_cursor })
+        Ok(SmallScanPage {
+            entries,
+            next_cursor,
+        })
     }
 
-    async fn remove_unclaimed_small_payload(&self, key: &ObjectLocation) -> StorageResult<()> {
+    async fn remove_unclaimed_small_payload(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<()> {
         self.lock_inner().small.remove(key);
         Ok(())
     }
 
-    async fn delete_meta_and_small(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>> {
+    async fn delete_meta_and_small(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>> {
         let mut inner = self.lock_inner();
         inner.small.remove(key);
         let old = inner.meta.remove(key);
@@ -168,7 +212,10 @@ impl CacheIndex for InMemoryCacheIndex {
         Ok(old)
     }
 
-    async fn replace_runtime_cache_usage(&self, usage: LogicalCacheUsage) -> StorageResult<()> {
+    async fn replace_runtime_cache_usage(
+        &self,
+        usage: LogicalCacheUsage,
+    ) -> StorageResult<()> {
         self.lock_inner().cached_bytes = usage.resident_bytes;
         Ok(())
     }
@@ -187,7 +234,8 @@ impl CacheIndex for InMemoryCacheIndex {
         let inner = self.lock_inner();
         let limit = limit.max(1);
         let start = cursor.map(|cursor| (cursor.last_access_ns, cursor.key));
-        let iter: Box<dyn Iterator<Item = &(u64, ObjectLocation)> + '_> = match start {
+        let iter: Box<dyn Iterator<Item = &(u64, ObjectLocation)> + '_> = match start
+        {
             Some(start) => Box::new(inner.lru.range((Excluded(start), Unbounded))),
             None => Box::new(inner.lru.iter()),
         };
@@ -226,11 +274,11 @@ impl CacheIndex for InMemoryCacheIndex {
         }
         let payload = match meta.cache_state() {
             CacheState::SmallKv => Some(Arc::<[u8]>::from(
-                inner
-                    .small
-                    .get(key)
-                    .cloned()
-                    .ok_or_else(|| StorageError::cache(format!("small object missing from cache: {key}")))?,
+                inner.small.get(key).cloned().ok_or_else(|| {
+                    StorageError::cache(format!(
+                        "small object missing from cache: {key}"
+                    ))
+                })?,
             )),
             CacheState::CompleteFile => None,
         };
@@ -245,11 +293,12 @@ impl CacheIndex for InMemoryCacheIndex {
     ) -> StorageResult<AdmitSmallOutcome> {
         let mut inner = self.lock_inner();
         if let Some(existing) = inner.meta.get(key_of(&meta)).cloned() {
-            let bytes = inner
-                .small
-                .get(key_of(&meta))
-                .cloned()
-                .ok_or_else(|| StorageError::cache(format!("small object missing from cache: {}", meta.key())))?;
+            let bytes = inner.small.get(key_of(&meta)).cloned().ok_or_else(|| {
+                StorageError::cache(format!(
+                    "small object missing from cache: {}",
+                    meta.key()
+                ))
+            })?;
             return Ok(AdmitSmallOutcome::AlreadyPresent {
                 meta: existing,
                 payload: Arc::<[u8]>::from(bytes),

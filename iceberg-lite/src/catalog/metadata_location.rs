@@ -124,7 +124,8 @@ mod test {
                 Ok(MetadataLocation {
                     table_location: "".to_string(),
                     version: 1234567,
-                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b").unwrap(),
+                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b")
+                        .unwrap(),
                 }),
             ),
             // Some prefix
@@ -133,7 +134,8 @@ mod test {
                 Ok(MetadataLocation {
                     table_location: "/abc".to_string(),
                     version: 1234567,
-                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b").unwrap(),
+                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b")
+                        .unwrap(),
                 }),
             ),
             // Longer prefix
@@ -142,7 +144,8 @@ mod test {
                 Ok(MetadataLocation {
                     table_location: "/abc/def".to_string(),
                     version: 1234567,
-                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b").unwrap(),
+                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b")
+                        .unwrap(),
                 }),
             ),
             // Prefix with special characters
@@ -151,7 +154,8 @@ mod test {
                 Ok(MetadataLocation {
                     table_location: "https://127.0.0.1".to_string(),
                     version: 1234567,
-                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b").unwrap(),
+                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b")
+                        .unwrap(),
                 }),
             ),
             // Another id
@@ -160,7 +164,8 @@ mod test {
                 Ok(MetadataLocation {
                     table_location: "/abc".to_string(),
                     version: 1234567,
-                    id: Uuid::from_str("81056704-ce5b-41c4-bb83-eb6408081af6").unwrap(),
+                    id: Uuid::from_str("81056704-ce5b-41c4-bb83-eb6408081af6")
+                        .unwrap(),
                 }),
             ),
             // Version 0
@@ -169,7 +174,8 @@ mod test {
                 Ok(MetadataLocation {
                     table_location: "/abc".to_string(),
                     version: 0,
-                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b").unwrap(),
+                    id: Uuid::from_str("2cd22b57-5127-4198-92ba-e4e67c79821b")
+                        .unwrap(),
                 }),
             ),
             // Negative version

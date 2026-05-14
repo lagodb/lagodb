@@ -25,7 +25,8 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use super::_serde::DataFileSerde;
 use super::{
-    Datum, FormatVersion, Schema, data_file_schema_v1, data_file_schema_v2, data_file_schema_v3,
+    Datum, FormatVersion, Schema, data_file_schema_v1, data_file_schema_v2,
+    data_file_schema_v3,
 };
 use crate::error::Result;
 use crate::spec::{DEFAULT_PARTITION_SPEC_ID, Struct, StructType};

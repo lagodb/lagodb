@@ -2,10 +2,10 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, format_ident, quote};
 use syn::{
-    parse_macro_input, punctuated::Punctuated, ItemStruct, Lit, LitStr,
-    MetaNameValue, Token,
+    ItemStruct, Lit, LitStr, MetaNameValue, Token, parse_macro_input,
+    punctuated::Punctuated,
 };
 
 /// Create necessary handler and meta functions for a PostgreSQL Table Access Method

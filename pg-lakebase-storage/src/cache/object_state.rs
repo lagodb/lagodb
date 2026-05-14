@@ -46,8 +46,11 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
-use super::chunks::{reaper_channel, LargeFillSession, ReaperHandle, ReaperInbox};
-use super::establish::{claim_or_join, EstablishFlight, EstablishLeader, EstablishRole, EstablishWaiter, FlightClaim};
+use super::chunks::{LargeFillSession, ReaperHandle, ReaperInbox, reaper_channel};
+use super::establish::{
+    EstablishFlight, EstablishLeader, EstablishRole, EstablishWaiter, FlightClaim,
+    claim_or_join,
+};
 use crate::error::StorageResult;
 use crate::object::{ObjectInfo, ObjectLocation};
 
@@ -129,7 +132,10 @@ impl PerObjectState {
     }
 
     /// Increments the activity counter for `kind`, returning a guard that decrements on drop.
-    pub(crate) fn activity_guard(self: &Arc<Self>, kind: CacheActivityKind) -> CacheActivityGuard {
+    pub(crate) fn activity_guard(
+        self: &Arc<Self>,
+        kind: CacheActivityKind,
+    ) -> CacheActivityGuard {
         self.lock_activity().increment(kind);
         CacheActivityGuard {
             state: self.clone(),
@@ -186,11 +192,17 @@ impl PerObjectState {
             claim_or_join(&mut slot)
         };
         match claim {
-            FlightClaim::Existing(flight) => EstablishRole::Follower(EstablishWaiter::new(flight)),
+            FlightClaim::Existing(flight) => {
+                EstablishRole::Follower(EstablishWaiter::new(flight))
+            }
             FlightClaim::Fresh(flight) => {
                 let admission = self.activity_guard(CacheActivityKind::Admission);
-                EstablishRole::Leader(EstablishLeader::new(self.key.clone(), flight, admission))
-            },
+                EstablishRole::Leader(EstablishLeader::new(
+                    self.key.clone(),
+                    flight,
+                    admission,
+                ))
+            }
         }
     }
 
@@ -233,7 +245,11 @@ impl PerObjectState {
     /// fill-slot mutex; this helper exists so unit tests for the reap-pin lifetime rule can build
     /// a session that mirrors the production install without going through the registry.
     #[cfg(test)]
-    pub(crate) fn install_fill_slot_for_test(&self, session: &Arc<LargeFillSession>, nonce: u64) {
+    pub(crate) fn install_fill_slot_for_test(
+        &self,
+        session: &Arc<LargeFillSession>,
+        nonce: u64,
+    ) {
         *self.lock_fill_slot() = LargeFillSlot {
             session: Arc::downgrade(session),
             nonce,
@@ -262,7 +278,11 @@ impl ActivityCounters {
     }
 
     fn is_active(&self) -> bool {
-        self.admissions > 0 || self.reads > 0 || self.downloads > 0 || self.promotions > 0 || self.open_leases > 0
+        self.admissions > 0
+            || self.reads > 0
+            || self.downloads > 0
+            || self.promotions > 0
+            || self.open_leases > 0
     }
 }
 
@@ -320,7 +340,9 @@ impl ObjectStateRegistry {
         (registry, inbox)
     }
 
-    fn lock_entries(&self) -> MutexGuard<'_, HashMap<ObjectLocation, Weak<PerObjectState>>> {
+    fn lock_entries(
+        &self,
+    ) -> MutexGuard<'_, HashMap<ObjectLocation, Weak<PerObjectState>>> {
         // The registry map is a pure lookup index; losing it means `get_or_create` might hand
         // out a second `PerObjectState` for a key that already has waiters on the first, which
         // would split every critical section. Fail fast.
@@ -349,7 +371,10 @@ impl ObjectStateRegistry {
     /// one. Unlike [`Self::get_or_create`], this never inserts a fresh entry — it is the
     /// cheap read-only probe callers use when they only care about "is anything happening
     /// right now".
-    pub(crate) fn get_existing(&self, key: &ObjectLocation) -> Option<Arc<PerObjectState>> {
+    pub(crate) fn get_existing(
+        &self,
+        key: &ObjectLocation,
+    ) -> Option<Arc<PerObjectState>> {
         self.lock_entries().get(key).and_then(Weak::upgrade)
     }
 

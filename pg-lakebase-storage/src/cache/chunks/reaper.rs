@@ -76,7 +76,10 @@ pub(crate) fn reaper_channel() -> (ReaperHandle, ReaperInbox) {
     (ReaperHandle::new(tx), ReaperInbox { rx })
 }
 
-pub(super) async fn run_reaper<I: CacheIndex + 'static>(mut inbox: ReaperInbox, cache: Weak<CacheManager<I>>) {
+pub(super) async fn run_reaper<I: CacheIndex + 'static>(
+    mut inbox: ReaperInbox,
+    cache: Weak<CacheManager<I>>,
+) {
     while let Some(request) = inbox.rx.recv().await {
         let Some(cache) = cache.upgrade() else {
             // Manager is shutting down; drop remaining requests and let orphan cleanup pick up

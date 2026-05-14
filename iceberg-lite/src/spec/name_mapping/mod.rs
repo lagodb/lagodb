@@ -60,7 +60,11 @@ pub struct MappedField {
 
 impl MappedField {
     /// Create a new [`MappedField`].
-    pub fn new(field_id: Option<i32>, names: Vec<String>, fields: Vec<MappedField>) -> Self {
+    pub fn new(
+        field_id: Option<i32>,
+        names: Vec<String>,
+        fields: Vec<MappedField>,
+    ) -> Self {
         Self {
             field_id,
             names,
@@ -219,38 +223,47 @@ mod tests {
         "#;
 
         let name_mapping: NameMapping = serde_json::from_str(name_mapping).unwrap();
-        assert_eq!(name_mapping, NameMapping {
-            root: vec![
-                MappedField {
-                    field_id: Some(1),
-                    names: vec!["id".to_string(), "record_id".to_string()],
-                    fields: vec![]
-                },
-                MappedField {
-                    field_id: Some(2),
-                    names: vec!["data".to_string()],
-                    fields: vec![]
-                },
-                MappedField {
-                    field_id: Some(3),
-                    names: vec!["location".to_string()],
-                    fields: vec![
-                        MappedField {
-                            field_id: Some(4),
-                            names: vec!["latitude".to_string(), "lat".to_string()],
-                            fields: vec![]
-                        }
-                        .into(),
-                        MappedField {
-                            field_id: Some(5),
-                            names: vec!["longitude".to_string(), "long".to_string()],
-                            fields: vec![]
-                        }
-                        .into(),
-                    ]
-                }
-            ],
-        });
+        assert_eq!(
+            name_mapping,
+            NameMapping {
+                root: vec![
+                    MappedField {
+                        field_id: Some(1),
+                        names: vec!["id".to_string(), "record_id".to_string()],
+                        fields: vec![]
+                    },
+                    MappedField {
+                        field_id: Some(2),
+                        names: vec!["data".to_string()],
+                        fields: vec![]
+                    },
+                    MappedField {
+                        field_id: Some(3),
+                        names: vec!["location".to_string()],
+                        fields: vec![
+                            MappedField {
+                                field_id: Some(4),
+                                names: vec![
+                                    "latitude".to_string(),
+                                    "lat".to_string()
+                                ],
+                                fields: vec![]
+                            }
+                            .into(),
+                            MappedField {
+                                field_id: Some(5),
+                                names: vec![
+                                    "longitude".to_string(),
+                                    "long".to_string()
+                                ],
+                                fields: vec![]
+                            }
+                            .into(),
+                        ]
+                    }
+                ],
+            }
+        );
     }
 
     #[test]

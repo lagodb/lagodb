@@ -31,25 +31,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::{MemoryObjectBackend, StoreRegistry};
-use crate::cache::index::persistent::test_support::{
-    counting_redb_index, unique_redb_path, CountingKv, KvCounts, KvCountsSnapshot,
-};
-use crate::cache::index::persistent::RedbKv;
 use crate::cache::CacheManager;
+use crate::cache::index::persistent::RedbKv;
+use crate::cache::index::persistent::test_support::{
+    CountingKv, KvCounts, KvCountsSnapshot, counting_redb_index, unique_redb_path,
+};
 use crate::handle::OpenFlags;
 use crate::object::ObjectLocation;
-use crate::service::command::{CloseCommand, OpenCommand, ReadCommand, StorageCommand};
-use crate::service::reply::CommandOutput;
 use crate::service::StorageService;
+use crate::service::command::{
+    CloseCommand, OpenCommand, ReadCommand, StorageCommand,
+};
+use crate::service::reply::CommandOutput;
 use crate::session::handle_table::HandleTable;
 
-use super::fixtures::{test_cache_dir, BUCKET, DEFAULT_STORE, LARGE_KEY, SMALL_KEY};
+use super::fixtures::{BUCKET, DEFAULT_STORE, LARGE_KEY, SMALL_KEY, test_cache_dir};
 
 const WARM_TOUCH_GRANULARITY: Duration = Duration::from_secs(60);
 const IMMEDIATE_TOUCH_GRANULARITY: Duration = Duration::ZERO;
 
 /// Service stack wired on top of a [`CountingKv`]-instrumented redb index.
-type InstrumentedService = StorageService<crate::cache::index::persistent::PersistentCacheIndex<CountingKv<RedbKv>>>;
+type InstrumentedService = StorageService<
+    crate::cache::index::persistent::PersistentCacheIndex<CountingKv<RedbKv>>,
+>;
 
 struct Harness {
     service: InstrumentedService,
@@ -58,7 +62,10 @@ struct Harness {
 }
 
 impl Harness {
-    async fn from_backend(backend: Arc<MemoryObjectBackend>, touch_granularity: Duration) -> Self {
+    async fn from_backend(
+        backend: Arc<MemoryObjectBackend>,
+        touch_granularity: Duration,
+    ) -> Self {
         let (index, counts) = counting_redb_index(unique_redb_path("contract"));
         // Small cap 8 bytes: our SMALL_KEY fixture payloads stay within that threshold; LARGE_KEY
         // payloads exceed it to drive the large-fill path.
@@ -68,7 +75,12 @@ impl Harness {
                 .with_touch_granularity(touch_granularity),
         );
         cache.spawn_large_fill_reaper();
-        let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, backend).unwrap(), cache);
+        let service = StorageService::with_registry(
+            StoreRegistry::new()
+                .with_shared_backend(DEFAULT_STORE, backend)
+                .unwrap(),
+            cache,
+        );
         let handles = HandleTable::new();
         Self {
             service,
@@ -100,7 +112,14 @@ impl Harness {
     async fn read(&self, handle: crate::handle::FileHandle, offset: u64, len: u32) {
         let reply = self
             .service
-            .execute(&self.handles, StorageCommand::Read(ReadCommand { handle, offset, len }))
+            .execute(
+                &self.handles,
+                StorageCommand::Read(ReadCommand {
+                    handle,
+                    offset,
+                    len,
+                }),
+            )
             .await
             .unwrap();
         let CommandOutput::Read(output) = reply.output else {
@@ -111,7 +130,10 @@ impl Harness {
 
     async fn close(&self, handle: crate::handle::FileHandle) {
         self.service
-            .execute(&self.handles, StorageCommand::Close(CloseCommand { handle }))
+            .execute(
+                &self.handles,
+                StorageCommand::Close(CloseCommand { handle }),
+            )
             .await
             .unwrap();
     }
@@ -136,9 +158,18 @@ async fn small_cold_open_plus_read_has_one_read_txn_and_one_write_txn() {
     harness.counts.reset();
     let handle = harness.open(SMALL_KEY).await;
     let after_open = harness.counts.snapshot();
-    assert_eq!(after_open.read_txns, 1, "lookup miss must be exactly one read txn");
-    assert_eq!(after_open.write_txns, 1, "admit must be exactly one write txn");
-    assert_eq!(after_open.meta_get, 2, "one miss read + one insert-if-absent check");
+    assert_eq!(
+        after_open.read_txns, 1,
+        "lookup miss must be exactly one read txn"
+    );
+    assert_eq!(
+        after_open.write_txns, 1,
+        "admit must be exactly one write txn"
+    );
+    assert_eq!(
+        after_open.meta_get, 2,
+        "one miss read + one insert-if-absent check"
+    );
     assert_eq!(after_open.small_get, 0);
     assert_eq!(after_open.small_put, 1);
     assert_eq!(after_open.meta_put, 1);
@@ -148,7 +179,11 @@ async fn small_cold_open_plus_read_has_one_read_txn_and_one_write_txn() {
     harness.counts.reset();
     harness.read(handle, 0, 3).await;
     let after_read = harness.counts.snapshot();
-    assert_eq!(after_read, KvCountsSnapshot::default(), "READ must not issue any KV operation");
+    assert_eq!(
+        after_read,
+        KvCountsSnapshot::default(),
+        "READ must not issue any KV operation"
+    );
 
     harness.close(handle).await;
 }
@@ -198,8 +233,14 @@ async fn small_warm_open_cross_window_touches_then_read_is_zero_kv() {
     let handle = harness.open(SMALL_KEY).await;
     let after_open = harness.counts.snapshot();
     assert_eq!(after_open.read_txns, 1);
-    assert_eq!(after_open.write_txns, 1, "zero-granularity must touch on every OPEN");
-    assert_eq!(after_open.meta_get, 1, "touch must reuse observed meta, not re-read it");
+    assert_eq!(
+        after_open.write_txns, 1,
+        "zero-granularity must touch on every OPEN"
+    );
+    assert_eq!(
+        after_open.meta_get, 1,
+        "touch must reuse observed meta, not re-read it"
+    );
     assert_eq!(after_open.small_get, 1);
     assert_eq!(after_open.meta_put, 1);
     assert_eq!(after_open.lru_remove, 1);
@@ -279,7 +320,10 @@ async fn large_cold_open_has_exactly_two_read_txns_and_no_writes() {
     harness.counts.reset();
     let handle = harness.open(LARGE_KEY).await;
     let after_open = harness.counts.snapshot();
-    assert_eq!(after_open.read_txns, 2, "lookup miss read + admit_large re-check read");
+    assert_eq!(
+        after_open.read_txns, 2,
+        "lookup miss read + admit_large re-check read"
+    );
     assert_eq!(after_open.write_txns, 0);
     assert_eq!(after_open.meta_get, 2);
     assert_eq!(after_open.small_get, 0);
@@ -304,7 +348,11 @@ async fn large_partial_read_is_zero_kv_and_promote_is_exactly_one_write_txn() {
     harness.counts.reset();
     harness.read(handle, 0, 4).await;
     let partial = harness.counts.snapshot();
-    assert_eq!(partial, KvCountsSnapshot::default(), "partial-fill READ must not touch KV");
+    assert_eq!(
+        partial,
+        KvCountsSnapshot::default(),
+        "partial-fill READ must not touch KV"
+    );
 
     // Finish the fill: READ the remaining bytes. Final chunk write triggers promote to
     // CompleteFile, which is exactly one write transaction (put_new_complete): meta_put + lru_put.
@@ -312,7 +360,10 @@ async fn large_partial_read_is_zero_kv_and_promote_is_exactly_one_write_txn() {
     harness.read(handle, 4, 6).await;
     let promote = harness.counts.snapshot();
     assert_eq!(promote.read_txns, 0);
-    assert_eq!(promote.write_txns, 1, "promote must be exactly one write transaction");
+    assert_eq!(
+        promote.write_txns, 1,
+        "promote must be exactly one write transaction"
+    );
     assert_eq!(promote.meta_put, 1);
     assert_eq!(promote.lru_put, 1);
     assert_eq!(promote.small_put, 0);

@@ -33,7 +33,11 @@ pub fn index_by_id(r#struct: &StructType) -> Result<HashMap<i32, NestedFieldRef>
             try_insert_field(&mut self.0, field.id, field.clone())
         }
 
-        fn r#struct(&mut self, _struct: &StructType, _results: Vec<Self::T>) -> Result<Self::T> {
+        fn r#struct(
+            &mut self,
+            _struct: &StructType,
+            _results: Vec<Self::T>,
+        ) -> Result<Self::T> {
             Ok(())
         }
 
@@ -45,7 +49,12 @@ pub fn index_by_id(r#struct: &StructType) -> Result<HashMap<i32, NestedFieldRef>
             )
         }
 
-        fn map(&mut self, map: &MapType, _key_value: Self::T, _value: Self::T) -> Result<Self::T> {
+        fn map(
+            &mut self,
+            map: &MapType,
+            _key_value: Self::T,
+            _value: Self::T,
+        ) -> Result<Self::T> {
             try_insert_field(&mut self.0, map.key_field.id, map.key_field.clone())?;
             try_insert_field(&mut self.0, map.value_field.id, map.value_field.clone())
         }
@@ -126,11 +135,19 @@ pub fn index_parents(r#struct: &StructType) -> Result<HashMap<i32, i32>> {
             Ok(())
         }
 
-        fn field(&mut self, _field: &NestedFieldRef, _value: Self::T) -> Result<Self::T> {
+        fn field(
+            &mut self,
+            _field: &NestedFieldRef,
+            _value: Self::T,
+        ) -> Result<Self::T> {
             Ok(())
         }
 
-        fn r#struct(&mut self, _struct: &StructType, _results: Vec<Self::T>) -> Result<Self::T> {
+        fn r#struct(
+            &mut self,
+            _struct: &StructType,
+            _results: Vec<Self::T>,
+        ) -> Result<Self::T> {
             Ok(())
         }
 
@@ -138,7 +155,12 @@ pub fn index_parents(r#struct: &StructType) -> Result<HashMap<i32, i32>> {
             Ok(())
         }
 
-        fn map(&mut self, _map: &MapType, _key_value: Self::T, _value: Self::T) -> Result<Self::T> {
+        fn map(
+            &mut self,
+            _map: &MapType,
+            _key_value: Self::T,
+            _value: Self::T,
+        ) -> Result<Self::T> {
             Ok(())
         }
 
@@ -277,7 +299,11 @@ impl SchemaVisitor for IndexByName {
         self.add_field(field.name.as_str(), field.id)
     }
 
-    fn r#struct(&mut self, _struct: &StructType, _results: Vec<Self::T>) -> Result<Self::T> {
+    fn r#struct(
+        &mut self,
+        _struct: &StructType,
+        _results: Vec<Self::T>,
+    ) -> Result<Self::T> {
         Ok(())
     }
 
@@ -285,7 +311,12 @@ impl SchemaVisitor for IndexByName {
         self.add_field(LIST_FIELD_NAME, list.element_field.id)
     }
 
-    fn map(&mut self, map: &MapType, _key_value: Self::T, _value: Self::T) -> Result<Self::T> {
+    fn map(
+        &mut self,
+        map: &MapType,
+        _key_value: Self::T,
+        _value: Self::T,
+    ) -> Result<Self::T> {
         self.add_field(MAP_KEY_FIELD_NAME, map.key_field.id)?;
         self.add_field(MAP_VALUE_FIELD_NAME, map.value_field.id)
     }

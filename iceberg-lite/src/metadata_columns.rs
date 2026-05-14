@@ -99,7 +99,8 @@ pub const RESERVED_COL_NAME_COMMIT_SNAPSHOT_ID: &str = "_commit_snapshot_id";
 pub const RESERVED_COL_NAME_ROW_ID: &str = "_row_id";
 
 /// Reserved column name for the last updated sequence number metadata column
-pub const RESERVED_COL_NAME_LAST_UPDATED_SEQUENCE_NUMBER: &str = "_last_updated_sequence_number";
+pub const RESERVED_COL_NAME_LAST_UPDATED_SEQUENCE_NUMBER: &str =
+    "_last_updated_sequence_number";
 
 /// Lazy-initialized Iceberg field definition for the _file metadata column.
 /// This field represents the file path as a required string field.
@@ -406,7 +407,9 @@ pub fn get_metadata_field(field_id: i32) -> Result<&'static NestedFieldRef> {
         RESERVED_FIELD_ID_CHANGE_ORDINAL => Ok(change_ordinal_field()),
         RESERVED_FIELD_ID_COMMIT_SNAPSHOT_ID => Ok(commit_snapshot_id_field()),
         RESERVED_FIELD_ID_ROW_ID => Ok(row_id_field()),
-        RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER => Ok(last_updated_sequence_number_field()),
+        RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER => {
+            Ok(last_updated_sequence_number_field())
+        }
         _ if is_metadata_field(field_id) => {
             // Future metadata fields can be added here
             Err(Error::new(
@@ -441,7 +444,9 @@ pub fn get_metadata_field_id(column_name: &str) -> Result<i32> {
         RESERVED_COL_NAME_DELETE_FILE_POS => Ok(RESERVED_FIELD_ID_DELETE_FILE_POS),
         RESERVED_COL_NAME_CHANGE_TYPE => Ok(RESERVED_FIELD_ID_CHANGE_TYPE),
         RESERVED_COL_NAME_CHANGE_ORDINAL => Ok(RESERVED_FIELD_ID_CHANGE_ORDINAL),
-        RESERVED_COL_NAME_COMMIT_SNAPSHOT_ID => Ok(RESERVED_FIELD_ID_COMMIT_SNAPSHOT_ID),
+        RESERVED_COL_NAME_COMMIT_SNAPSHOT_ID => {
+            Ok(RESERVED_FIELD_ID_COMMIT_SNAPSHOT_ID)
+        }
         RESERVED_COL_NAME_ROW_ID => Ok(RESERVED_FIELD_ID_ROW_ID),
         RESERVED_COL_NAME_LAST_UPDATED_SEQUENCE_NUMBER => {
             Ok(RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER)
@@ -567,6 +572,9 @@ mod tests {
         assert!(get_metadata_field(RESERVED_FIELD_ID_CHANGE_ORDINAL).is_ok());
         assert!(get_metadata_field(RESERVED_FIELD_ID_COMMIT_SNAPSHOT_ID).is_ok());
         assert!(get_metadata_field(RESERVED_FIELD_ID_ROW_ID).is_ok());
-        assert!(get_metadata_field(RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER).is_ok());
+        assert!(
+            get_metadata_field(RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER)
+                .is_ok()
+        );
     }
 }

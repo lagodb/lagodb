@@ -42,16 +42,32 @@ pub trait PredicateVisitor {
     fn not(&mut self, inner: Self::T) -> Result<Self::T>;
 
     /// Called after a predicate with an `IsNull` operator is visited
-    fn is_null(&mut self, reference: &Reference, predicate: &Predicate) -> Result<Self::T>;
+    fn is_null(
+        &mut self,
+        reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T>;
 
     /// Called after a predicate with a `NotNull` operator is visited
-    fn not_null(&mut self, reference: &Reference, predicate: &Predicate) -> Result<Self::T>;
+    fn not_null(
+        &mut self,
+        reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T>;
 
     /// Called after a predicate with an `IsNan` operator is visited
-    fn is_nan(&mut self, reference: &Reference, predicate: &Predicate) -> Result<Self::T>;
+    fn is_nan(
+        &mut self,
+        reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T>;
 
     /// Called after a predicate with a `NotNan` operator is visited
-    fn not_nan(&mut self, reference: &Reference, predicate: &Predicate) -> Result<Self::T>;
+    fn not_nan(
+        &mut self,
+        reference: &Reference,
+        predicate: &Predicate,
+    ) -> Result<Self::T>;
 
     /// Called after a predicate with a `LessThan` operator is visited
     fn less_than(
@@ -136,7 +152,10 @@ pub trait PredicateVisitor {
 
 /// Visits a [`Predicate`] with the provided visitor,
 /// in post-order
-pub(crate) fn visit<V: PredicateVisitor>(visitor: &mut V, predicate: &Predicate) -> Result<V::T> {
+pub(crate) fn visit<V: PredicateVisitor>(
+    visitor: &mut V,
+    predicate: &Predicate,
+) -> Result<V::T> {
     match predicate {
         Predicate::AlwaysTrue => visitor.always_true(),
         Predicate::AlwaysFalse => visitor.always_false(),
@@ -176,7 +195,9 @@ pub(crate) fn visit<V: PredicateVisitor>(visitor: &mut V, predicate: &Predicate)
             let reference = expr.term();
             let literal = expr.literal();
             match expr.op() {
-                PredicateOperator::LessThan => visitor.less_than(reference, literal, predicate),
+                PredicateOperator::LessThan => {
+                    visitor.less_than(reference, literal, predicate)
+                }
                 PredicateOperator::LessThanOrEq => {
                     visitor.less_than_or_eq(reference, literal, predicate)
                 }
@@ -187,8 +208,12 @@ pub(crate) fn visit<V: PredicateVisitor>(visitor: &mut V, predicate: &Predicate)
                     visitor.greater_than_or_eq(reference, literal, predicate)
                 }
                 PredicateOperator::Eq => visitor.eq(reference, literal, predicate),
-                PredicateOperator::NotEq => visitor.not_eq(reference, literal, predicate),
-                PredicateOperator::StartsWith => visitor.starts_with(reference, literal, predicate),
+                PredicateOperator::NotEq => {
+                    visitor.not_eq(reference, literal, predicate)
+                }
+                PredicateOperator::StartsWith => {
+                    visitor.starts_with(reference, literal, predicate)
+                }
                 PredicateOperator::NotStartsWith => {
                     visitor.not_starts_with(reference, literal, predicate)
                 }
@@ -202,7 +227,9 @@ pub(crate) fn visit<V: PredicateVisitor>(visitor: &mut V, predicate: &Predicate)
             let literals = expr.literals();
             match expr.op() {
                 PredicateOperator::In => visitor.r#in(reference, literals, predicate),
-                PredicateOperator::NotIn => visitor.not_in(reference, literals, predicate),
+                PredicateOperator::NotIn => {
+                    visitor.not_in(reference, literals, predicate)
+                }
                 op => {
                     panic!("Unexpected op for set predicate: {}", &op)
                 }
@@ -219,7 +246,8 @@ mod tests {
 
     use crate::expr::visitors::predicate_visitor::{PredicateVisitor, visit};
     use crate::expr::{
-        BinaryExpression, Predicate, PredicateOperator, Reference, SetExpression, UnaryExpression,
+        BinaryExpression, Predicate, PredicateOperator, Reference, SetExpression,
+        UnaryExpression,
     };
     use crate::spec::Datum;
 

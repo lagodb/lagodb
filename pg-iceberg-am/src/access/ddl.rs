@@ -13,7 +13,9 @@ impl AmDdl<IcebergError> for IcebergDdl {
         Ok((pg_sys::InvalidTransactionId, 0u32.into()))
     }
 
-    fn relation_nontransactional_truncate(_rel: &RelationHandle) -> IcebergResult<()> {
+    fn relation_nontransactional_truncate(
+        _rel: &RelationHandle,
+    ) -> IcebergResult<()> {
         Ok(())
     }
 
@@ -30,7 +32,8 @@ impl AmDdl<IcebergError> for IcebergDdl {
         _old_index: &RelationHandle,
         _use_sort: bool,
         _oldest_xmin: pg_sys::TransactionId,
-    ) -> IcebergResult<(pg_sys::TransactionId, pg_sys::MultiXactId, f64, f64, f64)> {
+    ) -> IcebergResult<(pg_sys::TransactionId, pg_sys::MultiXactId, f64, f64, f64)>
+    {
         Err(IcebergError::NotImplemented("relation_copy_for_cluster"))
     }
 }

@@ -17,17 +17,23 @@ use crate::error::{StorageError, StorageResult};
 /// owns the path; `ConnectionRefused` usually indicates a stale socket file (safe to remove and
 /// retry).
 pub fn bind_storage_unix_listener(path: &Path) -> StorageResult<UnixListener> {
-    UnixListener::bind(path).or_else(|bind_err| bind_unix_listener_after_addr_in_use(path, bind_err))
+    UnixListener::bind(path)
+        .or_else(|bind_err| bind_unix_listener_after_addr_in_use(path, bind_err))
 }
 
-fn bind_unix_listener_after_addr_in_use(path: &Path, bind_err: io::Error) -> StorageResult<UnixListener> {
+fn bind_unix_listener_after_addr_in_use(
+    path: &Path,
+    bind_err: io::Error,
+) -> StorageResult<UnixListener> {
     if bind_err.kind() != io::ErrorKind::AddrInUse {
         return Err(bind_err.into());
     }
 
     let meta = match symlink_metadata(path) {
         Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(bind_err.into()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(bind_err.into());
+        }
         Err(err) => return Err(err.into()),
     };
     if !meta.file_type().is_socket() {
@@ -39,12 +45,15 @@ fn bind_unix_listener_after_addr_in_use(path: &Path, bind_err: io::Error) -> Sto
     match UnixStream::connect(path) {
         Ok(conn) => {
             drop(conn);
-            Err(StorageError::io("storage unix socket path already has a listening server", bind_err))
-        },
+            Err(StorageError::io(
+                "storage unix socket path already has a listening server",
+                bind_err,
+            ))
+        }
         Err(conn_err) if conn_err.kind() == io::ErrorKind::ConnectionRefused => {
             remove_file(path)?;
             UnixListener::bind(path).map_err(|e| e.into())
-        },
+        }
         Err(conn_err) => Err(StorageError::io(
             format!(
                 "storage unix socket bind failed ({bind_err}); \

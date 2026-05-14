@@ -100,12 +100,20 @@ impl<'de> Deserialize<'de> for Datum {
         impl<'de> serde::de::Visitor<'de> for DatumVisitor {
             type Value = Datum;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(
+                &self,
+                formatter: &mut std::fmt::Formatter,
+            ) -> std::fmt::Result {
                 formatter.write_str("struct Datum")
             }
 
-            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
-            where A: serde::de::SeqAccess<'de> {
+            fn visit_seq<A>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
                 let r#type = seq
                     .next_element::<PrimitiveType>()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
@@ -124,7 +132,9 @@ impl<'de> Deserialize<'de> for Datum {
             }
 
             fn visit_map<V>(self, mut map: V) -> std::result::Result<Datum, V::Error>
-            where V: MapAccess<'de> {
+            where
+                V: MapAccess<'de>,
+            {
                 let mut raw_primitive: Option<RawLiteral> = None;
                 let mut r#type: Option<PrimitiveType> = None;
                 while let Some(key) = map.next_key()? {
@@ -263,7 +273,8 @@ impl PartialOrd for Datum {
                 PrimitiveLiteral::UInt128(other_val),
                 PrimitiveType::Uuid,
                 PrimitiveType::Uuid,
-            ) => uuid::Uuid::from_u128(*val).partial_cmp(&uuid::Uuid::from_u128(*other_val)),
+            ) => uuid::Uuid::from_u128(*val)
+                .partial_cmp(&uuid::Uuid::from_u128(*other_val)),
             (
                 PrimitiveLiteral::Binary(val),
                 PrimitiveLiteral::Binary(other_val),
@@ -289,7 +300,8 @@ impl PartialOrd for Datum {
                 },
             ) => {
                 let val = Decimal::from_i128_with_scale(*val, *scale);
-                let other_val = Decimal::from_i128_with_scale(*other_val, *other_scale);
+                let other_val =
+                    Decimal::from_i128_with_scale(*other_val, *other_scale);
                 val.partial_cmp(&other_val)
             }
             _ => None,
@@ -382,30 +394,41 @@ impl Datum {
                     PrimitiveLiteral::Boolean(true)
                 }
             }
-            PrimitiveType::Int => PrimitiveLiteral::Int(i32::from_le_bytes(bytes.try_into()?)),
+            PrimitiveType::Int => {
+                PrimitiveLiteral::Int(i32::from_le_bytes(bytes.try_into()?))
+            }
             PrimitiveType::Long => {
                 if bytes.len() == 4 {
                     // In the case of an evolved field
-                    PrimitiveLiteral::Long(i32::from_le_bytes(bytes.try_into()?) as i64)
+                    PrimitiveLiteral::Long(
+                        i32::from_le_bytes(bytes.try_into()?) as i64
+                    )
                 } else {
                     PrimitiveLiteral::Long(i64::from_le_bytes(bytes.try_into()?))
                 }
             }
-            PrimitiveType::Float => {
-                PrimitiveLiteral::Float(OrderedFloat(f32::from_le_bytes(bytes.try_into()?)))
-            }
+            PrimitiveType::Float => PrimitiveLiteral::Float(OrderedFloat(
+                f32::from_le_bytes(bytes.try_into()?),
+            )),
             PrimitiveType::Double => {
                 if bytes.len() == 4 {
                     // In the case of an evolved field
-                    PrimitiveLiteral::Double(OrderedFloat(
-                        f32::from_le_bytes(bytes.try_into()?) as f64
-                    ))
+                    PrimitiveLiteral::Double(OrderedFloat(f32::from_le_bytes(
+                        bytes.try_into()?,
+                    )
+                        as f64))
                 } else {
-                    PrimitiveLiteral::Double(OrderedFloat(f64::from_le_bytes(bytes.try_into()?)))
+                    PrimitiveLiteral::Double(OrderedFloat(f64::from_le_bytes(
+                        bytes.try_into()?,
+                    )))
                 }
             }
-            PrimitiveType::Date => PrimitiveLiteral::Int(i32::from_le_bytes(bytes.try_into()?)),
-            PrimitiveType::Time => PrimitiveLiteral::Long(i64::from_le_bytes(bytes.try_into()?)),
+            PrimitiveType::Date => {
+                PrimitiveLiteral::Int(i32::from_le_bytes(bytes.try_into()?))
+            }
+            PrimitiveType::Time => {
+                PrimitiveLiteral::Long(i64::from_le_bytes(bytes.try_into()?))
+            }
             PrimitiveType::Timestamp => {
                 PrimitiveLiteral::Long(i64::from_le_bytes(bytes.try_into()?))
             }
@@ -428,12 +451,14 @@ impl Datum {
             PrimitiveType::Binary => PrimitiveLiteral::Binary(Vec::from(bytes)),
             PrimitiveType::Decimal { .. } => {
                 let unscaled_value = BigInt::from_signed_bytes_be(bytes);
-                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!("Can't convert bytes to i128: {bytes:?}"),
-                    )
-                })?)
+                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(
+                    || {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            format!("Can't convert bytes to i128: {bytes:?}"),
+                        )
+                    },
+                )?)
             }
         };
         Ok(Datum::new(data_type, literal))
@@ -471,7 +496,8 @@ impl Datum {
 
                 // It's required by iceberg spec that we must keep the minimum
                 // number of bytes for the value
-                let Ok(required_bytes) = Type::decimal_required_bytes(precision) else {
+                let Ok(required_bytes) = Type::decimal_required_bytes(precision)
+                else {
                     return Err(Error::new(
                         ErrorKind::DataInvalid,
                         format!(
@@ -537,7 +563,8 @@ impl Datum {
     /// ```
     pub fn bool_from_str<S: AsRef<str>>(s: S) -> Result<Self> {
         let v = s.as_ref().parse::<bool>().map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, "Can't parse string to bool.").with_source(e)
+            Error::new(ErrorKind::DataInvalid, "Can't parse string to bool.")
+                .with_source(e)
         })?;
         Ok(Self::bool(v))
     }
@@ -677,7 +704,9 @@ impl Datum {
         let t = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
             Error::new(
                 ErrorKind::DataInvalid,
-                format!("Can't create date from year: {year}, month: {month}, day: {day}"),
+                format!(
+                    "Can't create date from year: {year}, month: {month}, day: {day}"
+                ),
             )
         })?;
 
@@ -769,7 +798,12 @@ impl Datum {
     ///
     /// assert_eq!(&format!("{t}"), "22:15:33.000111");
     /// ```
-    pub fn time_from_hms_micro(hour: u32, min: u32, sec: u32, micro: u32) -> Result<Self> {
+    pub fn time_from_hms_micro(
+        hour: u32,
+        min: u32,
+        sec: u32,
+        micro: u32,
+    ) -> Result<Self> {
         let t = NaiveTime::from_hms_micro_opt(hour, min, sec, micro)
             .ok_or_else(|| Error::new(
                 ErrorKind::DataInvalid,
@@ -847,7 +881,8 @@ impl Datum {
     /// ```
     pub fn timestamp_from_str<S: AsRef<str>>(s: S) -> Result<Self> {
         let dt = s.as_ref().parse::<NaiveDateTime>().map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, "Can't parse timestamp.").with_source(e)
+            Error::new(ErrorKind::DataInvalid, "Can't parse timestamp.")
+                .with_source(e)
         })?;
 
         Ok(Self::timestamp_from_datetime(dt))
@@ -1072,7 +1107,10 @@ impl Datum {
     ///
     /// assert_eq!(&format!("{t}"), "1.23");
     /// ```
-    pub fn decimal_with_precision(value: impl Into<Decimal>, precision: u32) -> Result<Self> {
+    pub fn decimal_with_precision(
+        value: impl Into<Decimal>,
+        precision: u32,
+    ) -> Result<Self> {
         let decimal = value.into();
         let scale = decimal.scale();
 
@@ -1082,7 +1120,9 @@ impl Datum {
         if actual_bytes.len() > available_bytes {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
-                format!("Decimal value {decimal} is too large for precision {precision}"),
+                format!(
+                    "Decimal value {decimal} is too large for precision {precision}"
+                ),
             ));
         }
 
@@ -1129,7 +1169,8 @@ impl Datum {
 
     fn string_to_i128<S: AsRef<str>>(s: S) -> Result<i128> {
         s.as_ref().parse::<i128>().map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, "Can't parse string to i128.").with_source(e)
+            Error::new(ErrorKind::DataInvalid, "Can't parse string to i128.")
+                .with_source(e)
         })
     }
 
@@ -1138,9 +1179,15 @@ impl Datum {
         match target_type {
             Type::Primitive(target_primitive_type) => {
                 match (&self.literal, &self.r#type, target_primitive_type) {
-                    (PrimitiveLiteral::Int(val), _, PrimitiveType::Int) => Ok(Datum::int(*val)),
-                    (PrimitiveLiteral::Int(val), _, PrimitiveType::Date) => Ok(Datum::date(*val)),
-                    (PrimitiveLiteral::Int(val), _, PrimitiveType::Long) => Ok(Datum::long(*val)),
+                    (PrimitiveLiteral::Int(val), _, PrimitiveType::Int) => {
+                        Ok(Datum::int(*val))
+                    }
+                    (PrimitiveLiteral::Int(val), _, PrimitiveType::Date) => {
+                        Ok(Datum::date(*val))
+                    }
+                    (PrimitiveLiteral::Int(val), _, PrimitiveType::Long) => {
+                        Ok(Datum::long(*val))
+                    }
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Int) => {
                         Ok(Datum::i64_to_i32(*val))
                     }
@@ -1167,12 +1214,16 @@ impl Datum {
                     (PrimitiveLiteral::String(val), _, PrimitiveType::Timestamp) => {
                         Datum::timestamp_from_str(val)
                     }
-                    (PrimitiveLiteral::String(val), _, PrimitiveType::Timestamptz) => {
-                        Datum::timestamptz_from_str(val)
-                    }
+                    (
+                        PrimitiveLiteral::String(val),
+                        _,
+                        PrimitiveType::Timestamptz,
+                    ) => Datum::timestamptz_from_str(val),
 
                     // TODO: implement more type conversions
-                    (_, self_type, target_type) if self_type == target_type => Ok(self),
+                    (_, self_type, target_type) if self_type == target_type => {
+                        Ok(self)
+                    }
                     _ => Err(Error::new(
                         ErrorKind::DataInvalid,
                         format!(

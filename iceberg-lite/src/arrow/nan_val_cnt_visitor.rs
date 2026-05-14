@@ -27,8 +27,8 @@ use arrow_schema::DataType;
 use crate::Result;
 use crate::arrow::{ArrowArrayAccessor, FieldMatchMode};
 use crate::spec::{
-    ListType, MapType, NestedFieldRef, PrimitiveType, Schema, SchemaRef, SchemaWithPartnerVisitor,
-    StructType, visit_struct_with_partner,
+    ListType, MapType, NestedFieldRef, PrimitiveType, Schema, SchemaRef,
+    SchemaWithPartnerVisitor, StructType, visit_struct_with_partner,
 };
 
 macro_rules! cast_and_update_cnt_map {
@@ -104,7 +104,12 @@ impl SchemaWithPartnerVisitor<ArrayRef> for NanValueCountVisitor {
         Ok(())
     }
 
-    fn list(&mut self, _list: &ListType, _list_arr: &ArrayRef, _value: Self::T) -> Result<Self::T> {
+    fn list(
+        &mut self,
+        _list: &ListType,
+        _list_arr: &ArrayRef,
+        _value: Self::T,
+    ) -> Result<Self::T> {
         Ok(())
     }
 
@@ -122,25 +127,41 @@ impl SchemaWithPartnerVisitor<ArrayRef> for NanValueCountVisitor {
         Ok(())
     }
 
-    fn after_struct_field(&mut self, field: &NestedFieldRef, partner: &ArrayRef) -> Result<()> {
+    fn after_struct_field(
+        &mut self,
+        field: &NestedFieldRef,
+        partner: &ArrayRef,
+    ) -> Result<()> {
         let field_id = field.id;
         count_float_nans!(partner, self, field_id);
         Ok(())
     }
 
-    fn after_list_element(&mut self, field: &NestedFieldRef, partner: &ArrayRef) -> Result<()> {
+    fn after_list_element(
+        &mut self,
+        field: &NestedFieldRef,
+        partner: &ArrayRef,
+    ) -> Result<()> {
         let field_id = field.id;
         count_float_nans!(partner, self, field_id);
         Ok(())
     }
 
-    fn after_map_key(&mut self, field: &NestedFieldRef, partner: &ArrayRef) -> Result<()> {
+    fn after_map_key(
+        &mut self,
+        field: &NestedFieldRef,
+        partner: &ArrayRef,
+    ) -> Result<()> {
         let field_id = field.id;
         count_float_nans!(partner, self, field_id);
         Ok(())
     }
 
-    fn after_map_value(&mut self, field: &NestedFieldRef, partner: &ArrayRef) -> Result<()> {
+    fn after_map_value(
+        &mut self,
+        field: &NestedFieldRef,
+        partner: &ArrayRef,
+    ) -> Result<()> {
         let field_id = field.id;
         count_float_nans!(partner, self, field_id);
         Ok(())
@@ -163,7 +184,8 @@ impl NanValueCountVisitor {
 
     /// Compute nan value counts in given schema and record batch
     pub fn compute(&mut self, schema: SchemaRef, batch: RecordBatch) -> Result<()> {
-        let arrow_arr_partner_accessor = ArrowArrayAccessor::new_with_match_mode(self.match_mode);
+        let arrow_arr_partner_accessor =
+            ArrowArrayAccessor::new_with_match_mode(self.match_mode);
 
         let struct_arr = Arc::new(StructArray::from(batch)) as ArrayRef;
         visit_struct_with_partner(

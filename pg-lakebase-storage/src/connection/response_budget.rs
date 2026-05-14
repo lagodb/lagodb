@@ -33,20 +33,33 @@ impl ResponseByteLimiter {
         if bytes == 0 {
             return Ok(ResponseBytes { _permit: None });
         }
-        let bytes = u32::try_from(bytes)
-            .map_err(|_| StorageError::configuration(format!("response byte reservation too large: {bytes}")))?;
+        let bytes = u32::try_from(bytes).map_err(|_| {
+            StorageError::configuration(format!(
+                "response byte reservation too large: {bytes}"
+            ))
+        })?;
         let permit = self
             .semaphore
             .clone()
             .acquire_many_owned(bytes)
             .await
-            .map_err(|error| StorageError::io("response byte limiter closed", io::Error::other(error)))?;
-        Ok(ResponseBytes { _permit: Some(permit) })
+            .map_err(|error| {
+                StorageError::io(
+                    "response byte limiter closed",
+                    io::Error::other(error),
+                )
+            })?;
+        Ok(ResponseBytes {
+            _permit: Some(permit),
+        })
     }
 }
 
 impl QueuedResponse {
-    pub(super) fn new(response: StorageHandlerResponse, response_bytes: ResponseBytes) -> Self {
+    pub(super) fn new(
+        response: StorageHandlerResponse,
+        response_bytes: ResponseBytes,
+    ) -> Self {
         let response_bytes = if response.read_body_len().unwrap_or(0) == 0 {
             ResponseBytes { _permit: None }
         } else {
@@ -59,7 +72,10 @@ impl QueuedResponse {
     }
 }
 
-pub(super) fn reserved_read_response_bytes(request: &WireRequest, max_read_size: u32) -> usize {
+pub(super) fn reserved_read_response_bytes(
+    request: &WireRequest,
+    max_read_size: u32,
+) -> usize {
     match request.payload {
         WireRequestPayload::Read { len, .. } => len.min(max_read_size) as usize,
         _ => 0,

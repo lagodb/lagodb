@@ -23,7 +23,10 @@ pub struct FrameReader<R> {
 
 impl<R: AsyncRead + Unpin> FrameReader<R> {
     pub fn new(reader: R) -> Self {
-        Self { reader, buf: Vec::new() }
+        Self {
+            reader,
+            buf: Vec::new(),
+        }
     }
 
     /// Returns `Ok(None)` on clean EOF between frames; any other read error surfaces as `Err`.
@@ -38,7 +41,7 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
     pub async fn read_frame_buf(&mut self) -> StorageResult<Option<&[u8]>> {
         let mut len_buf = [0_u8; 4];
         match self.reader.read_exact(&mut len_buf).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e.into()),
         }
@@ -84,10 +87,12 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
 }
 
 /// Reads one length-prefixed frame; yields `Ok(None)` at clean EOF.
-pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> StorageResult<Option<Vec<u8>>> {
+pub async fn read_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> StorageResult<Option<Vec<u8>>> {
     let mut len_buf = [0_u8; 4];
     match reader.read_exact(&mut len_buf).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
     }
@@ -105,7 +110,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> StorageResult<O
 /// Small frames (≤ 8 KiB) are coalesced with their 4-byte length prefix into a single
 /// `write_all` to save a syscall on unbuffered writers. Larger frames use two separate
 /// writes to avoid allocating and copying up to [`MAX_FRAME_BYTES`] (64 MiB) of data.
-pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, frame: &[u8]) -> StorageResult<()> {
+pub async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    frame: &[u8],
+) -> StorageResult<()> {
     let len = frame.len();
     if len > MAX_FRAME_BYTES {
         return Err(StorageError::protocol(format!("frame too large: {len}")));

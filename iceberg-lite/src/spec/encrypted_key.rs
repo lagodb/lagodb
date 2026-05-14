@@ -92,7 +92,8 @@ pub(super) mod _serde {
         type Error = base64::DecodeError;
 
         fn try_from(serde_key: EncryptedKeySerde) -> Result<Self, Self::Error> {
-            let encrypted_key_metadata = BASE64.decode(&serde_key.encrypted_key_metadata)?;
+            let encrypted_key_metadata =
+                BASE64.decode(&serde_key.encrypted_key_metadata)?;
 
             Ok(Self {
                 key_id: serde_key.key_id,
@@ -106,7 +107,9 @@ pub(super) mod _serde {
 
 impl Serialize for EncryptedKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         let serde_key = _serde::EncryptedKeySerde::from(self);
         serde_key.serialize(serializer)
     }
@@ -114,7 +117,9 @@ impl Serialize for EncryptedKey {
 
 impl<'de> Deserialize<'de> for EncryptedKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         let serde_key = _serde::EncryptedKeySerde::deserialize(deserializer)?;
 
         Self::try_from(serde_key).map_err(serde::de::Error::custom)
@@ -133,7 +138,8 @@ mod tests {
         let metadata = b"iceberg";
         let mut properties = HashMap::new();
         properties.insert("algo".to_string(), "AES-256".to_string());
-        properties.insert("created-at".to_string(), "2023-05-15T10:30:00Z".to_string());
+        properties
+            .insert("created-at".to_string(), "2023-05-15T10:30:00Z".to_string());
 
         // Create the encrypted key
         let key = EncryptedKey::builder()
@@ -177,7 +183,8 @@ mod tests {
         let json_string = serde_json::to_string(&original_key).unwrap();
 
         // Deserialize back from JSON string
-        let deserialized_key: EncryptedKey = serde_json::from_str(&json_string).unwrap();
+        let deserialized_key: EncryptedKey =
+            serde_json::from_str(&json_string).unwrap();
 
         // Verify the keys match
         assert_eq!(deserialized_key, original_key);

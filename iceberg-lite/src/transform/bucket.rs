@@ -234,23 +234,35 @@ impl TransformFunction for Bucket {
         let val = match (input.data_type(), input.literal()) {
             (PrimitiveType::Int, PrimitiveLiteral::Int(v)) => self.bucket_int(*v),
             (PrimitiveType::Long, PrimitiveLiteral::Long(v)) => self.bucket_long(*v),
-            (PrimitiveType::Decimal { .. }, PrimitiveLiteral::Int128(v)) => self.bucket_decimal(*v),
+            (PrimitiveType::Decimal { .. }, PrimitiveLiteral::Int128(v)) => {
+                self.bucket_decimal(*v)
+            }
             (PrimitiveType::Date, PrimitiveLiteral::Int(v)) => self.bucket_date(*v),
             (PrimitiveType::Time, PrimitiveLiteral::Long(v)) => self.bucket_time(*v),
-            (PrimitiveType::Timestamp, PrimitiveLiteral::Long(v)) => self.bucket_timestamp(*v),
-            (PrimitiveType::Timestamptz, PrimitiveLiteral::Long(v)) => self.bucket_timestamp(*v),
+            (PrimitiveType::Timestamp, PrimitiveLiteral::Long(v)) => {
+                self.bucket_timestamp(*v)
+            }
+            (PrimitiveType::Timestamptz, PrimitiveLiteral::Long(v)) => {
+                self.bucket_timestamp(*v)
+            }
             (PrimitiveType::TimestampNs, PrimitiveLiteral::Long(v)) => {
                 self.bucket_timestamp(*v / 1000)
             }
             (PrimitiveType::TimestamptzNs, PrimitiveLiteral::Long(v)) => {
                 self.bucket_timestamp(*v / 1000)
             }
-            (PrimitiveType::String, PrimitiveLiteral::String(v)) => self.bucket_str(v.as_str()),
+            (PrimitiveType::String, PrimitiveLiteral::String(v)) => {
+                self.bucket_str(v.as_str())
+            }
             (PrimitiveType::Uuid, PrimitiveLiteral::UInt128(v)) => {
                 self.bucket_bytes(uuid::Uuid::from_u128(*v).as_ref())
             }
-            (PrimitiveType::Binary, PrimitiveLiteral::Binary(v)) => self.bucket_bytes(v.as_ref()),
-            (PrimitiveType::Fixed(_), PrimitiveLiteral::Binary(v)) => self.bucket_bytes(v.as_ref()),
+            (PrimitiveType::Binary, PrimitiveLiteral::Binary(v)) => {
+                self.bucket_bytes(v.as_ref())
+            }
+            (PrimitiveType::Fixed(_), PrimitiveLiteral::Binary(v)) => {
+                self.bucket_bytes(v.as_ref())
+            }
             _ => {
                 return Err(crate::Error::new(
                     crate::ErrorKind::FeatureUnsupported,
@@ -269,18 +281,22 @@ impl TransformFunction for Bucket {
 mod test {
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, Int32Array, TimestampMicrosecondArray, TimestampNanosecondArray};
+    use arrow_array::{
+        ArrayRef, Int32Array, TimestampMicrosecondArray, TimestampNanosecondArray,
+    };
     use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 
     use super::Bucket;
     use crate::Result;
     use crate::expr::PredicateOperator;
     use crate::spec::PrimitiveType::{
-        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time, Timestamp,
-        TimestampNs, Timestamptz, TimestamptzNs, Uuid,
+        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time,
+        Timestamp, TimestampNs, Timestamptz, TimestamptzNs, Uuid,
     };
     use crate::spec::Type::{Primitive, Struct};
-    use crate::spec::{Datum, NestedField, PrimitiveType, StructType, Transform, Type};
+    use crate::spec::{
+        Datum, NestedField, PrimitiveType, StructType, Transform, Type,
+    };
     use crate::transform::TransformFunction;
     use crate::transform::test::{TestProjectionFixture, TestTransformFixture};
 
@@ -353,38 +369,46 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::uuid(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThan, Datum::uuid(value)),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::uuid(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThan, Datum::uuid(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::uuid(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
+            &fixture.binary_predicate(
+                PredicateOperator::LessThanOrEq,
                 Datum::uuid(value),
-                Datum::uuid(another),
-            ]),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture
+                .binary_predicate(PredicateOperator::GreaterThan, Datum::uuid(value)),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::uuid(value),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![Datum::uuid(value), Datum::uuid(another)],
+            ),
             Some("name IN (4, 6)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::uuid(value),
-                Datum::uuid(another),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::uuid(value), Datum::uuid(another)],
+            ),
             None,
         )?;
 
@@ -407,27 +431,40 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::Eq, Datum::fixed(value.clone())),
+            &fixture
+                .binary_predicate(PredicateOperator::Eq, Datum::fixed(value.clone())),
             Some("name = 4"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::NotEq, Datum::fixed(value.clone())),
+            &fixture.binary_predicate(
+                PredicateOperator::NotEq,
+                Datum::fixed(value.clone()),
+            ),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::fixed(value.clone())),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThan,
+                Datum::fixed(value.clone()),
+            ),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::fixed(value.clone())),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThanOrEq,
+                Datum::fixed(value.clone()),
+            ),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThan, Datum::fixed(value.clone())),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThan,
+                Datum::fixed(value.clone()),
+            ),
             None,
         )?;
 
@@ -440,18 +477,18 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::fixed(value.clone()),
-                Datum::fixed(another.clone()),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![Datum::fixed(value.clone()), Datum::fixed(another.clone())],
+            ),
             Some("name IN (4, 6)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::fixed(value.clone()),
-                Datum::fixed(another.clone()),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::fixed(value.clone()), Datum::fixed(another.clone())],
+            ),
             None,
         )?;
 
@@ -480,38 +517,48 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::string(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThan, Datum::string(value)),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::string(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThan, Datum::string(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::string(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
+            &fixture.binary_predicate(
+                PredicateOperator::LessThanOrEq,
                 Datum::string(value),
-                Datum::string(another),
-            ]),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThan,
+                Datum::string(value),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::string(value),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![Datum::string(value), Datum::string(another)],
+            ),
             Some("name IN (9, 4)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::string(value),
-                Datum::string(another),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::string(value), Datum::string(another)],
+            ),
             None,
         )?;
 
@@ -538,17 +585,26 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::Eq, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::Eq,
+                Datum::decimal_from_str(curr)?,
+            ),
             Some("name = 2"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::NotEq, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::NotEq,
+                Datum::decimal_from_str(curr)?,
+            ),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThan,
+                Datum::decimal_from_str(curr)?,
+            ),
             None,
         )?;
 
@@ -577,19 +633,25 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::decimal_from_str(next)?,
-                Datum::decimal_from_str(curr)?,
-                Datum::decimal_from_str(prev)?,
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::decimal_from_str(next)?,
+                    Datum::decimal_from_str(curr)?,
+                    Datum::decimal_from_str(prev)?,
+                ],
+            ),
             Some("name IN (2, 6)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::decimal_from_str(curr)?,
-                Datum::decimal_from_str(next)?,
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![
+                    Datum::decimal_from_str(curr)?,
+                    Datum::decimal_from_str(next)?,
+                ],
+            ),
             None,
         )?;
 
@@ -616,39 +678,50 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::long(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThan, Datum::long(value)),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::long(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThan, Datum::long(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::long(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::long(value - 1),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThanOrEq,
                 Datum::long(value),
-                Datum::long(value + 1),
-            ]),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture
+                .binary_predicate(PredicateOperator::GreaterThan, Datum::long(value)),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::long(value),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::long(value - 1),
+                    Datum::long(value),
+                    Datum::long(value + 1),
+                ],
+            ),
             Some("name IN (8, 7, 6)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::long(value),
-                Datum::long(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::long(value), Datum::long(value + 1)],
+            ),
             None,
         )?;
 
@@ -681,34 +754,42 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::int(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThanOrEq, Datum::int(value)),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThan, Datum::int(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::GreaterThan, Datum::int(value)),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::int(value)),
-            None,
-        )?;
-
-        fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::int(value - 1),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
                 Datum::int(value),
-                Datum::int(value + 1),
-            ]),
+            ),
+            None,
+        )?;
+
+        fixture.assert_projection(
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::int(value - 1),
+                    Datum::int(value),
+                    Datum::int(value + 1),
+                ],
+            ),
             Some("name IN (8, 7, 6)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::int(value),
-                Datum::int(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::int(value), Datum::int(value + 1)],
+            ),
             None,
         )?;
 
@@ -727,8 +808,10 @@ mod test {
         let date = NaiveDate::from_ymd_opt(2017, 11, 16).unwrap();
         assert_eq!(
             Bucket::hash_date(
-                date.signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
-                    .num_days() as i32
+                date.signed_duration_since(
+                    NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
+                )
+                .num_days() as i32
             ),
             -653330422
         );
@@ -744,13 +827,17 @@ mod test {
         );
         // test timestamp
         let timestamp =
-            NaiveDateTime::parse_from_str("2017-11-16 22:31:08", "%Y-%m-%d %H:%M:%S").unwrap();
+            NaiveDateTime::parse_from_str("2017-11-16 22:31:08", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
         assert_eq!(
             Bucket::hash_timestamp(
                 timestamp
                     .signed_duration_since(
-                        NaiveDateTime::parse_from_str("1970-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
-                            .unwrap()
+                        NaiveDateTime::parse_from_str(
+                            "1970-01-01 00:00:00",
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                        .unwrap()
                     )
                     .num_microseconds()
                     .unwrap()
@@ -758,12 +845,14 @@ mod test {
             -2047944441
         );
         // test timestamp with tz
-        let timestamp = DateTime::parse_from_rfc3339("2017-11-16T14:31:08-08:00").unwrap();
+        let timestamp =
+            DateTime::parse_from_rfc3339("2017-11-16T14:31:08-08:00").unwrap();
         assert_eq!(
             Bucket::hash_timestamp(
                 timestamp
                     .signed_duration_since(
-                        DateTime::parse_from_rfc3339("1970-01-01T00:00:00-00:00").unwrap()
+                        DateTime::parse_from_rfc3339("1970-01-01T00:00:00-00:00")
+                            .unwrap()
                     )
                     .num_microseconds()
                     .unwrap()
@@ -776,8 +865,8 @@ mod test {
         assert_eq!(
             Bucket::hash_bytes(
                 [
-                    0xF7, 0x9C, 0x3E, 0x09, 0x67, 0x7C, 0x4B, 0xBD, 0xA4, 0x79, 0x3F, 0x34, 0x9C,
-                    0xB7, 0x85, 0xE7
+                    0xF7, 0x9C, 0x3E, 0x09, 0x67, 0x7C, 0x4B, 0xBD, 0xA4, 0x79, 0x3F,
+                    0x34, 0x9C, 0xB7, 0x85, 0xE7
                 ]
                 .as_ref()
             ),
@@ -950,11 +1039,15 @@ mod test {
         let micros_value = 1510871468000000;
         let nanos_value = micros_value * 1000;
 
-        let micro_array = TimestampMicrosecondArray::from_iter_values(vec![micros_value]);
-        let nano_array = TimestampNanosecondArray::from_iter_values(vec![nanos_value]);
+        let micro_array =
+            TimestampMicrosecondArray::from_iter_values(vec![micros_value]);
+        let nano_array =
+            TimestampNanosecondArray::from_iter_values(vec![nanos_value]);
 
-        let transformed_micro: ArrayRef = bucket.transform(Arc::new(micro_array)).unwrap();
-        let transformed_nano: ArrayRef = bucket.transform(Arc::new(nano_array)).unwrap();
+        let transformed_micro: ArrayRef =
+            bucket.transform(Arc::new(micro_array)).unwrap();
+        let transformed_nano: ArrayRef =
+            bucket.transform(Arc::new(nano_array)).unwrap();
 
         let micro_result = transformed_micro
             .as_any()

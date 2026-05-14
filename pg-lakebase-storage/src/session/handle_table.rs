@@ -109,15 +109,19 @@ impl HandleTable {
         match self.open_slots.clone().try_acquire_owned() {
             Ok(permit) => Ok(OpenHandleSlot { _permit: permit }),
             Err(TryAcquireError::NoPermits) => {
-                warn!(max_open_handles = self.max_open_handles, "open handle limit exceeded");
+                warn!(
+                    max_open_handles = self.max_open_handles,
+                    "open handle limit exceeded"
+                );
                 Err(StorageError::resource_exhausted(format!(
                     "open handles per connection limit ({}) exceeded",
                     self.max_open_handles
                 )))
-            },
-            Err(TryAcquireError::Closed) => {
-                Err(StorageError::io("open handle limiter closed", std::io::Error::other("open handle limiter closed")))
-            },
+            }
+            Err(TryAcquireError::Closed) => Err(StorageError::io(
+                "open handle limiter closed",
+                std::io::Error::other("open handle limiter closed"),
+            )),
         }
     }
 
@@ -185,7 +189,10 @@ impl HandleTable {
             .ok_or_else(|| StorageError::closed_handle(handle.0))
     }
 
-    pub(crate) fn begin_read(&self, handle: FileHandle) -> StorageResult<ReadHandleGuard> {
+    pub(crate) fn begin_read(
+        &self,
+        handle: FileHandle,
+    ) -> StorageResult<ReadHandleGuard> {
         let entry = self
             .lock_handles()
             .get(&handle.0)
@@ -197,7 +204,10 @@ impl HandleTable {
 
     /// Completes READ/CLOSE serialization for `handle`, removes it from this table, and returns
     /// the handle's resources wrapped in a [`ClosedHandle`].
-    pub(crate) async fn close(&self, handle: FileHandle) -> StorageResult<ClosedHandle> {
+    pub(crate) async fn close(
+        &self,
+        handle: FileHandle,
+    ) -> StorageResult<ClosedHandle> {
         let entry = self
             .lock_handles()
             .get(&handle.0)
@@ -214,7 +224,10 @@ impl HandleTable {
         }
 
         let mut handles = self.lock_handles();
-        if handles.get(&handle.0).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+        if handles
+            .get(&handle.0)
+            .is_some_and(|current| Arc::ptr_eq(current, &entry))
+        {
             handles.remove(&handle.0);
         }
         Ok(ClosedHandle {
@@ -223,7 +236,12 @@ impl HandleTable {
     }
 
     pub(crate) async fn close_all(&self) -> Vec<StorageResult<ClosedHandle>> {
-        let handles = self.lock_handles().keys().copied().map(FileHandle).collect::<Vec<_>>();
+        let handles = self
+            .lock_handles()
+            .keys()
+            .copied()
+            .map(FileHandle)
+            .collect::<Vec<_>>();
         let mut closed = Vec::with_capacity(handles.len());
         for handle in handles {
             closed.push(self.close(handle).await);
@@ -318,22 +336,31 @@ mod tests {
         let read = handles.begin_read(state.handle).unwrap();
 
         let close_handles = handles.clone();
-        let mut close = tokio::spawn(async move { close_handles.close(state.handle).await });
+        let mut close =
+            tokio::spawn(async move { close_handles.close(state.handle).await });
 
         for _ in 0..10 {
             match handles.begin_read(state.handle) {
                 Ok(extra_read) => {
                     drop(extra_read);
                     tokio::task::yield_now().await;
-                },
+                }
                 Err(_) => break,
             }
         }
         assert!(handles.begin_read(state.handle).is_err());
-        assert!(timeout(Duration::from_millis(20), &mut close).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(20), &mut close)
+                .await
+                .is_err()
+        );
 
         drop(read);
-        let closed = timeout(Duration::from_secs(1), close).await.unwrap().unwrap().unwrap();
+        let closed = timeout(Duration::from_secs(1), close)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         drop(closed);
     }
 
@@ -344,10 +371,15 @@ mod tests {
         let read = handles.begin_read(state.handle).unwrap();
 
         let close_handles = handles.clone();
-        let close = tokio::spawn(async move { close_handles.close(state.handle).await });
+        let close =
+            tokio::spawn(async move { close_handles.close(state.handle).await });
 
         drop(read);
-        let closed = timeout(Duration::from_secs(1), close).await.unwrap().unwrap().unwrap();
+        let closed = timeout(Duration::from_secs(1), close)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         drop(closed);
         assert!(handles.begin_read(state.handle).is_err());
     }
@@ -355,14 +387,22 @@ mod tests {
     fn open_test_handle(handles: &HandleTable) -> OpenFileState {
         let registry = StoreRegistry::new();
         registry
-            .register_shared_backend(TEST_STORE_ID, Arc::new(MemoryObjectBackend::new()))
+            .register_shared_backend(
+                TEST_STORE_ID,
+                Arc::new(MemoryObjectBackend::new()),
+            )
             .unwrap();
-        let registered = registry.resolve(&StoreId::new(TEST_STORE_ID).unwrap()).unwrap();
+        let registered = registry
+            .resolve(&StoreId::new(TEST_STORE_ID).unwrap())
+            .unwrap();
         handles
             .open(
                 ObjectLocation::new(TEST_STORE_ID, "bucket", "file").unwrap(),
                 registered,
-                ObjectInfo { size: 8, etag: None },
+                ObjectInfo {
+                    size: 8,
+                    etag: None,
+                },
                 OpenFlags::READ_ONLY,
             )
             .unwrap()

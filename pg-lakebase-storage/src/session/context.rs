@@ -27,7 +27,10 @@ impl<I: CacheIndex> Clone for StorageContext<I> {
 }
 
 impl<I: CacheIndex> StorageContext<I> {
-    pub fn new(client_addr: impl Into<Arc<str>>, service: Arc<StorageService<I>>) -> Self {
+    pub fn new(
+        client_addr: impl Into<Arc<str>>,
+        service: Arc<StorageService<I>>,
+    ) -> Self {
         Self::new_with_hooks(client_addr, service, RequestHooks::default())
     }
 
@@ -53,7 +56,9 @@ impl<I: CacheIndex> StorageContext<I> {
         Self {
             client_addr: client_addr.into(),
             service,
-            handles: Arc::new(HandleTable::with_max_open_handles(max_open_handles_per_connection)),
+            handles: Arc::new(HandleTable::with_max_open_handles(
+                max_open_handles_per_connection,
+            )),
             request_hooks,
         }
     }

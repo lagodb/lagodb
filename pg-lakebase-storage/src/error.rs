@@ -138,7 +138,10 @@ impl StorageError {
         }
     }
 
-    pub fn protocol_source(context: impl Into<String>, source: impl Into<BoxError>) -> Self {
+    pub fn protocol_source(
+        context: impl Into<String>,
+        source: impl Into<BoxError>,
+    ) -> Self {
         Self::Protocol {
             context: context.into(),
             source: Some(source.into()),
@@ -152,7 +155,10 @@ impl StorageError {
         }
     }
 
-    pub fn backend_source(context: impl Into<String>, source: impl Into<BoxError>) -> Self {
+    pub fn backend_source(
+        context: impl Into<String>,
+        source: impl Into<BoxError>,
+    ) -> Self {
         Self::Backend {
             context: context.into(),
             source: Some(source.into()),
@@ -166,7 +172,10 @@ impl StorageError {
         }
     }
 
-    pub fn cache_source(context: impl Into<String>, source: impl Into<BoxError>) -> Self {
+    pub fn cache_source(
+        context: impl Into<String>,
+        source: impl Into<BoxError>,
+    ) -> Self {
         Self::Cache {
             context: context.into(),
             source: Some(source.into()),
@@ -185,7 +194,10 @@ impl StorageError {
     /// Join failures fall into two categories (panic and cancellation); both are surfaced as
     /// `StorageError::Io` because callers of this crate never interact with tokio's task model
     /// directly.
-    pub(crate) fn from_join_error(context: &str, error: tokio::task::JoinError) -> Self {
+    pub(crate) fn from_join_error(
+        context: &str,
+        error: tokio::task::JoinError,
+    ) -> Self {
         if error.is_cancelled() {
             Self::io(context, io::Error::other("cancelled"))
         } else {
@@ -247,13 +259,15 @@ impl StorageError {
             Self::Unsupported { operation } => operation.clone(),
             Self::Protocol { context, source }
             | Self::Backend { context, source }
-            | Self::Cache { context, source } => message_with_optional_source(context, source.as_deref()),
+            | Self::Cache { context, source } => {
+                message_with_optional_source(context, source.as_deref())
+            }
             Self::Io { context, source } => format!("{context}: {source}"),
             Self::ClosedHandle { handle } => handle.to_string(),
             Self::Configuration { message } => message.clone(),
-            Self::ResourceExhausted { message } | Self::Busy { message } | Self::CacheFillAborted { message } => {
-                message.clone()
-            },
+            Self::ResourceExhausted { message }
+            | Self::Busy { message }
+            | Self::CacheFillAborted { message } => message.clone(),
         }
     }
 
@@ -265,11 +279,17 @@ impl StorageError {
             StorageErrorKind::Protocol => Self::protocol(message),
             StorageErrorKind::Backend => Self::backend(message),
             StorageErrorKind::Cache => Self::cache(message),
-            StorageErrorKind::Io => Self::io("remote io error", io::Error::other(message)),
+            StorageErrorKind::Io => {
+                Self::io("remote io error", io::Error::other(message))
+            }
             StorageErrorKind::ClosedHandle => message
                 .parse::<u64>()
                 .map(Self::closed_handle)
-                .unwrap_or_else(|_| Self::protocol(format!("invalid closed-handle error payload: {message:?}"))),
+                .unwrap_or_else(|_| {
+                    Self::protocol(format!(
+                        "invalid closed-handle error payload: {message:?}"
+                    ))
+                }),
             StorageErrorKind::Configuration => Self::configuration(message),
             StorageErrorKind::ResourceExhausted => Self::resource_exhausted(message),
             StorageErrorKind::Busy => Self::busy(message),
@@ -284,7 +304,10 @@ impl From<io::Error> for StorageError {
     }
 }
 
-fn message_with_optional_source(context: &str, source: Option<&(dyn Error + Send + Sync + 'static)>) -> String {
+fn message_with_optional_source(
+    context: &str,
+    source: Option<&(dyn Error + Send + Sync + 'static)>,
+) -> String {
     match source {
         Some(source) => format!("{context}: {source}"),
         None => context.to_string(),
@@ -299,18 +322,30 @@ mod tests {
 
     #[test]
     fn io_error_retains_source() {
-        let error = StorageError::io("open cache file", io::Error::other("permission denied"));
+        let error = StorageError::io(
+            "open cache file",
+            io::Error::other("permission denied"),
+        );
 
         assert_eq!(error.to_string(), "io error: open cache file");
-        assert_eq!(error.source().map(ToString::to_string).as_deref(), Some("permission denied"));
+        assert_eq!(
+            error.source().map(ToString::to_string).as_deref(),
+            Some("permission denied")
+        );
     }
 
     #[test]
     fn backend_error_retains_source() {
-        let error = StorageError::backend_source("head object bucket/file", io::Error::other("backend timed out"));
+        let error = StorageError::backend_source(
+            "head object bucket/file",
+            io::Error::other("backend timed out"),
+        );
 
         assert_eq!(error.to_string(), "backend error: head object bucket/file");
-        assert_eq!(error.source().map(ToString::to_string).as_deref(), Some("backend timed out"));
+        assert_eq!(
+            error.source().map(ToString::to_string).as_deref(),
+            Some("backend timed out")
+        );
     }
 
     #[test]

@@ -8,23 +8,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 
-use crate::session::StorageContext;
 use crate::backend::{MemoryObjectBackend, ObjectBackend, StoreRegistry};
 use crate::cache::{CacheManager, InMemoryCacheIndex};
 use crate::config::StorageServerConfig;
 use crate::error::StorageResult;
 use crate::handle::OpenFlags;
 use crate::object::{ObjectInfo, ObjectLocation};
-use crate::protocol::{decode_response, encode_request, WireRequest, WireRequestPayload, WireResponsePayload};
-use crate::service::reply::ReadBody;
+use crate::protocol::{
+    WireRequest, WireRequestPayload, WireResponsePayload, decode_response,
+    encode_request,
+};
 use crate::service::StorageService;
+use crate::service::reply::ReadBody;
+use crate::session::StorageContext;
 use crate::transport::{read_frame, write_frame};
 
-use super::pipeline::process_connection_with_shutdown;
 use super::dispatch::{StorageHandlerPayload, StorageHandlerResponse};
+use super::pipeline::process_connection_with_shutdown;
 use super::request_tasks::RequestTasks;
 use super::response_budget::{QueuedResponse, ResponseByteLimiter};
 use super::shutdown::ConnectionShutdown;
@@ -42,7 +45,10 @@ async fn disconnect_aborts_in_flight_request_tasks() {
         started: Arc::new(Mutex::new(Some(started_send))),
         dropped: Arc::new(Mutex::new(Some(dropped_send))),
     };
-    let cache = Arc::new(CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+            .with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
@@ -87,10 +93,19 @@ async fn disconnect_aborts_in_flight_request_tasks() {
     )
     .await;
 
-    timeout(Duration::from_secs(1), started_recv).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), started_recv)
+        .await
+        .unwrap()
+        .unwrap();
     drop(client_stream);
-    timeout(Duration::from_secs(1), dropped_recv).await.unwrap().unwrap();
-    let result = timeout(Duration::from_secs(1), server_task).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), dropped_recv)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = timeout(Duration::from_secs(1), server_task)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(result.is_ok());
 }
 
@@ -103,7 +118,10 @@ async fn write_half_shutdown_still_receives_in_flight_response() {
         started: Mutex::new(Some(started_send)),
         release: Mutex::new(Some(release_recv)),
     };
-    let cache = Arc::new(CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+            .with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
@@ -130,7 +148,10 @@ async fn write_half_shutdown_still_receives_in_flight_response() {
         },
     )
     .await;
-    timeout(Duration::from_secs(1), started_recv).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), started_recv)
+        .await
+        .unwrap()
+        .unwrap();
     client_stream.shutdown().await.unwrap();
     release_send.send(()).unwrap();
 
@@ -138,14 +159,19 @@ async fn write_half_shutdown_still_receives_in_flight_response() {
         .await
         .unwrap()
     {
-        WireResponsePayload::Open { size, direct_io, .. } => {
+        WireResponsePayload::Open {
+            size, direct_io, ..
+        } => {
             assert_eq!(size, 10);
             assert!(!direct_io);
-        },
+        }
         other => panic!("unexpected open response: {other:?}"),
     }
 
-    let result = timeout(Duration::from_secs(1), server_task).await.unwrap().unwrap();
+    let result = timeout(Duration::from_secs(1), server_task)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(result.is_ok());
 }
 
@@ -158,7 +184,10 @@ async fn close_waits_for_prior_read_on_same_handle() {
         started: Mutex::new(Some(started_send)),
         release: Mutex::new(Some(release_recv)),
     };
-    let cache = Arc::new(CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+            .with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
@@ -202,7 +231,10 @@ async fn close_waits_for_prior_read_on_same_handle() {
         },
     )
     .await;
-    timeout(Duration::from_secs(1), started_recv).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), started_recv)
+        .await
+        .unwrap()
+        .unwrap();
 
     send_request(
         &mut client_stream,
@@ -212,9 +244,11 @@ async fn close_waits_for_prior_read_on_same_handle() {
         },
     )
     .await;
-    assert!(timeout(Duration::from_millis(30), read_frame(&mut client_stream))
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(30), read_frame(&mut client_stream))
+            .await
+            .is_err()
+    );
 
     release_send.send(()).unwrap();
     match timeout(Duration::from_secs(1), read_response(&mut client_stream))
@@ -224,7 +258,7 @@ async fn close_waits_for_prior_read_on_same_handle() {
         WireResponsePayload::Read { data, eof } => {
             assert_eq!(data, b"abcd");
             assert!(!eof);
-        },
+        }
         other => panic!("unexpected first response: {other:?}"),
     }
     assert!(matches!(
@@ -235,7 +269,10 @@ async fn close_waits_for_prior_read_on_same_handle() {
     ));
 
     drop(client_stream);
-    let result = timeout(Duration::from_secs(1), server_task).await.unwrap().unwrap();
+    let result = timeout(Duration::from_secs(1), server_task)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(result.is_ok());
 }
 
@@ -244,7 +281,10 @@ async fn read_admission_precedes_response_budget_wait() {
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "file").unwrap();
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
-    let cache = Arc::new(CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+            .with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
@@ -254,7 +294,15 @@ async fn read_admission_precedes_response_budget_wait() {
     let store = context.service.registry().resolve(key.store_id()).unwrap();
     let state = context
         .handles
-        .open(key, store, ObjectInfo { size: 10, etag: None }, OpenFlags::READ_ONLY)
+        .open(
+            key,
+            store,
+            ObjectInfo {
+                size: 10,
+                etag: None,
+            },
+            OpenFlags::READ_ONLY,
+        )
         .unwrap();
     let mut tasks = RequestTasks::new();
     let request_limiter = Arc::new(Semaphore::new(2));
@@ -283,7 +331,9 @@ async fn read_admission_precedes_response_budget_wait() {
         .spawn_request(
             WireRequest {
                 request_id: 2,
-                payload: WireRequestPayload::Close { handle: state.handle },
+                payload: WireRequestPayload::Close {
+                    handle: state.handle,
+                },
             },
             context,
             request_limiter,
@@ -294,7 +344,11 @@ async fn read_admission_precedes_response_budget_wait() {
         .await
         .unwrap();
 
-    assert!(timeout(Duration::from_millis(50), response_rx.recv()).await.is_err());
+    assert!(
+        timeout(Duration::from_millis(50), response_rx.recv())
+            .await
+            .is_err()
+    );
     tasks.abort_all().await;
 }
 
@@ -305,7 +359,8 @@ async fn inbound_close_uses_one_total_drain_budget() {
     request_tasks.spawn_background(async {
         sleep(Duration::from_millis(60)).await;
     });
-    let writer_task = tokio::spawn(async { future::pending::<StorageResult<()>>().await });
+    let writer_task =
+        tokio::spawn(async { future::pending::<StorageResult<()>>().await });
     let mut writer = ResponseWriter::from_parts_for_test(response_tx, writer_task);
 
     let result = timeout(
@@ -327,10 +382,17 @@ async fn response_byte_limiter_waits_until_permit_is_released() {
     let limiter = ResponseByteLimiter::new(4);
     let first = limiter.acquire(4).await.unwrap();
 
-    assert!(timeout(Duration::from_millis(20), limiter.acquire(1)).await.is_err());
+    assert!(
+        timeout(Duration::from_millis(20), limiter.acquire(1))
+            .await
+            .is_err()
+    );
 
     drop(first);
-    timeout(Duration::from_secs(1), limiter.acquire(4)).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), limiter.acquire(4))
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -349,10 +411,17 @@ async fn queued_read_response_holds_byte_budget_until_dropped() {
         response_bytes,
     );
 
-    assert!(timeout(Duration::from_millis(20), limiter.acquire(1)).await.is_err());
+    assert!(
+        timeout(Duration::from_millis(20), limiter.acquire(1))
+            .await
+            .is_err()
+    );
 
     drop(queued);
-    timeout(Duration::from_secs(1), limiter.acquire(4)).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), limiter.acquire(4))
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -368,7 +437,10 @@ async fn queued_non_read_response_releases_reserved_read_budget() {
         response_bytes,
     );
 
-    timeout(Duration::from_secs(1), limiter.acquire(4)).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), limiter.acquire(4))
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 async fn send_request(stream: &mut UnixStream, request: WireRequest) {
@@ -389,11 +461,20 @@ struct HangingBackend {
 #[async_trait]
 impl ObjectBackend for HangingBackend {
     async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
-        Ok(ObjectInfo { size: 10, etag: None })
+        Ok(ObjectInfo {
+            size: 10,
+            etag: None,
+        })
     }
 
-    async fn get_range(&self, _key: &ObjectLocation, _range: Range<u64>) -> StorageResult<bytes::Bytes> {
-        if let Some(started) = self.started.lock().expect("started mutex poisoned").take() {
+    async fn get_range(
+        &self,
+        _key: &ObjectLocation,
+        _range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
+        if let Some(started) =
+            self.started.lock().expect("started mutex poisoned").take()
+        {
             let _ = started.send(());
         }
         let _guard = DropSignal {
@@ -416,7 +497,8 @@ impl ObjectBackend for HangingBackend {
         _store_id: &str,
         _bucket: &str,
         _prefix: Option<&str>,
-    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>> {
+    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
+    {
         unreachable!("HangingBackend does not participate in list")
     }
 
@@ -440,7 +522,9 @@ struct DropSignal {
 
 impl Drop for DropSignal {
     fn drop(&mut self) {
-        if let Some(dropped) = self.dropped.lock().expect("dropped mutex poisoned").take() {
+        if let Some(dropped) =
+            self.dropped.lock().expect("dropped mutex poisoned").take()
+        {
             let _ = dropped.send(());
         }
     }
@@ -459,18 +543,30 @@ struct DelayedRangeBackend {
 #[async_trait]
 impl ObjectBackend for DelayedHeadBackend {
     async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
-        if let Some(started) = self.started.lock().expect("started mutex poisoned").take() {
+        if let Some(started) =
+            self.started.lock().expect("started mutex poisoned").take()
+        {
             let _ = started.send(());
         }
         let release = self.release.lock().expect("release mutex poisoned").take();
         if let Some(release) = release {
             let _ = release.await;
         }
-        Ok(ObjectInfo { size: 10, etag: None })
+        Ok(ObjectInfo {
+            size: 10,
+            etag: None,
+        })
     }
 
-    async fn get_range(&self, _key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
-        Ok(bytes::Bytes::from(vec![0; (range.end - range.start) as usize]))
+    async fn get_range(
+        &self,
+        _key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
+        Ok(bytes::Bytes::from(vec![
+            0;
+            (range.end - range.start) as usize
+        ]))
     }
 
     async fn put_from_file(
@@ -487,7 +583,8 @@ impl ObjectBackend for DelayedHeadBackend {
         _store_id: &str,
         _bucket: &str,
         _prefix: Option<&str>,
-    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>> {
+    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
+    {
         unreachable!("DelayedHeadBackend does not participate in list")
     }
 
@@ -508,18 +605,29 @@ impl ObjectBackend for DelayedHeadBackend {
 #[async_trait]
 impl ObjectBackend for DelayedRangeBackend {
     async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
-        Ok(ObjectInfo { size: 10, etag: None })
+        Ok(ObjectInfo {
+            size: 10,
+            etag: None,
+        })
     }
 
-    async fn get_range(&self, _key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
-        if let Some(started) = self.started.lock().expect("started mutex poisoned").take() {
+    async fn get_range(
+        &self,
+        _key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
+        if let Some(started) =
+            self.started.lock().expect("started mutex poisoned").take()
+        {
             let _ = started.send(());
         }
         let release = self.release.lock().expect("release mutex poisoned").take();
         if let Some(release) = release {
             let _ = release.await;
         }
-        Ok(bytes::Bytes::copy_from_slice(&b"abcdefghij"[range.start as usize..range.end as usize]))
+        Ok(bytes::Bytes::copy_from_slice(
+            &b"abcdefghij"[range.start as usize..range.end as usize],
+        ))
     }
 
     async fn put_from_file(
@@ -536,7 +644,8 @@ impl ObjectBackend for DelayedRangeBackend {
         _store_id: &str,
         _bucket: &str,
         _prefix: Option<&str>,
-    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>> {
+    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
+    {
         unreachable!("DelayedRangeBackend does not participate in list")
     }
 
@@ -565,7 +674,13 @@ fn test_server_config(max_in_flight_requests: usize) -> StorageServerConfig {
 }
 
 fn test_cache_dir() -> PathBuf {
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let id = TEST_WIRE_ID.fetch_add(1, Ordering::Relaxed);
-    PathBuf::from("/tmp").join(format!("pg-lakebase-storage-wire-test-{}-{stamp}-{id}", std::process::id()))
+    PathBuf::from("/tmp").join(format!(
+        "pg-lakebase-storage-wire-test-{}-{stamp}-{id}",
+        std::process::id()
+    ))
 }

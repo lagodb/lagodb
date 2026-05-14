@@ -9,8 +9,8 @@ use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 
-use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
+use tokio::net::unix::OwnedWriteHalf;
 
 use crate::error::{StorageError, StorageResult};
 
@@ -30,7 +30,11 @@ impl<'a> FdSender<'a> {
     pub async fn send(&mut self, fd: RawFd) -> StorageResult<()> {
         loop {
             self.writer.writable().await?;
-            match sendmsg_with_fd(self.writer.as_ref().as_raw_fd(), &FD_TOKEN_BYTE, fd) {
+            match sendmsg_with_fd(
+                self.writer.as_ref().as_raw_fd(),
+                &FD_TOKEN_BYTE,
+                fd,
+            ) {
                 Ok(_) => return Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error.into()),
@@ -54,9 +58,17 @@ impl<'a> FdReceiver<'a> {
         loop {
             self.stream.readable().await?;
             match recvmsg_with_fd(self.stream.as_raw_fd(), &mut token) {
-                Ok((0, _)) => return Err(StorageError::protocol("connection closed while receiving fd")),
+                Ok((0, _)) => {
+                    return Err(StorageError::protocol(
+                        "connection closed while receiving fd",
+                    ));
+                }
                 Ok((_, Some(fd))) => return Ok(fd),
-                Ok((_, None)) => return Err(StorageError::protocol("fd control message was missing fd")),
+                Ok((_, None)) => {
+                    return Err(StorageError::protocol(
+                        "fd control message was missing fd",
+                    ));
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -68,9 +80,13 @@ impl<'a> FdReceiver<'a> {
 pub(super) fn recv_blocking(stream: &mut StdUnixStream) -> StorageResult<OwnedFd> {
     let mut token = [0_u8; 1];
     match recvmsg_with_fd(stream.as_raw_fd(), &mut token) {
-        Ok((0, _)) => Err(StorageError::protocol("connection closed while receiving fd")),
+        Ok((0, _)) => Err(StorageError::protocol(
+            "connection closed while receiving fd",
+        )),
         Ok((_, Some(fd))) => Ok(fd),
-        Ok((_, None)) => Err(StorageError::protocol("fd control message was missing fd")),
+        Ok((_, None)) => {
+            Err(StorageError::protocol("fd control message was missing fd"))
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -102,7 +118,11 @@ fn sendmsg_with_fd(socket: RawFd, packet: &[u8], fd: RawFd) -> io::Result<usize>
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
-        std::ptr::copy_nonoverlapping(&fd as *const RawFd as *const u8, libc::CMSG_DATA(cmsg), mem::size_of::<RawFd>());
+        std::ptr::copy_nonoverlapping(
+            &fd as *const RawFd as *const u8,
+            libc::CMSG_DATA(cmsg),
+            mem::size_of::<RawFd>(),
+        );
 
         let sent = libc::sendmsg(socket, &msg, 0);
         if sent < 0 {
@@ -113,7 +133,10 @@ fn sendmsg_with_fd(socket: RawFd, packet: &[u8], fd: RawFd) -> io::Result<usize>
     }
 }
 
-fn recvmsg_with_fd(socket: RawFd, packet: &mut [u8]) -> io::Result<(usize, Option<OwnedFd>)> {
+fn recvmsg_with_fd(
+    socket: RawFd,
+    packet: &mut [u8],
+) -> io::Result<(usize, Option<OwnedFd>)> {
     // SAFETY: symmetric to `sendmsg_with_fd`. `FromRawFd::from_raw_fd` takes ownership of the
     // received descriptor exactly once, so the caller is responsible for closing it via `OwnedFd`.
     unsafe {
@@ -137,7 +160,10 @@ fn recvmsg_with_fd(socket: RawFd, packet: &mut [u8]) -> io::Result<(usize, Optio
 
         let mut received_fd = None;
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
-        if !cmsg.is_null() && (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
+        if !cmsg.is_null()
+            && (*cmsg).cmsg_level == libc::SOL_SOCKET
+            && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+        {
             let mut raw_fd: RawFd = -1;
             std::ptr::copy_nonoverlapping(
                 libc::CMSG_DATA(cmsg),

@@ -1,11 +1,17 @@
 use crate::backend::{
-    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig, SecretString, StoreConfig,
+    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig,
+    SecretString, StoreConfig,
 };
 use crate::error::StorageErrorKind;
 use crate::handle::{FileHandle, OpenFlags};
 
-use super::super::model::{WireRequest, WireRequestPayload, WireResponse, WireResponsePayload};
-use super::{decode_request, decode_response, encode_read_request, encode_request, encode_response};
+use super::super::model::{
+    WireRequest, WireRequestPayload, WireResponse, WireResponsePayload,
+};
+use super::{
+    decode_request, decode_response, encode_read_request, encode_request,
+    encode_response,
+};
 
 #[test]
 fn decode_rejects_open_store_id_length_claim_beyond_frame() {
@@ -21,7 +27,8 @@ fn decode_rejects_open_store_id_length_claim_beyond_frame() {
     .unwrap();
     // After fixed header (15 B): op (2) + flags (1), then store id length u32.
     const STORE_ID_LEN_OFFSET: usize = 15 + 2 + 1;
-    frame[STORE_ID_LEN_OFFSET..STORE_ID_LEN_OFFSET + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    frame[STORE_ID_LEN_OFFSET..STORE_ID_LEN_OFFSET + 4]
+        .copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(decode_request(&frame).is_err());
 }
 
@@ -29,14 +36,20 @@ fn decode_rejects_open_store_id_length_claim_beyond_frame() {
 fn decode_rejects_previous_protocol_version() {
     let mut frame = encode_request(&WireRequest {
         request_id: 42,
-        payload: WireRequestPayload::Close { handle: FileHandle(7) },
+        payload: WireRequestPayload::Close {
+            handle: FileHandle(7),
+        },
     })
     .unwrap();
     frame[4..6].copy_from_slice(&2_u16.to_be_bytes());
 
     let error = decode_request(&frame).unwrap_err();
 
-    assert!(error.wire_message().contains("unsupported protocol version 2"));
+    assert!(
+        error
+            .wire_message()
+            .contains("unsupported protocol version 2")
+    );
 }
 
 #[test]
@@ -52,7 +65,8 @@ fn decode_rejects_stage_create_payload_length_claim_beyond_frame() {
     .unwrap();
     // Header (15) + op (2), then store id length u32.
     const STORE_ID_LEN_OFFSET: usize = 15 + 2;
-    frame[STORE_ID_LEN_OFFSET..STORE_ID_LEN_OFFSET + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    frame[STORE_ID_LEN_OFFSET..STORE_ID_LEN_OFFSET + 4]
+        .copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(decode_request(&frame).is_err());
 }
 
@@ -91,7 +105,9 @@ fn request_payloads_roundtrip() {
             offset: 11,
             len: 13,
         },
-        WireRequestPayload::Close { handle: FileHandle(7) },
+        WireRequestPayload::Close {
+            handle: FileHandle(7),
+        },
         WireRequestPayload::StageCreate {
             store_id: "default".to_string(),
             bucket: "bucket".to_string(),
@@ -153,7 +169,9 @@ fn request_payloads_roundtrip() {
             bucket: "bucket".to_string(),
             prefix: None,
             page_size: 0,
-            cursor: Some(crate::protocol::ListCursor::from_wire("ls-deadbeef".to_string())),
+            cursor: Some(crate::protocol::ListCursor::from_wire(
+                "ls-deadbeef".to_string(),
+            )),
         },
     ] {
         let request = WireRequest {
@@ -183,7 +201,8 @@ fn response_payloads_roundtrip() {
         },
         WireResponsePayload::Close,
         WireResponsePayload::StageCreate {
-            staging_path: "/tmp/cache/staging/default/bucket/pgl-staging.file".to_string(),
+            staging_path: "/tmp/cache/staging/default/bucket/pgl-staging.file"
+                .to_string(),
         },
         WireResponsePayload::Commit {
             size: 42,
@@ -209,7 +228,9 @@ fn response_payloads_roundtrip() {
                     etag: None,
                 },
             ],
-            next_cursor: Some(crate::protocol::ListCursor::from_wire("ls-cafef00d".to_string())),
+            next_cursor: Some(crate::protocol::ListCursor::from_wire(
+                "ls-cafef00d".to_string(),
+            )),
         },
         WireResponsePayload::List {
             entries: Vec::new(),
@@ -255,8 +276,12 @@ fn register_store_config_variants_roundtrip() {
         StoreConfig::Gcs(GcsStoreConfig {
             base_url: Some("https://storage.googleapis.com".to_string()),
             service_account_path: Some("/tmp/service-account.json".to_string()),
-            service_account_key: Some(SecretString::new("{\"type\":\"service_account\"}")),
-            application_credentials_path: Some("/tmp/application-default.json".to_string()),
+            service_account_key: Some(SecretString::new(
+                "{\"type\":\"service_account\"}",
+            )),
+            application_credentials_path: Some(
+                "/tmp/application-default.json".to_string(),
+            ),
             skip_signature: true,
         }),
         StoreConfig::Azure(AzureStoreConfig {
@@ -306,8 +331,10 @@ fn request_open_golden_frame() {
             0x00, 0x01, // open op
             0x01, // read-only flags
             0x00, 0x00, 0x00, 0x07, // store id len
-            b'd', b'e', b'f', b'a', b'u', b'l', b't', 0x00, 0x00, 0x00, 0x06, // bucket len
-            b'b', b'u', b'c', b'k', b'e', b't', 0x00, 0x00, 0x00, 0x04, // key len
+            b'd', b'e', b'f', b'a', b'u', b'l', b't', 0x00, 0x00, 0x00,
+            0x06, // bucket len
+            b'b', b'u', b'c', b'k', b'e', b't', 0x00, 0x00, 0x00,
+            0x04, // key len
             b'f', b'i', b'l', b'e',
         ]
     );
@@ -327,8 +354,9 @@ fn request_read_golden_frame() {
     assert_eq!(
         encode_request(&request).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x02, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x2a, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00,
             0x0d,
         ]
     );
@@ -345,7 +373,10 @@ fn fixed_read_request_encoder_matches_general_encoder() {
         },
     };
 
-    assert_eq!(encode_read_request(42, FileHandle(7), 11, 13).as_slice(), encode_request(&request).unwrap());
+    assert_eq!(
+        encode_read_request(42, FileHandle(7), 11, 13).as_slice(),
+        encode_request(&request).unwrap()
+    );
 }
 
 #[test]
@@ -362,8 +393,9 @@ fn response_open_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x01, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x01,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x2a, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x01,
         ]
     );
 }
@@ -381,8 +413,9 @@ fn response_read_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x02, 0x01,
-            0x00, 0x00, 0x00, 0x03, b'a', b'b', b'c',
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x2a, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x03, b'a', b'b',
+            b'c',
         ]
     );
 }
@@ -390,12 +423,18 @@ fn response_read_golden_frame() {
 #[test]
 fn response_read_prefix_decodes_without_body() {
     let prefix = super::encode_read_response_prefix(42, true, 3).unwrap();
-    let header = super::ResponseFrameHeader::decode(&prefix[..super::ResponseFrameHeader::ENCODED_LEN]).unwrap();
+    let header = super::ResponseFrameHeader::decode(
+        &prefix[..super::ResponseFrameHeader::ENCODED_LEN],
+    )
+    .unwrap();
     assert!(header.is_read());
     assert_eq!(header.request_id, 42);
 
-    let read =
-        super::ReadResponsePrefix::decode_tail(header, &prefix[super::ResponseFrameHeader::ENCODED_LEN..]).unwrap();
+    let read = super::ReadResponsePrefix::decode_tail(
+        header,
+        &prefix[super::ResponseFrameHeader::ENCODED_LEN..],
+    )
+    .unwrap();
     assert!(read.eof);
     assert_eq!(read.data_len, 3);
 }
@@ -413,8 +452,9 @@ fn response_error_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a, 0x03, 0xe8, 0x00,
-            0x01, 0x00, 0x00, 0x00, 0x0e, b'm', b'i', b's', b's', b'i', b'n', b'g', b' ', b'b', b'u', b'c', b'k', b'e',
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x2a, 0x03, 0xe8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0e, b'm',
+            b'i', b's', b's', b'i', b'n', b'g', b' ', b'b', b'u', b'c', b'k', b'e',
             b't',
         ]
     );

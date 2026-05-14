@@ -320,11 +320,13 @@ impl BoundPredicateVisitor for InclusiveMetricsEvaluator<'_> {
                 ));
             };
 
-            let prefix_length = lower_bound.chars().count().min(datum.chars().count());
+            let prefix_length =
+                lower_bound.chars().count().min(datum.chars().count());
 
             // truncate lower bound so that its length
             // is not greater than the length of prefix
-            let truncated_lower_bound = lower_bound.chars().take(prefix_length).collect::<String>();
+            let truncated_lower_bound =
+                lower_bound.chars().take(prefix_length).collect::<String>();
             if datum < &truncated_lower_bound {
                 return ROWS_CANNOT_MATCH;
             }
@@ -338,11 +340,13 @@ impl BoundPredicateVisitor for InclusiveMetricsEvaluator<'_> {
                 ));
             };
 
-            let prefix_length = upper_bound.chars().count().min(datum.chars().count());
+            let prefix_length =
+                upper_bound.chars().count().min(datum.chars().count());
 
             // truncate upper bound so that its length
             // is not greater than the length of prefix
-            let truncated_upper_bound = upper_bound.chars().take(prefix_length).collect::<String>();
+            let truncated_upper_bound =
+                upper_bound.chars().take(prefix_length).collect::<String>();
             if datum > &truncated_upper_bound {
                 return ROWS_CANNOT_MATCH;
             }
@@ -486,8 +490,8 @@ mod test {
     use fnv::FnvHashSet;
 
     use crate::expr::PredicateOperator::{
-        Eq, GreaterThan, GreaterThanOrEq, In, IsNan, IsNull, LessThan, LessThanOrEq, NotEq, NotIn,
-        NotNan, NotNull, NotStartsWith, StartsWith,
+        Eq, GreaterThan, GreaterThanOrEq, In, IsNan, IsNull, LessThan, LessThanOrEq,
+        NotEq, NotIn, NotNan, NotNull, NotStartsWith, StartsWith,
     };
     use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluator;
     use crate::expr::{
@@ -515,22 +519,32 @@ mod test {
 
         let data_file = create_test_data_file();
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&partition_filter, &data_file, case_sensitive).unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &partition_filter,
+            &data_file,
+            case_sensitive,
+        )
+        .unwrap();
 
         assert!(result);
     }
 
     #[test]
     fn test_all_nulls() {
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_null("all_nulls"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_null("all_nulls"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(!result, "Should skip: no non-null value in all null column");
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&less_than("all_nulls", "a"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &less_than("all_nulls", "a"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(!result, "Should skip: LessThan on an all null column");
 
         let result = InclusiveMetricsEvaluator::eval(
@@ -563,9 +577,12 @@ mod test {
             "Should skip: GreaterThanOrEqual on an all null column"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&equal("all_nulls", "a"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &equal("all_nulls", "a"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(!result, "Should skip: Equal on an all null column");
 
         let result = InclusiveMetricsEvaluator::eval(
@@ -584,17 +601,23 @@ mod test {
         .unwrap();
         assert!(result, "Should read: NotStartsWith on an all null column");
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_null("some_nulls"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_null("some_nulls"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with some nulls could contain a non-null value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_null("no_nulls"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_null("no_nulls"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with all nulls contains a non-null value"
@@ -603,25 +626,34 @@ mod test {
 
     #[test]
     fn test_no_nulls() {
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_null("all_nulls"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_null("all_nulls"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with all nulls contains a non-null value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_null("some_nulls"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_null("some_nulls"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with some nulls could contain a non-null value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_null("no_nulls"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_null("no_nulls"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             !result,
             "Should skip: col with no nulls can't contains a non-null value"
@@ -630,55 +662,78 @@ mod test {
 
     #[test]
     fn test_is_nan() {
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_nan("all_nans"), &get_test_file_1(), true).unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_nan("all_nans"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with all nans must contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_nan("some_nans"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_nan("some_nans"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with some nans could contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_nan("no_nans"), &get_test_file_1(), true).unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_nan("no_nans"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             !result,
             "Should skip: col with no nans can't contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_nan("all_nulls_double"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_nan("all_nulls_double"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             !result,
             "Should skip: col with no nans can't contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_nan("no_nan_stats"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_nan("no_nan_stats"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: no guarantee col is nan-free without nan stats"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_nan("all_nans_v1_stats"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_nan("all_nans_v1_stats"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with all nans must contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_nan("nan_and_null_only"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_nan("nan_and_null_only"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with nans and nulls must contain a nan value"
@@ -687,40 +742,56 @@ mod test {
 
     #[test]
     fn test_not_nan() {
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_nan("all_nans"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_nan("all_nans"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             !result,
             "Should read: col with all nans must contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_nan("some_nans"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_nan("some_nans"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with some nans could contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_nan("no_nans"), &get_test_file_1(), true).unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_nan("no_nans"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with no nans might contains a non-nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_nan("all_nulls_double"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_nan("all_nulls_double"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: col with no nans can't contains a nan value"
         );
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_nan("no_nan_stats"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_nan("no_nan_stats"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: no guarantee col is nan-free without nan stats"
@@ -751,22 +822,31 @@ mod test {
 
     #[test]
     fn test_required_column() {
-        let result =
-            InclusiveMetricsEvaluator::eval(&not_null("required"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &not_null("required"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(result, "Should read: required columns are always non-null");
 
-        let result =
-            InclusiveMetricsEvaluator::eval(&is_null("required"), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &is_null("required"),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(!result, "Should skip: required columns are always non-null");
     }
 
     #[test]
     #[should_panic]
     fn test_missing_column() {
-        let _result =
-            InclusiveMetricsEvaluator::eval(&less_than("missing", "a"), &get_test_file_1(), true);
+        let _result = InclusiveMetricsEvaluator::eval(
+            &less_than("missing", "a"),
+            &get_test_file_1(),
+            true,
+        );
     }
 
     #[test]
@@ -787,9 +867,12 @@ mod test {
         ];
 
         for expression in expressions {
-            let result =
-                InclusiveMetricsEvaluator::eval(&expression, &missing_stats_datafile, true)
-                    .unwrap();
+            let result = InclusiveMetricsEvaluator::eval(
+                &expression,
+                &missing_stats_datafile,
+                true,
+            )
+            .unwrap();
 
             assert!(
                 result,
@@ -817,8 +900,12 @@ mod test {
         ];
 
         for expression in expressions {
-            let result =
-                InclusiveMetricsEvaluator::eval(&expression, &zero_records_datafile, true).unwrap();
+            let result = InclusiveMetricsEvaluator::eval(
+                &expression,
+                &zero_records_datafile,
+                true,
+            )
+            .unwrap();
 
             assert!(
                 result,
@@ -867,7 +954,8 @@ mod test {
         let bound_pred = filter.bind(schema.clone(), true).unwrap();
 
         let result =
-            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true).unwrap();
+            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true)
+                .unwrap();
         assert!(!result, "Should skip: and(false, true)");
 
         let schema = create_test_schema();
@@ -885,7 +973,8 @@ mod test {
         let bound_pred = filter.bind(schema.clone(), true).unwrap();
 
         let result =
-            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true).unwrap();
+            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true)
+                .unwrap();
         assert!(!result, "Should skip: and(false, false)");
 
         let schema = create_test_schema();
@@ -903,7 +992,8 @@ mod test {
         let bound_pred = filter.bind(schema.clone(), true).unwrap();
 
         let result =
-            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true).unwrap();
+            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true)
+                .unwrap();
         assert!(result, "Should read: and(true, true)");
     }
 
@@ -924,7 +1014,8 @@ mod test {
         let bound_pred = filter.bind(schema.clone(), true).unwrap();
 
         let result =
-            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true).unwrap();
+            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true)
+                .unwrap();
         assert!(result, "Should read: or(false, true)");
 
         let schema = create_test_schema();
@@ -942,7 +1033,8 @@ mod test {
         let bound_pred = filter.bind(schema.clone(), true).unwrap();
 
         let result =
-            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true).unwrap();
+            InclusiveMetricsEvaluator::eval(&bound_pred, &get_test_file_1(), true)
+                .unwrap();
         assert!(!result, "Should skip: or(false, false)");
     }
 
@@ -1213,9 +1305,12 @@ mod test {
     #[test]
     #[should_panic]
     fn test_case_sensitive_integer_not_eq_rewritten() {
-        let _result =
-            InclusiveMetricsEvaluator::eval(&equal_int_not("ID", 5), &get_test_file_1(), true)
-                .unwrap();
+        let _result = InclusiveMetricsEvaluator::eval(
+            &equal_int_not("ID", 5),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1542,9 +1637,12 @@ mod test {
         assert!(result, "Should read: in on no nulls column");
 
         let ids = (-400..=0).collect::<Vec<_>>();
-        let result =
-            InclusiveMetricsEvaluator::eval(&r#in_int("id", &ids), &get_test_file_1(), true)
-                .unwrap();
+        let result = InclusiveMetricsEvaluator::eval(
+            &r#in_int("id", &ids),
+            &get_test_file_1(),
+            true,
+        )
+        .unwrap();
         assert!(
             result,
             "Should read: number of items in In expression greater than threshold"
@@ -1675,25 +1773,31 @@ mod test {
 
     fn not_null(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(NotNull, Reference::new(reference)));
+        let filter = Predicate::Unary(UnaryExpression::new(
+            NotNull,
+            Reference::new(reference),
+        ));
         filter.bind(schema.clone(), true).unwrap()
     }
 
     fn is_null(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(IsNull, Reference::new(reference)));
+        let filter =
+            Predicate::Unary(UnaryExpression::new(IsNull, Reference::new(reference)));
         filter.bind(schema.clone(), true).unwrap()
     }
 
     fn not_nan(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(NotNan, Reference::new(reference)));
+        let filter =
+            Predicate::Unary(UnaryExpression::new(NotNan, Reference::new(reference)));
         filter.bind(schema.clone(), true).unwrap()
     }
 
     fn is_nan(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(IsNan, Reference::new(reference)));
+        let filter =
+            Predicate::Unary(UnaryExpression::new(IsNan, Reference::new(reference)));
         filter.bind(schema.clone(), true).unwrap()
     }
 
@@ -1799,7 +1903,10 @@ mod test {
         filter.bind(schema.clone(), true).unwrap()
     }
 
-    fn greater_than_or_equal_int(reference: &str, int_literal: i32) -> BoundPredicate {
+    fn greater_than_or_equal_int(
+        reference: &str,
+        int_literal: i32,
+    ) -> BoundPredicate {
         let schema = create_test_schema();
         let filter = Predicate::Binary(BinaryExpression::new(
             GreaterThanOrEq,

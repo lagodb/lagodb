@@ -13,12 +13,14 @@ mod types;
 use crate::error::{StorageError, StorageResult};
 use crate::handle::FileHandle;
 
-use super::limits::{MAX_READ_RESPONSE_DATA_BYTES, READ_REQUEST_BYTES, READ_RESPONSE_PREFIX_BYTES};
+use super::limits::{
+    MAX_READ_RESPONSE_DATA_BYTES, READ_REQUEST_BYTES, READ_RESPONSE_PREFIX_BYTES,
+};
 use super::model::{WireRequest, WireResponse};
 use super::op::WireOp;
 
 use self::header::{FrameHeader, FrameKind};
-use self::traits::{ensure_eof, get_u16, get_u32, WireDecode, WireEncode};
+use self::traits::{WireDecode, WireEncode, ensure_eof, get_u16, get_u32};
 
 pub fn encode_request(request: &WireRequest) -> StorageResult<Vec<u8>> {
     let mut out = Vec::with_capacity(64);
@@ -93,7 +95,8 @@ impl ResponseFrameHeader {
 
     pub(crate) fn decode(input: &[u8]) -> StorageResult<Self> {
         let mut cursor = input;
-        let request_id = FrameHeader::decode_expecting(&mut cursor, FrameKind::Response)?;
+        let request_id =
+            FrameHeader::decode_expecting(&mut cursor, FrameKind::Response)?;
         let op = WireOp::from_response_code(get_u16(&mut cursor)?)?;
         ensure_eof(&cursor)?;
         let kind = match op {
@@ -116,11 +119,17 @@ pub(crate) struct ReadResponsePrefix {
 }
 
 impl ReadResponsePrefix {
-    pub(crate) const TAIL_LEN: usize = READ_RESPONSE_PREFIX_BYTES - ResponseFrameHeader::ENCODED_LEN;
+    pub(crate) const TAIL_LEN: usize =
+        READ_RESPONSE_PREFIX_BYTES - ResponseFrameHeader::ENCODED_LEN;
 
-    pub(crate) fn decode_tail(header: ResponseFrameHeader, input: &[u8]) -> StorageResult<Self> {
+    pub(crate) fn decode_tail(
+        header: ResponseFrameHeader,
+        input: &[u8],
+    ) -> StorageResult<Self> {
         if !header.is_read() {
-            return Err(StorageError::protocol("response frame is not a read response"));
+            return Err(StorageError::protocol(
+                "response frame is not a read response",
+            ));
         }
         let mut cursor = input;
         let eof = bool::decode(&mut cursor)?;
@@ -152,7 +161,8 @@ pub(crate) fn encode_read_response_prefix(
             "read response data length {data_len} exceeds maximum ({MAX_READ_RESPONSE_DATA_BYTES} bytes)"
         )));
     }
-    let data_len = u32::try_from(data_len).map_err(|_| StorageError::protocol("read response data too large"))?;
+    let data_len = u32::try_from(data_len)
+        .map_err(|_| StorageError::protocol("read response data too large"))?;
     let mut buf = [0u8; READ_RESPONSE_PREFIX_BYTES];
     let header = FrameHeader::new(FrameKind::Response, request_id).encode_fixed();
     buf[..FrameHeader::ENCODED_LEN].copy_from_slice(&header);

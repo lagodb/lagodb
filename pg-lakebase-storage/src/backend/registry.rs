@@ -11,9 +11,9 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use futures::stream::BoxStream;
 use object_store::ObjectStore;
 
+use super::ObjectBackend;
 use super::config::{ConfiguredObjectBackend, StoreConfig};
 use super::object_store::ObjectStoreBackend;
-use super::ObjectBackend;
 use crate::error::{StorageError, StorageResult};
 use crate::object::{ListEntry, ObjectInfo, ObjectLocation, StoreId};
 
@@ -71,7 +71,11 @@ impl StoreRegistry {
     }
 
     /// Register a concrete [`ObjectBackend`] under `id`.
-    pub fn register_backend<B>(&self, id: impl Into<String>, backend: B) -> StorageResult<Option<Arc<RegisteredStore>>>
+    pub fn register_backend<B>(
+        &self,
+        id: impl Into<String>,
+        backend: B,
+    ) -> StorageResult<Option<Arc<RegisteredStore>>>
     where
         B: ObjectBackend + 'static,
     {
@@ -138,7 +142,10 @@ impl StoreRegistry {
     }
 
     /// Convenience wrapper around [`Self::unregister`] that parses the id first.
-    pub fn unregister_id(&self, id: impl Into<String>) -> StorageResult<Option<Arc<RegisteredStore>>> {
+    pub fn unregister_id(
+        &self,
+        id: impl Into<String>,
+    ) -> StorageResult<Option<Arc<RegisteredStore>>> {
         let id = StoreId::new(id)?;
         Ok(self.unregister(&id))
     }
@@ -180,7 +187,11 @@ impl RegisteredStore {
         self.backend.head(key).await
     }
 
-    pub async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
+    pub async fn get_range(
+        &self,
+        key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
         self.backend.get_range(key, range).await
     }
 
@@ -193,7 +204,11 @@ impl RegisteredStore {
         self.backend.put_from_file(key, path, len).await
     }
 
-    pub fn list(&self, bucket: &str, prefix: Option<&str>) -> BoxStream<'static, StorageResult<ListEntry>> {
+    pub fn list(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+    ) -> BoxStream<'static, StorageResult<ListEntry>> {
         self.backend.list(self.id.as_str(), bucket, prefix)
     }
 

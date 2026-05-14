@@ -5,12 +5,12 @@
 
 use crate::api::AmScan;
 use crate::data::Row;
+use crate::diag::ReportableError;
 use crate::handles::{
     ItemPointer, ParallelTableScanDescHandle, ReadStreamHandle, RelationHandle,
     SampleScanStateHandle, ScanDirection, ScanKeyHandle, SnapshotHandle,
     TBMIterateResultHandle,
 };
-use crate::diag::ReportableError;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
@@ -48,8 +48,10 @@ impl<T> ScanState<T> {
             let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
 
             // Use the slot's own pre-allocated buffers
-            let slot_values = std::slice::from_raw_parts_mut((*slot).tts_values, natts);
-            let slot_nulls = std::slice::from_raw_parts_mut((*slot).tts_isnull, natts);
+            let slot_values =
+                std::slice::from_raw_parts_mut((*slot).tts_values, natts);
+            let slot_nulls =
+                std::slice::from_raw_parts_mut((*slot).tts_isnull, natts);
 
             PgMemoryContexts::For(self.tmp_ctx).switch_to(|_| {
                 for i in 0..natts {

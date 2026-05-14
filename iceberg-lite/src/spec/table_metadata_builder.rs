@@ -21,11 +21,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{
-    FormatVersion, MetadataLog, PartitionSpec, PartitionSpecBuilder, PartitionStatisticsFile,
-    Schema, SchemaRef, Snapshot, SnapshotLog, SnapshotReference, SnapshotRetention, SortOrder,
-    SortOrderRef, StatisticsFile, StructType, TableMetadata, TableProperties, UnboundPartitionSpec,
-    DEFAULT_PARTITION_SPEC_ID, DEFAULT_SCHEMA_ID, MAIN_BRANCH, ONE_MINUTE_MS,
-    UNPARTITIONED_LAST_ASSIGNED_ID,
+    DEFAULT_PARTITION_SPEC_ID, DEFAULT_SCHEMA_ID, FormatVersion, MAIN_BRANCH,
+    MetadataLog, ONE_MINUTE_MS, PartitionSpec, PartitionSpecBuilder,
+    PartitionStatisticsFile, Schema, SchemaRef, Snapshot, SnapshotLog,
+    SnapshotReference, SnapshotRetention, SortOrder, SortOrderRef, StatisticsFile,
+    StructType, TableMetadata, TableProperties, UNPARTITIONED_LAST_ASSIGNED_ID,
+    UnboundPartitionSpec,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::spec::{EncryptedKey, INITIAL_ROW_ID, MIN_FORMAT_VERSION_ROW_LINEAGE};
@@ -95,8 +96,8 @@ impl TableMetadataBuilder {
                 table_uuid: Uuid::now_v7(),
                 location: "".to_string(), // Overwritten immediately by set_location
                 last_sequence_number: 0,
-                last_updated_ms: 0,    // Overwritten by build() if not set before
-                last_column_id: -1,    // Overwritten immediately by add_current_schema
+                last_updated_ms: 0, // Overwritten by build() if not set before
+                last_column_id: -1, // Overwritten immediately by add_current_schema
                 current_schema_id: -1, // Overwritten immediately by add_current_schema
                 schemas: HashMap::new(),
                 partition_specs: HashMap::new(),
@@ -210,7 +211,10 @@ impl TableMetadataBuilder {
     ///
     /// # Errors
     /// - Cannot downgrade to older format versions.
-    pub fn upgrade_format_version(mut self, format_version: FormatVersion) -> Result<Self> {
+    pub fn upgrade_format_version(
+        mut self,
+        format_version: FormatVersion,
+    ) -> Result<Self> {
         if format_version < self.metadata.format_version {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
@@ -250,11 +254,16 @@ impl TableMetadataBuilder {
     ///
     /// # Errors
     /// - If properties contains a reserved property
-    pub fn set_properties(mut self, properties: HashMap<String, String>) -> Result<Self> {
+    pub fn set_properties(
+        mut self,
+        properties: HashMap<String, String>,
+    ) -> Result<Self> {
         // List of specified properties that are RESERVED and should not be persisted.
         let reserved_properties = properties
             .keys()
-            .filter(|key| TableProperties::RESERVED_PROPERTIES.contains(&key.as_str()))
+            .filter(|key| {
+                TableProperties::RESERVED_PROPERTIES.contains(&key.as_str())
+            })
             .map(ToString::to_string)
             .collect::<Vec<_>>();
 
@@ -292,7 +301,9 @@ impl TableMetadataBuilder {
         // disallow removal of reserved properties
         let reserved_properties = properties
             .iter()
-            .filter(|key| TableProperties::RESERVED_PROPERTIES.contains(&key.as_str()))
+            .filter(|key| {
+                TableProperties::RESERVED_PROPERTIES.contains(&key.as_str())
+            })
             .map(ToString::to_string)
             .collect::<Vec<_>>();
 
@@ -452,14 +463,20 @@ impl TableMetadataBuilder {
     ///
     /// # Errors
     /// - Any of the preconditions of `self.add_snapshot` are not met.
-    pub fn set_branch_snapshot(self, snapshot: Snapshot, branch: &str) -> Result<Self> {
+    pub fn set_branch_snapshot(
+        self,
+        snapshot: Snapshot,
+        branch: &str,
+    ) -> Result<Self> {
         let reference = self.metadata.refs.get(branch).cloned();
 
         let reference = if let Some(mut reference) = reference {
             if !reference.is_branch() {
                 return Err(Error::new(
                     ErrorKind::DataInvalid,
-                    format!("Cannot append snapshot to non-branch reference '{branch}'",),
+                    format!(
+                        "Cannot append snapshot to non-branch reference '{branch}'",
+                    ),
                 ));
             }
 
@@ -512,7 +529,11 @@ impl TableMetadataBuilder {
     ///
     /// # Errors
     /// - The snapshot id is unknown.
-    pub fn set_ref(mut self, ref_name: &str, reference: SnapshotReference) -> Result<Self> {
+    pub fn set_ref(
+        mut self,
+        ref_name: &str,
+        reference: SnapshotReference,
+    ) -> Result<Self> {
         if self
             .metadata
             .refs
@@ -522,7 +543,8 @@ impl TableMetadataBuilder {
             return Ok(self);
         }
 
-        let Some(snapshot) = self.metadata.snapshots.get(&reference.snapshot_id) else {
+        let Some(snapshot) = self.metadata.snapshots.get(&reference.snapshot_id)
+        else {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
                 format!(
@@ -743,7 +765,8 @@ impl TableMetadataBuilder {
         }
 
         for field_name in schema.field_id_to_name_map().values() {
-            let has_partition_conflict = self.metadata.partition_name_exists(field_name);
+            let has_partition_conflict =
+                self.metadata.partition_name_exists(field_name);
             let is_new_field = !self.metadata.name_exists_in_any_schema(field_name);
 
             if has_partition_conflict && is_new_field {
@@ -769,7 +792,10 @@ impl TableMetadataBuilder {
     /// # Errors
     /// - Partition field name conflicts with schema field name but doesn't use identity transform.
     /// - Partition field uses identity transform but references wrong source field ID.
-    fn validate_partition_field_names(&self, unbound_spec: &UnboundPartitionSpec) -> Result<()> {
+    fn validate_partition_field_names(
+        &self,
+        unbound_spec: &UnboundPartitionSpec,
+    ) -> Result<()> {
         if self.metadata.schemas.is_empty() {
             return Ok(());
         }
@@ -786,10 +812,13 @@ impl TableMetadataBuilder {
             }
 
             // If name exists in schemas, validate against current schema rules
-            if let Some(schema_field) = current_schema.field_by_name(&partition_field.name) {
+            if let Some(schema_field) =
+                current_schema.field_by_name(&partition_field.name)
+            {
                 let is_identity_transform =
                     partition_field.transform == crate::spec::Transform::Identity;
-                let has_matching_source_id = schema_field.id == partition_field.source_id;
+                let has_matching_source_id =
+                    schema_field.id == partition_field.source_id;
 
                 if !is_identity_transform {
                     return Err(Error::new(
@@ -807,7 +836,9 @@ impl TableMetadataBuilder {
                         format!(
                             "Cannot create identity partition sourced from different field in schema. \
                              Field name '{}' has id `{}` in schema but partition source id is `{}`",
-                            partition_field.name, schema_field.id, partition_field.source_id
+                            partition_field.name,
+                            schema_field.id,
+                            partition_field.source_id
                         ),
                     ));
                 }
@@ -827,15 +858,19 @@ impl TableMetadataBuilder {
     /// # Errors
     /// - The partition spec cannot be bound to the current schema.
     /// - The partition spec has non-sequential field ids and the table format version is 1.
-    pub fn add_partition_spec(mut self, unbound_spec: UnboundPartitionSpec) -> Result<Self> {
+    pub fn add_partition_spec(
+        mut self,
+        unbound_spec: UnboundPartitionSpec,
+    ) -> Result<Self> {
         let schema = self.get_current_schema()?.clone();
 
         // Check if partition field names conflict with schema field names across all schemas
         self.validate_partition_field_names(&unbound_spec)?;
 
-        let spec = PartitionSpecBuilder::new_from_unbound(unbound_spec.clone(), schema)?
-            .with_last_assigned_field_id(self.metadata.last_partition_id)
-            .build()?;
+        let spec =
+            PartitionSpecBuilder::new_from_unbound(unbound_spec.clone(), schema)?
+                .with_last_assigned_field_id(self.metadata.last_partition_id)
+                .build()?;
 
         let new_spec_id = self.reuse_or_create_new_spec_id(&spec);
         let spec_found = self.metadata.partition_specs.contains_key(&new_spec_id);
@@ -852,7 +887,9 @@ impl TableMetadataBuilder {
             return Ok(self);
         }
 
-        if self.metadata.format_version <= FormatVersion::V1 && !spec.has_sequential_ids() {
+        if self.metadata.format_version <= FormatVersion::V1
+            && !spec.has_sequential_ids()
+        {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
                 "Cannot add partition spec with non-sequential field ids to format version 1 table",
@@ -897,7 +934,9 @@ impl TableMetadataBuilder {
         if !self.metadata.partition_specs.contains_key(&spec_id) {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
-                format!("Cannot set default partition spec to unknown spec with id: '{spec_id}'",),
+                format!(
+                    "Cannot set default partition spec to unknown spec with id: '{spec_id}'",
+                ),
             ));
         }
 
@@ -931,7 +970,10 @@ impl TableMetadataBuilder {
     }
 
     /// Add a partition spec and set it as the default
-    pub fn add_default_partition_spec(self, unbound_spec: UnboundPartitionSpec) -> Result<Self> {
+    pub fn add_default_partition_spec(
+        self,
+        unbound_spec: UnboundPartitionSpec,
+    ) -> Result<Self> {
         self.add_partition_spec(unbound_spec)?
             .set_default_partition_spec(Self::LAST_ADDED)
     }
@@ -999,7 +1041,9 @@ impl TableMetadataBuilder {
             .map_err(|e| {
                 Error::new(
                     ErrorKind::DataInvalid,
-                    format!("Sort order to add is incompatible with current schema: {e}"),
+                    format!(
+                        "Sort order to add is incompatible with current schema: {e}"
+                    ),
                 )
                 .with_source(e)
             })?;
@@ -1130,7 +1174,9 @@ impl TableMetadataBuilder {
             .properties
             .get(TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX)
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT)
+            .unwrap_or(
+                TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT,
+            )
             .max(1);
 
         if self.metadata.metadata_log.len() > max_size {
@@ -1254,8 +1300,11 @@ impl TableMetadataBuilder {
                     ),
                 )
             })?;
-            fresh_spec =
-                fresh_spec.add_partition_field(source_field_name, &field.name, field.transform)?;
+            fresh_spec = fresh_spec.add_partition_field(
+                source_field_name,
+                &field.name,
+                field.transform,
+            )?;
         }
         let fresh_spec = fresh_spec.build()?;
 
@@ -1342,7 +1391,9 @@ impl TableMetadataBuilder {
         self.metadata
             .partition_specs
             .iter()
-            .find_map(|(id, old_spec)| new_spec.is_compatible_with(old_spec).then_some(*id))
+            .find_map(|(id, old_spec)| {
+                new_spec.is_compatible_with(old_spec).then_some(*id)
+            })
             .unwrap_or_else(|| {
                 self.get_highest_spec_id()
                     .map(|id| id + 1)
@@ -1422,14 +1473,14 @@ mod tests {
     use std::thread::sleep;
 
     use super::*;
+    use crate::TableIdent;
     use crate::io::FileIO;
     use crate::spec::{
-        BlobMetadata, NestedField, NullOrder, Operation, PartitionSpec, PrimitiveType, Schema,
-        SnapshotRetention, SortDirection, SortField, StructType, Summary, TableProperties,
-        Transform, Type, UnboundPartitionField,
+        BlobMetadata, NestedField, NullOrder, Operation, PartitionSpec,
+        PrimitiveType, Schema, SnapshotRetention, SortDirection, SortField,
+        StructType, Summary, TableProperties, Transform, Type, UnboundPartitionField,
     };
     use crate::table::Table;
-    use crate::TableIdent;
 
     const TEST_LOCATION: &str = "s3://bucket/test/location";
     const LAST_ASSIGNED_COLUMN_ID: i32 = 3;
@@ -1437,9 +1488,12 @@ mod tests {
     fn schema() -> Schema {
         Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "x", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(2, "y", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(3, "z", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(1, "x", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(2, "y", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(3, "z", Type::Primitive(PrimitiveType::Long))
+                    .into(),
             ])
             .build()
             .unwrap()
@@ -1467,7 +1521,9 @@ mod tests {
             .build()
     }
 
-    fn builder_without_changes(format_version: FormatVersion) -> TableMetadataBuilder {
+    fn builder_without_changes(
+        format_version: FormatVersion,
+    ) -> TableMetadataBuilder {
         TableMetadataBuilder::new(
             schema(),
             partition_spec(),
@@ -1569,20 +1625,25 @@ mod tests {
         let schema = Schema::builder()
             .with_schema_id(10)
             .with_fields(vec![
-                NestedField::required(11, "a", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(12, "b", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(11, "a", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(12, "b", Type::Primitive(PrimitiveType::Long))
+                    .into(),
                 NestedField::required(
                     13,
                     "struct",
-                    Type::Struct(StructType::new(vec![NestedField::required(
-                        14,
-                        "nested",
-                        Type::Primitive(PrimitiveType::Long),
-                    )
-                    .into()])),
+                    Type::Struct(StructType::new(vec![
+                        NestedField::required(
+                            14,
+                            "nested",
+                            Type::Primitive(PrimitiveType::Long),
+                        )
+                        .into(),
+                    ])),
                 )
                 .into(),
-                NestedField::required(15, "c", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(15, "c", Type::Primitive(PrimitiveType::Long))
+                    .into(),
             ])
             .build()
             .unwrap();
@@ -1590,7 +1651,11 @@ mod tests {
             .with_spec_id(20)
             .add_partition_field("a", "a", Transform::Identity)
             .unwrap()
-            .add_partition_field("struct.nested", "nested_partition", Transform::Identity)
+            .add_partition_field(
+                "struct.nested",
+                "nested_partition",
+                Transform::Identity,
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -1606,24 +1671,34 @@ mod tests {
             .unwrap();
 
         let (fresh_schema, fresh_spec, fresh_sort_order) =
-            TableMetadataBuilder::reassign_ids(schema, spec.into_unbound(), sort_order).unwrap();
+            TableMetadataBuilder::reassign_ids(
+                schema,
+                spec.into_unbound(),
+                sort_order,
+            )
+            .unwrap();
 
         let expected_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "a", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(2, "b", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(1, "a", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(2, "b", Type::Primitive(PrimitiveType::Long))
+                    .into(),
                 NestedField::required(
                     3,
                     "struct",
-                    Type::Struct(StructType::new(vec![NestedField::required(
-                        5,
-                        "nested",
-                        Type::Primitive(PrimitiveType::Long),
-                    )
-                    .into()])),
+                    Type::Struct(StructType::new(vec![
+                        NestedField::required(
+                            5,
+                            "nested",
+                            Type::Primitive(PrimitiveType::Long),
+                        )
+                        .into(),
+                    ])),
                 )
                 .into(),
-                NestedField::required(4, "c", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(4, "c", Type::Primitive(PrimitiveType::Long))
+                    .into(),
             ])
             .build()
             .unwrap();
@@ -1632,7 +1707,11 @@ mod tests {
             .with_spec_id(0)
             .add_partition_field("a", "a", Transform::Identity)
             .unwrap()
-            .add_partition_field("struct.nested", "nested_partition", Transform::Identity)
+            .add_partition_field(
+                "struct.nested",
+                "nested_partition",
+                Transform::Identity,
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -1682,7 +1761,10 @@ mod tests {
             sort_order(),
             TEST_LOCATION.to_string(),
             FormatVersion::V1,
-            HashMap::from_iter(vec![("property 1".to_string(), "value 1".to_string())]),
+            HashMap::from_iter(vec![(
+                "property 1".to_string(),
+                "value 1".to_string(),
+            )]),
         )
         .unwrap()
         .build()
@@ -2001,10 +2083,14 @@ mod tests {
         let added_schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::required(1, "x", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(2, "y", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(3, "z", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(4, "a", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(1, "x", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(2, "y", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(3, "z", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(4, "a", Type::Primitive(PrimitiveType::Long))
+                    .into(),
             ])
             .build()
             .unwrap();
@@ -2034,16 +2120,21 @@ mod tests {
     }
 
     #[test]
-    fn test_set_current_schema_change_is_minus_one_if_schema_was_added_in_this_change() {
+    fn test_set_current_schema_change_is_minus_one_if_schema_was_added_in_this_change()
+     {
         let builder = builder_without_changes(FormatVersion::V2);
 
         let added_schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::required(1, "x", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(2, "y", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(3, "z", Type::Primitive(PrimitiveType::Long)).into(),
-                NestedField::required(4, "a", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(1, "x", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(2, "y", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(3, "z", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::required(4, "a", Type::Primitive(PrimitiveType::Long))
+                    .into(),
             ])
             .build()
             .unwrap();
@@ -2158,22 +2249,24 @@ mod tests {
 
         let builder = builder.add_snapshot(snapshot.clone()).unwrap();
 
-        assert!(builder
-            .clone()
-            .set_ref(
-                MAIN_BRANCH,
-                SnapshotReference {
-                    snapshot_id: 10,
-                    retention: SnapshotRetention::Branch {
-                        min_snapshots_to_keep: Some(10),
-                        max_snapshot_age_ms: None,
-                        max_ref_age_ms: None,
-                    },
-                }
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot set 'main' to unknown snapshot: '10'"));
+        assert!(
+            builder
+                .clone()
+                .set_ref(
+                    MAIN_BRANCH,
+                    SnapshotReference {
+                        snapshot_id: 10,
+                        retention: SnapshotRetention::Branch {
+                            min_snapshots_to_keep: Some(10),
+                            max_snapshot_age_ms: None,
+                            max_ref_age_ms: None,
+                        },
+                    }
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot set 'main' to unknown snapshot: '10'")
+        );
 
         let build_result = builder
             .set_ref(
@@ -2440,9 +2533,10 @@ mod tests {
             .build()
             .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("Cannot find partition source field"));
+        assert!(
+            err.to_string()
+                .contains("Cannot find partition source field")
+        );
     }
 
     #[test]
@@ -2564,9 +2658,10 @@ mod tests {
         let err = builder
             .set_branch_snapshot(snapshot, MAIN_BRANCH)
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Cannot add snapshot with sequence number"));
+        assert!(
+            err.to_string()
+                .contains("Cannot add snapshot with sequence number")
+        );
     }
 
     #[test]
@@ -2594,7 +2689,8 @@ mod tests {
                 properties: HashMap::new(),
             }],
         };
-        let build_result = builder.set_statistics(statistics.clone()).build().unwrap();
+        let build_result =
+            builder.set_statistics(statistics.clone()).build().unwrap();
 
         assert_eq!(
             build_result.metadata.statistics,
@@ -2723,7 +2819,9 @@ mod tests {
 
         let table = Table::builder()
             .metadata(resp)
-            .metadata_location("s3://bucket/test/location/metadata/v1.json".to_string())
+            .metadata_location(
+                "s3://bucket/test/location/metadata/v1.json".to_string(),
+            )
             .identifier(TableIdent::from_strs(["ns1", "test1"]).unwrap())
             .file_io(FileIO::memory())
             .build()
@@ -2754,7 +2852,9 @@ mod tests {
 
         let table = Table::builder()
             .metadata(resp)
-            .metadata_location("s3://bucket/test/location/metadata/v1.json".to_string())
+            .metadata_location(
+                "s3://bucket/test/location/metadata/v1.json".to_string(),
+            )
             .identifier(TableIdent::from_strs(["ns1", "test1"]).unwrap())
             .file_io(FileIO::memory())
             .build()
@@ -2776,24 +2876,28 @@ mod tests {
         assert_eq!(1, build_result.metadata.current_schema().schema_id());
         assert_eq!(1, build_result.changes.len());
 
-        let remove_schema_ids =
-            if let TableUpdate::RemoveSchemas { schema_ids } = &build_result.changes[0] {
-                schema_ids
-            } else {
-                unreachable!("Expected RemoveSchema change")
-            };
+        let remove_schema_ids = if let TableUpdate::RemoveSchemas { schema_ids } =
+            &build_result.changes[0]
+        {
+            schema_ids
+        } else {
+            unreachable!("Expected RemoveSchema change")
+        };
         assert_eq!(remove_schema_ids, &[0]);
     }
 
     #[test]
-    fn test_schema_evolution_now_correctly_validates_partition_field_name_conflicts() {
+    fn test_schema_evolution_now_correctly_validates_partition_field_name_conflicts()
+    {
         let initial_schema = Schema::builder()
-            .with_fields(vec![NestedField::required(
-                1,
-                "data",
-                Type::Primitive(PrimitiveType::String),
-            )
-            .into()])
+            .with_fields(vec![
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+            ])
             .build()
             .unwrap();
 
@@ -2826,9 +2930,19 @@ mod tests {
 
         let evolved_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
                 // Adding a schema field with the same name as an existing partition field
-                NestedField::required(2, "bucket_data", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(
+                    2,
+                    "bucket_data",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -2850,12 +2964,14 @@ mod tests {
     #[test]
     fn test_schema_evolution_should_validate_on_schema_add_not_metadata_build() {
         let initial_schema = Schema::builder()
-            .with_fields(vec![NestedField::required(
-                1,
-                "data",
-                Type::Primitive(PrimitiveType::String),
-            )
-            .into()])
+            .with_fields(vec![
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+            ])
             .build()
             .unwrap();
 
@@ -2880,8 +2996,18 @@ mod tests {
 
         let non_conflicting_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "new_field", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    2,
+                    "new_field",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -2901,9 +3027,18 @@ mod tests {
     fn test_partition_spec_evolution_validates_schema_field_name_conflicts() {
         let initial_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "existing_field", Type::Primitive(PrimitiveType::Int))
-                    .into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    2,
+                    "existing_field",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -2954,9 +3089,18 @@ mod tests {
         // Create a table with an initial schema that has a field "existing_field"
         let initial_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "existing_field", Type::Primitive(PrimitiveType::Int))
-                    .into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    2,
+                    "existing_field",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -2983,9 +3127,18 @@ mod tests {
         // Add a second schema that removes the existing_field but keeps the data field
         let second_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(3, "new_field", Type::Primitive(PrimitiveType::String))
-                    .into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    3,
+                    "new_field",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -3003,11 +3156,24 @@ mod tests {
         // even though there's a partition field named "bucket_data"
         let third_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(3, "new_field", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::required(4, "existing_field", Type::Primitive(PrimitiveType::Int))
-                    .into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    3,
+                    "new_field",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    4,
+                    "existing_field",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -3024,13 +3190,30 @@ mod tests {
         // and doesn't exist in any historical schema should fail
         let conflicting_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(3, "new_field", Type::Primitive(PrimitiveType::String))
-                    .into(),
-                NestedField::required(4, "existing_field", Type::Primitive(PrimitiveType::Int))
-                    .into(),
-                NestedField::required(5, "bucket_data", Type::Primitive(PrimitiveType::String))
-                    .into(), // conflicts with partition field
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    3,
+                    "new_field",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    4,
+                    "existing_field",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
+                NestedField::required(
+                    5,
+                    "bucket_data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(), // conflicts with partition field
             ])
             .build()
             .unwrap();
@@ -3046,13 +3229,23 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_evolution_allows_existing_partition_field_if_exists_in_historical_schema() {
+    fn test_schema_evolution_allows_existing_partition_field_if_exists_in_historical_schema()
+     {
         // Create initial schema with a field
         let initial_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "partition_data", Type::Primitive(PrimitiveType::Int))
-                    .into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    2,
+                    "partition_data",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -3079,11 +3272,24 @@ mod tests {
         // Add a new schema that still contains the partition_data field
         let evolved_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "partition_data", Type::Primitive(PrimitiveType::Int))
-                    .into(),
-                NestedField::required(3, "new_field", Type::Primitive(PrimitiveType::String))
-                    .into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    2,
+                    "partition_data",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
+                NestedField::required(
+                    3,
+                    "new_field",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -3100,12 +3306,14 @@ mod tests {
     fn test_schema_evolution_prevents_new_field_conflicting_with_partition_field() {
         // Create initial schema WITHOUT the conflicting field
         let initial_schema = Schema::builder()
-            .with_fields(vec![NestedField::required(
-                1,
-                "data",
-                Type::Primitive(PrimitiveType::String),
-            )
-            .into()])
+            .with_fields(vec![
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+            ])
             .build()
             .unwrap();
 
@@ -3131,9 +3339,19 @@ mod tests {
         // Try to add a schema with a field that conflicts with partition field name
         let conflicting_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
                 // This field name conflicts with the partition field "bucket_data"
-                NestedField::required(2, "bucket_data", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(
+                    2,
+                    "bucket_data",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -3152,9 +3370,18 @@ mod tests {
     fn test_partition_spec_evolution_allows_non_conflicting_names() {
         let initial_schema = Schema::builder()
             .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "existing_field", Type::Primitive(PrimitiveType::Int))
-                    .into(),
+                NestedField::required(
+                    1,
+                    "data",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(
+                    2,
+                    "existing_field",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -3299,9 +3526,9 @@ mod tests {
             .into_builder(None)
             .add_snapshot(invalid_new_rows)
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Cannot add a snapshot, first-row-id is behind table next-row-id: 29 < 30"));
+        assert!(err.to_string().contains(
+            "Cannot add a snapshot, first-row-id is behind table next-row-id: 29 < 30"
+        ));
     }
 
     #[test]

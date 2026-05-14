@@ -134,7 +134,11 @@ mod tests {
     use crate::spec::schema::tests::table_schema_simple;
     use crate::spec::{PrimitiveType, Type};
 
-    fn check_schema_serde(json: &str, expected_type: Schema, _expected_enum: SchemaEnum) {
+    fn check_schema_serde(
+        json: &str,
+        expected_type: Schema,
+        _expected_enum: SchemaEnum,
+    ) {
         let desered_type: Schema = serde_json::from_str(json).unwrap();
         assert_eq!(desered_type, expected_type);
         assert!(matches!(desered_type.clone(), _expected_enum));

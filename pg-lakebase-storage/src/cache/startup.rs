@@ -3,8 +3,9 @@ use tracing::debug;
 
 use crate::cache::eviction::OrphanFileDeleted;
 use crate::cache::{
-    CacheIndex, CacheManager, CacheRecoveryReport, LogicalCacheUsage, PhysicalCacheEntry, PhysicalCacheEntryVisitor,
-    PhysicalCacheId, PhysicalCacheUsage, ScanControl,
+    CacheIndex, CacheManager, CacheRecoveryReport, LogicalCacheUsage,
+    PhysicalCacheEntry, PhysicalCacheEntryVisitor, PhysicalCacheId,
+    PhysicalCacheUsage, ScanControl,
 };
 use crate::error::StorageResult;
 
@@ -30,24 +31,36 @@ impl<'a, I: CacheIndex> StartupRecovery<'a, I> {
         let mut report = CacheRecoveryReport::default();
         let resident_bytes = self.scan_metadata_usage(&mut report).await?;
         report.logical_usage_after = LogicalCacheUsage::resident(resident_bytes);
-        self.cache.index.replace_runtime_cache_usage(report.logical_usage_after).await?;
+        self.cache
+            .index
+            .replace_runtime_cache_usage(report.logical_usage_after)
+            .await?;
 
         let mut orphan_visitor = StartupOrphanVisitor {
             cache: self.cache,
             report: &mut report,
             usage: PhysicalCacheUsage::default(),
         };
-        self.cache.visit_physical_cache_entries(&mut orphan_visitor).await?;
+        self.cache
+            .visit_physical_cache_entries(&mut orphan_visitor)
+            .await?;
         report.physical_usage_before = orphan_visitor.usage;
 
         Ok(report)
     }
 
-    async fn scan_metadata_usage(&self, report: &mut CacheRecoveryReport) -> StorageResult<u64> {
+    async fn scan_metadata_usage(
+        &self,
+        report: &mut CacheRecoveryReport,
+    ) -> StorageResult<u64> {
         let mut resident_bytes = 0_u64;
         let mut cursor = None;
         loop {
-            let page = self.cache.index.scan_meta_page(cursor, STARTUP_META_PAGE_SIZE).await?;
+            let page = self
+                .cache
+                .index
+                .scan_meta_page(cursor, STARTUP_META_PAGE_SIZE)
+                .await?;
             cursor = page.next_cursor;
             for meta in page.metas {
                 report.objects_seen += 1;
@@ -69,22 +82,29 @@ struct StartupOrphanVisitor<'a, 'r, I: CacheIndex> {
 
 #[async_trait]
 impl<I: CacheIndex> PhysicalCacheEntryVisitor for StartupOrphanVisitor<'_, '_, I> {
-    async fn visit(&mut self, entry: PhysicalCacheEntry) -> StorageResult<ScanControl> {
+    async fn visit(
+        &mut self,
+        entry: PhysicalCacheEntry,
+    ) -> StorageResult<ScanControl> {
         self.usage.add_entry(&entry);
 
         match entry.id {
-            PhysicalCacheId::Path(path) => match self.cache.delete_orphan_file_if_unclaimed(path.clone()).await? {
+            PhysicalCacheId::Path(path) => match self
+                .cache
+                .delete_orphan_file_if_unclaimed(path.clone())
+                .await?
+            {
                 Some(OrphanFileDeleted::Complete) => {
                     debug!(path = %path.display(), "startup: deleted orphan complete file");
                     self.report.orphan_complete_files += 1;
-                },
+                }
                 Some(OrphanFileDeleted::Partial) => {
                     debug!(path = %path.display(), "startup: deleted orphan partial file");
                     self.report.orphan_partial_files += 1;
-                },
-                None => {},
+                }
+                None => {}
             },
-            PhysicalCacheId::SmallObject(_) => {},
+            PhysicalCacheId::SmallObject(_) => {}
         }
 
         Ok(ScanControl::Continue)

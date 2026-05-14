@@ -4,9 +4,9 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::future::Future;
 
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::{JoinError, JoinSet};
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{Instant, timeout_at};
 use tracing::warn;
 
 use crate::cache::CacheIndex;
@@ -15,7 +15,9 @@ use crate::protocol::WireRequest;
 use crate::session::StorageContext;
 
 use super::dispatch::RequestDispatcher;
-use super::response_budget::{reserved_read_response_bytes, QueuedResponse, ResponseByteLimiter};
+use super::response_budget::{
+    QueuedResponse, ResponseByteLimiter, reserved_read_response_bytes,
+};
 
 pub(super) struct RequestTasks {
     tasks: JoinSet<()>,
@@ -23,7 +25,9 @@ pub(super) struct RequestTasks {
 
 impl RequestTasks {
     pub(super) fn new() -> Self {
-        Self { tasks: JoinSet::new() }
+        Self {
+            tasks: JoinSet::new(),
+        }
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -43,11 +47,11 @@ impl RequestTasks {
         max_read_size: u32,
         response_tx: mpsc::Sender<QueuedResponse>,
     ) -> StorageResult<()> {
-        let permit = request_limiter
-            .acquire_owned()
-            .await
-            .map_err(|error| StorageError::io("request limiter closed", io::Error::other(error)))?;
-        let reserved_response_bytes = reserved_read_response_bytes(&request, max_read_size);
+        let permit = request_limiter.acquire_owned().await.map_err(|error| {
+            StorageError::io("request limiter closed", io::Error::other(error))
+        })?;
+        let reserved_response_bytes =
+            reserved_read_response_bytes(&request, max_read_size);
         // Admit synchronously in wire order on the inbound loop, before spawning the dispatch
         // task. See [`RequestDispatcher::admit`] for the full ordering contract: a READ admitted
         // here holds a guard that keeps the target handle alive until `dispatch` completes, so a
@@ -85,19 +89,26 @@ impl RequestTasks {
         while self.tasks.join_next().await.is_some() {}
     }
 
-    pub(super) async fn drain_until(&mut self, drain_deadline: Instant, client_addr: &str) -> StorageResult<()> {
+    pub(super) async fn drain_until(
+        &mut self,
+        drain_deadline: Instant,
+        client_addr: &str,
+    ) -> StorageResult<()> {
         match timeout_at(drain_deadline, self.drain()).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
                 warn!(client_addr, error = %error, "storage connection request task failed while draining");
                 self.abort_all().await;
                 Err(StorageError::from_join_error("request task failed", error))
-            },
+            }
             Err(_) => {
-                warn!(client_addr, "storage connection drain timeout elapsed; aborting request tasks");
+                warn!(
+                    client_addr,
+                    "storage connection drain timeout elapsed; aborting request tasks"
+                );
                 self.abort_all().await;
                 Ok(())
-            },
+            }
         }
     }
 

@@ -94,8 +94,10 @@ mod tests {
         assert_eq!(accessor.r#type(), &PrimitiveType::Boolean);
         assert_eq!(accessor.position(), 1);
 
-        let test_struct =
-            Struct::from_iter(vec![Some(Literal::bool(false)), Some(Literal::bool(true))]);
+        let test_struct = Struct::from_iter(vec![
+            Some(Literal::bool(false)),
+            Some(Literal::bool(true)),
+        ]);
 
         assert_eq!(accessor.get(&test_struct).unwrap(), Some(Datum::bool(true)));
     }
@@ -120,8 +122,10 @@ mod tests {
         assert_eq!(accessor.r#type(), &PrimitiveType::Boolean);
         //assert_eq!(accessor.position(), 1);
 
-        let nested_test_struct =
-            Struct::from_iter(vec![Some(Literal::bool(false)), Some(Literal::bool(true))]);
+        let nested_test_struct = Struct::from_iter(vec![
+            Some(Literal::bool(false)),
+            Some(Literal::bool(true)),
+        ]);
 
         let test_struct = Struct::from_iter(vec![
             Some(Literal::bool(false)),
@@ -140,7 +144,8 @@ mod tests {
         assert_eq!(accessor.r#type(), &PrimitiveType::Boolean);
         //assert_eq!(accessor.position(), 1);
 
-        let nested_test_struct = Struct::from_iter(vec![None, Some(Literal::bool(true))]);
+        let nested_test_struct =
+            Struct::from_iter(vec![None, Some(Literal::bool(true))]);
 
         let test_struct = Struct::from_iter(vec![
             Some(Literal::bool(false)),

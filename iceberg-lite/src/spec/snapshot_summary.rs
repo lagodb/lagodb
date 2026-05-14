@@ -113,7 +113,8 @@ impl SnapshotSummaryCollector {
         data_file: &DataFile,
         is_add_file: bool,
     ) {
-        let partition_path = partition_spec.partition_to_path(&data_file.partition, schema);
+        let partition_path =
+            partition_spec.partition_to_path(&data_file.partition, schema);
         let metrics = self.partition_metrics.entry(partition_path).or_default();
 
         if is_add_file {
@@ -152,8 +153,10 @@ impl SnapshotSummaryCollector {
         );
 
         if changed_partitions_count <= self.max_changed_partitions_for_summaries {
-            for (partition_path, update_metrics_partition) in &self.partition_metrics {
-                let property_key = format!("{CHANGED_PARTITION_PREFIX}{partition_path}");
+            for (partition_path, update_metrics_partition) in &self.partition_metrics
+            {
+                let property_key =
+                    format!("{CHANGED_PARTITION_PREFIX}{partition_path}");
                 let partition_summary = update_metrics_partition
                     .to_map()
                     .into_iter()
@@ -240,7 +243,8 @@ impl UpdateMetrics {
             }
             ManifestContentType::Deletes => {
                 self.added_delete_files += manifest.added_files_count.unwrap_or(0);
-                self.removed_delete_files += manifest.deleted_files_count.unwrap_or(0);
+                self.removed_delete_files +=
+                    manifest.deleted_files_count.unwrap_or(0);
             }
         }
     }
@@ -322,8 +326,13 @@ impl UpdateMetrics {
     }
 }
 
-fn set_if_positive<T>(properties: &mut HashMap<String, String>, value: T, property_name: &str)
-where T: PartialOrd + Default + ToString {
+fn set_if_positive<T>(
+    properties: &mut HashMap<String, String>,
+    value: T,
+    property_name: &str,
+) where
+    T: PartialOrd + Default + ToString,
+{
     if value > T::default() {
         properties.insert(property_name.to_string(), value.to_string());
     }
@@ -347,11 +356,16 @@ pub(crate) fn update_snapshot_summaries(
     }
 
     let mut summary = match previous_summary {
-        Some(prev_summary) if truncate_full_table && summary.operation == Operation::Overwrite => {
+        Some(prev_summary)
+            if truncate_full_table && summary.operation == Operation::Overwrite =>
+        {
             truncate_table_summary(summary, prev_summary)
                 .map_err(|err| {
-                    Error::new(ErrorKind::Unexpected, "Failed to truncate table summary.")
-                        .with_source(err)
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "Failed to truncate table summary.",
+                    )
+                    .with_source(err)
                 })
                 .unwrap()
         }
@@ -425,7 +439,10 @@ fn get_prop(previous_summary: &Summary, prop: &str) -> Result<i32> {
 }
 
 #[allow(dead_code)]
-fn truncate_table_summary(mut summary: Summary, previous_summary: &Summary) -> Result<Summary> {
+fn truncate_table_summary(
+    mut summary: Summary,
+    previous_summary: &Summary,
+) -> Result<Summary> {
     for prop in [
         TOTAL_DATA_FILES,
         TOTAL_DELETE_FILES,
@@ -523,8 +540,8 @@ mod tests {
 
     use super::*;
     use crate::spec::{
-        DataFileFormat, Datum, Literal, NestedField, PartitionSpec, PrimitiveType, Schema, Struct,
-        Transform, Type, UnboundPartitionField,
+        DataFileFormat, Datum, Literal, NestedField, PartitionSpec, PrimitiveType,
+        Schema, Struct, Transform, Type, UnboundPartitionField,
     };
 
     #[test]
@@ -567,7 +584,9 @@ mod tests {
             additional_properties: new_props,
         };
 
-        let updated = update_snapshot_summaries(summary, Some(&previous_summary), false).unwrap();
+        let updated =
+            update_snapshot_summaries(summary, Some(&previous_summary), false)
+                .unwrap();
 
         assert_eq!(
             updated.additional_properties.get(TOTAL_DATA_FILES).unwrap(),
@@ -720,8 +739,18 @@ mod tests {
         let schema = Arc::new(
             Schema::builder()
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -870,8 +899,18 @@ mod tests {
         let schema = Arc::new(
             Schema::builder()
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),

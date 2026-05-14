@@ -57,18 +57,25 @@ impl FrameHeader {
         buf
     }
 
-    pub(crate) fn decode_expecting(input: &mut impl Buf, expected: FrameKind) -> StorageResult<u64> {
+    pub(crate) fn decode_expecting(
+        input: &mut impl Buf,
+        expected: FrameKind,
+    ) -> StorageResult<u64> {
         let magic = get_u32(input)?;
         if magic != MAGIC {
             return Err(StorageError::protocol(format!("bad magic 0x{magic:08x}")));
         }
         let version = get_u16(input)?;
         if version != VERSION {
-            return Err(StorageError::protocol(format!("unsupported protocol version {version}")));
+            return Err(StorageError::protocol(format!(
+                "unsupported protocol version {version}"
+            )));
         }
         let kind = super::traits::get_u8(input)?;
         if kind != expected.code() {
-            return Err(StorageError::protocol(format!("unexpected frame kind {kind}")));
+            return Err(StorageError::protocol(format!(
+                "unexpected frame kind {kind}"
+            )));
         }
         get_u64(input)
     }

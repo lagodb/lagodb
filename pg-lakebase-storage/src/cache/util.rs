@@ -12,8 +12,14 @@ pub(crate) fn now_ns() -> u64 {
         .unwrap_or_default()
 }
 
-pub(crate) fn should_touch(last_access_ns: u64, now_ns: u64, touch_granularity_ns: u64) -> bool {
-    last_access_ns == 0 || touch_granularity_ns == 0 || now_ns.saturating_sub(last_access_ns) >= touch_granularity_ns
+pub(crate) fn should_touch(
+    last_access_ns: u64,
+    now_ns: u64,
+    touch_granularity_ns: u64,
+) -> bool {
+    last_access_ns == 0
+        || touch_granularity_ns == 0
+        || now_ns.saturating_sub(last_access_ns) >= touch_granularity_ns
 }
 
 /// Ensures parent segments exist before creating/truncating a cache file under `path`.

@@ -28,8 +28,8 @@ use crate::service::StorageService;
 use crate::session::handle_table::HandleTable;
 
 use super::fixtures::{
-    close, memory_cache, memory_cache_with_limits, open_file, residency_hint, BlockingHeadBackend, BUCKET,
-    DEFAULT_STORE, LARGE_KEY, SMALL_KEY,
+    BUCKET, BlockingHeadBackend, DEFAULT_STORE, LARGE_KEY, SMALL_KEY, close,
+    memory_cache, memory_cache_with_limits, open_file, residency_hint,
 };
 
 /// Concurrent OPENs on a missing small object converge through a single leader HEAD.
@@ -44,13 +44,20 @@ async fn concurrent_small_opens_share_a_single_head() {
     memory.insert(key.clone(), b"abc".to_vec());
     let backend = Arc::new(BlockingHeadBackend::new(memory));
     let cache = memory_cache();
-    let service = Arc::new(StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, backend.clone()).unwrap(), cache.clone()));
+    let service = Arc::new(StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, backend.clone())
+            .unwrap(),
+        cache.clone(),
+    ));
     let handles = Arc::new(HandleTable::new());
 
     // Kick off the leader, then stall it inside the blocked HEAD.
     let leader_service = service.clone();
     let leader_handles = handles.clone();
-    let leader = tokio::spawn(async move { open_file(&leader_service, &leader_handles, BUCKET, SMALL_KEY).await });
+    let leader = tokio::spawn(async move {
+        open_file(&leader_service, &leader_handles, BUCKET, SMALL_KEY).await
+    });
     backend.wait_until_first_head_starts().await;
 
     // Spawn followers that must all observe the single in-flight HEAD as a `Waiting` outcome.
@@ -58,7 +65,9 @@ async fn concurrent_small_opens_share_a_single_head() {
     for _ in 0..4 {
         let service = service.clone();
         let handles = handles.clone();
-        followers.spawn(async move { open_file(&service, &handles, BUCKET, SMALL_KEY).await });
+        followers.spawn(async move {
+            open_file(&service, &handles, BUCKET, SMALL_KEY).await
+        });
     }
 
     // Give the followers a chance to reach `lookup_for_open` and register as waiters. We
@@ -76,12 +85,22 @@ async fn concurrent_small_opens_share_a_single_head() {
         follower_handles.push(open.unwrap());
     }
 
-    assert_eq!(backend.head_calls(), 1, "establishment single-flight must collapse all HEADs into one");
+    assert_eq!(
+        backend.head_calls(),
+        1,
+        "establishment single-flight must collapse all HEADs into one"
+    );
     // Every caller must end up bound to a SmallKv residency — the leader's admit is visible to
     // followers by the time `lookup_for_open` retries.
-    assert_eq!(residency_hint(&handles, leader_open.handle), Some(crate::cache::ResidencyStateHint::SmallKv),);
+    assert_eq!(
+        residency_hint(&handles, leader_open.handle),
+        Some(crate::cache::ResidencyStateHint::SmallKv),
+    );
     for open in &follower_handles {
-        assert_eq!(residency_hint(&handles, open.handle), Some(crate::cache::ResidencyStateHint::SmallKv),);
+        assert_eq!(
+            residency_hint(&handles, open.handle),
+            Some(crate::cache::ResidencyStateHint::SmallKv),
+        );
     }
 
     close(&service, &handles, leader_open.handle).await;
@@ -101,19 +120,28 @@ async fn concurrent_large_opens_share_a_single_head() {
     memory.insert(key.clone(), b"abcdefghij".to_vec());
     let backend = Arc::new(BlockingHeadBackend::new(memory));
     let cache = memory_cache_with_limits(4, 4);
-    let service = Arc::new(StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, backend.clone()).unwrap(), cache.clone()));
+    let service = Arc::new(StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, backend.clone())
+            .unwrap(),
+        cache.clone(),
+    ));
     let handles = Arc::new(HandleTable::new());
 
     let leader_service = service.clone();
     let leader_handles = handles.clone();
-    let leader = tokio::spawn(async move { open_file(&leader_service, &leader_handles, BUCKET, LARGE_KEY).await });
+    let leader = tokio::spawn(async move {
+        open_file(&leader_service, &leader_handles, BUCKET, LARGE_KEY).await
+    });
     backend.wait_until_first_head_starts().await;
 
     let mut followers = JoinSet::new();
     for _ in 0..4 {
         let service = service.clone();
         let handles = handles.clone();
-        followers.spawn(async move { open_file(&service, &handles, BUCKET, LARGE_KEY).await });
+        followers.spawn(async move {
+            open_file(&service, &handles, BUCKET, LARGE_KEY).await
+        });
     }
     for _ in 0..16 {
         tokio::task::yield_now().await;
@@ -127,10 +155,20 @@ async fn concurrent_large_opens_share_a_single_head() {
         follower_handles.push(open.unwrap());
     }
 
-    assert_eq!(backend.head_calls(), 1, "establishment single-flight must collapse all HEADs into one");
-    assert_eq!(residency_hint(&handles, leader_open.handle), Some(crate::cache::ResidencyStateHint::LargeFill),);
+    assert_eq!(
+        backend.head_calls(),
+        1,
+        "establishment single-flight must collapse all HEADs into one"
+    );
+    assert_eq!(
+        residency_hint(&handles, leader_open.handle),
+        Some(crate::cache::ResidencyStateHint::LargeFill),
+    );
     for open in &follower_handles {
-        assert_eq!(residency_hint(&handles, open.handle), Some(crate::cache::ResidencyStateHint::LargeFill),);
+        assert_eq!(
+            residency_hint(&handles, open.handle),
+            Some(crate::cache::ResidencyStateHint::LargeFill),
+        );
     }
 
     close(&service, &handles, leader_open.handle).await;
@@ -149,19 +187,28 @@ async fn follower_receives_equivalent_error_when_leader_head_fails() {
     let backend = Arc::new(BlockingHeadBackend::new(memory));
     backend.fail_first_head_with_not_found();
     let cache = memory_cache();
-    let service = Arc::new(StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, backend.clone()).unwrap(), cache.clone()));
+    let service = Arc::new(StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, backend.clone())
+            .unwrap(),
+        cache.clone(),
+    ));
     let handles = Arc::new(HandleTable::new());
 
     let leader_service = service.clone();
     let leader_handles = handles.clone();
-    let leader = tokio::spawn(async move { service_open_result(&leader_service, &leader_handles, SMALL_KEY).await });
+    let leader = tokio::spawn(async move {
+        service_open_result(&leader_service, &leader_handles, SMALL_KEY).await
+    });
     backend.wait_until_first_head_starts().await;
 
     let mut followers = JoinSet::new();
     for _ in 0..3 {
         let service = service.clone();
         let handles = handles.clone();
-        followers.spawn(async move { service_open_result(&service, &handles, SMALL_KEY).await });
+        followers.spawn(async move {
+            service_open_result(&service, &handles, SMALL_KEY).await
+        });
     }
     for _ in 0..16 {
         tokio::task::yield_now().await;
@@ -173,11 +220,18 @@ async fn follower_receives_equivalent_error_when_leader_head_fails() {
     assert_eq!(leader_err.kind(), StorageErrorKind::NotFound);
 
     while let Some(follower) = followers.join_next().await {
-        let err = follower.unwrap().err().expect("follower must surface leader's failure");
+        let err = follower
+            .unwrap()
+            .err()
+            .expect("follower must surface leader's failure");
         assert_eq!(err.kind(), StorageErrorKind::NotFound);
     }
 
-    assert_eq!(backend.head_calls(), 1, "followers must not issue their own HEAD after the leader fails",);
+    assert_eq!(
+        backend.head_calls(),
+        1,
+        "followers must not issue their own HEAD after the leader fails",
+    );
 }
 
 async fn service_open_result<I: crate::cache::CacheIndex + 'static>(
@@ -188,7 +242,7 @@ async fn service_open_result<I: crate::cache::CacheIndex + 'static>(
     use crate::handle::OpenFlags;
     use crate::service::command::{OpenCommand, StorageCommand};
     use crate::service::reply::CommandOutput;
-    use crate::service::tests::fixtures::{OpenResult, BUCKET, DEFAULT_STORE};
+    use crate::service::tests::fixtures::{BUCKET, DEFAULT_STORE, OpenResult};
 
     let reply = service
         .execute(

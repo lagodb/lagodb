@@ -37,7 +37,9 @@ impl StoreId {
             )));
         }
         if !value.bytes().all(is_store_id_byte) {
-            return Err(StorageError::invalid_path("store id may only contain ASCII letters, digits, '.', '_' or '-'"));
+            return Err(StorageError::invalid_path(
+                "store id may only contain ASCII letters, digits, '.', '_' or '-'",
+            ));
         }
         Ok(Self(value))
     }
@@ -83,7 +85,11 @@ pub struct ObjectLocation {
 }
 
 impl ObjectLocation {
-    pub fn new(store_id: impl Into<String>, bucket: impl Into<String>, key: impl Into<String>) -> StorageResult<Self> {
+    pub fn new(
+        store_id: impl Into<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+    ) -> StorageResult<Self> {
         let store_id = StoreId::new(store_id)?;
         let bucket = bucket.into();
         let key = key.into();
@@ -96,17 +102,25 @@ impl ObjectLocation {
         if key.is_empty() {
             return Err(StorageError::invalid_path("missing object key"));
         }
-        Ok(Self { store_id, bucket, key })
+        Ok(Self {
+            store_id,
+            bucket,
+            key,
+        })
     }
 
     pub fn parse_path(path: &str) -> StorageResult<Self> {
         let path = path.trim_start_matches('/');
-        let (store_id, rest) = path
-            .split_once('/')
-            .ok_or_else(|| StorageError::invalid_path(format!("expected /store_id/bucket/key, got {path:?}")))?;
-        let (bucket, key) = rest
-            .split_once('/')
-            .ok_or_else(|| StorageError::invalid_path(format!("expected /store_id/bucket/key, got {path:?}")))?;
+        let (store_id, rest) = path.split_once('/').ok_or_else(|| {
+            StorageError::invalid_path(format!(
+                "expected /store_id/bucket/key, got {path:?}"
+            ))
+        })?;
+        let (bucket, key) = rest.split_once('/').ok_or_else(|| {
+            StorageError::invalid_path(format!(
+                "expected /store_id/bucket/key, got {path:?}"
+            ))
+        })?;
         Self::new(store_id, bucket, key)
     }
 
@@ -200,16 +214,23 @@ mod tests {
 
     #[test]
     fn rejects_bucket_path_separator() {
-        let error = ObjectLocation::new("store-a", "bucket/path", "file").unwrap_err();
+        let error =
+            ObjectLocation::new("store-a", "bucket/path", "file").unwrap_err();
 
-        assert_eq!(error.to_string(), "invalid path: bucket must not contain '/'");
+        assert_eq!(
+            error.to_string(),
+            "invalid path: bucket must not contain '/'"
+        );
     }
 
     #[test]
     fn rejects_invalid_store_id() {
         let error = ObjectLocation::new("store/a", "bucket", "file").unwrap_err();
 
-        assert_eq!(error.to_string(), "invalid path: store id may only contain ASCII letters, digits, '.', '_' or '-'");
+        assert_eq!(
+            error.to_string(),
+            "invalid path: store id may only contain ASCII letters, digits, '.', '_' or '-'"
+        );
     }
 
     #[test]
@@ -219,7 +240,10 @@ mod tests {
         assert_eq!(chunk_count(8, 4), 2);
         assert_eq!(chunk_count(9, 4), 3);
         assert_eq!(chunk_range(10, 4, 2), 8..10);
-        assert_eq!(chunk_range(u64::MAX, 4, u64::MAX / 4), u64::MAX - 3..u64::MAX);
+        assert_eq!(
+            chunk_range(u64::MAX, 4, u64::MAX / 4),
+            u64::MAX - 3..u64::MAX
+        );
     }
 
     #[test]

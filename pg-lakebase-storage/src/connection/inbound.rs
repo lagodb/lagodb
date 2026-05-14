@@ -9,7 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::unix::OwnedReadHalf;
 
 use crate::error::{StorageError, StorageResult};
-use crate::protocol::{decode_request, WireRequest, MAX_FRAME_BYTES};
+use crate::protocol::{MAX_FRAME_BYTES, WireRequest, decode_request};
 
 /// Event produced by the inbound reader each loop iteration.
 pub(super) enum InboundEvent {
@@ -30,14 +30,19 @@ pub(super) struct InboundReader {
 
 impl InboundReader {
     pub(super) fn new(reader: OwnedReadHalf) -> Self {
-        Self { reader, buf: Vec::new() }
+        Self {
+            reader,
+            buf: Vec::new(),
+        }
     }
 
     pub(super) async fn next_event(&mut self) -> StorageResult<InboundEvent> {
         let mut len_buf = [0_u8; 4];
         match self.reader.read_exact(&mut len_buf).await {
-            Ok(_) => {},
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(InboundEvent::Closed),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Ok(InboundEvent::Closed);
+            }
             Err(e) => return Err(e.into()),
         }
         let len = u32::from_be_bytes(len_buf) as usize;

@@ -64,15 +64,13 @@ pub unsafe fn extract_and_remove_options(
 
     for i in 0..length {
         // SAFETY: i < length, so cell.add(i) is within the list allocation.
-        let def_elem_ptr = unsafe {
-            (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem
-        };
+        let def_elem_ptr =
+            unsafe { (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem };
         // SAFETY: DefElem is a valid Postgres node with a C-string defname.
         let def_name_cstr = unsafe { CStr::from_ptr((*def_elem_ptr).defname) };
         let def_name = def_name_cstr.to_string_lossy();
 
-        if let Some(def) = valid_options.iter().find(|opt| opt.name == &*def_name)
-        {
+        if let Some(def) = valid_options.iter().find(|opt| opt.name == &*def_name) {
             // SAFETY: defGetString reads from a valid DefElem node.
             let raw_val = unsafe {
                 if (*def_elem_ptr).arg.is_null() {
@@ -85,7 +83,10 @@ pub unsafe fn extract_and_remove_options(
                 }
             };
 
-            if custom_opts.iter().any(|(k, _): &(String, _)| *k == *def_name) {
+            if custom_opts
+                .iter()
+                .any(|(k, _): &(String, _)| *k == *def_name)
+            {
                 return Err(format!(
                     "option '{}' specified more than once",
                     def_name
@@ -106,10 +107,7 @@ pub unsafe fn extract_and_remove_options(
         } else {
             // SAFETY: lappend is safe for a valid (or null) list and node.
             new_pg_opts = unsafe {
-                pg_sys::lappend(
-                    new_pg_opts,
-                    def_elem_ptr as *mut std::ffi::c_void,
-                )
+                pg_sys::lappend(new_pg_opts, def_elem_ptr as *mut std::ffi::c_void)
             };
         }
     }

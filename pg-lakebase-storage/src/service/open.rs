@@ -17,16 +17,24 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::backend::RegisteredStore;
-use crate::cache::{CacheIndex, EstablishLeader, OpenOutcome, Residency, ResidencyStateHint};
+use crate::cache::{
+    CacheIndex, EstablishLeader, OpenOutcome, Residency, ResidencyStateHint,
+};
 use crate::error::StorageResult;
 use crate::object::ObjectLocation;
-use crate::service::command::OpenCommand;
-use crate::service::reply::{CommandOutput, OpenOutput, ResponseAttachment, ServiceReply};
 use crate::service::StorageService;
+use crate::service::command::OpenCommand;
+use crate::service::reply::{
+    CommandOutput, OpenOutput, ResponseAttachment, ServiceReply,
+};
 use crate::session::handle_table::{HandleTable, ReservedOpen};
 
 impl<I: CacheIndex + 'static> StorageService<I> {
-    pub(super) async fn handle_open(&self, handles: &HandleTable, command: OpenCommand) -> StorageResult<ServiceReply> {
+    pub(super) async fn handle_open(
+        &self,
+        handles: &HandleTable,
+        command: OpenCommand,
+    ) -> StorageResult<ServiceReply> {
         let key = ObjectLocation::new(command.store_id, command.bucket, command.key)?;
         let store = self.registry().resolve(key.store_id())?;
         self.cache.validate_file_cache_paths(&key)?;
@@ -77,10 +85,10 @@ impl<I: CacheIndex + 'static> StorageService<I> {
                     // Leader published `Succeeded`; loop back and the next `lookup_for_open`
                     // observes a hit (or, in the pathological case of an immediate invalidate
                     // racing against the retry, another miss that this caller is free to lead).
-                },
+                }
                 OpenOutcome::Establish(leader) => {
                     return self.populate_as_leader(store, leader).await;
-                },
+                }
             }
         }
     }
@@ -147,15 +155,18 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         let size = residency.size();
         let hint = residency.state_hint();
         let direct_file = match hint {
-            ResidencyStateHint::CompleteFile => Some(self.cache.open_complete_file(&key).await?),
+            ResidencyStateHint::CompleteFile => {
+                Some(self.cache.open_complete_file(&key).await?)
+            }
             ResidencyStateHint::SmallKv | ResidencyStateHint::LargeFill => None,
         };
         let direct_io = direct_file.is_some();
         let residency = Arc::new(residency);
         let etag = match &residency.body {
-            crate::cache::ResidencyBody::Small { meta, .. } | crate::cache::ResidencyBody::Complete { meta } => {
+            crate::cache::ResidencyBody::Small { meta, .. }
+            | crate::cache::ResidencyBody::Complete { meta } => {
                 meta.etag().map(str::to_string)
-            },
+            }
             crate::cache::ResidencyBody::LargeFill { session } => session.info().etag,
         };
         let state = handles.open_reserved(ReservedOpen {
@@ -179,7 +190,10 @@ impl<I: CacheIndex + 'static> StorageService<I> {
             direct_io,
         });
         match direct_file {
-            Some(file) => Ok(ServiceReply::with_attachment(output, ResponseAttachment::File(file))),
+            Some(file) => Ok(ServiceReply::with_attachment(
+                output,
+                ResponseAttachment::File(file),
+            )),
             None => Ok(ServiceReply::new(output)),
         }
     }

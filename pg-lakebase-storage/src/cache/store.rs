@@ -72,7 +72,10 @@ pub enum ScanControl {
 /// Visitor invoked for each physical cache entry during scans.
 #[async_trait]
 pub trait PhysicalCacheEntryVisitor: Send {
-    async fn visit(&mut self, entry: PhysicalCacheEntry) -> StorageResult<ScanControl>;
+    async fn visit(
+        &mut self,
+        entry: PhysicalCacheEntry,
+    ) -> StorageResult<ScanControl>;
 }
 
 /// Abstract access to one kind of payload storage (file-backed cache directory or small-object rows).
@@ -82,10 +85,17 @@ pub trait PhysicalCacheEntryVisitor: Send {
 /// which must not run unless metadata proves the key is not [`crate::cache::CacheState::SmallKv`].
 #[async_trait]
 pub trait CacheStore {
-    async fn visit_entries(&self, visitor: &mut dyn PhysicalCacheEntryVisitor) -> StorageResult<()>;
+    async fn visit_entries(
+        &self,
+        visitor: &mut dyn PhysicalCacheEntryVisitor,
+    ) -> StorageResult<()>;
 
-    async fn stat_entry(&self, id: &PhysicalCacheId) -> StorageResult<PhysicalCacheStat>;
-    async fn delete_entry(&self, id: &PhysicalCacheId) -> StorageResult<DeleteReport>;
+    async fn stat_entry(
+        &self,
+        id: &PhysicalCacheId,
+    ) -> StorageResult<PhysicalCacheStat>;
+    async fn delete_entry(&self, id: &PhysicalCacheId)
+    -> StorageResult<DeleteReport>;
 }
 
 /// Walks the unified `<root>/objects/` tree and classifies each cache file via
@@ -111,12 +121,17 @@ pub(crate) struct SmallObjectStore<'a, I: CacheIndex> {
 
 #[async_trait]
 impl CacheStore for FileCacheStore {
-    async fn visit_entries(&self, visitor: &mut dyn PhysicalCacheEntryVisitor) -> StorageResult<()> {
+    async fn visit_entries(
+        &self,
+        visitor: &mut dyn PhysicalCacheEntryVisitor,
+    ) -> StorageResult<()> {
         let mut dirs = vec![self.paths.objects_dir()];
         while let Some(next_dir) = dirs.pop() {
             let mut dir = match tokio::fs::read_dir(&next_dir).await {
                 Ok(dir) => dir,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
                 Err(error) => return Err(error.into()),
             };
             while let Some(entry) = dir.next_entry().await? {
@@ -132,10 +147,13 @@ impl CacheStore for FileCacheStore {
                 // Unknown filenames (wrong prefix / wrong suffix) are quietly ignored: the cache
                 // directory may pick up temp files from partially-completed filesystem operations
                 // and startup recovery should not choke on them.
-                let Some((object_key, kind)) = self.paths.parse_cache_path(&path) else {
+                let Some((object_key, kind)) = self.paths.parse_cache_path(&path)
+                else {
                     continue;
                 };
-                let stat = self.stat_entry(&PhysicalCacheId::Path(path.clone())).await?;
+                let stat = self
+                    .stat_entry(&PhysicalCacheId::Path(path.clone()))
+                    .await?;
                 let entry = PhysicalCacheEntry {
                     store_kind: kind.into(),
                     id: PhysicalCacheId::Path(path),
@@ -152,7 +170,10 @@ impl CacheStore for FileCacheStore {
         Ok(())
     }
 
-    async fn stat_entry(&self, id: &PhysicalCacheId) -> StorageResult<PhysicalCacheStat> {
+    async fn stat_entry(
+        &self,
+        id: &PhysicalCacheId,
+    ) -> StorageResult<PhysicalCacheStat> {
         let PhysicalCacheId::Path(path) = id else {
             return Err(StorageError::cache("file cache store received non-file id"));
         };
@@ -161,7 +182,10 @@ impl CacheStore for FileCacheStore {
         })
     }
 
-    async fn delete_entry(&self, id: &PhysicalCacheId) -> StorageResult<DeleteReport> {
+    async fn delete_entry(
+        &self,
+        id: &PhysicalCacheId,
+    ) -> StorageResult<DeleteReport> {
         let PhysicalCacheId::Path(path) = id else {
             return Err(StorageError::cache("file cache store received non-file id"));
         };
@@ -171,8 +195,12 @@ impl CacheStore for FileCacheStore {
             Err(error) => return Err(error.into()),
         };
         match tokio::fs::remove_file(path).await {
-            Ok(()) => Ok(DeleteReport { bytes_deleted: bytes }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(DeleteReport { bytes_deleted: 0 }),
+            Ok(()) => Ok(DeleteReport {
+                bytes_deleted: bytes,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(DeleteReport { bytes_deleted: 0 })
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -180,12 +208,18 @@ impl CacheStore for FileCacheStore {
 
 #[async_trait]
 impl<I: CacheIndex> CacheStore for SmallObjectStore<'_, I> {
-    async fn visit_entries(&self, visitor: &mut dyn PhysicalCacheEntryVisitor) -> StorageResult<()> {
+    async fn visit_entries(
+        &self,
+        visitor: &mut dyn PhysicalCacheEntryVisitor,
+    ) -> StorageResult<()> {
         const PAGE_SIZE: usize = 1024;
 
         let mut cursor = None;
         loop {
-            let page = self.index.scan_small_entries_page(cursor, PAGE_SIZE).await?;
+            let page = self
+                .index
+                .scan_small_entries_page(cursor, PAGE_SIZE)
+                .await?;
             cursor = page.next_cursor;
             for entry in page.entries {
                 let physical = PhysicalCacheEntry {
@@ -207,20 +241,37 @@ impl<I: CacheIndex> CacheStore for SmallObjectStore<'_, I> {
         Ok(())
     }
 
-    async fn stat_entry(&self, id: &PhysicalCacheId) -> StorageResult<PhysicalCacheStat> {
+    async fn stat_entry(
+        &self,
+        id: &PhysicalCacheId,
+    ) -> StorageResult<PhysicalCacheStat> {
         let PhysicalCacheId::SmallObject(key) = id else {
-            return Err(StorageError::cache("small object store received non-small id"));
+            return Err(StorageError::cache(
+                "small object store received non-small id",
+            ));
         };
-        let bytes = self.index.get_small(key).await?.map(|data| data.len() as u64).unwrap_or(0);
+        let bytes = self
+            .index
+            .get_small(key)
+            .await?
+            .map(|data| data.len() as u64)
+            .unwrap_or(0);
         Ok(PhysicalCacheStat { bytes })
     }
 
-    async fn delete_entry(&self, id: &PhysicalCacheId) -> StorageResult<DeleteReport> {
+    async fn delete_entry(
+        &self,
+        id: &PhysicalCacheId,
+    ) -> StorageResult<DeleteReport> {
         let PhysicalCacheId::SmallObject(key) = id else {
-            return Err(StorageError::cache("small object store received non-small id"));
+            return Err(StorageError::cache(
+                "small object store received non-small id",
+            ));
         };
         let bytes = self.stat_entry(id).await?.bytes;
         self.index.remove_unclaimed_small_payload(key).await?;
-        Ok(DeleteReport { bytes_deleted: bytes })
+        Ok(DeleteReport {
+            bytes_deleted: bytes,
+        })
     }
 }

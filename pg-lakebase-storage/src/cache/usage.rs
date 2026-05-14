@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use super::store::{CacheStoreKind, PhysicalCacheEntry, PhysicalCacheEntryVisitor, ScanControl};
+use super::store::{
+    CacheStoreKind, PhysicalCacheEntry, PhysicalCacheEntryVisitor, ScanControl,
+};
 use crate::error::StorageResult;
 
 /// Sum of [`crate::cache::index`] resident-byte counters (`cached_bytes` totals for resident objects).
@@ -35,14 +37,18 @@ impl PhysicalCacheUsage {
     pub(crate) fn add_entry(&mut self, entry: &PhysicalCacheEntry) {
         match entry.store_kind {
             CacheStoreKind::CompleteFile => {
-                self.complete_file_bytes = self.complete_file_bytes.saturating_add(entry.physical_bytes);
-            },
+                self.complete_file_bytes = self
+                    .complete_file_bytes
+                    .saturating_add(entry.physical_bytes);
+            }
             CacheStoreKind::PartialPayload => {
-                self.partial_file_bytes = self.partial_file_bytes.saturating_add(entry.physical_bytes);
-            },
+                self.partial_file_bytes =
+                    self.partial_file_bytes.saturating_add(entry.physical_bytes);
+            }
             CacheStoreKind::SmallObject => {
-                self.small_object_bytes = self.small_object_bytes.saturating_add(entry.physical_bytes);
-            },
+                self.small_object_bytes =
+                    self.small_object_bytes.saturating_add(entry.physical_bytes);
+            }
         }
     }
 }
@@ -68,7 +74,10 @@ impl PhysicalUsageVisitor {
 
 #[async_trait]
 impl PhysicalCacheEntryVisitor for PhysicalUsageVisitor {
-    async fn visit(&mut self, entry: PhysicalCacheEntry) -> StorageResult<ScanControl> {
+    async fn visit(
+        &mut self,
+        entry: PhysicalCacheEntry,
+    ) -> StorageResult<ScanControl> {
         self.usage.add_entry(&entry);
         Ok(ScanControl::Continue)
     }

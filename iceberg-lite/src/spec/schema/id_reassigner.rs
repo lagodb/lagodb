@@ -41,8 +41,13 @@ impl ReassignFieldIds {
         let outer_fields = fields
             .into_iter()
             .map(|field| {
-                try_insert_field(&mut self.old_to_new_id, field.id, self.next_field_id)?;
-                let new_field = Arc::unwrap_or_clone(field).with_id(self.next_field_id);
+                try_insert_field(
+                    &mut self.old_to_new_id,
+                    field.id,
+                    self.next_field_id,
+                )?;
+                let new_field =
+                    Arc::unwrap_or_clone(field).with_id(self.next_field_id);
                 self.increase_next_field_id()?;
                 Ok(Arc::new(new_field))
             })
@@ -56,7 +61,8 @@ impl ReassignFieldIds {
                     Ok(field)
                 } else {
                     let mut new_field = Arc::unwrap_or_clone(field);
-                    *new_field.field_type = self.reassign_ids_visit_type(*new_field.field_type)?;
+                    *new_field.field_type =
+                        self.reassign_ids_visit_type(*new_field.field_type)?;
                     Ok(Arc::new(new_field))
                 }
             })
@@ -88,14 +94,16 @@ impl ReassignFieldIds {
                 let mut key_field = Arc::unwrap_or_clone(m.key_field);
                 key_field.id = self.next_field_id;
                 self.increase_next_field_id()?;
-                *key_field.field_type = self.reassign_ids_visit_type(*key_field.field_type)?;
+                *key_field.field_type =
+                    self.reassign_ids_visit_type(*key_field.field_type)?;
 
                 self.old_to_new_id
                     .insert(m.value_field.id, self.next_field_id);
                 let mut value_field = Arc::unwrap_or_clone(m.value_field);
                 value_field.id = self.next_field_id;
                 self.increase_next_field_id()?;
-                *value_field.field_type = self.reassign_ids_visit_type(*value_field.field_type)?;
+                *value_field.field_type =
+                    self.reassign_ids_visit_type(*value_field.field_type)?;
 
                 Ok(Type::Map(MapType {
                     key_field: Arc::new(key_field),
@@ -115,7 +123,10 @@ impl ReassignFieldIds {
         Ok(())
     }
 
-    pub fn apply_to_identifier_fields(&self, field_ids: HashSet<i32>) -> Result<HashSet<i32>> {
+    pub fn apply_to_identifier_fields(
+        &self,
+        field_ids: HashSet<i32>,
+    ) -> Result<HashSet<i32>> {
         field_ids
             .into_iter()
             .map(|id| {
@@ -163,9 +174,20 @@ mod tests {
             .with_identifier_field_ids(vec![3])
             .with_alias(BiHashMap::from_iter(vec![("bar_alias".to_string(), 3)]))
             .with_fields(vec![
-                NestedField::optional(5, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(3, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(4, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(
+                    5,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(3, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    4,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -181,9 +203,20 @@ mod tests {
             .with_identifier_field_ids(vec![1])
             .with_alias(BiHashMap::from_iter(vec![("bar_alias".to_string(), 1)]))
             .with_fields(vec![
-                NestedField::optional(0, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(1, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(2, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(
+                    0,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(1, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    2,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -207,9 +240,20 @@ mod tests {
             .with_identifier_field_ids(vec![1])
             .with_alias(BiHashMap::from_iter(vec![("bar_alias".to_string(), 1)]))
             .with_fields(vec![
-                NestedField::optional(0, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(1, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(2, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(
+                    0,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(1, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    2,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
                 NestedField::required(
                     3,
                     "qux",
@@ -283,10 +327,18 @@ mod tests {
                     6,
                     "person",
                     Type::Struct(StructType::new(vec![
-                        NestedField::optional(15, "name", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::required(16, "age", Type::Primitive(PrimitiveType::Int))
-                            .into(),
+                        NestedField::optional(
+                            15,
+                            "name",
+                            Type::Primitive(PrimitiveType::String),
+                        )
+                        .into(),
+                        NestedField::required(
+                            16,
+                            "age",
+                            Type::Primitive(PrimitiveType::Int),
+                        )
+                        .into(),
                     ])),
                 )
                 .into(),
@@ -307,9 +359,20 @@ mod tests {
             .with_identifier_field_ids(vec![5])
             .with_alias(BiHashMap::from_iter(vec![("bar_alias".to_string(), 3)]))
             .with_fields(vec![
-                NestedField::required(5, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(3, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::required(
+                    5,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::optional(3, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    3,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
             ])
             .with_reassigned_field_ids(0)
             .build()

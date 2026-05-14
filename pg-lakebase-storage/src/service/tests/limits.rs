@@ -5,18 +5,26 @@ use std::sync::Arc;
 use crate::backend::{MemoryObjectBackend, StoreRegistry};
 use crate::error::StorageError;
 use crate::handle::OpenFlags;
-use crate::service::command::{OpenCommand, StorageCommand};
 use crate::service::StorageService;
+use crate::service::command::{OpenCommand, StorageCommand};
 use crate::session::handle_table::HandleTable;
 
-use super::fixtures::{close, default_location, memory_cache_with_limits, open_file, BUCKET, DEFAULT_STORE, LARGE_KEY};
+use super::fixtures::{
+    BUCKET, DEFAULT_STORE, LARGE_KEY, close, default_location,
+    memory_cache_with_limits, open_file,
+};
 
 #[tokio::test]
 async fn open_handle_limit_rejects_until_existing_handle_is_closed() {
     let backend = MemoryObjectBackend::new();
     backend.insert(default_location(LARGE_KEY), b"abc".to_vec());
     let cache = memory_cache_with_limits(8, 4);
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache);
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache,
+    );
     let handles = HandleTable::with_max_open_handles(1);
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;

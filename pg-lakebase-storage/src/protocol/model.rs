@@ -207,7 +207,9 @@ impl WireResponse {
 
     pub fn into_result(self) -> StorageResult<WireResponsePayload> {
         match self.payload {
-            WireResponsePayload::Error { kind, message } => Err(StorageError::from_wire(kind, message)),
+            WireResponsePayload::Error { kind, message } => {
+                Err(StorageError::from_wire(kind, message))
+            }
             payload => Ok(payload),
         }
     }

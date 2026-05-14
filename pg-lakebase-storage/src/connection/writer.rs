@@ -5,13 +5,15 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, timeout_at, Duration, Instant};
+use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use crate::error::{StorageError, StorageResult};
 use crate::protocol::limits::READ_RESPONSE_PREFIX_BYTES;
-use crate::protocol::{encode_read_response_prefix, encode_response, WireResponse, MAX_FRAME_BYTES};
+use crate::protocol::{
+    MAX_FRAME_BYTES, WireResponse, encode_read_response_prefix, encode_response,
+};
 use crate::service::reply::{ReadBody, ReadFileRange};
-use crate::transport::{write_frame, FdSender};
+use crate::transport::{FdSender, write_frame};
 
 use super::dispatch::{StorageHandlerPayload, StorageHandlerResponse};
 use super::response_budget::QueuedResponse;
@@ -54,11 +56,18 @@ impl ResponseWriter {
         max_pending_responses: usize,
         response_write_timeout: Option<Duration>,
     ) -> Self {
-        let (response_tx, mut response_rx) = mpsc::channel::<QueuedResponse>(max_pending_responses);
+        let (response_tx, mut response_rx) =
+            mpsc::channel::<QueuedResponse>(max_pending_responses);
         let task = tokio::spawn(async move {
             let mut bufs = WriteBuffers::new();
             while let Some(queued_response) = response_rx.recv().await {
-                write_queued_response(&mut writer, queued_response, response_write_timeout, &mut bufs).await?;
+                write_queued_response(
+                    &mut writer,
+                    queued_response,
+                    response_write_timeout,
+                    &mut bufs,
+                )
+                .await?;
             }
             Ok(())
         });
@@ -86,20 +95,28 @@ impl ResponseWriter {
     pub(super) async fn wait_finished(&mut self) -> StorageResult<()> {
         match (&mut self.task).await {
             Ok(result) => result,
-            Err(error) => Err(StorageError::from_join_error("writer task failed", error)),
+            Err(error) => {
+                Err(StorageError::from_join_error("writer task failed", error))
+            }
         }
     }
 
     /// Waits for the writer task up to `drain_deadline`. Returns `Some` if the task completed in
     /// time (with its flattened result), `None` if the deadline elapsed and the task was aborted.
-    pub(super) async fn wait_until(&mut self, drain_deadline: Instant) -> Option<StorageResult<()>> {
+    pub(super) async fn wait_until(
+        &mut self,
+        drain_deadline: Instant,
+    ) -> Option<StorageResult<()>> {
         match timeout_at(drain_deadline, &mut self.task).await {
             Ok(Ok(result)) => Some(result),
-            Ok(Err(error)) => Some(Err(StorageError::from_join_error("writer task failed", error))),
+            Ok(Err(error)) => Some(Err(StorageError::from_join_error(
+                "writer task failed",
+                error,
+            ))),
             Err(_) => {
                 self.abort().await;
                 None
-            },
+            }
         }
     }
 
@@ -152,11 +169,14 @@ async fn write_storage_response(
     match payload {
         StorageHandlerPayload::Read { body, eof } => {
             write_read_response(writer, request_id, eof, body, bufs).await?;
-        },
+        }
         StorageHandlerPayload::Wire(payload) => {
-            let frame = encode_response(&WireResponse { request_id, payload })?;
+            let frame = encode_response(&WireResponse {
+                request_id,
+                payload,
+            })?;
             write_frame(writer, &frame).await?;
-        },
+        }
     }
     if let Some(file) = direct_file {
         FdSender::new(writer).send(file.as_raw_fd()).await?;
@@ -178,7 +198,9 @@ async fn write_read_response(
     let prefix = encode_read_response_prefix(request_id, eof, body_len)?;
     let frame_len = prefix.len() + body_len;
     if frame_len > MAX_FRAME_BYTES {
-        return Err(StorageError::protocol(format!("frame too large: {frame_len}")));
+        return Err(StorageError::protocol(format!(
+            "frame too large: {frame_len}"
+        )));
     }
     let frame_len_bytes = (frame_len as u32).to_be_bytes();
     match body {
@@ -191,21 +213,21 @@ async fn write_read_response(
             buf.extend_from_slice(&prefix);
             buf.extend_from_slice(&data);
             writer.write_all(buf).await?;
-        },
+        }
         ReadBody::Bytes(data) => {
             let mut header = [0u8; FRAME_LEN_PLUS_PREFIX];
             header[..4].copy_from_slice(&frame_len_bytes);
             header[4..].copy_from_slice(&prefix);
             writer.write_all(&header).await?;
             writer.write_all(&data).await?;
-        },
+        }
         ReadBody::FileRange(range) => {
             let mut header = [0u8; FRAME_LEN_PLUS_PREFIX];
             header[..4].copy_from_slice(&frame_len_bytes);
             header[4..].copy_from_slice(&prefix);
             writer.write_all(&header).await?;
             write_file_range_body(writer, range, &mut bufs.file_range).await?;
-        },
+        }
     }
     writer.flush().await?;
     Ok(())

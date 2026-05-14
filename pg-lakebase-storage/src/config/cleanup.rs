@@ -42,13 +42,20 @@ impl CacheCleanupConfig {
         self
     }
 
-    pub fn with_thresholds(mut self, cleanup_start_percent: u8, cleanup_target_percent: u8) -> Self {
+    pub fn with_thresholds(
+        mut self,
+        cleanup_start_percent: u8,
+        cleanup_target_percent: u8,
+    ) -> Self {
         self.cleanup_start_percent = cleanup_start_percent;
         self.cleanup_target_percent = cleanup_target_percent;
         self.normalized()
     }
 
-    pub fn with_max_cleanup_batch_bytes(mut self, max_cleanup_batch_bytes: u64) -> Self {
+    pub fn with_max_cleanup_batch_bytes(
+        mut self,
+        max_cleanup_batch_bytes: u64,
+    ) -> Self {
         self.max_cleanup_batch_bytes = max_cleanup_batch_bytes;
         self.normalized()
     }
@@ -61,7 +68,9 @@ impl CacheCleanupConfig {
     pub fn normalized(mut self) -> Self {
         self.max_cache_bytes = self.max_cache_bytes.map(|bytes| bytes.max(1));
         self.cleanup_start_percent = self.cleanup_start_percent.clamp(1, 100);
-        self.cleanup_target_percent = self.cleanup_target_percent.clamp(0, self.cleanup_start_percent);
+        self.cleanup_target_percent = self
+            .cleanup_target_percent
+            .clamp(0, self.cleanup_start_percent);
         self.max_cleanup_batch_items = self.max_cleanup_batch_items.max(1);
         self.max_cleanup_batch_bytes = self.max_cleanup_batch_bytes.max(1);
         if self.cleanup_interval == Some(Duration::ZERO) {

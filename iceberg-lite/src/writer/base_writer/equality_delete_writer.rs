@@ -28,8 +28,12 @@ use crate::arrow::record_batch_projector::RecordBatchProjector;
 use crate::arrow::schema_to_arrow_schema;
 use crate::spec::{DataFile, PartitionKey, SchemaRef};
 use crate::writer::file_writer::FileWriterBuilder;
-use crate::writer::file_writer::location_generator::{FileNameGenerator, LocationGenerator};
-use crate::writer::file_writer::rolling_writer::{RollingFileWriter, RollingFileWriterBuilder};
+use crate::writer::file_writer::location_generator::{
+    FileNameGenerator, LocationGenerator,
+};
+use crate::writer::file_writer::rolling_writer::{
+    RollingFileWriter, RollingFileWriterBuilder,
+};
 use crate::writer::{IcebergWriter, IcebergWriterBuilder};
 use crate::{Error, ErrorKind, Result};
 
@@ -71,7 +75,8 @@ pub struct EqualityDeleteWriterConfig {
 impl EqualityDeleteWriterConfig {
     /// Create a new `DataFileWriterConfig` with equality ids.
     pub fn new(equality_ids: Vec<i32>, original_schema: SchemaRef) -> Result<Self> {
-        let original_arrow_schema = Arc::new(schema_to_arrow_schema(&original_schema)?);
+        let original_arrow_schema =
+            Arc::new(schema_to_arrow_schema(&original_schema)?);
         let projector = RecordBatchProjector::new(
             original_arrow_schema,
             &equality_ids,
@@ -94,10 +99,15 @@ impl EqualityDeleteWriterConfig {
                         .metadata()
                         .get(PARQUET_FIELD_ID_META_KEY)
                         .ok_or_else(|| {
-                            Error::new(ErrorKind::Unexpected, "Field metadata is missing.")
+                            Error::new(
+                                ErrorKind::Unexpected,
+                                "Field metadata is missing.",
+                            )
                         })?
                         .parse::<i64>()
-                        .map_err(|e| Error::new(ErrorKind::Unexpected, e.to_string()))?,
+                        .map_err(|e| {
+                            Error::new(ErrorKind::Unexpected, e.to_string())
+                        })?,
                 ))
             },
             |_field: &Field| true,
@@ -170,7 +180,9 @@ where
                 .into_iter()
                 .map(|mut res| {
                     res.content(crate::spec::DataContentType::EqualityDeletes);
-                    res.equality_ids(Some(self.equality_ids.iter().copied().collect_vec()));
+                    res.equality_ids(Some(
+                        self.equality_ids.iter().copied().collect_vec(),
+                    ));
                     if let Some(pk) = self.partition_key.as_ref() {
                         res.partition(pk.data().clone());
                         res.partition_spec_id(pk.spec().spec_id());
@@ -198,7 +210,9 @@ mod test {
     use std::sync::Arc;
 
     use arrow_array::types::Int32Type;
-    use arrow_array::{ArrayRef, BooleanArray, Int32Array, Int64Array, RecordBatch, StructArray};
+    use arrow_array::{
+        ArrayRef, BooleanArray, Int32Array, Int64Array, RecordBatch, StructArray,
+    };
     use arrow_buffer::NullBuffer;
     use arrow_schema::{DataType, Field, Fields};
     use arrow_select::concat::concat_batches;
@@ -212,8 +226,8 @@ mod test {
     use crate::arrow::{arrow_schema_to_schema, schema_to_arrow_schema};
     use crate::io::FileIO;
     use crate::spec::{
-        DataFile, DataFileFormat, ListType, MapType, NestedField, PrimitiveType, Schema,
-        StructType, Type,
+        DataFile, DataFileFormat, ListType, MapType, NestedField, PrimitiveType,
+        Schema, StructType, Type,
     };
     use crate::writer::base_writer::equality_delete_writer::{
         EqualityDeleteFileWriterBuilder, EqualityDeleteWriterConfig,
@@ -308,31 +322,48 @@ mod test {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         // prepare data
         // Int, Struct(Int), String, List(Int), Struct(Struct(Int))
         let schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::required(0, "col0", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(0, "col0", Type::Primitive(PrimitiveType::Int))
+                    .into(),
                 NestedField::required(
                     1,
                     "col1",
                     Type::Struct(StructType::new(vec![
-                        NestedField::required(5, "sub_col", Type::Primitive(PrimitiveType::Int))
-                            .into(),
+                        NestedField::required(
+                            5,
+                            "sub_col",
+                            Type::Primitive(PrimitiveType::Int),
+                        )
+                        .into(),
                     ])),
                 )
                 .into(),
-                NestedField::required(2, "col2", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(
+                    2,
+                    "col2",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
                 NestedField::required(
                     3,
                     "col3",
                     Type::List(ListType::new(
-                        NestedField::required(6, "element", Type::Primitive(PrimitiveType::Int))
-                            .into(),
+                        NestedField::required(
+                            6,
+                            "element",
+                            Type::Primitive(PrimitiveType::Int),
+                        )
+                        .into(),
                     )),
                 )
                 .into(),
@@ -362,7 +393,9 @@ mod test {
         let arrow_schema = Arc::new(schema_to_arrow_schema(&schema).unwrap());
         let col0 = Arc::new(Int32Array::from_iter_values(vec![1; 1024])) as ArrayRef;
         let col1 = Arc::new(StructArray::new(
-            if let DataType::Struct(fields) = arrow_schema.fields.get(1).unwrap().data_type() {
+            if let DataType::Struct(fields) =
+                arrow_schema.fields.get(1).unwrap().data_type()
+            {
                 fields.clone()
             } else {
                 unreachable!()
@@ -375,15 +408,16 @@ mod test {
             1024
         ])) as ArrayRef;
         let col3 = Arc::new({
-            let list_parts = arrow_array::ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
-              Some(
-                  vec![Some(1),]
-              );
-              1024
-          ])
+            let list_parts = arrow_array::ListArray::from_iter_primitive::<
+                Int32Type,
+                _,
+                _,
+            >(vec![Some(vec![Some(1),]); 1024])
             .into_parts();
             arrow_array::ListArray::new(
-                if let DataType::List(field) = arrow_schema.fields.get(3).unwrap().data_type() {
+                if let DataType::List(field) =
+                    arrow_schema.fields.get(3).unwrap().data_type()
+                {
                     field.clone()
                 } else {
                     unreachable!()
@@ -394,14 +428,20 @@ mod test {
             )
         }) as ArrayRef;
         let col4 = Arc::new(StructArray::new(
-            if let DataType::Struct(fields) = arrow_schema.fields.get(4).unwrap().data_type() {
+            if let DataType::Struct(fields) =
+                arrow_schema.fields.get(4).unwrap().data_type()
+            {
                 fields.clone()
             } else {
                 unreachable!()
             },
             vec![Arc::new(StructArray::new(
-                if let DataType::Struct(fields) = arrow_schema.fields.get(4).unwrap().data_type() {
-                    if let DataType::Struct(fields) = fields.first().unwrap().data_type() {
+                if let DataType::Struct(fields) =
+                    arrow_schema.fields.get(4).unwrap().data_type()
+                {
+                    if let DataType::Struct(fields) =
+                        fields.first().unwrap().data_type()
+                    {
                         fields.clone()
                     } else {
                         unreachable!()
@@ -421,21 +461,27 @@ mod test {
         let equality_config =
             EqualityDeleteWriterConfig::new(equality_ids, Arc::new(schema)).unwrap();
         let delete_schema =
-            arrow_schema_to_schema(equality_config.projected_arrow_schema_ref()).unwrap();
+            arrow_schema_to_schema(equality_config.projected_arrow_schema_ref())
+                .unwrap();
         let projector = equality_config.projector.clone();
 
         // prepare writer
-        let pb =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), Arc::new(delete_schema));
-        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            pb,
-            file_io.clone(),
-            location_gen,
-            file_name_gen,
+        let pb = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            Arc::new(delete_schema),
         );
-        let mut equality_delete_writer =
-            EqualityDeleteFileWriterBuilder::new(rolling_writer_builder, equality_config)
-                .build(None)?;
+        let rolling_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                pb,
+                file_io.clone(),
+                location_gen,
+                file_name_gen,
+            );
+        let mut equality_delete_writer = EqualityDeleteFileWriterBuilder::new(
+            rolling_writer_builder,
+            equality_config,
+        )
+        .build(None)?;
 
         // write
         equality_delete_writer.write(to_write.clone())?;
@@ -459,9 +505,24 @@ mod test {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(0, "col0", Type::Primitive(PrimitiveType::Float)).into(),
-                    NestedField::required(1, "col1", Type::Primitive(PrimitiveType::Double)).into(),
-                    NestedField::optional(2, "col2", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        0,
+                        "col0",
+                        Type::Primitive(PrimitiveType::Float),
+                    )
+                    .into(),
+                    NestedField::required(
+                        1,
+                        "col1",
+                        Type::Primitive(PrimitiveType::Double),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "col2",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                     NestedField::required(
                         3,
                         "col3",
@@ -544,17 +605,34 @@ mod test {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         let schema = Arc::new(
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(0, "col0", Type::Primitive(PrimitiveType::Boolean))
-                        .into(),
-                    NestedField::required(1, "col1", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "col2", Type::Primitive(PrimitiveType::Long)).into(),
+                    NestedField::required(
+                        0,
+                        "col0",
+                        Type::Primitive(PrimitiveType::Boolean),
+                    )
+                    .into(),
+                    NestedField::required(
+                        1,
+                        "col1",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "col2",
+                        Type::Primitive(PrimitiveType::Long),
+                    )
+                    .into(),
                     NestedField::required(
                         3,
                         "col3",
@@ -564,40 +642,87 @@ mod test {
                         }),
                     )
                     .into(),
-                    NestedField::required(4, "col4", Type::Primitive(PrimitiveType::Date)).into(),
-                    NestedField::required(5, "col5", Type::Primitive(PrimitiveType::Time)).into(),
-                    NestedField::required(6, "col6", Type::Primitive(PrimitiveType::Timestamp))
-                        .into(),
-                    NestedField::required(7, "col7", Type::Primitive(PrimitiveType::Timestamptz))
-                        .into(),
-                    NestedField::required(8, "col8", Type::Primitive(PrimitiveType::TimestampNs))
-                        .into(),
-                    NestedField::required(9, "col9", Type::Primitive(PrimitiveType::TimestamptzNs))
-                        .into(),
-                    NestedField::required(10, "col10", Type::Primitive(PrimitiveType::String))
-                        .into(),
-                    NestedField::required(11, "col11", Type::Primitive(PrimitiveType::Uuid)).into(),
-                    NestedField::required(12, "col12", Type::Primitive(PrimitiveType::Fixed(10)))
-                        .into(),
-                    NestedField::required(13, "col13", Type::Primitive(PrimitiveType::Binary))
-                        .into(),
+                    NestedField::required(
+                        4,
+                        "col4",
+                        Type::Primitive(PrimitiveType::Date),
+                    )
+                    .into(),
+                    NestedField::required(
+                        5,
+                        "col5",
+                        Type::Primitive(PrimitiveType::Time),
+                    )
+                    .into(),
+                    NestedField::required(
+                        6,
+                        "col6",
+                        Type::Primitive(PrimitiveType::Timestamp),
+                    )
+                    .into(),
+                    NestedField::required(
+                        7,
+                        "col7",
+                        Type::Primitive(PrimitiveType::Timestamptz),
+                    )
+                    .into(),
+                    NestedField::required(
+                        8,
+                        "col8",
+                        Type::Primitive(PrimitiveType::TimestampNs),
+                    )
+                    .into(),
+                    NestedField::required(
+                        9,
+                        "col9",
+                        Type::Primitive(PrimitiveType::TimestamptzNs),
+                    )
+                    .into(),
+                    NestedField::required(
+                        10,
+                        "col10",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        11,
+                        "col11",
+                        Type::Primitive(PrimitiveType::Uuid),
+                    )
+                    .into(),
+                    NestedField::required(
+                        12,
+                        "col12",
+                        Type::Primitive(PrimitiveType::Fixed(10)),
+                    )
+                    .into(),
+                    NestedField::required(
+                        13,
+                        "col13",
+                        Type::Primitive(PrimitiveType::Binary),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
         );
         let equality_ids = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-        let config = EqualityDeleteWriterConfig::new(equality_ids, schema.clone()).unwrap();
+        let config =
+            EqualityDeleteWriterConfig::new(equality_ids, schema.clone()).unwrap();
         let delete_arrow_schema = config.projected_arrow_schema_ref().clone();
         let delete_schema = arrow_schema_to_schema(&delete_arrow_schema).unwrap();
 
-        let pb =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), Arc::new(delete_schema));
-        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            pb,
-            file_io.clone(),
-            location_gen,
-            file_name_gen,
+        let pb = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            Arc::new(delete_schema),
         );
+        let rolling_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                pb,
+                file_io.clone(),
+                location_gen,
+                file_name_gen,
+            );
         let mut equality_delete_writer =
             EqualityDeleteFileWriterBuilder::new(rolling_writer_builder, config)
                 .build(None)?;
@@ -608,8 +733,10 @@ mod test {
             Some(false),
             Some(true),
         ])) as ArrayRef;
-        let col1 = Arc::new(Int32Array::from(vec![Some(1), Some(2), Some(4)])) as ArrayRef;
-        let col2 = Arc::new(Int64Array::from(vec![Some(1), Some(2), Some(4)])) as ArrayRef;
+        let col1 =
+            Arc::new(Int32Array::from(vec![Some(1), Some(2), Some(4)])) as ArrayRef;
+        let col2 =
+            Arc::new(Int64Array::from(vec![Some(1), Some(2), Some(4)])) as ArrayRef;
         let col3 = Arc::new(
             arrow_array::Decimal128Array::from(vec![Some(1), Some(2), Some(4)])
                 .with_precision_and_scale(38, 5)
@@ -631,8 +758,12 @@ mod test {
             Some(3),
         ])) as ArrayRef;
         let col7 = Arc::new(
-            arrow_array::TimestampMicrosecondArray::from(vec![Some(0), Some(1), Some(3)])
-                .with_timezone_utc(),
+            arrow_array::TimestampMicrosecondArray::from(vec![
+                Some(0),
+                Some(1),
+                Some(3),
+            ])
+            .with_timezone_utc(),
         ) as ArrayRef;
         let col8 = Arc::new(arrow_array::TimestampNanosecondArray::from(vec![
             Some(0),
@@ -640,8 +771,12 @@ mod test {
             Some(3),
         ])) as ArrayRef;
         let col9 = Arc::new(
-            arrow_array::TimestampNanosecondArray::from(vec![Some(0), Some(1), Some(3)])
-                .with_timezone_utc(),
+            arrow_array::TimestampNanosecondArray::from(vec![
+                Some(0),
+                Some(1),
+                Some(3),
+            ])
+            .with_timezone_utc(),
         ) as ArrayRef;
         let col10 = Arc::new(arrow_array::StringArray::from(vec![
             Some("a"),
@@ -677,9 +812,13 @@ mod test {
             Some(b""),
             Some(b"zzzz"),
         ])) as ArrayRef;
-        let to_write = RecordBatch::try_new(delete_arrow_schema.clone(), vec![
-            col0, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11, col12, col13,
-        ])
+        let to_write = RecordBatch::try_new(
+            delete_arrow_schema.clone(),
+            vec![
+                col0, col1, col2, col3, col4, col5, col6, col7, col8, col9, col10,
+                col11, col12, col13,
+            ],
+        )
         .unwrap();
         equality_delete_writer.write(to_write.clone())?;
         let res = equality_delete_writer.close()?;
@@ -700,13 +839,18 @@ mod test {
         let schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::optional(0, "col0", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(0, "col0", Type::Primitive(PrimitiveType::Int))
+                    .into(),
                 NestedField::optional(
                     1,
                     "col1",
                     Type::Struct(StructType::new(vec![
-                        NestedField::optional(2, "sub_col", Type::Primitive(PrimitiveType::Int))
-                            .into(),
+                        NestedField::optional(
+                            2,
+                            "sub_col",
+                            Type::Primitive(PrimitiveType::Int),
+                        )
+                        .into(),
                     ])),
                 )
                 .into(),
@@ -737,11 +881,14 @@ mod test {
         // null 1            null(struct)
         // 2    null(struct) null(sub_struct_col)
         // 3    null(field)  null(sub_sub_col)
-        let col0 = Arc::new(Int32Array::from(vec![None, Some(2), Some(3)])) as ArrayRef;
+        let col0 =
+            Arc::new(Int32Array::from(vec![None, Some(2), Some(3)])) as ArrayRef;
         let col1 = {
             let nulls = NullBuffer::from(vec![true, false, true]);
             Arc::new(StructArray::new(
-                if let DataType::Struct(fields) = arrow_schema.fields.get(1).unwrap().data_type() {
+                if let DataType::Struct(fields) =
+                    arrow_schema.fields.get(1).unwrap().data_type()
+                {
                     fields.clone()
                 } else {
                     unreachable!()
@@ -755,12 +902,11 @@ mod test {
                 let nulls = NullBuffer::from(vec![true, false, true]);
                 Arc::new(StructArray::new(
                     Fields::from(vec![
-                        Field::new("sub_sub_col", DataType::Int32, true).with_metadata(
-                            HashMap::from([(
+                        Field::new("sub_sub_col", DataType::Int32, true)
+                            .with_metadata(HashMap::from([(
                                 PARQUET_FIELD_ID_META_KEY.to_string(),
                                 "5".to_string(),
-                            )]),
-                        ),
+                            )])),
                     ]),
                     vec![Arc::new(Int32Array::from(vec![Some(1), Some(2), None]))],
                     Some(nulls),
@@ -768,7 +914,9 @@ mod test {
             };
             let nulls = NullBuffer::from(vec![false, true, true]);
             Arc::new(StructArray::new(
-                if let DataType::Struct(fields) = arrow_schema.fields.get(2).unwrap().data_type() {
+                if let DataType::Struct(fields) =
+                    arrow_schema.fields.get(2).unwrap().data_type()
+                {
                     fields.clone()
                 } else {
                     unreachable!()
@@ -787,13 +935,15 @@ mod test {
 
         // check
         let to_write_projected = projector.project_batch(to_write)?;
-        let expect_batch =
-            RecordBatch::try_new(equality_config.projected_arrow_schema_ref().clone(), vec![
+        let expect_batch = RecordBatch::try_new(
+            equality_config.projected_arrow_schema_ref().clone(),
+            vec![
                 Arc::new(Int32Array::from(vec![None, Some(2), Some(3)])) as ArrayRef,
                 Arc::new(Int32Array::from(vec![Some(1), None, None])) as ArrayRef,
                 Arc::new(Int32Array::from(vec![None, None, None])) as ArrayRef,
-            ])
-            .unwrap();
+            ],
+        )
+        .unwrap();
         assert_eq!(to_write_projected, expect_batch);
         Ok(())
     }

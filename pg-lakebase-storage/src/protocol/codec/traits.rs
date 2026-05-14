@@ -50,7 +50,10 @@ pub(crate) fn get_u64(input: &mut impl Buf) -> StorageResult<u64> {
 
 fn ensure_remaining(input: &impl Buf, needed: usize) -> StorageResult<()> {
     if input.remaining() < needed {
-        return Err(StorageError::protocol(format!("short frame: need {needed} bytes, have {}", input.remaining())));
+        return Err(StorageError::protocol(format!(
+            "short frame: need {needed} bytes, have {}",
+            input.remaining()
+        )));
     }
     Ok(())
 }
@@ -67,14 +70,18 @@ pub(crate) fn ensure_eof(input: &impl Buf) -> StorageResult<()> {
 
 /// Writes a length-prefixed byte field.
 pub(crate) fn put_bytes(out: &mut impl BufMut, value: &[u8]) -> StorageResult<()> {
-    let len = u32::try_from(value.len()).map_err(|_| StorageError::protocol("byte field too large"))?;
+    let len = u32::try_from(value.len())
+        .map_err(|_| StorageError::protocol("byte field too large"))?;
     out.put_u32(len);
     out.put_slice(value);
     Ok(())
 }
 
 /// Reads a length-prefixed byte field, capping the allocation at `max_field_bytes`.
-pub(crate) fn get_bytes(input: &mut impl Buf, max_field_bytes: usize) -> StorageResult<Vec<u8>> {
+pub(crate) fn get_bytes(
+    input: &mut impl Buf,
+    max_field_bytes: usize,
+) -> StorageResult<Vec<u8>> {
     let len = get_u32(input)? as usize;
     if len > input.remaining() {
         return Err(StorageError::protocol(format!(
@@ -106,7 +113,9 @@ impl WireDecode for bool {
         match get_u8(input)? {
             0 => Ok(false),
             1 => Ok(true),
-            other => Err(StorageError::protocol(format!("invalid bool value {other}"))),
+            other => Err(StorageError::protocol(format!(
+                "invalid bool value {other}"
+            ))),
         }
     }
 }
@@ -120,7 +129,9 @@ impl WireEncode for String {
 impl WireDecode for String {
     fn decode(input: &mut impl Buf) -> StorageResult<Self> {
         let bytes = get_bytes(input, MAX_STRING_FIELD_BYTES)?;
-        String::from_utf8(bytes).map_err(|error| StorageError::protocol_source("invalid utf-8 string field", error))
+        String::from_utf8(bytes).map_err(|error| {
+            StorageError::protocol_source("invalid utf-8 string field", error)
+        })
     }
 }
 
@@ -131,11 +142,11 @@ impl<T: WireEncode> WireEncode for Option<T> {
             Some(value) => {
                 out.put_u8(1);
                 value.encode(out)
-            },
+            }
             None => {
                 out.put_u8(0);
                 Ok(())
-            },
+            }
         }
     }
 }
@@ -145,7 +156,9 @@ impl<T: WireDecode> WireDecode for Option<T> {
         match get_u8(input)? {
             0 => Ok(None),
             1 => Ok(Some(T::decode(input)?)),
-            other => Err(StorageError::protocol(format!("invalid optional tag {other}"))),
+            other => Err(StorageError::protocol(format!(
+                "invalid optional tag {other}"
+            ))),
         }
     }
 }

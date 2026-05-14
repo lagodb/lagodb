@@ -71,7 +71,8 @@ impl TableProperties {
     /// Reserved table property for current snapshot id.
     pub const PROPERTY_CURRENT_SNAPSHOT_ID: &str = "current-snapshot-id";
     /// Reserved table property for current snapshot timestamp.
-    pub const PROPERTY_CURRENT_SNAPSHOT_TIMESTAMP: &str = "current-snapshot-timestamp-ms";
+    pub const PROPERTY_CURRENT_SNAPSHOT_TIMESTAMP: &str =
+        "current-snapshot-timestamp-ms";
     /// Reserved table property for the JSON representation of current schema.
     pub const PROPERTY_CURRENT_SCHEMA: &str = "current-schema";
     /// Reserved table property for the JSON representation of current(default) partition spec.
@@ -86,7 +87,8 @@ impl TableProperties {
     pub const PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT: usize = 100;
 
     /// Property key for max number of partitions to keep summary stats for.
-    pub const PROPERTY_WRITE_PARTITION_SUMMARY_LIMIT: &str = "write.summary.partition-limit";
+    pub const PROPERTY_WRITE_PARTITION_SUMMARY_LIMIT: &str =
+        "write.summary.partition-limit";
     /// Default value for the max number of partitions to keep summary stats for.
     pub const PROPERTY_WRITE_PARTITION_SUMMARY_LIMIT_DEFAULT: u64 = 0;
 
@@ -122,21 +124,25 @@ impl TableProperties {
     pub const PROPERTY_COMMIT_MAX_RETRY_WAIT_MS_DEFAULT: u64 = 60 * 1000; // 1 minute
 
     /// Property key for total maximum retry time (ms).
-    pub const PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS: &str = "commit.retry.total-timeout-ms";
+    pub const PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS: &str =
+        "commit.retry.total-timeout-ms";
     /// Default value for total maximum retry time (ms).
     pub const PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS_DEFAULT: u64 = 30 * 60 * 1000; // 30 minutes
 
     /// Default file format for data files
     pub const PROPERTY_DEFAULT_FILE_FORMAT: &str = "write.format.default";
     /// Default file format for delete files
-    pub const PROPERTY_DELETE_DEFAULT_FILE_FORMAT: &str = "write.delete.format.default";
+    pub const PROPERTY_DELETE_DEFAULT_FILE_FORMAT: &str =
+        "write.delete.format.default";
     /// Default value for data file format
     pub const PROPERTY_DEFAULT_FILE_FORMAT_DEFAULT: &str = "parquet";
 
     /// Target file size for newly written files.
-    pub const PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES: &str = "write.target-file-size-bytes";
+    pub const PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES: &str =
+        "write.target-file-size-bytes";
     /// Default target file size
-    pub const PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT: usize = 512 * 1024 * 1024; // 512 MB
+    pub const PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT: usize =
+        512 * 1024 * 1024; // 512 MB
 }
 
 impl TryFrom<&HashMap<String, String>> for TableProperties {
@@ -243,7 +249,8 @@ mod tests {
             "abc".to_string(),
         )]);
 
-        let table_properties = TableProperties::try_from(&invalid_retries).unwrap_err();
+        let table_properties =
+            TableProperties::try_from(&invalid_retries).unwrap_err();
         assert!(
             table_properties.to_string().contains(
                 "Invalid value for commit.retry.num-retries: invalid digit found in string"
@@ -254,7 +261,8 @@ mod tests {
             TableProperties::PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_string(),
             "abc".to_string(),
         )]);
-        let table_properties = TableProperties::try_from(&invalid_min_wait).unwrap_err();
+        let table_properties =
+            TableProperties::try_from(&invalid_min_wait).unwrap_err();
         assert!(
             table_properties.to_string().contains(
                 "Invalid value for commit.retry.min-wait-ms: invalid digit found in string"
@@ -265,7 +273,8 @@ mod tests {
             TableProperties::PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_string(),
             "abc".to_string(),
         )]);
-        let table_properties = TableProperties::try_from(&invalid_max_wait).unwrap_err();
+        let table_properties =
+            TableProperties::try_from(&invalid_max_wait).unwrap_err();
         assert!(
             table_properties.to_string().contains(
                 "Invalid value for commit.retry.max-wait-ms: invalid digit found in string"
@@ -276,7 +285,8 @@ mod tests {
             TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES.to_string(),
             "abc".to_string(),
         )]);
-        let table_properties = TableProperties::try_from(&invalid_target_size).unwrap_err();
+        let table_properties =
+            TableProperties::try_from(&invalid_target_size).unwrap_err();
         assert!(table_properties.to_string().contains(
             "Invalid value for write.target-file-size-bytes: invalid digit found in string"
         ));

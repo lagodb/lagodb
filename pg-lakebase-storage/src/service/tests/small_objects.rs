@@ -6,14 +6,14 @@ use crate::cache::CachedObjectMeta;
 use crate::error::StorageError;
 use crate::handle::OpenFlags;
 use crate::object::{ObjectInfo, ObjectLocation};
+use crate::service::StorageService;
 use crate::service::command::{OpenCommand, ReadCommand, StorageCommand};
 use crate::service::reply::CommandOutput;
-use crate::service::StorageService;
 use crate::session::handle_table::HandleTable;
 
 use super::fixtures::{
-    close, default_location, invalidate_cmd, memory_cache, open_file, read, residency_hint, BUCKET, DEFAULT_STORE,
-    SMALL_KEY,
+    BUCKET, DEFAULT_STORE, SMALL_KEY, close, default_location, invalidate_cmd,
+    memory_cache, open_file, read, residency_hint,
 };
 
 #[tokio::test]
@@ -22,14 +22,25 @@ async fn open_small_object_populates_small_kv() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abc".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
 
     assert!(!open.direct_io);
-    assert_eq!(residency_hint(&handles, open.handle), Some(crate::cache::ResidencyStateHint::SmallKv));
-    assert_eq!(cache.index().get_small(&key).await.unwrap(), Some(b"abc".to_vec()));
+    assert_eq!(
+        residency_hint(&handles, open.handle),
+        Some(crate::cache::ResidencyStateHint::SmallKv)
+    );
+    assert_eq!(
+        cache.index().get_small(&key).await.unwrap(),
+        Some(b"abc".to_vec())
+    );
 
     close(&service, &handles, open.handle).await;
 }
@@ -40,7 +51,12 @@ async fn small_cache_hit_open_does_not_head_backend() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key, b"abc".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend.clone())).unwrap(), cache);
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend.clone()))
+            .unwrap(),
+        cache,
+    );
     let handles = HandleTable::new();
 
     let first = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
@@ -50,7 +66,10 @@ async fn small_cache_hit_open_does_not_head_backend() {
     let second = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
 
     assert!(!second.direct_io);
-    assert_eq!(residency_hint(&handles, second.handle), Some(crate::cache::ResidencyStateHint::SmallKv));
+    assert_eq!(
+        residency_hint(&handles, second.handle),
+        Some(crate::cache::ResidencyStateHint::SmallKv)
+    );
     assert_eq!(backend.head_call_count(), 1);
 
     close(&service, &handles, second.handle).await;
@@ -79,23 +98,35 @@ async fn small_admit_if_absent_returns_existing_meta_on_race_loser() {
 
     let first = cache
         .index()
-        .admit_small_if_absent(CachedObjectMeta::small(key.clone(), old_info, 3), b"old".to_vec(), 0)
+        .admit_small_if_absent(
+            CachedObjectMeta::small(key.clone(), old_info, 3),
+            b"old".to_vec(),
+            0,
+        )
         .await
         .unwrap();
     let second = cache
         .index()
-        .admit_small_if_absent(CachedObjectMeta::small(key.clone(), new_info, 3), b"new".to_vec(), 0)
+        .admit_small_if_absent(
+            CachedObjectMeta::small(key.clone(), new_info, 3),
+            b"new".to_vec(),
+            0,
+        )
         .await
         .unwrap();
 
     let crate::cache::AdmitSmallOutcome::Admitted { meta: m1, .. } = first else {
         panic!("expected first admit to win the insert-if-absent race");
     };
-    let crate::cache::AdmitSmallOutcome::AlreadyPresent { meta: m2, .. } = second else {
+    let crate::cache::AdmitSmallOutcome::AlreadyPresent { meta: m2, .. } = second
+    else {
         panic!("expected second admit to observe AlreadyPresent");
     };
     assert_eq!(m1, m2, "race loser must see the winner's meta verbatim");
-    assert_eq!(cache.index().get_small(&key).await.unwrap(), Some(b"old".to_vec()));
+    assert_eq!(
+        cache.index().get_small(&key).await.unwrap(),
+        Some(b"old".to_vec())
+    );
 }
 
 #[tokio::test]
@@ -104,7 +135,12 @@ async fn invalidate_small_object_cache_is_busy_while_handle_is_open() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abc".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
@@ -114,10 +150,16 @@ async fn invalidate_small_object_cache_is_busy_while_handle_is_open() {
     };
 
     assert!(matches!(error, StorageError::Busy { .. }));
-    assert_eq!(cache.index().get_small(&key).await.unwrap(), Some(b"abc".to_vec()));
+    assert_eq!(
+        cache.index().get_small(&key).await.unwrap(),
+        Some(b"abc".to_vec())
+    );
 
     close(&service, &handles, open.handle).await;
-    let reply = service.execute(&handles, invalidate_cmd(SMALL_KEY)).await.unwrap();
+    let reply = service
+        .execute(&handles, invalidate_cmd(SMALL_KEY))
+        .await
+        .unwrap();
     let CommandOutput::InvalidateObjectCache(output) = reply.output else {
         panic!("unexpected invalidate output");
     };
@@ -137,7 +179,12 @@ async fn small_read_keeps_residency_bytes_after_durable_rewrite() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abc".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend.clone())).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend.clone()))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
@@ -147,7 +194,14 @@ async fn small_read_keeps_residency_bytes_after_durable_rewrite() {
     cache
         .index()
         .admit_small_if_absent(
-            CachedObjectMeta::small(key.clone(), ObjectInfo { size: 4, etag: None }, 4),
+            CachedObjectMeta::small(
+                key.clone(),
+                ObjectInfo {
+                    size: 4,
+                    etag: None,
+                },
+                4,
+            ),
             b"abcd".to_vec(),
             0,
         )
@@ -171,7 +225,12 @@ async fn invalidate_object_cache_from_task_after_close_removes_small_kv() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abc".to_vec());
     let cache = memory_cache();
-    let service = std::sync::Arc::new(StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend)).unwrap(), cache.clone()));
+    let service = std::sync::Arc::new(StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    ));
     let handles = std::sync::Arc::new(HandleTable::new());
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
@@ -180,7 +239,10 @@ async fn invalidate_object_cache_from_task_after_close_removes_small_kv() {
     let handles_task = handles.clone();
     let invalidator = tokio::spawn(async move {
         rx.await.expect("close signal");
-        let reply = service_task.execute(&handles_task, invalidate_cmd(SMALL_KEY)).await.unwrap();
+        let reply = service_task
+            .execute(&handles_task, invalidate_cmd(SMALL_KEY))
+            .await
+            .unwrap();
         let CommandOutput::InvalidateObjectCache(output) = reply.output else {
             panic!("unexpected invalidate output");
         };
@@ -201,19 +263,30 @@ async fn explicit_invalidate_allows_next_open_to_refresh_small_object() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abc".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend.clone())).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend.clone()))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
     close(&service, &handles, open.handle).await;
     backend.insert(key.clone(), b"new".to_vec());
 
-    service.execute(&handles, invalidate_cmd(SMALL_KEY)).await.unwrap();
+    service
+        .execute(&handles, invalidate_cmd(SMALL_KEY))
+        .await
+        .unwrap();
     let refreshed = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
     let refreshed_read = read(&service, &handles, refreshed.handle, 0, 3).await;
 
     assert_eq!(refreshed_read.data, b"new");
-    assert_eq!(cache.index().get_small(&key).await.unwrap(), Some(b"new".to_vec()));
+    assert_eq!(
+        cache.index().get_small(&key).await.unwrap(),
+        Some(b"new".to_vec())
+    );
 
     close(&service, &handles, refreshed.handle).await;
 }
@@ -221,11 +294,17 @@ async fn explicit_invalidate_allows_next_open_to_refresh_small_object() {
 #[tokio::test]
 async fn open_rejects_unrepresentable_cache_paths_before_small_kv_cache() {
     let object_name = "x".repeat(300);
-    let key = ObjectLocation::new(DEFAULT_STORE, BUCKET, object_name.clone()).unwrap();
+    let key =
+        ObjectLocation::new(DEFAULT_STORE, BUCKET, object_name.clone()).unwrap();
     let backend = MemoryObjectBackend::new();
     backend.insert(key, b"abc".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend)).unwrap(), cache);
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend))
+            .unwrap(),
+        cache,
+    );
     let handles = HandleTable::new();
 
     let error = service
@@ -255,11 +334,24 @@ async fn read_rejects_handle_without_bound_residency() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abc".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend)).unwrap(), cache);
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend))
+            .unwrap(),
+        cache,
+    );
     let handles = HandleTable::new();
     let store = service.registry().resolve(key.store_id()).unwrap();
     let state = handles
-        .open(key.clone(), store, ObjectInfo { size: 3, etag: None }, OpenFlags::READ_ONLY)
+        .open(
+            key.clone(),
+            store,
+            ObjectInfo {
+                size: 3,
+                etag: None,
+            },
+            OpenFlags::READ_ONLY,
+        )
         .unwrap();
 
     let error = match service

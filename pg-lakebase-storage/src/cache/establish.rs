@@ -57,7 +57,10 @@ use crate::object::ObjectLocation;
 #[derive(Clone, Debug)]
 enum EstablishOutcome {
     Succeeded,
-    Failed { kind: StorageErrorKind, message: String },
+    Failed {
+        kind: StorageErrorKind,
+        message: String,
+    },
 }
 
 /// Shared coordination point between one leader and any number of followers. The `Arc` is
@@ -181,7 +184,10 @@ impl Drop for EstablishLeader {
         if !self.finished {
             self.flight.publish(EstablishOutcome::Failed {
                 kind: StorageErrorKind::Cache,
-                message: format!("residency establishment for {} dropped without outcome", self.key),
+                message: format!(
+                    "residency establishment for {} dropped without outcome",
+                    self.key
+                ),
             });
         }
     }
@@ -212,7 +218,9 @@ impl EstablishWaiter {
             if let Some(outcome) = rx.borrow_and_update().clone() {
                 return match outcome {
                     EstablishOutcome::Succeeded => Ok(()),
-                    EstablishOutcome::Failed { kind, message } => Err(StorageError::from_wire(kind, message)),
+                    EstablishOutcome::Failed { kind, message } => {
+                        Err(StorageError::from_wire(kind, message))
+                    }
                 };
             }
             if rx.changed().await.is_err() {
@@ -221,7 +229,9 @@ impl EstablishWaiter {
                 // a way that bypassed the leader handle entirely (for example, a panic during
                 // election before the leader was returned). Surface a cache error rather than
                 // hang the follower forever.
-                return Err(StorageError::cache("residency establishment flight closed without outcome"));
+                return Err(StorageError::cache(
+                    "residency establishment flight closed without outcome",
+                ));
             }
         }
     }
@@ -255,7 +265,11 @@ pub(super) fn claim_or_join(slot: &mut Weak<EstablishFlight>) -> FlightClaim {
 }
 
 impl EstablishLeader {
-    pub(super) fn new(key: ObjectLocation, flight: Arc<EstablishFlight>, admission: CacheActivityGuard) -> Self {
+    pub(super) fn new(
+        key: ObjectLocation,
+        flight: Arc<EstablishFlight>,
+        admission: CacheActivityGuard,
+    ) -> Self {
         Self {
             key,
             flight,

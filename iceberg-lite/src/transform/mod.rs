@@ -54,7 +54,9 @@ pub trait TransformFunction: Send + Sync + Debug {
 pub type BoxedTransformFunction = Box<dyn TransformFunction>;
 
 /// create_transform_function creates a boxed trait object of TransformFunction from a Transform.
-pub fn create_transform_function(transform: &Transform) -> Result<BoxedTransformFunction> {
+pub fn create_transform_function(
+    transform: &Transform,
+) -> Result<BoxedTransformFunction> {
     match transform {
         Transform::Identity => Ok(Box::new(identity::Identity {})),
         Transform::Void => Ok(Box::new(void::Void {})),
@@ -79,9 +81,12 @@ mod test {
     use crate::Result;
     use crate::expr::accessor::StructAccessor;
     use crate::expr::{
-        BinaryExpression, BoundPredicate, BoundReference, PredicateOperator, SetExpression,
+        BinaryExpression, BoundPredicate, BoundReference, PredicateOperator,
+        SetExpression,
     };
-    use crate::spec::{Datum, NestedField, NestedFieldRef, PrimitiveType, Transform, Type};
+    use crate::spec::{
+        Datum, NestedField, NestedFieldRef, PrimitiveType, Transform, Type,
+    };
 
     /// A utitily struct, test fixture
     /// used for testing the projection on `Transform`
@@ -175,7 +180,8 @@ mod test {
                 );
             }
 
-            for (i, (input_type, result_type)) in self.trans_types.iter().enumerate() {
+            for (i, (input_type, result_type)) in self.trans_types.iter().enumerate()
+            {
                 let actual = trans.result_type(input_type).ok();
                 assert_eq!(
                     result_type, &actual,

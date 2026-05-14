@@ -22,7 +22,9 @@ use std::marker::PhantomData;
 
 use crate::spec::{PartitionKey, Struct};
 use crate::writer::partitioning::PartitioningWriter;
-use crate::writer::{DefaultInput, DefaultOutput, IcebergWriter, IcebergWriterBuilder};
+use crate::writer::{
+    DefaultInput, DefaultOutput, IcebergWriter, IcebergWriterBuilder,
+};
 use crate::{Error, ErrorKind, Result};
 
 /// A writer that writes data to a single partition at a time.
@@ -113,7 +115,8 @@ where
             self.close_current_writer()?;
 
             // Create a new writer for the new partition
-            self.current_writer = Some(self.inner_builder.build(Some(partition_key.clone()))?);
+            self.current_writer =
+                Some(self.inner_builder.build(Some(partition_key.clone()))?);
             self.current_partition = Some(partition_value.clone());
         }
 
@@ -160,74 +163,103 @@ mod tests {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         // Create schema with partition field
         let schema = Arc::new(
             crate::spec::Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(3, "region", Type::Primitive(PrimitiveType::String))
-                        .into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        3,
+                        "region",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()?,
         );
 
         // Create partition spec and key
-        let partition_spec = crate::spec::PartitionSpec::builder(schema.clone()).build()?;
-        let partition_value =
-            crate::spec::Struct::from_iter([Some(crate::spec::Literal::string("US"))]);
-        let partition_key =
-            crate::spec::PartitionKey::new(partition_spec, schema.clone(), partition_value.clone());
-
-        // Create writer builder
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), schema.clone());
-
-        // Create rolling file writer builder
-        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            parquet_writer_builder,
-            file_io.clone(),
-            location_gen,
-            file_name_gen,
+        let partition_spec =
+            crate::spec::PartitionSpec::builder(schema.clone()).build()?;
+        let partition_value = crate::spec::Struct::from_iter([Some(
+            crate::spec::Literal::string("US"),
+        )]);
+        let partition_key = crate::spec::PartitionKey::new(
+            partition_spec,
+            schema.clone(),
+            partition_value.clone(),
         );
 
+        // Create writer builder
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            schema.clone(),
+        );
+
+        // Create rolling file writer builder
+        let rolling_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                parquet_writer_builder,
+                file_io.clone(),
+                location_gen,
+                file_name_gen,
+            );
+
         // Create data file writer builder
-        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+        let data_file_writer_builder =
+            DataFileWriterBuilder::new(rolling_writer_builder);
 
         // Create clustered writer
         let mut writer = ClusteredWriter::new(data_file_writer_builder);
 
         // Create test data with proper field ID metadata
         let arrow_schema = Schema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                1.to_string(),
-            )])),
-            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                2.to_string(),
-            )])),
-            Field::new("region", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                3.to_string(),
-            )])),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 1.to_string()),
+            ])),
+            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 2.to_string()),
+            ])),
+            Field::new("region", DataType::Utf8, false).with_metadata(HashMap::from(
+                [(PARQUET_FIELD_ID_META_KEY.to_string(), 3.to_string())],
+            )),
         ]);
 
-        let batch1 = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![1, 2])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob"])),
-            Arc::new(StringArray::from(vec!["US", "US"])),
-        ])?;
+        let batch1 = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+                Arc::new(StringArray::from(vec!["US", "US"])),
+            ],
+        )?;
 
-        let batch2 = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![3, 4])),
-            Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
-            Arc::new(StringArray::from(vec!["US", "US"])),
-        ])?;
+        let batch2 = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![3, 4])),
+                Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
+                Arc::new(StringArray::from(vec!["US", "US"])),
+            ],
+        )?;
 
         // Write data to the same partition (this should work)
         writer.write(partition_key.clone(), batch1)?;
@@ -257,44 +289,65 @@ mod tests {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         // Create schema with partition field
         let schema = Arc::new(
             crate::spec::Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(3, "region", Type::Primitive(PrimitiveType::String))
-                        .into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        3,
+                        "region",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()?,
         );
 
         // Create partition spec
-        let partition_spec = crate::spec::PartitionSpec::builder(schema.clone()).build()?;
+        let partition_spec =
+            crate::spec::PartitionSpec::builder(schema.clone()).build()?;
 
         // Create partition keys for different regions (in sorted order)
-        let partition_value_asia =
-            crate::spec::Struct::from_iter([Some(crate::spec::Literal::string("ASIA"))]);
+        let partition_value_asia = crate::spec::Struct::from_iter([Some(
+            crate::spec::Literal::string("ASIA"),
+        )]);
         let partition_key_asia = crate::spec::PartitionKey::new(
             partition_spec.clone(),
             schema.clone(),
             partition_value_asia.clone(),
         );
 
-        let partition_value_eu =
-            crate::spec::Struct::from_iter([Some(crate::spec::Literal::string("EU"))]);
+        let partition_value_eu = crate::spec::Struct::from_iter([Some(
+            crate::spec::Literal::string("EU"),
+        )]);
         let partition_key_eu = crate::spec::PartitionKey::new(
             partition_spec.clone(),
             schema.clone(),
             partition_value_eu.clone(),
         );
 
-        let partition_value_us =
-            crate::spec::Struct::from_iter([Some(crate::spec::Literal::string("US"))]);
+        let partition_value_us = crate::spec::Struct::from_iter([Some(
+            crate::spec::Literal::string("US"),
+        )]);
         let partition_key_us = crate::spec::PartitionKey::new(
             partition_spec.clone(),
             schema.clone(),
@@ -302,57 +355,67 @@ mod tests {
         );
 
         // Create writer builder
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), schema.clone());
-
-        // Create rolling file writer builder
-        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            parquet_writer_builder,
-            file_io.clone(),
-            location_gen,
-            file_name_gen,
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            schema.clone(),
         );
 
+        // Create rolling file writer builder
+        let rolling_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                parquet_writer_builder,
+                file_io.clone(),
+                location_gen,
+                file_name_gen,
+            );
+
         // Create data file writer builder
-        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+        let data_file_writer_builder =
+            DataFileWriterBuilder::new(rolling_writer_builder);
 
         // Create clustered writer
         let mut writer = ClusteredWriter::new(data_file_writer_builder);
 
         // Create test data with proper field ID metadata
         let arrow_schema = Schema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                1.to_string(),
-            )])),
-            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                2.to_string(),
-            )])),
-            Field::new("region", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                3.to_string(),
-            )])),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 1.to_string()),
+            ])),
+            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 2.to_string()),
+            ])),
+            Field::new("region", DataType::Utf8, false).with_metadata(HashMap::from(
+                [(PARQUET_FIELD_ID_META_KEY.to_string(), 3.to_string())],
+            )),
         ]);
 
         // Create batches for different partitions (in sorted order)
-        let batch_asia = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![1, 2])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob"])),
-            Arc::new(StringArray::from(vec!["ASIA", "ASIA"])),
-        ])?;
+        let batch_asia = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+                Arc::new(StringArray::from(vec!["ASIA", "ASIA"])),
+            ],
+        )?;
 
-        let batch_eu = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![3, 4])),
-            Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
-            Arc::new(StringArray::from(vec!["EU", "EU"])),
-        ])?;
+        let batch_eu = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![3, 4])),
+                Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
+                Arc::new(StringArray::from(vec!["EU", "EU"])),
+            ],
+        )?;
 
-        let batch_us = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![5, 6])),
-            Arc::new(StringArray::from(vec!["Eve", "Frank"])),
-            Arc::new(StringArray::from(vec!["US", "US"])),
-        ])?;
+        let batch_us = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![5, 6])),
+                Arc::new(StringArray::from(vec!["Eve", "Frank"])),
+                Arc::new(StringArray::from(vec!["US", "US"])),
+            ],
+        )?;
 
         // Write data in sorted partition order (this should work)
         writer.write(partition_key_asia.clone(), batch_asia)?;
@@ -398,36 +461,56 @@ mod tests {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         // Create schema with partition field
         let schema = Arc::new(
             crate::spec::Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(3, "region", Type::Primitive(PrimitiveType::String))
-                        .into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        3,
+                        "region",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()?,
         );
 
         // Create partition spec
-        let partition_spec = crate::spec::PartitionSpec::builder(schema.clone()).build()?;
+        let partition_spec =
+            crate::spec::PartitionSpec::builder(schema.clone()).build()?;
 
         // Create partition keys for different regions
-        let partition_value_us =
-            crate::spec::Struct::from_iter([Some(crate::spec::Literal::string("US"))]);
+        let partition_value_us = crate::spec::Struct::from_iter([Some(
+            crate::spec::Literal::string("US"),
+        )]);
         let partition_key_us = crate::spec::PartitionKey::new(
             partition_spec.clone(),
             schema.clone(),
             partition_value_us.clone(),
         );
 
-        let partition_value_eu =
-            crate::spec::Struct::from_iter([Some(crate::spec::Literal::string("EU"))]);
+        let partition_value_eu = crate::spec::Struct::from_iter([Some(
+            crate::spec::Literal::string("EU"),
+        )]);
         let partition_key_eu = crate::spec::PartitionKey::new(
             partition_spec.clone(),
             schema.clone(),
@@ -435,57 +518,67 @@ mod tests {
         );
 
         // Create writer builder
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), schema.clone());
-
-        // Create rolling file writer builder
-        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            parquet_writer_builder,
-            file_io.clone(),
-            location_gen,
-            file_name_gen,
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            schema.clone(),
         );
 
+        // Create rolling file writer builder
+        let rolling_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                parquet_writer_builder,
+                file_io.clone(),
+                location_gen,
+                file_name_gen,
+            );
+
         // Create data file writer builder
-        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+        let data_file_writer_builder =
+            DataFileWriterBuilder::new(rolling_writer_builder);
 
         // Create clustered writer
         let mut writer = ClusteredWriter::new(data_file_writer_builder);
 
         // Create test data with proper field ID metadata
         let arrow_schema = Schema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                1.to_string(),
-            )])),
-            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                2.to_string(),
-            )])),
-            Field::new("region", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                3.to_string(),
-            )])),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 1.to_string()),
+            ])),
+            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 2.to_string()),
+            ])),
+            Field::new("region", DataType::Utf8, false).with_metadata(HashMap::from(
+                [(PARQUET_FIELD_ID_META_KEY.to_string(), 3.to_string())],
+            )),
         ]);
 
         // Create batches for different partitions
-        let batch_us = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![1, 2])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob"])),
-            Arc::new(StringArray::from(vec!["US", "US"])),
-        ])?;
+        let batch_us = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+                Arc::new(StringArray::from(vec!["US", "US"])),
+            ],
+        )?;
 
-        let batch_eu = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![3, 4])),
-            Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
-            Arc::new(StringArray::from(vec!["EU", "EU"])),
-        ])?;
+        let batch_eu = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![3, 4])),
+                Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
+                Arc::new(StringArray::from(vec!["EU", "EU"])),
+            ],
+        )?;
 
-        let batch_us2 = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![5])),
-            Arc::new(StringArray::from(vec!["Eve"])),
-            Arc::new(StringArray::from(vec!["US"])),
-        ])?;
+        let batch_us2 = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![5])),
+                Arc::new(StringArray::from(vec!["Eve"])),
+                Arc::new(StringArray::from(vec!["US"])),
+            ],
+        )?;
 
         // Write data to US partition first
         writer.write(partition_key_us.clone(), batch_us)?;

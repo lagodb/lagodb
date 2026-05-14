@@ -61,9 +61,7 @@ impl TableOptions {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
-        self.options
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_deref()))
+        self.options.iter().map(|(k, v)| (k.as_str(), v.as_deref()))
     }
 
     pub fn get_str(&self, key: &str) -> Option<&str> {
@@ -145,8 +143,8 @@ impl TableOptions {
     pub fn load_from_catalog(
         relid: pg_sys::Oid,
     ) -> Result<Option<Self>, TableOptionError> {
-        let table_oid = catalog::get_table_options_oid()
-            .map_err(TableOptionError::LoadFailed)?;
+        let table_oid =
+            catalog::get_table_options_oid().map_err(TableOptionError::LoadFailed)?;
         let index_oid = catalog::get_table_options_pkey_oid()
             .map_err(TableOptionError::LoadFailed)?;
 

@@ -1,8 +1,8 @@
-use crate::api::TableAccessMethod;
 use crate::TableAmRoutine;
-use pgrx::{pg_sys, PgMemoryContexts};
-use pgrx::pg_sys::panic::ErrorReport;
+use crate::api::TableAccessMethod;
 use pgrx::AllocatedByPostgres;
+use pgrx::pg_sys::panic::ErrorReport;
+use pgrx::{PgMemoryContexts, pg_sys};
 use std::sync::Once;
 
 pub fn make_table_am_routine<E, T>() -> TableAmRoutine
@@ -16,7 +16,9 @@ where
 
         INIT.call_once(|| {
             let mut am_routine = PgMemoryContexts::TopMemoryContext.switch_to(|_| {
-                TableAmRoutine::<AllocatedByPostgres>::alloc_node(pg_sys::NodeTag::T_TableAmRoutine)
+                TableAmRoutine::<AllocatedByPostgres>::alloc_node(
+                    pg_sys::NodeTag::T_TableAmRoutine,
+                )
             });
 
             crate::access::scan::register::<E, T::ScanState>(&mut am_routine);

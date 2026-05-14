@@ -21,5 +21,6 @@ pub(super) fn lru_access_ns(key: &str) -> StorageResult<u64> {
     let Some((last_access_ns, _)) = key.split_once('\0') else {
         return Err(StorageError::cache(format!("invalid lru key {key:?}")));
     };
-    u64::from_str_radix(last_access_ns, 16).map_err(|error| StorageError::cache_source("invalid lru timestamp", error))
+    u64::from_str_radix(last_access_ns, 16)
+        .map_err(|error| StorageError::cache_source("invalid lru timestamp", error))
 }

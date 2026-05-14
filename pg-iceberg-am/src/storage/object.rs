@@ -119,7 +119,9 @@ impl Storage for ObjectStorage {
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
         match self.client.head(self.store_id.as_str(), &self.bucket, path) {
             Ok(info) => Ok(Some(FileMetadata { size: info.size })),
-            Err(e) if e.kind() == pg_lakebase_storage::StorageErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == pg_lakebase_storage::StorageErrorKind::NotFound => {
+                Ok(None)
+            }
             Err(e) => Err(Error::new(ErrorKind::IoError, e.to_string())),
         }
     }

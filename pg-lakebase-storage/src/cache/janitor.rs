@@ -2,7 +2,10 @@ use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use tracing::info;
 
 use crate::cache::eviction::OrphanFileDeleted;
-use crate::cache::{CacheCleanupPolicy, CacheCleanupReport, CacheEvictionOutcome, CacheIndex, CacheManager};
+use crate::cache::{
+    CacheCleanupPolicy, CacheCleanupReport, CacheEvictionOutcome, CacheIndex,
+    CacheManager,
+};
 use crate::error::StorageResult;
 
 const CLEANUP_LRU_PAGE_SIZE: usize = 32;
@@ -43,10 +46,18 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
         Self { cache }
     }
 
-    pub(crate) async fn cleanup(&self, policy: CacheCleanupPolicy) -> StorageResult<CacheCleanupReport> {
+    pub(crate) async fn cleanup(
+        &self,
+        policy: CacheCleanupPolicy,
+    ) -> StorageResult<CacheCleanupReport> {
         self.cache.prepare_dirs().await?;
         let mut report = CacheCleanupReport {
-            bytes_before: self.cache.index.logical_cache_usage().await?.resident_bytes,
+            bytes_before: self
+                .cache
+                .index
+                .logical_cache_usage()
+                .await?
+                .resident_bytes,
             ..CacheCleanupReport::default()
         };
 
@@ -66,10 +77,18 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
         Ok(report)
     }
 
-    pub(crate) async fn cleanup_capacity(&self, policy: CacheCleanupPolicy) -> StorageResult<CacheCleanupReport> {
+    pub(crate) async fn cleanup_capacity(
+        &self,
+        policy: CacheCleanupPolicy,
+    ) -> StorageResult<CacheCleanupReport> {
         self.cache.prepare_dirs().await?;
         let report = CacheCleanupReport {
-            bytes_before: self.cache.index.logical_cache_usage().await?.resident_bytes,
+            bytes_before: self
+                .cache
+                .index
+                .logical_cache_usage()
+                .await?
+                .resident_bytes,
             ..CacheCleanupReport::default()
         };
         self.evict_by_lru(policy, report).await
@@ -92,7 +111,11 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
             && report.evicted_objects < policy.max_cleanup_batch_items
             && report.bytes_evicted < policy.max_cleanup_batch_bytes
         {
-            let page = self.cache.index.oldest_cached_metas_page(cursor, CLEANUP_LRU_PAGE_SIZE).await?;
+            let page = self
+                .cache
+                .index
+                .oldest_cached_metas_page(cursor, CLEANUP_LRU_PAGE_SIZE)
+                .await?;
             cursor = page.next_cursor;
             if page.metas.is_empty() {
                 break;
@@ -100,7 +123,9 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
 
             let mut reached_batch_bytes = false;
             for meta in page.metas {
-                if usage <= target || report.evicted_objects >= policy.max_cleanup_batch_items {
+                if usage <= target
+                    || report.evicted_objects >= policy.max_cleanup_batch_items
+                {
                     break;
                 }
                 if report.bytes_evicted >= policy.max_cleanup_batch_bytes {
@@ -116,7 +141,8 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
                 }
                 let bytes = meta.cached_bytes();
                 if report.bytes_evicted > 0
-                    && report.bytes_evicted.saturating_add(bytes) > policy.max_cleanup_batch_bytes
+                    && report.bytes_evicted.saturating_add(bytes)
+                        > policy.max_cleanup_batch_bytes
                 {
                     reached_batch_bytes = true;
                     break;
@@ -125,18 +151,24 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
                     CacheEvictionOutcome::Evicted { bytes } => {
                         usage = usage.saturating_sub(bytes);
                         report.evicted_objects += 1;
-                        report.bytes_evicted = report.bytes_evicted.saturating_add(bytes);
-                    },
+                        report.bytes_evicted =
+                            report.bytes_evicted.saturating_add(bytes);
+                    }
                     CacheEvictionOutcome::Active => {
                         report.active_objects_skipped += 1;
-                    },
+                    }
                     CacheEvictionOutcome::Changed
                     | CacheEvictionOutcome::AlreadyGone
                     | CacheEvictionOutcome::NotResident => {
                         // Snapshot LRU iteration became stale; re-read authoritative sum instead of local subtraction
                         // drift.
-                        usage = self.cache.index.logical_cache_usage().await?.resident_bytes;
-                    },
+                        usage = self
+                            .cache
+                            .index
+                            .logical_cache_usage()
+                            .await?
+                            .resident_bytes;
+                    }
                 }
             }
 
@@ -145,18 +177,26 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
             }
         }
 
-        report.bytes_after = self.cache.index.logical_cache_usage().await?.resident_bytes;
+        report.bytes_after =
+            self.cache.index.logical_cache_usage().await?.resident_bytes;
         Ok(report)
     }
 
-    async fn delete_orphans(&self, report: &mut CacheCleanupReport) -> StorageResult<()> {
+    async fn delete_orphans(
+        &self,
+        report: &mut CacheCleanupReport,
+    ) -> StorageResult<()> {
         let candidates = self.cache.orphan_candidate_snapshot();
 
         for path in candidates.file_paths {
             match self.cache.delete_orphan_file_if_unclaimed(path).await? {
-                Some(OrphanFileDeleted::Complete) => report.orphan_complete_files_deleted += 1,
-                Some(OrphanFileDeleted::Partial) => report.orphan_partial_files_deleted += 1,
-                None => {},
+                Some(OrphanFileDeleted::Complete) => {
+                    report.orphan_complete_files_deleted += 1
+                }
+                Some(OrphanFileDeleted::Partial) => {
+                    report.orphan_partial_files_deleted += 1
+                }
+                None => {}
             }
         }
 
@@ -171,7 +211,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::cache::util::create_parent_dir;
-    use crate::cache::{CacheIndex, CacheManager, CachedObjectMeta, InMemoryCacheIndex};
+    use crate::cache::{
+        CacheIndex, CacheManager, CachedObjectMeta, InMemoryCacheIndex,
+    };
     use crate::object::{ObjectInfo, ObjectLocation};
 
     static TEST_CACHE_ID: AtomicU64 = AtomicU64::new(0);
@@ -179,17 +221,27 @@ mod tests {
     #[tokio::test]
     async fn recovery_leaves_no_runtime_orphan_candidates() {
         let index = InMemoryCacheIndex::new();
-        let complete_key = ObjectLocation::new("default", "bucket", "complete").unwrap();
-        let deleted_partial_key = ObjectLocation::new("default", "bucket", "deleted-partial").unwrap();
+        let complete_key =
+            ObjectLocation::new("default", "bucket", "complete").unwrap();
+        let deleted_partial_key =
+            ObjectLocation::new("default", "bucket", "deleted-partial").unwrap();
 
         let cache = CacheManager::new(test_cache_dir(), index).with_limits(4, 4);
         cache.prepare_dirs().await.unwrap();
 
-        let complete_meta = CachedObjectMeta::complete(complete_key.clone(), ObjectInfo { size: 8, etag: None });
+        let complete_meta = CachedObjectMeta::complete(
+            complete_key.clone(),
+            ObjectInfo {
+                size: 8,
+                etag: None,
+            },
+        );
         cache.index().put_new_complete(complete_meta).await.unwrap();
-        write_cache_file(cache.complete_path(&complete_key).unwrap(), b"complete").await;
+        write_cache_file(cache.complete_path(&complete_key).unwrap(), b"complete")
+            .await;
 
-        write_cache_file(cache.partial_path(&deleted_partial_key).unwrap(), b"").await;
+        write_cache_file(cache.partial_path(&deleted_partial_key).unwrap(), b"")
+            .await;
 
         cache.recover().await.unwrap();
 
@@ -199,9 +251,15 @@ mod tests {
     }
 
     fn test_cache_dir() -> PathBuf {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let id = TEST_CACHE_ID.fetch_add(1, Ordering::Relaxed);
-        PathBuf::from("/tmp").join(format!("-cache-janitor-inventory-test-{}-{stamp}-{id}", std::process::id()))
+        PathBuf::from("/tmp").join(format!(
+            "-cache-janitor-inventory-test-{}-{stamp}-{id}",
+            std::process::id()
+        ))
     }
 
     async fn write_cache_file(path: PathBuf, data: &[u8]) {

@@ -42,7 +42,8 @@ pub type ViewMetadataRef = Arc<ViewMetadata>;
 pub(crate) static INITIAL_VIEW_VERSION_ID: i32 = 1;
 
 /// Property key for allowing to drop dialects when replacing a view.
-pub const VIEW_PROPERTY_REPLACE_DROP_DIALECT_ALLOWED: &str = "replace.drop-dialect.allowed";
+pub const VIEW_PROPERTY_REPLACE_DROP_DIALECT_ALLOWED: &str =
+    "replace.drop-dialect.allowed";
 /// Default value for the property key for allowing to drop dialects when replacing a view.
 pub const VIEW_PROPERTY_REPLACE_DROP_DIALECT_ALLOWED_DEFAULT: bool = false;
 /// Property key for the number of history entries to keep.
@@ -117,7 +118,10 @@ impl ViewMetadata {
 
     /// Lookup a view version by id.
     #[inline]
-    pub fn version_by_id(&self, version_id: ViewVersionId) -> Option<&ViewVersionRef> {
+    pub fn version_by_id(
+        &self,
+        version_id: ViewVersionId,
+    ) -> Option<&ViewVersionRef> {
         self.versions.get(&version_id)
     }
 
@@ -276,7 +280,9 @@ pub(super) mod _serde {
 
     impl Serialize for ViewMetadata {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: serde::Serializer {
+        where
+            S: serde::Serializer,
+        {
             // we must do a clone here
             let metadata_enum: ViewMetadataEnum =
                 self.clone().try_into().map_err(serde::ser::Error::custom)?;
@@ -310,7 +316,9 @@ pub(super) mod _serde {
                 value
                     .schemas
                     .into_iter()
-                    .map(|schema| Ok((schema.schema_id, Arc::new(schema.try_into()?))))
+                    .map(|schema| {
+                        Ok((schema.schema_id, Arc::new(schema.try_into()?)))
+                    })
                     .collect::<Result<Vec<_>, Error>>()?,
             );
             let versions = HashMap::from_iter(
@@ -410,8 +418,8 @@ pub(crate) mod tests {
 
     use super::{ViewFormatVersion, ViewMetadataBuilder, ViewVersionLog};
     use crate::spec::{
-        INITIAL_VIEW_VERSION_ID, NestedField, PrimitiveType, Schema, SqlViewRepresentation, Type,
-        ViewMetadata, ViewRepresentations, ViewVersion,
+        INITIAL_VIEW_VERSION_ID, NestedField, PrimitiveType, Schema,
+        SqlViewRepresentation, Type, ViewMetadata, ViewRepresentations, ViewVersion,
     };
     use crate::{NamespaceIdent, ViewCreation};
 
@@ -420,7 +428,8 @@ pub(crate) mod tests {
         assert_eq!(desered_type, expected_type);
 
         let sered_json = serde_json::to_string(&expected_type).unwrap();
-        let parsed_json_value = serde_json::from_str::<ViewMetadata>(&sered_json).unwrap();
+        let parsed_json_value =
+            serde_json::from_str::<ViewMetadata>(&sered_json).unwrap();
 
         assert_eq!(parsed_json_value, desered_type);
     }
@@ -480,8 +489,12 @@ pub(crate) mod tests {
         let schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![Arc::new(
-                NestedField::optional(1, "event_count", Type::Primitive(PrimitiveType::Int))
-                    .with_doc("Count of events"),
+                NestedField::optional(
+                    1,
+                    "event_count",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .with_doc("Count of events"),
             )])
             .build()
             .unwrap();
@@ -507,7 +520,8 @@ pub(crate) mod tests {
 
         let expected = ViewMetadata {
             format_version: ViewFormatVersion::V1,
-            view_uuid: Uuid::parse_str("fa6506c3-7681-40c8-86dc-e36561f83385").unwrap(),
+            view_uuid: Uuid::parse_str("fa6506c3-7681-40c8-86dc-e36561f83385")
+                .unwrap(),
             location: "s3://bucket/warehouse/default.db/event_agg".to_string(),
             current_version_id: 1,
             versions: HashMap::from_iter(vec![(1, Arc::new(version))]),
@@ -551,7 +565,9 @@ pub(crate) mod tests {
             .location("s3://bucket/warehouse/default.db/event_agg".to_string())
             .name("view".to_string())
             .schema(Schema::builder().build().unwrap())
-            .default_namespace(NamespaceIdent::from_vec(vec!["default".to_string()]).unwrap())
+            .default_namespace(
+                NamespaceIdent::from_vec(vec!["default".to_string()]).unwrap(),
+            )
             .representations(representations)
             .build();
 
@@ -574,14 +590,19 @@ pub(crate) mod tests {
     #[test]
     fn test_view_metadata_v1_file_valid() {
         let metadata =
-            fs::read_to_string("testdata/view_metadata/ViewMetadataV1Valid.json").unwrap();
+            fs::read_to_string("testdata/view_metadata/ViewMetadataV1Valid.json")
+                .unwrap();
 
         let schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
                 Arc::new(
-                    NestedField::optional(1, "event_count", Type::Primitive(PrimitiveType::Int))
-                        .with_doc("Count of events"),
+                    NestedField::optional(
+                        1,
+                        "event_count",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .with_doc("Count of events"),
                 ),
                 Arc::new(NestedField::optional(
                     2,
@@ -614,7 +635,8 @@ pub(crate) mod tests {
 
         let expected = ViewMetadata {
             format_version: ViewFormatVersion::V1,
-            view_uuid: Uuid::parse_str("fa6506c3-7681-40c8-86dc-e36561f83385").unwrap(),
+            view_uuid: Uuid::parse_str("fa6506c3-7681-40c8-86dc-e36561f83385")
+                .unwrap(),
             location: "s3://bucket/warehouse/default.db/event_agg".to_string(),
             current_version_id: 1,
             versions: HashMap::from_iter(vec![(1, Arc::new(version))]),
@@ -643,11 +665,13 @@ pub(crate) mod tests {
 
     #[test]
     fn test_view_metadata_v1_unsupported_version() {
-        let metadata =
-            fs::read_to_string("testdata/view_metadata/ViewMetadataUnsupportedVersion.json")
-                .unwrap();
+        let metadata = fs::read_to_string(
+            "testdata/view_metadata/ViewMetadataUnsupportedVersion.json",
+        )
+        .unwrap();
 
-        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+        let desered: Result<ViewMetadata, serde_json::Error> =
+            serde_json::from_str(&metadata);
 
         assert_eq!(
             desered.unwrap_err().to_string(),
@@ -657,11 +681,13 @@ pub(crate) mod tests {
 
     #[test]
     fn test_view_metadata_v1_version_not_found() {
-        let metadata =
-            fs::read_to_string("testdata/view_metadata/ViewMetadataV1CurrentVersionNotFound.json")
-                .unwrap();
+        let metadata = fs::read_to_string(
+            "testdata/view_metadata/ViewMetadataV1CurrentVersionNotFound.json",
+        )
+        .unwrap();
 
-        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+        let desered: Result<ViewMetadata, serde_json::Error> =
+            serde_json::from_str(&metadata);
 
         assert_eq!(
             desered.unwrap_err().to_string(),
@@ -671,10 +697,13 @@ pub(crate) mod tests {
 
     #[test]
     fn test_view_metadata_v1_schema_not_found() {
-        let metadata =
-            fs::read_to_string("testdata/view_metadata/ViewMetadataV1SchemaNotFound.json").unwrap();
+        let metadata = fs::read_to_string(
+            "testdata/view_metadata/ViewMetadataV1SchemaNotFound.json",
+        )
+        .unwrap();
 
-        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+        let desered: Result<ViewMetadata, serde_json::Error> =
+            serde_json::from_str(&metadata);
 
         assert_eq!(
             desered.unwrap_err().to_string(),
@@ -684,10 +713,13 @@ pub(crate) mod tests {
 
     #[test]
     fn test_view_metadata_v1_missing_schema_for_version() {
-        let metadata =
-            fs::read_to_string("testdata/view_metadata/ViewMetadataV1MissingSchema.json").unwrap();
+        let metadata = fs::read_to_string(
+            "testdata/view_metadata/ViewMetadataV1MissingSchema.json",
+        )
+        .unwrap();
 
-        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+        let desered: Result<ViewMetadata, serde_json::Error> =
+            serde_json::from_str(&metadata);
 
         assert_eq!(
             desered.unwrap_err().to_string(),
@@ -697,11 +729,13 @@ pub(crate) mod tests {
 
     #[test]
     fn test_view_metadata_v1_missing_current_version() {
-        let metadata =
-            fs::read_to_string("testdata/view_metadata/ViewMetadataV1MissingCurrentVersion.json")
-                .unwrap();
+        let metadata = fs::read_to_string(
+            "testdata/view_metadata/ViewMetadataV1MissingCurrentVersion.json",
+        )
+        .unwrap();
 
-        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+        let desered: Result<ViewMetadata, serde_json::Error> =
+            serde_json::from_str(&metadata);
 
         assert_eq!(
             desered.unwrap_err().to_string(),

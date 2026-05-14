@@ -50,12 +50,19 @@ impl<K: CacheKv> PersistentCacheIndex<K> {
         let kv = self.kv.clone();
         task::spawn_blocking(move || operation(kv.as_ref()))
             .await
-            .map_err(|error| StorageError::cache_source("persistent cache index task failed", error))?
+            .map_err(|error| {
+                StorageError::cache_source(
+                    "persistent cache index task failed",
+                    error,
+                )
+            })?
     }
 
     pub(super) async fn run_tracked<T>(
         &self,
-        operation: impl FnOnce(&K, &RuntimeCacheTracking) -> StorageResult<T> + Send + 'static,
+        operation: impl FnOnce(&K, &RuntimeCacheTracking) -> StorageResult<T>
+        + Send
+        + 'static,
     ) -> StorageResult<T>
     where
         T: Send + 'static,
@@ -64,7 +71,12 @@ impl<K: CacheKv> PersistentCacheIndex<K> {
         let tracking = self.tracking.clone();
         task::spawn_blocking(move || operation(kv.as_ref(), tracking.as_ref()))
             .await
-            .map_err(|error| StorageError::cache_source("persistent cache index task failed", error))?
+            .map_err(|error| {
+                StorageError::cache_source(
+                    "persistent cache index task failed",
+                    error,
+                )
+            })?
     }
 
     pub(super) fn tracking(&self) -> &RuntimeCacheTracking {

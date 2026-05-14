@@ -28,10 +28,13 @@ use crate::error::{StorageError, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::object::ObjectInfo;
 use crate::protocol::{
-    decode_response, encode_read_request, encode_request, ListCursor, ReadResponsePrefix, ResponseFrameHeader,
-    WireRequest, WireRequestPayload, WireResponsePayload,
+    ListCursor, ReadResponsePrefix, ResponseFrameHeader, WireRequest,
+    WireRequestPayload, WireResponsePayload, decode_response, encode_read_request,
+    encode_request,
 };
-use crate::transport::{read_fd_blocking, read_frame_blocking, write_frame_blocking, BlockingFrameCursor};
+use crate::transport::{
+    BlockingFrameCursor, read_fd_blocking, read_frame_blocking, write_frame_blocking,
+};
 
 mod list;
 mod staging_file;
@@ -142,14 +145,17 @@ impl StorageClient {
                 direct_io,
             } => {
                 let read_path = if direct_io {
-                    let fd =
-                        direct_fd.ok_or_else(|| StorageError::protocol("direct open response did not include fd"))?;
+                    let fd = direct_fd.ok_or_else(|| {
+                        StorageError::protocol(
+                            "direct open response did not include fd",
+                        )
+                    })?;
                     ReadPath::Direct(DirectReader::new(std::fs::File::from(fd)))
                 } else {
                     ReadPath::Mediated
                 };
                 Ok(StorageFile::new(self.clone(), handle, size, read_path))
-            },
+            }
             other => Err(unexpected_response("open", &other)),
         }
     }
@@ -183,7 +189,11 @@ impl StorageClient {
     ) -> StorageResult<bool> {
         match self.head(store_id, bucket, key) {
             Ok(_) => Ok(true),
-            Err(error) if error.kind() == crate::error::StorageErrorKind::NotFound => Ok(false),
+            Err(error)
+                if error.kind() == crate::error::StorageErrorKind::NotFound =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }
@@ -220,10 +230,16 @@ impl StorageClient {
                     .custom_flags(libc::O_CLOEXEC)
                     .open(&path)
                     .map_err(|error| {
-                        StorageError::io(format!("open staging file returned by server {}", path.display()), error)
+                        StorageError::io(
+                            format!(
+                                "open staging file returned by server {}",
+                                path.display()
+                            ),
+                            error,
+                        )
                     })?;
                 Ok(StagingFile::new(file, path))
-            },
+            }
             other => Err(unexpected_response("stage create", &other)),
         }
     }
@@ -247,7 +263,9 @@ impl StorageClient {
             key: key.into(),
         })?;
         match response {
-            WireResponsePayload::Commit { size, etag } => Ok(CommitInfo { size, etag }),
+            WireResponsePayload::Commit { size, etag } => {
+                Ok(CommitInfo { size, etag })
+            }
             other => Err(unexpected_response("commit", &other)),
         }
     }
@@ -271,7 +289,11 @@ impl StorageClient {
         }
     }
 
-    pub fn register_store(&self, store_id: impl Into<String>, config: StoreConfig) -> StorageResult<bool> {
+    pub fn register_store(
+        &self,
+        store_id: impl Into<String>,
+        config: StoreConfig,
+    ) -> StorageResult<bool> {
         let (response, _) = self.request(WireRequestPayload::RegisterStore {
             store_id: store_id.into(),
             config,
@@ -282,7 +304,10 @@ impl StorageClient {
         }
     }
 
-    pub fn unregister_store(&self, store_id: impl Into<String>) -> StorageResult<bool> {
+    pub fn unregister_store(
+        &self,
+        store_id: impl Into<String>,
+    ) -> StorageResult<bool> {
         let (response, _) = self.request(WireRequestPayload::UnregisterStore {
             store_id: store_id.into(),
         })?;
@@ -292,7 +317,10 @@ impl StorageClient {
         }
     }
 
-    pub fn purge_store_cache(&self, store_id: impl Into<String>) -> StorageResult<()> {
+    pub fn purge_store_cache(
+        &self,
+        store_id: impl Into<String>,
+    ) -> StorageResult<()> {
         let (response, _) = self.request(WireRequestPayload::PurgeStoreCache {
             store_id: store_id.into(),
         })?;
@@ -308,11 +336,12 @@ impl StorageClient {
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<bool> {
-        let (response, _) = self.request(WireRequestPayload::InvalidateObjectCache {
-            store_id: store_id.into(),
-            bucket: bucket.into(),
-            key: key.into(),
-        })?;
+        let (response, _) =
+            self.request(WireRequestPayload::InvalidateObjectCache {
+                store_id: store_id.into(),
+                bucket: bucket.into(),
+                key: key.into(),
+            })?;
         match response {
             WireResponsePayload::InvalidateObjectCache { removed } => Ok(removed),
             other => Err(unexpected_response("invalidate-object-cache", &other)),
@@ -401,7 +430,10 @@ impl StorageClient {
             cursor,
         })?;
         match response {
-            WireResponsePayload::List { entries, next_cursor } => Ok(ListPage {
+            WireResponsePayload::List {
+                entries,
+                next_cursor,
+            } => Ok(ListPage {
                 entries: entries
                     .into_iter()
                     .map(|entry| ListEntry {
@@ -427,8 +459,18 @@ impl StorageClient {
     /// `Err` (the underlying server-side cursor is dropped on the next refill); callers that
     /// want to keep going after a transient backend error should use [`Self::list_page`]
     /// directly so they can inspect and resume.
-    pub fn list(&self, store_id: impl Into<String>, bucket: impl Into<String>, prefix: Option<&str>) -> ListIter<'_> {
-        ListIter::new(self, store_id.into(), bucket.into(), prefix.map(str::to_string))
+    pub fn list(
+        &self,
+        store_id: impl Into<String>,
+        bucket: impl Into<String>,
+        prefix: Option<&str>,
+    ) -> ListIter<'_> {
+        ListIter::new(
+            self,
+            store_id.into(),
+            bucket.into(),
+            prefix.map(str::to_string),
+        )
     }
 
     /// Sends a READ request and decodes the response header/prefix, returning the cursor
@@ -439,13 +481,16 @@ impl StorageClient {
         offset: u64,
         len: u32,
         stream: &'a mut std::os::unix::net::UnixStream,
-    ) -> StorageResult<(BlockingFrameCursor<'a, std::os::unix::net::UnixStream>, ReadResponsePrefix)> {
+    ) -> StorageResult<(
+        BlockingFrameCursor<'a, std::os::unix::net::UnixStream>,
+        ReadResponsePrefix,
+    )> {
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         let frame = encode_read_request(request_id, handle, offset, len);
         write_frame_blocking(&mut *stream, &frame)?;
 
-        let mut response_frame =
-            BlockingFrameCursor::read_from(&mut *stream)?.ok_or_else(|| StorageError::protocol("connection closed"))?;
+        let mut response_frame = BlockingFrameCursor::read_from(&mut *stream)?
+            .ok_or_else(|| StorageError::protocol("connection closed"))?;
         let mut header_bytes = [0_u8; ResponseFrameHeader::ENCODED_LEN];
         response_frame.read_exact(&mut header_bytes)?;
         let header = ResponseFrameHeader::decode(&header_bytes)?;
@@ -458,7 +503,8 @@ impl StorageClient {
         }
 
         if !header.is_read() {
-            let response_frame = response_frame.read_remaining_after(&header_bytes)?;
+            let response_frame =
+                response_frame.read_remaining_after(&header_bytes)?;
             let response = decode_response(&response_frame)?;
             let other = response.into_result()?;
             return Err(unexpected_response("read", &other));
@@ -478,9 +524,16 @@ impl StorageClient {
         Ok((response_frame, prefix))
     }
 
-    fn read_into(&self, handle: FileHandle, offset: u64, len: u32, buf: &mut [u8]) -> StorageResult<ReadIntoOutcome> {
+    fn read_into(
+        &self,
+        handle: FileHandle,
+        offset: u64,
+        len: u32,
+        buf: &mut [u8],
+    ) -> StorageResult<ReadIntoOutcome> {
         let mut stream = self.inner.lock_stream()?;
-        let (mut response_frame, prefix) = self.send_read_request(handle, offset, len, &mut stream)?;
+        let (mut response_frame, prefix) =
+            self.send_read_request(handle, offset, len, &mut stream)?;
         if prefix.data_len > buf.len() {
             response_frame.discard_remaining()?;
             return Err(StorageError::protocol(format!(
@@ -497,9 +550,15 @@ impl StorageClient {
 
     /// Allocating read: sends a READ request, decodes the response header to learn the actual
     /// body size, allocates exactly that size, then streams the body into the new buffer.
-    fn read_alloc(&self, handle: FileHandle, offset: u64, len: u32) -> StorageResult<Vec<u8>> {
+    fn read_alloc(
+        &self,
+        handle: FileHandle,
+        offset: u64,
+        len: u32,
+    ) -> StorageResult<Vec<u8>> {
         let mut stream = self.inner.lock_stream()?;
-        let (mut response_frame, prefix) = self.send_read_request(handle, offset, len, &mut stream)?;
+        let (mut response_frame, prefix) =
+            self.send_read_request(handle, offset, len, &mut stream)?;
         let mut data = vec![0u8; prefix.data_len];
         response_frame.read_exact(&mut data)?;
         Ok(data)
@@ -510,12 +569,15 @@ impl StorageClient {
         payload: WireRequestPayload,
     ) -> StorageResult<(WireResponsePayload, Option<std::os::fd::OwnedFd>)> {
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let request = WireRequest { request_id, payload };
+        let request = WireRequest {
+            request_id,
+            payload,
+        };
         let frame = encode_request(&request)?;
         let mut stream = self.inner.lock_stream()?;
         write_frame_blocking(&mut *stream, &frame)?;
-        let response_frame =
-            read_frame_blocking(&mut *stream)?.ok_or_else(|| StorageError::protocol("connection closed"))?;
+        let response_frame = read_frame_blocking(&mut *stream)?
+            .ok_or_else(|| StorageError::protocol("connection closed"))?;
         let response = decode_response(&response_frame)?;
         if response.request_id != request_id {
             return Err(StorageError::protocol(format!(
@@ -524,7 +586,13 @@ impl StorageClient {
             )));
         }
         let payload = response.into_result()?;
-        let fd = if matches!(payload, WireResponsePayload::Open { direct_io: true, .. }) {
+        let fd = if matches!(
+            payload,
+            WireResponsePayload::Open {
+                direct_io: true,
+                ..
+            }
+        ) {
             Some(read_fd_blocking(&mut stream)?)
         } else {
             None

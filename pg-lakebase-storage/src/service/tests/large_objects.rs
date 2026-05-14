@@ -9,13 +9,16 @@ use crate::cache::{CacheCleanupPolicy, CacheIndex};
 use crate::error::{StorageError, StorageErrorKind};
 use crate::handle::OpenFlags;
 use crate::object::ObjectInfo;
-use crate::service::command::{CloseCommand, OpenCommand, ReadCommand, StorageCommand};
 use crate::service::StorageService;
+use crate::service::command::{
+    CloseCommand, OpenCommand, ReadCommand, StorageCommand,
+};
 use crate::session::handle_table::HandleTable;
 
 use super::fixtures::{
-    close, default_location, invalidate_cmd, memory_cache, open_file, read, wait_until, wait_until_async,
-    write_cache_file, BlockingRangeBackend, CountingCompleteIndex, BUCKET, DEFAULT_STORE, LARGE_KEY,
+    BUCKET, BlockingRangeBackend, CountingCompleteIndex, DEFAULT_STORE, LARGE_KEY,
+    close, default_location, invalidate_cmd, memory_cache, open_file, read,
+    wait_until, wait_until_async, write_cache_file,
 };
 
 #[tokio::test]
@@ -24,7 +27,12 @@ async fn large_partial_read_does_not_persist_metadata() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -45,7 +53,12 @@ async fn invalidate_large_fill_is_busy_while_handle_is_open() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key, b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache);
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache,
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -79,12 +92,20 @@ async fn stale_reap_request_does_not_clobber_newer_session() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     // Partially fill so a partial file exists and a reap would have something to delete.
-    assert_eq!(read(&service, &handles, first.handle, 0, 4).await.data, b"abcd");
+    assert_eq!(
+        read(&service, &handles, first.handle, 0, 4).await.data,
+        b"abcd"
+    );
     let partial_path = cache.live_large_fill_partial_path(&key).unwrap();
     assert!(tokio::fs::try_exists(&partial_path).await.unwrap());
 
@@ -94,13 +115,25 @@ async fn stale_reap_request_does_not_clobber_newer_session() {
     // key. Whether the reaper runs before or after this OPEN, the stale nonce must prevent
     // cross-generation interference.
     let second = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
-    assert_eq!(read(&service, &handles, second.handle, 0, 4).await.data, b"abcd");
+    assert_eq!(
+        read(&service, &handles, second.handle, 0, 4).await.data,
+        b"abcd"
+    );
 
     // Let any pending reaper work drain on the object lock.
     let new_partial = cache.live_large_fill_partial_path(&key).unwrap();
-    assert_eq!(partial_path, new_partial, "partial path is deterministic per key");
-    assert!(tokio::fs::try_exists(&new_partial).await.unwrap(), "S2 partial must survive stale reap");
-    assert!(cache.has_live_large_fill(&key), "registry must still resolve to S2");
+    assert_eq!(
+        partial_path, new_partial,
+        "partial path is deterministic per key"
+    );
+    assert!(
+        tokio::fs::try_exists(&new_partial).await.unwrap(),
+        "S2 partial must survive stale reap"
+    );
+    assert!(
+        cache.has_live_large_fill(&key),
+        "registry must still resolve to S2"
+    );
 
     close(&service, &handles, second.handle).await;
 }
@@ -111,7 +144,12 @@ async fn last_large_fill_close_deletes_incomplete_partial() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -124,9 +162,14 @@ async fn last_large_fill_close_deletes_incomplete_partial() {
     // Large-fill cleanup runs on the cache manager's reaper task; close itself only releases the
     // per-handle Arc. Wait for the reaper to finalize — it will clear the registry entry and
     // unlink the partial.
-    wait_until("reaper clears live large fill registry entry", || !cache.has_live_large_fill(&key)).await;
-    wait_until_async("reaper unlinks partial payload", || async { !tokio::fs::try_exists(&partial).await.unwrap() })
-        .await;
+    wait_until("reaper clears live large fill registry entry", || {
+        !cache.has_live_large_fill(&key)
+    })
+    .await;
+    wait_until_async("reaper unlinks partial payload", || async {
+        !tokio::fs::try_exists(&partial).await.unwrap()
+    })
+    .await;
 
     let report = cache.cleanup(CacheCleanupPolicy::new(1024)).await.unwrap();
 
@@ -139,11 +182,19 @@ async fn aborted_large_fill_rejects_new_open_until_last_close_finalizes() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend.clone())).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend.clone()))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let old_open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
-    assert_eq!(read(&service, &handles, old_open.handle, 0, 4).await.data, b"abcd");
+    assert_eq!(
+        read(&service, &handles, old_open.handle, 0, 4).await.data,
+        b"abcd"
+    );
     let old_partial = cache.live_large_fill_partial_path(&key).unwrap();
     let heads_after_old_open = backend.head_call_count();
     assert!(heads_after_old_open >= 1);
@@ -180,12 +231,18 @@ async fn aborted_large_fill_rejects_new_open_until_last_close_finalizes() {
         !tokio::fs::try_exists(&old_partial).await.unwrap()
     })
     .await;
-    wait_until("reaper clears aborted session entry", || !cache.has_live_large_fill(&key)).await;
+    wait_until("reaper clears aborted session entry", || {
+        !cache.has_live_large_fill(&key)
+    })
+    .await;
 
     let new_open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let new_partial = cache.live_large_fill_partial_path(&key).unwrap();
     assert_eq!(old_partial, new_partial);
-    assert_eq!(read(&service, &handles, new_open.handle, 0, 4).await.data, b"abcd");
+    assert_eq!(
+        read(&service, &handles, new_open.handle, 0, 4).await.data,
+        b"abcd"
+    );
     assert!(tokio::fs::try_exists(&new_partial).await.unwrap());
     close(&service, &handles, new_open.handle).await;
 }
@@ -196,7 +253,12 @@ async fn stale_partial_from_failed_unlink_is_truncated_on_next_fill() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     // Plant a stale partial twice the object size with a recognizable byte pattern. If the new
@@ -215,7 +277,11 @@ async fn stale_partial_from_failed_unlink_is_truncated_on_next_fill() {
     let first_read = read(&service, &handles, open.handle, 0, 4).await;
     assert_eq!(first_read.data, b"abcd");
     let after_first_write = tokio::fs::read(&partial).await.unwrap();
-    assert_eq!(after_first_write.len(), 4, "stale bytes past the first chunk must be truncated");
+    assert_eq!(
+        after_first_write.len(),
+        4,
+        "stale bytes past the first chunk must be truncated"
+    );
     assert_eq!(after_first_write, b"abcd");
 
     // Finish the fill to confirm promotion still yields the backend's bytes, not a mix with the
@@ -223,7 +289,9 @@ async fn stale_partial_from_failed_unlink_is_truncated_on_next_fill() {
     let tail = read(&service, &handles, open.handle, 4, 6).await;
     assert_eq!(tail.data, b"efghij");
     assert!(tail.eof);
-    let complete = tokio::fs::read(cache.complete_path(&key).unwrap()).await.unwrap();
+    let complete = tokio::fs::read(cache.complete_path(&key).unwrap())
+        .await
+        .unwrap();
     assert_eq!(complete, b"abcdefghij");
 
     close(&service, &handles, open.handle).await;
@@ -236,7 +304,12 @@ async fn abort_large_fill_wakes_waiting_chunk_followers() {
     inner_backend.insert(key.clone(), b"abcdefgh".to_vec());
     let backend = Arc::new(BlockingRangeBackend::new(inner_backend));
     let cache = memory_cache();
-    let service = Arc::new(StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, backend.clone()).unwrap(), cache.clone()));
+    let service = Arc::new(StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, backend.clone())
+            .unwrap(),
+        cache.clone(),
+    ));
     let handles = Arc::new(HandleTable::new());
 
     let leader_open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -282,7 +355,10 @@ async fn abort_large_fill_wakes_waiting_chunk_followers() {
         .await
         .expect("follower read should wake after abort")
         .expect("follower read task should not panic");
-    assert!(matches!(follower, Err(StorageError::CacheFillAborted { .. })));
+    assert!(matches!(
+        follower,
+        Err(StorageError::CacheFillAborted { .. })
+    ));
 
     backend.release_first_range_get();
     let leader = tokio::time::timeout(Duration::from_secs(1), leader_read)
@@ -292,7 +368,12 @@ async fn abort_large_fill_wakes_waiting_chunk_followers() {
     assert!(matches!(leader, Err(StorageError::CacheFillAborted { .. })));
 
     service
-        .execute(&handles, StorageCommand::Close(CloseCommand { handle: leader_handle }))
+        .execute(
+            &handles,
+            StorageCommand::Close(CloseCommand {
+                handle: leader_handle,
+            }),
+        )
         .await
         .unwrap();
     service
@@ -312,7 +393,12 @@ async fn large_open_joins_live_fill_without_second_head() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key, b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend.clone())).unwrap(), cache);
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend.clone()))
+            .unwrap(),
+        cache,
+    );
     let handles = HandleTable::new();
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -343,11 +429,24 @@ async fn read_rejects_large_handle_without_bound_fill_session() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
     let store = service.registry().resolve(key.store_id()).unwrap();
     let state = handles
-        .open(key.clone(), store, ObjectInfo { size: 10, etag: None }, OpenFlags::READ_ONLY)
+        .open(
+            key.clone(),
+            store,
+            ObjectInfo {
+                size: 10,
+                etag: None,
+            },
+            OpenFlags::READ_ONLY,
+        )
         .unwrap();
 
     let error = match service
@@ -377,7 +476,12 @@ async fn live_large_fill_is_removed_after_last_open_close() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -397,7 +501,12 @@ async fn large_full_read_commits_complete_metadata() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = memory_cache();
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -408,7 +517,11 @@ async fn large_full_read_commits_complete_metadata() {
     assert!(read.eof);
     let meta = cache.index().get_meta(&key).await.unwrap().unwrap();
     assert_eq!(meta.cache_state(), CacheState::CompleteFile);
-    assert!(tokio::fs::try_exists(cache.complete_path(&key).unwrap()).await.unwrap());
+    assert!(
+        tokio::fs::try_exists(cache.complete_path(&key).unwrap())
+            .await
+            .unwrap()
+    );
     assert!(!tokio::fs::try_exists(partial).await.unwrap());
 
     close(&service, &handles, open.handle).await;
@@ -422,7 +535,12 @@ async fn large_full_read_replaces_unclaimed_complete_payload() {
     let cache = memory_cache();
     let complete_path = cache.complete_path(&key).unwrap();
     write_cache_file(complete_path.clone(), b"stale").await;
-    let service = StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, Arc::new(backend)).unwrap(), cache.clone());
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
+            .unwrap(),
+        cache.clone(),
+    );
     let handles = HandleTable::new();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -431,7 +549,16 @@ async fn large_full_read_replaces_unclaimed_complete_payload() {
     assert_eq!(read.data, b"abcdefghij");
     assert!(read.eof);
     assert_eq!(tokio::fs::read(complete_path).await.unwrap(), b"abcdefghij");
-    assert_eq!(cache.index().get_meta(&key).await.unwrap().unwrap().cache_state(), CacheState::CompleteFile);
+    assert_eq!(
+        cache
+            .index()
+            .get_meta(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .cache_state(),
+        CacheState::CompleteFile
+    );
 
     close(&service, &handles, open.handle).await;
 }
@@ -445,9 +572,16 @@ async fn concurrent_large_reads_commit_complete_metadata_once() {
     inner_backend.insert(key.clone(), b"abcdefgh".to_vec());
     let backend = Arc::new(BlockingRangeBackend::new(inner_backend));
     let index = CountingCompleteIndex::new(InMemoryCacheIndex::new());
-    let cache = Arc::new(CacheManager::new(super::fixtures::test_cache_dir(), index).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(super::fixtures::test_cache_dir(), index).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
-    let service = Arc::new(StorageService::with_registry(StoreRegistry::new().with_shared_backend(DEFAULT_STORE, backend.clone()).unwrap(), cache.clone()));
+    let service = Arc::new(StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, backend.clone())
+            .unwrap(),
+        cache.clone(),
+    ));
     let handles = Arc::new(HandleTable::new());
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -456,12 +590,16 @@ async fn concurrent_large_reads_commit_complete_metadata_once() {
 
     let first_service = service.clone();
     let first_handles = handles.clone();
-    let first_read = tokio::spawn(async move { read(&first_service, &first_handles, first.handle, 0, 8).await });
+    let first_read = tokio::spawn(async move {
+        read(&first_service, &first_handles, first.handle, 0, 8).await
+    });
     backend.wait_until_first_range_get_starts().await;
 
     let second_service = service.clone();
     let second_handles = handles.clone();
-    let second_read = tokio::spawn(async move { read(&second_service, &second_handles, second.handle, 0, 8).await });
+    let second_read = tokio::spawn(async move {
+        read(&second_service, &second_handles, second.handle, 0, 8).await
+    });
     tokio::task::yield_now().await;
     backend.release_first_range_get();
 
@@ -474,7 +612,20 @@ async fn concurrent_large_reads_commit_complete_metadata_once() {
     assert!(second.eof);
     assert_eq!(cache.index().complete_puts(), 1);
     assert_eq!(backend.range_gets(), 2);
-    assert_eq!(cache.index().get_meta(&key).await.unwrap().unwrap().cache_state(), CacheState::CompleteFile);
-    assert!(tokio::fs::try_exists(cache.complete_path(&key).unwrap()).await.unwrap());
+    assert_eq!(
+        cache
+            .index()
+            .get_meta(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .cache_state(),
+        CacheState::CompleteFile
+    );
+    assert!(
+        tokio::fs::try_exists(cache.complete_path(&key).unwrap())
+            .await
+            .unwrap()
+    );
     assert!(!tokio::fs::try_exists(partial).await.unwrap());
 }

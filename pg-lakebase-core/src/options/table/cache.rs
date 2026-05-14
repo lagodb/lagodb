@@ -119,22 +119,24 @@ impl AmCache {
         // SAFETY: palloc + copy within CacheMemoryContext; memory persists
         // as long as the Relation and is freed by Postgres on invalidation.
         // switch_to is unsafe because it changes the active memory context.
-        let ptr = unsafe { PgMemoryContexts::CacheMemoryContext.switch_to(|_| {
-            let ptr = pg_sys::palloc(total_size) as *mut u8;
-            std::ptr::copy_nonoverlapping(
-                &header as *const T as *const u8,
-                ptr,
-                header_size,
-            );
-            if !data.is_empty() {
+        let ptr = unsafe {
+            PgMemoryContexts::CacheMemoryContext.switch_to(|_| {
+                let ptr = pg_sys::palloc(total_size) as *mut u8;
                 std::ptr::copy_nonoverlapping(
-                    data.as_ptr(),
-                    ptr.add(header_size),
-                    data.len(),
+                    &header as *const T as *const u8,
+                    ptr,
+                    header_size,
                 );
-            }
-            ptr
-        }) };
+                if !data.is_empty() {
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        ptr.add(header_size),
+                        data.len(),
+                    );
+                }
+                ptr
+            })
+        };
 
         // SAFETY: rel is valid and writable while the lock is held.
         unsafe {

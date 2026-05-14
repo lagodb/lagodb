@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::expr::accessor::{StructAccessor, StructAccessorRef};
 use crate::expr::{
-    BinaryExpression, Bind, Predicate, PredicateOperator, SetExpression, UnaryExpression,
+    BinaryExpression, Bind, Predicate, PredicateOperator, SetExpression,
+    UnaryExpression,
 };
 use crate::spec::{Datum, NestedField, NestedFieldRef, SchemaRef};
 use crate::{Error, ErrorKind};
@@ -155,7 +156,11 @@ impl Reference {
     /// assert_eq!(&format!("{expr}"), "a != 10");
     /// ```
     pub fn not_equal_to(self, datum: Datum) -> Predicate {
-        Predicate::Binary(BinaryExpression::new(PredicateOperator::NotEq, self, datum))
+        Predicate::Binary(BinaryExpression::new(
+            PredicateOperator::NotEq,
+            self,
+            datum,
+        ))
     }
 
     /// Creates a start-with expression. For example, `a STARTS WITH "foo"`.
@@ -309,7 +314,11 @@ impl Display for Reference {
 impl Bind for Reference {
     type Bound = BoundReference;
 
-    fn bind(&self, schema: SchemaRef, case_sensitive: bool) -> crate::Result<Self::Bound> {
+    fn bind(
+        &self,
+        schema: SchemaRef,
+        case_sensitive: bool,
+    ) -> crate::Result<Self::Bound> {
         let field = if case_sensitive {
             schema.field_by_name(&self.name)
         } else {
@@ -396,9 +405,24 @@ mod tests {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![2])
                 .with_fields(vec![
-                    NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                    NestedField::optional(
+                        1,
+                        "foo",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "bar",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        3,
+                        "baz",
+                        Type::Primitive(PrimitiveType::Boolean),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -413,7 +437,8 @@ mod tests {
         let accessor_ref = Arc::new(StructAccessor::new(1, PrimitiveType::Int));
         let expected_ref = BoundReference::new(
             "bar",
-            NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
+            NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                .into(),
             accessor_ref.clone(),
         );
 
@@ -428,7 +453,8 @@ mod tests {
         let accessor_ref = Arc::new(StructAccessor::new(1, PrimitiveType::Int));
         let expected_ref = BoundReference::new(
             "BAR",
-            NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
+            NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                .into(),
             accessor_ref.clone(),
         );
 

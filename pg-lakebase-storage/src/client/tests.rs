@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backend::{
-    MemoryObjectBackend, ObjectBackend, S3CompatibleStoreConfig, SecretString, StoreConfig, StoreRegistry,
+    MemoryObjectBackend, ObjectBackend, S3CompatibleStoreConfig, SecretString,
+    StoreConfig, StoreRegistry,
 };
 use crate::cache::{CacheCleanupPolicy, CacheManager, InMemoryCacheIndex};
 use crate::error::StorageErrorKind;
@@ -24,7 +25,9 @@ async fn client_reads_through_unix_socket_server() {
 
     let root = test_root("cache");
     let socket = test_root("storage.sock");
-    let cache = Arc::new(CacheManager::new(root.clone(), InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root.clone(), InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
@@ -60,7 +63,9 @@ async fn client_head_and_exists_do_not_admit_cache() {
 
     let root = test_root("head-cache");
     let socket = test_root("head.sock");
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, backend.clone())
@@ -77,7 +82,11 @@ async fn client_head_and_exists_do_not_admit_cache() {
         let info = client.head(TEST_STORE_ID, "bucket", "head.txt").unwrap();
         assert_eq!(info.size, b"hello metadata".len() as u64);
         assert!(client.exists(TEST_STORE_ID, "bucket", "head.txt").unwrap());
-        assert!(!client.exists(TEST_STORE_ID, "bucket", "missing.txt").unwrap());
+        assert!(
+            !client
+                .exists(TEST_STORE_ID, "bucket", "missing.txt")
+                .unwrap()
+        );
     })
     .await
     .unwrap();
@@ -100,7 +109,8 @@ async fn client_head_returns_from_cache_after_open() {
     // small_object_limit must be >= data length so the object is admitted as SmallKv
     // (large-fill objects don't persist metadata to the index until fill completes).
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(data.len() as u64, 4096),
+        CacheManager::new(root, InMemoryCacheIndex::new())
+            .with_limits(data.len() as u64, 4096),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -149,7 +159,9 @@ async fn client_stage_write_commit_roundtrip_uploads_to_backend() {
     staging.wipe().await.unwrap();
 
     let backend = Arc::new(MemoryObjectBackend::new());
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
@@ -169,12 +181,16 @@ async fn client_stage_write_commit_roundtrip_uploads_to_backend() {
     let client_socket = socket.clone();
     let commit_info = tokio::task::spawn_blocking(move || {
         let client = StorageClient::connect(&client_socket).unwrap();
-        let mut staging = client.stage(TEST_STORE_ID, "bucket", "uploaded.txt").unwrap();
+        let mut staging = client
+            .stage(TEST_STORE_ID, "bucket", "uploaded.txt")
+            .unwrap();
         staging.write(b"hello ").unwrap();
         staging.write(b"commit").unwrap();
         staging.sync().unwrap();
         drop(staging);
-        client.commit(TEST_STORE_ID, "bucket", "uploaded.txt").unwrap()
+        client
+            .commit(TEST_STORE_ID, "bucket", "uploaded.txt")
+            .unwrap()
     })
     .await
     .unwrap();
@@ -196,7 +212,9 @@ async fn client_stage_abort_removes_staging_file_without_upload() {
     staging.wipe().await.unwrap();
 
     let backend = Arc::new(MemoryObjectBackend::new());
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
@@ -216,19 +234,28 @@ async fn client_stage_abort_removes_staging_file_without_upload() {
     let client_socket = socket.clone();
     let staging_path = tokio::task::spawn_blocking(move || {
         let client = StorageClient::connect(&client_socket).unwrap();
-        let mut staging_file = client.stage(TEST_STORE_ID, "bucket", "aborted.txt").unwrap();
+        let mut staging_file = client
+            .stage(TEST_STORE_ID, "bucket", "aborted.txt")
+            .unwrap();
         staging_file.write(b"doomed").unwrap();
         let path = staging_file.path().to_path_buf();
         drop(staging_file);
-        client.abort(TEST_STORE_ID, "bucket", "aborted.txt").unwrap();
+        client
+            .abort(TEST_STORE_ID, "bucket", "aborted.txt")
+            .unwrap();
         // Second abort is a no-op.
-        client.abort(TEST_STORE_ID, "bucket", "aborted.txt").unwrap();
+        client
+            .abort(TEST_STORE_ID, "bucket", "aborted.txt")
+            .unwrap();
         path
     })
     .await
     .unwrap();
 
-    assert!(!tokio::fs::try_exists(&staging_path).await.unwrap(), "abort must remove the staging file");
+    assert!(
+        !tokio::fs::try_exists(&staging_path).await.unwrap(),
+        "abort must remove the staging file"
+    );
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "aborted.txt").unwrap();
     assert!(
         backend.get_range(&key, 0..1).await.is_err(),
@@ -247,7 +274,9 @@ async fn client_commit_can_be_issued_from_a_different_connection() {
     staging.wipe().await.unwrap();
 
     let backend = Arc::new(MemoryObjectBackend::new());
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
@@ -267,7 +296,9 @@ async fn client_commit_can_be_issued_from_a_different_connection() {
     let socket_for_writer = socket.clone();
     tokio::task::spawn_blocking(move || {
         let writer_client = StorageClient::connect(&socket_for_writer).unwrap();
-        let mut staging_file = writer_client.stage(TEST_STORE_ID, "bucket", "cross-conn.txt").unwrap();
+        let mut staging_file = writer_client
+            .stage(TEST_STORE_ID, "bucket", "cross-conn.txt")
+            .unwrap();
         staging_file.write(b"cross-connection commit").unwrap();
         drop(staging_file);
         drop(writer_client);
@@ -278,7 +309,9 @@ async fn client_commit_can_be_issued_from_a_different_connection() {
     let socket_for_committer = socket.clone();
     let commit_info = tokio::task::spawn_blocking(move || {
         let committer = StorageClient::connect(&socket_for_committer).unwrap();
-        committer.commit(TEST_STORE_ID, "bucket", "cross-conn.txt").unwrap()
+        committer
+            .commit(TEST_STORE_ID, "bucket", "cross-conn.txt")
+            .unwrap()
     })
     .await
     .unwrap();
@@ -299,7 +332,9 @@ async fn stage_twice_without_finalize_returns_busy() {
     staging.prepare_dirs().await.unwrap();
     staging.wipe().await.unwrap();
     let backend = Arc::new(MemoryObjectBackend::new());
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
@@ -319,8 +354,12 @@ async fn stage_twice_without_finalize_returns_busy() {
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
         let client = StorageClient::connect(&client_socket).unwrap();
-        let _first = client.stage(TEST_STORE_ID, "bucket", "duplicate.txt").unwrap();
-        let error = client.stage(TEST_STORE_ID, "bucket", "duplicate.txt").unwrap_err();
+        let _first = client
+            .stage(TEST_STORE_ID, "bucket", "duplicate.txt")
+            .unwrap();
+        let error = client
+            .stage(TEST_STORE_ID, "bucket", "duplicate.txt")
+            .unwrap_err();
         assert_eq!(error.kind(), StorageErrorKind::Busy);
     })
     .await
@@ -337,7 +376,9 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
 
     let root = test_root("drop-close-cache");
     let socket = test_root("drop-close.sock");
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
@@ -352,12 +393,16 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
     let client = tokio::task::spawn_blocking(move || {
         let client = StorageClient::connect(&client_socket).unwrap();
 
-        let mut file = client.open(TEST_STORE_ID, "bucket", "drop-close.txt").unwrap();
+        let mut file = client
+            .open(TEST_STORE_ID, "bucket", "drop-close.txt")
+            .unwrap();
         let data = file.read(16).unwrap();
         assert_eq!(data, b"abcdefghijklmnop");
         file.close().unwrap();
 
-        let file = client.open(TEST_STORE_ID, "bucket", "drop-close.txt").unwrap();
+        let file = client
+            .open(TEST_STORE_ID, "bucket", "drop-close.txt")
+            .unwrap();
         assert!(file.is_direct_io());
         drop(file);
 
@@ -373,7 +418,11 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
 
     assert_eq!(report.evicted_objects, 1);
     assert_eq!(cache.logical_cache_usage().await.unwrap().resident_bytes, 0);
-    assert!(!tokio::fs::try_exists(cache.complete_path(&key).unwrap()).await.unwrap());
+    assert!(
+        !tokio::fs::try_exists(cache.complete_path(&key).unwrap())
+            .await
+            .unwrap()
+    );
 
     drop(client);
     server_task.abort();
@@ -383,9 +432,12 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
 async fn client_registers_unregisters_and_purges_store_over_wire() {
     let root = test_root("client-store-cache");
     let socket = test_root("client-store.sock");
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
-    let service = Arc::new(StorageService::with_registry(StoreRegistry::new(), cache));
+    let service =
+        Arc::new(StorageService::with_registry(StoreRegistry::new(), cache));
     let server = StorageServer::bind(&socket, service).await.unwrap();
     let server_task = tokio::spawn(async move {
         let _ = server.serve_forever().await;
@@ -408,7 +460,11 @@ async fn client_registers_unregisters_and_purges_store_over_wire() {
         assert!(!client.register_store("store-a", config.clone()).unwrap());
         assert!(client.register_store("store-a", config).unwrap());
         client.purge_store_cache("store-a").unwrap();
-        assert!(!client.invalidate_object_cache("store-a", "bucket", "file").unwrap());
+        assert!(
+            !client
+                .invalidate_object_cache("store-a", "bucket", "file")
+                .unwrap()
+        );
         assert!(client.unregister_store("store-a").unwrap());
         assert!(!client.unregister_store("store-a").unwrap());
 
@@ -436,7 +492,10 @@ async fn client_registers_unregisters_and_purges_store_over_wire() {
 }
 
 fn test_root(name: &str) -> PathBuf {
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     PathBuf::from("/tmp").join(format!("pss-{name}-{stamp}"))
 }
 
@@ -447,7 +506,9 @@ async fn client_delete_removes_object_from_backend_and_is_idempotent() {
     let backend = Arc::new(MemoryObjectBackend::new());
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "doomed.txt").unwrap();
     backend.insert(key.clone(), b"bye".to_vec());
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, backend.clone())
@@ -461,9 +522,13 @@ async fn client_delete_removes_object_from_backend_and_is_idempotent() {
     let socket_for_client = socket.clone();
     tokio::task::spawn_blocking(move || {
         let client = StorageClient::connect(&socket_for_client).unwrap();
-        client.delete(TEST_STORE_ID, "bucket", "doomed.txt").unwrap();
+        client
+            .delete(TEST_STORE_ID, "bucket", "doomed.txt")
+            .unwrap();
         // Second delete is idempotent regardless of backend's missing-key behavior.
-        client.delete(TEST_STORE_ID, "bucket", "doomed.txt").unwrap();
+        client
+            .delete(TEST_STORE_ID, "bucket", "doomed.txt")
+            .unwrap();
     })
     .await
     .unwrap();
@@ -477,14 +542,20 @@ async fn client_delete_removes_object_from_backend_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn client_delete_prefix_removes_all_matching_objects_and_rejects_empty_prefix() {
+async fn client_delete_prefix_removes_all_matching_objects_and_rejects_empty_prefix()
+{
     let root = test_root("delete-prefix-cache");
     let socket = test_root("delete-prefix.sock");
     let backend = Arc::new(MemoryObjectBackend::new());
     for key in ["scope/a", "scope/b", "scope/nested/c", "other/d"] {
-        backend.insert(ObjectLocation::new(TEST_STORE_ID, "bucket", key).unwrap(), b"x".to_vec());
+        backend.insert(
+            ObjectLocation::new(TEST_STORE_ID, "bucket", key).unwrap(),
+            b"x".to_vec(),
+        );
     }
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, backend.clone())
@@ -499,10 +570,14 @@ async fn client_delete_prefix_removes_all_matching_objects_and_rejects_empty_pre
     let deleted = tokio::task::spawn_blocking(move || {
         let client = StorageClient::connect(&socket_for_client).unwrap();
 
-        let empty_prefix_error = client.delete_prefix(TEST_STORE_ID, "bucket", "").unwrap_err();
+        let empty_prefix_error = client
+            .delete_prefix(TEST_STORE_ID, "bucket", "")
+            .unwrap_err();
         assert_eq!(empty_prefix_error.kind(), StorageErrorKind::InvalidPath);
 
-        client.delete_prefix(TEST_STORE_ID, "bucket", "scope/").unwrap()
+        client
+            .delete_prefix(TEST_STORE_ID, "bucket", "scope/")
+            .unwrap()
     })
     .await
     .unwrap();
@@ -539,7 +614,9 @@ async fn client_list_iterates_pages_and_returns_every_object() {
         expected.push(key);
     }
     expected.sort();
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, backend.clone())
@@ -579,7 +656,9 @@ async fn client_list_page_drives_pagination_explicitly() {
             b"x".to_vec(),
         );
     }
-    let cache = Arc::new(CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4));
+    let cache = Arc::new(
+        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+    );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
         .with_shared_backend(TEST_STORE_ID, backend)
@@ -610,7 +689,10 @@ async fn client_list_page_drives_pagination_explicitly() {
             .list_page(TEST_STORE_ID, "bucket", Some("k/"), Some(cursor2), 2)
             .unwrap();
         assert_eq!(page3.entries.len(), 1);
-        assert!(page3.next_cursor.is_none(), "final page must not return a cursor");
+        assert!(
+            page3.next_cursor.is_none(),
+            "final page must not return a cursor"
+        );
     })
     .await
     .unwrap();

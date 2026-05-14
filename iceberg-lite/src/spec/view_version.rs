@@ -304,9 +304,10 @@ mod tests {
           }
         );
 
-        let result: ViewVersion = serde_json::from_value::<ViewVersionV1>(record.clone())
-            .unwrap()
-            .into();
+        let result: ViewVersion =
+            serde_json::from_value::<ViewVersionV1>(record.clone())
+                .unwrap()
+                .into();
 
         // Roundtrip
         assert_eq!(serde_json::to_value(result.clone()).unwrap(), record);
@@ -334,9 +335,10 @@ mod tests {
                 },
             )])
         );
-        assert_eq!(result.default_namespace.inner(), vec![
-            "default".to_string()
-        ]);
+        assert_eq!(
+            result.default_namespace.inner(),
+            vec!["default".to_string()]
+        );
     }
 
     #[test]
@@ -371,12 +373,12 @@ mod tests {
             .with_schema_id(view_version.schema_id())
             .with_timestamp_ms(view_version.timestamp_ms())
             .with_summary(view_version.summary().clone())
-            .with_representations(ViewRepresentations(vec![super::ViewRepresentation::Sql(
-                super::SqlViewRepresentation {
+            .with_representations(ViewRepresentations(vec![
+                super::ViewRepresentation::Sql(super::SqlViewRepresentation {
                     sql: "SELECT * from events".to_string(),
                     dialect: "spark".to_string(),
-                },
-            )]))
+                }),
+            ]))
             .with_default_catalog(view_version.default_catalog().cloned())
             .with_default_namespace(view_version.default_namespace().clone())
             .build();

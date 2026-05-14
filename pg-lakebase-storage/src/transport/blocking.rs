@@ -27,8 +27,10 @@ impl<'a, R: Read> BlockingFrameCursor<'a, R> {
     pub(crate) fn read_from(reader: &'a mut R) -> StorageResult<Option<Self>> {
         let mut len_buf = [0_u8; 4];
         match reader.read_exact(&mut len_buf) {
-            Ok(_) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(None);
+            }
             Err(e) => return Err(e.into()),
         }
         let len = u32::from_be_bytes(len_buf) as usize;
@@ -63,7 +65,10 @@ impl<'a, R: Read> BlockingFrameCursor<'a, R> {
         Ok(())
     }
 
-    pub(crate) fn read_remaining_after(&mut self, prefix: &[u8]) -> StorageResult<Vec<u8>> {
+    pub(crate) fn read_remaining_after(
+        &mut self,
+        prefix: &[u8],
+    ) -> StorageResult<Vec<u8>> {
         let mut frame = Vec::with_capacity(prefix.len() + self.remaining);
         frame.extend_from_slice(prefix);
         let prefix_len = frame.len();
@@ -82,7 +87,9 @@ impl<'a, R: Read> BlockingFrameCursor<'a, R> {
     }
 }
 
-pub fn read_frame_blocking<R: Read>(reader: &mut R) -> StorageResult<Option<Vec<u8>>> {
+pub fn read_frame_blocking<R: Read>(
+    reader: &mut R,
+) -> StorageResult<Option<Vec<u8>>> {
     let Some(mut cursor) = BlockingFrameCursor::read_from(reader)? else {
         return Ok(None);
     };
@@ -91,7 +98,10 @@ pub fn read_frame_blocking<R: Read>(reader: &mut R) -> StorageResult<Option<Vec<
     Ok(Some(frame))
 }
 
-pub fn write_frame_blocking<W: Write>(writer: &mut W, frame: &[u8]) -> StorageResult<()> {
+pub fn write_frame_blocking<W: Write>(
+    writer: &mut W,
+    frame: &[u8],
+) -> StorageResult<()> {
     let len = frame.len();
     if len > MAX_FRAME_BYTES {
         return Err(StorageError::protocol(format!("frame too large: {len}")));
@@ -102,7 +112,11 @@ pub fn write_frame_blocking<W: Write>(writer: &mut W, frame: &[u8]) -> StorageRe
     Ok(())
 }
 
-fn write_all_two_vectored<W: Write>(writer: &mut W, mut first: &[u8], mut second: &[u8]) -> std::io::Result<()> {
+fn write_all_two_vectored<W: Write>(
+    writer: &mut W,
+    mut first: &[u8],
+    mut second: &[u8],
+) -> std::io::Result<()> {
     while !first.is_empty() || !second.is_empty() {
         let written = if first.is_empty() {
             writer.write(second)?
@@ -112,7 +126,10 @@ fn write_all_two_vectored<W: Write>(writer: &mut W, mut first: &[u8], mut second
             writer.write_vectored(&[IoSlice::new(first), IoSlice::new(second)])?
         };
         if written == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write whole frame"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write whole frame",
+            ));
         }
         if written < first.len() {
             first = &first[written..];

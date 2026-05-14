@@ -32,22 +32,25 @@ mod util;
 pub(crate) use chunks::{ChunkFillClaim, LargeFillSession};
 pub(crate) use establish::EstablishLeader;
 pub use index::{
-    AdmitSmallOutcome, CacheIndex, InMemoryCacheIndex, LruScanCursor, LruScanPage, MetaScanCursor, MetaScanPage,
-    OpenHit, RedbCacheIndex, SmallCacheEntry, SmallScanCursor, SmallScanPage,
+    AdmitSmallOutcome, CacheIndex, InMemoryCacheIndex, LruScanCursor, LruScanPage,
+    MetaScanCursor, MetaScanPage, OpenHit, RedbCacheIndex, SmallCacheEntry,
+    SmallScanCursor, SmallScanPage,
 };
 pub use manager::CacheManager;
 pub use meta::{CacheState, CachedObjectMeta};
 pub(crate) use object_state::CacheActivityGuard;
 pub use path::{CacheFileKind, CachePathResolver};
 pub use store::{
-    CacheStore, CacheStoreKind, DeleteReport, PhysicalCacheEntry, PhysicalCacheEntryVisitor, PhysicalCacheId,
-    PhysicalCacheStat, ScanControl,
+    CacheStore, CacheStoreKind, DeleteReport, PhysicalCacheEntry,
+    PhysicalCacheEntryVisitor, PhysicalCacheId, PhysicalCacheStat, ScanControl,
 };
 pub use types::{
-    BestEffortInvalidateOutcome, CacheCleanupPolicy, CacheCleanupReport, CacheDeleteReason, CacheInvalidateReport,
-    CachePurgeReport, CacheRecoveryReport,
+    BestEffortInvalidateOutcome, CacheCleanupPolicy, CacheCleanupReport,
+    CacheDeleteReason, CacheInvalidateReport, CachePurgeReport, CacheRecoveryReport,
 };
-pub(crate) use types::{CacheEvictionOutcome, OpenOutcome, Residency, ResidencyBody, ResidencyStateHint};
+pub(crate) use types::{
+    CacheEvictionOutcome, OpenOutcome, Residency, ResidencyBody, ResidencyStateHint,
+};
 pub use usage::{CacheUsageSnapshot, LogicalCacheUsage, PhysicalCacheUsage};
 pub(crate) use util::{create_parent_dir, now_ns, should_touch};
 

@@ -8,20 +8,25 @@
 //!   and are re-exported below so test files do not need to know the sub-module layout.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::CachedObjectMeta;
 use crate::cache::{CacheIndex, CacheManager, InMemoryCacheIndex};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::object::{ObjectInfo, ObjectLocation};
-use crate::service::command::{CloseCommand, InvalidateObjectCacheCommand, OpenCommand, ReadCommand, StorageCommand};
-use crate::service::reply::CommandOutput;
 use crate::service::StorageService;
+use crate::service::command::{
+    CloseCommand, InvalidateObjectCacheCommand, OpenCommand, ReadCommand,
+    StorageCommand,
+};
+use crate::service::reply::CommandOutput;
 use crate::session::handle_table::HandleTable;
 
-pub(crate) use super::test_doubles::{BlockingHeadBackend, BlockingRangeBackend, CountingCompleteIndex};
+pub(crate) use super::test_doubles::{
+    BlockingHeadBackend, BlockingRangeBackend, CountingCompleteIndex,
+};
 
 /// Default store id used by almost every service test.
 pub(crate) const DEFAULT_STORE: &str = "default";
@@ -38,9 +43,15 @@ static TEST_CACHE_ID: AtomicU64 = AtomicU64::new(0);
 /// Returns a fresh per-test temp directory under `/tmp`. Nothing cleans it up; tests
 /// rely on the OS temp reaper, which matches the behaviour before the split.
 pub(crate) fn test_cache_dir() -> PathBuf {
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let id = TEST_CACHE_ID.fetch_add(1, Ordering::Relaxed);
-    PathBuf::from("/tmp").join(format!("pg-lakebase-storage-service-test-{}-{stamp}-{id}", std::process::id()))
+    PathBuf::from("/tmp").join(format!(
+        "pg-lakebase-storage-service-test-{}-{stamp}-{id}",
+        std::process::id()
+    ))
 }
 
 /// Shorthand for `ObjectLocation::new(DEFAULT_STORE, BUCKET, key)`.
@@ -54,9 +65,14 @@ pub(crate) fn memory_cache() -> Arc<CacheManager<InMemoryCacheIndex>> {
 }
 
 /// Cache manager with explicit small/large watermarks for tests that exercise thresholds.
-pub(crate) fn memory_cache_with_limits(small_limit: u64, large_limit: u64) -> Arc<CacheManager<InMemoryCacheIndex>> {
-    let cache =
-        Arc::new(CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new()).with_limits(small_limit, large_limit));
+pub(crate) fn memory_cache_with_limits(
+    small_limit: u64,
+    large_limit: u64,
+) -> Arc<CacheManager<InMemoryCacheIndex>> {
+    let cache = Arc::new(
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+            .with_limits(small_limit, large_limit),
+    );
     cache.spawn_large_fill_reaper();
     cache
 }
@@ -121,7 +137,14 @@ pub(crate) async fn read<I: CacheIndex + 'static>(
     len: u32,
 ) -> ReadResult {
     let reply = service
-        .execute(handles, StorageCommand::Read(ReadCommand { handle, offset, len }))
+        .execute(
+            handles,
+            StorageCommand::Read(ReadCommand {
+                handle,
+                offset,
+                len,
+            }),
+        )
         .await
         .unwrap();
     let CommandOutput::Read(output) = reply.output else {
@@ -145,7 +168,10 @@ pub(crate) async fn close<I: CacheIndex + 'static>(
 
 /// Returns the residency variant hint bound to `handle`, or `None` when the handle has no
 /// residency (test-only direct-open path).
-pub(crate) fn residency_hint(handles: &HandleTable, handle: FileHandle) -> Option<crate::cache::ResidencyStateHint> {
+pub(crate) fn residency_hint(
+    handles: &HandleTable,
+    handle: FileHandle,
+) -> Option<crate::cache::ResidencyStateHint> {
     handles
         .get(handle)
         .unwrap()
@@ -165,7 +191,11 @@ pub(crate) fn invalidate_cmd(key: &str) -> StorageCommand {
 
 /// Seeds `cache` with a `CompleteFile`-shaped row: `meta` defaults to
 /// [`CachedObjectMeta::complete`] with the given size.
-pub(crate) async fn seed_complete_cache<I: CacheIndex>(cache: &CacheManager<I>, key: &ObjectLocation, data: &[u8]) {
+pub(crate) async fn seed_complete_cache<I: CacheIndex>(
+    cache: &CacheManager<I>,
+    key: &ObjectLocation,
+    data: &[u8],
+) {
     let meta = CachedObjectMeta::complete(
         key.clone(),
         ObjectInfo {

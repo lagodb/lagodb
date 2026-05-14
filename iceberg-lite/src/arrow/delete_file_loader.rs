@@ -17,12 +17,12 @@
 
 use std::sync::Arc;
 
+use crate::Result;
 use crate::arrow::ArrowReader;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::io::FileIO;
 use crate::scan::{ArrowRecordBatchIterator, FileScanTaskDeleteFile};
 use crate::spec::{Schema, SchemaRef};
-use crate::Result;
 
 /// Delete File Loader
 #[allow(unused)]

@@ -66,7 +66,8 @@ impl<'a> RowGroupMetricsEvaluator<'a> {
             return ROW_GROUP_CANT_MATCH;
         }
 
-        let mut evaluator = Self::new(row_group_metadata, field_id_map, snapshot_schema);
+        let mut evaluator =
+            Self::new(row_group_metadata, field_id_map, snapshot_schema);
 
         visit(&mut evaluator, filter)
     }
@@ -136,7 +137,9 @@ impl<'a> RowGroupMetricsEvaluator<'a> {
     }
 
     fn min_value(&self, field_id: i32) -> Result<Option<Datum>> {
-        let Some((stats, primitive_type)) = self.stats_and_type_for_field_id(field_id)? else {
+        let Some((stats, primitive_type)) =
+            self.stats_and_type_for_field_id(field_id)?
+        else {
             return Ok(None);
         };
 
@@ -144,7 +147,9 @@ impl<'a> RowGroupMetricsEvaluator<'a> {
     }
 
     fn max_value(&self, field_id: i32) -> Result<Option<Datum>> {
-        let Some((stats, primitive_type)) = self.stats_and_type_for_field_id(field_id)? else {
+        let Some((stats, primitive_type)) =
+            self.stats_and_type_for_field_id(field_id)?
+        else {
             return Ok(None);
         };
 
@@ -211,7 +216,11 @@ impl BoundPredicateVisitor for RowGroupMetricsEvaluator<'_> {
         Ok(!inner)
     }
 
-    fn is_null(&mut self, reference: &BoundReference, _predicate: &BoundPredicate) -> Result<bool> {
+    fn is_null(
+        &mut self,
+        reference: &BoundReference,
+        _predicate: &BoundPredicate,
+    ) -> Result<bool> {
         let field_id = reference.field().id;
 
         match self.null_count(field_id) {
@@ -235,7 +244,11 @@ impl BoundPredicateVisitor for RowGroupMetricsEvaluator<'_> {
         ROW_GROUP_MIGHT_MATCH
     }
 
-    fn is_nan(&mut self, _reference: &BoundReference, _predicate: &BoundPredicate) -> Result<bool> {
+    fn is_nan(
+        &mut self,
+        _reference: &BoundReference,
+        _predicate: &BoundPredicate,
+    ) -> Result<bool> {
         // NaN counts not in ColumnChunkMetadata Statistics
         ROW_GROUP_MIGHT_MATCH
     }
@@ -359,11 +372,13 @@ impl BoundPredicateVisitor for RowGroupMetricsEvaluator<'_> {
                 ));
             };
 
-            let prefix_length = lower_bound.chars().count().min(datum.chars().count());
+            let prefix_length =
+                lower_bound.chars().count().min(datum.chars().count());
 
             // truncate lower bound so that its length
             // is not greater than the length of prefix
-            let truncated_lower_bound = lower_bound.chars().take(prefix_length).collect::<String>();
+            let truncated_lower_bound =
+                lower_bound.chars().take(prefix_length).collect::<String>();
             if datum < &truncated_lower_bound {
                 return ROW_GROUP_CANT_MATCH;
             }
@@ -377,11 +392,13 @@ impl BoundPredicateVisitor for RowGroupMetricsEvaluator<'_> {
                 ));
             };
 
-            let prefix_length = upper_bound.chars().count().min(datum.chars().count());
+            let prefix_length =
+                upper_bound.chars().count().min(datum.chars().count());
 
             // truncate upper bound so that its length
             // is not greater than the length of prefix
-            let truncated_upper_bound = upper_bound.chars().take(prefix_length).collect::<String>();
+            let truncated_upper_bound =
+                upper_bound.chars().take(prefix_length).collect::<String>();
             if datum > &truncated_upper_bound {
                 return ROW_GROUP_CANT_MATCH;
             }
@@ -521,7 +538,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use parquet::basic::{LogicalType as ParquetLogicalType, Type as ParquetPhysicalType};
+    use parquet::basic::{
+        LogicalType as ParquetLogicalType, Type as ParquetPhysicalType,
+    };
     use parquet::data_type::ByteArray;
     use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
     use parquet::file::statistics::Statistics;
@@ -539,7 +558,8 @@ mod tests {
     fn eval_matches_no_rows_for_empty_row_group() -> Result<()> {
         let row_group_metadata = create_row_group_metadata(0, 0, None, 0, None)?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .greater_than(Datum::float(1.0))
@@ -561,7 +581,8 @@ mod tests {
     fn eval_true_for_row_group_no_bounds_present() -> Result<()> {
         let row_group_metadata = create_row_group_metadata(1, 1, None, 1, None)?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .greater_than(Datum::float(1.0))
@@ -589,7 +610,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_not_null()
@@ -616,7 +638,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_null()
@@ -643,7 +666,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_not_null()
@@ -670,7 +694,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_null()
@@ -697,7 +722,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .greater_than(Datum::float(1.0))
@@ -730,7 +756,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .greater_than(Datum::float(f32::NAN))
@@ -748,7 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn eval_true_for_meta_missing_bound_valid_other_bound_filter_inequality() -> Result<()> {
+    fn eval_true_for_meta_missing_bound_valid_other_bound_filter_inequality()
+    -> Result<()> {
         let row_group_metadata = create_row_group_metadata(
             1,
             1,
@@ -757,7 +785,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .greater_than(Datum::float(1.0))
@@ -790,7 +819,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .greater_than(Datum::float(1.0))
@@ -823,7 +853,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .greater_than(Datum::float(1.0))
@@ -850,7 +881,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .equal_to(Datum::float(1.0))
@@ -883,7 +915,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .equal_to(Datum::float(1.0))
@@ -916,7 +949,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .equal_to(Datum::float(1.0))
@@ -949,7 +983,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .equal_to(Datum::float(1.0))
@@ -982,7 +1017,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .equal_to(Datum::float(1.0))
@@ -1015,7 +1051,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .equal_to(Datum::float(1.0))
@@ -1048,7 +1085,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .not_equal_to(Datum::float(1.0))
@@ -1075,7 +1113,8 @@ mod tests {
             Some(Statistics::byte_array(None, None, None, Some(1), false)),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .starts_with(Datum::string("iceberg"))
@@ -1102,7 +1141,8 @@ mod tests {
             Some(Statistics::byte_array(None, None, None, Some(0), false)),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .starts_with(Datum::float(1.0))
@@ -1136,7 +1176,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .starts_with(Datum::string("iceberg"))
@@ -1170,7 +1211,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .starts_with(Datum::string("iceberg"))
@@ -1198,7 +1240,8 @@ mod tests {
             Some(Statistics::byte_array(None, None, None, Some(1), false)),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .starts_with(Datum::string("iceberg"))
@@ -1232,7 +1275,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .starts_with(Datum::string("iceberg"))
@@ -1266,7 +1310,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .starts_with(Datum::string("iceberg"))
@@ -1300,7 +1345,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .starts_with(Datum::string("iceberg"))
@@ -1327,7 +1373,8 @@ mod tests {
             Some(Statistics::byte_array(None, None, None, Some(1), false)),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1361,7 +1408,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1395,7 +1443,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1429,7 +1478,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1463,7 +1513,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1497,7 +1548,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1515,7 +1567,8 @@ mod tests {
     }
 
     #[test]
-    fn eval_true_for_not_starts_with_datum_matches_lower_upper_shorter() -> Result<()> {
+    fn eval_true_for_not_starts_with_datum_matches_lower_upper_shorter() -> Result<()>
+    {
         let row_group_metadata = create_row_group_metadata(
             1,
             1,
@@ -1531,7 +1584,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1565,7 +1619,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .not_starts_with(Datum::string("iceberg"))
@@ -1598,7 +1653,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .is_in([Datum::string("ice"), Datum::string("berg")])
@@ -1633,10 +1689,14 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .is_in(std::iter::repeat_with(|| Datum::float(rng.gen_range(0.0..10.0))).take(1000))
+            .is_in(
+                std::iter::repeat_with(|| Datum::float(rng.gen_range(0.0..10.0)))
+                    .take(1000),
+            )
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1660,7 +1720,8 @@ mod tests {
             Some(Statistics::byte_array(None, None, None, Some(0), false)),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .is_in([Datum::string("ice")])
@@ -1695,7 +1756,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_in([Datum::float(2.0), Datum::float(3.0)])
@@ -1722,7 +1784,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_in([Datum::float(2.0), Datum::float(3.0)])
@@ -1755,7 +1818,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_in([Datum::float(2.0), Datum::float(3.0)])
@@ -1788,7 +1852,8 @@ mod tests {
             None,
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
             .is_in([Datum::float(2.0), Datum::float(3.0)])
@@ -1822,7 +1887,8 @@ mod tests {
             )),
         )?;
 
-        let (iceberg_schema_ref, field_id_map) = build_iceberg_schema_and_field_map()?;
+        let (iceberg_schema_ref, field_id_map) =
+            build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_string")
             .is_not_in([Datum::string("iceberg")])
@@ -1839,7 +1905,8 @@ mod tests {
         Ok(())
     }
 
-    fn build_iceberg_schema_and_field_map() -> Result<(Arc<Schema>, HashMap<i32, usize>)> {
+    fn build_iceberg_schema_and_field_map()
+    -> Result<(Arc<Schema>, HashMap<i32, usize>)> {
         let iceberg_schema = Schema::builder()
             .with_fields([
                 Arc::new(NestedField::new(
@@ -1865,9 +1932,12 @@ mod tests {
 
     fn build_parquet_schema_descriptor() -> Result<Arc<SchemaDescriptor>> {
         let field_1 = Arc::new(
-            parquetSchemaType::primitive_type_builder("col_float", ParquetPhysicalType::FLOAT)
-                .with_id(Some(1))
-                .build()?,
+            parquetSchemaType::primitive_type_builder(
+                "col_float",
+                ParquetPhysicalType::FLOAT,
+            )
+            .with_id(Some(1))
+            .build()?,
         );
 
         let field_2 = Arc::new(
@@ -1915,14 +1985,14 @@ mod tests {
             ColumnPath::new(vec!["col_string".to_string()]),
         ));
 
-        let mut col_1_meta =
-            ColumnChunkMetaData::builder(column_1_desc_ptr).set_num_values(col_1_num_vals);
+        let mut col_1_meta = ColumnChunkMetaData::builder(column_1_desc_ptr)
+            .set_num_values(col_1_num_vals);
         if let Some(stats1) = col_1_stats {
             col_1_meta = col_1_meta.set_statistics(stats1)
         }
 
-        let mut col_2_meta =
-            ColumnChunkMetaData::builder(column_2_desc_ptr).set_num_values(col_2_num_vals);
+        let mut col_2_meta = ColumnChunkMetaData::builder(column_2_desc_ptr)
+            .set_num_values(col_2_num_vals);
         if let Some(stats2) = col_2_stats {
             col_2_meta = col_2_meta.set_statistics(stats2)
         }

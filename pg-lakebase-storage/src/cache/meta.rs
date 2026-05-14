@@ -25,7 +25,9 @@ impl CacheState {
         match value {
             1 => Ok(Self::SmallKv),
             3 => Ok(Self::CompleteFile),
-            _ => Err(StorageError::protocol(format!("unknown cache state {value}"))),
+            _ => Err(StorageError::protocol(format!(
+                "unknown cache state {value}"
+            ))),
         }
     }
 }
@@ -84,11 +86,21 @@ pub struct CachedObjectMeta {
 
 impl CachedObjectMeta {
     pub fn small(key: ObjectLocation, info: ObjectInfo, bytes: u64) -> Self {
-        Self::from_residency(ObjectIdentity::new(key, info), CachedResidency::Small { bytes }, 0, 0)
+        Self::from_residency(
+            ObjectIdentity::new(key, info),
+            CachedResidency::Small { bytes },
+            0,
+            0,
+        )
     }
 
     pub fn complete(key: ObjectLocation, info: ObjectInfo) -> Self {
-        Self::from_residency(ObjectIdentity::new(key, info), CachedResidency::Complete, 0, 0)
+        Self::from_residency(
+            ObjectIdentity::new(key, info),
+            CachedResidency::Complete,
+            0,
+            0,
+        )
     }
 
     pub(crate) fn from_residency(
@@ -168,7 +180,13 @@ mod tests {
     #[test]
     fn complete_meta_reports_full_size() {
         let key = ObjectLocation::new("store-a", "bucket", "file").unwrap();
-        let meta = CachedObjectMeta::complete(key, ObjectInfo { size: 3, etag: None });
+        let meta = CachedObjectMeta::complete(
+            key,
+            ObjectInfo {
+                size: 3,
+                etag: None,
+            },
+        );
         assert_eq!(meta.cache_state(), CacheState::CompleteFile);
         assert_eq!(meta.cached_bytes(), 3);
     }

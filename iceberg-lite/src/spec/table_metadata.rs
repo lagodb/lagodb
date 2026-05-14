@@ -479,9 +479,7 @@ impl TableMetadata {
         metadata_location: impl AsRef<str>,
     ) -> Result<()> {
         let json_bytes = serde_json::to_vec(self)?;
-        file_io
-            .new_output(metadata_location)?
-            .write(&json_bytes)
+        file_io.new_output(metadata_location)?.write(&json_bytes)
     }
 
     /// Normalize this partition spec.

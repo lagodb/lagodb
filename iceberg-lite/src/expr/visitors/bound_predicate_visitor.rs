@@ -56,8 +56,11 @@ pub trait BoundPredicateVisitor {
     ) -> Result<Self::T>;
 
     /// Called after a predicate with an `IsNan` operator is visited
-    fn is_nan(&mut self, reference: &BoundReference, predicate: &BoundPredicate)
-    -> Result<Self::T>;
+    fn is_nan(
+        &mut self,
+        reference: &BoundReference,
+        predicate: &BoundPredicate,
+    ) -> Result<Self::T>;
 
     /// Called after a predicate with a `NotNan` operator is visited
     fn not_nan(
@@ -192,7 +195,9 @@ pub(crate) fn visit<V: BoundPredicateVisitor>(
             let reference = expr.term();
             let literal = expr.literal();
             match expr.op() {
-                PredicateOperator::LessThan => visitor.less_than(reference, literal, predicate),
+                PredicateOperator::LessThan => {
+                    visitor.less_than(reference, literal, predicate)
+                }
                 PredicateOperator::LessThanOrEq => {
                     visitor.less_than_or_eq(reference, literal, predicate)
                 }
@@ -203,8 +208,12 @@ pub(crate) fn visit<V: BoundPredicateVisitor>(
                     visitor.greater_than_or_eq(reference, literal, predicate)
                 }
                 PredicateOperator::Eq => visitor.eq(reference, literal, predicate),
-                PredicateOperator::NotEq => visitor.not_eq(reference, literal, predicate),
-                PredicateOperator::StartsWith => visitor.starts_with(reference, literal, predicate),
+                PredicateOperator::NotEq => {
+                    visitor.not_eq(reference, literal, predicate)
+                }
+                PredicateOperator::StartsWith => {
+                    visitor.starts_with(reference, literal, predicate)
+                }
                 PredicateOperator::NotStartsWith => {
                     visitor.not_starts_with(reference, literal, predicate)
                 }
@@ -218,7 +227,9 @@ pub(crate) fn visit<V: BoundPredicateVisitor>(
             let literals = expr.literals();
             match expr.op() {
                 PredicateOperator::In => visitor.r#in(reference, literals, predicate),
-                PredicateOperator::NotIn => visitor.not_in(reference, literals, predicate),
+                PredicateOperator::NotIn => {
+                    visitor.not_in(reference, literals, predicate)
+                }
                 op => {
                     panic!("Unexpected op for set predicate: {}", &op)
                 }
@@ -234,10 +245,12 @@ mod tests {
 
     use fnv::FnvHashSet;
 
-    use crate::expr::visitors::bound_predicate_visitor::{BoundPredicateVisitor, visit};
+    use crate::expr::visitors::bound_predicate_visitor::{
+        BoundPredicateVisitor, visit,
+    };
     use crate::expr::{
-        BinaryExpression, Bind, BoundPredicate, BoundReference, Predicate, PredicateOperator,
-        Reference, SetExpression, UnaryExpression,
+        BinaryExpression, Bind, BoundPredicate, BoundReference, Predicate,
+        PredicateOperator, Reference, SetExpression, UnaryExpression,
     };
     use crate::spec::{Datum, NestedField, PrimitiveType, Schema, SchemaRef, Type};
 

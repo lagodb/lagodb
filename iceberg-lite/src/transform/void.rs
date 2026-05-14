@@ -28,7 +28,10 @@ impl TransformFunction for Void {
         Ok(new_null_array(input.data_type(), input.len()))
     }
 
-    fn transform_literal(&self, _input: &crate::spec::Datum) -> Result<Option<crate::spec::Datum>> {
+    fn transform_literal(
+        &self,
+        _input: &crate::spec::Datum,
+    ) -> Result<Option<crate::spec::Datum>> {
         Ok(None)
     }
 }
@@ -36,8 +39,8 @@ impl TransformFunction for Void {
 #[cfg(test)]
 mod test {
     use crate::spec::PrimitiveType::{
-        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time, Timestamp,
-        TimestampNs, Timestamptz, TimestamptzNs, Uuid,
+        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time,
+        Timestamp, TimestampNs, Timestamptz, TimestamptzNs, Uuid,
     };
     use crate::spec::Type::{Primitive, Struct};
     use crate::spec::{NestedField, StructType, Transform};

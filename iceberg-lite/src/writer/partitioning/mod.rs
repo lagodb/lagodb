@@ -33,7 +33,9 @@ use crate::writer::{DefaultInput, DefaultOutput};
 ///
 /// This trait provides methods for writing data with partition keys and
 /// closing the writer to retrieve the output.
-pub trait PartitioningWriter<I = DefaultInput, O = DefaultOutput>: Send + 'static {
+pub trait PartitioningWriter<I = DefaultInput, O = DefaultOutput>:
+    Send + 'static
+{
     /// Write data with a partition key.
     ///
     /// # Parameters

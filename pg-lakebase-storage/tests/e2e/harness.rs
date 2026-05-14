@@ -15,14 +15,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::Client as AwsS3Client;
+use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectStorePath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use pg_lakebase_storage::{
-    InMemoryCacheIndex, S3CompatibleStoreConfig, SecretString, StorageClient, StorageServerBuilder,
-    StorageServiceConfig, StoreConfig,
+    InMemoryCacheIndex, S3CompatibleStoreConfig, SecretString, StorageClient,
+    StorageServerBuilder, StorageServiceConfig, StoreConfig,
 };
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -59,18 +59,22 @@ impl MinioFixture {
     /// because the upstream module waits on stderr while this MinIO release
     /// emits the ready marker on stdout.
     pub async fn start() -> Self {
-        let container = GenericImage::new("minio/minio", "RELEASE.2024-01-16T16-07-38Z")
-            .with_exposed_port(ContainerPort::Tcp(9000))
-            .with_wait_for(WaitFor::message_on_stdout("S3-API:"))
-            .with_env_var("MINIO_ROOT_USER", MINIO_USER)
-            .with_env_var("MINIO_ROOT_PASSWORD", MINIO_PASSWORD)
-            .with_cmd(["server".to_string(), "/data".to_string()])
-            .start()
-            .await
-            .expect("failed to start MinIO container — is Docker running?");
+        let container =
+            GenericImage::new("minio/minio", "RELEASE.2024-01-16T16-07-38Z")
+                .with_exposed_port(ContainerPort::Tcp(9000))
+                .with_wait_for(WaitFor::message_on_stdout("S3-API:"))
+                .with_env_var("MINIO_ROOT_USER", MINIO_USER)
+                .with_env_var("MINIO_ROOT_PASSWORD", MINIO_PASSWORD)
+                .with_cmd(["server".to_string(), "/data".to_string()])
+                .start()
+                .await
+                .expect("failed to start MinIO container — is Docker running?");
 
         let host = container.get_host().await.expect("MinIO host");
-        let port = container.get_host_port_ipv4(9000).await.expect("MinIO port");
+        let port = container
+            .get_host_port_ipv4(9000)
+            .await
+            .expect("MinIO port");
         let endpoint = format!("http://{}:{}", host, port);
 
         Self {
@@ -91,7 +95,9 @@ impl MinioFixture {
             .bucket(bucket)
             .send()
             .await
-            .unwrap_or_else(|error| panic!("failed to create bucket {bucket} via S3 API: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("failed to create bucket {bucket} via S3 API: {error}")
+            });
     }
 
     /// Uploads a test object directly to MinIO (bypasses the storage server).
@@ -136,7 +142,13 @@ impl MinioFixture {
         let config = aws_sdk_s3::config::Builder::default()
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new("us-east-1"))
-            .credentials_provider(Credentials::new(MINIO_USER, MINIO_PASSWORD, None, None, "minio-e2e"))
+            .credentials_provider(Credentials::new(
+                MINIO_USER,
+                MINIO_PASSWORD,
+                None,
+                None,
+                "minio-e2e",
+            ))
             .endpoint_url(self.endpoint.clone())
             .force_path_style(true)
             .build();
@@ -194,7 +206,8 @@ impl ServerFixture {
     }
 
     pub fn connect(&self) -> StorageClient {
-        StorageClient::connect(&self.workspace.socket_path).expect("failed to connect client")
+        StorageClient::connect(&self.workspace.socket_path)
+            .expect("failed to connect client")
     }
 
     /// Restarts the server in the same workspace, preserving cache files and redb state.
@@ -210,11 +223,16 @@ impl ServerFixture {
         }
     }
 
-    async fn spawn_server(kind: CacheIndexKind, workspace: &ServerWorkspace) -> tokio::task::JoinHandle<()> {
+    async fn spawn_server(
+        kind: CacheIndexKind,
+        workspace: &ServerWorkspace,
+    ) -> tokio::task::JoinHandle<()> {
         let socket_path = workspace.socket_path.clone();
         let cache_dir = workspace.cache_dir.clone();
         let builder = StorageServerBuilder::new(&socket_path, &cache_dir)
-            .with_service_config(StorageServiceConfig::default().with_cache_limits(4, 4));
+            .with_service_config(
+                StorageServiceConfig::default().with_cache_limits(4, 4),
+            );
 
         match kind {
             CacheIndexKind::InMemory => {
@@ -225,13 +243,16 @@ impl ServerFixture {
                 tokio::spawn(async move {
                     let _ = server.serve_forever().await;
                 })
-            },
+            }
             CacheIndexKind::Redb => {
-                let server = builder.bind().await.expect("failed to bind server (redb index)");
+                let server = builder
+                    .bind()
+                    .await
+                    .expect("failed to bind server (redb index)");
                 tokio::spawn(async move {
                     let _ = server.serve_forever().await;
                 })
-            },
+            }
         }
     }
 }

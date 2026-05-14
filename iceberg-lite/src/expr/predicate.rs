@@ -43,14 +43,20 @@ pub struct LogicalExpression<T, const N: usize> {
 
 impl<T: Serialize, const N: usize> Serialize for LogicalExpression<T, N> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         self.inputs.serialize(serializer)
     }
 }
 
-impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for LogicalExpression<T, N> {
+impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de>
+    for LogicalExpression<T, N>
+{
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         let inputs = Vec::<Box<T>>::deserialize(deserializer)?;
         Ok(LogicalExpression::new(
             array_init::from_iter(inputs.into_iter()).ok_or_else(|| {
@@ -84,7 +90,8 @@ impl<T, const N: usize> LogicalExpression<T, N> {
 }
 
 impl<T: Bind, const N: usize> Bind for LogicalExpression<T, N>
-where T::Bound: Sized
+where
+    T::Bound: Sized,
 {
     type Bound = LogicalExpression<T::Bound, N>;
 
@@ -95,7 +102,8 @@ where T::Bound: Sized
         }
 
         // It's safe to use `unwrap` here since they are all `Some`.
-        let bound_inputs = array_init::from_iter(outputs.into_iter().map(Option::unwrap)).unwrap();
+        let bound_inputs =
+            array_init::from_iter(outputs.into_iter().map(Option::unwrap)).unwrap();
         Ok(LogicalExpression::new(bound_inputs))
     }
 }
@@ -340,7 +348,11 @@ pub enum Predicate {
 impl Bind for Predicate {
     type Bound = BoundPredicate;
 
-    fn bind(&self, schema: SchemaRef, case_sensitive: bool) -> Result<BoundPredicate> {
+    fn bind(
+        &self,
+        schema: SchemaRef,
+        case_sensitive: bool,
+    ) -> Result<BoundPredicate> {
         match self {
             Predicate::And(expr) => {
                 let bound_expr = expr.bind(schema, case_sensitive)?;
@@ -354,16 +366,24 @@ impl Bind for Predicate {
                         BoundPredicate::AlwaysFalse
                     }
                     (left, r) if matches!(&*r, &BoundPredicate::AlwaysTrue) => *left,
-                    (l, right) if matches!(&*l, &BoundPredicate::AlwaysTrue) => *right,
-                    (left, right) => BoundPredicate::And(LogicalExpression::new([left, right])),
+                    (l, right) if matches!(&*l, &BoundPredicate::AlwaysTrue) => {
+                        *right
+                    }
+                    (left, right) => {
+                        BoundPredicate::And(LogicalExpression::new([left, right]))
+                    }
                 })
             }
             Predicate::Not(expr) => {
                 let bound_expr = expr.bind(schema, case_sensitive)?;
                 let [inner] = bound_expr.inputs;
                 Ok(match inner {
-                    e if matches!(&*e, &BoundPredicate::AlwaysTrue) => BoundPredicate::AlwaysFalse,
-                    e if matches!(&*e, &BoundPredicate::AlwaysFalse) => BoundPredicate::AlwaysTrue,
+                    e if matches!(&*e, &BoundPredicate::AlwaysTrue) => {
+                        BoundPredicate::AlwaysFalse
+                    }
+                    e if matches!(&*e, &BoundPredicate::AlwaysFalse) => {
+                        BoundPredicate::AlwaysTrue
+                    }
                     e => BoundPredicate::Not(LogicalExpression::new([e])),
                 })
             }
@@ -378,8 +398,12 @@ impl Bind for Predicate {
                         BoundPredicate::AlwaysTrue
                     }
                     (left, r) if matches!(&*r, &BoundPredicate::AlwaysFalse) => *left,
-                    (l, right) if matches!(&*l, &BoundPredicate::AlwaysFalse) => *right,
-                    (left, right) => BoundPredicate::Or(LogicalExpression::new([left, right])),
+                    (l, right) if matches!(&*l, &BoundPredicate::AlwaysFalse) => {
+                        *right
+                    }
+                    (left, right) => {
+                        BoundPredicate::Or(LogicalExpression::new([left, right]))
+                    }
                 })
             }
             Predicate::Unary(expr) => {
@@ -419,7 +443,8 @@ impl Bind for Predicate {
             }
             Predicate::Binary(expr) => {
                 let bound_expr = expr.bind(schema, case_sensitive)?;
-                let bound_literal = bound_expr.literal.to(&bound_expr.term.field().field_type)?;
+                let bound_literal =
+                    bound_expr.literal.to(&bound_expr.term.field().field_type)?;
 
                 match bound_literal.literal() {
                     PrimitiveLiteral::AboveMax => match &bound_expr.op {
@@ -471,11 +496,13 @@ impl Bind for Predicate {
                             return Ok(BoundPredicate::AlwaysFalse);
                         }
                         if bound_literals.len() == 1 {
-                            return Ok(BoundPredicate::Binary(BinaryExpression::new(
-                                PredicateOperator::Eq,
-                                bound_expr.term,
-                                bound_literals.into_iter().next().unwrap(),
-                            )));
+                            return Ok(BoundPredicate::Binary(
+                                BinaryExpression::new(
+                                    PredicateOperator::Eq,
+                                    bound_expr.term,
+                                    bound_literals.into_iter().next().unwrap(),
+                                ),
+                            ));
                         }
                     }
                     &PredicateOperator::NotIn => {
@@ -483,11 +510,13 @@ impl Bind for Predicate {
                             return Ok(BoundPredicate::AlwaysTrue);
                         }
                         if bound_literals.len() == 1 {
-                            return Ok(BoundPredicate::Binary(BinaryExpression::new(
-                                PredicateOperator::NotEq,
-                                bound_expr.term,
-                                bound_literals.into_iter().next().unwrap(),
-                            )));
+                            return Ok(BoundPredicate::Binary(
+                                BinaryExpression::new(
+                                    PredicateOperator::NotEq,
+                                    bound_expr.term,
+                                    bound_literals.into_iter().next().unwrap(),
+                                ),
+                            ));
                         }
                     }
                     op => {
@@ -566,7 +595,9 @@ impl Predicate {
             (_, Predicate::AlwaysFalse) => Predicate::AlwaysFalse,
             (Predicate::AlwaysTrue, rhs) => rhs,
             (lhs, Predicate::AlwaysTrue) => lhs,
-            (lhs, rhs) => Predicate::And(LogicalExpression::new([Box::new(lhs), Box::new(rhs)])),
+            (lhs, rhs) => {
+                Predicate::And(LogicalExpression::new([Box::new(lhs), Box::new(rhs)]))
+            }
         }
     }
 
@@ -594,7 +625,9 @@ impl Predicate {
             (_, Predicate::AlwaysTrue) => Predicate::AlwaysTrue,
             (Predicate::AlwaysFalse, rhs) => rhs,
             (lhs, Predicate::AlwaysFalse) => lhs,
-            (lhs, rhs) => Predicate::Or(LogicalExpression::new([Box::new(lhs), Box::new(rhs)])),
+            (lhs, rhs) => {
+                Predicate::Or(LogicalExpression::new([Box::new(lhs), Box::new(rhs)]))
+            }
         }
     }
 
@@ -746,14 +779,12 @@ impl BoundPredicate {
                 let LogicalExpression { inputs: [input_0] } = expr;
                 *input_0
             }
-            BoundPredicate::Unary(expr) => {
-                BoundPredicate::Unary(UnaryExpression::new(expr.op.negate(), expr.term))
-            }
-            BoundPredicate::Binary(expr) => BoundPredicate::Binary(BinaryExpression::new(
-                expr.op.negate(),
-                expr.term,
-                expr.literal,
-            )),
+            BoundPredicate::Unary(expr) => BoundPredicate::Unary(
+                UnaryExpression::new(expr.op.negate(), expr.term),
+            ),
+            BoundPredicate::Binary(expr) => BoundPredicate::Binary(
+                BinaryExpression::new(expr.op.negate(), expr.term, expr.literal),
+            ),
             BoundPredicate::Set(expr) => BoundPredicate::Set(SetExpression::new(
                 expr.op.negate(),
                 expr.term,
@@ -895,7 +926,8 @@ mod tests {
 
     #[test]
     fn test_predicate_and_reduce_always_true_false() {
-        let true_or_expr = AlwaysTrue.and(Reference::new("b").less_than(Datum::long(5)));
+        let true_or_expr =
+            AlwaysTrue.and(Reference::new("b").less_than(Datum::long(5)));
         assert_eq!(&format!("{true_or_expr}"), "b < 5");
 
         let expr_or_true = Reference::new("b")
@@ -903,7 +935,8 @@ mod tests {
             .and(AlwaysTrue);
         assert_eq!(&format!("{expr_or_true}"), "b < 5");
 
-        let false_or_expr = AlwaysFalse.and(Reference::new("b").less_than(Datum::long(5)));
+        let false_or_expr =
+            AlwaysFalse.and(Reference::new("b").less_than(Datum::long(5)));
         assert_eq!(&format!("{false_or_expr}"), "FALSE");
 
         let expr_or_false = Reference::new("b")
@@ -914,13 +947,16 @@ mod tests {
 
     #[test]
     fn test_predicate_or_reduce_always_true_false() {
-        let true_or_expr = AlwaysTrue.or(Reference::new("b").less_than(Datum::long(5)));
+        let true_or_expr =
+            AlwaysTrue.or(Reference::new("b").less_than(Datum::long(5)));
         assert_eq!(&format!("{true_or_expr}"), "TRUE");
 
-        let expr_or_true = Reference::new("b").less_than(Datum::long(5)).or(AlwaysTrue);
+        let expr_or_true =
+            Reference::new("b").less_than(Datum::long(5)).or(AlwaysTrue);
         assert_eq!(&format!("{expr_or_true}"), "TRUE");
 
-        let false_or_expr = AlwaysFalse.or(Reference::new("b").less_than(Datum::long(5)));
+        let false_or_expr =
+            AlwaysFalse.or(Reference::new("b").less_than(Datum::long(5)));
         assert_eq!(&format!("{false_or_expr}"), "b < 5");
 
         let expr_or_false = Reference::new("b")
@@ -998,7 +1034,8 @@ mod tests {
     fn test_predicate_negate_set() {
         let expression = Reference::new("a").is_in([Datum::long(5), Datum::long(6)]);
 
-        let expected = Reference::new("a").is_not_in([Datum::long(5), Datum::long(6)]);
+        let expected =
+            Reference::new("a").is_not_in([Datum::long(5), Datum::long(6)]);
 
         let result = expression.negate();
 
@@ -1011,10 +1048,30 @@ mod tests {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![2])
                 .with_fields(vec![
-                    NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
-                    NestedField::optional(4, "qux", Type::Primitive(PrimitiveType::Float)).into(),
+                    NestedField::optional(
+                        1,
+                        "foo",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "bar",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        3,
+                        "baz",
+                        Type::Primitive(PrimitiveType::Boolean),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        4,
+                        "qux",
+                        Type::Primitive(PrimitiveType::Float),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1165,7 +1222,8 @@ mod tests {
     #[test]
     fn test_bind_greater_than_or_eq_wrong_type() {
         let schema = table_schema_simple();
-        let expr = Reference::new("bar").greater_than_or_equal_to(Datum::string("abcd"));
+        let expr =
+            Reference::new("bar").greater_than_or_equal_to(Datum::string("abcd"));
         let bound_expr = expr.bind(schema, true);
         assert!(bound_expr.is_err());
     }
@@ -1243,7 +1301,8 @@ mod tests {
     fn test_bind_less_than_or_equal_to_above_max() {
         let schema = table_schema_simple();
         // int32 can hold up to 2147483647
-        let expr = Reference::new("bar").less_than_or_equal_to(Datum::long(2147483648i64));
+        let expr =
+            Reference::new("bar").less_than_or_equal_to(Datum::long(2147483648i64));
         let bound_expr = expr.bind(schema, true).unwrap();
         assert_eq!(&format!("{bound_expr}"), "True");
         test_bound_predicate_serialize_diserialize(bound_expr);
@@ -1253,7 +1312,8 @@ mod tests {
     fn test_bind_less_than_or_equal_to_below_min() {
         let schema = table_schema_simple();
         // int32 can hold up to -2147483647
-        let expr = Reference::new("bar").less_than_or_equal_to(Datum::long(-2147483649i64));
+        let expr =
+            Reference::new("bar").less_than_or_equal_to(Datum::long(-2147483649i64));
         let bound_expr = expr.bind(schema, true).unwrap();
         assert_eq!(&format!("{bound_expr}"), "False");
         test_bound_predicate_serialize_diserialize(bound_expr);
@@ -1283,7 +1343,8 @@ mod tests {
     fn test_bind_great_than_or_equal_to_above_max() {
         let schema = table_schema_simple();
         // int32 can hold up to 2147483647
-        let expr = Reference::new("bar").greater_than_or_equal_to(Datum::long(2147483648i64));
+        let expr = Reference::new("bar")
+            .greater_than_or_equal_to(Datum::long(2147483648i64));
         let bound_expr = expr.bind(schema, true).unwrap();
         assert_eq!(&format!("{bound_expr}"), "False");
         test_bound_predicate_serialize_diserialize(bound_expr);
@@ -1293,7 +1354,8 @@ mod tests {
     fn test_bind_great_than_or_equal_to_below_min() {
         let schema = table_schema_simple();
         // int32 can hold up to -2147483647
-        let expr = Reference::new("bar").greater_than_or_equal_to(Datum::long(-2147483649i64));
+        let expr = Reference::new("bar")
+            .greater_than_or_equal_to(Datum::long(-2147483649i64));
         let bound_expr = expr.bind(schema, true).unwrap();
         assert_eq!(&format!("{bound_expr}"), "True");
         test_bound_predicate_serialize_diserialize(bound_expr);
@@ -1388,7 +1450,8 @@ mod tests {
     #[test]
     fn test_bind_in_wrong_type() {
         let schema = table_schema_simple();
-        let expr = Reference::new("bar").is_in(vec![Datum::int(10), Datum::string("abcd")]);
+        let expr =
+            Reference::new("bar").is_in(vec![Datum::int(10), Datum::string("abcd")]);
         let bound_expr = expr.bind(schema, true);
         assert!(bound_expr.is_err());
     }
@@ -1423,7 +1486,8 @@ mod tests {
     #[test]
     fn test_bind_not_in_wrong_type() {
         let schema = table_schema_simple();
-        let expr = Reference::new("bar").is_not_in([Datum::int(10), Datum::string("abcd")]);
+        let expr =
+            Reference::new("bar").is_not_in([Datum::int(10), Datum::string("abcd")]);
         let bound_expr = expr.bind(schema, true);
         assert!(bound_expr.is_err());
     }
@@ -1531,7 +1595,8 @@ mod tests {
         let result = bound_predicate.rewrite_not();
 
         // The result should be bar >= 10
-        let expected_predicate = Reference::new("bar").greater_than_or_equal_to(Datum::int(10));
+        let expected_predicate =
+            Reference::new("bar").greater_than_or_equal_to(Datum::int(10));
         let expected_bound = expected_predicate.bind(schema, true).unwrap();
 
         assert_eq!(result, expected_bound);
@@ -1567,7 +1632,8 @@ mod tests {
         let result = bound_predicate.rewrite_not();
 
         // The result should be bar NOT IN (10, 20)
-        let expected_predicate = Reference::new("bar").is_not_in([Datum::int(10), Datum::int(20)]);
+        let expected_predicate =
+            Reference::new("bar").is_not_in([Datum::int(10), Datum::int(20)]);
         let expected_bound = expected_predicate.bind(schema, true).unwrap();
 
         assert_eq!(result, expected_bound);

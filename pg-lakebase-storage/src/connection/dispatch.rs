@@ -7,18 +7,23 @@
 
 use std::time::Instant;
 
-use crate::session::handle_table::ReadHandleGuard;
-use crate::session::StorageContext;
 use crate::cache::CacheIndex;
 use crate::error::StorageError;
-use crate::protocol::{WireRequest, WireRequestPayload, WireResponse, WireResponsePayload};
+use crate::protocol::{
+    WireRequest, WireRequestPayload, WireResponse, WireResponsePayload,
+};
 use crate::request::{RequestContext, RequestOutcome};
 use crate::service::command::{
-    AbortCommand, CloseCommand, CommitCommand, DeleteCommand, DeletePrefixCommand, InvalidateObjectCacheCommand,
-    HeadCommand, ListCommand, OpenCommand, PurgeStoreCacheCommand, ReadCommand, RegisterStoreCommand, StageCreateCommand,
+    AbortCommand, CloseCommand, CommitCommand, DeleteCommand, DeletePrefixCommand,
+    HeadCommand, InvalidateObjectCacheCommand, ListCommand, OpenCommand,
+    PurgeStoreCacheCommand, ReadCommand, RegisterStoreCommand, StageCreateCommand,
     StorageCommand, UnregisterStoreCommand,
 };
-use crate::service::reply::{CommandOutput, ReadBody, ResponseAttachment, ServiceReply};
+use crate::service::reply::{
+    CommandOutput, ReadBody, ResponseAttachment, ServiceReply,
+};
+use crate::session::StorageContext;
+use crate::session::handle_table::ReadHandleGuard;
 
 // ---- response envelope that the writer task consumes -------------------------------------------
 
@@ -91,12 +96,17 @@ impl RequestDispatcher {
     /// The two methods are deliberately not merged into a single `async fn`: in that shape
     /// admission would only run when the future is first polled, defeating rule 1 for spawned
     /// dispatch futures.
-    pub(crate) fn admit<I: CacheIndex>(request: &WireRequest, context: &StorageContext<I>) -> Self {
+    pub(crate) fn admit<I: CacheIndex>(
+        request: &WireRequest,
+        context: &StorageContext<I>,
+    ) -> Self {
         let admission = match &request.payload {
-            WireRequestPayload::Read { handle, .. } => match context.handles.begin_read(*handle) {
-                Ok(guard) => Admission::ReadHandle(guard),
-                Err(error) => Admission::Rejected(Some(error)),
-            },
+            WireRequestPayload::Read { handle, .. } => {
+                match context.handles.begin_read(*handle) {
+                    Ok(guard) => Admission::ReadHandle(guard),
+                    Err(error) => Admission::Rejected(Some(error)),
+                }
+            }
             _ => Admission::None,
         };
         Self { admission }
@@ -112,41 +122,56 @@ impl RequestDispatcher {
         context: &StorageContext<I>,
     ) -> StorageHandlerResponse {
         let request_id = request.request_id;
-        let request_context =
-            RequestContext::new(request_id, context.client_addr.clone(), request.payload.clone());
+        let request_context = RequestContext::new(
+            request_id,
+            context.client_addr.clone(),
+            request.payload.clone(),
+        );
         let started = Instant::now();
-        context.request_hooks.observer().on_request_start(&request_context);
+        context
+            .request_hooks
+            .observer()
+            .on_request_start(&request_context);
 
-        let result = match context.request_hooks.policy().before_dispatch(&request_context) {
+        let result = match context
+            .request_hooks
+            .policy()
+            .before_dispatch(&request_context)
+        {
             Err(error) => Err(error),
-            Ok(()) => self.run_command(StorageCommand::from(request.payload), context).await,
+            Ok(()) => {
+                self.run_command(StorageCommand::from(request.payload), context)
+                    .await
+            }
         };
 
         match result {
             Ok(reply) => {
-                context
-                    .request_hooks
-                    .observer()
-                    .on_request_finish(&request_context, &RequestOutcome::success(started.elapsed()));
+                context.request_hooks.observer().on_request_finish(
+                    &request_context,
+                    &RequestOutcome::success(started.elapsed()),
+                );
                 let ServiceReply { output, attachment } = reply;
                 StorageHandlerResponse {
                     request_id,
                     payload: StorageHandlerPayload::from(output),
                     direct_file: attachment.map(std::fs::File::from),
                 }
-            },
+            }
             Err(error) => {
                 let kind = error.kind();
-                context
-                    .request_hooks
-                    .observer()
-                    .on_request_finish(&request_context, &RequestOutcome::error(kind, started.elapsed()));
+                context.request_hooks.observer().on_request_finish(
+                    &request_context,
+                    &RequestOutcome::error(kind, started.elapsed()),
+                );
                 StorageHandlerResponse {
                     request_id,
-                    payload: StorageHandlerPayload::Wire(WireResponse::error(request_id, error).payload),
+                    payload: StorageHandlerPayload::Wire(
+                        WireResponse::error(request_id, error).payload,
+                    ),
                     direct_file: None,
                 }
-            },
+            }
         }
     }
 
@@ -157,17 +182,33 @@ impl RequestDispatcher {
     ) -> crate::error::StorageResult<ServiceReply> {
         match command {
             StorageCommand::Read(command) => match &mut self.admission {
-                Admission::ReadHandle(read_handle) => context.service.handle_admitted_read(read_handle, command).await,
-                Admission::Rejected(error) => Err(error
-                    .take()
-                    .unwrap_or_else(|| StorageError::cache("request admission error was already consumed"))),
+                Admission::ReadHandle(read_handle) => {
+                    context
+                        .service
+                        .handle_admitted_read(read_handle, command)
+                        .await
+                }
+                Admission::Rejected(error) => {
+                    Err(error.take().unwrap_or_else(|| {
+                        StorageError::cache(
+                            "request admission error was already consumed",
+                        )
+                    }))
+                }
                 // `admit` always maps a `Read` request to `ReadHandle` or `Rejected`, never `None`.
                 // Hitting this arm means the admit-before-dispatch ordering contract was violated
                 // (see `RequestDispatcher::admit` docs) — fail loudly rather than silently route
                 // through `execute` and skip the handle guard.
-                Admission::None => unreachable!("Read command dispatched without prior admit"),
+                Admission::None => {
+                    unreachable!("Read command dispatched without prior admit")
+                }
             },
-            command => context.service.execute(context.handles.as_ref(), command).await,
+            command => {
+                context
+                    .service
+                    .execute(context.handles.as_ref(), command)
+                    .await
+            }
         }
     }
 }
@@ -188,40 +229,90 @@ impl From<WireRequestPayload> for StorageCommand {
                 key,
                 flags,
             }),
-            WireRequestPayload::Head { store_id, bucket, key } => Self::Head(HeadCommand {
+            WireRequestPayload::Head {
+                store_id,
+                bucket,
+                key,
+            } => Self::Head(HeadCommand {
                 store_id,
                 bucket,
                 key,
             }),
-            WireRequestPayload::Read { handle, offset, len } => Self::Read(ReadCommand { handle, offset, len }),
-            WireRequestPayload::Close { handle } => Self::Close(CloseCommand { handle }),
-            WireRequestPayload::StageCreate { store_id, bucket, key } => {
-                Self::StageCreate(StageCreateCommand { store_id, bucket, key })
-            },
-            WireRequestPayload::Commit { store_id, bucket, key } => {
-                Self::Commit(CommitCommand { store_id, bucket, key })
-            },
-            WireRequestPayload::Abort { store_id, bucket, key } => {
-                Self::Abort(AbortCommand { store_id, bucket, key })
-            },
+            WireRequestPayload::Read {
+                handle,
+                offset,
+                len,
+            } => Self::Read(ReadCommand {
+                handle,
+                offset,
+                len,
+            }),
+            WireRequestPayload::Close { handle } => {
+                Self::Close(CloseCommand { handle })
+            }
+            WireRequestPayload::StageCreate {
+                store_id,
+                bucket,
+                key,
+            } => Self::StageCreate(StageCreateCommand {
+                store_id,
+                bucket,
+                key,
+            }),
+            WireRequestPayload::Commit {
+                store_id,
+                bucket,
+                key,
+            } => Self::Commit(CommitCommand {
+                store_id,
+                bucket,
+                key,
+            }),
+            WireRequestPayload::Abort {
+                store_id,
+                bucket,
+                key,
+            } => Self::Abort(AbortCommand {
+                store_id,
+                bucket,
+                key,
+            }),
             WireRequestPayload::RegisterStore { store_id, config } => {
                 Self::RegisterStore(RegisterStoreCommand { store_id, config })
-            },
+            }
             WireRequestPayload::UnregisterStore { store_id } => {
                 Self::UnregisterStore(UnregisterStoreCommand { store_id })
-            },
+            }
             WireRequestPayload::PurgeStoreCache { store_id } => {
                 Self::PurgeStoreCache(PurgeStoreCacheCommand { store_id })
-            },
-            WireRequestPayload::InvalidateObjectCache { store_id, bucket, key } => {
-                Self::InvalidateObjectCache(InvalidateObjectCacheCommand { store_id, bucket, key })
-            },
-            WireRequestPayload::Delete { store_id, bucket, key } => {
-                Self::Delete(DeleteCommand { store_id, bucket, key })
-            },
-            WireRequestPayload::DeletePrefix { store_id, bucket, prefix } => {
-                Self::DeletePrefix(DeletePrefixCommand { store_id, bucket, prefix })
-            },
+            }
+            WireRequestPayload::InvalidateObjectCache {
+                store_id,
+                bucket,
+                key,
+            } => Self::InvalidateObjectCache(InvalidateObjectCacheCommand {
+                store_id,
+                bucket,
+                key,
+            }),
+            WireRequestPayload::Delete {
+                store_id,
+                bucket,
+                key,
+            } => Self::Delete(DeleteCommand {
+                store_id,
+                bucket,
+                key,
+            }),
+            WireRequestPayload::DeletePrefix {
+                store_id,
+                bucket,
+                prefix,
+            } => Self::DeletePrefix(DeletePrefixCommand {
+                store_id,
+                bucket,
+                prefix,
+            }),
             WireRequestPayload::List {
                 store_id,
                 bucket,
@@ -256,28 +347,42 @@ impl From<CommandOutput> for StorageHandlerPayload {
                 eof: output.eof,
             },
             CommandOutput::Close => Self::Wire(WireResponsePayload::Close),
-            CommandOutput::StageCreate(output) => Self::Wire(WireResponsePayload::StageCreate {
-                staging_path: output.staging_path,
-            }),
-            CommandOutput::Commit(output) => Self::Wire(WireResponsePayload::Commit {
-                size: output.size,
-                etag: output.etag,
-            }),
+            CommandOutput::StageCreate(output) => {
+                Self::Wire(WireResponsePayload::StageCreate {
+                    staging_path: output.staging_path,
+                })
+            }
+            CommandOutput::Commit(output) => {
+                Self::Wire(WireResponsePayload::Commit {
+                    size: output.size,
+                    etag: output.etag,
+                })
+            }
             CommandOutput::Abort => Self::Wire(WireResponsePayload::Abort),
-            CommandOutput::RegisterStore(output) => Self::Wire(WireResponsePayload::RegisterStore {
-                replaced: output.replaced,
-            }),
-            CommandOutput::UnregisterStore(output) => Self::Wire(WireResponsePayload::UnregisterStore {
-                removed: output.removed,
-            }),
-            CommandOutput::PurgeStoreCache => Self::Wire(WireResponsePayload::PurgeStoreCache),
-            CommandOutput::InvalidateObjectCache(output) => Self::Wire(WireResponsePayload::InvalidateObjectCache {
-                removed: output.removed,
-            }),
+            CommandOutput::RegisterStore(output) => {
+                Self::Wire(WireResponsePayload::RegisterStore {
+                    replaced: output.replaced,
+                })
+            }
+            CommandOutput::UnregisterStore(output) => {
+                Self::Wire(WireResponsePayload::UnregisterStore {
+                    removed: output.removed,
+                })
+            }
+            CommandOutput::PurgeStoreCache => {
+                Self::Wire(WireResponsePayload::PurgeStoreCache)
+            }
+            CommandOutput::InvalidateObjectCache(output) => {
+                Self::Wire(WireResponsePayload::InvalidateObjectCache {
+                    removed: output.removed,
+                })
+            }
             CommandOutput::Delete => Self::Wire(WireResponsePayload::Delete),
-            CommandOutput::DeletePrefix(output) => Self::Wire(WireResponsePayload::DeletePrefix {
-                deleted: output.deleted,
-            }),
+            CommandOutput::DeletePrefix(output) => {
+                Self::Wire(WireResponsePayload::DeletePrefix {
+                    deleted: output.deleted,
+                })
+            }
             CommandOutput::List(output) => Self::Wire(WireResponsePayload::List {
                 entries: output.entries,
                 next_cursor: output.next_cursor,
@@ -308,7 +413,8 @@ mod tests {
     use crate::object::ObjectLocation;
     use crate::protocol::{WireRequest, WireRequestPayload, WireResponsePayload};
     use crate::request::{
-        RequestContext, RequestHooks, RequestObserver, RequestOutcome, RequestPolicy, RequestStatus,
+        RequestContext, RequestHooks, RequestObserver, RequestOutcome, RequestPolicy,
+        RequestStatus,
     };
     use crate::service::StorageService;
     use crate::session::StorageContext;
@@ -318,7 +424,9 @@ mod tests {
     #[tokio::test]
     async fn observer_wraps_successful_request() {
         let observer = Arc::new(RecordingObserver::default());
-        let context = test_context(RequestHooks::default().with_shared_observer(observer.clone()));
+        let context = test_context(
+            RequestHooks::default().with_shared_observer(observer.clone()),
+        );
 
         let request = WireRequest {
             request_id: 7,
@@ -329,9 +437,14 @@ mod tests {
                 flags: OpenFlags::READ_ONLY,
             },
         };
-        let response = RequestDispatcher::admit(&request, &context).dispatch(request, &context).await;
+        let response = RequestDispatcher::admit(&request, &context)
+            .dispatch(request, &context)
+            .await;
 
-        assert!(matches!(response.payload, StorageHandlerPayload::Wire(WireResponsePayload::Open { .. })));
+        assert!(matches!(
+            response.payload,
+            StorageHandlerPayload::Wire(WireResponsePayload::Open { .. })
+        ));
         let events = observer.events();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind, RecordedEventKind::Start);
@@ -358,13 +471,18 @@ mod tests {
                 len: 4,
             },
         };
-        let response = RequestDispatcher::admit(&request, &context).dispatch(request, &context).await;
+        let response = RequestDispatcher::admit(&request, &context)
+            .dispatch(request, &context)
+            .await;
 
         match response.payload {
-            StorageHandlerPayload::Wire(WireResponsePayload::Error { kind, message }) => {
+            StorageHandlerPayload::Wire(WireResponsePayload::Error {
+                kind,
+                message,
+            }) => {
                 assert_eq!(kind, StorageErrorKind::Unsupported);
                 assert_eq!(message, "read denied by request policy");
-            },
+            }
             other => panic!("unexpected response: {other:?}"),
         }
         assert!(response.direct_file.is_none());
@@ -384,7 +502,10 @@ mod tests {
         let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "file").unwrap();
         let backend = MemoryObjectBackend::new();
         backend.insert(key, b"abc".to_vec());
-        let cache = Arc::new(CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new()).with_limits(4, 4));
+        let cache = Arc::new(
+            CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+                .with_limits(4, 4),
+        );
         cache.spawn_large_fill_reaper();
         let registry = StoreRegistry::new()
             .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
@@ -415,7 +536,10 @@ mod tests {
 
     impl RecordingObserver {
         fn events(&self) -> Vec<RecordedEvent> {
-            self.events.lock().expect("recording observer mutex poisoned").clone()
+            self.events
+                .lock()
+                .expect("recording observer mutex poisoned")
+                .clone()
         }
     }
 
@@ -433,7 +557,11 @@ mod tests {
                 });
         }
 
-        fn on_request_finish(&self, context: &RequestContext, outcome: &RequestOutcome) {
+        fn on_request_finish(
+            &self,
+            context: &RequestContext,
+            outcome: &RequestOutcome,
+        ) {
             self.events
                 .lock()
                 .expect("recording observer mutex poisoned")
@@ -460,7 +588,11 @@ mod tests {
     }
 
     fn test_cache_dir() -> PathBuf {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        PathBuf::from("/tmp").join(format!("pg-lakebase-storage-request-hooks-{stamp}"))
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        PathBuf::from("/tmp")
+            .join(format!("pg-lakebase-storage-request-hooks-{stamp}"))
     }
 }

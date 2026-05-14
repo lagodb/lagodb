@@ -17,7 +17,9 @@
 
 //! Temporal value conversions for dates, times, and timestamps
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Utc};
+use chrono::{
+    DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Utc,
+};
 
 pub(crate) mod date {
     use super::*;
@@ -63,7 +65,8 @@ pub(crate) mod time {
     pub(crate) fn microseconds_to_time(micros: i64) -> NaiveTime {
         let (secs, rem) = (micros / 1_000_000, micros % 1_000_000);
 
-        NaiveTime::from_num_seconds_from_midnight_opt(secs as u32, rem as u32 * 1_000).unwrap()
+        NaiveTime::from_num_seconds_from_midnight_opt(secs as u32, rem as u32 * 1_000)
+            .unwrap()
     }
 }
 

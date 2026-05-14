@@ -10,7 +10,10 @@ pub(super) struct TrackingDelta {
 }
 
 impl TrackingDelta {
-    pub(super) fn from_metas(old: Option<&CachedObjectMeta>, new: Option<&CachedObjectMeta>) -> Self {
+    pub(super) fn from_metas(
+        old: Option<&CachedObjectMeta>,
+        new: Option<&CachedObjectMeta>,
+    ) -> Self {
         Self {
             old_bytes: resident_bytes(old),
             new_bytes: resident_bytes(new),
@@ -54,9 +57,15 @@ impl RuntimeCacheTracking {
             return;
         }
         if delta.new_bytes >= delta.old_bytes {
-            fetch_saturating_add(&self.added_bytes, delta.new_bytes - delta.old_bytes);
+            fetch_saturating_add(
+                &self.added_bytes,
+                delta.new_bytes - delta.old_bytes,
+            );
         } else {
-            fetch_saturating_add(&self.removed_bytes, delta.old_bytes - delta.new_bytes);
+            fetch_saturating_add(
+                &self.removed_bytes,
+                delta.old_bytes - delta.new_bytes,
+            );
         }
     }
 
@@ -70,7 +79,9 @@ impl RuntimeCacheTracking {
 }
 
 fn fetch_saturating_add(value: &AtomicU64, amount: u64) {
-    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| Some(current.saturating_add(amount)));
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(amount))
+    });
 }
 
 fn resident_bytes(meta: Option<&CachedObjectMeta>) -> u64 {

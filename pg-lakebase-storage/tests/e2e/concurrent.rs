@@ -29,7 +29,8 @@ async fn concurrent_reads_on_same_object_on(kind: CacheIndexKind) {
             let socket = socket.clone();
             let expected = expected.clone();
             tokio::task::spawn_blocking(move || {
-                let client = StorageClient::connect(&socket).unwrap_or_else(|e| panic!("client {i} connect: {e}"));
+                let client = StorageClient::connect(&socket)
+                    .unwrap_or_else(|e| panic!("client {i} connect: {e}"));
                 let mut f = client
                     .open(STORE_ID, TEST_BUCKET, "shared.bin")
                     .unwrap_or_else(|e| panic!("client {i} open: {e}"));
@@ -40,7 +41,8 @@ async fn concurrent_reads_on_same_object_on(kind: CacheIndexKind) {
         .collect();
 
     for (i, h) in handles.into_iter().enumerate() {
-        h.await.unwrap_or_else(|e| panic!("client {i} panicked: {e}"));
+        h.await
+            .unwrap_or_else(|e| panic!("client {i} panicked: {e}"));
     }
 }
 
@@ -57,7 +59,12 @@ async fn redb_concurrent_reads_on_different_objects() {
 async fn concurrent_reads_on_different_objects_on(kind: CacheIndexKind) {
     let h = E2eHarness::start_with_index(kind).await;
     let objects: Vec<(String, Vec<u8>)> = (0..4)
-        .map(|i| (format!("multi/obj-{i}.txt"), format!("content of object {i}").into_bytes()))
+        .map(|i| {
+            (
+                format!("multi/obj-{i}.txt"),
+                format!("content of object {i}").into_bytes(),
+            )
+        })
         .collect();
     for (key, data) in &objects {
         h.seed_object(key, data).await;
@@ -114,7 +121,9 @@ async fn concurrent_stage_commit_on(kind: CacheIndexKind) {
                 let info = client.commit(STORE_ID, TEST_BUCKET, &key).unwrap();
                 assert_eq!(info.size, payload.len() as u64);
 
-                client.invalidate_object_cache(STORE_ID, TEST_BUCKET, &key).unwrap();
+                client
+                    .invalidate_object_cache(STORE_ID, TEST_BUCKET, &key)
+                    .unwrap();
 
                 let mut f = client.open(STORE_ID, TEST_BUCKET, &key).unwrap();
                 assert_eq!(f.read(payload.len() as u32).unwrap(), payload.as_bytes());

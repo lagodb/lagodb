@@ -11,8 +11,8 @@ mod persistent;
 pub use memory::InMemoryCacheIndex;
 pub use persistent::RedbCacheIndex;
 
-use crate::cache::meta::CachedObjectMeta;
 use crate::cache::LogicalCacheUsage;
+use crate::cache::meta::CachedObjectMeta;
 use crate::error::StorageResult;
 use crate::object::ObjectLocation;
 
@@ -83,9 +83,15 @@ pub struct OpenHit {
 #[derive(Clone, Debug)]
 pub enum AdmitSmallOutcome {
     /// This caller's `(meta, payload)` was committed to the index.
-    Admitted { meta: CachedObjectMeta, payload: Arc<[u8]> },
+    Admitted {
+        meta: CachedObjectMeta,
+        payload: Arc<[u8]>,
+    },
     /// A concurrent caller already published a small-KV row for this key; we return theirs.
-    AlreadyPresent { meta: CachedObjectMeta, payload: Arc<[u8]> },
+    AlreadyPresent {
+        meta: CachedObjectMeta,
+        payload: Arc<[u8]>,
+    },
 }
 
 /// Complete cache-index contract required by `CacheManager`.
@@ -118,13 +124,20 @@ pub enum AdmitSmallOutcome {
 #[async_trait]
 pub trait CacheIndex: Send + Sync {
     /// Returns metadata for `key`, or `None` when the object is unknown to the cache index.
-    async fn get_meta(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>>;
+    async fn get_meta(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>>;
 
     /// Scans metadata records in stable key order.
     ///
     /// Startup recovery uses this so large indexes do not need to materialize every object record
     /// at once.
-    async fn scan_meta_page(&self, cursor: Option<MetaScanCursor>, limit: usize) -> StorageResult<MetaScanPage>;
+    async fn scan_meta_page(
+        &self,
+        cursor: Option<MetaScanCursor>,
+        limit: usize,
+    ) -> StorageResult<MetaScanPage>;
 
     /// Writes complete-file metadata for a cache row whose slot `CacheManager` has proven absent.
     ///
@@ -132,13 +145,20 @@ pub trait CacheIndex: Send + Sync {
     /// through `CacheManager`'s admission/fill state that no current metadata can exist for
     /// `meta.key()`. This method does not perform an insert-if-absent check; the no-rehome rule lives
     /// in `CacheManager`'s state machine.
-    async fn put_new_complete(&self, meta: CachedObjectMeta) -> StorageResult<CachedObjectMeta>;
+    async fn put_new_complete(
+        &self,
+        meta: CachedObjectMeta,
+    ) -> StorageResult<CachedObjectMeta>;
 
     /// Removes metadata and its resident tracking entry, but does not remove any small-object payload.
-    async fn delete_meta(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>>;
+    async fn delete_meta(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>>;
 
     /// Reads embedded small-object bytes.
-    async fn get_small(&self, key: &ObjectLocation) -> StorageResult<Option<Vec<u8>>>;
+    async fn get_small(&self, key: &ObjectLocation)
+    -> StorageResult<Option<Vec<u8>>>;
 
     async fn stat_small(&self, key: &ObjectLocation) -> StorageResult<Option<u64>> {
         Ok(self.get_small(key).await?.map(|data| data.len() as u64))
@@ -156,14 +176,20 @@ pub trait CacheIndex: Send + Sync {
     /// This does not update metadata or resident-byte tracking. Callers must prove the current
     /// metadata does not claim `key` before calling this. Normal deletion of a cached small object
     /// must use `delete_meta_and_small` instead.
-    async fn remove_unclaimed_small_payload(&self, key: &ObjectLocation) -> StorageResult<()>;
+    async fn remove_unclaimed_small_payload(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<()>;
 
     /// Removes metadata and the small-object payload as one logical operation.
     ///
     /// Persistent implementations must apply this atomically together with any resident-tracking indexes
     /// maintained alongside metadata (for example LRU-by-access rows), so completed operations never leave
     /// [`crate::cache::CacheState::SmallKv`] metadata without a matching small-object payload.
-    async fn delete_meta_and_small(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>>;
+    async fn delete_meta_and_small(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>>;
 
     /// Replaces in-memory resident-byte tracking from an authoritative startup reconciliation pass.
     ///
@@ -173,7 +199,10 @@ pub trait CacheIndex: Send + Sync {
     /// Callers must only install this value while there are no concurrent index writes. The normal
     /// server startup path satisfies that by running recovery before publishing the cache manager to
     /// request handling or periodic cleanup tasks.
-    async fn replace_runtime_cache_usage(&self, usage: LogicalCacheUsage) -> StorageResult<()>;
+    async fn replace_runtime_cache_usage(
+        &self,
+        usage: LogicalCacheUsage,
+    ) -> StorageResult<()>;
 
     /// Returns logical resident cache usage maintained by the index.
     ///
@@ -182,8 +211,11 @@ pub trait CacheIndex: Send + Sync {
     async fn logical_cache_usage(&self) -> StorageResult<LogicalCacheUsage>;
 
     /// Scans resident metadata in oldest-access order.
-    async fn oldest_cached_metas_page(&self, cursor: Option<LruScanCursor>, limit: usize)
-        -> StorageResult<LruScanPage>;
+    async fn oldest_cached_metas_page(
+        &self,
+        cursor: Option<LruScanCursor>,
+        limit: usize,
+    ) -> StorageResult<LruScanPage>;
 
     /// Reads meta (and the small payload when residency is `SmallKv`) in one logical query,
     /// applying the LRU touch policy at the same time.

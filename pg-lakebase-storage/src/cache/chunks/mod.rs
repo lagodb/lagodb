@@ -46,5 +46,5 @@ mod session;
 mod tests;
 
 pub(crate) use flight::ChunkFillClaim;
-pub(crate) use reaper::{reaper_channel, ReaperHandle, ReaperInbox};
+pub(crate) use reaper::{ReaperHandle, ReaperInbox, reaper_channel};
 pub(crate) use session::LargeFillSession;

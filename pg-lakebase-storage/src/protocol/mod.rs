@@ -9,7 +9,13 @@ pub(crate) mod limits;
 mod model;
 mod op;
 
+pub(crate) use codec::{
+    ReadResponsePrefix, ResponseFrameHeader, encode_read_request,
+    encode_read_response_prefix,
+};
 pub use codec::{decode_request, decode_response, encode_request, encode_response};
-pub(crate) use codec::{encode_read_request, encode_read_response_prefix, ReadResponsePrefix, ResponseFrameHeader};
 pub use limits::{MAX_FRAME_BYTES, MAX_READ_RESPONSE_DATA_BYTES};
-pub use model::{ListCursor, WireListEntry, WireRequest, WireRequestPayload, WireResponse, WireResponsePayload};
+pub use model::{
+    ListCursor, WireListEntry, WireRequest, WireRequestPayload, WireResponse,
+    WireResponsePayload,
+};

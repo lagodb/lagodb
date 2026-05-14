@@ -17,7 +17,7 @@
 
 use fnv::FnvHashSet;
 
-use crate::expr::visitors::bound_predicate_visitor::{visit, BoundPredicateVisitor};
+use crate::expr::visitors::bound_predicate_visitor::{BoundPredicateVisitor, visit};
 use crate::expr::{BoundPredicate, BoundReference};
 use crate::spec::{DataFile, Datum};
 use crate::{Error, ErrorKind, Result};
@@ -51,7 +51,10 @@ impl<'a> StrictMetricsEvaluator<'a> {
     /// see if this `DataFile` contains data that could match
     /// the scan's filter.
     #[allow(dead_code)]
-    pub(crate) fn eval(filter: &'a BoundPredicate, data_file: &'a DataFile) -> crate::Result<bool> {
+    pub(crate) fn eval(
+        filter: &'a BoundPredicate,
+        data_file: &'a DataFile,
+    ) -> crate::Result<bool> {
         if data_file.record_count == 0 {
             return ROWS_MUST_MATCH;
         }
@@ -288,11 +291,14 @@ impl BoundPredicateVisitor for StrictMetricsEvaluator<'_> {
             return ROWS_MIGHT_NOT_MATCH;
         }
 
-        if let (Some(lower), Some(upper)) = (self.lower_bound(field_id), self.upper_bound(field_id))
+        if let (Some(lower), Some(upper)) =
+            (self.lower_bound(field_id), self.upper_bound(field_id))
         {
             // For an equality predicate to hold strictly, we must have:
             //     lower == literal.value == upper.
-            if lower.literal() == datum.literal() && upper.literal() == datum.literal() {
+            if lower.literal() == datum.literal()
+                && upper.literal() == datum.literal()
+            {
                 return ROWS_MUST_MATCH;
             } else {
                 return ROWS_MIGHT_NOT_MATCH;
@@ -365,9 +371,13 @@ impl BoundPredicateVisitor for StrictMetricsEvaluator<'_> {
             return ROWS_MIGHT_NOT_MATCH;
         }
 
-        if let (Some(lower), Some(upper)) = (self.lower_bound(field_id), self.upper_bound(field_id))
+        if let (Some(lower), Some(upper)) =
+            (self.lower_bound(field_id), self.upper_bound(field_id))
         {
-            if !literals.contains(lower) || !literals.contains(upper) || lower != upper {
+            if !literals.contains(lower)
+                || !literals.contains(upper)
+                || lower != upper
+            {
                 return ROWS_MIGHT_NOT_MATCH;
             }
 
@@ -421,18 +431,18 @@ mod test {
 
     use fnv::FnvHashSet;
 
-    use crate::expr::visitors::strict_metrics_evaluator::StrictMetricsEvaluator;
     use crate::expr::PredicateOperator::{
-        Eq, GreaterThan, GreaterThanOrEq, In, IsNan, IsNull, LessThan, LessThanOrEq, NotEq, NotIn,
-        NotNan, NotNull, NotStartsWith, StartsWith,
+        Eq, GreaterThan, GreaterThanOrEq, In, IsNan, IsNull, LessThan, LessThanOrEq,
+        NotEq, NotIn, NotNan, NotNull, NotStartsWith, StartsWith,
     };
+    use crate::expr::visitors::strict_metrics_evaluator::StrictMetricsEvaluator;
     use crate::expr::{
         BinaryExpression, Bind, BoundPredicate, Predicate, Reference, SetExpression,
         UnaryExpression,
     };
     use crate::spec::{
-        DataContentType, DataFile, DataFileFormat, Datum, NestedField, PrimitiveType, Schema,
-        Struct, Type,
+        DataContentType, DataFile, DataFileFormat, Datum, NestedField, PrimitiveType,
+        Schema, Struct, Type,
     };
 
     const INT_MIN_VALUE: i32 = 30;
@@ -563,7 +573,13 @@ mod test {
                 (11, 0),
                 (12, 1),
             ]),
-            nan_value_counts: HashMap::from([(1, 0), (7, 50), (8, 10), (9, 0), (11, 50)]),
+            nan_value_counts: HashMap::from([
+                (1, 0),
+                (7, 50),
+                (8, 10),
+                (9, 0),
+                (11, 50),
+            ]),
             lower_bounds: HashMap::from([
                 (1, Datum::int(INT_MIN_VALUE)), // id lower bound = 30
                 (11, Datum::float(f32::NAN)),
@@ -671,25 +687,31 @@ mod test {
     // Helper functions to bind predicates with the test schema and then evaluate using StrictMetricsEvaluator.
     fn not_null(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(NotNull, Reference::new(reference)));
+        let filter = Predicate::Unary(UnaryExpression::new(
+            NotNull,
+            Reference::new(reference),
+        ));
         filter.bind(schema.clone(), true).unwrap()
     }
 
     fn is_null(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(IsNull, Reference::new(reference)));
+        let filter =
+            Predicate::Unary(UnaryExpression::new(IsNull, Reference::new(reference)));
         filter.bind(schema.clone(), true).unwrap()
     }
 
     fn not_nan(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(NotNan, Reference::new(reference)));
+        let filter =
+            Predicate::Unary(UnaryExpression::new(NotNan, Reference::new(reference)));
         filter.bind(schema.clone(), true).unwrap()
     }
 
     fn is_nan(reference: &str) -> BoundPredicate {
         let schema = create_test_schema();
-        let filter = Predicate::Unary(UnaryExpression::new(IsNan, Reference::new(reference)));
+        let filter =
+            Predicate::Unary(UnaryExpression::new(IsNan, Reference::new(reference)));
         filter.bind(schema.clone(), true).unwrap()
     }
 
@@ -784,7 +806,10 @@ mod test {
         filter.bind(schema.clone(), true).unwrap()
     }
 
-    fn greater_than_or_equal_int(reference: &str, int_literal: i32) -> BoundPredicate {
+    fn greater_than_or_equal_int(
+        reference: &str,
+        int_literal: i32,
+    ) -> BoundPredicate {
         let schema = create_test_schema();
         let filter = Predicate::Binary(BinaryExpression::new(
             GreaterThanOrEq,
@@ -878,11 +903,13 @@ mod test {
     #[test]
     fn test_data_file_no_partitions() {
         let schema = create_test_schema();
-        let partition_filter = Predicate::AlwaysTrue.bind(schema.clone(), false).unwrap();
+        let partition_filter =
+            Predicate::AlwaysTrue.bind(schema.clone(), false).unwrap();
 
         let data_file = get_test_file_1();
 
-        let result = StrictMetricsEvaluator::eval(&partition_filter, &data_file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&partition_filter, &data_file).unwrap();
         assert!(result, "Should read: AlwaysTrue predicate");
     }
 
@@ -891,42 +918,59 @@ mod test {
         let file = get_test_file_1();
 
         // "all_nulls" (field 4) is all null.
-        let result = StrictMetricsEvaluator::eval(&not_null("all_nulls"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_null("all_nulls"), &file).unwrap();
         assert!(!result, "Should skip: notNull on all-null column");
 
-        let result = StrictMetricsEvaluator::eval(&less_than("all_nulls", "a"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&less_than("all_nulls", "a"), &file)
+                .unwrap();
         assert!(!result, "Should skip: lessThan on all-null column");
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_or_equal("all_nulls", "a"), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_or_equal("all_nulls", "a"),
+            &file,
+        )
+        .unwrap();
         assert!(!result, "Should skip: lessThanOrEqual on all-null column");
 
-        let result = StrictMetricsEvaluator::eval(&greater_than("all_nulls", "a"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&greater_than("all_nulls", "a"), &file)
+                .unwrap();
         assert!(!result, "Should skip: greaterThan on all-null column");
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_or_equal("all_nulls", "a"), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_or_equal("all_nulls", "a"),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Should skip: greaterThanOrEqual on all-null column"
         );
 
-        let result = StrictMetricsEvaluator::eval(&equal("all_nulls", "a"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&equal("all_nulls", "a"), &file).unwrap();
         assert!(!result, "Should skip: equal on all-null column");
 
-        let result = StrictMetricsEvaluator::eval(&starts_with("all_nulls", "a"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&starts_with("all_nulls", "a"), &file)
+                .unwrap();
         assert!(!result, "Strict eval: startsWith always returns false");
 
         let result =
-            StrictMetricsEvaluator::eval(&not_starts_with("all_nulls", "a"), &file).unwrap();
+            StrictMetricsEvaluator::eval(&not_starts_with("all_nulls", "a"), &file)
+                .unwrap();
         assert!(!result, "Strict eval: notStartsWith always returns false");
 
         // "some_nulls" (field 5) has some nulls.
-        let result = StrictMetricsEvaluator::eval(&not_null("some_nulls"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_null("some_nulls"), &file).unwrap();
         assert!(!result, "Should skip: notNull on column with some nulls");
 
         // "no_nulls" (field 6) has no nulls.
-        let result = StrictMetricsEvaluator::eval(&not_null("no_nulls"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_null("no_nulls"), &file).unwrap();
         assert!(result, "Should read: notNull on column with no nulls");
     }
 
@@ -935,18 +979,21 @@ mod test {
         let file = get_test_file_1();
 
         // "all_nulls" is all null so isNull returns MUST_MATCH.
-        let result = StrictMetricsEvaluator::eval(&is_null("all_nulls"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_null("all_nulls"), &file).unwrap();
         assert!(result, "Should read: isNull on all-null column");
 
         // "some_nulls" is not all null.
-        let result = StrictMetricsEvaluator::eval(&is_null("some_nulls"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_null("some_nulls"), &file).unwrap();
         assert!(
             !result,
             "Should skip: isNull on column with some non-null values"
         );
 
         // "no_nulls" has no nulls.
-        let result = StrictMetricsEvaluator::eval(&is_null("no_nulls"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_null("no_nulls"), &file).unwrap();
         assert!(!result, "Should skip: isNull on column with no nulls");
     }
 
@@ -955,11 +1002,13 @@ mod test {
         let file = get_test_file_1();
 
         // "all_nans" (field 7) is all NaN.
-        let result = StrictMetricsEvaluator::eval(&is_nan("all_nans"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_nan("all_nans"), &file).unwrap();
         assert!(result, "Should read: isNan on all-NaN column");
 
         // "some_nans" (field 8) has some NaN.
-        let result = StrictMetricsEvaluator::eval(&is_nan("some_nans"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_nan("some_nans"), &file).unwrap();
         assert!(!result, "Should skip: isNan on column with some NaNs");
 
         // "no_nans" (field 9) has no NaN.
@@ -967,19 +1016,25 @@ mod test {
         assert!(!result, "Should skip: isNan on column with no NaNs");
 
         // "all_nulls_double" (field 10) is all null.
-        let result = StrictMetricsEvaluator::eval(&is_nan("all_nulls_double"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_nan("all_nulls_double"), &file).unwrap();
         assert!(!result, "Should skip: isNan on all-null double column");
 
         // "no_nan_stats" (field 13) missing stats → cannot guarantee, so false.
-        let result = StrictMetricsEvaluator::eval(&is_nan("no_nan_stats"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_nan("no_nan_stats"), &file).unwrap();
         assert!(!result, "Should skip: isNan when stats are missing");
 
         // "all_nans_v1_stats" (field 11) is all NaN.
-        let result = StrictMetricsEvaluator::eval(&is_nan("all_nans_v1_stats"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_nan("all_nans_v1_stats"), &file)
+                .unwrap();
         assert!(result, "Should read: isNan on all-NaN (v1 stats) column");
 
         // "nan_and_null_only" (field 12) → mixed, so false.
-        let result = StrictMetricsEvaluator::eval(&is_nan("nan_and_null_only"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&is_nan("nan_and_null_only"), &file)
+                .unwrap();
         assert!(!result, "Should skip: isNan on nan-and-null-only column");
     }
 
@@ -988,41 +1043,54 @@ mod test {
         let file = get_test_file_1();
 
         // "all_nans" → notNan returns MIGHT_NOT_MATCH.
-        let result = StrictMetricsEvaluator::eval(&not_nan("all_nans"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_nan("all_nans"), &file).unwrap();
         assert!(
             !result,
             "Should read: notNan on all-NaN column (strict: must match)"
         );
 
         // "some_nans" → returns false.
-        let result = StrictMetricsEvaluator::eval(&not_nan("some_nans"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_nan("some_nans"), &file).unwrap();
         assert!(!result, "Should skip: notNan on column with some NaNs");
 
         // "no_nans" → notNan returns MUST_MATCH.
-        let result = StrictMetricsEvaluator::eval(&not_nan("no_nans"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_nan("no_nans"), &file).unwrap();
         assert!(result, "Should read: notNan on column with no NaNs");
 
         // "all_nulls_double" → returns MUST_MATCH due to all nulls.
-        let result = StrictMetricsEvaluator::eval(&not_nan("all_nulls_double"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_nan("all_nulls_double"), &file)
+                .unwrap();
         assert!(result, "Should read: notNan on all-null double column");
 
         // "no_nan_stats" → missing stats so returns false.
-        let result = StrictMetricsEvaluator::eval(&not_nan("no_nan_stats"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_nan("no_nan_stats"), &file).unwrap();
         assert!(!result, "Should skip: notNan when stats are missing");
 
         // "all_nans_v1_stats" → returns false.
-        let result = StrictMetricsEvaluator::eval(&not_nan("all_nans_v1_stats"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_nan("all_nans_v1_stats"), &file)
+                .unwrap();
         assert!(!result, "Should read: notNan on all-NaN (v1 stats) column");
 
         // "nan_and_null_only" → returns false.
-        let result = StrictMetricsEvaluator::eval(&not_nan("nan_and_null_only"), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_nan("nan_and_null_only"), &file)
+                .unwrap();
         assert!(!result, "Should skip: notNan on nan-and-null-only column");
     }
 
     #[test]
     #[should_panic]
     fn test_missing_column() {
-        let _ = StrictMetricsEvaluator::eval(&less_than("missing", "a"), &get_test_file_1());
+        let _ = StrictMetricsEvaluator::eval(
+            &less_than("missing", "a"),
+            &get_test_file_1(),
+        );
     }
 
     #[test]
@@ -1054,8 +1122,10 @@ mod test {
     fn test_not() {
         let file = get_test_file_1();
 
-        let result =
-            StrictMetricsEvaluator::eval(&not_less_than_int("id", INT_MIN_VALUE - 25), &file);
+        let result = StrictMetricsEvaluator::eval(
+            &not_less_than_int("id", INT_MIN_VALUE - 25),
+            &file,
+        );
         assert!(result.is_err());
     }
 
@@ -1075,7 +1145,8 @@ mod test {
             Datum::int(INT_MAX_VALUE + 1),
         )));
         let bound = filter.bind(schema.clone(), true).unwrap();
-        let result = StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
         assert!(!result, "Strict eval: and(false, false) should be false");
 
         // (id > (INT_MIN_VALUE - 1)) AND (id <= (INT_MAX_VALUE + 1))
@@ -1090,7 +1161,8 @@ mod test {
             Datum::int(INT_MAX_VALUE + 1),
         )));
         let bound = filter.bind(schema.clone(), true).unwrap();
-        let result = StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
         assert!(result, "Strict eval: and(true, true) should be true");
     }
 
@@ -1109,7 +1181,8 @@ mod test {
             Datum::int(INT_MIN_VALUE - 30),
         )));
         let bound = filter.bind(schema.clone(), true).unwrap();
-        let result = StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
         assert!(result, "Strict eval: or(false, true) should be true");
 
         let filter = Predicate::Binary(BinaryExpression::new(
@@ -1123,7 +1196,8 @@ mod test {
             Datum::int(INT_MAX_VALUE + 1),
         )));
         let bound = filter.bind(schema.clone(), true).unwrap();
-        let result = StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&bound, &get_test_file_1()).unwrap();
         assert!(!result, "Strict eval: or(false, false) should be false");
     }
 
@@ -1131,8 +1205,11 @@ mod test {
     fn test_integer_lt() {
         let file = get_test_file_1();
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_int("id", INT_MIN_VALUE - 25), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_int("id", INT_MIN_VALUE - 25),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: id < {} should be false",
@@ -1140,11 +1217,15 @@ mod test {
         );
 
         let result =
-            StrictMetricsEvaluator::eval(&less_than_int("id", INT_MIN_VALUE), &file).unwrap();
+            StrictMetricsEvaluator::eval(&less_than_int("id", INT_MIN_VALUE), &file)
+                .unwrap();
         assert!(!result, "Strict eval: id < {INT_MIN_VALUE} should be false");
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_int("id", INT_MIN_VALUE + 1), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_int("id", INT_MIN_VALUE + 1),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: id < {} should be false",
@@ -1152,11 +1233,15 @@ mod test {
         );
 
         let result =
-            StrictMetricsEvaluator::eval(&less_than_int("id", INT_MAX_VALUE), &file).unwrap();
+            StrictMetricsEvaluator::eval(&less_than_int("id", INT_MAX_VALUE), &file)
+                .unwrap();
         assert!(!result, "Strict eval: id < {INT_MAX_VALUE} should be false");
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_int("id", INT_MAX_VALUE + 1), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_int("id", INT_MAX_VALUE + 1),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: id < {} should be true",
@@ -1168,40 +1253,50 @@ mod test {
     fn test_integer_lt_eq() {
         let file = get_test_file_1();
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_or_equal_int("id", INT_MIN_VALUE - 25), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_or_equal_int("id", INT_MIN_VALUE - 25),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: id <= {} should be false",
             INT_MIN_VALUE - 25
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_or_equal_int("id", INT_MIN_VALUE - 1), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_or_equal_int("id", INT_MIN_VALUE - 1),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: id <= {} should be false",
             INT_MIN_VALUE - 1
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_or_equal_int("id", INT_MIN_VALUE), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_or_equal_int("id", INT_MIN_VALUE),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: id <= {INT_MIN_VALUE} should be false"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_or_equal_int("id", INT_MAX_VALUE), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_or_equal_int("id", INT_MAX_VALUE),
+            &file,
+        )
+        .unwrap();
         assert!(result, "Strict eval: id <= {INT_MAX_VALUE} should be true");
 
-        let result =
-            StrictMetricsEvaluator::eval(&less_than_or_equal_int("id", INT_MAX_VALUE + 1), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &less_than_or_equal_int("id", INT_MAX_VALUE + 1),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: id <= {} should be true",
@@ -1213,35 +1308,47 @@ mod test {
     fn test_integer_gt() {
         let file = get_test_file_1();
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_int("id", INT_MAX_VALUE + 6), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_int("id", INT_MAX_VALUE + 6),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: id > {} should be false",
             INT_MAX_VALUE + 6
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_int("id", INT_MAX_VALUE), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_int("id", INT_MAX_VALUE),
+            &file,
+        )
+        .unwrap();
         assert!(!result, "Strict eval: id > {INT_MAX_VALUE} should be false");
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_int("id", INT_MIN_VALUE), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_int("id", INT_MIN_VALUE),
+            &file,
+        )
+        .unwrap();
         assert!(!result, "Strict eval: id > {INT_MIN_VALUE} should be false");
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_int("id", INT_MIN_VALUE - 1), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_int("id", INT_MIN_VALUE - 1),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: id > {} should be true",
             INT_MIN_VALUE - 1
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_int("id", INT_MIN_VALUE - 4), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_int("id", INT_MIN_VALUE - 4),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: id > {} should be true",
@@ -1275,17 +1382,21 @@ mod test {
             INT_MAX_VALUE + 1
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_or_equal_int("id", INT_MAX_VALUE), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_or_equal_int("id", INT_MAX_VALUE),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: id >= {INT_MAX_VALUE} should be false"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&greater_than_or_equal_int("id", INT_MIN_VALUE), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &greater_than_or_equal_int("id", INT_MIN_VALUE),
+            &file,
+        )
+        .unwrap();
         assert!(result, "Strict eval: id >= {INT_MIN_VALUE} should be true");
 
         let result = StrictMetricsEvaluator::eval(
@@ -1304,20 +1415,24 @@ mod test {
     fn test_integer_eq() {
         let file = get_test_file_1();
 
-        let result = StrictMetricsEvaluator::eval(&equal_int("id", INT_MIN_VALUE), &file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&equal_int("id", INT_MIN_VALUE), &file)
+                .unwrap();
         assert!(
             !result,
             "Strict eval: equal should be false if bounds are not identical"
         );
 
         let eq_file = get_test_file_eq();
-        let result = StrictMetricsEvaluator::eval(&equal_int("id", 42), &eq_file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&equal_int("id", 42), &eq_file).unwrap();
         assert!(
             result,
             "Strict eval: equal should be true when lower == upper == literal"
         );
 
-        let result = StrictMetricsEvaluator::eval(&equal_int("id", 41), &eq_file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&equal_int("id", 41), &eq_file).unwrap();
         assert!(
             !result,
             "Strict eval: equal should be false for non-matching literal"
@@ -1328,63 +1443,82 @@ mod test {
     fn test_integer_not_eq() {
         let file = get_test_file_1();
 
-        let result =
-            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MIN_VALUE - 25), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &not_equal_int("id", INT_MIN_VALUE - 25),
+            &file,
+        )
+        .unwrap();
+        assert!(
+            result,
+            "Strict eval: notEqual should be true when lower bound > literal"
+        );
+
+        let result = StrictMetricsEvaluator::eval(
+            &not_equal_int("id", INT_MIN_VALUE - 1),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: notEqual should be true when lower bound > literal"
         );
 
         let result =
-            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MIN_VALUE - 1), &file).unwrap();
-        assert!(
-            result,
-            "Strict eval: notEqual should be true when lower bound > literal"
-        );
-
-        let result =
-            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MIN_VALUE), &file).unwrap();
+            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MIN_VALUE), &file)
+                .unwrap();
         assert!(
             !result,
             "Strict eval: notEqual should be false when literal equals lower bound (but upper is different)"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MAX_VALUE - 4), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &not_equal_int("id", INT_MAX_VALUE - 4),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: notEqual should be false when literal is between bounds"
         );
 
         let result =
-            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MAX_VALUE), &file).unwrap();
+            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MAX_VALUE), &file)
+                .unwrap();
         assert!(
             !result,
             "Strict eval: notEqual should be false when literal equals upper bound"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MAX_VALUE + 1), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &not_equal_int("id", INT_MAX_VALUE + 1),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: notEqual should be true when upper bound < literal"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&not_equal_int("id", INT_MAX_VALUE + 6), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &not_equal_int("id", INT_MAX_VALUE + 6),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: notEqual should be true when literal is well above upper bound"
         );
 
         let eq_file = get_test_file_eq();
-        let result = StrictMetricsEvaluator::eval(&not_equal_int("id", 42), &eq_file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_equal_int("id", 42), &eq_file).unwrap();
         assert!(
             !result,
             "Strict eval: notEqual should be false when literal equals the only value"
         );
 
-        let result = StrictMetricsEvaluator::eval(&not_equal_int("id", 41), &eq_file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&not_equal_int("id", 41), &eq_file).unwrap();
         assert!(
             result,
             "Strict eval: notEqual should be true when literal does not equal the only value"
@@ -1394,7 +1528,9 @@ mod test {
     #[test]
     #[should_panic]
     fn test_case_sensitive_integer_not_eq_rewritten() {
-        let _ = StrictMetricsEvaluator::eval(&equal_int_not("ID", 5), &get_test_file_1()).unwrap();
+        let _ =
+            StrictMetricsEvaluator::eval(&equal_int_not("ID", 5), &get_test_file_1())
+                .unwrap();
     }
 
     #[test]
@@ -1402,12 +1538,16 @@ mod test {
         let file1 = get_test_file_1();
         let file2 = get_test_file_2();
 
-        let result = StrictMetricsEvaluator::eval(&starts_with("required", "a"), &file1).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&starts_with("required", "a"), &file1)
+                .unwrap();
         assert!(
             !result,
             "strict eval: startsWith always false (no metrics support)"
         );
-        let result = StrictMetricsEvaluator::eval(&starts_with("required", "a"), &file2).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&starts_with("required", "a"), &file2)
+                .unwrap();
         assert!(!result, "strict eval: startsWith always false");
     }
 
@@ -1417,10 +1557,12 @@ mod test {
         let file2 = get_test_file_2();
 
         let result =
-            StrictMetricsEvaluator::eval(&not_starts_with("required", "a"), &file1).unwrap();
+            StrictMetricsEvaluator::eval(&not_starts_with("required", "a"), &file1)
+                .unwrap();
         assert!(!result, "Strict eval: notStartsWith always false");
         let result =
-            StrictMetricsEvaluator::eval(&not_starts_with("required", "a"), &file2).unwrap();
+            StrictMetricsEvaluator::eval(&not_starts_with("required", "a"), &file2)
+                .unwrap();
         assert!(!result, "Strict eval: notStartsWith always false");
     }
 
@@ -1438,9 +1580,11 @@ mod test {
             "Strict eval: inInt on file1 returns false because bounds are not equal"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&in_int("id", &[INT_MIN_VALUE - 1, INT_MIN_VALUE]), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &in_int("id", &[INT_MIN_VALUE - 1, INT_MIN_VALUE]),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: inInt on file1 returns false when only one bound is in set"
@@ -1448,15 +1592,18 @@ mod test {
 
         // For file with equality stats.
         let eq_file = get_test_file_eq();
-        let result = StrictMetricsEvaluator::eval(&in_int("id", &[42]), &eq_file).unwrap();
+        let result =
+            StrictMetricsEvaluator::eval(&in_int("id", &[42]), &eq_file).unwrap();
         assert!(
             result,
             "Strict eval: inInt should be true when both bounds equal literal in set"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&in_int("id", &[INT_MAX_VALUE, INT_MAX_VALUE + 1]), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &in_int("id", &[INT_MAX_VALUE, INT_MAX_VALUE + 1]),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: inInt on file1 returns false due to unequal bounds"
@@ -1537,16 +1684,21 @@ mod test {
             "Strict eval: notInInt should be true when literals are well above upper bound"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&not_in_str("all_nulls", &["abc", "def"]), &file).unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &not_in_str("all_nulls", &["abc", "def"]),
+            &file,
+        )
+        .unwrap();
         assert!(
             result,
             "Strict eval: notInStr on all-null column should be true"
         );
 
-        let result =
-            StrictMetricsEvaluator::eval(&not_in_str("some_nulls", &["abc", "def"]), &file)
-                .unwrap();
+        let result = StrictMetricsEvaluator::eval(
+            &not_in_str("some_nulls", &["abc", "def"]),
+            &file,
+        )
+        .unwrap();
         assert!(
             !result,
             "Strict eval: notInStr on column start with nan should be false"

@@ -21,14 +21,22 @@ use arrow_array::RecordBatch;
 
 use crate::spec::{DataContentType, DataFile, PartitionKey};
 use crate::writer::file_writer::FileWriterBuilder;
-use crate::writer::file_writer::location_generator::{FileNameGenerator, LocationGenerator};
-use crate::writer::file_writer::rolling_writer::{RollingFileWriter, RollingFileWriterBuilder};
+use crate::writer::file_writer::location_generator::{
+    FileNameGenerator, LocationGenerator,
+};
+use crate::writer::file_writer::rolling_writer::{
+    RollingFileWriter, RollingFileWriterBuilder,
+};
 use crate::writer::{CurrentFileStatus, IcebergWriter, IcebergWriterBuilder};
 use crate::{Error, ErrorKind, Result};
 
 /// Builder for `DataFileWriter`.
 #[derive(Debug)]
-pub struct DataFileWriterBuilder<B: FileWriterBuilder, L: LocationGenerator, F: FileNameGenerator> {
+pub struct DataFileWriterBuilder<
+    B: FileWriterBuilder,
+    L: LocationGenerator,
+    F: FileNameGenerator,
+> {
     inner: RollingFileWriterBuilder<B, L, F>,
 }
 
@@ -62,7 +70,11 @@ where
 
 /// A writer write data is within one spec/partition.
 #[derive(Debug)]
-pub struct DataFileWriter<B: FileWriterBuilder, L: LocationGenerator, F: FileNameGenerator> {
+pub struct DataFileWriter<
+    B: FileWriterBuilder,
+    L: LocationGenerator,
+    F: FileNameGenerator,
+> {
     inner: Option<RollingFileWriter<B, L, F>>,
     partition_key: Option<PartitionKey>,
 }
@@ -146,8 +158,8 @@ mod test {
     use crate::Result;
     use crate::io::FileIO;
     use crate::spec::{
-        DataContentType, DataFileFormat, Literal, NestedField, PartitionKey, PartitionSpec,
-        PrimitiveType, Schema, Struct, Type,
+        DataContentType, DataFileFormat, Literal, NestedField, PartitionKey,
+        PartitionSpec, PrimitiveType, Schema, Struct, Type,
     };
     use crate::writer::base_writer::data_file_writer::DataFileWriterBuilder;
     use crate::writer::file_writer::ParquetWriterBuilder;
@@ -164,44 +176,59 @@ mod test {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         let schema = Schema::builder()
             .with_schema_id(3)
             .with_fields(vec![
-                NestedField::required(3, "foo", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::required(4, "bar", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(3, "foo", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::required(
+                    4,
+                    "bar",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
             ])
             .build()?;
 
-        let pw = ParquetWriterBuilder::new(WriterProperties::builder().build(), Arc::new(schema));
-
-        let rolling_file_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            pw,
-            file_io.clone(),
-            location_gen,
-            file_name_gen,
+        let pw = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            Arc::new(schema),
         );
 
-        let mut data_file_writer = DataFileWriterBuilder::new(rolling_file_writer_builder)
-            .build(None)
-            .unwrap();
+        let rolling_file_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                pw,
+                file_io.clone(),
+                location_gen,
+                file_name_gen,
+            );
+
+        let mut data_file_writer =
+            DataFileWriterBuilder::new(rolling_file_writer_builder)
+                .build(None)
+                .unwrap();
 
         let arrow_schema = arrow_schema::Schema::new(vec![
-            Field::new("foo", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                3.to_string(),
-            )])),
-            Field::new("bar", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                4.to_string(),
-            )])),
+            Field::new("foo", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 3.to_string()),
+            ])),
+            Field::new("bar", DataType::Utf8, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 4.to_string()),
+            ])),
         ]);
-        let batch = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
-        ])?;
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
+            ],
+        )?;
         data_file_writer.write(batch)?;
 
         let data_files = data_file_writer.close().unwrap();
@@ -246,8 +273,14 @@ mod test {
         let schema = Schema::builder()
             .with_schema_id(5)
             .with_fields(vec![
-                NestedField::required(5, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::required(6, "name", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(5, "id", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::required(
+                    6,
+                    "name",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
             ])
             .build()?;
         let schema_ref = Arc::new(schema);
@@ -259,33 +292,38 @@ mod test {
             partition_value.clone(),
         );
 
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), schema_ref.clone());
-
-        let rolling_file_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            parquet_writer_builder,
-            file_io.clone(),
-            location_gen,
-            file_name_gen,
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            schema_ref.clone(),
         );
 
-        let mut data_file_writer = DataFileWriterBuilder::new(rolling_file_writer_builder)
-            .build(Some(partition_key))?;
+        let rolling_file_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                parquet_writer_builder,
+                file_io.clone(),
+                location_gen,
+                file_name_gen,
+            );
+
+        let mut data_file_writer =
+            DataFileWriterBuilder::new(rolling_file_writer_builder)
+                .build(Some(partition_key))?;
 
         let arrow_schema = arrow_schema::Schema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                5.to_string(),
-            )])),
-            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                6.to_string(),
-            )])),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 5.to_string()),
+            ])),
+            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 6.to_string()),
+            ])),
         ]);
-        let batch = RecordBatch::try_new(Arc::new(arrow_schema.clone()), vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
-        ])?;
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow_schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
+            ],
+        )?;
         data_file_writer.write(batch)?;
 
         let data_files = data_file_writer.close().unwrap();

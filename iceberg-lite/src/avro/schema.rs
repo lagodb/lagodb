@@ -20,15 +20,15 @@ use std::collections::BTreeMap;
 
 use apache_avro::Schema as AvroSchema;
 use apache_avro::schema::{
-    ArraySchema, DecimalSchema, FixedSchema, MapSchema, Name, RecordField as AvroRecordField,
-    RecordFieldOrder, RecordSchema, UnionSchema,
+    ArraySchema, DecimalSchema, FixedSchema, MapSchema, Name,
+    RecordField as AvroRecordField, RecordFieldOrder, RecordSchema, UnionSchema,
 };
 use itertools::{Either, Itertools};
 use serde_json::{Number, Value};
 
 use crate::spec::{
-    ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, Schema, SchemaVisitor,
-    StructType, Type, visit_schema,
+    ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, Schema,
+    SchemaVisitor, StructType, Type, visit_schema,
 };
 use crate::{Error, ErrorKind, Result, ensure_data_valid};
 
@@ -49,7 +49,11 @@ type AvroSchemaOrField = Either<AvroSchema, AvroRecordField>;
 impl SchemaVisitor for SchemaToAvroSchema {
     type T = AvroSchemaOrField;
 
-    fn schema(&mut self, _schema: &Schema, value: AvroSchemaOrField) -> Result<AvroSchemaOrField> {
+    fn schema(
+        &mut self,
+        _schema: &Schema,
+        value: AvroSchemaOrField,
+    ) -> Result<AvroSchemaOrField> {
         let mut avro_schema = value.unwrap_left();
 
         if let AvroSchema::Record(record) = &mut avro_schema {
@@ -119,7 +123,11 @@ impl SchemaVisitor for SchemaToAvroSchema {
         ))
     }
 
-    fn list(&mut self, list: &ListType, value: AvroSchemaOrField) -> Result<AvroSchemaOrField> {
+    fn list(
+        &mut self,
+        list: &ListType,
+        value: AvroSchemaOrField,
+    ) -> Result<AvroSchemaOrField> {
         let mut field_schema = value.unwrap_left();
 
         if let AvroSchema::Record(record) = &mut field_schema {
@@ -246,7 +254,10 @@ impl SchemaVisitor for SchemaToAvroSchema {
 }
 
 /// Converting iceberg schema to avro schema.
-pub(crate) fn schema_to_avro_schema(name: impl ToString, schema: &Schema) -> Result<AvroSchema> {
+pub(crate) fn schema_to_avro_schema(
+    name: impl ToString,
+    schema: &Schema,
+) -> Result<AvroSchema> {
     let mut converter = SchemaToAvroSchema {
         schema: name.to_string(),
     };
@@ -254,7 +265,10 @@ pub(crate) fn schema_to_avro_schema(name: impl ToString, schema: &Schema) -> Res
     visit_schema(schema, &mut converter).map(Either::unwrap_left)
 }
 
-fn avro_record_schema(name: &str, fields: Vec<AvroRecordField>) -> Result<AvroSchema> {
+fn avro_record_schema(
+    name: &str,
+    fields: Vec<AvroRecordField>,
+) -> Result<AvroSchema> {
     let lookup = fields
         .iter()
         .enumerate()
@@ -282,7 +296,10 @@ pub(crate) fn avro_fixed_schema(len: usize) -> Result<AvroSchema> {
     }))
 }
 
-pub(crate) fn avro_decimal_schema(precision: usize, scale: usize) -> Result<AvroSchema> {
+pub(crate) fn avro_decimal_schema(
+    precision: usize,
+    scale: usize,
+) -> Result<AvroSchema> {
     // Avro decimal logical type annotates Avro bytes _or_ fixed types.
     // https://avro.apache.org/docs/1.11.1/specification/_print/#decimal
     // Iceberg spec: Stored as _fixed_ using the minimum number of bytes for the given precision.
@@ -296,7 +313,8 @@ pub(crate) fn avro_decimal_schema(precision: usize, scale: usize) -> Result<Avro
             name: Name::new(&format!("decimal_{precision}_{scale}")).unwrap(),
             aliases: None,
             doc: None,
-            size: crate::spec::Type::decimal_required_bytes(precision as u32)? as usize,
+            size: crate::spec::Type::decimal_required_bytes(precision as u32)?
+                as usize,
             attributes: Default::default(),
             default: None,
         })),
@@ -321,21 +339,37 @@ fn is_avro_optional(avro_schema: &AvroSchema) -> bool {
 pub(crate) trait AvroSchemaVisitor {
     type T;
 
-    fn record(&mut self, record: &RecordSchema, fields: Vec<Self::T>) -> Result<Self::T>;
+    fn record(
+        &mut self,
+        record: &RecordSchema,
+        fields: Vec<Self::T>,
+    ) -> Result<Self::T>;
 
-    fn union(&mut self, union: &UnionSchema, options: Vec<Self::T>) -> Result<Self::T>;
+    fn union(
+        &mut self,
+        union: &UnionSchema,
+        options: Vec<Self::T>,
+    ) -> Result<Self::T>;
 
     fn array(&mut self, array: &ArraySchema, item: Self::T) -> Result<Self::T>;
     fn map(&mut self, map: &MapSchema, value: Self::T) -> Result<Self::T>;
     // There are two representation for iceberg map in avro: array of key-value records, or map when keys are strings (optional),
     // ref: https://iceberg.apache.org/spec/#avro
-    fn map_array(&mut self, array: &RecordSchema, key: Self::T, value: Self::T) -> Result<Self::T>;
+    fn map_array(
+        &mut self,
+        array: &RecordSchema,
+        key: Self::T,
+        value: Self::T,
+    ) -> Result<Self::T>;
 
     fn primitive(&mut self, schema: &AvroSchema) -> Result<Self::T>;
 }
 
 /// Visit avro schema in post order visitor.
-pub(crate) fn visit<V: AvroSchemaVisitor>(schema: &AvroSchema, visitor: &mut V) -> Result<V::T> {
+pub(crate) fn visit<V: AvroSchemaVisitor>(
+    schema: &AvroSchema,
+    visitor: &mut V,
+) -> Result<V::T> {
     match schema {
         AvroSchema::Record(record) => {
             let field_results = record
@@ -437,13 +471,19 @@ impl AvroSchemaVisitor for AvroSchemaToSchema {
     ) -> Result<Option<Type>> {
         let mut fields = Vec::with_capacity(field_types.len());
         for (avro_field, field_type) in record.fields.iter().zip_eq(field_types) {
-            let field_id =
-                Self::get_element_id_from_attributes(&avro_field.custom_attributes, FIELD_ID_PROP)?;
+            let field_id = Self::get_element_id_from_attributes(
+                &avro_field.custom_attributes,
+                FIELD_ID_PROP,
+            )?;
 
             let optional = is_avro_optional(&avro_field.schema);
 
-            let mut field =
-                NestedField::new(field_id, &avro_field.name, field_type.unwrap(), !optional);
+            let mut field = NestedField::new(
+                field_id,
+                &avro_field.name,
+                field_type.unwrap(),
+                !optional,
+            );
 
             if let Some(doc) = &avro_field.doc {
                 field = field.with_doc(doc);
@@ -482,7 +522,8 @@ impl AvroSchemaVisitor for AvroSchemaToSchema {
     }
 
     fn array(&mut self, array: &ArraySchema, item: Option<Type>) -> Result<Self::T> {
-        let element_field_id = Self::get_element_id_from_attributes(&array.attributes, ELEMENT_ID)?;
+        let element_field_id =
+            Self::get_element_id_from_attributes(&array.attributes, ELEMENT_ID)?;
         let element_field = NestedField::list_element(
             element_field_id,
             item.unwrap(),
@@ -493,10 +534,14 @@ impl AvroSchemaVisitor for AvroSchemaToSchema {
     }
 
     fn map(&mut self, map: &MapSchema, value: Option<Type>) -> Result<Option<Type>> {
-        let key_field_id = Self::get_element_id_from_attributes(&map.attributes, KEY_ID)?;
-        let key_field =
-            NestedField::map_key_element(key_field_id, Type::Primitive(PrimitiveType::String));
-        let value_field_id = Self::get_element_id_from_attributes(&map.attributes, VALUE_ID)?;
+        let key_field_id =
+            Self::get_element_id_from_attributes(&map.attributes, KEY_ID)?;
+        let key_field = NestedField::map_key_element(
+            key_field_id,
+            Type::Primitive(PrimitiveType::String),
+        );
+        let value_field_id =
+            Self::get_element_id_from_attributes(&map.attributes, VALUE_ID)?;
         let value_field = NestedField::map_value_element(
             value_field_id,
             value.unwrap(),
@@ -523,8 +568,12 @@ impl AvroSchemaVisitor for AvroSchemaToSchema {
             AvroSchema::Float => Type::Primitive(PrimitiveType::Float),
             AvroSchema::Double => Type::Primitive(PrimitiveType::Double),
             AvroSchema::Uuid => Type::Primitive(PrimitiveType::Uuid),
-            AvroSchema::String | AvroSchema::Enum(_) => Type::Primitive(PrimitiveType::String),
-            AvroSchema::Fixed(fixed) => Type::Primitive(PrimitiveType::Fixed(fixed.size as u64)),
+            AvroSchema::String | AvroSchema::Enum(_) => {
+                Type::Primitive(PrimitiveType::String)
+            }
+            AvroSchema::Fixed(fixed) => {
+                Type::Primitive(PrimitiveType::Fixed(fixed.size as u64))
+            }
             AvroSchema::Bytes => Type::Primitive(PrimitiveType::Binary),
             AvroSchema::Null => return Ok(None),
             _ => {
@@ -584,8 +633,8 @@ impl AvroSchemaVisitor for AvroSchemaToSchema {
 pub(crate) fn avro_schema_to_schema(avro_schema: &AvroSchema) -> Result<Schema> {
     if let AvroSchema::Record(_) = avro_schema {
         let mut converter = AvroSchemaToSchema;
-        let schema_type =
-            visit(avro_schema, &mut converter)?.expect("Iceberg schema should not be none.");
+        let schema_type = visit(avro_schema, &mut converter)?
+            .expect("Iceberg schema should not be none.");
         if let Type::Struct(s) = schema_type {
             Schema::builder()
                 .with_fields(s.fields().iter().cloned())
@@ -593,7 +642,9 @@ pub(crate) fn avro_schema_to_schema(avro_schema: &AvroSchema) -> Result<Schema> 
         } else {
             Err(Error::new(
                 ErrorKind::Unexpected,
-                format!("Expected to convert avro record schema to struct type, but {schema_type}"),
+                format!(
+                    "Expected to convert avro record schema to struct type, but {schema_type}"
+                ),
             ))
         }
     } else {
@@ -614,7 +665,9 @@ mod tests {
 
     use super::*;
     use crate::avro::schema::AvroSchemaToSchema;
-    use crate::spec::{ListType, MapType, NestedField, PrimitiveType, Schema, StructType, Type};
+    use crate::spec::{
+        ListType, MapType, NestedField, PrimitiveType, Schema, StructType, Type,
+    };
 
     fn read_test_data_file_to_avro_schema(filename: &str) -> AvroSchema {
         let input = read_to_string(format!(
@@ -659,21 +712,41 @@ mod tests {
             NestedField::required(501, "manifest_length", PrimitiveType::Long.into())
                 .with_doc("Total file size in bytes")
                 .into(),
-            NestedField::required(502, "partition_spec_id", PrimitiveType::Int.into())
-                .with_doc("Spec ID used to write")
-                .into(),
-            NestedField::optional(503, "added_snapshot_id", PrimitiveType::Long.into())
-                .with_doc("Snapshot ID that added the manifest")
-                .into(),
-            NestedField::optional(504, "added_data_files_count", PrimitiveType::Int.into())
-                .with_doc("Added entry count")
-                .into(),
-            NestedField::optional(505, "existing_data_files_count", PrimitiveType::Int.into())
-                .with_doc("Existing entry count")
-                .into(),
-            NestedField::optional(506, "deleted_data_files_count", PrimitiveType::Int.into())
-                .with_doc("Deleted entry count")
-                .into(),
+            NestedField::required(
+                502,
+                "partition_spec_id",
+                PrimitiveType::Int.into(),
+            )
+            .with_doc("Spec ID used to write")
+            .into(),
+            NestedField::optional(
+                503,
+                "added_snapshot_id",
+                PrimitiveType::Long.into(),
+            )
+            .with_doc("Snapshot ID that added the manifest")
+            .into(),
+            NestedField::optional(
+                504,
+                "added_data_files_count",
+                PrimitiveType::Int.into(),
+            )
+            .with_doc("Added entry count")
+            .into(),
+            NestedField::optional(
+                505,
+                "existing_data_files_count",
+                PrimitiveType::Int.into(),
+            )
+            .with_doc("Existing entry count")
+            .into(),
+            NestedField::optional(
+                506,
+                "deleted_data_files_count",
+                PrimitiveType::Int.into(),
+            )
+            .with_doc("Deleted entry count")
+            .into(),
             NestedField::optional(
                 507,
                 "partitions",
@@ -695,12 +768,20 @@ mod tests {
                             )
                             .with_doc("True if any file has a nan partition value")
                             .into(),
-                            NestedField::optional(510, "lower_bound", PrimitiveType::Binary.into())
-                                .with_doc("Partition lower bound for all files")
-                                .into(),
-                            NestedField::optional(511, "upper_bound", PrimitiveType::Binary.into())
-                                .with_doc("Partition upper bound for all files")
-                                .into(),
+                            NestedField::optional(
+                                510,
+                                "lower_bound",
+                                PrimitiveType::Binary.into(),
+                            )
+                            .with_doc("Partition lower bound for all files")
+                            .into(),
+                            NestedField::optional(
+                                511,
+                                "upper_bound",
+                                PrimitiveType::Binary.into(),
+                            )
+                            .with_doc("Partition upper bound for all files")
+                            .into(),
                         ])
                         .into(),
                         true,
@@ -711,15 +792,27 @@ mod tests {
             )
             .with_doc("Summary for each partition")
             .into(),
-            NestedField::optional(512, "added_rows_count", PrimitiveType::Long.into())
-                .with_doc("Added rows count")
-                .into(),
-            NestedField::optional(513, "existing_rows_count", PrimitiveType::Long.into())
-                .with_doc("Existing rows count")
-                .into(),
-            NestedField::optional(514, "deleted_rows_count", PrimitiveType::Long.into())
-                .with_doc("Deleted rows count")
-                .into(),
+            NestedField::optional(
+                512,
+                "added_rows_count",
+                PrimitiveType::Long.into(),
+            )
+            .with_doc("Added rows count")
+            .into(),
+            NestedField::optional(
+                513,
+                "existing_rows_count",
+                PrimitiveType::Long.into(),
+            )
+            .with_doc("Existing rows count")
+            .into(),
+            NestedField::optional(
+                514,
+                "deleted_rows_count",
+                PrimitiveType::Long.into(),
+            )
+            .with_doc("Deleted rows count")
+            .into(),
         ];
 
         let iceberg_schema = Schema::builder().with_fields(fields).build().unwrap();
@@ -1098,9 +1191,17 @@ mod tests {
 
         let mut converter = AvroSchemaToSchema;
         let iceberg_type = Type::Map(MapType {
-            key_field: NestedField::map_key_element(101, PrimitiveType::String.into()).into(),
-            value_field: NestedField::map_value_element(102, PrimitiveType::Long.into(), false)
-                .into(),
+            key_field: NestedField::map_key_element(
+                101,
+                PrimitiveType::String.into(),
+            )
+            .into(),
+            value_field: NestedField::map_value_element(
+                102,
+                PrimitiveType::Long.into(),
+                false,
+            )
+            .into(),
         });
 
         assert_eq!(

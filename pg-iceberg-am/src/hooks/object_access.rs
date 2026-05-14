@@ -3,7 +3,9 @@ use crate::catalog::generate_table_location;
 use crate::catalog::is_iceberg_table;
 use crate::storage::create_storage_context;
 use pg_lakebase_core::handles::{RelationHandle, TableGuard};
-use pg_lakebase_core::hooks::{self, ObjectAccessContext, ObjectAccessHook, ObjectAccessHookError};
+use pg_lakebase_core::hooks::{
+    self, ObjectAccessContext, ObjectAccessHook, ObjectAccessHookError,
+};
 use pgrx::pg_sys;
 
 pub struct IcebergObjectAccessHook;

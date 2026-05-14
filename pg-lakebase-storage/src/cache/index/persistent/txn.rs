@@ -18,13 +18,23 @@ impl<'a, T: KvWriteTxn> MetaTxn<'a, T> {
     }
 
     pub(super) fn read(&self, key: &str) -> StorageResult<Option<CachedObjectMeta>> {
-        self.txn.get(KvTable::Meta, key)?.map(|value| decode_meta(&value)).transpose()
+        self.txn
+            .get(KvTable::Meta, key)?
+            .map(|value| decode_meta(&value))
+            .transpose()
     }
 
-    pub(super) fn insert_new(&mut self, meta: &CachedObjectMeta) -> StorageResult<TrackingDelta> {
+    pub(super) fn insert_new(
+        &mut self,
+        meta: &CachedObjectMeta,
+    ) -> StorageResult<TrackingDelta> {
         let meta = meta.clone().normalized();
         let db_key = meta.key().to_string();
-        self.txn.put(KvTable::Meta, db_key.as_str(), encode_meta(&meta).as_slice())?;
+        self.txn.put(
+            KvTable::Meta,
+            db_key.as_str(),
+            encode_meta(&meta).as_slice(),
+        )?;
         self.update_tracking(None, Some(&meta))
     }
 
@@ -43,7 +53,11 @@ impl<'a, T: KvWriteTxn> MetaTxn<'a, T> {
         }
 
         let db_key = meta.key().to_string();
-        self.txn.put(KvTable::Meta, db_key.as_str(), encode_meta(&meta).as_slice())?;
+        self.txn.put(
+            KvTable::Meta,
+            db_key.as_str(),
+            encode_meta(&meta).as_slice(),
+        )?;
         self.update_tracking(Some(old), Some(&meta))
     }
 
@@ -58,7 +72,10 @@ impl<'a, T: KvWriteTxn> MetaTxn<'a, T> {
         Ok((meta.normalized(), delta))
     }
 
-    pub(super) fn delete(&mut self, key: &str) -> StorageResult<(Option<CachedObjectMeta>, TrackingDelta)> {
+    pub(super) fn delete(
+        &mut self,
+        key: &str,
+    ) -> StorageResult<(Option<CachedObjectMeta>, TrackingDelta)> {
         let old = self.read(key)?;
         if old.is_some() {
             self.txn.remove(KvTable::Meta, key)?;
@@ -75,7 +92,10 @@ impl<'a, T: KvWriteTxn> MetaTxn<'a, T> {
         // LRU primary key embeds last_access_ns; touch/delete/update must remove the stale key before inserting the new
         // one.
         if let Some(old) = old {
-            self.txn.remove(KvTable::Lru, lru_key(old.last_access_ns, old.key()).as_str())?;
+            self.txn.remove(
+                KvTable::Lru,
+                lru_key(old.last_access_ns, old.key()).as_str(),
+            )?;
         }
         if let Some(new) = new.filter(|meta| meta.is_cache_resident()) {
             self.txn.put(

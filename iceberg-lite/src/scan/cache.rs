@@ -62,12 +62,13 @@ impl PartitionFilterCache {
             }
         }
 
-        let partition_spec = table_metadata
-            .partition_spec_by_id(spec_id)
-            .ok_or(Error::new(
-                ErrorKind::Unexpected,
-                format!("Could not find partition spec for id {spec_id}"),
-            ))?;
+        let partition_spec =
+            table_metadata
+                .partition_spec_by_id(spec_id)
+                .ok_or(Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Could not find partition spec for id {spec_id}"),
+                ))?;
 
         let partition_type = partition_spec.partition_type(schema)?;
         let partition_fields = partition_type.fields().to_owned();
@@ -78,7 +79,8 @@ impl PartitionFilterCache {
                 .build()?,
         );
 
-        let mut inclusive_projection = InclusiveProjection::new(partition_spec.clone());
+        let mut inclusive_projection =
+            InclusiveProjection::new(partition_spec.clone());
 
         let partition_filter = inclusive_projection
             .project(&filter)?
@@ -109,7 +111,9 @@ impl PartitionFilterCache {
 /// Manages the caching of [`ManifestEvaluator`] objects
 /// for [`PartitionSpec`]s based on partition spec id.
 #[derive(Debug)]
-pub(crate) struct ManifestEvaluatorCache(RwLock<HashMap<i32, Arc<ManifestEvaluator>>>);
+pub(crate) struct ManifestEvaluatorCache(
+    RwLock<HashMap<i32, Arc<ManifestEvaluator>>>,
+);
 
 impl ManifestEvaluatorCache {
     /// Creates a new [`ManifestEvaluatorCache`]
@@ -155,7 +159,10 @@ impl ManifestEvaluatorCache {
             .unwrap()
             .insert(
                 spec_id,
-                Arc::new(ManifestEvaluator::builder(partition_filter.as_ref().clone()).build()),
+                Arc::new(
+                    ManifestEvaluator::builder(partition_filter.as_ref().clone())
+                        .build(),
+                ),
             );
 
         let read = self
@@ -176,7 +183,9 @@ impl ManifestEvaluatorCache {
 /// Manages the caching of [`ExpressionEvaluator`] objects
 /// for [`PartitionSpec`]s based on partition spec id.
 #[derive(Debug)]
-pub(crate) struct ExpressionEvaluatorCache(RwLock<HashMap<i32, Arc<ExpressionEvaluator>>>);
+pub(crate) struct ExpressionEvaluatorCache(
+    RwLock<HashMap<i32, Arc<ExpressionEvaluator>>>,
+);
 
 impl ExpressionEvaluatorCache {
     /// Creates a new [`ExpressionEvaluatorCache`]

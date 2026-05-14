@@ -26,7 +26,9 @@ use crate::backend::StoreRegistry;
 use crate::cache::{CacheCleanupPolicy, CacheIndex, CacheManager, RedbCacheIndex};
 use crate::config::{CacheCleanupConfig, StorageServerConfig, StorageServiceConfig};
 use crate::error::StorageResult;
-use crate::request::{RequestHooks, RequestObserver, RequestPolicy, TracingRequestObserver};
+use crate::request::{
+    RequestHooks, RequestObserver, RequestPolicy, TracingRequestObserver,
+};
 use crate::server::StorageServer;
 use crate::service::StorageService;
 use crate::staging::StagingArea;
@@ -95,7 +97,10 @@ impl StorageServerBuilder {
     ///
     /// Build the config with [`StorageServiceConfig::default()`] and its `with_*` methods,
     /// then pass it here.
-    pub fn with_service_config(mut self, service_config: StorageServiceConfig) -> Self {
+    pub fn with_service_config(
+        mut self,
+        service_config: StorageServiceConfig,
+    ) -> Self {
         self.service_config = service_config.normalized();
         self
     }
@@ -128,7 +133,10 @@ impl StorageServerBuilder {
     }
 
     /// Installs a shared (Arc'd) request observer.
-    pub fn with_shared_request_observer(mut self, observer: Arc<dyn RequestObserver>) -> Self {
+    pub fn with_shared_request_observer(
+        mut self,
+        observer: Arc<dyn RequestObserver>,
+    ) -> Self {
         self.request_hooks = self.request_hooks.with_shared_observer(observer);
         self
     }
@@ -143,7 +151,10 @@ impl StorageServerBuilder {
     }
 
     /// Installs a shared (Arc'd) request policy.
-    pub fn with_shared_request_policy(mut self, policy: Arc<dyn RequestPolicy>) -> Self {
+    pub fn with_shared_request_policy(
+        mut self,
+        policy: Arc<dyn RequestPolicy>,
+    ) -> Self {
         self.request_hooks = self.request_hooks.with_shared_policy(policy);
         self
     }
@@ -170,10 +181,19 @@ impl StorageServerBuilder {
 
         prepare_dirs(&socket_path, &cache_dir).await?;
 
-        let db_path = db_path.unwrap_or_else(|| cache_dir.join("db").join("index.redb"));
+        let db_path =
+            db_path.unwrap_or_else(|| cache_dir.join("db").join("index.redb"));
         let index = RedbCacheIndex::open(db_path)?;
-        start_server(socket_path, cache_dir, service_config, server_config.normalized(), registry, index, request_hooks)
-            .await
+        start_server(
+            socket_path,
+            cache_dir,
+            service_config,
+            server_config.normalized(),
+            registry,
+            index,
+            request_hooks,
+        )
+        .await
     }
 
     /// Binds the server with a caller-supplied [`CacheIndex`] implementation.
@@ -195,8 +215,16 @@ impl StorageServerBuilder {
         let service_config = service_config.normalized();
 
         prepare_dirs(&socket_path, &cache_dir).await?;
-        start_server(socket_path, cache_dir, service_config, server_config.normalized(), registry, index, request_hooks)
-            .await
+        start_server(
+            socket_path,
+            cache_dir,
+            service_config,
+            server_config.normalized(),
+            registry,
+            index,
+            request_hooks,
+        )
+        .await
     }
 }
 
@@ -225,7 +253,11 @@ where
     I: CacheIndex + 'static,
 {
     let cleanup_policy = derive_cleanup_policy(&service_config.cache_cleanup);
-    let cleanup_interval = service_config.cache_cleanup.clone().normalized().cleanup_interval;
+    let cleanup_interval = service_config
+        .cache_cleanup
+        .clone()
+        .normalized()
+        .cleanup_interval;
 
     let mut cache_manager = CacheManager::new(cache_dir.clone(), index)
         .with_limits(service_config.small_object_limit, service_config.chunk_size)
@@ -262,8 +294,19 @@ where
     staging.wipe().await?;
     info!(staging_dir = %staging.paths().staging_dir().display(), "staging directory wiped on startup");
 
-    let service = Arc::new(StorageService::with_staging(registry, cache, staging, service_config));
-    StorageServer::bind_with_config_and_hooks(socket_path, service, server_config, request_hooks).await
+    let service = Arc::new(StorageService::with_staging(
+        registry,
+        cache,
+        staging,
+        service_config,
+    ));
+    StorageServer::bind_with_config_and_hooks(
+        socket_path,
+        service,
+        server_config,
+        request_hooks,
+    )
+    .await
 }
 
 /// Derives a [`CacheCleanupPolicy`] from the user-facing [`CacheCleanupConfig`], returning

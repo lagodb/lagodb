@@ -83,14 +83,14 @@ impl StagingArea {
     pub async fn wipe(&self) -> StorageResult<()> {
         let root = self.paths.staging_dir();
         match tokio::fs::remove_dir_all(&root).await {
-            Ok(()) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(StorageError::io(
                     format!("failed to wipe staging root {}", root.display()),
                     error,
                 ));
-            },
+            }
         }
         self.prepare_dirs().await
     }
@@ -116,10 +116,12 @@ impl StagingArea {
             Ok(_file) => {
                 info!(key = %key, path = %path.display(), "staging file created");
                 Ok(path)
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(StorageError::busy(format!(
-                "staging file for {key} already exists; abort or commit the existing staging before re-creating"
-            ))),
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(StorageError::busy(format!(
+                    "staging file for {key} already exists; abort or commit the existing staging before re-creating"
+                )))
+            }
             Err(error) => Err(StorageError::io(
                 format!("failed to create staging file {}", path.display()),
                 error,
@@ -142,19 +144,25 @@ impl StagingArea {
     ///
     /// Crashed clients that never do either eventually get their staging file removed by the
     /// next startup `wipe()`.
-    pub async fn commit(&self, key: &ObjectLocation, store: &RegisteredStore) -> StorageResult<ObjectInfo> {
+    pub async fn commit(
+        &self,
+        key: &ObjectLocation,
+        store: &RegisteredStore,
+    ) -> StorageResult<ObjectInfo> {
         let path = self.paths.path_for(key)?;
         let metadata = match tokio::fs::metadata(&path).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(StorageError::not_found(format!("staging file for {key}")));
-            },
+                return Err(StorageError::not_found(format!(
+                    "staging file for {key}"
+                )));
+            }
             Err(error) => {
                 return Err(StorageError::io(
                     format!("failed to stat staging file {}", path.display()),
                     error,
                 ));
-            },
+            }
         };
         let size = metadata.len();
 
@@ -185,7 +193,7 @@ impl StagingArea {
             Ok(()) => {
                 info!(key = %key, "staging file aborted");
                 Ok(())
-            },
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(StorageError::io(
                 format!("failed to remove staging file {}", path.display()),
@@ -209,13 +217,23 @@ mod tests {
     const TEST_STORE_ID: &str = "test-store";
 
     fn test_root(label: &str) -> PathBuf {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
-        PathBuf::from("/tmp").join(format!("pg-lakebase-storage-staging-test-{}-{stamp}-{nonce}-{label}", std::process::id()))
+        PathBuf::from("/tmp").join(format!(
+            "pg-lakebase-storage-staging-test-{}-{stamp}-{nonce}-{label}",
+            std::process::id()
+        ))
     }
 
     async fn write_staging_bytes(path: &std::path::Path, data: &[u8]) {
-        let mut file = tokio::fs::OpenOptions::new().append(true).open(path).await.unwrap();
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await
+            .unwrap();
         file.write_all(data).await.unwrap();
         file.flush().await.unwrap();
     }
@@ -246,7 +264,10 @@ mod tests {
         let _first = staging.create(&key).await.unwrap();
         let error = staging.create(&key).await.unwrap_err();
 
-        assert!(matches!(error, StorageError::Busy { .. }), "expected busy, got {error:?}");
+        assert!(
+            matches!(error, StorageError::Busy { .. }),
+            "expected busy, got {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -260,7 +281,12 @@ mod tests {
 
         let registry = StoreRegistry::new();
         let backend = MemoryObjectBackend::new();
-        registry.register_shared_backend(TEST_STORE_ID, std::sync::Arc::new(backend.clone())).unwrap();
+        registry
+            .register_shared_backend(
+                TEST_STORE_ID,
+                std::sync::Arc::new(backend.clone()),
+            )
+            .unwrap();
         let store = registry.resolve(key.store_id()).unwrap();
 
         let info = staging.commit(&key, &store).await.unwrap();
@@ -279,8 +305,8 @@ mod tests {
         use crate::backend::ObjectBackend;
         use async_trait::async_trait;
         use std::ops::Range;
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct FlakyBackend {
             attempts: AtomicUsize,
@@ -291,9 +317,16 @@ mod tests {
         #[async_trait]
         impl ObjectBackend for FlakyBackend {
             async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
-                Ok(ObjectInfo { size: 0, etag: None })
+                Ok(ObjectInfo {
+                    size: 0,
+                    etag: None,
+                })
             }
-            async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
+            async fn get_range(
+                &self,
+                key: &ObjectLocation,
+                range: Range<u64>,
+            ) -> StorageResult<bytes::Bytes> {
                 self.inner.get_range(key, range).await
             }
             async fn put_from_file(
@@ -304,7 +337,9 @@ mod tests {
             ) -> StorageResult<ObjectInfo> {
                 let attempt = self.attempts.fetch_add(1, Ordering::AcqRel) + 1;
                 if attempt < self.succeed_on_attempt {
-                    return Err(StorageError::backend(format!("simulated transient failure on attempt {attempt}")));
+                    return Err(StorageError::backend(format!(
+                        "simulated transient failure on attempt {attempt}"
+                    )));
                 }
                 self.inner.put_from_file(key, path, len).await
             }
@@ -313,7 +348,10 @@ mod tests {
                 _store_id: &str,
                 _bucket: &str,
                 _prefix: Option<&str>,
-            ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>> {
+            ) -> futures::stream::BoxStream<
+                'static,
+                StorageResult<crate::object::ListEntry>,
+            > {
                 unreachable!("FlakyBackend does not participate in list")
             }
             async fn delete(&self, _key: &ObjectLocation) -> StorageResult<()> {
@@ -324,7 +362,8 @@ mod tests {
                 _store_id: &str,
                 _bucket: &str,
                 _keys: futures::stream::BoxStream<'static, StorageResult<String>>,
-            ) -> futures::stream::BoxStream<'static, StorageResult<String>> {
+            ) -> futures::stream::BoxStream<'static, StorageResult<String>>
+            {
                 unreachable!("FlakyBackend does not participate in delete_stream")
             }
         }
@@ -348,7 +387,10 @@ mod tests {
         let store = registry.resolve(key.store_id()).unwrap();
 
         let first = staging.commit(&key, &store).await.unwrap_err();
-        assert!(matches!(first, StorageError::Backend { .. }), "first attempt must bubble backend failure");
+        assert!(
+            matches!(first, StorageError::Backend { .. }),
+            "first attempt must bubble backend failure"
+        );
         assert!(
             tokio::fs::try_exists(&path).await.unwrap(),
             "staging file must survive a failed commit so the client can retry without re-writing bytes",
@@ -356,7 +398,10 @@ mod tests {
 
         let info = staging.commit(&key, &store).await.unwrap();
         assert_eq!(info.size, b"retry-me".len() as u64);
-        assert!(!tokio::fs::try_exists(&path).await.unwrap(), "successful retry must unlink the staging file");
+        assert!(
+            !tokio::fs::try_exists(&path).await.unwrap(),
+            "successful retry must unlink the staging file"
+        );
 
         let readback = backend.get_range(&key, 0..info.size).await.unwrap();
         assert_eq!(&readback[..], b"retry-me");
@@ -375,9 +420,16 @@ mod tests {
         #[async_trait]
         impl ObjectBackend for AlwaysFailBackend {
             async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
-                Ok(ObjectInfo { size: 0, etag: None })
+                Ok(ObjectInfo {
+                    size: 0,
+                    etag: None,
+                })
             }
-            async fn get_range(&self, _key: &ObjectLocation, _range: Range<u64>) -> StorageResult<bytes::Bytes> {
+            async fn get_range(
+                &self,
+                _key: &ObjectLocation,
+                _range: Range<u64>,
+            ) -> StorageResult<bytes::Bytes> {
                 Ok(bytes::Bytes::new())
             }
             async fn put_from_file(
@@ -393,7 +445,10 @@ mod tests {
                 _store_id: &str,
                 _bucket: &str,
                 _prefix: Option<&str>,
-            ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>> {
+            ) -> futures::stream::BoxStream<
+                'static,
+                StorageResult<crate::object::ListEntry>,
+            > {
                 unreachable!("AlwaysFailBackend does not participate in list")
             }
             async fn delete(&self, _key: &ObjectLocation) -> StorageResult<()> {
@@ -404,8 +459,11 @@ mod tests {
                 _store_id: &str,
                 _bucket: &str,
                 _keys: futures::stream::BoxStream<'static, StorageResult<String>>,
-            ) -> futures::stream::BoxStream<'static, StorageResult<String>> {
-                unreachable!("AlwaysFailBackend does not participate in delete_stream")
+            ) -> futures::stream::BoxStream<'static, StorageResult<String>>
+            {
+                unreachable!(
+                    "AlwaysFailBackend does not participate in delete_stream"
+                )
             }
         }
 
@@ -422,7 +480,10 @@ mod tests {
         let store = registry.resolve(key.store_id()).unwrap();
 
         let _ = staging.commit(&key, &store).await.unwrap_err();
-        assert!(tokio::fs::try_exists(&path).await.unwrap(), "commit failure must leave staging file for client to decide");
+        assert!(
+            tokio::fs::try_exists(&path).await.unwrap(),
+            "commit failure must leave staging file for client to decide"
+        );
 
         staging.abort(&key).await.unwrap();
         assert!(!tokio::fs::try_exists(&path).await.unwrap());
@@ -461,7 +522,11 @@ mod tests {
         assert!(!tokio::fs::try_exists(&path_one).await.unwrap());
         assert!(!tokio::fs::try_exists(&path_two).await.unwrap());
         // Root itself is preserved so subsequent `create` calls do not need to recreate it.
-        assert!(tokio::fs::try_exists(staging.paths().staging_dir()).await.unwrap());
+        assert!(
+            tokio::fs::try_exists(staging.paths().staging_dir())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -469,6 +534,10 @@ mod tests {
         let staging = StagingArea::new(test_root("wipe-empty"));
         // Don't prepare_dirs() — simulate first boot with an empty tree.
         staging.wipe().await.unwrap();
-        assert!(tokio::fs::try_exists(staging.paths().staging_dir()).await.unwrap());
+        assert!(
+            tokio::fs::try_exists(staging.paths().staging_dir())
+                .await
+                .unwrap()
+        );
     }
 }

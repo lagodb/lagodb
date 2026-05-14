@@ -17,7 +17,7 @@
 
 use std::cmp::min;
 
-use apache_avro::{to_value, Writer as AvroWriter};
+use apache_avro::{Writer as AvroWriter, to_value};
 use itertools::Itertools;
 use serde_json::to_vec;
 
@@ -30,8 +30,9 @@ use crate::io::OutputFile;
 use crate::spec::manifest::_serde::{ManifestEntryV1, ManifestEntryV2};
 use crate::spec::manifest::{manifest_schema_v1, manifest_schema_v2};
 use crate::spec::{
-    DataContentType, DataFile, FieldSummary, ManifestEntry, ManifestFile, ManifestMetadata,
-    ManifestStatus, PrimitiveLiteral, SchemaRef, StructType, UNASSIGNED_SNAPSHOT_ID,
+    DataContentType, DataFile, FieldSummary, ManifestEntry, ManifestFile,
+    ManifestMetadata, ManifestStatus, PrimitiveLiteral, SchemaRef, StructType,
+    UNASSIGNED_SNAPSHOT_ID,
 };
 use crate::{Error, ErrorKind};
 
@@ -211,11 +212,17 @@ impl ManifestWriter {
         let mut field_stats: Vec<_> = partition_type
             .fields()
             .iter()
-            .map(|f| PartitionFieldStats::new(f.field_type.as_primitive_type().unwrap().clone()))
+            .map(|f| {
+                PartitionFieldStats::new(
+                    f.field_type.as_primitive_type().unwrap().clone(),
+                )
+            })
             .collect();
-        for partition in self.manifest_entries.iter().map(|e| &e.data_file.partition) {
+        for partition in self.manifest_entries.iter().map(|e| &e.data_file.partition)
+        {
             for (literal, stat) in partition.iter().zip_eq(field_stats.iter_mut()) {
-                let primitive_literal = literal.map(|v| v.as_primitive_literal().unwrap());
+                let primitive_literal =
+                    literal.map(|v| v.as_primitive_literal().unwrap());
                 stat.update(primitive_literal)?;
             }
         }
@@ -278,7 +285,11 @@ impl ManifestWriter {
     /// Add file as an added entry with a specific sequence number. The entry's snapshot ID will be this manifest's snapshot ID. The entry's data sequence
     /// number will be the provided data sequence number. The entry's file sequence number will be
     /// assigned at commit.
-    pub fn add_file(&mut self, data_file: DataFile, sequence_number: i64) -> Result<()> {
+    pub fn add_file(
+        &mut self,
+        data_file: DataFile,
+        sequence_number: i64,
+    ) -> Result<()> {
         self.check_data_file(&data_file)?;
         let entry = ManifestEntry {
             status: ManifestStatus::Added,
@@ -298,7 +309,10 @@ impl ManifestWriter {
     /// # TODO
     /// Remove this allow later
     #[allow(dead_code)]
-    pub(crate) fn add_delete_entry(&mut self, mut entry: ManifestEntry) -> Result<()> {
+    pub(crate) fn add_delete_entry(
+        &mut self,
+        mut entry: ManifestEntry,
+    ) -> Result<()> {
         self.check_data_file(&entry.data_file)?;
         entry.status = ManifestStatus::Deleted;
         entry.snapshot_id = self.snapshot_id;
@@ -333,7 +347,10 @@ impl ManifestWriter {
     /// # TODO
     /// Remove this allow later
     #[allow(dead_code)]
-    pub(crate) fn add_existing_entry(&mut self, mut entry: ManifestEntry) -> Result<()> {
+    pub(crate) fn add_existing_entry(
+        &mut self,
+        mut entry: ManifestEntry,
+    ) -> Result<()> {
         self.check_data_file(&entry.data_file)?;
         entry.status = ManifestStatus::Existing;
         self.add_entry_inner(entry)?;
@@ -363,8 +380,10 @@ impl ManifestWriter {
 
     fn add_entry_inner(&mut self, entry: ManifestEntry) -> Result<()> {
         // Check if the entry has sequence number
-        if (entry.status == ManifestStatus::Deleted || entry.status == ManifestStatus::Existing)
-            && (entry.sequence_number.is_none() || entry.file_sequence_number.is_none())
+        if (entry.status == ManifestStatus::Deleted
+            || entry.status == ManifestStatus::Existing)
+            && (entry.sequence_number.is_none()
+                || entry.file_sequence_number.is_none())
         {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
@@ -389,7 +408,8 @@ impl ManifestWriter {
         }
         if entry.is_alive() {
             if let Some(seq_num) = entry.sequence_number {
-                self.min_seq_num = Some(self.min_seq_num.map_or(seq_num, |v| min(v, seq_num)));
+                self.min_seq_num =
+                    Some(self.min_seq_num.map_or(seq_num, |v| min(v, seq_num)));
             }
         }
         self.manifest_entries.push(entry);
@@ -407,7 +427,9 @@ impl ManifestWriter {
         let avro_schema = match self.metadata.format_version {
             FormatVersion::V1 => manifest_schema_v1(&partition_type)?,
             // Manifest schema did not change between V2 and V3
-            FormatVersion::V2 | FormatVersion::V3 => manifest_schema_v2(&partition_type)?,
+            FormatVersion::V2 | FormatVersion::V3 => {
+                manifest_schema_v2(&partition_type)?
+            }
         };
         let mut avro_writer = AvroWriter::new(&avro_schema, Vec::new());
         avro_writer.add_user_metadata(
@@ -437,16 +459,21 @@ impl ManifestWriter {
             (self.metadata.format_version as u8).to_string(),
         )?;
         if self.metadata.format_version == FormatVersion::V2 {
-            avro_writer
-                .add_user_metadata("content".to_string(), self.metadata.content.to_string())?;
+            avro_writer.add_user_metadata(
+                "content".to_string(),
+                self.metadata.content.to_string(),
+            )?;
         }
 
-        let partition_summary = self.construct_partition_summaries(&partition_type)?;
+        let partition_summary =
+            self.construct_partition_summaries(&partition_type)?;
         // Write manifest entries
         for entry in std::mem::take(&mut self.manifest_entries) {
             let value = match self.metadata.format_version {
-                FormatVersion::V1 => to_value(ManifestEntryV1::try_from(entry, &partition_type)?)?
-                    .resolve(&avro_schema)?,
+                FormatVersion::V1 => {
+                    to_value(ManifestEntryV1::try_from(entry, &partition_type)?)?
+                        .resolve(&avro_schema)?
+                }
                 // Manifest entry format did not change between V2 and V3
                 FormatVersion::V2 | FormatVersion::V3 => {
                     to_value(ManifestEntryV2::try_from(entry, &partition_type)?)?
@@ -469,7 +496,9 @@ impl ManifestWriter {
             // sequence_number and min_sequence_number with UNASSIGNED_SEQUENCE_NUMBER will be replace with
             // real sequence number in `ManifestListWriter`.
             sequence_number: UNASSIGNED_SEQUENCE_NUMBER,
-            min_sequence_number: self.min_seq_num.unwrap_or(UNASSIGNED_SEQUENCE_NUMBER),
+            min_sequence_number: self
+                .min_seq_num
+                .unwrap_or(UNASSIGNED_SEQUENCE_NUMBER),
             added_snapshot_id: self.snapshot_id.unwrap_or(UNASSIGNED_SNAPSHOT_ID),
             added_files_count: Some(self.added_files),
             existing_files_count: Some(self.existing_files),
@@ -522,20 +551,18 @@ impl PartitionFieldStats {
             return Ok(());
         }
 
-        self.lower_bound = Some(self.lower_bound.take().map_or(value.clone(), |original| {
-            if value < original {
-                value.clone()
-            } else {
-                original
-            }
-        }));
-        self.upper_bound = Some(self.upper_bound.take().map_or(value.clone(), |original| {
-            if value > original {
-                value
-            } else {
-                original
-            }
-        }));
+        self.lower_bound =
+            Some(self.lower_bound.take().map_or(value.clone(), |original| {
+                if value < original {
+                    value.clone()
+                } else {
+                    original
+                }
+            }));
+        self.upper_bound =
+            Some(self.upper_bound.take().map_or(value.clone(), |original| {
+                if value > original { value } else { original }
+            }));
 
         Ok(())
     }
@@ -560,7 +587,9 @@ mod tests {
 
     use super::*;
     use crate::io::FileIO;
-    use crate::spec::{DataFileFormat, Manifest, NestedField, PrimitiveType, Schema, Struct, Type};
+    use crate::spec::{
+        DataFileFormat, Manifest, NestedField, PrimitiveType, Schema, Struct, Type,
+    };
 
     #[test]
     fn test_add_delete_existing() {
@@ -700,9 +729,10 @@ mod tests {
         writer.write_manifest_file().unwrap();
 
         // read back the manifest file and check the content
-        let actual_manifest =
-            Manifest::parse_avro(fs::read(path).expect("read_file must succeed").as_slice())
-                .unwrap();
+        let actual_manifest = Manifest::parse_avro(
+            fs::read(path).expect("read_file must succeed").as_slice(),
+        )
+        .unwrap();
 
         // The snapshot id is assigned when the entry is added and delete to the manifest. Existing entries are keep original.
         entries[0].snapshot_id = Some(3);

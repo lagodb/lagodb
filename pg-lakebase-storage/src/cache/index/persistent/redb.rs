@@ -5,7 +5,9 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use super::kv::{CacheKv, KvPair, KvReadTxn, KvTable, KvWriteTxn};
 use crate::error::{StorageError, StorageResult};
 
-pub(super) fn redb_error(error: impl std::error::Error + Send + Sync + 'static) -> StorageError {
+pub(super) fn redb_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> StorageError {
     StorageError::cache_source("redb cache index operation failed", error)
 }
 
@@ -37,7 +39,9 @@ impl CacheKv for RedbKv {
         let txn = self.db.begin_write().map_err(redb_error)?;
         {
             for table in tables {
-                let _ = txn.open_table(table_definition(*table)).map_err(redb_error)?;
+                let _ = txn
+                    .open_table(table_definition(*table))
+                    .map_err(redb_error)?;
             }
         }
         txn.commit().map_err(redb_error)
@@ -62,18 +66,35 @@ pub struct RedbReadTxn {
 
 impl KvReadTxn for RedbReadTxn {
     fn get(&self, table: KvTable, key: &str) -> StorageResult<Option<Vec<u8>>> {
-        let table = self.txn.open_table(table_definition(table)).map_err(redb_error)?;
-        let value = table.get(key).map_err(redb_error)?.map(|value| value.value().to_vec());
+        let table = self
+            .txn
+            .open_table(table_definition(table))
+            .map_err(redb_error)?;
+        let value = table
+            .get(key)
+            .map_err(redb_error)?
+            .map(|value| value.value().to_vec());
         Ok(value)
     }
 
     fn get_len(&self, table: KvTable, key: &str) -> StorageResult<Option<u64>> {
-        let table = self.txn.open_table(table_definition(table)).map_err(redb_error)?;
-        let len = table.get(key).map_err(redb_error)?.map(|value| value.value().len() as u64);
+        let table = self
+            .txn
+            .open_table(table_definition(table))
+            .map_err(redb_error)?;
+        let len = table
+            .get(key)
+            .map_err(redb_error)?
+            .map(|value| value.value().len() as u64);
         Ok(len)
     }
 
-    fn scan_page(&self, table: KvTable, after_exclusive: Option<&str>, limit: usize) -> StorageResult<Vec<KvPair>> {
+    fn scan_page(
+        &self,
+        table: KvTable,
+        after_exclusive: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<KvPair>> {
         scan_page(&self.txn, table, after_exclusive, limit)
     }
 }
@@ -84,31 +105,54 @@ pub struct RedbWriteTxn {
 
 impl KvReadTxn for RedbWriteTxn {
     fn get(&self, table: KvTable, key: &str) -> StorageResult<Option<Vec<u8>>> {
-        let table = self.txn.open_table(table_definition(table)).map_err(redb_error)?;
-        let value = table.get(key).map_err(redb_error)?.map(|value| value.value().to_vec());
+        let table = self
+            .txn
+            .open_table(table_definition(table))
+            .map_err(redb_error)?;
+        let value = table
+            .get(key)
+            .map_err(redb_error)?
+            .map(|value| value.value().to_vec());
         Ok(value)
     }
 
     fn get_len(&self, table: KvTable, key: &str) -> StorageResult<Option<u64>> {
-        let table = self.txn.open_table(table_definition(table)).map_err(redb_error)?;
-        let len = table.get(key).map_err(redb_error)?.map(|value| value.value().len() as u64);
+        let table = self
+            .txn
+            .open_table(table_definition(table))
+            .map_err(redb_error)?;
+        let len = table
+            .get(key)
+            .map_err(redb_error)?
+            .map(|value| value.value().len() as u64);
         Ok(len)
     }
 
-    fn scan_page(&self, table: KvTable, after_exclusive: Option<&str>, limit: usize) -> StorageResult<Vec<KvPair>> {
+    fn scan_page(
+        &self,
+        table: KvTable,
+        after_exclusive: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<KvPair>> {
         scan_page(&self.txn, table, after_exclusive, limit)
     }
 }
 
 impl KvWriteTxn for RedbWriteTxn {
     fn put(&mut self, table: KvTable, key: &str, value: &[u8]) -> StorageResult<()> {
-        let mut table = self.txn.open_table(table_definition(table)).map_err(redb_error)?;
+        let mut table = self
+            .txn
+            .open_table(table_definition(table))
+            .map_err(redb_error)?;
         table.insert(key, value).map_err(redb_error)?;
         Ok(())
     }
 
     fn remove(&mut self, table: KvTable, key: &str) -> StorageResult<()> {
-        let mut table = self.txn.open_table(table_definition(table)).map_err(redb_error)?;
+        let mut table = self
+            .txn
+            .open_table(table_definition(table))
+            .map_err(redb_error)?;
         table.remove(key).map_err(redb_error)?;
         Ok(())
     }
@@ -118,11 +162,18 @@ impl KvWriteTxn for RedbWriteTxn {
     }
 }
 
-fn table_definition(table: KvTable) -> TableDefinition<'static, &'static str, &'static [u8]> {
+fn table_definition(
+    table: KvTable,
+) -> TableDefinition<'static, &'static str, &'static [u8]> {
     TableDefinition::new(table.name())
 }
 
-fn scan_page<T>(txn: &T, table: KvTable, after_exclusive: Option<&str>, limit: usize) -> StorageResult<Vec<KvPair>>
+fn scan_page<T>(
+    txn: &T,
+    table: KvTable,
+    after_exclusive: Option<&str>,
+    limit: usize,
+) -> StorageResult<Vec<KvPair>>
 where
     T: RedbTableReader,
 {
@@ -131,7 +182,9 @@ where
     let table = txn.open_bytes_table(table)?;
     let limit = limit.max(1);
     let iter = match after_exclusive {
-        Some(after) => table.range::<&str>((Excluded(after), Unbounded)).map_err(redb_error)?,
+        Some(after) => table
+            .range::<&str>((Excluded(after), Unbounded))
+            .map_err(redb_error)?,
         None => table.range::<&str>(..).map_err(redb_error)?,
     };
     let mut rows = Vec::new();

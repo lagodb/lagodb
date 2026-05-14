@@ -34,13 +34,20 @@ pub(super) struct ManifestEntryV2 {
 }
 
 impl ManifestEntryV2 {
-    pub fn try_from(value: ManifestEntry, partition_type: &StructType) -> Result<Self, Error> {
+    pub fn try_from(
+        value: ManifestEntry,
+        partition_type: &StructType,
+    ) -> Result<Self, Error> {
         Ok(Self {
             status: value.status as i32,
             snapshot_id: value.snapshot_id,
             sequence_number: value.sequence_number,
             file_sequence_number: value.file_sequence_number,
-            data_file: DataFileSerde::try_from(value.data_file, partition_type, FormatVersion::V2)?,
+            data_file: DataFileSerde::try_from(
+                value.data_file,
+                partition_type,
+                FormatVersion::V2,
+            )?,
         })
     }
 
@@ -55,9 +62,11 @@ impl ManifestEntryV2 {
             snapshot_id: self.snapshot_id,
             sequence_number: self.sequence_number,
             file_sequence_number: self.file_sequence_number,
-            data_file: self
-                .data_file
-                .try_into(partition_spec_id, partition_type, schema)?,
+            data_file: self.data_file.try_into(
+                partition_spec_id,
+                partition_type,
+                schema,
+            )?,
         })
     }
 }
@@ -70,11 +79,18 @@ pub(super) struct ManifestEntryV1 {
 }
 
 impl ManifestEntryV1 {
-    pub fn try_from(value: ManifestEntry, partition_type: &StructType) -> Result<Self, Error> {
+    pub fn try_from(
+        value: ManifestEntry,
+        partition_type: &StructType,
+    ) -> Result<Self, Error> {
         Ok(Self {
             status: value.status as i32,
             snapshot_id: value.snapshot_id.unwrap_or_default(),
-            data_file: DataFileSerde::try_from(value.data_file, partition_type, FormatVersion::V1)?,
+            data_file: DataFileSerde::try_from(
+                value.data_file,
+                partition_type,
+                FormatVersion::V1,
+            )?,
         })
     }
 
@@ -89,9 +105,11 @@ impl ManifestEntryV1 {
             snapshot_id: Some(self.snapshot_id),
             sequence_number: Some(0),
             file_sequence_number: Some(0),
-            data_file: self
-                .data_file
-                .try_into(partition_spec_id, partition_type, schema)?,
+            data_file: self.data_file.try_into(
+                partition_spec_id,
+                partition_type,
+                schema,
+            )?,
         })
     }
 }
@@ -242,7 +260,10 @@ struct BytesEntry {
     value: serde_bytes::ByteBuf,
 }
 
-fn parse_bytes_entry(v: Vec<BytesEntry>, schema: &Schema) -> Result<HashMap<i32, Datum>, Error> {
+fn parse_bytes_entry(
+    v: Vec<BytesEntry>,
+    schema: &Schema,
+) -> Result<HashMap<i32, Datum>, Error> {
     let mut m = HashMap::with_capacity(v.len());
     for entry in v {
         // First try to find the field in the schema, or check if it's a reserved metadata field
@@ -268,7 +289,9 @@ fn parse_bytes_entry(v: Vec<BytesEntry>, schema: &Schema) -> Result<HashMap<i32,
     Ok(m)
 }
 
-fn to_bytes_entry(v: impl IntoIterator<Item = (i32, Datum)>) -> Result<Vec<BytesEntry>, Error> {
+fn to_bytes_entry(
+    v: impl IntoIterator<Item = (i32, Datum)>,
+) -> Result<Vec<BytesEntry>, Error> {
     let iter = v.into_iter();
     // Reserve the capacity to the lower bound.
     let mut bs = Vec::with_capacity(iter.size_hint().0);
@@ -334,10 +357,10 @@ mod tests {
 
     #[test]
     fn test_parse_negative_manifest_entry() {
-        let entries = vec![I64Entry { key: 1, value: -1 }, I64Entry {
-            key: 2,
-            value: 3,
-        }];
+        let entries = vec![
+            I64Entry { key: 1, value: -1 },
+            I64Entry { key: 2, value: 3 },
+        ];
 
         let ret = parse_i64_entry(entries).unwrap();
 

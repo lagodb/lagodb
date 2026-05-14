@@ -14,12 +14,14 @@
 //! one.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::flight::{ChunkFillClaim, ChunkFillLeader, ChunkFillWaiter, ChunkFlight, ChunkFlightOutcome};
+use super::flight::{
+    ChunkFillClaim, ChunkFillLeader, ChunkFillWaiter, ChunkFlight, ChunkFlightOutcome,
+};
 use super::reaper::{ReapRequest, ReaperHandle};
 use crate::cache::meta::CachedObjectMeta;
 use crate::cache::object_state::PerObjectState;
@@ -109,20 +111,28 @@ impl LargeFillSession {
         self.nonce
     }
 
-    pub(crate) async fn complete_meta(&self) -> StorageResult<Option<CachedObjectMeta>> {
+    pub(crate) async fn complete_meta(
+        &self,
+    ) -> StorageResult<Option<CachedObjectMeta>> {
         let state = self.fill_state.lock().await;
         match &*state {
             LargeFillState::Filling { .. } => Ok(None),
             LargeFillState::Complete { meta } => Ok(Some(meta.clone())),
-            LargeFillState::Aborted => Err(StorageError::cache_fill_aborted(self.key())),
+            LargeFillState::Aborted => {
+                Err(StorageError::cache_fill_aborted(self.key()))
+            }
         }
     }
 
     pub(crate) async fn ensure_openable(&self) -> StorageResult<()> {
         let state = self.fill_state.lock().await;
         match &*state {
-            LargeFillState::Filling { .. } | LargeFillState::Complete { .. } => Ok(()),
-            LargeFillState::Aborted => Err(StorageError::cache_fill_aborted(self.key())),
+            LargeFillState::Filling { .. } | LargeFillState::Complete { .. } => {
+                Ok(())
+            }
+            LargeFillState::Aborted => {
+                Err(StorageError::cache_fill_aborted(self.key()))
+            }
         }
     }
 
@@ -150,75 +160,104 @@ impl LargeFillSession {
                     "large fill invariant violated: session for {} is already Complete while a chunk write is in progress",
                     self.key()
                 )))
-            },
-            LargeFillState::Aborted => Err(StorageError::cache_fill_aborted(self.key())),
+            }
+            LargeFillState::Aborted => {
+                Err(StorageError::cache_fill_aborted(self.key()))
+            }
         }
     }
 
-    pub(crate) async fn claim_chunk(&self, chunk: u64) -> StorageResult<ChunkFillClaim> {
+    pub(crate) async fn claim_chunk(
+        &self,
+        chunk: u64,
+    ) -> StorageResult<ChunkFillClaim> {
         loop {
             let mut state = self.fill_state.lock().await;
             match &mut *state {
                 LargeFillState::Filling { chunks } => {
                     let Some(slot) = chunks.slots.get_mut(chunk as usize) else {
-                        return Err(StorageError::cache(format!("chunk {chunk} out of bounds for {}", self.key())));
+                        return Err(StorageError::cache(format!(
+                            "chunk {chunk} out of bounds for {}",
+                            self.key()
+                        )));
                     };
                     match slot {
                         ChunkSlot::Complete => return Ok(ChunkFillClaim::Complete),
                         ChunkSlot::Missing => {
                             let flight = Arc::new(ChunkFlight::new());
                             *slot = ChunkSlot::InFlight(flight.clone());
-                            return Ok(ChunkFillClaim::Leader(ChunkFillLeader::new(flight)));
-                        },
+                            return Ok(ChunkFillClaim::Leader(ChunkFillLeader::new(
+                                flight,
+                            )));
+                        }
                         ChunkSlot::InFlight(flight) if flight.failed() => {
                             *slot = ChunkSlot::Missing;
-                        },
+                        }
                         ChunkSlot::InFlight(flight) => {
-                            return Ok(ChunkFillClaim::Follower(ChunkFillWaiter::new(flight.clone())));
-                        },
+                            return Ok(ChunkFillClaim::Follower(
+                                ChunkFillWaiter::new(flight.clone()),
+                            ));
+                        }
                     }
-                },
-                LargeFillState::Complete { .. } => return Ok(ChunkFillClaim::Complete),
+                }
+                LargeFillState::Complete { .. } => {
+                    return Ok(ChunkFillClaim::Complete);
+                }
                 LargeFillState::Aborted => {
                     return Err(StorageError::cache_fill_aborted(self.key()));
-                },
+                }
             }
         }
     }
 
-    pub(crate) async fn record_chunk_complete(&self, chunk: u64, leader: ChunkFillLeader) -> StorageResult<bool> {
+    pub(crate) async fn record_chunk_complete(
+        &self,
+        chunk: u64,
+        leader: ChunkFillLeader,
+    ) -> StorageResult<bool> {
         let mut state = self.fill_state.lock().await;
         match &mut *state {
             LargeFillState::Filling { chunks } => {
                 let Some(slot) = chunks.slots.get_mut(chunk as usize) else {
-                    return Err(StorageError::cache(format!("chunk {chunk} out of bounds for {}", self.key())));
+                    return Err(StorageError::cache(format!(
+                        "chunk {chunk} out of bounds for {}",
+                        self.key()
+                    )));
                 };
                 match slot {
                     ChunkSlot::InFlight(flight) if leader.flight_ptr_eq(flight) => {
                         *slot = ChunkSlot::Complete;
-                        chunks.completed_count = chunks.completed_count.saturating_add(1);
+                        chunks.completed_count =
+                            chunks.completed_count.saturating_add(1);
                         leader.finish(ChunkFlightOutcome::Succeeded);
                         Ok(chunks.completed_count as usize == chunks.slots.len())
-                    },
+                    }
                     ChunkSlot::Complete => {
                         leader.finish(ChunkFlightOutcome::Succeeded);
                         Ok(chunks.completed_count as usize == chunks.slots.len())
-                    },
-                    ChunkSlot::Missing | ChunkSlot::InFlight(_) => Err(StorageError::cache(format!(
-                        "chunk {chunk} completion does not match active fill leader for {}",
-                        self.key()
-                    ))),
+                    }
+                    ChunkSlot::Missing | ChunkSlot::InFlight(_) => {
+                        Err(StorageError::cache(format!(
+                            "chunk {chunk} completion does not match active fill leader for {}",
+                            self.key()
+                        )))
+                    }
                 }
-            },
+            }
             LargeFillState::Complete { .. } => {
                 leader.finish(ChunkFlightOutcome::Succeeded);
                 Ok(true)
-            },
-            LargeFillState::Aborted => Err(StorageError::cache_fill_aborted(self.key())),
+            }
+            LargeFillState::Aborted => {
+                Err(StorageError::cache_fill_aborted(self.key()))
+            }
         }
     }
 
-    pub(crate) async fn mark_complete(&self, meta: CachedObjectMeta) -> StorageResult<()> {
+    pub(crate) async fn mark_complete(
+        &self,
+        meta: CachedObjectMeta,
+    ) -> StorageResult<()> {
         let mut state = self.fill_state.lock().await;
         match &*state {
             LargeFillState::Filling { .. } | LargeFillState::Complete { .. } => {
@@ -228,8 +267,10 @@ impl LargeFillSession {
                 // under this lock.
                 self.completed.store(true, Ordering::Release);
                 Ok(())
-            },
-            LargeFillState::Aborted => Err(StorageError::cache_fill_aborted(self.key())),
+            }
+            LargeFillState::Aborted => {
+                Err(StorageError::cache_fill_aborted(self.key()))
+            }
         }
     }
 

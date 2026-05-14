@@ -70,7 +70,11 @@ impl Map {
     /// Inserts a key-value pair into the map.
     /// If the map did not have this key present, None is returned.
     /// If the map did have this key present, the value is updated, and the old value is returned.
-    pub fn insert(&mut self, key: Literal, value: Option<Literal>) -> Option<Option<Literal>> {
+    pub fn insert(
+        &mut self,
+        key: Literal,
+        value: Option<Literal>,
+    ) -> Option<Option<Literal>> {
         if let Some(index) = self.index.get(&key) {
             let old_value = std::mem::replace(&mut self.pair[*index].1, value);
             Some(old_value)
@@ -120,7 +124,9 @@ impl Hash for Map {
 }
 
 impl FromIterator<(Literal, Option<Literal>)> for Map {
-    fn from_iter<T: IntoIterator<Item = (Literal, Option<Literal>)>>(iter: T) -> Self {
+    fn from_iter<T: IntoIterator<Item = (Literal, Option<Literal>)>>(
+        iter: T,
+    ) -> Self {
         let mut map = Map::new();
         for (key, value) in iter {
             map.insert(key, value);

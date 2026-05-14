@@ -42,7 +42,9 @@ impl StrictProjection {
     }
 
     fn get_parts_for_field_id(&mut self, field_id: i32) -> &Vec<PartitionField> {
-        if let std::collections::hash_map::Entry::Vacant(e) = self.cached_parts.entry(field_id) {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.cached_parts.entry(field_id)
+        {
             let mut parts: Vec<PartitionField> = vec![];
             for partition_spec_field in self.partition_spec.fields() {
                 if partition_spec_field.source_id == field_id {
@@ -255,7 +257,8 @@ mod tests {
     use crate::expr::visitors::strict_projection::StrictProjection;
     use crate::expr::{Bind, Reference};
     use crate::spec::{
-        Datum, NestedField, PartitionSpec, PrimitiveLiteral, PrimitiveType, Schema, Transform, Type,
+        Datum, NestedField, PartitionSpec, PrimitiveLiteral, PrimitiveType, Schema,
+        Transform, Type,
     };
 
     #[test]
@@ -354,10 +357,22 @@ mod tests {
         // test less or eq: (col1 <= 1970-01-01) AND (col2 <= 1970-01-01) AND (col3 <= 1970-01-01) AND (col4 <= 1970-01-01) AND (col5 <= 1970-01-01)
         let predicate = Reference::new("col1")
             .less_than_or_equal_to(Datum::date(0))
-            .and(Reference::new("col2").less_than_or_equal_to(Datum::timestamp_micros(0)))
-            .and(Reference::new("col3").less_than_or_equal_to(Datum::timestamptz_micros(0)))
-            .and(Reference::new("col4").less_than_or_equal_to(Datum::timestamp_nanos(0)))
-            .and(Reference::new("col5").less_than_or_equal_to(Datum::timestamptz_nanos(0)))
+            .and(
+                Reference::new("col2")
+                    .less_than_or_equal_to(Datum::timestamp_micros(0)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than_or_equal_to(Datum::timestamptz_micros(0)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than_or_equal_to(Datum::timestamp_nanos(0)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than_or_equal_to(Datum::timestamptz_nanos(0)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -386,10 +401,22 @@ mod tests {
         // test greater or eq: (col1 >= 1970-01-01) AND (col2 >= 1970-01-01) AND (col3 >= 1970-01-01) AND (col4 >= 1970-01-01) AND (col5 >= 1970-01-01)
         let predicate = Reference::new("col1")
             .greater_than_or_equal_to(Datum::date(0))
-            .and(Reference::new("col2").greater_than_or_equal_to(Datum::timestamp_micros(0)))
-            .and(Reference::new("col3").greater_than_or_equal_to(Datum::timestamptz_micros(0)))
-            .and(Reference::new("col4").greater_than_or_equal_to(Datum::timestamp_nanos(0)))
-            .and(Reference::new("col5").greater_than_or_equal_to(Datum::timestamptz_nanos(0)))
+            .and(
+                Reference::new("col2")
+                    .greater_than_or_equal_to(Datum::timestamp_micros(0)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than_or_equal_to(Datum::timestamptz_micros(0)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than_or_equal_to(Datum::timestamp_nanos(0)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than_or_equal_to(Datum::timestamptz_nanos(0)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -400,47 +427,60 @@ mod tests {
         );
 
         // test not in
-        let predicate =
-            Reference::new("col1")
-                .is_not_in(
-                    vec![
-                        Datum::date_from_str("1970-01-01").unwrap(),
-                        Datum::date_from_str("1969-12-31").unwrap(),
-                    ]
-                    .into_iter(),
-                )
-                .and(Reference::new("col2").is_not_in(
-                    vec![Datum::timestamp_micros(0), Datum::timestamp_micros(-1)].into_iter(),
-                ))
-                .and(Reference::new("col3").is_not_in(
-                    vec![Datum::timestamptz_micros(0), Datum::timestamptz_micros(-1)].into_iter(),
-                ))
-                .and(Reference::new("col4").is_not_in(
-                    vec![Datum::timestamp_nanos(0), Datum::timestamp_nanos(-1)].into_iter(),
-                ))
-                .and(Reference::new("col5").is_not_in(
-                    vec![Datum::timestamptz_nanos(0), Datum::timestamptz_nanos(-1)].into_iter(),
-                ))
-                .bind(schema.clone(), false)
-                .unwrap();
+        let predicate = Reference::new("col1")
+            .is_not_in(
+                vec![
+                    Datum::date_from_str("1970-01-01").unwrap(),
+                    Datum::date_from_str("1969-12-31").unwrap(),
+                ]
+                .into_iter(),
+            )
+            .and(
+                Reference::new("col2").is_not_in(
+                    vec![Datum::timestamp_micros(0), Datum::timestamp_micros(-1)]
+                        .into_iter(),
+                ),
+            )
+            .and(
+                Reference::new("col3").is_not_in(
+                    vec![Datum::timestamptz_micros(0), Datum::timestamptz_micros(-1)]
+                        .into_iter(),
+                ),
+            )
+            .and(
+                Reference::new("col4").is_not_in(
+                    vec![Datum::timestamp_nanos(0), Datum::timestamp_nanos(-1)]
+                        .into_iter(),
+                ),
+            )
+            .and(
+                Reference::new("col5").is_not_in(
+                    vec![Datum::timestamptz_nanos(0), Datum::timestamptz_nanos(-1)]
+                        .into_iter(),
+                ),
+            )
+            .bind(schema.clone(), false)
+            .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(result.to_string(), "((((pcol1 NOT IN (0, -1)) AND (pcol2 NOT IN (0, -1))) AND (pcol3 NOT IN (0, -1))) AND (pcol4 NOT IN (0, -1))) AND (pcol5 NOT IN (0, -1))".to_string());
 
         // test in
-        let predicate =
-            Reference::new("col1")
-                .is_in(
-                    vec![
-                        Datum::date_from_str("1970-01-01").unwrap(),
-                        Datum::date_from_str("1969-12-31").unwrap(),
-                    ]
-                    .into_iter(),
-                )
-                .and(Reference::new("col2").is_in(
-                    vec![Datum::timestamp_micros(0), Datum::timestamp_micros(-1)].into_iter(),
-                ))
-                .bind(schema.clone(), false)
-                .unwrap();
+        let predicate = Reference::new("col1")
+            .is_in(
+                vec![
+                    Datum::date_from_str("1970-01-01").unwrap(),
+                    Datum::date_from_str("1969-12-31").unwrap(),
+                ]
+                .into_iter(),
+            )
+            .and(
+                Reference::new("col2").is_in(
+                    vec![Datum::timestamp_micros(0), Datum::timestamp_micros(-1)]
+                        .into_iter(),
+                ),
+            )
+            .bind(schema.clone(), false)
+            .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(result.to_string(), "FALSE".to_string());
     }
@@ -501,10 +541,22 @@ mod tests {
         // test eq: (col1 = 2017-01-01) AND (col2 = 2017-01-01) AND (col3 = 2017-01-01) AND (col4 = 2017-01-01) AND (col5 = 2017-01-01)
         let predicate = Reference::new("col1")
             .equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").equal_to(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").equal_to(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").equal_to(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").equal_to(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .equal_to(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .equal_to(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .equal_to(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .equal_to(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -513,10 +565,22 @@ mod tests {
         // test not eq: (col1 != 2017-01-01) AND (col2 != 2017-01-01) AND (col3 != 2017-01-01) AND (col4 != 2017-01-01) AND (col5 != 2017-01-01)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -525,10 +589,22 @@ mod tests {
         // test less: (col1 < 2017-01-01) AND (col2 < 2017-01-01) AND (col3 < 2017-01-01) AND (col4 < 2017-01-01) AND (col5 < 2017-01-01)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -539,26 +615,25 @@ mod tests {
         );
 
         // test less or eq: (col1 <= 2017-01-01) AND (col2 <= 2017-01-01) AND (col3 <= 2017-01-01) AND (col4 <= 2017-01-01) AND (col5 <= 2017-01-01)
-        let predicate = Reference::new("col1")
-            .less_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .less_than_or_equal_to(Datum::timestamp_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .less_than_or_equal_to(Datum::timestamptz_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .less_than_or_equal_to(Datum::timestamp_nanos(1483228800000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .less_than_or_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .less_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
+                .and(
+                    Reference::new("col2").less_than_or_equal_to(
+                        Datum::timestamp_micros(1483228800000000),
+                    ),
+                )
+                .and(Reference::new("col3").less_than_or_equal_to(
+                    Datum::timestamptz_micros(1483228800000000),
+                ))
+                .and(Reference::new("col4").less_than_or_equal_to(
+                    Datum::timestamp_nanos(1483228800000000000),
+                ))
+                .and(Reference::new("col5").less_than_or_equal_to(
+                    Datum::timestamptz_nanos(1483228800000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -569,10 +644,22 @@ mod tests {
         // test greater: (col1 > 2017-01-01) AND (col2 > 2017-01-01) AND (col3 > 2017-01-01) AND (col4 > 2017-01-01) AND (col5 > 2017-01-01)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -583,26 +670,23 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 2017-01-01) AND (col2 >= 2017-01-01) AND (col3 >= 2017-01-01) AND (col4 >= 2017-01-01) AND (col5 >= 2017-01-01)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(1483228800000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
+                .and(Reference::new("col2").greater_than_or_equal_to(
+                    Datum::timestamp_micros(1483228800000000),
+                ))
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(1483228800000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(1483228800000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(1483228800000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -741,10 +825,22 @@ mod tests {
         // test less: (col1 < 1969-01-01) AND (col2 < 1969-01-01) AND (col3 < 1969-01-01) AND (col4 < 1969-01-01) AND (col5 < 1969-01-01)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("1969-01-01").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(-31536000000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(-31536000000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(-31536000000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(-31536000000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(-31536000000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(-31536000000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(-31536000000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(-31536000000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -755,26 +851,25 @@ mod tests {
         );
 
         // test less or eq: (col1 <= 1969-01-01) AND (col2 <= 1969-01-01) AND (col3 <= 1969-01-01) AND (col4 <= 1969-01-01) AND (col5 <= 1969-01-01)
-        let predicate = Reference::new("col1")
-            .less_than_or_equal_to(Datum::date_from_str("1969-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .less_than_or_equal_to(Datum::timestamp_micros(-31536000000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .less_than_or_equal_to(Datum::timestamptz_micros(-31536000000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .less_than_or_equal_to(Datum::timestamp_nanos(-31536000000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .less_than_or_equal_to(Datum::timestamptz_nanos(-31536000000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .less_than_or_equal_to(Datum::date_from_str("1969-01-01").unwrap())
+                .and(
+                    Reference::new("col2").less_than_or_equal_to(
+                        Datum::timestamp_micros(-31536000000000),
+                    ),
+                )
+                .and(Reference::new("col3").less_than_or_equal_to(
+                    Datum::timestamptz_micros(-31536000000000),
+                ))
+                .and(Reference::new("col4").less_than_or_equal_to(
+                    Datum::timestamp_nanos(-31536000000000000),
+                ))
+                .and(Reference::new("col5").less_than_or_equal_to(
+                    Datum::timestamptz_nanos(-31536000000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -785,10 +880,22 @@ mod tests {
         // test greater: (col1 > 1969-01-01) AND (col2 > 1969-01-01) AND (col3 > 1969-01-01) AND (col4 > 1969-01-01) AND (col5 > 1969-01-01)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("1969-01-01").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(-31536000000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(-31536000000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(-31536000000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(-31536000000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(-31536000000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(-31536000000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(-31536000000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(-31536000000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -799,26 +906,23 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 1969-01-01) AND (col2 >= 1969-01-01) AND (col3 >= 1969-01-01) AND (col4 >= 1969-01-01) AND (col5 >= 1969-01-01)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("1969-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(-31536000000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(-31536000000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(-31536000000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(-31536000000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("1969-01-01").unwrap())
+                .and(Reference::new("col2").greater_than_or_equal_to(
+                    Datum::timestamp_micros(-31536000000000),
+                ))
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(-31536000000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(-31536000000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(-31536000000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -829,10 +933,22 @@ mod tests {
         // test not eq: (col1 != 1969-01-01) AND (col2 != 1969-01-01) AND (col3 != 1969-01-01) AND (col4 != 1969-01-01) AND (col5 != 1969-01-01)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("1969-01-01").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(-31536000000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(-31536000000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(-31536000000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(-31536000000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(-31536000000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(-31536000000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(-31536000000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(-31536000000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -969,10 +1085,22 @@ mod tests {
         // test less: (col1 < 2017-12-31) AND (col2 < 2017-12-31) AND (col3 < 2017-12-31) AND (col4 < 2017-12-31) AND (col5 < 2017-12-31)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("2017-12-31").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(1514764799000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(1514764799000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(1514764799000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(1514764799000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(1514764799000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(1514764799000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -983,26 +1111,25 @@ mod tests {
         );
 
         // test less or eq: (col1 <= 2017-12-31) AND (col2 <= 2017-12-31) AND (col3 <= 2017-12-31) AND (col4 <= 2017-12-31) AND (col5 <= 2017-12-31)
-        let predicate = Reference::new("col1")
-            .less_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
-            .and(
-                Reference::new("col2")
-                    .less_than_or_equal_to(Datum::timestamp_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .less_than_or_equal_to(Datum::timestamptz_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .less_than_or_equal_to(Datum::timestamp_nanos(1514764799000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .less_than_or_equal_to(Datum::timestamptz_nanos(1514764799000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .less_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
+                .and(
+                    Reference::new("col2").less_than_or_equal_to(
+                        Datum::timestamp_micros(1514764799000000),
+                    ),
+                )
+                .and(Reference::new("col3").less_than_or_equal_to(
+                    Datum::timestamptz_micros(1514764799000000),
+                ))
+                .and(Reference::new("col4").less_than_or_equal_to(
+                    Datum::timestamp_nanos(1514764799000000000),
+                ))
+                .and(Reference::new("col5").less_than_or_equal_to(
+                    Datum::timestamptz_nanos(1514764799000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1013,10 +1140,22 @@ mod tests {
         // test greater: (col1 > 2017-12-31) AND (col2 > 2017-12-31) AND (col3 > 2017-12-31) AND (col4 > 2017-12-31) AND (col5 > 2017-12-31)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("2017-12-31").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(1514764799000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(1514764799000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(1514764799000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(1514764799000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(1514764799000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(1514764799000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1027,26 +1166,23 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 2017-12-31) AND (col2 >= 2017-12-31) AND (col3 >= 2017-12-31) AND (col4 >= 2017-12-31) AND (col5 >= 2017-12-31)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(1514764799000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(1514764799000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
+                .and(Reference::new("col2").greater_than_or_equal_to(
+                    Datum::timestamp_micros(1514764799000000),
+                ))
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(1514764799000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(1514764799000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(1514764799000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1057,10 +1193,22 @@ mod tests {
         // test not eq: (col1 != 2017-12-31) AND (col2 != 2017-12-31) AND (col3 != 2017-12-31) AND (col4 != 2017-12-31) AND (col5 != 2017-12-31)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("2017-12-31").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(1514764799000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(1514764799000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(1514764799000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(1514764799000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(1514764799000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(1514764799000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1197,10 +1345,22 @@ mod tests {
         // test less: (col1 < 1969-12-31) AND (col2 < 1969-12-31) AND (col3 < 1969-12-31) AND (col4 < 1969-12-31) AND (col5 < 1969-12-31)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("1969-12-31").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(-86400000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(-86400000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(-86400000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(-86400000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(-86400000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(-86400000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(-86400000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(-86400000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1214,7 +1374,8 @@ mod tests {
         let predicate = Reference::new("col1")
             .less_than_or_equal_to(Datum::date_from_str("1969-12-31").unwrap())
             .and(
-                Reference::new("col2").less_than_or_equal_to(Datum::timestamp_micros(-86400000000)),
+                Reference::new("col2")
+                    .less_than_or_equal_to(Datum::timestamp_micros(-86400000000)),
             )
             .and(
                 Reference::new("col3")
@@ -1240,10 +1401,22 @@ mod tests {
         // test greater: (col1 > 1969-12-31) AND (col2 > 1969-12-31) AND (col3 > 1969-12-31) AND (col4 > 1969-12-31) AND (col5 > 1969-12-31)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("1969-12-31").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(-86400000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(-86400000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(-86400000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(-86400000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(-86400000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(-86400000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(-86400000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(-86400000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1254,26 +1427,25 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 1969-12-31) AND (col2 >= 1969-12-31) AND (col3 >= 1969-12-31) AND (col4 >= 1969-12-31) AND (col5 >= 1969-12-31)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("1969-12-31").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(-86400000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(-86400000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(-86400000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(-86400000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("1969-12-31").unwrap())
+                .and(
+                    Reference::new("col2").greater_than_or_equal_to(
+                        Datum::timestamp_micros(-86400000000),
+                    ),
+                )
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(-86400000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(-86400000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(-86400000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1284,10 +1456,22 @@ mod tests {
         // test not eq: (col1 != 1969-12-31) AND (col2 != 1969-12-31) AND (col3 != 1969-12-31) AND (col4 != 1969-12-31) AND (col5 != 1969-12-31)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("1969-12-31").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(-86400000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(-86400000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(-86400000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(-86400000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(-86400000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(-86400000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(-86400000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(-86400000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1351,10 +1535,22 @@ mod tests {
         // test less: (col1 < 2017-01-01) AND (col2 < 2017-01-01) AND (col3 < 2017-01-01) AND (col4 < 2017-01-01) AND (col5 < 2017-01-01)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1365,26 +1561,25 @@ mod tests {
         );
 
         // test less or eq: (col1 <= 2017-01-01) AND (col2 <= 2017-01-01) AND (col3 <= 2017-01-01) AND (col4 <= 2017-01-01) AND (col5 <= 2017-01-01)
-        let predicate = Reference::new("col1")
-            .less_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .less_than_or_equal_to(Datum::timestamp_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .less_than_or_equal_to(Datum::timestamptz_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .less_than_or_equal_to(Datum::timestamp_nanos(1483228800000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .less_than_or_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .less_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
+                .and(
+                    Reference::new("col2").less_than_or_equal_to(
+                        Datum::timestamp_micros(1483228800000000),
+                    ),
+                )
+                .and(Reference::new("col3").less_than_or_equal_to(
+                    Datum::timestamptz_micros(1483228800000000),
+                ))
+                .and(Reference::new("col4").less_than_or_equal_to(
+                    Datum::timestamp_nanos(1483228800000000000),
+                ))
+                .and(Reference::new("col5").less_than_or_equal_to(
+                    Datum::timestamptz_nanos(1483228800000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1395,10 +1590,22 @@ mod tests {
         // test greater: (col1 > 2017-01-01) AND (col2 > 2017-01-01) AND (col3 > 2017-01-01) AND (col4 > 2017-01-01) AND (col5 > 2017-01-01)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1409,26 +1616,23 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 2017-01-01) AND (col2 >= 2017-01-01) AND (col3 >= 2017-01-01) AND (col4 >= 2017-01-01) AND (col5 >= 2017-01-01)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(1483228800000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
+                .and(Reference::new("col2").greater_than_or_equal_to(
+                    Datum::timestamp_micros(1483228800000000),
+                ))
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(1483228800000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(1483228800000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(1483228800000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1439,10 +1643,22 @@ mod tests {
         // test not eq: (col1 != 2017-01-01) AND (col2 != 2017-01-01) AND (col3 != 2017-01-01) AND (col4 != 2017-01-01) AND (col5 != 2017-01-01)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1579,10 +1795,22 @@ mod tests {
         // test less: (col1 < 1969-12-30) AND (col2 < 1969-12-30) AND (col3 < 1969-12-30) AND (col4 < 1969-12-30) AND (col5 < 1969-12-30)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("1969-12-30").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(-172800000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(-172800000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(-172800000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(-172800000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(-172800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(-172800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(-172800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(-172800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1608,8 +1836,9 @@ mod tests {
                     .less_than_or_equal_to(Datum::timestamp_nanos(-172800000000000)),
             )
             .and(
-                Reference::new("col5")
-                    .less_than_or_equal_to(Datum::timestamptz_nanos(-172800000000000)),
+                Reference::new("col5").less_than_or_equal_to(
+                    Datum::timestamptz_nanos(-172800000000000),
+                ),
             )
             .bind(schema.clone(), false)
             .unwrap();
@@ -1623,10 +1852,22 @@ mod tests {
         // test greater: (col1 > 1969-12-30) AND (col2 > 1969-12-30) AND (col3 > 1969-12-30) AND (col4 > 1969-12-30) AND (col5 > 1969-12-30)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("1969-12-30").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(-172800000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(-172800000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(-172800000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(-172800000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(-172800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(-172800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(-172800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(-172800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1637,26 +1878,25 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 1969-12-30) AND (col2 >= 1969-12-30) AND (col3 >= 1969-12-30) AND (col4 >= 1969-12-30) AND (col5 >= 1969-12-30)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("1969-12-30").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(-172800000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(-172800000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(-172800000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(-172800000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("1969-12-30").unwrap())
+                .and(
+                    Reference::new("col2").greater_than_or_equal_to(
+                        Datum::timestamp_micros(-172800000000),
+                    ),
+                )
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(-172800000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(-172800000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(-172800000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1667,10 +1907,22 @@ mod tests {
         // test not eq: (col1 != 1969-12-30) AND (col2 != 1969-12-30) AND (col3 != 1969-12-30) AND (col4 != 1969-12-30) AND (col5 != 1969-12-30)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("1969-12-30").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(-172800000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(-172800000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(-172800000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(-172800000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(-172800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(-172800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(-172800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(-172800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1807,10 +2059,22 @@ mod tests {
         // test less: (col1 < 2017-01-01) AND (col2 < 2017-01-01) AND (col3 < 2017-01-01) AND (col4 < 2017-01-01) AND (col5 < 2017-01-01)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1821,26 +2085,25 @@ mod tests {
         );
 
         // test less or eq: (col1 <= 2017-01-01) AND (col2 <= 2017-01-01) AND (col3 <= 2017-01-01) AND (col4 <= 2017-01-01) AND (col5 <= 2017-01-01)
-        let predicate = Reference::new("col1")
-            .less_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .less_than_or_equal_to(Datum::timestamp_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .less_than_or_equal_to(Datum::timestamptz_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .less_than_or_equal_to(Datum::timestamp_nanos(1483228800000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .less_than_or_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .less_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
+                .and(
+                    Reference::new("col2").less_than_or_equal_to(
+                        Datum::timestamp_micros(1483228800000000),
+                    ),
+                )
+                .and(Reference::new("col3").less_than_or_equal_to(
+                    Datum::timestamptz_micros(1483228800000000),
+                ))
+                .and(Reference::new("col4").less_than_or_equal_to(
+                    Datum::timestamp_nanos(1483228800000000000),
+                ))
+                .and(Reference::new("col5").less_than_or_equal_to(
+                    Datum::timestamptz_nanos(1483228800000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1851,10 +2114,22 @@ mod tests {
         // test greater: (col1 > 2017-01-01) AND (col2 > 2017-01-01) AND (col3 > 2017-01-01) AND (col4 > 2017-01-01) AND (col5 > 2017-01-01)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1865,26 +2140,23 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 2017-01-01) AND (col2 >= 2017-01-01) AND (col3 >= 2017-01-01) AND (col4 >= 2017-01-01) AND (col5 >= 2017-01-01)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(1483228800000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(1483228800000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("2017-01-01").unwrap())
+                .and(Reference::new("col2").greater_than_or_equal_to(
+                    Datum::timestamp_micros(1483228800000000),
+                ))
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(1483228800000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(1483228800000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(1483228800000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -1895,10 +2167,22 @@ mod tests {
         // test not eq: (col1 != 2017-01-01) AND (col2 != 2017-01-01) AND (col3 != 2017-01-01) AND (col4 != 2017-01-01) AND (col5 != 2017-01-01)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("2017-01-01").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(1483228800000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(1483228800000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(1483228800000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(1483228800000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(1483228800000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(1483228800000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(1483228800000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2051,10 +2335,22 @@ mod tests {
         // test less or eq: (col1 <= 1970-01-01) AND (col2 <= 1970-01-01) AND (col3 <= 1970-01-01) AND (col4 <= 1970-01-01) AND (col5 <= 1970-01-01)
         let predicate = Reference::new("col1")
             .less_than_or_equal_to(Datum::date_from_str("1970-01-01").unwrap())
-            .and(Reference::new("col2").less_than_or_equal_to(Datum::timestamp_micros(0)))
-            .and(Reference::new("col3").less_than_or_equal_to(Datum::timestamptz_micros(0)))
-            .and(Reference::new("col4").less_than_or_equal_to(Datum::timestamp_nanos(0)))
-            .and(Reference::new("col5").less_than_or_equal_to(Datum::timestamptz_nanos(0)))
+            .and(
+                Reference::new("col2")
+                    .less_than_or_equal_to(Datum::timestamp_micros(0)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than_or_equal_to(Datum::timestamptz_micros(0)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than_or_equal_to(Datum::timestamp_nanos(0)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than_or_equal_to(Datum::timestamptz_nanos(0)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2083,10 +2379,22 @@ mod tests {
         // test greater or eq: (col1 >= 1970-01-01) AND (col2 >= 1970-01-01) AND (col3 >= 1970-01-01) AND (col4 >= 1970-01-01) AND (col5 >= 1970-01-01)
         let predicate = Reference::new("col1")
             .greater_than_or_equal_to(Datum::date_from_str("1970-01-01").unwrap())
-            .and(Reference::new("col2").greater_than_or_equal_to(Datum::timestamp_micros(0)))
-            .and(Reference::new("col3").greater_than_or_equal_to(Datum::timestamptz_micros(0)))
-            .and(Reference::new("col4").greater_than_or_equal_to(Datum::timestamp_nanos(0)))
-            .and(Reference::new("col5").greater_than_or_equal_to(Datum::timestamptz_nanos(0)))
+            .and(
+                Reference::new("col2")
+                    .greater_than_or_equal_to(Datum::timestamp_micros(0)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than_or_equal_to(Datum::timestamptz_micros(0)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than_or_equal_to(Datum::timestamp_nanos(0)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than_or_equal_to(Datum::timestamptz_nanos(0)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2239,10 +2547,22 @@ mod tests {
         // test less: (col1 < 2017-12-31) AND (col2 < 2017-12-31) AND (col3 < 2017-12-31) AND (col4 < 2017-12-31) AND (col5 < 2017-12-31)
         let predicate = Reference::new("col1")
             .less_than(Datum::date_from_str("2017-12-31").unwrap())
-            .and(Reference::new("col2").less_than(Datum::timestamp_micros(1514764799000000)))
-            .and(Reference::new("col3").less_than(Datum::timestamptz_micros(1514764799000000)))
-            .and(Reference::new("col4").less_than(Datum::timestamp_nanos(1514764799000000000)))
-            .and(Reference::new("col5").less_than(Datum::timestamptz_nanos(1514764799000000000)))
+            .and(
+                Reference::new("col2")
+                    .less_than(Datum::timestamp_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .less_than(Datum::timestamptz_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .less_than(Datum::timestamp_nanos(1514764799000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .less_than(Datum::timestamptz_nanos(1514764799000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2253,26 +2573,25 @@ mod tests {
         );
 
         // test less or eq: (col1 <= 2017-12-31) AND (col2 <= 2017-12-31) AND (col3 <= 2017-12-31) AND (col4 <= 2017-12-31) AND (col5 <= 2017-12-31)
-        let predicate = Reference::new("col1")
-            .less_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
-            .and(
-                Reference::new("col2")
-                    .less_than_or_equal_to(Datum::timestamp_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .less_than_or_equal_to(Datum::timestamptz_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .less_than_or_equal_to(Datum::timestamp_nanos(1514764799000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .less_than_or_equal_to(Datum::timestamptz_nanos(1514764799000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .less_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
+                .and(
+                    Reference::new("col2").less_than_or_equal_to(
+                        Datum::timestamp_micros(1514764799000000),
+                    ),
+                )
+                .and(Reference::new("col3").less_than_or_equal_to(
+                    Datum::timestamptz_micros(1514764799000000),
+                ))
+                .and(Reference::new("col4").less_than_or_equal_to(
+                    Datum::timestamp_nanos(1514764799000000000),
+                ))
+                .and(Reference::new("col5").less_than_or_equal_to(
+                    Datum::timestamptz_nanos(1514764799000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -2283,10 +2602,22 @@ mod tests {
         // test greater: (col1 > 2017-12-31) AND (col2 > 2017-12-31) AND (col3 > 2017-12-31) AND (col4 > 2017-12-31) AND (col5 > 2017-12-31)
         let predicate = Reference::new("col1")
             .greater_than(Datum::date_from_str("2017-12-31").unwrap())
-            .and(Reference::new("col2").greater_than(Datum::timestamp_micros(1514764799000000)))
-            .and(Reference::new("col3").greater_than(Datum::timestamptz_micros(1514764799000000)))
-            .and(Reference::new("col4").greater_than(Datum::timestamp_nanos(1514764799000000000)))
-            .and(Reference::new("col5").greater_than(Datum::timestamptz_nanos(1514764799000000000)))
+            .and(
+                Reference::new("col2")
+                    .greater_than(Datum::timestamp_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .greater_than(Datum::timestamptz_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .greater_than(Datum::timestamp_nanos(1514764799000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .greater_than(Datum::timestamptz_nanos(1514764799000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2297,26 +2628,23 @@ mod tests {
         );
 
         // test greater or eq: (col1 >= 2017-12-31) AND (col2 >= 2017-12-31) AND (col3 >= 2017-12-31) AND (col4 >= 2017-12-31) AND (col5 >= 2017-12-31)
-        let predicate = Reference::new("col1")
-            .greater_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
-            .and(
-                Reference::new("col2")
-                    .greater_than_or_equal_to(Datum::timestamp_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col3")
-                    .greater_than_or_equal_to(Datum::timestamptz_micros(1514764799000000)),
-            )
-            .and(
-                Reference::new("col4")
-                    .greater_than_or_equal_to(Datum::timestamp_nanos(1514764799000000000)),
-            )
-            .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::timestamptz_nanos(1514764799000000000)),
-            )
-            .bind(schema.clone(), false)
-            .unwrap();
+        let predicate =
+            Reference::new("col1")
+                .greater_than_or_equal_to(Datum::date_from_str("2017-12-31").unwrap())
+                .and(Reference::new("col2").greater_than_or_equal_to(
+                    Datum::timestamp_micros(1514764799000000),
+                ))
+                .and(Reference::new("col3").greater_than_or_equal_to(
+                    Datum::timestamptz_micros(1514764799000000),
+                ))
+                .and(Reference::new("col4").greater_than_or_equal_to(
+                    Datum::timestamp_nanos(1514764799000000000),
+                ))
+                .and(Reference::new("col5").greater_than_or_equal_to(
+                    Datum::timestamptz_nanos(1514764799000000000),
+                ))
+                .bind(schema.clone(), false)
+                .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -2327,10 +2655,22 @@ mod tests {
         // test not eq: (col1 != 2017-12-31) AND (col2 != 2017-12-31) AND (col3 != 2017-12-31) AND (col4 != 2017-12-31) AND (col5 != 2017-12-31)
         let predicate = Reference::new("col1")
             .not_equal_to(Datum::date_from_str("2017-12-31").unwrap())
-            .and(Reference::new("col2").not_equal_to(Datum::timestamp_micros(1514764799000000)))
-            .and(Reference::new("col3").not_equal_to(Datum::timestamptz_micros(1514764799000000)))
-            .and(Reference::new("col4").not_equal_to(Datum::timestamp_nanos(1514764799000000000)))
-            .and(Reference::new("col5").not_equal_to(Datum::timestamptz_nanos(1514764799000000000)))
+            .and(
+                Reference::new("col2")
+                    .not_equal_to(Datum::timestamp_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col3")
+                    .not_equal_to(Datum::timestamptz_micros(1514764799000000)),
+            )
+            .and(
+                Reference::new("col4")
+                    .not_equal_to(Datum::timestamp_nanos(1514764799000000000)),
+            )
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::timestamptz_nanos(1514764799000000000)),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2487,7 +2827,10 @@ mod tests {
                 PrimitiveLiteral::Int128(10000),
             )))
             .and(Reference::new("col4").not_equal_to(Datum::string("abcdefg")))
-            .and(Reference::new("col5").not_equal_to(Datum::binary("abcdefg".as_bytes().to_vec())))
+            .and(
+                Reference::new("col5")
+                    .not_equal_to(Datum::binary("abcdefg".as_bytes().to_vec())),
+            )
             .and(Reference::new("col6").not_equal_to(Datum::uuid(
                 Uuid::parse_str("00000000-0000-007b-0000-0000000001c8").unwrap(),
             )))
@@ -2509,17 +2852,20 @@ mod tests {
             )))
             .and(Reference::new("col4").greater_than(Datum::string("abcdefg")))
             .and(
-                Reference::new("col5")
-                    .greater_than_or_equal_to(Datum::binary("abcdefg".as_bytes().to_vec())),
+                Reference::new("col5").greater_than_or_equal_to(Datum::binary(
+                    "abcdefg".as_bytes().to_vec(),
+                )),
             )
             .and(
                 Reference::new("col6").is_in(
                     vec![
                         Datum::uuid(
-                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c8").unwrap(),
+                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c8")
+                                .unwrap(),
                         ),
                         Datum::uuid(
-                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c9").unwrap(),
+                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c9")
+                                .unwrap(),
                         ),
                     ]
                     .into_iter(),
@@ -2531,67 +2877,73 @@ mod tests {
         assert_eq!(result.to_string(), "FALSE".to_string());
 
         // test not in
-        let predicate =
-            Reference::new("col1")
-                .is_not_in(vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter())
-                .and(Reference::new("col2").is_not_in(
-                    vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
-                ))
-                .and(
-                    Reference::new("col3").is_not_in(
-                        vec![
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(9900),
-                            ),
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(10000),
-                            ),
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(10100),
-                            ),
-                        ]
+        let predicate = Reference::new("col1")
+            .is_not_in(
+                vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter(),
+            )
+            .and(Reference::new("col2").is_not_in(
+                vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
+            ))
+            .and(
+                Reference::new("col3").is_not_in(
+                    vec![
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(9900),
+                        ),
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(10000),
+                        ),
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(10100),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            )
+            .and(
+                Reference::new("col4").is_not_in(
+                    vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")]
                         .into_iter(),
-                    ),
-                )
-                .and(Reference::new("col4").is_not_in(
-                    vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")].into_iter(),
-                ))
-                .and(
-                    Reference::new("col5").is_not_in(
-                        vec![
-                            Datum::binary("abcdefg".as_bytes().to_vec()),
-                            Datum::binary("abcdehij".as_bytes().to_vec()),
-                        ]
-                        .into_iter(),
-                    ),
-                )
-                .and(
-                    Reference::new("col6").is_not_in(
-                        vec![
-                            Datum::uuid(
-                                Uuid::parse_str("00000000-0000-007b-0000-0000000001c8").unwrap(),
-                            ),
-                            Datum::uuid(
-                                Uuid::parse_str("00000000-0000-01c8-0000-00000000007b").unwrap(),
-                            ),
-                        ]
-                        .into_iter(),
-                    ),
-                )
-                .bind(schema.clone(), false)
-                .unwrap();
+                ),
+            )
+            .and(
+                Reference::new("col5").is_not_in(
+                    vec![
+                        Datum::binary("abcdefg".as_bytes().to_vec()),
+                        Datum::binary("abcdehij".as_bytes().to_vec()),
+                    ]
+                    .into_iter(),
+                ),
+            )
+            .and(
+                Reference::new("col6").is_not_in(
+                    vec![
+                        Datum::uuid(
+                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c8")
+                                .unwrap(),
+                        ),
+                        Datum::uuid(
+                            Uuid::parse_str("00000000-0000-01c8-0000-00000000007b")
+                                .unwrap(),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            )
+            .bind(schema.clone(), false)
+            .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(result.to_string(), "(((((pcol1 NOT IN (8, 7, 6)) AND (pcol2 NOT IN (8, 7, 6))) AND (pcol3 NOT IN (6, 2))) AND (pcol4 NOT IN (9, 4))) AND (pcol5 NOT IN (4, 6))) AND (pcol6 NOT IN (4, 6))".to_string());
     }
@@ -2841,42 +3193,43 @@ mod tests {
         );
 
         // test not in
-        let predicate =
-            Reference::new("col1")
-                .is_not_in(vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter())
-                .and(Reference::new("col2").is_not_in(
-                    vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
-                ))
-                .and(
-                    Reference::new("col3").is_not_in(
-                        vec![
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(9900),
-                            ),
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(10000),
-                            ),
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(10100),
-                            ),
-                        ]
-                        .into_iter(),
-                    ),
-                )
-                .bind(schema.clone(), false)
-                .unwrap();
+        let predicate = Reference::new("col1")
+            .is_not_in(
+                vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter(),
+            )
+            .and(Reference::new("col2").is_not_in(
+                vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
+            ))
+            .and(
+                Reference::new("col3").is_not_in(
+                    vec![
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(9900),
+                        ),
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(10000),
+                        ),
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(10100),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            )
+            .bind(schema.clone(), false)
+            .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -2887,10 +3240,9 @@ mod tests {
         // test in
         let predicate = Reference::new("col1")
             .is_in(vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter())
-            .and(
-                Reference::new("col2")
-                    .is_in(vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter()),
-            )
+            .and(Reference::new("col2").is_in(
+                vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
+            ))
             .and(
                 Reference::new("col3").is_in(
                     vec![
@@ -3064,42 +3416,43 @@ mod tests {
         );
 
         // test not in
-        let predicate =
-            Reference::new("col1")
-                .is_not_in(vec![Datum::int(99), Datum::int(100), Datum::int(98)].into_iter())
-                .and(Reference::new("col2").is_not_in(
-                    vec![Datum::long(99), Datum::long(100), Datum::long(98)].into_iter(),
-                ))
-                .and(
-                    Reference::new("col3").is_not_in(
-                        vec![
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(9999),
-                            ),
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(9899),
-                            ),
-                            Datum::new(
-                                PrimitiveType::Decimal {
-                                    precision: 9,
-                                    scale: 2,
-                                },
-                                PrimitiveLiteral::Int128(10099),
-                            ),
-                        ]
-                        .into_iter(),
-                    ),
-                )
-                .bind(schema.clone(), false)
-                .unwrap();
+        let predicate = Reference::new("col1")
+            .is_not_in(
+                vec![Datum::int(99), Datum::int(100), Datum::int(98)].into_iter(),
+            )
+            .and(Reference::new("col2").is_not_in(
+                vec![Datum::long(99), Datum::long(100), Datum::long(98)].into_iter(),
+            ))
+            .and(
+                Reference::new("col3").is_not_in(
+                    vec![
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(9999),
+                        ),
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(9899),
+                        ),
+                        Datum::new(
+                            PrimitiveType::Decimal {
+                                precision: 9,
+                                scale: 2,
+                            },
+                            PrimitiveLiteral::Int128(10099),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            )
+            .bind(schema.clone(), false)
+            .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
         assert_eq!(
             result.to_string(),
@@ -3110,10 +3463,9 @@ mod tests {
         // test in
         let predicate = Reference::new("col1")
             .is_in(vec![Datum::int(99), Datum::int(100), Datum::int(98)].into_iter())
-            .and(
-                Reference::new("col2")
-                    .is_in(vec![Datum::long(99), Datum::long(100), Datum::long(98)].into_iter()),
-            )
+            .and(Reference::new("col2").is_in(
+                vec![Datum::long(99), Datum::long(100), Datum::long(98)].into_iter(),
+            ))
             .and(
                 Reference::new("col3").is_in(
                     vec![
@@ -3214,7 +3566,10 @@ mod tests {
 
         // test not in
         let predicate = Reference::new("col1")
-            .is_not_in(vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")].into_iter())
+            .is_not_in(
+                vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")]
+                    .into_iter(),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3222,7 +3577,10 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")].into_iter())
+            .is_in(
+                vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")]
+                    .into_iter(),
+            )
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();

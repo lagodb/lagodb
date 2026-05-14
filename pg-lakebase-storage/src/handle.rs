@@ -62,7 +62,10 @@ impl fmt::Debug for OpenFileState {
             .field("size", &self.size)
             .field("etag", &self.etag)
             .field("flags", &self.flags)
-            .field("residency", &self.residency.as_ref().map(|r| r.state_hint()))
+            .field(
+                "residency",
+                &self.residency.as_ref().map(|r| r.state_hint()),
+            )
             .finish()
     }
 }

@@ -4,7 +4,9 @@
 use std::time::Duration;
 
 use super::cleanup::CacheCleanupConfig;
-use crate::object::{normalize_chunk_size, DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT};
+use crate::object::{
+    DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, normalize_chunk_size,
+};
 
 pub const DEFAULT_MAX_READ_SIZE: u32 = 1024 * 1024;
 pub const DEFAULT_CACHE_TOUCH_GRANULARITY: Duration = Duration::from_secs(60);
@@ -38,7 +40,11 @@ impl StorageServiceConfig {
         self
     }
 
-    pub fn with_cache_limits(mut self, small_object_limit: u64, chunk_size: u64) -> Self {
+    pub fn with_cache_limits(
+        mut self,
+        small_object_limit: u64,
+        chunk_size: u64,
+    ) -> Self {
         self.small_object_limit = small_object_limit;
         self.chunk_size = normalize_chunk_size(chunk_size);
         self
@@ -49,7 +55,10 @@ impl StorageServiceConfig {
         self
     }
 
-    pub fn with_cache_cleanup_config(mut self, cache_cleanup: CacheCleanupConfig) -> Self {
+    pub fn with_cache_cleanup_config(
+        mut self,
+        cache_cleanup: CacheCleanupConfig,
+    ) -> Self {
         self.cache_cleanup = cache_cleanup.normalized();
         self
     }

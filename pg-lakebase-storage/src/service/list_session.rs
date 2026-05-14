@@ -44,12 +44,12 @@
 //! preemptively.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 
 use crate::error::StorageResult;
 use crate::object::ListEntry;
@@ -101,7 +101,10 @@ impl ListSessionTable {
     }
 
     /// Register a fresh stream and return the cursor that names it.
-    pub(crate) fn insert(&self, stream: BoxStream<'static, StorageResult<ListEntry>>) -> ListCursor {
+    pub(crate) fn insert(
+        &self,
+        stream: BoxStream<'static, StorageResult<ListEntry>>,
+    ) -> ListCursor {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // The cursor is opaque to the client. The "ls-" prefix is purely so a stray log line
         // surfaces what the bytes are — the client must not parse it.
@@ -144,7 +147,9 @@ impl ListSessionTable {
         let mut session = {
             let mut sessions = self.lock();
             self.expire_idle_locked(&mut sessions);
-            sessions.remove(cursor).ok_or(ListSessionError::UnknownCursor)?
+            sessions
+                .remove(cursor)
+                .ok_or(ListSessionError::UnknownCursor)?
         };
 
         let mut entries = Vec::with_capacity(count.min(64));
@@ -158,11 +163,11 @@ impl ListSessionTable {
                     // recover. Drop the session here (we already removed it from the table
                     // above) and surface the error.
                     return Err(ListSessionError::StreamError(error));
-                },
+                }
                 None => {
                     exhausted = true;
                     break;
-                },
+                }
             }
         }
 
@@ -188,7 +193,9 @@ impl ListSessionTable {
 
     fn expire_idle_locked(&self, sessions: &mut HashMap<ListCursor, ListSession>) {
         let now = Instant::now();
-        sessions.retain(|_, session| now.duration_since(session.last_used) < self.idle_ttl);
+        sessions.retain(|_, session| {
+            now.duration_since(session.last_used) < self.idle_ttl
+        });
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ListCursor, ListSession>> {
@@ -285,7 +292,14 @@ mod tests {
         );
 
         let err = table.drain(&cursor, 5).await.unwrap_err();
-        assert!(matches!(err, ListSessionError::StreamError(_)), "expected StreamError, got {err:?}");
-        assert_eq!(table.len(), 0, "errored session must be removed from the table");
+        assert!(
+            matches!(err, ListSessionError::StreamError(_)),
+            "expected StreamError, got {err:?}"
+        );
+        assert_eq!(
+            table.len(),
+            0,
+            "errored session must be removed from the table"
+        );
     }
 }

@@ -62,17 +62,29 @@ pub trait SchemaVisitor {
     /// Called after struct's field type visited.
     fn field(&mut self, field: &NestedFieldRef, value: Self::T) -> Result<Self::T>;
     /// Called after struct's fields visited.
-    fn r#struct(&mut self, r#struct: &StructType, results: Vec<Self::T>) -> Result<Self::T>;
+    fn r#struct(
+        &mut self,
+        r#struct: &StructType,
+        results: Vec<Self::T>,
+    ) -> Result<Self::T>;
     /// Called after list fields visited.
     fn list(&mut self, list: &ListType, value: Self::T) -> Result<Self::T>;
     /// Called after map's key and value fields visited.
-    fn map(&mut self, map: &MapType, key_value: Self::T, value: Self::T) -> Result<Self::T>;
+    fn map(
+        &mut self,
+        map: &MapType,
+        key_value: Self::T,
+        value: Self::T,
+    ) -> Result<Self::T>;
     /// Called when see a primitive type.
     fn primitive(&mut self, p: &PrimitiveType) -> Result<Self::T>;
 }
 
 /// Visiting a type in post order.
-pub(crate) fn visit_type<V: SchemaVisitor>(r#type: &Type, visitor: &mut V) -> Result<V::T> {
+pub(crate) fn visit_type<V: SchemaVisitor>(
+    r#type: &Type,
+    visitor: &mut V,
+) -> Result<V::T> {
     match r#type {
         Type::Primitive(p) => visitor.primitive(p),
         Type::List(list) => {
@@ -103,7 +115,10 @@ pub(crate) fn visit_type<V: SchemaVisitor>(r#type: &Type, visitor: &mut V) -> Re
 }
 
 /// Visit struct type in post order.
-pub fn visit_struct<V: SchemaVisitor>(s: &StructType, visitor: &mut V) -> Result<V::T> {
+pub fn visit_struct<V: SchemaVisitor>(
+    s: &StructType,
+    visitor: &mut V,
+) -> Result<V::T> {
     let mut results = Vec::with_capacity(s.fields().len());
     for field in s.fields() {
         visitor.before_struct_field(field)?;
@@ -117,7 +132,10 @@ pub fn visit_struct<V: SchemaVisitor>(s: &StructType, visitor: &mut V) -> Result
 }
 
 /// Visit schema in post order.
-pub fn visit_schema<V: SchemaVisitor>(schema: &Schema, visitor: &mut V) -> Result<V::T> {
+pub fn visit_schema<V: SchemaVisitor>(
+    schema: &Schema,
+    visitor: &mut V,
+) -> Result<V::T> {
     let result = visit_struct(&schema.r#struct, visitor)?;
     visitor.schema(schema, result)
 }
@@ -130,23 +148,43 @@ pub trait SchemaWithPartnerVisitor<P> {
     type T;
 
     /// Called before struct field.
-    fn before_struct_field(&mut self, _field: &NestedFieldRef, _partner: &P) -> Result<()> {
+    fn before_struct_field(
+        &mut self,
+        _field: &NestedFieldRef,
+        _partner: &P,
+    ) -> Result<()> {
         Ok(())
     }
     /// Called after struct field.
-    fn after_struct_field(&mut self, _field: &NestedFieldRef, _partner: &P) -> Result<()> {
+    fn after_struct_field(
+        &mut self,
+        _field: &NestedFieldRef,
+        _partner: &P,
+    ) -> Result<()> {
         Ok(())
     }
     /// Called before list field.
-    fn before_list_element(&mut self, _field: &NestedFieldRef, _partner: &P) -> Result<()> {
+    fn before_list_element(
+        &mut self,
+        _field: &NestedFieldRef,
+        _partner: &P,
+    ) -> Result<()> {
         Ok(())
     }
     /// Called after list field.
-    fn after_list_element(&mut self, _field: &NestedFieldRef, _partner: &P) -> Result<()> {
+    fn after_list_element(
+        &mut self,
+        _field: &NestedFieldRef,
+        _partner: &P,
+    ) -> Result<()> {
         Ok(())
     }
     /// Called before map key field.
-    fn before_map_key(&mut self, _field: &NestedFieldRef, _partner: &P) -> Result<()> {
+    fn before_map_key(
+        &mut self,
+        _field: &NestedFieldRef,
+        _partner: &P,
+    ) -> Result<()> {
         Ok(())
     }
     /// Called after map key field.
@@ -154,18 +192,36 @@ pub trait SchemaWithPartnerVisitor<P> {
         Ok(())
     }
     /// Called before map value field.
-    fn before_map_value(&mut self, _field: &NestedFieldRef, _partner: &P) -> Result<()> {
+    fn before_map_value(
+        &mut self,
+        _field: &NestedFieldRef,
+        _partner: &P,
+    ) -> Result<()> {
         Ok(())
     }
     /// Called after map value field.
-    fn after_map_value(&mut self, _field: &NestedFieldRef, _partner: &P) -> Result<()> {
+    fn after_map_value(
+        &mut self,
+        _field: &NestedFieldRef,
+        _partner: &P,
+    ) -> Result<()> {
         Ok(())
     }
 
     /// Called after schema's type visited.
-    fn schema(&mut self, schema: &Schema, partner: &P, value: Self::T) -> Result<Self::T>;
+    fn schema(
+        &mut self,
+        schema: &Schema,
+        partner: &P,
+        value: Self::T,
+    ) -> Result<Self::T>;
     /// Called after struct's field type visited.
-    fn field(&mut self, field: &NestedFieldRef, partner: &P, value: Self::T) -> Result<Self::T>;
+    fn field(
+        &mut self,
+        field: &NestedFieldRef,
+        partner: &P,
+        value: Self::T,
+    ) -> Result<Self::T>;
     /// Called after struct's fields visited.
     fn r#struct(
         &mut self,
@@ -174,7 +230,12 @@ pub trait SchemaWithPartnerVisitor<P> {
         results: Vec<Self::T>,
     ) -> Result<Self::T>;
     /// Called after list fields visited.
-    fn list(&mut self, list: &ListType, partner: &P, value: Self::T) -> Result<Self::T>;
+    fn list(
+        &mut self,
+        list: &ListType,
+        partner: &P,
+        value: Self::T,
+    ) -> Result<Self::T>;
     /// Called after map's key and value fields visited.
     fn map(
         &mut self,
@@ -192,7 +253,11 @@ pub trait PartnerAccessor<P> {
     /// Get the struct partner from schema partner.
     fn struct_partner<'a>(&self, schema_partner: &'a P) -> Result<&'a P>;
     /// Get the field partner from struct partner.
-    fn field_partner<'a>(&self, struct_partner: &'a P, field: &NestedField) -> Result<&'a P>;
+    fn field_partner<'a>(
+        &self,
+        struct_partner: &'a P,
+        field: &NestedField,
+    ) -> Result<&'a P>;
     /// Get the list element partner from list partner.
     fn list_element_partner<'a>(&self, list_partner: &'a P) -> Result<&'a P>;
     /// Get the map key partner from map partner.
@@ -202,7 +267,11 @@ pub trait PartnerAccessor<P> {
 }
 
 /// Visiting a type in post order.
-pub(crate) fn visit_type_with_partner<P, V: SchemaWithPartnerVisitor<P>, A: PartnerAccessor<P>>(
+pub(crate) fn visit_type_with_partner<
+    P,
+    V: SchemaWithPartnerVisitor<P>,
+    A: PartnerAccessor<P>,
+>(
     r#type: &Type,
     partner: &P,
     visitor: &mut V,
@@ -225,8 +294,12 @@ pub(crate) fn visit_type_with_partner<P, V: SchemaWithPartnerVisitor<P>, A: Part
         Type::Map(map) => {
             let key_partner = accessor.map_key_partner(partner)?;
             visitor.before_map_key(&map.key_field, key_partner)?;
-            let key_result =
-                visit_type_with_partner(&map.key_field.field_type, key_partner, visitor, accessor)?;
+            let key_result = visit_type_with_partner(
+                &map.key_field.field_type,
+                key_partner,
+                visitor,
+                accessor,
+            )?;
             visitor.after_map_key(&map.key_field, key_partner)?;
 
             let value_partner = accessor.map_value_partner(partner)?;
@@ -246,7 +319,11 @@ pub(crate) fn visit_type_with_partner<P, V: SchemaWithPartnerVisitor<P>, A: Part
 }
 
 /// Visit struct type in post order.
-pub fn visit_struct_with_partner<P, V: SchemaWithPartnerVisitor<P>, A: PartnerAccessor<P>>(
+pub fn visit_struct_with_partner<
+    P,
+    V: SchemaWithPartnerVisitor<P>,
+    A: PartnerAccessor<P>,
+>(
     s: &StructType,
     partner: &P,
     visitor: &mut V,
@@ -256,7 +333,12 @@ pub fn visit_struct_with_partner<P, V: SchemaWithPartnerVisitor<P>, A: PartnerAc
     for field in s.fields() {
         let field_partner = accessor.field_partner(partner, field)?;
         visitor.before_struct_field(field, field_partner)?;
-        let result = visit_type_with_partner(&field.field_type, field_partner, visitor, accessor)?;
+        let result = visit_type_with_partner(
+            &field.field_type,
+            field_partner,
+            visitor,
+            accessor,
+        )?;
         visitor.after_struct_field(field, field_partner)?;
         let result = visitor.field(field, field_partner, result)?;
         results.push(result);
@@ -266,7 +348,11 @@ pub fn visit_struct_with_partner<P, V: SchemaWithPartnerVisitor<P>, A: PartnerAc
 }
 
 /// Visit schema in post order.
-pub fn visit_schema_with_partner<P, V: SchemaWithPartnerVisitor<P>, A: PartnerAccessor<P>>(
+pub fn visit_schema_with_partner<
+    P,
+    V: SchemaWithPartnerVisitor<P>,
+    A: PartnerAccessor<P>,
+>(
     schema: &Schema,
     partner: &P,
     visitor: &mut V,

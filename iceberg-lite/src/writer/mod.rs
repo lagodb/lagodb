@@ -382,7 +382,9 @@ type DefaultInput = RecordBatch;
 type DefaultOutput = Vec<DataFile>;
 
 /// The builder for iceberg writer.
-pub trait IcebergWriterBuilder<I = DefaultInput, O = DefaultOutput>: Send + Sync + 'static {
+pub trait IcebergWriterBuilder<I = DefaultInput, O = DefaultOutput>:
+    Send + Sync + 'static
+{
     /// The associated writer type.
     type R: IcebergWriter<I, O>;
     /// Build the iceberg writer with an optional partition key.

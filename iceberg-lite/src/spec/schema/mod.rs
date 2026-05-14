@@ -40,8 +40,8 @@ use super::NestedField;
 use crate::error::Result;
 use crate::expr::accessor::StructAccessor;
 use crate::spec::datatypes::{
-    LIST_FIELD_NAME, ListType, MAP_KEY_FIELD_NAME, MAP_VALUE_FIELD_NAME, MapType, NestedFieldRef,
-    PrimitiveType, StructType, Type,
+    LIST_FIELD_NAME, ListType, MAP_KEY_FIELD_NAME, MAP_VALUE_FIELD_NAME, MapType,
+    NestedFieldRef, PrimitiveType, StructType, Type,
 };
 use crate::{Error, ErrorKind, ensure_data_valid};
 
@@ -93,7 +93,10 @@ pub struct SchemaBuilder {
 
 impl SchemaBuilder {
     /// Add fields to schema builder.
-    pub fn with_fields(mut self, fields: impl IntoIterator<Item = NestedFieldRef>) -> Self {
+    pub fn with_fields(
+        mut self,
+        fields: impl IntoIterator<Item = NestedFieldRef>,
+    ) -> Self {
         self.fields.extend(fields);
         self
     }
@@ -103,7 +106,8 @@ impl SchemaBuilder {
     ///
     /// All specified aliases and identifier fields will be updated to the new field-ids.
     pub(crate) fn with_reassigned_field_ids(mut self, start_from: u32) -> Self {
-        self.reassign_field_ids_from = Some(start_from.try_into().unwrap_or(i32::MAX));
+        self.reassign_field_ids_from =
+            Some(start_from.try_into().unwrap_or(i32::MAX));
         self
     }
 
@@ -114,7 +118,10 @@ impl SchemaBuilder {
     }
 
     /// Set identifier field ids.
-    pub fn with_identifier_field_ids(mut self, ids: impl IntoIterator<Item = i32>) -> Self {
+    pub fn with_identifier_field_ids(
+        mut self,
+        ids: impl IntoIterator<Item = i32>,
+    ) -> Self {
         self.identifier_field_ids.extend(ids);
         self
     }
@@ -168,10 +175,12 @@ impl SchemaBuilder {
 
         if let Some(start_from) = self.reassign_field_ids_from {
             let mut id_reassigner = ReassignFieldIds::new(start_from);
-            let new_fields = id_reassigner.reassign_field_ids(schema.r#struct.fields().to_vec())?;
-            let new_identifier_field_ids =
-                id_reassigner.apply_to_identifier_fields(schema.identifier_field_ids)?;
-            let new_alias_to_id = id_reassigner.apply_to_aliases(schema.alias_to_id.clone())?;
+            let new_fields = id_reassigner
+                .reassign_field_ids(schema.r#struct.fields().to_vec())?;
+            let new_identifier_field_ids = id_reassigner
+                .apply_to_identifier_fields(schema.identifier_field_ids)?;
+            let new_alias_to_id =
+                id_reassigner.apply_to_aliases(schema.alias_to_id.clone())?;
 
             schema = Schema::builder()
                 .with_schema_id(schema.schema_id)
@@ -191,14 +200,18 @@ impl SchemaBuilder {
             match field.field_type.as_ref() {
                 Type::Primitive(prim_type) => {
                     // add an accessor for this field
-                    let accessor = Arc::new(StructAccessor::new(pos, prim_type.clone()));
+                    let accessor =
+                        Arc::new(StructAccessor::new(pos, prim_type.clone()));
                     map.insert(field.id, accessor.clone());
                 }
 
                 Type::Struct(nested) => {
                     // add accessors for nested fields
-                    for (field_id, accessor) in Self::build_accessors_nested(nested.fields()) {
-                        let new_accessor = Arc::new(StructAccessor::wrap(pos, accessor));
+                    for (field_id, accessor) in
+                        Self::build_accessors_nested(nested.fields())
+                    {
+                        let new_accessor =
+                            Arc::new(StructAccessor::wrap(pos, accessor));
                         map.insert(field_id, new_accessor.clone());
                     }
                 }
@@ -211,20 +224,25 @@ impl SchemaBuilder {
         map
     }
 
-    fn build_accessors_nested(fields: &[NestedFieldRef]) -> Vec<(i32, Box<StructAccessor>)> {
+    fn build_accessors_nested(
+        fields: &[NestedFieldRef],
+    ) -> Vec<(i32, Box<StructAccessor>)> {
         let mut results = vec![];
         for (pos, field) in fields.iter().enumerate() {
             match field.field_type.as_ref() {
                 Type::Primitive(prim_type) => {
-                    let accessor = Box::new(StructAccessor::new(pos, prim_type.clone()));
+                    let accessor =
+                        Box::new(StructAccessor::new(pos, prim_type.clone()));
                     results.push((field.id, accessor));
                 }
                 Type::Struct(nested) => {
-                    let nested_accessors = Self::build_accessors_nested(nested.fields());
+                    let nested_accessors =
+                        Self::build_accessors_nested(nested.fields());
 
                     let wrapped_nested_accessors =
                         nested_accessors.into_iter().map(|(id, accessor)| {
-                            let new_accessor = Box::new(StructAccessor::wrap(pos, accessor));
+                            let new_accessor =
+                                Box::new(StructAccessor::wrap(pos, accessor));
                             (id, new_accessor.clone())
                         });
 
@@ -345,7 +363,10 @@ impl Schema {
     /// Get field by field name, but in case-insensitive way.
     ///
     /// Both full name and short name could work here.
-    pub fn field_by_name_case_insensitive(&self, field_name: &str) -> Option<&NestedFieldRef> {
+    pub fn field_by_name_case_insensitive(
+        &self,
+        field_name: &str,
+    ) -> Option<&NestedFieldRef> {
         self.lowercase_name_to_id
             .get(&field_name.to_lowercase())
             .and_then(|id| self.field_by_id(*id))
@@ -439,7 +460,8 @@ mod tests {
 
     use crate::spec::datatypes::Type::{List, Map, Primitive, Struct};
     use crate::spec::datatypes::{
-        ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, StructType, Type,
+        ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, StructType,
+        Type,
     };
     use crate::spec::schema::Schema;
     use crate::spec::values::Map as MapValue;
@@ -448,9 +470,11 @@ mod tests {
     #[test]
     fn test_construct_schema() {
         let field1: NestedFieldRef =
-            NestedField::required(1, "f1", Type::Primitive(PrimitiveType::Boolean)).into();
+            NestedField::required(1, "f1", Type::Primitive(PrimitiveType::Boolean))
+                .into();
         let field2: NestedFieldRef =
-            NestedField::optional(2, "f2", Type::Primitive(PrimitiveType::Int)).into();
+            NestedField::optional(2, "f2", Type::Primitive(PrimitiveType::Int))
+                .into();
 
         let schema = Schema::builder()
             .with_fields(vec![field1.clone()])
@@ -471,9 +495,20 @@ mod tests {
             .with_schema_id(1)
             .with_identifier_field_ids(vec![2])
             .with_fields(vec![
-                NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(
+                    1,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    3,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -510,9 +545,20 @@ mod tests {
             .with_schema_id(1)
             .with_identifier_field_ids(vec![2])
             .with_fields(vec![
-                NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(
+                    1,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    3,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
                 NestedField::required(
                     4,
                     "qux",
@@ -586,10 +632,18 @@ mod tests {
                     15,
                     "person",
                     Type::Struct(StructType::new(vec![
-                        NestedField::optional(16, "name", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::required(17, "age", Type::Primitive(PrimitiveType::Int))
-                            .into(),
+                        NestedField::optional(
+                            16,
+                            "name",
+                            Type::Primitive(PrimitiveType::String),
+                        )
+                        .into(),
+                        NestedField::required(
+                            17,
+                            "age",
+                            Type::Primitive(PrimitiveType::Int),
+                        )
+                        .into(),
                     ])),
                 )
                 .into(),
@@ -617,10 +671,13 @@ table {
             .with_schema_id(1)
             .with_identifier_field_ids(vec![1])
             .with_fields(vec![
-                NestedField::required(1, "foo", Primitive(PrimitiveType::String)).into(),
+                NestedField::required(1, "foo", Primitive(PrimitiveType::String))
+                    .into(),
                 NestedField::required(2, "bar", Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(3, "baz", Primitive(PrimitiveType::Boolean)).into(),
-                NestedField::optional(4, "baz", Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(3, "baz", Primitive(PrimitiveType::Boolean))
+                    .into(),
+                NestedField::optional(4, "baz", Primitive(PrimitiveType::Boolean))
+                    .into(),
             ])
             .build();
 
@@ -910,21 +967,37 @@ table {
                 NestedField::list_element(
                     12,
                     Struct(StructType::new(vec![
-                        NestedField::optional(13, "latitude", Primitive(PrimitiveType::Float))
-                            .into(),
-                        NestedField::optional(14, "longitude", Primitive(PrimitiveType::Float))
-                            .into(),
+                        NestedField::optional(
+                            13,
+                            "latitude",
+                            Primitive(PrimitiveType::Float),
+                        )
+                        .into(),
+                        NestedField::optional(
+                            14,
+                            "longitude",
+                            Primitive(PrimitiveType::Float),
+                        )
+                        .into(),
                     ])),
                     true,
                 ),
             ),
             (
                 13,
-                NestedField::optional(13, "latitude", Primitive(PrimitiveType::Float)),
+                NestedField::optional(
+                    13,
+                    "latitude",
+                    Primitive(PrimitiveType::Float),
+                ),
             ),
             (
                 14,
-                NestedField::optional(14, "longitude", Primitive(PrimitiveType::Float)),
+                NestedField::optional(
+                    14,
+                    "longitude",
+                    Primitive(PrimitiveType::Float),
+                ),
             ),
             (
                 15,
@@ -932,16 +1005,28 @@ table {
                     15,
                     "person",
                     Type::Struct(StructType::new(vec![
-                        NestedField::optional(16, "name", Type::Primitive(PrimitiveType::String))
-                            .into(),
-                        NestedField::required(17, "age", Type::Primitive(PrimitiveType::Int))
-                            .into(),
+                        NestedField::optional(
+                            16,
+                            "name",
+                            Type::Primitive(PrimitiveType::String),
+                        )
+                        .into(),
+                        NestedField::required(
+                            17,
+                            "age",
+                            Type::Primitive(PrimitiveType::Int),
+                        )
+                        .into(),
                     ])),
                 ),
             ),
             (
                 16,
-                NestedField::optional(16, "name", Type::Primitive(PrimitiveType::String)),
+                NestedField::optional(
+                    16,
+                    "name",
+                    Type::Primitive(PrimitiveType::String),
+                ),
             ),
             (
                 17,
@@ -1054,9 +1139,20 @@ table {
             .with_identifier_field_ids(vec![5])
             .with_alias(BiHashMap::from_iter(vec![("bar_alias".to_string(), 3)]))
             .with_fields(vec![
-                NestedField::required(5, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(3, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::required(
+                    5,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::optional(3, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    3,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
             ])
             .build()
             .unwrap_err();
@@ -1090,8 +1186,11 @@ table {
                         1,
                         "Map",
                         Type::Map(MapType::new(
-                            NestedField::map_key_element(2, Type::Primitive(PrimitiveType::String))
-                                .into(),
+                            NestedField::map_key_element(
+                                2,
+                                Type::Primitive(PrimitiveType::String)
+                            )
+                            .into(),
                             NestedField::map_value_element(
                                 3,
                                 Type::Primitive(PrimitiveType::Boolean),
@@ -1114,8 +1213,11 @@ table {
                         1,
                         "Map",
                         Type::Map(MapType::new(
-                            NestedField::map_key_element(2, Type::Primitive(PrimitiveType::String))
-                                .into(),
+                            NestedField::map_key_element(
+                                2,
+                                Type::Primitive(PrimitiveType::String)
+                            )
+                            .into(),
                             NestedField::map_value_element(
                                 3,
                                 Type::Primitive(PrimitiveType::Boolean),
@@ -1170,8 +1272,12 @@ table {
                                 Type::Primitive(PrimitiveType::String)
                             )
                             .into(),
-                            NestedField::optional(3, "age", Type::Primitive(PrimitiveType::Int))
-                                .into(),
+                            NestedField::optional(
+                                3,
+                                "age",
+                                Type::Primitive(PrimitiveType::Int)
+                            )
+                            .into(),
                         ])),
                     )
                     .into()
@@ -1186,8 +1292,12 @@ table {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![1])
                 .with_fields(vec![
-                    NestedField::required(1, "Float", Type::Primitive(PrimitiveType::Float),)
-                        .into()
+                    NestedField::required(
+                        1,
+                        "Float",
+                        Type::Primitive(PrimitiveType::Float),
+                    )
+                    .into()
                 ])
                 .build()
                 .is_err()
@@ -1197,8 +1307,12 @@ table {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![1])
                 .with_fields(vec![
-                    NestedField::required(1, "Double", Type::Primitive(PrimitiveType::Double),)
-                        .into()
+                    NestedField::required(
+                        1,
+                        "Double",
+                        Type::Primitive(PrimitiveType::Double),
+                    )
+                    .into()
                 ])
                 .build()
                 .is_err()
@@ -1210,8 +1324,12 @@ table {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![1])
                 .with_fields(vec![
-                    NestedField::required(1, "Required", Type::Primitive(PrimitiveType::String),)
-                        .into()
+                    NestedField::required(
+                        1,
+                        "Required",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into()
                 ])
                 .build()
                 .is_ok()
@@ -1221,8 +1339,12 @@ table {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![1])
                 .with_fields(vec![
-                    NestedField::optional(1, "Optional", Type::Primitive(PrimitiveType::String),)
-                        .into()
+                    NestedField::optional(
+                        1,
+                        "Optional",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into()
                 ])
                 .build()
                 .is_err()

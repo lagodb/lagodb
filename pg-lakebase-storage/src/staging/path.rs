@@ -9,8 +9,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::StorageResult;
-use crate::object::path_encoding::{build_encoded_object_path, validate_portable_path};
 use crate::object::ObjectLocation;
+use crate::object::path_encoding::{
+    build_encoded_object_path, validate_portable_path,
+};
 
 /// Maps [`ObjectLocation`] to deterministic staging paths under `<root>/staging/`.
 ///
@@ -66,7 +68,12 @@ mod tests {
 
         let path = resolver.path_for(&key).unwrap();
 
-        assert_eq!(path, PathBuf::from("/tmp/root/staging/store-a/bucket/dir/pgl-staging.file.txt"));
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/tmp/root/staging/store-a/bucket/dir/pgl-staging.file.txt"
+            )
+        );
     }
 
     #[test]
@@ -88,9 +95,12 @@ mod tests {
         let path = resolver.path_for(&key).unwrap();
 
         assert!(path.starts_with("/tmp/root/staging/"));
-        assert!(!path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir)));
+        assert!(
+            !path.components().any(|component| matches!(
+                component,
+                std::path::Component::ParentDir
+            ))
+        );
     }
 
     #[test]
@@ -98,6 +108,9 @@ mod tests {
         let resolver = StagingPathResolver::new("/tmp/root");
         let a = ObjectLocation::new("store-a", "bucket", "file.txt").unwrap();
         let b = ObjectLocation::new("store-b", "bucket", "file.txt").unwrap();
-        assert_ne!(resolver.path_for(&a).unwrap(), resolver.path_for(&b).unwrap());
+        assert_ne!(
+            resolver.path_for(&a).unwrap(),
+            resolver.path_for(&b).unwrap()
+        );
     }
 }

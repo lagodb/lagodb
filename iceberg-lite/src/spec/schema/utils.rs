@@ -19,13 +19,19 @@ use std::collections::HashMap;
 
 use crate::{Error, ErrorKind, Result};
 
-pub fn try_insert_field<V>(map: &mut HashMap<i32, V>, field_id: i32, value: V) -> Result<()> {
+pub fn try_insert_field<V>(
+    map: &mut HashMap<i32, V>,
+    field_id: i32,
+    value: V,
+) -> Result<()> {
     map.insert(field_id, value).map_or_else(
         || Ok(()),
         |_| {
             Err(Error::new(
                 ErrorKind::DataInvalid,
-                format!("Found duplicate 'field.id' {field_id}. Field ids must be unique."),
+                format!(
+                    "Found duplicate 'field.id' {field_id}. Field ids must be unique."
+                ),
             ))
         },
     )

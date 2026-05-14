@@ -9,9 +9,9 @@ use crate::config::StorageServerConfig;
 use crate::error::StorageResult;
 use crate::session::StorageContext;
 
-mod pipeline;
 mod dispatch;
 mod inbound;
+mod pipeline;
 mod request_tasks;
 mod response_budget;
 mod shutdown;
@@ -25,7 +25,13 @@ pub async fn process_connection<I: CacheIndex + 'static>(
     context: StorageContext<I>,
     config: StorageServerConfig,
 ) -> StorageResult<()> {
-    process_connection_with_shutdown(stream, context, config.normalized(), ConnectionShutdown::default()).await
+    process_connection_with_shutdown(
+        stream,
+        context,
+        config.normalized(),
+        ConnectionShutdown::default(),
+    )
+    .await
 }
 
 pub(crate) async fn process_connection_with_drain_timeout<I: CacheIndex + 'static>(

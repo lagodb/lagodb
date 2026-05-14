@@ -30,9 +30,9 @@ use crate::expr::{Predicate, Reference};
 use crate::io::FileIO;
 use crate::scan::{ArrowRecordBatchIterator, FileScanTaskDeleteFile};
 use crate::spec::{
-    visit_schema_with_partner, DataContentType, Datum, ListType, MapType, NestedField,
-    NestedFieldRef, PartnerAccessor, PrimitiveType, Schema, SchemaRef, SchemaWithPartnerVisitor,
-    StructType, Type,
+    DataContentType, Datum, ListType, MapType, NestedField, NestedFieldRef,
+    PartnerAccessor, PrimitiveType, Schema, SchemaRef, SchemaWithPartnerVisitor,
+    StructType, Type, visit_schema_with_partner,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -111,7 +111,11 @@ impl CachingDeleteFileLoader {
     ///
     /// Uses OnceLock to ensure this file is only loaded once.
     /// If another thread is loading this file, we block and wait.
-    fn load_equality_delete(&self, task: &FileScanTaskDeleteFile, schema: SchemaRef) -> Result<()> {
+    fn load_equality_delete(
+        &self,
+        task: &FileScanTaskDeleteFile,
+        schema: SchemaRef,
+    ) -> Result<()> {
         let file_path = task.file_path.clone();
         let equality_ids_vec = task.equality_ids.clone().unwrap_or_default();
         let equality_ids: HashSet<i32> = HashSet::from_iter(equality_ids_vec.clone());
@@ -119,9 +123,15 @@ impl CachingDeleteFileLoader {
 
         self.delete_filter.load_eq_del_file(&file_path, || {
             let raw_iterator = loader.parquet_to_batch_iterator(&file_path)?;
-            let evolved_iterator =
-                BasicDeleteFileLoader::evolve_schema(raw_iterator, schema, &equality_ids_vec)?;
-            Self::parse_equality_deletes_record_batch_iterator(evolved_iterator, equality_ids)
+            let evolved_iterator = BasicDeleteFileLoader::evolve_schema(
+                raw_iterator,
+                schema,
+                &equality_ids_vec,
+            )?;
+            Self::parse_equality_deletes_record_batch_iterator(
+                evolved_iterator,
+                equality_ids,
+            )
         })
     }
 
@@ -137,13 +147,15 @@ impl CachingDeleteFileLoader {
             let batch = batch?;
             let columns = batch.columns();
 
-            let Some(file_paths) = columns[0].as_any().downcast_ref::<StringArray>() else {
+            let Some(file_paths) = columns[0].as_any().downcast_ref::<StringArray>()
+            else {
                 return Err(Error::new(
                     ErrorKind::DataInvalid,
                     "Could not downcast file paths array to StringArray",
                 ));
             };
-            let Some(positions) = columns[1].as_any().downcast_ref::<Int64Array>() else {
+            let Some(positions) = columns[1].as_any().downcast_ref::<Int64Array>()
+            else {
                 return Err(Error::new(
                     ErrorKind::DataInvalid,
                     "Could not downcast positions array to Int64Array",
@@ -189,7 +201,8 @@ impl CachingDeleteFileLoader {
             let schema = match &batch_schema_iceberg {
                 Some(schema) => schema,
                 None => {
-                    let schema = arrow_schema_to_schema(record_batch.schema().as_ref())?;
+                    let schema =
+                        arrow_schema_to_schema(record_batch.schema().as_ref())?;
                     batch_schema_iceberg = Some(schema);
                     batch_schema_iceberg.as_ref().unwrap()
                 }
@@ -198,7 +211,12 @@ impl CachingDeleteFileLoader {
             let root_array: ArrayRef = Arc::new(StructArray::from(record_batch));
 
             let mut processor = EqDelColumnProcessor::new(&equality_ids);
-            visit_schema_with_partner(schema, &root_array, &mut processor, &accessor)?;
+            visit_schema_with_partner(
+                schema,
+                &root_array,
+                &mut processor,
+                &accessor,
+            )?;
 
             let mut datum_columns_with_names = processor.finish()?;
             if datum_columns_with_names.is_empty() {
@@ -209,7 +227,9 @@ impl CachingDeleteFileLoader {
             #[allow(clippy::len_zero)]
             while datum_columns_with_names[0].0.len() > 0 {
                 let mut row_predicate = AlwaysTrue;
-                for &mut (ref mut column, ref field_name) in &mut datum_columns_with_names {
+                for &mut (ref mut column, ref field_name) in
+                    &mut datum_columns_with_names
+                {
                     if let Some(item) = column.next() {
                         let cell_predicate = if let Some(datum) = item? {
                             Reference::new(field_name.clone()).equal_to(datum.clone())
@@ -273,26 +293,30 @@ impl<'a> EqDelColumnProcessor<'a> {
                 let primitive_type = field_type
                     .as_primitive_type()
                     .ok_or_else(|| {
-                        Error::new(ErrorKind::Unexpected, "field is not a primitive type")
+                        Error::new(
+                            ErrorKind::Unexpected,
+                            "field is not a primitive type",
+                        )
                     })?
                     .clone();
 
                 let lit_vec = arrow_primitive_to_literal(&array, &field_type)?;
-                let datum_iterator: Box<dyn ExactSizeIterator<Item = Result<Option<Datum>>>> =
-                    Box::new(lit_vec.into_iter().map(move |c| {
-                        c.map(|literal| {
-                            literal
-                                .as_primitive_literal()
-                                .map(|primitive_literal| {
-                                    Datum::new(primitive_type.clone(), primitive_literal)
-                                })
-                                .ok_or(Error::new(
-                                    ErrorKind::Unexpected,
-                                    "failed to convert to primitive literal",
-                                ))
-                        })
-                        .transpose()
-                    }));
+                let datum_iterator: Box<
+                    dyn ExactSizeIterator<Item = Result<Option<Datum>>>,
+                > = Box::new(lit_vec.into_iter().map(move |c| {
+                    c.map(|literal| {
+                        literal
+                            .as_primitive_literal()
+                            .map(|primitive_literal| {
+                                Datum::new(primitive_type.clone(), primitive_literal)
+                            })
+                            .ok_or(Error::new(
+                                ErrorKind::Unexpected,
+                                "failed to convert to primitive literal",
+                            ))
+                    })
+                    .transpose()
+                }));
 
                 Ok((datum_iterator, field_name))
             })
@@ -303,12 +327,24 @@ impl<'a> EqDelColumnProcessor<'a> {
 impl SchemaWithPartnerVisitor<ArrayRef> for EqDelColumnProcessor<'_> {
     type T = ();
 
-    fn schema(&mut self, _schema: &Schema, _partner: &ArrayRef, _value: ()) -> Result<()> {
+    fn schema(
+        &mut self,
+        _schema: &Schema,
+        _partner: &ArrayRef,
+        _value: (),
+    ) -> Result<()> {
         Ok(())
     }
 
-    fn field(&mut self, field: &NestedFieldRef, partner: &ArrayRef, _value: ()) -> Result<()> {
-        if self.equality_ids.contains(&field.id) && field.field_type.as_primitive_type().is_some() {
+    fn field(
+        &mut self,
+        field: &NestedFieldRef,
+        partner: &ArrayRef,
+        _value: (),
+    ) -> Result<()> {
+        if self.equality_ids.contains(&field.id)
+            && field.field_type.as_primitive_type().is_some()
+        {
             self.collected_columns.push((
                 partner.clone(),
                 field.name.clone(),
@@ -327,7 +363,12 @@ impl SchemaWithPartnerVisitor<ArrayRef> for EqDelColumnProcessor<'_> {
         Ok(())
     }
 
-    fn list(&mut self, _list: &ListType, _partner: &ArrayRef, _value: ()) -> Result<()> {
+    fn list(
+        &mut self,
+        _list: &ListType,
+        _partner: &ArrayRef,
+        _value: (),
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -341,7 +382,11 @@ impl SchemaWithPartnerVisitor<ArrayRef> for EqDelColumnProcessor<'_> {
         Ok(())
     }
 
-    fn primitive(&mut self, _primitive: &PrimitiveType, _partner: &ArrayRef) -> Result<()> {
+    fn primitive(
+        &mut self,
+        _primitive: &PrimitiveType,
+        _partner: &ArrayRef,
+    ) -> Result<()> {
         Ok(())
     }
 }
@@ -349,7 +394,10 @@ impl SchemaWithPartnerVisitor<ArrayRef> for EqDelColumnProcessor<'_> {
 struct EqDelRecordBatchPartnerAccessor;
 
 impl PartnerAccessor<ArrayRef> for EqDelRecordBatchPartnerAccessor {
-    fn struct_partner<'a>(&self, schema_partner: &'a ArrayRef) -> Result<&'a ArrayRef> {
+    fn struct_partner<'a>(
+        &self,
+        schema_partner: &'a ArrayRef,
+    ) -> Result<&'a ArrayRef> {
         Ok(schema_partner)
     }
 
@@ -358,7 +406,9 @@ impl PartnerAccessor<ArrayRef> for EqDelRecordBatchPartnerAccessor {
         struct_partner: &'a ArrayRef,
         field: &NestedField,
     ) -> Result<&'a ArrayRef> {
-        let Some(struct_array) = struct_partner.as_any().downcast_ref::<StructArray>() else {
+        let Some(struct_array) =
+            struct_partner.as_any().downcast_ref::<StructArray>()
+        else {
             return Err(Error::new(
                 ErrorKind::Unexpected,
                 "Expected struct array for field extraction",
@@ -378,21 +428,30 @@ impl PartnerAccessor<ArrayRef> for EqDelRecordBatchPartnerAccessor {
         ))
     }
 
-    fn list_element_partner<'a>(&self, _list_partner: &'a ArrayRef) -> Result<&'a ArrayRef> {
+    fn list_element_partner<'a>(
+        &self,
+        _list_partner: &'a ArrayRef,
+    ) -> Result<&'a ArrayRef> {
         Err(Error::new(
             ErrorKind::FeatureUnsupported,
             "List columns are unsupported in equality deletes",
         ))
     }
 
-    fn map_key_partner<'a>(&self, _map_partner: &'a ArrayRef) -> Result<&'a ArrayRef> {
+    fn map_key_partner<'a>(
+        &self,
+        _map_partner: &'a ArrayRef,
+    ) -> Result<&'a ArrayRef> {
         Err(Error::new(
             ErrorKind::FeatureUnsupported,
             "Map columns are unsupported in equality deletes",
         ))
     }
 
-    fn map_value_partner<'a>(&self, _map_partner: &'a ArrayRef) -> Result<&'a ArrayRef> {
+    fn map_value_partner<'a>(
+        &self,
+        _map_partner: &'a ArrayRef,
+    ) -> Result<&'a ArrayRef> {
         Err(Error::new(
             ErrorKind::FeatureUnsupported,
             "Map columns are unsupported in equality deletes",
@@ -408,7 +467,8 @@ mod tests {
 
     use arrow_array::cast::AsArray;
     use arrow_array::{
-        ArrayRef, BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray, StructArray,
+        ArrayRef, BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray,
+        StructArray,
     };
     use arrow_schema::{DataType, Field, Fields};
     use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
@@ -487,19 +547,26 @@ mod tests {
                 simple_field("sb", DataType::Utf8, true, "7"),
             ]));
 
-            let fields = vec![
-                Field::new("y", arrow_schema::DataType::Int64, true).with_metadata(HashMap::from(
-                    [(PARQUET_FIELD_ID_META_KEY.to_string(), "2".to_string())],
-                )),
-                Field::new("z", arrow_schema::DataType::Int64, true).with_metadata(HashMap::from(
-                    [(PARQUET_FIELD_ID_META_KEY.to_string(), "3".to_string())],
-                )),
-                Field::new("a", arrow_schema::DataType::Utf8, true).with_metadata(HashMap::from([
-                    (PARQUET_FIELD_ID_META_KEY.to_string(), "4".to_string()),
-                ])),
-                simple_field("s", struct_field, false, "5"),
-                simple_field("b", DataType::Binary, true, "8"),
-            ];
+            let fields =
+                vec![
+                    Field::new("y", arrow_schema::DataType::Int64, true)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "2".to_string(),
+                        )])),
+                    Field::new("z", arrow_schema::DataType::Int64, true)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "3".to_string(),
+                        )])),
+                    Field::new("a", arrow_schema::DataType::Utf8, true)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "4".to_string(),
+                        )])),
+                    simple_field("s", struct_field, false, "5"),
+                    simple_field("b", DataType::Binary, true, "8"),
+                ];
             Arc::new(arrow_schema::Schema::new(fields))
         };
 
@@ -538,14 +605,18 @@ mod tests {
     fn test_caching_delete_file_loader_load_deletes() {
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path();
-        let file_io = FileIO::from_path(table_location.as_os_str().to_str().unwrap()).unwrap();
+        let file_io =
+            FileIO::from_path(table_location.as_os_str().to_str().unwrap()).unwrap();
 
         let delete_file_loader = CachingDeleteFileLoader::new(file_io.clone(), 10);
 
         let file_scan_tasks = setup(table_location);
 
         let delete_filter = delete_file_loader
-            .load_deletes(&file_scan_tasks[0].deletes, file_scan_tasks[0].schema_ref())
+            .load_deletes(
+                &file_scan_tasks[0].deletes,
+                file_scan_tasks[0].schema_ref(),
+            )
             .unwrap();
 
         let result = delete_filter
@@ -585,7 +656,9 @@ mod tests {
                     crate::spec::NestedField::required(
                         2,
                         "data",
-                        crate::spec::Type::Primitive(crate::spec::PrimitiveType::String),
+                        crate::spec::Type::Primitive(
+                            crate::spec::PrimitiveType::String,
+                        ),
                     )
                     .into(),
                 ])
@@ -598,14 +671,16 @@ mod tests {
             let data_vals = vec!["a", "d", "g"];
             let data_col = Arc::new(StringArray::from(data_vals)) as ArrayRef;
 
-            let delete_schema = Arc::new(arrow_schema::Schema::new(vec![simple_field(
-                "data",
-                DataType::Utf8,
-                false,
-                "2", // field ID
-            )]));
+            let delete_schema =
+                Arc::new(arrow_schema::Schema::new(vec![simple_field(
+                    "data",
+                    DataType::Utf8,
+                    false,
+                    "2", // field ID
+                )]));
 
-            let delete_batch = RecordBatch::try_new(delete_schema.clone(), vec![data_col]).unwrap();
+            let delete_batch =
+                RecordBatch::try_new(delete_schema.clone(), vec![data_col]).unwrap();
 
             let path = format!("{}/partial-eq-deletes.parquet", &table_location);
             let file = File::create(&path).unwrap();
@@ -613,7 +688,8 @@ mod tests {
                 .set_compression(Compression::SNAPPY)
                 .build();
             let mut writer =
-                ArrowWriter::try_new(file, delete_batch.schema(), Some(props)).unwrap();
+                ArrowWriter::try_new(file, delete_batch.schema(), Some(props))
+                    .unwrap();
             writer.write(&delete_batch).expect("Writing batch");
             writer.close().unwrap();
             path
@@ -628,9 +704,12 @@ mod tests {
 
         // Only evolve the equality_ids columns (field 2), not all table columns
         let equality_ids = vec![2];
-        let evolved_iterator =
-            BasicDeleteFileLoader::evolve_schema(batch_iterator, table_schema, &equality_ids)
-                .unwrap();
+        let evolved_iterator = BasicDeleteFileLoader::evolve_schema(
+            batch_iterator,
+            table_schema,
+            &equality_ids,
+        )
+        .unwrap();
 
         let result: Result<Vec<_>> = evolved_iterator.collect();
 
@@ -662,7 +741,8 @@ mod tests {
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path();
-        let file_io = FileIO::from_path(table_location.as_os_str().to_str().unwrap()).unwrap();
+        let file_io =
+            FileIO::from_path(table_location.as_os_str().to_str().unwrap()).unwrap();
 
         // Create the data file schema
         let data_file_schema = Arc::new(
@@ -671,13 +751,17 @@ mod tests {
                     crate::spec::NestedField::optional(
                         2,
                         "y",
-                        crate::spec::Type::Primitive(crate::spec::PrimitiveType::Long),
+                        crate::spec::Type::Primitive(
+                            crate::spec::PrimitiveType::Long,
+                        ),
                     )
                     .into(),
                     crate::spec::NestedField::optional(
                         3,
                         "z",
-                        crate::spec::Type::Primitive(crate::spec::PrimitiveType::Long),
+                        crate::spec::Type::Primitive(
+                            crate::spec::PrimitiveType::Long,
+                        ),
                     )
                     .into(),
                 ])
@@ -686,10 +770,12 @@ mod tests {
         );
 
         // Write positional delete file
-        let positional_delete_schema = crate::arrow::delete_filter::tests::create_pos_del_schema();
+        let positional_delete_schema =
+            crate::arrow::delete_filter::tests::create_pos_del_schema();
         let file_path_values =
             vec![format!("{}/data-1.parquet", table_location.to_str().unwrap()); 4];
-        let file_path_col = Arc::new(StringArray::from_iter_values(&file_path_values));
+        let file_path_col =
+            Arc::new(StringArray::from_iter_values(&file_path_values));
         let pos_col = Arc::new(Int64Array::from_iter_values(vec![0i64, 1, 2, 3]));
 
         let positional_deletes_to_write = RecordBatch::try_new(
@@ -702,7 +788,8 @@ mod tests {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let pos_del_path = format!("{}/pos-del-mixed.parquet", table_location.to_str().unwrap());
+        let pos_del_path =
+            format!("{}/pos-del-mixed.parquet", table_location.to_str().unwrap());
         let file = File::create(&pos_del_path).unwrap();
         let mut writer = ArrowWriter::try_new(
             file,
@@ -714,7 +801,8 @@ mod tests {
         writer.close().unwrap();
 
         // Write equality delete file
-        let eq_delete_path = setup_write_equality_delete_file_1(table_location.to_str().unwrap());
+        let eq_delete_path =
+            setup_write_equality_delete_file_1(table_location.to_str().unwrap());
 
         // Create FileScanTask with BOTH positional and equality deletes
         let pos_del = FileScanTaskDeleteFile {
@@ -735,7 +823,10 @@ mod tests {
             start: 0,
             length: 0,
             record_count: None,
-            data_file_path: format!("{}/data-1.parquet", table_location.to_str().unwrap()),
+            data_file_path: format!(
+                "{}/data-1.parquet",
+                table_location.to_str().unwrap()
+            ),
             data_file_format: DataFileFormat::Parquet,
             schema: data_file_schema.clone(),
             project_field_ids: vec![2, 3],
@@ -773,15 +864,14 @@ mod tests {
         let col_y_vals: Vec<i64> = (0..num_rows).collect();
         let col_y = Arc::new(Int64Array::from(col_y_vals)) as ArrayRef;
 
-        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
-            "y",
-            arrow_schema::DataType::Int64,
-            false,
-        )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            "2".to_string(),
-        )]))]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            Field::new("y", arrow_schema::DataType::Int64, false).with_metadata(
+                HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "2".to_string(),
+                )]),
+            ),
+        ]));
 
         let record_batch = RecordBatch::try_new(schema.clone(), vec![col_y]).unwrap();
 
@@ -802,10 +892,11 @@ mod tests {
 
         let eq_ids = HashSet::from_iter(vec![2]);
 
-        let result = CachingDeleteFileLoader::parse_equality_deletes_record_batch_iterator(
-            record_batch_iterator,
-            eq_ids,
-        );
+        let result =
+            CachingDeleteFileLoader::parse_equality_deletes_record_batch_iterator(
+                record_batch_iterator,
+                eq_ids,
+            );
 
         assert!(result.is_ok());
     }
@@ -814,7 +905,8 @@ mod tests {
     fn test_caching_delete_file_loader_caches_results() {
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path();
-        let file_io = FileIO::from_path(table_location.as_os_str().to_str().unwrap()).unwrap();
+        let file_io =
+            FileIO::from_path(table_location.as_os_str().to_str().unwrap()).unwrap();
 
         let delete_file_loader = CachingDeleteFileLoader::new(file_io.clone(), 10);
 
@@ -822,12 +914,18 @@ mod tests {
 
         // Load deletes for the first time
         let delete_filter_1 = delete_file_loader
-            .load_deletes(&file_scan_tasks[0].deletes, file_scan_tasks[0].schema_ref())
+            .load_deletes(
+                &file_scan_tasks[0].deletes,
+                file_scan_tasks[0].schema_ref(),
+            )
             .unwrap();
 
         // Load deletes for the second time (same task/files)
         let delete_filter_2 = delete_file_loader
-            .load_deletes(&file_scan_tasks[0].deletes, file_scan_tasks[0].schema_ref())
+            .load_deletes(
+                &file_scan_tasks[0].deletes,
+                file_scan_tasks[0].schema_ref(),
+            )
             .unwrap();
 
         let dv1 = delete_filter_1

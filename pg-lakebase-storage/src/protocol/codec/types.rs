@@ -7,13 +7,14 @@
 use bytes::{Buf, BufMut};
 
 use crate::backend::{
-    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig, SecretString, StoreConfig,
+    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig,
+    SecretString, StoreConfig,
 };
 use crate::error::{StorageError, StorageErrorKind, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::protocol::model::{ListCursor, WireListEntry};
 
-use super::traits::{get_u16, get_u32, get_u64, get_u8, WireDecode, WireEncode};
+use super::traits::{WireDecode, WireEncode, get_u8, get_u16, get_u32, get_u64};
 
 impl WireEncode for FileHandle {
     fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {
@@ -40,9 +41,13 @@ impl WireDecode for OpenFlags {
     fn decode(input: &mut impl Buf) -> StorageResult<Self> {
         let bits = get_u8(input)?;
         if bits & !0b1 != 0 {
-            return Err(StorageError::protocol(format!("unknown open flags 0x{bits:02x}")));
+            return Err(StorageError::protocol(format!(
+                "unknown open flags 0x{bits:02x}"
+            )));
         }
-        Ok(OpenFlags { read: bits & 1 != 0 })
+        Ok(OpenFlags {
+            read: bits & 1 != 0,
+        })
     }
 }
 
@@ -71,19 +76,19 @@ impl WireEncode for StoreConfig {
             Self::S3(config) => {
                 out.put_u8(1);
                 config.encode(out)
-            },
+            }
             Self::S3Compatible(config) => {
                 out.put_u8(2);
                 config.encode(out)
-            },
+            }
             Self::Gcs(config) => {
                 out.put_u8(3);
                 config.encode(out)
-            },
+            }
             Self::Azure(config) => {
                 out.put_u8(4);
                 config.encode(out)
-            },
+            }
         }
     }
 }
@@ -95,7 +100,9 @@ impl WireDecode for StoreConfig {
             2 => Ok(Self::S3Compatible(S3CompatibleStoreConfig::decode(input)?)),
             3 => Ok(Self::Gcs(GcsStoreConfig::decode(input)?)),
             4 => Ok(Self::Azure(AzureStoreConfig::decode(input)?)),
-            other => Err(StorageError::protocol(format!("unknown store config type {other}"))),
+            other => Err(StorageError::protocol(format!(
+                "unknown store config type {other}"
+            ))),
         }
     }
 }
@@ -220,7 +227,9 @@ impl WireEncode for StorageErrorKind {
 impl WireDecode for StorageErrorKind {
     fn decode(input: &mut impl Buf) -> StorageResult<Self> {
         let code = get_u16(input)?;
-        StorageErrorKind::from_code(code).ok_or_else(|| StorageError::protocol(format!("unknown error code {code}")))
+        StorageErrorKind::from_code(code).ok_or_else(|| {
+            StorageError::protocol(format!("unknown error code {code}"))
+        })
     }
 }
 
@@ -312,8 +321,9 @@ impl WireDecode for WireListEntry {
 
 impl WireEncode for Vec<WireListEntry> {
     fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {
-        let len =
-            u32::try_from(self.len()).map_err(|_| StorageError::protocol("list response too large to encode"))?;
+        let len = u32::try_from(self.len()).map_err(|_| {
+            StorageError::protocol("list response too large to encode")
+        })?;
         out.put_u32(len);
         for entry in self {
             entry.encode(out)?;

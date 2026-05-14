@@ -55,16 +55,18 @@
 
 use std::sync::Arc;
 
+use crate::cache::CacheManager;
 use crate::cache::establish::{EstablishLeader, EstablishRole};
 use crate::cache::index::{AdmitSmallOutcome, CacheIndex, OpenHit};
+use crate::cache::manager::duration_to_ns;
 use crate::cache::meta::{CacheState, CachedObjectMeta};
-use crate::cache::object_state::{CacheActivityGuard, CacheActivityKind, ObjectLockGuard, PerObjectState};
+use crate::cache::object_state::{
+    CacheActivityGuard, CacheActivityKind, ObjectLockGuard, PerObjectState,
+};
 use crate::cache::types::{OpenOutcome, Residency, ResidencyBody};
 use crate::cache::util::now_ns;
-use crate::cache::manager::duration_to_ns;
-use crate::cache::CacheManager;
 use crate::error::StorageResult;
-use crate::object::{chunk_count, ObjectInfo, ObjectLocation};
+use crate::object::{ObjectInfo, ObjectLocation, chunk_count};
 
 /// Per-object cache lock that also vends the activity guards callers need while holding it.
 ///
@@ -87,10 +89,16 @@ impl LockedCacheObject {
 }
 
 impl<I: CacheIndex> CacheManager<I> {
-    pub(crate) async fn lock_cache_object(&self, key: &ObjectLocation) -> LockedCacheObject {
+    pub(crate) async fn lock_cache_object(
+        &self,
+        key: &ObjectLocation,
+    ) -> LockedCacheObject {
         let state = self.object_state(key);
         let guard = state.lock().await;
-        LockedCacheObject { state, _guard: guard }
+        LockedCacheObject {
+            state,
+            _guard: guard,
+        }
     }
 
     /// Classifies an `OPEN`: hit, establishment follower (wait for the leader), or newly
@@ -100,14 +108,20 @@ impl<I: CacheIndex> CacheManager<I> {
     /// on the same key observes a consistent slot state — at most one caller sees an empty
     /// slot and is returned as the leader; every other caller joins as a follower on the
     /// same [`crate::cache::establish::EstablishFlight`].
-    pub(crate) async fn lookup_for_open(&self, key: &ObjectLocation) -> StorageResult<OpenOutcome> {
+    pub(crate) async fn lookup_for_open(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<OpenOutcome> {
         let object = self.lock_cache_object(key).await;
         if let Some(hit) = self
             .index
             .open_hit(key, now_ns(), duration_to_ns(self.touch_granularity))
             .await?
         {
-            return Ok(OpenOutcome::Hit(residency_from_open_hit(hit, object.open_lease())?));
+            return Ok(OpenOutcome::Hit(residency_from_open_hit(
+                hit,
+                object.open_lease(),
+            )?));
         }
         if let Some(session) = object.state().live_fill_session() {
             session.ensure_openable().await?;
@@ -161,8 +175,12 @@ impl<I: CacheIndex> CacheManager<I> {
         let key = leader.key();
         let (residency, admitted) = {
             let object = self.lock_cache_object(key).await;
-            let meta_template = CachedObjectMeta::small(key.clone(), info, data.len() as u64);
-            let outcome = self.index.admit_small_if_absent(meta_template, data, now_ns()).await?;
+            let meta_template =
+                CachedObjectMeta::small(key.clone(), info, data.len() as u64);
+            let outcome = self
+                .index
+                .admit_small_if_absent(meta_template, data, now_ns())
+                .await?;
             match outcome {
                 AdmitSmallOutcome::Admitted { meta, payload } => (
                     Residency {
@@ -203,7 +221,11 @@ impl<I: CacheIndex> CacheManager<I> {
     ///
     /// Skipping the call here keeps the symmetry "only paths that added resident bytes run the
     /// cleanup gate" — matching the [`Self::admit_small`] rule above.
-    pub(crate) async fn admit_large(&self, leader: &EstablishLeader, info: ObjectInfo) -> StorageResult<Residency> {
+    pub(crate) async fn admit_large(
+        &self,
+        leader: &EstablishLeader,
+        info: ObjectInfo,
+    ) -> StorageResult<Residency> {
         let key = leader.key();
         let object = self.lock_cache_object(key).await;
         // Race-vs-promote guard: `open_hit` fires one read txn (or one write txn if the
@@ -231,40 +253,52 @@ impl<I: CacheIndex> CacheManager<I> {
         })
     }
 
-    pub(crate) async fn download_guard(&self, key: &ObjectLocation) -> CacheActivityGuard {
+    pub(crate) async fn download_guard(
+        &self,
+        key: &ObjectLocation,
+    ) -> CacheActivityGuard {
         let state = self.object_state(key);
         let _guard = state.lock().await;
         state.activity_guard(CacheActivityKind::Download)
     }
 
-    pub(crate) async fn read_guard(&self, key: &ObjectLocation) -> CacheActivityGuard {
+    pub(crate) async fn read_guard(
+        &self,
+        key: &ObjectLocation,
+    ) -> CacheActivityGuard {
         let state = self.object_state(key);
         let _guard = state.lock().await;
         state.activity_guard(CacheActivityKind::Read)
     }
 
     pub(crate) fn promotion_guard(&self, key: &ObjectLocation) -> CacheActivityGuard {
-        self.object_state(key).activity_guard(CacheActivityKind::Promotion)
+        self.object_state(key)
+            .activity_guard(CacheActivityKind::Promotion)
     }
 }
 
-fn residency_from_open_hit(hit: OpenHit, lease: CacheActivityGuard) -> StorageResult<Residency> {
+fn residency_from_open_hit(
+    hit: OpenHit,
+    lease: CacheActivityGuard,
+) -> StorageResult<Residency> {
     let OpenHit { meta, payload } = hit;
     let body = match (meta.cache_state(), payload) {
-        (CacheState::SmallKv, Some(payload)) => ResidencyBody::Small { meta, payload },
+        (CacheState::SmallKv, Some(payload)) => {
+            ResidencyBody::Small { meta, payload }
+        }
         (CacheState::CompleteFile, None) => ResidencyBody::Complete { meta },
         (CacheState::SmallKv, None) => {
             return Err(crate::error::StorageError::cache(format!(
                 "cache index returned SmallKv meta for {} without payload",
                 meta.key()
             )));
-        },
+        }
         (CacheState::CompleteFile, Some(_)) => {
             return Err(crate::error::StorageError::cache(format!(
                 "cache index returned CompleteFile meta for {} with unexpected small payload",
                 meta.key()
             )));
-        },
+        }
     };
     Ok(Residency { lease, body })
 }

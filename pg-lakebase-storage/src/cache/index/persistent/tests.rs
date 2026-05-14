@@ -1,7 +1,9 @@
+use super::RedbCacheIndex;
 use super::test_support::{counting_redb_index, unique_redb_path};
 use super::tracking::{RuntimeCacheTracking, TrackingDelta};
-use super::RedbCacheIndex;
-use crate::cache::index::{AdmitSmallOutcome, CacheIndex, LogicalCacheUsage, OpenHit};
+use crate::cache::index::{
+    AdmitSmallOutcome, CacheIndex, LogicalCacheUsage, OpenHit,
+};
 use crate::cache::meta::{CacheState, CachedObjectMeta};
 use crate::object::{ObjectInfo, ObjectLocation};
 
@@ -33,7 +35,10 @@ async fn admit_small_if_absent_installs_meta_and_payload() {
     let mut meta = CachedObjectMeta::small(key.clone(), info, 3);
     meta.generation = 7;
 
-    let outcome = index.admit_small_if_absent(meta, b"abc".to_vec(), 10).await.unwrap();
+    let outcome = index
+        .admit_small_if_absent(meta, b"abc".to_vec(), 10)
+        .await
+        .unwrap();
     let AdmitSmallOutcome::Admitted { meta, payload } = outcome else {
         panic!("expected Admitted outcome on first admit");
     };
@@ -51,7 +56,10 @@ async fn admit_small_if_absent_installs_meta_and_payload() {
         },
         3,
     );
-    let second = index.admit_small_if_absent(racer, b"xyz".to_vec(), 20).await.unwrap();
+    let second = index
+        .admit_small_if_absent(racer, b"xyz".to_vec(), 20)
+        .await
+        .unwrap();
     let AdmitSmallOutcome::AlreadyPresent {
         meta: existing,
         payload: existing_payload,
@@ -69,15 +77,34 @@ async fn tracks_complete_usage_and_oldest_cached_metadata() {
     let old_key = ObjectLocation::new("default", "bucket", "old").unwrap();
     let new_key = ObjectLocation::new("default", "bucket", "new").unwrap();
 
-    let mut old_meta = CachedObjectMeta::small(old_key.clone(), ObjectInfo { size: 4, etag: None }, 4);
+    let mut old_meta = CachedObjectMeta::small(
+        old_key.clone(),
+        ObjectInfo {
+            size: 4,
+            etag: None,
+        },
+        4,
+    );
     old_meta.last_access_ns = 1;
-    index.admit_small_if_absent(old_meta, b"old!".to_vec(), 1).await.unwrap();
+    index
+        .admit_small_if_absent(old_meta, b"old!".to_vec(), 1)
+        .await
+        .unwrap();
 
-    let mut new_meta = CachedObjectMeta::complete(new_key.clone(), ObjectInfo { size: 8, etag: None });
+    let mut new_meta = CachedObjectMeta::complete(
+        new_key.clone(),
+        ObjectInfo {
+            size: 8,
+            etag: None,
+        },
+    );
     new_meta.last_access_ns = 2;
     index.put_new_complete(new_meta).await.unwrap();
 
-    assert_eq!(index.logical_cache_usage().await.unwrap().resident_bytes, 12);
+    assert_eq!(
+        index.logical_cache_usage().await.unwrap().resident_bytes,
+        12
+    );
     let oldest = index.oldest_cached_metas_page(None, 1).await.unwrap().metas;
     assert_eq!(oldest[0].key(), &old_key);
 }
@@ -86,8 +113,18 @@ async fn tracks_complete_usage_and_oldest_cached_metadata() {
 async fn delete_meta_and_small_removes_payload_tracking() {
     let index = RedbCacheIndex::open(unique_redb_path("delete")).unwrap();
     let key = ObjectLocation::new("default", "bucket", "tiny").unwrap();
-    let meta = CachedObjectMeta::small(key.clone(), ObjectInfo { size: 4, etag: None }, 4);
-    index.admit_small_if_absent(meta, b"tiny".to_vec(), 1).await.unwrap();
+    let meta = CachedObjectMeta::small(
+        key.clone(),
+        ObjectInfo {
+            size: 4,
+            etag: None,
+        },
+        4,
+    );
+    index
+        .admit_small_if_absent(meta, b"tiny".to_vec(), 1)
+        .await
+        .unwrap();
 
     let deleted = index.delete_meta_and_small(&key).await.unwrap().unwrap();
 
@@ -95,7 +132,14 @@ async fn delete_meta_and_small_removes_payload_tracking() {
     assert!(index.get_meta(&key).await.unwrap().is_none());
     assert!(index.get_small(&key).await.unwrap().is_none());
     assert_eq!(index.logical_cache_usage().await.unwrap().resident_bytes, 0);
-    assert!(index.oldest_cached_metas_page(None, 1).await.unwrap().metas.is_empty());
+    assert!(
+        index
+            .oldest_cached_metas_page(None, 1)
+            .await
+            .unwrap()
+            .metas
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -105,7 +149,13 @@ async fn persisted_lru_survives_reopen_and_usage_is_installed_by_startup() {
 
     {
         let index = RedbCacheIndex::open(&path).unwrap();
-        let mut meta = CachedObjectMeta::complete(key.clone(), ObjectInfo { size: 8, etag: None });
+        let mut meta = CachedObjectMeta::complete(
+            key.clone(),
+            ObjectInfo {
+                size: 8,
+                etag: None,
+            },
+        );
         meta.last_access_ns = 1;
         index.put_new_complete(meta).await.unwrap();
         assert_eq!(index.logical_cache_usage().await.unwrap().resident_bytes, 8);
@@ -117,7 +167,10 @@ async fn persisted_lru_survives_reopen_and_usage_is_installed_by_startup() {
     let oldest = index.oldest_cached_metas_page(None, 1).await.unwrap().metas;
     assert_eq!(oldest[0].key(), &key);
 
-    index.replace_runtime_cache_usage(LogicalCacheUsage::resident(8)).await.unwrap();
+    index
+        .replace_runtime_cache_usage(LogicalCacheUsage::resident(8))
+        .await
+        .unwrap();
     assert_eq!(index.logical_cache_usage().await.unwrap().resident_bytes, 8);
 }
 
@@ -125,8 +178,18 @@ async fn persisted_lru_survives_reopen_and_usage_is_installed_by_startup() {
 async fn scans_and_removes_unclaimed_small_payloads() {
     let index = RedbCacheIndex::open(unique_redb_path("unclaimed")).unwrap();
     let key = ObjectLocation::new("default", "bucket", "orphan-small").unwrap();
-    let meta = CachedObjectMeta::small(key.clone(), ObjectInfo { size: 3, etag: None }, 3);
-    index.admit_small_if_absent(meta, b"abc".to_vec(), 1).await.unwrap();
+    let meta = CachedObjectMeta::small(
+        key.clone(),
+        ObjectInfo {
+            size: 3,
+            etag: None,
+        },
+        3,
+    );
+    index
+        .admit_small_if_absent(meta, b"abc".to_vec(), 1)
+        .await
+        .unwrap();
     index.delete_meta(&key).await.unwrap();
 
     let page = index.scan_small_entries_page(None, 10).await.unwrap();
@@ -142,11 +205,25 @@ async fn scans_and_removes_unclaimed_small_payloads() {
 async fn open_hit_small_window_in_does_not_touch() {
     let (index, counts) = counting_redb_index(unique_redb_path("small-warm"));
     let key = ObjectLocation::new("default", "bucket", "tiny-warm").unwrap();
-    let meta = CachedObjectMeta::small(key.clone(), ObjectInfo { size: 4, etag: None }, 4);
-    index.admit_small_if_absent(meta, b"tiny".to_vec(), 1_000).await.unwrap();
+    let meta = CachedObjectMeta::small(
+        key.clone(),
+        ObjectInfo {
+            size: 4,
+            etag: None,
+        },
+        4,
+    );
+    index
+        .admit_small_if_absent(meta, b"tiny".to_vec(), 1_000)
+        .await
+        .unwrap();
     counts.reset();
 
-    let hit = index.open_hit(&key, 5_000, 60_000_000_000).await.unwrap().unwrap();
+    let hit = index
+        .open_hit(&key, 5_000, 60_000_000_000)
+        .await
+        .unwrap()
+        .unwrap();
     let OpenHit { meta, payload } = hit;
 
     assert_eq!(meta.last_access_ns, 1_000);
@@ -167,9 +244,19 @@ async fn open_hit_small_window_in_does_not_touch() {
 async fn open_hit_small_cross_window_touches_without_second_meta_get() {
     let (index, counts) = counting_redb_index(unique_redb_path("small-touch"));
     let key = ObjectLocation::new("default", "bucket", "tiny-touch").unwrap();
-    let mut meta = CachedObjectMeta::small(key.clone(), ObjectInfo { size: 4, etag: None }, 4);
+    let mut meta = CachedObjectMeta::small(
+        key.clone(),
+        ObjectInfo {
+            size: 4,
+            etag: None,
+        },
+        4,
+    );
     meta.last_access_ns = 1;
-    index.admit_small_if_absent(meta, b"tiny".to_vec(), 1).await.unwrap();
+    index
+        .admit_small_if_absent(meta, b"tiny".to_vec(), 1)
+        .await
+        .unwrap();
     counts.reset();
 
     let hit = index.open_hit(&key, 10, 0).await.unwrap().unwrap();
@@ -193,12 +280,22 @@ async fn open_hit_small_cross_window_touches_without_second_meta_get() {
 async fn open_hit_complete_window_in_uses_one_read_txn_and_one_meta_get() {
     let (index, counts) = counting_redb_index(unique_redb_path("complete-warm"));
     let key = ObjectLocation::new("default", "bucket", "complete-warm").unwrap();
-    let mut meta = CachedObjectMeta::complete(key.clone(), ObjectInfo { size: 8, etag: None });
+    let mut meta = CachedObjectMeta::complete(
+        key.clone(),
+        ObjectInfo {
+            size: 8,
+            etag: None,
+        },
+    );
     meta.last_access_ns = 1_000;
     index.put_new_complete(meta).await.unwrap();
     counts.reset();
 
-    let hit = index.open_hit(&key, 5_000, 60_000_000_000).await.unwrap().unwrap();
+    let hit = index
+        .open_hit(&key, 5_000, 60_000_000_000)
+        .await
+        .unwrap()
+        .unwrap();
     let OpenHit { meta, payload } = hit;
 
     assert!(payload.is_none());
@@ -215,7 +312,13 @@ async fn open_hit_complete_window_in_uses_one_read_txn_and_one_meta_get() {
 async fn open_hit_complete_cross_window_touches_without_second_meta_get() {
     let (index, counts) = counting_redb_index(unique_redb_path("complete-touch"));
     let key = ObjectLocation::new("default", "bucket", "complete-touch").unwrap();
-    let mut meta = CachedObjectMeta::complete(key.clone(), ObjectInfo { size: 8, etag: None });
+    let mut meta = CachedObjectMeta::complete(
+        key.clone(),
+        ObjectInfo {
+            size: 8,
+            etag: None,
+        },
+    );
     meta.last_access_ns = 1;
     index.put_new_complete(meta).await.unwrap();
     counts.reset();
@@ -240,10 +343,20 @@ async fn open_hit_complete_cross_window_touches_without_second_meta_get() {
 async fn admit_small_if_absent_uses_exactly_one_write_txn_on_insert() {
     let (index, counts) = counting_redb_index(unique_redb_path("admit-cold"));
     let key = ObjectLocation::new("default", "bucket", "admit-cold").unwrap();
-    let meta = CachedObjectMeta::small(key, ObjectInfo { size: 3, etag: None }, 3);
+    let meta = CachedObjectMeta::small(
+        key,
+        ObjectInfo {
+            size: 3,
+            etag: None,
+        },
+        3,
+    );
     counts.reset();
 
-    let outcome = index.admit_small_if_absent(meta, b"abc".to_vec(), 100).await.unwrap();
+    let outcome = index
+        .admit_small_if_absent(meta, b"abc".to_vec(), 100)
+        .await
+        .unwrap();
     assert!(matches!(outcome, AdmitSmallOutcome::Admitted { .. }));
 
     let snapshot = counts.snapshot();
@@ -260,8 +373,18 @@ async fn admit_small_if_absent_uses_exactly_one_write_txn_on_insert() {
 async fn admit_small_if_absent_already_present_issues_one_write_txn_no_writes() {
     let (index, counts) = counting_redb_index(unique_redb_path("admit-race"));
     let key = ObjectLocation::new("default", "bucket", "admit-race").unwrap();
-    let meta = CachedObjectMeta::small(key.clone(), ObjectInfo { size: 3, etag: None }, 3);
-    index.admit_small_if_absent(meta, b"abc".to_vec(), 100).await.unwrap();
+    let meta = CachedObjectMeta::small(
+        key.clone(),
+        ObjectInfo {
+            size: 3,
+            etag: None,
+        },
+        3,
+    );
+    index
+        .admit_small_if_absent(meta, b"abc".to_vec(), 100)
+        .await
+        .unwrap();
     counts.reset();
 
     let racer = CachedObjectMeta::small(
@@ -272,7 +395,10 @@ async fn admit_small_if_absent_already_present_issues_one_write_txn_no_writes() 
         },
         3,
     );
-    let outcome = index.admit_small_if_absent(racer, b"xyz".to_vec(), 200).await.unwrap();
+    let outcome = index
+        .admit_small_if_absent(racer, b"xyz".to_vec(), 200)
+        .await
+        .unwrap();
     assert!(matches!(outcome, AdmitSmallOutcome::AlreadyPresent { .. }));
 
     let snapshot = counts.snapshot();

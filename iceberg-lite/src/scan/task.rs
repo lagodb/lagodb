@@ -21,14 +21,19 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::expr::BoundPredicate;
 use crate::spec::{
-    DataContentType, DataFileFormat, ManifestEntryRef, NameMapping, PartitionSpec, Schema,
-    SchemaRef, Struct,
+    DataContentType, DataFileFormat, ManifestEntryRef, NameMapping, PartitionSpec,
+    Schema, SchemaRef, Struct,
 };
 
 /// Serialization helper that always returns NotImplementedError.
 /// Used for fields that should not be serialized but we want to be explicit about it.
-fn serialize_not_implemented<S, T>(_: &T, _: S) -> std::result::Result<S::Ok, S::Error>
-where S: Serializer {
+fn serialize_not_implemented<S, T>(
+    _: &T,
+    _: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
     Err(serde::ser::Error::custom(
         "Serialization not implemented for this field",
     ))
@@ -37,7 +42,9 @@ where S: Serializer {
 /// Deserialization helper that always returns NotImplementedError.
 /// Used for fields that should not be deserialized but we want to be explicit about it.
 fn deserialize_not_implemented<'de, D, T>(_: D) -> std::result::Result<T, D::Error>
-where D: serde::Deserializer<'de> {
+where
+    D: serde::Deserializer<'de>,
+{
     Err(serde::de::Error::custom(
         "Deserialization not implemented for this field",
     ))

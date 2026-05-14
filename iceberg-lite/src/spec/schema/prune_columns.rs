@@ -28,7 +28,8 @@ pub fn prune_columns(
     selected: impl IntoIterator<Item = i32>,
     select_full_types: bool,
 ) -> Result<Type> {
-    let mut visitor = PruneColumn::new(HashSet::from_iter(selected), select_full_types);
+    let mut visitor =
+        PruneColumn::new(HashSet::from_iter(selected), select_full_types);
     let result = visit_schema(schema, &mut visitor);
 
     match result {
@@ -101,11 +102,19 @@ impl PruneColumn {
 impl SchemaVisitor for PruneColumn {
     type T = Option<Type>;
 
-    fn schema(&mut self, _schema: &Schema, value: Option<Type>) -> Result<Option<Type>> {
+    fn schema(
+        &mut self,
+        _schema: &Schema,
+        value: Option<Type>,
+    ) -> Result<Option<Type>> {
         Ok(Some(value.unwrap()))
     }
 
-    fn field(&mut self, field: &NestedFieldRef, value: Option<Type>) -> Result<Option<Type>> {
+    fn field(
+        &mut self,
+        field: &NestedFieldRef,
+        value: Option<Type>,
+    ) -> Result<Option<Type>> {
         if self.selected.contains(&field.id) {
             if self.select_full_types {
                 Ok(Some(*field.field_type.clone()))
@@ -173,7 +182,8 @@ impl SchemaVisitor for PruneColumn {
             if self.select_full_types {
                 Ok(Some(Type::List(list.clone())))
             } else if list.element_field.field_type.is_struct() {
-                let projected_struct = PruneColumn::project_selected_struct(value).unwrap();
+                let projected_struct =
+                    PruneColumn::project_selected_struct(value).unwrap();
                 Ok(Some(Type::List(PruneColumn::project_list(
                     list,
                     Type::Struct(projected_struct),
@@ -207,7 +217,8 @@ impl SchemaVisitor for PruneColumn {
                 Ok(Some(Type::Map(map.clone())))
             } else if map.value_field.field_type.is_struct() {
                 let projected_struct =
-                    PruneColumn::project_selected_struct(Some(value.unwrap())).unwrap();
+                    PruneColumn::project_selected_struct(Some(value.unwrap()))
+                        .unwrap();
                 Ok(Some(Type::Map(PruneColumn::project_map(
                     map,
                     Type::Struct(projected_struct),
@@ -252,7 +263,12 @@ mod tests {
         let expected_type = Type::from(
             Schema::builder()
                 .with_fields(vec![
-                    NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(
+                        1,
+                        "foo",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap()
@@ -271,7 +287,12 @@ mod tests {
         let expected_type = Type::from(
             Schema::builder()
                 .with_fields(vec![
-                    NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(
+                        1,
+                        "foo",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap()
@@ -573,15 +594,24 @@ mod tests {
     fn test_prune_columns_empty_struct() {
         let schema_with_empty_struct_field = Schema::builder()
             .with_fields(vec![
-                NestedField::optional(15, "person", Type::Struct(StructType::new(vec![]))).into(),
+                NestedField::optional(
+                    15,
+                    "person",
+                    Type::Struct(StructType::new(vec![])),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
         let expected_type = Type::from(
             Schema::builder()
                 .with_fields(vec![
-                    NestedField::optional(15, "person", Type::Struct(StructType::new(vec![])))
-                        .into(),
+                    NestedField::optional(
+                        15,
+                        "person",
+                        Type::Struct(StructType::new(vec![])),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap()
@@ -598,15 +628,24 @@ mod tests {
     fn test_prune_columns_empty_struct_full() {
         let schema_with_empty_struct_field = Schema::builder()
             .with_fields(vec![
-                NestedField::optional(15, "person", Type::Struct(StructType::new(vec![]))).into(),
+                NestedField::optional(
+                    15,
+                    "person",
+                    Type::Struct(StructType::new(vec![])),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
         let expected_type = Type::from(
             Schema::builder()
                 .with_fields(vec![
-                    NestedField::optional(15, "person", Type::Struct(StructType::new(vec![])))
-                        .into(),
+                    NestedField::optional(
+                        15,
+                        "person",
+                        Type::Struct(StructType::new(vec![])),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap()
@@ -636,10 +675,18 @@ mod tests {
                         value_field: NestedField::map_value_element(
                             8,
                             Type::Struct(StructType::new(vec![
-                                NestedField::optional(10, "name", Primitive(PrimitiveType::String))
-                                    .into(),
-                                NestedField::required(11, "age", Primitive(PrimitiveType::Int))
-                                    .into(),
+                                NestedField::optional(
+                                    10,
+                                    "name",
+                                    Primitive(PrimitiveType::String),
+                                )
+                                .into(),
+                                NestedField::required(
+                                    11,
+                                    "age",
+                                    Primitive(PrimitiveType::Int),
+                                )
+                                .into(),
                             ])),
                             true,
                         )
@@ -665,8 +712,12 @@ mod tests {
                             value_field: NestedField::map_value_element(
                                 8,
                                 Type::Struct(StructType::new(vec![
-                                    NestedField::required(11, "age", Primitive(PrimitiveType::Int))
-                                        .into(),
+                                    NestedField::required(
+                                        11,
+                                        "age",
+                                        Primitive(PrimitiveType::Int),
+                                    )
+                                    .into(),
                                 ])),
                                 true,
                             )
@@ -702,10 +753,18 @@ mod tests {
                         value_field: NestedField::map_value_element(
                             8,
                             Type::Struct(StructType::new(vec![
-                                NestedField::optional(10, "name", Primitive(PrimitiveType::String))
-                                    .into(),
-                                NestedField::required(11, "age", Primitive(PrimitiveType::Int))
-                                    .into(),
+                                NestedField::optional(
+                                    10,
+                                    "name",
+                                    Primitive(PrimitiveType::String),
+                                )
+                                .into(),
+                                NestedField::required(
+                                    11,
+                                    "age",
+                                    Primitive(PrimitiveType::Int),
+                                )
+                                .into(),
                             ])),
                             true,
                         )
@@ -731,8 +790,12 @@ mod tests {
                             value_field: NestedField::map_value_element(
                                 8,
                                 Type::Struct(StructType::new(vec![
-                                    NestedField::required(11, "age", Primitive(PrimitiveType::Int))
-                                        .into(),
+                                    NestedField::required(
+                                        11,
+                                        "age",
+                                        Primitive(PrimitiveType::Int),
+                                    )
+                                    .into(),
                                 ])),
                                 true,
                             )

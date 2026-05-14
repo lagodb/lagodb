@@ -21,25 +21,28 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use arrow_arith::boolean::{and, and_kleene, is_not_null, is_null, not, or, or_kleene};
-use arrow_array::{Array, ArrayRef, BooleanArray, Datum as ArrowDatum, RecordBatch, Scalar};
+use arrow_arith::boolean::{
+    and, and_kleene, is_not_null, is_null, not, or, or_kleene,
+};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Datum as ArrowDatum, RecordBatch, Scalar,
+};
 use arrow_cast::cast::cast;
 use arrow_ord::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_schema::{
-    ArrowError, DataType, FieldRef, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+    ArrowError, DataType, FieldRef, Schema as ArrowSchema,
+    SchemaRef as ArrowSchemaRef,
 };
 use arrow_string::like::starts_with;
 use bytes::Bytes;
 use fnv::FnvHashSet;
 use parquet::arrow::arrow_reader::{
-    ArrowPredicateFn, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowFilter, RowSelection,
-    RowSelector,
+    ArrowPredicateFn, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowFilter,
+    RowSelection, RowSelector,
 };
 
-use parquet::arrow::{ProjectionMask, PARQUET_FIELD_ID_META_KEY};
-use parquet::file::metadata::{
-    ParquetMetaData, RowGroupMetaData,
-};
+use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, ProjectionMask};
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::schema::types::{SchemaDescriptor, Type as ParquetType};
 
@@ -48,12 +51,12 @@ use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::{arrow_schema_to_schema, get_arrow_datum};
 use crate::delete_vector::DeleteVector;
 use crate::error::Result;
-use crate::expr::visitors::bound_predicate_visitor::{visit, BoundPredicateVisitor};
+use crate::expr::visitors::bound_predicate_visitor::{BoundPredicateVisitor, visit};
 use crate::expr::visitors::page_index_evaluator::PageIndexEvaluator;
 use crate::expr::visitors::row_group_metrics_evaluator::RowGroupMetricsEvaluator;
 use crate::expr::{BoundPredicate, BoundReference};
 use crate::io::{FileIO, FileMetadata, FileRead};
-use crate::metadata_columns::{is_metadata_field, RESERVED_FIELD_ID_FILE};
+use crate::metadata_columns::{RESERVED_FIELD_ID_FILE, is_metadata_field};
 use crate::scan::{ArrowRecordBatchIterator, FileScanTask};
 use crate::spec::{Datum, NameMapping, NestedField, PrimitiveType, Schema, Type};
 use crate::utils::available_parallelism;
@@ -96,7 +99,10 @@ impl ArrowReaderBuilder {
     }
 
     /// Determines whether to enable row group filtering.
-    pub fn with_row_group_filtering_enabled(mut self, row_group_filtering_enabled: bool) -> Self {
+    pub fn with_row_group_filtering_enabled(
+        mut self,
+        row_group_filtering_enabled: bool,
+    ) -> Self {
         self.row_group_filtering_enabled = row_group_filtering_enabled;
         self
     }
@@ -162,8 +168,11 @@ impl ArrowReader {
             ) {
                 Ok(iter) => iter,
                 Err(e) => {
-                    let err = Error::new(ErrorKind::Unexpected, "file scan task generate failed")
-                        .with_source(e);
+                    let err = Error::new(
+                        ErrorKind::Unexpected,
+                        "file scan task generate failed",
+                    )
+                    .with_source(e);
                     Box::new(std::iter::once(Err(err))) as ArrowRecordBatchIterator
                 }
             }
@@ -181,20 +190,22 @@ impl ArrowReader {
         row_group_filtering_enabled: bool,
         row_selection_enabled: bool,
     ) -> Result<ArrowRecordBatchIterator> {
-        let should_load_page_index =
-            (row_selection_enabled && task.predicate.is_some()) || !task.deletes.is_empty();
+        let should_load_page_index = (row_selection_enabled
+            && task.predicate.is_some())
+            || !task.deletes.is_empty();
 
-        let delete_filter =
-            delete_file_loader.load_deletes(&task.deletes, Arc::clone(&task.schema))?;
+        let delete_filter = delete_file_loader
+            .load_deletes(&task.deletes, Arc::clone(&task.schema))?;
 
         // Migrated tables lack field IDs, requiring us to inspect the schema to choose
         // between field-ID-based or position-based projection
-        let initial_reader_builder = Self::create_parquet_record_batch_reader_builder(
-            &task.data_file_path,
-            file_io.clone(),
-            should_load_page_index,
-            None,
-        )?;
+        let initial_reader_builder =
+            Self::create_parquet_record_batch_reader_builder(
+                &task.data_file_path,
+                file_io.clone(),
+                should_load_page_index,
+                None,
+            )?;
 
         // Check if Parquet file has embedded field IDs
         // Corresponds to Java's ParquetSchemaUtil.hasIds()
@@ -235,7 +246,9 @@ impl ArrowReader {
             } else {
                 // Branch 3: No name mapping - use position-based fallback IDs
                 // Corresponds to Java's ParquetSchemaUtil.addFallbackIds()
-                add_fallback_field_ids_to_arrow_schema(initial_reader_builder.schema())
+                add_fallback_field_ids_to_arrow_schema(
+                    initial_reader_builder.schema(),
+                )
             };
 
             let options = ArrowReaderOptions::new().with_schema(arrow_schema);
@@ -277,30 +290,34 @@ impl ArrowReader {
         // RecordBatchTransformer performs any transformations required on the RecordBatches
         // that come back from the file, such as type promotion, default column insertion,
         // column re-ordering, partition constants, and virtual field addition (like _file)
-        let mut record_batch_transformer_builder =
-            RecordBatchTransformerBuilder::new(task.schema_ref(), task.project_field_ids());
+        let mut record_batch_transformer_builder = RecordBatchTransformerBuilder::new(
+            task.schema_ref(),
+            task.project_field_ids(),
+        );
 
         // Add the _file metadata column if it's in the projected fields
         if task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
             let file_datum = Datum::string(task.data_file_path.clone());
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_constant(RESERVED_FIELD_ID_FILE, file_datum);
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_constant(RESERVED_FIELD_ID_FILE, file_datum);
         }
 
         if let (Some(partition_spec), Some(partition_data)) =
             (task.partition_spec.clone(), task.partition.clone())
         {
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_partition(partition_spec, partition_data)?;
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_partition(partition_spec, partition_data)?;
         }
 
         let mut record_batch_transformer = record_batch_transformer_builder.build();
 
         if let Some(batch_size) = batch_size {
-            record_batch_reader_builder = record_batch_reader_builder.with_batch_size(batch_size);
+            record_batch_reader_builder =
+                record_batch_reader_builder.with_batch_size(batch_size);
         }
 
-        let delete_predicate = delete_filter.build_equality_delete_predicate(&task)?;
+        let delete_predicate =
+            delete_filter.build_equality_delete_predicate(&task)?;
 
         // In addition to the optional predicate supplied in the `FileScanTask`,
         // we also have an optional predicate resulting from equality delete files.
@@ -336,11 +353,12 @@ impl ArrowReader {
         // Filter row groups based on byte range from task.start and task.length.
         // If both start and length are 0, read the entire file (backwards compatibility).
         if task.start != 0 || task.length != 0 {
-            let byte_range_filtered_row_groups = Self::filter_row_groups_by_byte_range(
-                record_batch_reader_builder.metadata(),
-                task.start,
-                task.length,
-            )?;
+            let byte_range_filtered_row_groups =
+                Self::filter_row_groups_by_byte_range(
+                    record_batch_reader_builder.metadata(),
+                    task.start,
+                    task.length,
+                )?;
             selected_row_group_indices = Some(byte_range_filtered_row_groups);
         }
 
@@ -356,15 +374,17 @@ impl ArrowReader {
                 &iceberg_field_ids,
                 &field_id_map,
             )?;
-            record_batch_reader_builder = record_batch_reader_builder.with_row_filter(row_filter);
+            record_batch_reader_builder =
+                record_batch_reader_builder.with_row_filter(row_filter);
 
             if row_group_filtering_enabled {
-                let predicate_filtered_row_groups = Self::get_selected_row_group_indices(
-                    &predicate,
-                    record_batch_reader_builder.metadata(),
-                    &field_id_map,
-                    &task.schema,
-                )?;
+                let predicate_filtered_row_groups =
+                    Self::get_selected_row_group_indices(
+                        &predicate,
+                        record_batch_reader_builder.metadata(),
+                        &field_id_map,
+                        &task.schema,
+                    )?;
 
                 // Merge predicate-based filtering with byte range filtering (if present)
                 // by taking the intersection of both filters
@@ -396,7 +416,8 @@ impl ArrowReader {
 
         if let Some(positional_delete_indexes) = positional_delete_indexes {
             let delete_row_selection = {
-                let positional_delete_indexes = positional_delete_indexes.lock().unwrap();
+                let positional_delete_indexes =
+                    positional_delete_indexes.lock().unwrap();
 
                 Self::build_deletes_row_selection(
                     record_batch_reader_builder.metadata().row_groups(),
@@ -421,8 +442,8 @@ impl ArrowReader {
         }
 
         if let Some(selected_row_group_indices) = selected_row_group_indices {
-            record_batch_reader_builder =
-                record_batch_reader_builder.with_row_groups(selected_row_group_indices);
+            record_batch_reader_builder = record_batch_reader_builder
+                .with_row_groups(selected_row_group_indices);
         }
 
         // Build the batch stream and send all the RecordBatches that it generates
@@ -446,19 +467,24 @@ impl ArrowReader {
         file_io: FileIO,
         should_load_page_index: bool,
         arrow_reader_options: Option<ArrowReaderOptions>,
-    ) -> Result<ParquetRecordBatchReaderBuilder<ArrowFileReader<Box<dyn FileRead>>>> {
+    ) -> Result<ParquetRecordBatchReaderBuilder<ArrowFileReader<Box<dyn FileRead>>>>
+    {
         // Get the metadata for the Parquet file we need to read and build
         // a reader for the data within
         let parquet_file = file_io.new_input(data_file_path)?;
         let opened_file = parquet_file.open_reader()?;
-        let parquet_file_reader = ArrowFileReader::new(opened_file.metadata, opened_file.reader)
-            .with_page_index(should_load_page_index);
+        let parquet_file_reader =
+            ArrowFileReader::new(opened_file.metadata, opened_file.reader)
+                .with_page_index(should_load_page_index);
 
         // Create the record batch stream builder with options derived from the file reader
         let options = parquet_file_reader
             .apply_to_options(arrow_reader_options.unwrap_or_default());
         let record_batch_reader_builder =
-            ParquetRecordBatchReaderBuilder::try_new_with_options(parquet_file_reader, options)?;
+            ParquetRecordBatchReaderBuilder::try_new_with_options(
+                parquet_file_reader,
+                options,
+            )?;
         Ok(record_batch_reader_builder)
     }
 
@@ -480,7 +506,8 @@ impl ArrowReader {
 
         for (idx, row_group_metadata) in row_group_metadata_list.iter().enumerate() {
             let row_group_num_rows = row_group_metadata.num_rows() as u64;
-            let next_row_group_base_idx = current_row_group_base_idx + row_group_num_rows;
+            let next_row_group_base_idx =
+                current_row_group_base_idx + row_group_num_rows;
 
             // if row group selection is enabled,
             if let Some(selected_row_groups) = selected_row_groups {
@@ -519,7 +546,8 @@ impl ArrowReader {
                     // if the index of the next deleted row is beyond this row group, add a selection for
                     // the remainder of this row group and skip to the next row group
                     if next_deleted_row_idx >= next_row_group_base_idx {
-                        results.push(RowSelector::select(row_group_num_rows as usize));
+                        results
+                            .push(RowSelector::select(row_group_num_rows as usize));
                         current_row_group_base_idx += row_group_num_rows;
                         continue;
                     }
@@ -648,7 +676,11 @@ impl ArrowReader {
                         precision: requested_precision,
                         scale: requested_scale,
                     }),
-                ) if requested_precision >= file_precision && file_scale == requested_scale => true,
+                ) if requested_precision >= file_precision
+                    && file_scale == requested_scale =>
+                {
+                    true
+                }
                 // Uuid will be store as Fixed(16) in parquet file, so the read back type will be Fixed(16).
                 (Some(PrimitiveType::Fixed(16)), Some(PrimitiveType::Uuid)) => true,
                 _ => false,
@@ -691,7 +723,10 @@ impl ArrowReader {
         iceberg_schema_of_task: &Schema,
         parquet_schema: &SchemaDescriptor,
         arrow_schema: &ArrowSchemaRef,
-        type_promotion_is_valid: fn(Option<&PrimitiveType>, Option<&PrimitiveType>) -> bool,
+        type_promotion_is_valid: fn(
+            Option<&PrimitiveType>,
+            Option<&PrimitiveType>,
+        ) -> bool,
     ) -> Result<ProjectionMask> {
         let mut column_map = HashMap::new();
         let fields = arrow_schema.fields();
@@ -807,7 +842,8 @@ impl ArrowReader {
 
         // After collecting required leaf column indices used in the predicate,
         // creates the projection mask for the Arrow predicates.
-        let projection_mask = ProjectionMask::leaves(parquet_schema, column_indices.clone());
+        let projection_mask =
+            ProjectionMask::leaves(parquet_schema, column_indices.clone());
         let predicate_func = visit(&mut converter, predicates)?;
         let arrow_predicate = ArrowPredicateFn::new(projection_mask, predicate_func);
         Ok(RowFilter::new(vec![Box::new(arrow_predicate)]))
@@ -937,7 +973,9 @@ impl ArrowReader {
 
 /// Build the map of parquet field id to Parquet column index in the schema.
 /// Returns None if the Parquet file doesn't have field IDs embedded (e.g., migrated tables).
-fn build_field_id_map(parquet_schema: &SchemaDescriptor) -> Result<Option<HashMap<i32, usize>>> {
+fn build_field_id_map(
+    parquet_schema: &SchemaDescriptor,
+) -> Result<Option<HashMap<i32, usize>>> {
     let mut column_map = HashMap::new();
 
     for (idx, field) in parquet_schema.columns().iter().enumerate() {
@@ -965,7 +1003,9 @@ fn build_field_id_map(parquet_schema: &SchemaDescriptor) -> Result<Option<HashMa
 
 /// Build a fallback field ID map for Parquet files without embedded field IDs.
 /// Position-based (1, 2, 3, ...) for compatibility with iceberg-java migrations.
-fn build_fallback_field_id_map(parquet_schema: &SchemaDescriptor) -> HashMap<i32, usize> {
+fn build_fallback_field_id_map(
+    parquet_schema: &SchemaDescriptor,
+) -> HashMap<i32, usize> {
     let mut column_map = HashMap::new();
 
     // 1-indexed to match iceberg-java's convention
@@ -1031,7 +1071,10 @@ fn apply_name_mapping_to_arrow_schema(
             if let Some(mapped_field) = mapped_field_opt {
                 if let Some(field_id) = mapped_field.field_id() {
                     // Field found in mapping with a field_id → assign it
-                    metadata.insert(PARQUET_FIELD_ID_META_KEY.to_string(), field_id.to_string());
+                    metadata.insert(
+                        PARQUET_FIELD_ID_META_KEY.to_string(),
+                        field_id.to_string(),
+                    );
                 }
             }
             // If field_id is None, leave the field without an ID (will be filtered by projection)
@@ -1053,7 +1096,9 @@ fn apply_name_mapping_to_arrow_schema(
 /// Why at schema level (not per-batch): Efficiency - avoids repeated schema modification.
 /// Why only top-level: Nested projection uses leaf column indices, not parent struct IDs.
 /// Why 1-indexed: Compatibility with iceberg-java's ParquetSchemaUtil.addFallbackIds().
-fn add_fallback_field_ids_to_arrow_schema(arrow_schema: &ArrowSchemaRef) -> Arc<ArrowSchema> {
+fn add_fallback_field_ids_to_arrow_schema(
+    arrow_schema: &ArrowSchemaRef,
+) -> Arc<ArrowSchema> {
     debug_assert!(
         arrow_schema
             .fields()
@@ -1072,7 +1117,8 @@ fn add_fallback_field_ids_to_arrow_schema(arrow_schema: &ArrowSchemaRef) -> Arc<
         .map(|(pos, field)| {
             let mut metadata = field.metadata().clone();
             let field_id = (pos + 1) as i32; // 1-indexed for Java compatibility
-            metadata.insert(PARQUET_FIELD_ID_META_KEY.to_string(), field_id.to_string());
+            metadata
+                .insert(PARQUET_FIELD_ID_META_KEY.to_string(), field_id.to_string());
 
             Field::new(field.name(), field.data_type().clone(), field.is_nullable())
                 .with_metadata(metadata)
@@ -1119,22 +1165,38 @@ impl BoundPredicateVisitor for CollectFieldIdVisitor {
         Ok(())
     }
 
-    fn is_null(&mut self, reference: &BoundReference, _predicate: &BoundPredicate) -> Result<()> {
+    fn is_null(
+        &mut self,
+        reference: &BoundReference,
+        _predicate: &BoundPredicate,
+    ) -> Result<()> {
         self.field_ids.insert(reference.field().id);
         Ok(())
     }
 
-    fn not_null(&mut self, reference: &BoundReference, _predicate: &BoundPredicate) -> Result<()> {
+    fn not_null(
+        &mut self,
+        reference: &BoundReference,
+        _predicate: &BoundPredicate,
+    ) -> Result<()> {
         self.field_ids.insert(reference.field().id);
         Ok(())
     }
 
-    fn is_nan(&mut self, reference: &BoundReference, _predicate: &BoundPredicate) -> Result<()> {
+    fn is_nan(
+        &mut self,
+        reference: &BoundReference,
+        _predicate: &BoundPredicate,
+    ) -> Result<()> {
         self.field_ids.insert(reference.field().id);
         Ok(())
     }
 
-    fn not_nan(&mut self, reference: &BoundReference, _predicate: &BoundPredicate) -> Result<()> {
+    fn not_nan(
+        &mut self,
+        reference: &BoundReference,
+        _predicate: &BoundPredicate,
+    ) -> Result<()> {
         self.field_ids.insert(reference.field().id);
         Ok(())
     }
@@ -1255,7 +1317,10 @@ impl PredicateConverter<'_> {
     /// required column indices which is used to project the column in the record batch.
     /// Return None if the field id is not found in the column map, which is possible
     /// due to schema evolution.
-    fn bound_reference(&mut self, reference: &BoundReference) -> Result<Option<usize>> {
+    fn bound_reference(
+        &mut self,
+        reference: &BoundReference,
+    ) -> Result<Option<usize>> {
         // The leaf column's index in Parquet schema.
         if let Some(column_idx) = self.column_map.get(&reference.field().id) {
             if self.parquet_schema.get_column_root(*column_idx).is_group() {
@@ -1318,8 +1383,9 @@ fn project_column(
     }
 }
 
-type PredicateResult =
-    dyn FnMut(RecordBatch) -> std::result::Result<BooleanArray, ArrowError> + Send + 'static;
+type PredicateResult = dyn FnMut(RecordBatch) -> std::result::Result<BooleanArray, ArrowError>
+    + Send
+    + 'static;
 
 impl BoundPredicateVisitor for PredicateConverter<'_> {
     type T = Box<PredicateResult>;
@@ -1356,7 +1422,10 @@ impl BoundPredicateVisitor for PredicateConverter<'_> {
         }))
     }
 
-    fn not(&mut self, mut inner: Box<PredicateResult>) -> Result<Box<PredicateResult>> {
+    fn not(
+        &mut self,
+        mut inner: Box<PredicateResult>,
+    ) -> Result<Box<PredicateResult>> {
         Ok(Box::new(move |batch| {
             let pred_ret = inner(batch)?;
             not(&pred_ret)
@@ -1679,7 +1748,10 @@ impl<R: FileRead> ArrowFileReader<R> {
     /// Convert the page index settings to ArrowReaderOptions.
     ///
     /// This merges the page index setting with any existing options.
-    pub fn apply_to_options(&self, options: ArrowReaderOptions) -> ArrowReaderOptions {
+    pub fn apply_to_options(
+        &self,
+        options: ArrowReaderOptions,
+    ) -> ArrowReaderOptions {
         options.with_page_index(self.load_page_index)
     }
 }
@@ -1751,6 +1823,7 @@ mod tests {
     use roaring::RoaringTreemap;
     use tempfile::TempDir;
 
+    use crate::ErrorKind;
     use crate::arrow::reader::{CollectFieldIdVisitor, PARQUET_FIELD_ID_META_KEY};
     use crate::arrow::{ArrowReader, ArrowReaderBuilder};
     use crate::delete_vector::DeleteVector;
@@ -1759,9 +1832,9 @@ mod tests {
     use crate::io::FileIO;
     use crate::scan::{FileScanTask, FileScanTaskDeleteFile};
     use crate::spec::{
-        DataContentType, DataFileFormat, Datum, NestedField, PrimitiveType, Schema, SchemaRef, Type,
+        DataContentType, DataFileFormat, Datum, NestedField, PrimitiveType, Schema,
+        SchemaRef, Type,
     };
-    use crate::ErrorKind;
 
     fn table_schema_simple() -> SchemaRef {
         Arc::new(
@@ -1769,10 +1842,30 @@ mod tests {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![2])
                 .with_fields(vec![
-                    NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
-                    NestedField::optional(4, "qux", Type::Primitive(PrimitiveType::Float)).into(),
+                    NestedField::optional(
+                        1,
+                        "foo",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "bar",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        3,
+                        "baz",
+                        Type::Primitive(PrimitiveType::Boolean),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        4,
+                        "qux",
+                        Type::Primitive(PrimitiveType::Float),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -1843,8 +1936,18 @@ mod tests {
                 .with_schema_id(1)
                 .with_identifier_field_ids(vec![1])
                 .with_fields(vec![
-                    NestedField::required(1, "c1", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::optional(2, "c2", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        1,
+                        "c1",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "c2",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                     NestedField::optional(
                         3,
                         "c3",
@@ -1864,14 +1967,18 @@ mod tests {
                 "1".to_string(),
             )])),
             // Type not supported
-            Field::new("c2", DataType::Duration(TimeUnit::Microsecond), true).with_metadata(
-                HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "2".to_string())]),
-            ),
+            Field::new("c2", DataType::Duration(TimeUnit::Microsecond), true)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "2".to_string(),
+                )])),
             // Precision is beyond the supported range
-            Field::new("c3", DataType::Decimal128(39, 3), true).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                "3".to_string(),
-            )])),
+            Field::new("c3", DataType::Decimal128(39, 3), true).with_metadata(
+                HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "3".to_string(),
+                )]),
+            ),
         ]));
 
         let message_type = "
@@ -1881,7 +1988,8 @@ message schema {
   optional fixed_len_byte_array(17) c3 (DECIMAL(39,3)) = 3;
 }
     ";
-        let parquet_type = parse_message_type(message_type).expect("should parse schema");
+        let parquet_type =
+            parse_message_type(message_type).expect("should parse schema");
         let parquet_schema = SchemaDescriptor::new(Arc::new(parquet_type));
 
         // Try projecting the fields c2 and c3 with the unsupported data types
@@ -1936,7 +2044,8 @@ message schema {
             .or(Reference::new("a").equal_to(Datum::string("foo")));
 
         // Table data: [NULL, "foo", "bar"]
-        let data_for_col_a = vec![None, Some("foo".to_string()), Some("bar".to_string())];
+        let data_for_col_a =
+            vec![None, Some("foo".to_string()), Some("bar".to_string())];
 
         // Expected: [NULL, "foo"].
         let expected = vec![None, Some("foo".to_string())];
@@ -1945,7 +2054,8 @@ message schema {
             setup_kleene_logic(data_for_col_a, DataType::Utf8);
         let reader = ArrowReaderBuilder::new(file_io).build();
 
-        let result_data = test_perform_read(predicate, schema, table_location, reader);
+        let result_data =
+            test_perform_read(predicate, schema, table_location, reader);
 
         assert_eq!(result_data, expected);
     }
@@ -1958,7 +2068,8 @@ message schema {
             .and(Reference::new("a").not_equal_to(Datum::string("foo")));
 
         // Table data: [NULL, "foo", "bar"]
-        let data_for_col_a = vec![None, Some("foo".to_string()), Some("bar".to_string())];
+        let data_for_col_a =
+            vec![None, Some("foo".to_string()), Some("bar".to_string())];
 
         // Expected: ["bar"].
         let expected = vec![Some("bar".to_string())];
@@ -1967,7 +2078,8 @@ message schema {
             setup_kleene_logic(data_for_col_a, DataType::Utf8);
         let reader = ArrowReaderBuilder::new(file_io).build();
 
-        let result_data = test_perform_read(predicate, schema, table_location, reader);
+        let result_data =
+            test_perform_read(predicate, schema, table_location, reader);
 
         assert_eq!(result_data, expected);
     }
@@ -2017,12 +2129,14 @@ message schema {
             ),
             // a IN ('foo', 'bar')
             (
-                Reference::new("a").is_in([Datum::string("foo"), Datum::string("baz")]),
+                Reference::new("a")
+                    .is_in([Datum::string("foo"), Datum::string("baz")]),
                 vec![Some("foo".to_string())],
             ),
             // a NOT IN ('foo', 'bar')
             (
-                Reference::new("a").is_not_in([Datum::string("foo"), Datum::string("baz")]),
+                Reference::new("a")
+                    .is_not_in([Datum::string("foo"), Datum::string("baz")]),
                 vec![Some("bar".to_string())],
             ),
         ];
@@ -2090,25 +2204,23 @@ message schema {
         let schema = Arc::new(
             Schema::builder()
                 .with_schema_id(1)
-                .with_fields(vec![NestedField::optional(
-                    1,
-                    "a",
-                    Type::Primitive(PrimitiveType::String),
-                )
-                .into()])
+                .with_fields(vec![
+                    NestedField::optional(
+                        1,
+                        "a",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                ])
                 .build()
                 .unwrap(),
         );
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "a",
-            col_a_type.clone(),
-            true,
-        )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            "1".to_string(),
-        )]))]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("a", col_a_type.clone(), true).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
+        ]));
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
@@ -2117,7 +2229,9 @@ message schema {
 
         let col = match col_a_type {
             DataType::Utf8 => Arc::new(StringArray::from(data_for_col_a)) as ArrayRef,
-            DataType::LargeUtf8 => Arc::new(LargeStringArray::from(data_for_col_a)) as ArrayRef,
+            DataType::LargeUtf8 => {
+                Arc::new(LargeStringArray::from(data_for_col_a)) as ArrayRef
+            }
             _ => panic!("unexpected col_a_type"),
         };
 
@@ -2130,7 +2244,8 @@ message schema {
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
         let mut writer =
-            ArrowWriter::try_new(file, to_write.schema(), Some(props.clone())).unwrap();
+            ArrowWriter::try_new(file, to_write.schema(), Some(props.clone()))
+                .unwrap();
 
         writer.write(&to_write).expect("Writing batch");
 
@@ -2268,14 +2383,20 @@ message schema {
         let schema = SchemaType::group_type_builder("schema")
             .with_fields(vec![
                 Arc::new(
-                    SchemaType::primitive_type_builder("a", parquet::basic::Type::INT32)
-                        .build()
-                        .unwrap(),
+                    SchemaType::primitive_type_builder(
+                        "a",
+                        parquet::basic::Type::INT32,
+                    )
+                    .build()
+                    .unwrap(),
                 ),
                 Arc::new(
-                    SchemaType::primitive_type_builder("b", parquet::basic::Type::INT32)
-                        .build()
-                        .unwrap(),
+                    SchemaType::primitive_type_builder(
+                        "b",
+                        parquet::basic::Type::INT32,
+                    )
+                    .build()
+                    .unwrap(),
                 ),
             ])
             .build()
@@ -2293,25 +2414,23 @@ message schema {
         let schema = Arc::new(
             Schema::builder()
                 .with_schema_id(1)
-                .with_fields(vec![NestedField::required(
-                    1,
-                    "id",
-                    Type::Primitive(PrimitiveType::Int),
-                )
-                .into()])
+                .with_fields(vec![
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                ])
                 .build()
                 .unwrap(),
         );
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            "1".to_string(),
-        )]))]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
+        ]));
 
         let tmp_dir = TempDir::new().unwrap();
         let table_location = tmp_dir.path().to_str().unwrap().to_string();
@@ -2340,7 +2459,8 @@ message schema {
             .build();
 
         let file = File::create(&file_path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
         writer.write(&batch1).expect("Writing batch 1");
         writer.write(&batch2).expect("Writing batch 2");
         writer.write(&batch3).expect("Writing batch 3");
@@ -2444,7 +2564,9 @@ message schema {
             .unwrap();
 
         let total_rows_task2: usize = result2.iter().map(|b| b.num_rows()).sum();
-        println!("Task 2 (bytes {rg1_start}-{file_end}) returned {total_rows_task2} rows");
+        println!(
+            "Task 2 (bytes {rg1_start}-{file_end}) returned {total_rows_task2} rows"
+        );
 
         assert_eq!(
             total_rows_task1, 100,
@@ -2496,23 +2618,30 @@ message schema {
             Schema::builder()
                 .with_schema_id(2)
                 .with_fields(vec![
-                    NestedField::required(1, "a", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "b", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        1,
+                        "a",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "b",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
         );
 
         // Create Arrow schema for old Parquet file (only has column 'a')
-        let arrow_schema_old = Arc::new(ArrowSchema::new(vec![Field::new(
-            "a",
-            DataType::Int32,
-            false,
-        )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            "1".to_string(),
-        )]))]));
+        let arrow_schema_old = Arc::new(ArrowSchema::new(vec![
+            Field::new("a", DataType::Int32, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "1".to_string(),
+            )])),
+        ]));
 
         // Write old Parquet file with only column 'a'
         let tmp_dir = TempDir::new().unwrap();
@@ -2520,13 +2649,16 @@ message schema {
         let file_io = FileIO::from_path(&table_location).unwrap();
 
         let data_a = Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef;
-        let to_write = RecordBatch::try_new(arrow_schema_old.clone(), vec![data_a]).unwrap();
+        let to_write =
+            RecordBatch::try_new(arrow_schema_old.clone(), vec![data_a]).unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
-        let file = File::create(format!("{table_location}/old_file.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let file =
+            File::create(format!("{table_location}/old_file.parquet")).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
 
@@ -2611,25 +2743,23 @@ message schema {
         let table_schema = Arc::new(
             Schema::builder()
                 .with_schema_id(1)
-                .with_fields(vec![NestedField::required(
-                    1,
-                    "id",
-                    Type::Primitive(PrimitiveType::Int),
-                )
-                .into()])
+                .with_fields(vec![
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                ])
                 .build()
                 .unwrap(),
         );
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            "1".to_string(),
-        )]))]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
+        ]));
 
         // Step 1: Create data file with 200 rows in 2 row groups
         // Row group 0: rows 0-99 (ids 1-100)
@@ -2655,7 +2785,8 @@ message schema {
             .build();
 
         let file = File::create(&data_file_path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
         writer.write(&batch1).expect("Writing batch 1");
         writer.write(&batch2).expect("Writing batch 2");
         writer.close().unwrap();
@@ -2673,14 +2804,18 @@ message schema {
         let delete_file_path = format!("{table_location}/deletes.parquet");
 
         let delete_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("file_path", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                FIELD_ID_POSITIONAL_DELETE_FILE_PATH.to_string(),
-            )])),
-            Field::new("pos", DataType::Int64, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                FIELD_ID_POSITIONAL_DELETE_POS.to_string(),
-            )])),
+            Field::new("file_path", DataType::Utf8, false).with_metadata(
+                HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    FIELD_ID_POSITIONAL_DELETE_FILE_PATH.to_string(),
+                )]),
+            ),
+            Field::new("pos", DataType::Int64, false).with_metadata(HashMap::from([
+                (
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    FIELD_ID_POSITIONAL_DELETE_POS.to_string(),
+                ),
+            ])),
         ]));
 
         // Delete row at position 199 (0-indexed, so it's the last row: id=200)
@@ -2699,7 +2834,8 @@ message schema {
 
         let delete_file = File::create(&delete_file_path).unwrap();
         let mut delete_writer =
-            ArrowWriter::try_new(delete_file, delete_schema, Some(delete_props)).unwrap();
+            ArrowWriter::try_new(delete_file, delete_schema, Some(delete_props))
+                .unwrap();
         delete_writer.write(&delete_batch).unwrap();
         delete_writer.close().unwrap();
 
@@ -2814,25 +2950,23 @@ message schema {
         let table_schema = Arc::new(
             Schema::builder()
                 .with_schema_id(1)
-                .with_fields(vec![NestedField::required(
-                    1,
-                    "id",
-                    Type::Primitive(PrimitiveType::Int),
-                )
-                .into()])
+                .with_fields(vec![
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                ])
                 .build()
                 .unwrap(),
         );
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            "1".to_string(),
-        )]))]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
+        ]));
 
         // Step 1: Create data file with 200 rows in 2 row groups
         // Row group 0: rows 0-99 (ids 1-100)
@@ -2858,7 +2992,8 @@ message schema {
             .build();
 
         let file = File::create(&data_file_path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
         writer.write(&batch1).expect("Writing batch 1");
         writer.write(&batch2).expect("Writing batch 2");
         writer.close().unwrap();
@@ -2876,14 +3011,18 @@ message schema {
         let delete_file_path = format!("{table_location}/deletes.parquet");
 
         let delete_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("file_path", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                FIELD_ID_POSITIONAL_DELETE_FILE_PATH.to_string(),
-            )])),
-            Field::new("pos", DataType::Int64, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                FIELD_ID_POSITIONAL_DELETE_POS.to_string(),
-            )])),
+            Field::new("file_path", DataType::Utf8, false).with_metadata(
+                HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    FIELD_ID_POSITIONAL_DELETE_FILE_PATH.to_string(),
+                )]),
+            ),
+            Field::new("pos", DataType::Int64, false).with_metadata(HashMap::from([
+                (
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    FIELD_ID_POSITIONAL_DELETE_POS.to_string(),
+                ),
+            ])),
         ]));
 
         // Delete row at position 199 (0-indexed, so it's the last row: id=200)
@@ -2902,7 +3041,8 @@ message schema {
 
         let delete_file = File::create(&delete_file_path).unwrap();
         let mut delete_writer =
-            ArrowWriter::try_new(delete_file, delete_schema, Some(delete_props)).unwrap();
+            ArrowWriter::try_new(delete_file, delete_schema, Some(delete_props))
+                .unwrap();
         delete_writer.write(&delete_batch).unwrap();
         delete_writer.close().unwrap();
 
@@ -2967,7 +3107,9 @@ message schema {
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
 
         println!("Total rows read from row group 1: {total_rows}");
-        println!("Expected: 99 rows (row group 1 has 100 rows, 1 delete at position 199)");
+        println!(
+            "Expected: 99 rows (row group 1 has 100 rows, 1 delete at position 199)"
+        );
 
         // This assertion will FAIL before the fix and PASS after the fix
         assert_eq!(
@@ -3046,25 +3188,23 @@ message schema {
         let table_schema = Arc::new(
             Schema::builder()
                 .with_schema_id(1)
-                .with_fields(vec![NestedField::required(
-                    1,
-                    "id",
-                    Type::Primitive(PrimitiveType::Int),
-                )
-                .into()])
+                .with_fields(vec![
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                ])
                 .build()
                 .unwrap(),
         );
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )
-        .with_metadata(HashMap::from([(
-            PARQUET_FIELD_ID_META_KEY.to_string(),
-            "1".to_string(),
-        )]))]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
+        ]));
 
         // Step 1: Create data file with 200 rows in 2 row groups
         // Row group 0: rows 0-99 (ids 1-100)
@@ -3090,7 +3230,8 @@ message schema {
             .build();
 
         let file = File::create(&data_file_path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
         writer.write(&batch1).expect("Writing batch 1");
         writer.write(&batch2).expect("Writing batch 2");
         writer.close().unwrap();
@@ -3108,14 +3249,18 @@ message schema {
         let delete_file_path = format!("{table_location}/deletes.parquet");
 
         let delete_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("file_path", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                FIELD_ID_POSITIONAL_DELETE_FILE_PATH.to_string(),
-            )])),
-            Field::new("pos", DataType::Int64, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                FIELD_ID_POSITIONAL_DELETE_POS.to_string(),
-            )])),
+            Field::new("file_path", DataType::Utf8, false).with_metadata(
+                HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    FIELD_ID_POSITIONAL_DELETE_FILE_PATH.to_string(),
+                )]),
+            ),
+            Field::new("pos", DataType::Int64, false).with_metadata(HashMap::from([
+                (
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    FIELD_ID_POSITIONAL_DELETE_POS.to_string(),
+                ),
+            ])),
         ]));
 
         // Delete row at position 0 (0-indexed, so it's the first row: id=1)
@@ -3134,7 +3279,8 @@ message schema {
 
         let delete_file = File::create(&delete_file_path).unwrap();
         let mut delete_writer =
-            ArrowWriter::try_new(delete_file, delete_schema, Some(delete_props)).unwrap();
+            ArrowWriter::try_new(delete_file, delete_schema, Some(delete_props))
+                .unwrap();
         delete_writer.write(&delete_batch).unwrap();
         delete_writer.close().unwrap();
 
@@ -3224,8 +3370,18 @@ message schema {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(2, "age", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        1,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "age",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -3248,14 +3404,17 @@ message schema {
         let name_col = Arc::new(StringArray::from(name_data.clone())) as ArrayRef;
         let age_col = Arc::new(Int32Array::from(age_data.clone())) as ArrayRef;
 
-        let to_write = RecordBatch::try_new(arrow_schema.clone(), vec![name_col, age_col]).unwrap();
+        let to_write =
+            RecordBatch::try_new(arrow_schema.clone(), vec![name_col, age_col])
+                .unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
 
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
@@ -3314,10 +3473,30 @@ message schema {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "col1", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(2, "col2", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(3, "col3", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(4, "col4", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        1,
+                        "col1",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "col2",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        3,
+                        "col3",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        4,
+                        "col4",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -3350,7 +3529,8 @@ message schema {
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
 
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
@@ -3405,9 +3585,24 @@ message schema {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(2, "age", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(3, "city", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "age",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        3,
+                        "city",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -3426,14 +3621,16 @@ message schema {
         let age_data = Arc::new(Int32Array::from(vec![30, 25])) as ArrayRef;
 
         let to_write =
-            RecordBatch::try_new(arrow_schema.clone(), vec![name_data, age_data]).unwrap();
+            RecordBatch::try_new(arrow_schema.clone(), vec![name_data, age_data])
+                .unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
 
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
@@ -3494,8 +3691,18 @@ message schema {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(2, "value", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        1,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "value",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -3518,7 +3725,8 @@ message schema {
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)).unwrap();
 
         // Write 6 rows in 3 batches (will create 3 row groups)
         for batch_num in 0..3 {
@@ -3527,10 +3735,14 @@ message schema {
                 format!("name_{}", batch_num * 2 + 1),
             ])) as ArrayRef;
             let value_data =
-                Arc::new(Int32Array::from(vec![batch_num * 2, batch_num * 2 + 1])) as ArrayRef;
+                Arc::new(Int32Array::from(vec![batch_num * 2, batch_num * 2 + 1]))
+                    as ArrayRef;
 
-            let batch =
-                RecordBatch::try_new(arrow_schema.clone(), vec![name_data, value_data]).unwrap();
+            let batch = RecordBatch::try_new(
+                arrow_schema.clone(),
+                vec![name_data, value_data],
+            )
+            .unwrap();
             writer.write(&batch).expect("Writing batch");
         }
         writer.close().unwrap();
@@ -3597,7 +3809,12 @@ message schema {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                     NestedField::required(
                         2,
                         "person",
@@ -3608,8 +3825,12 @@ message schema {
                                 Type::Primitive(PrimitiveType::String),
                             )
                             .into(),
-                            NestedField::required(4, "age", Type::Primitive(PrimitiveType::Int))
-                                .into(),
+                            NestedField::required(
+                                4,
+                                "age",
+                                Type::Primitive(PrimitiveType::Int),
+                            )
+                            .into(),
                         ])),
                     )
                     .into(),
@@ -3649,14 +3870,16 @@ message schema {
         ])) as ArrayRef;
 
         let to_write =
-            RecordBatch::try_new(arrow_schema.clone(), vec![id_data, person_data]).unwrap();
+            RecordBatch::try_new(arrow_schema.clone(), vec![id_data, person_data])
+                .unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
 
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
@@ -3727,9 +3950,24 @@ message schema {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::optional(1, "col0", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(5, "newCol", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "col1", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(
+                        1,
+                        "col0",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        5,
+                        "newCol",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "col1",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -3742,15 +3980,19 @@ message schema {
         let col0_data = Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef;
         let col1_data = Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef;
 
-        let to_write =
-            RecordBatch::try_new(arrow_schema_old.clone(), vec![col0_data, col1_data]).unwrap();
+        let to_write = RecordBatch::try_new(
+            arrow_schema_old.clone(),
+            vec![col0_data, col1_data],
+        )
+        .unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
 
@@ -3816,10 +4058,24 @@ message schema {
             Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-                    NestedField::required(3, "value", Type::Primitive(PrimitiveType::Double))
-                        .into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        3,
+                        "value",
+                        Type::Primitive(PrimitiveType::Double),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -3838,18 +4094,22 @@ message schema {
         // Write data where all ids are >= 10
         let id_data = Arc::new(Int32Array::from(vec![10, 11, 12])) as ArrayRef;
         let name_data = Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef;
-        let value_data = Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])) as ArrayRef;
+        let value_data =
+            Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])) as ArrayRef;
 
-        let to_write =
-            RecordBatch::try_new(arrow_schema.clone(), vec![id_data, name_data, value_data])
-                .unwrap();
+        let to_write = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![id_data, name_data, value_data],
+        )
+        .unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
 
         let file = File::create(format!("{table_location}/1.parquet")).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
 
@@ -3886,7 +4146,9 @@ message schema {
             .unwrap();
 
         // Should return empty results
-        assert!(result.is_empty() || result.iter().all(|batch| batch.num_rows() == 0));
+        assert!(
+            result.is_empty() || result.iter().all(|batch| batch.num_rows() == 0)
+        );
     }
 
     /// Test bucket partitioning reads source column from data file (not partition metadata).
@@ -3944,8 +4206,18 @@ message schema {
             Schema::builder()
                 .with_schema_id(0)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()
                 .unwrap(),
@@ -3966,14 +4238,12 @@ message schema {
 
         // Create Arrow schema with field IDs for Parquet file
         let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                "1".to_string(),
-            )])),
-            Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                "2".to_string(),
-            )])),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
+            Field::new("name", DataType::Utf8, true).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "2".to_string()),
+            ])),
         ]));
 
         // Write Parquet file with data
@@ -3983,16 +4253,19 @@ message schema {
 
         let id_data = Arc::new(Int32Array::from(vec![1, 5, 9, 13])) as ArrayRef;
         let name_data =
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "Dave"])) as ArrayRef;
+            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "Dave"]))
+                as ArrayRef;
 
         let to_write =
-            RecordBatch::try_new(arrow_schema.clone(), vec![id_data, name_data]).unwrap();
+            RecordBatch::try_new(arrow_schema.clone(), vec![id_data, name_data])
+                .unwrap();
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
         let file = File::create(format!("{}/data.parquet", &table_location)).unwrap();
-        let mut writer = ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
         writer.write(&to_write).expect("Writing batch");
         writer.close().unwrap();
 

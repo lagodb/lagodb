@@ -5,11 +5,11 @@
 
 use crate::api::AmRelation;
 use crate::data::Row;
+use crate::diag::ReportableError;
 use crate::handles::{
     BufferAccessStrategyHandle, ItemPointer, RelationHandle, SnapshotHandle,
     TupleTableSlotHandle, VacuumParamsHandle, VarlenaHandle,
 };
-use crate::diag::ReportableError;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;

@@ -79,7 +79,10 @@ impl Storage for MemoryStorage {
                 }),
             })
         } else {
-            Err(Error::new(ErrorKind::IoError, format!("file not found: {path:?}")))
+            Err(Error::new(
+                ErrorKind::IoError,
+                format!("file not found: {path:?}"),
+            ))
         }
     }
 
@@ -138,7 +141,8 @@ impl Read for MemoryFileRead {
             return Ok(0);
         }
         let to_read = std::cmp::min(remaining, buf.len());
-        buf[..to_read].copy_from_slice(&self.data[self.position..self.position + to_read]);
+        buf[..to_read]
+            .copy_from_slice(&self.data[self.position..self.position + to_read]);
         self.position += to_read;
         Ok(to_read)
     }

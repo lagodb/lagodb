@@ -31,7 +31,8 @@ mod registry;
 mod secret;
 
 pub use config::{
-    AzureStoreConfig, ConfiguredObjectBackend, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig, StoreConfig,
+    AzureStoreConfig, ConfiguredObjectBackend, GcsStoreConfig,
+    S3CompatibleStoreConfig, S3StoreConfig, StoreConfig,
 };
 pub use memory::MemoryObjectBackend;
 pub use object_store::ObjectStoreBackend;
@@ -47,7 +48,11 @@ pub use secret::SecretString;
 #[async_trait]
 pub trait ObjectBackend: Send + Sync {
     async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo>;
-    async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes>;
+    async fn get_range(
+        &self,
+        key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes>;
 
     /// Uploads the contents of a local `path` to `key` and returns the resulting backend identity.
     ///
@@ -58,7 +63,12 @@ pub trait ObjectBackend: Send + Sync {
     /// Used today only by the staging commit path in [`crate::staging::StagingArea::commit`],
     /// which always writes the full file; other callers that need partial or in-memory uploads
     /// should grow a new method rather than reusing this one.
-    async fn put_from_file(&self, key: &ObjectLocation, path: &Path, len: u64) -> StorageResult<ObjectInfo>;
+    async fn put_from_file(
+        &self,
+        key: &ObjectLocation,
+        path: &Path,
+        len: u64,
+    ) -> StorageResult<ObjectInfo>;
 
     /// Lists objects under `(store_id, bucket)` whose key starts with `prefix` (or the whole
     /// bucket when `prefix` is `None`). Listing is recursive: an object at `foo/bar/baz`

@@ -6,8 +6,8 @@ pub use object::ObjectStorage;
 
 use crate::error::{IcebergError, IcebergResult};
 use iceberg_lite::io::FileIO;
-use pg_lakebase_core::options::get_tablespace;
 use pg_lakebase_core::handles::RelationHandle;
+use pg_lakebase_core::options::get_tablespace;
 use pg_lakebase_storage::StorageClient;
 use pgrx::pg_sys;
 use std::ffi::CStr;

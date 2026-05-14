@@ -51,14 +51,15 @@ mod _decimal {
     use crate::spec::{MAX_DECIMAL_BYTES, MAX_DECIMAL_PRECISION};
 
     // Max precision of bytes, starts from 1
-    pub(super) static MAX_PRECISION: Lazy<[u32; MAX_DECIMAL_BYTES as usize]> = Lazy::new(|| {
-        let mut ret: [u32; 24] = [0; 24];
-        for (i, prec) in ret.iter_mut().enumerate() {
-            *prec = 2f64.powi((8 * (i + 1) - 1) as i32).log10().floor() as u32;
-        }
+    pub(super) static MAX_PRECISION: Lazy<[u32; MAX_DECIMAL_BYTES as usize]> =
+        Lazy::new(|| {
+            let mut ret: [u32; 24] = [0; 24];
+            for (i, prec) in ret.iter_mut().enumerate() {
+                *prec = 2f64.powi((8 * (i + 1) - 1) as i32).log10().floor() as u32;
+            }
 
-        ret
-    });
+            ret
+        });
 
     //  Required bytes of precision, starts from 1
     pub(super) static REQUIRED_LENGTH: Lazy<[u32; MAX_DECIMAL_PRECISION as usize]> =
@@ -175,7 +176,8 @@ impl Type {
     pub fn is_floating_type(&self) -> bool {
         matches!(
             self,
-            Type::Primitive(PrimitiveType::Float) | Type::Primitive(PrimitiveType::Double)
+            Type::Primitive(PrimitiveType::Float)
+                | Type::Primitive(PrimitiveType::Double)
         )
     }
 }
@@ -276,7 +278,9 @@ impl PrimitiveType {
 
 impl Serialize for Type {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         let type_serde = _serde::SerdeType::from(self);
         type_serde.serialize(serializer)
     }
@@ -284,7 +288,9 @@ impl Serialize for Type {
 
 impl<'de> Deserialize<'de> for Type {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let type_serde = _serde::SerdeType::deserialize(deserializer)?;
         Ok(Type::from(type_serde))
     }
@@ -292,7 +298,9 @@ impl<'de> Deserialize<'de> for Type {
 
 impl<'de> Deserialize<'de> for PrimitiveType {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let s = String::deserialize(deserializer)?;
         if s.starts_with("decimal") {
             deserialize_decimal(s.into_deserializer())
@@ -306,7 +314,9 @@ impl<'de> Deserialize<'de> for PrimitiveType {
 
 impl Serialize for PrimitiveType {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         match self {
             PrimitiveType::Decimal { precision, scale } => {
                 serialize_decimal(precision, scale, serializer)
@@ -317,14 +327,20 @@ impl Serialize for PrimitiveType {
     }
 }
 
-fn deserialize_decimal<'de, D>(deserializer: D) -> std::result::Result<PrimitiveType, D::Error>
-where D: Deserializer<'de> {
+fn deserialize_decimal<'de, D>(
+    deserializer: D,
+) -> std::result::Result<PrimitiveType, D::Error>
+where
+    D: Deserializer<'de>,
+{
     let s = String::deserialize(deserializer)?;
     let (precision, scale) = s
         .trim_start_matches(r"decimal(")
         .trim_end_matches(')')
         .split_once(',')
-        .ok_or_else(|| D::Error::custom("Decimal requires precision and scale: {s}"))?;
+        .ok_or_else(|| {
+            D::Error::custom("Decimal requires precision and scale: {s}")
+        })?;
 
     Ok(PrimitiveType::Decimal {
         precision: precision.trim().parse().map_err(D::Error::custom)?,
@@ -343,8 +359,12 @@ where
     serializer.serialize_str(&format!("decimal({precision},{scale})"))
 }
 
-fn deserialize_fixed<'de, D>(deserializer: D) -> std::result::Result<PrimitiveType, D::Error>
-where D: Deserializer<'de> {
+fn deserialize_fixed<'de, D>(
+    deserializer: D,
+) -> std::result::Result<PrimitiveType, D::Error>
+where
+    D: Deserializer<'de>,
+{
     let fixed = String::deserialize(deserializer)?
         .trim_start_matches(r"fixed[")
         .trim_end_matches(']')
@@ -356,8 +376,13 @@ where D: Deserializer<'de> {
         .map_err(D::Error::custom)
 }
 
-fn serialize_fixed<S>(value: &u64, serializer: S) -> std::result::Result<S::Ok, S::Error>
-where S: Serializer {
+fn serialize_fixed<S>(
+    value: &u64,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
     serializer.serialize_str(&format!("fixed[{value}]"))
 }
 
@@ -401,7 +426,9 @@ pub struct StructType {
 
 impl<'de> Deserialize<'de> for StructType {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         #[serde(field_identifier, rename_all = "lowercase")]
         enum Field {
@@ -418,8 +445,13 @@ impl<'de> Deserialize<'de> for StructType {
                 formatter.write_str("struct")
             }
 
-            fn visit_map<V>(self, mut map: V) -> std::result::Result<StructType, V::Error>
-            where V: MapAccess<'de> {
+            fn visit_map<V>(
+                self,
+                mut map: V,
+            ) -> std::result::Result<StructType, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
                 let mut fields = None;
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -433,7 +465,9 @@ impl<'de> Deserialize<'de> for StructType {
                         }
                         Field::Fields => {
                             if fields.is_some() {
-                                return Err(serde::de::Error::duplicate_field("fields"));
+                                return Err(serde::de::Error::duplicate_field(
+                                    "fields",
+                                ));
                             }
                             fields = Some(map.next_value()?);
                         }
@@ -469,7 +503,9 @@ impl StructType {
     fn field_id_to_index(&self, field_id: i32) -> Option<usize> {
         self.id_lookup
             .get_or_init(|| {
-                HashMap::from_iter(self.fields.iter().enumerate().map(|(i, x)| (x.id, i)))
+                HashMap::from_iter(
+                    self.fields.iter().enumerate().map(|(i, x)| (x.id, i)),
+                )
             })
             .get(&field_id)
             .copied()
@@ -607,7 +643,12 @@ pub type NestedFieldRef = Arc<NestedField>;
 
 impl NestedField {
     /// Construct a new field.
-    pub fn new(id: i32, name: impl ToString, field_type: Type, required: bool) -> Self {
+    pub fn new(
+        id: i32,
+        name: impl ToString,
+        field_type: Type,
+        required: bool,
+    ) -> Self {
         Self {
             id,
             name: name.to_string(),
@@ -709,7 +750,8 @@ pub(super) mod _serde {
 
     use crate::spec::datatypes::Type::Map;
     use crate::spec::datatypes::{
-        ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, StructType, Type,
+        ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, StructType,
+        Type,
     };
 
     /// List type for serialization and deserialization
@@ -763,7 +805,8 @@ pub(super) mod _serde {
                     value_required,
                     value,
                 } => Map(MapType {
-                    key_field: NestedField::map_key_element(key_id, key.into_owned()).into(),
+                    key_field: NestedField::map_key_element(key_id, key.into_owned())
+                        .into(),
                     value_field: NestedField::map_value_element(
                         value_id,
                         value.into_owned(),
@@ -841,7 +884,8 @@ mod tests {
         assert_eq!(desered_type, expected_type);
 
         let sered_json = serde_json::to_string(&expected_type).unwrap();
-        let parsed_json_value = serde_json::from_str::<serde_json::Value>(&sered_json).unwrap();
+        let parsed_json_value =
+            serde_json::from_str::<serde_json::Value>(&sered_json).unwrap();
         let raw_json_value = serde_json::from_str::<serde_json::Value>(json).unwrap();
 
         assert_eq!(parsed_json_value, raw_json_value);
@@ -877,14 +921,30 @@ mod tests {
             record,
             Type::Struct(StructType {
                 fields: vec![
-                    NestedField::required(1, "bool_field", Type::Primitive(PrimitiveType::Boolean))
-                        .into(),
-                    NestedField::required(2, "int_field", Type::Primitive(PrimitiveType::Int))
-                        .into(),
-                    NestedField::required(3, "long_field", Type::Primitive(PrimitiveType::Long))
-                        .into(),
-                    NestedField::required(4, "float_field", Type::Primitive(PrimitiveType::Float))
-                        .into(),
+                    NestedField::required(
+                        1,
+                        "bool_field",
+                        Type::Primitive(PrimitiveType::Boolean),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "int_field",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        3,
+                        "long_field",
+                        Type::Primitive(PrimitiveType::Long),
+                    )
+                    .into(),
+                    NestedField::required(
+                        4,
+                        "float_field",
+                        Type::Primitive(PrimitiveType::Float),
+                    )
+                    .into(),
                     NestedField::required(
                         5,
                         "double_field",
@@ -900,10 +960,18 @@ mod tests {
                         }),
                     )
                     .into(),
-                    NestedField::required(7, "date_field", Type::Primitive(PrimitiveType::Date))
-                        .into(),
-                    NestedField::required(8, "time_field", Type::Primitive(PrimitiveType::Time))
-                        .into(),
+                    NestedField::required(
+                        7,
+                        "date_field",
+                        Type::Primitive(PrimitiveType::Date),
+                    )
+                    .into(),
+                    NestedField::required(
+                        8,
+                        "time_field",
+                        Type::Primitive(PrimitiveType::Time),
+                    )
+                    .into(),
                     NestedField::required(
                         9,
                         "timestamp_field",
@@ -928,8 +996,12 @@ mod tests {
                         Type::Primitive(PrimitiveType::TimestamptzNs),
                     )
                     .into(),
-                    NestedField::required(13, "uuid_field", Type::Primitive(PrimitiveType::Uuid))
-                        .into(),
+                    NestedField::required(
+                        13,
+                        "uuid_field",
+                        Type::Primitive(PrimitiveType::Uuid),
+                    )
+                    .into(),
                     NestedField::required(
                         14,
                         "fixed_field",
@@ -982,22 +1054,39 @@ mod tests {
             record,
             Type::Struct(StructType {
                 fields: vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Uuid))
-                        .with_initial_default(Literal::Primitive(PrimitiveLiteral::UInt128(
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Uuid),
+                    )
+                    .with_initial_default(Literal::Primitive(
+                        PrimitiveLiteral::UInt128(
                             Uuid::parse_str("0db3e2a8-9d1d-42b9-aa7b-74ebe558dceb")
                                 .unwrap()
                                 .as_u128(),
-                        )))
-                        .with_write_default(Literal::Primitive(PrimitiveLiteral::UInt128(
+                        ),
+                    ))
+                    .with_write_default(Literal::Primitive(
+                        PrimitiveLiteral::UInt128(
                             Uuid::parse_str("ec5911be-b0a7-458c-8438-c9a3e53cffae")
                                 .unwrap()
                                 .as_u128(),
-                        )))
-                        .into(),
-                    NestedField::optional(2, "data", Type::Primitive(PrimitiveType::Int)).into(),
+                        ),
+                    ))
+                    .into(),
+                    NestedField::optional(
+                        2,
+                        "data",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                 ],
                 id_lookup: HashMap::from([(1, 0), (2, 1)]).into(),
-                name_lookup: HashMap::from([("id".to_string(), 0), ("data".to_string(), 1)]).into(),
+                name_lookup: HashMap::from([
+                    ("id".to_string(), 0),
+                    ("data".to_string(), 1),
+                ])
+                .into(),
             }),
         )
     }
@@ -1067,16 +1156,30 @@ mod tests {
                         .as_u128(),
                 )))
                 .into(),
-            NestedField::optional(2, "data", Type::Primitive(PrimitiveType::Int)).into(),
+            NestedField::optional(2, "data", Type::Primitive(PrimitiveType::Int))
+                .into(),
             NestedField::required(
                 3,
                 "address",
                 Type::Struct(StructType::new(vec![
-                    NestedField::required(4, "street", Type::Primitive(PrimitiveType::String))
-                        .into(),
-                    NestedField::optional(5, "province", Type::Primitive(PrimitiveType::String))
-                        .into(),
-                    NestedField::required(6, "zip", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::required(
+                        4,
+                        "street",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::optional(
+                        5,
+                        "province",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    NestedField::required(
+                        6,
+                        "zip",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
                 ])),
             )
             .into(),
@@ -1125,8 +1228,11 @@ mod tests {
         check_type_serde(
             record,
             Type::Map(MapType {
-                key_field: NestedField::map_key_element(4, Type::Primitive(PrimitiveType::String))
-                    .into(),
+                key_field: NestedField::map_key_element(
+                    4,
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
                 value_field: NestedField::map_value_element(
                     5,
                     Type::Primitive(PrimitiveType::Double),
@@ -1153,8 +1259,11 @@ mod tests {
         check_type_serde(
             record,
             Type::Map(MapType {
-                key_field: NestedField::map_key_element(4, Type::Primitive(PrimitiveType::Int))
-                    .into(),
+                key_field: NestedField::map_key_element(
+                    4,
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into(),
                 value_field: NestedField::map_value_element(
                     5,
                     Type::Primitive(PrimitiveType::String),
@@ -1168,8 +1277,8 @@ mod tests {
     #[test]
     fn test_decimal_precision() {
         let expected_max_precision = [
-            2, 4, 6, 9, 11, 14, 16, 18, 21, 23, 26, 28, 31, 33, 35, 38, 40, 43, 45, 47, 50, 52, 55,
-            57,
+            2, 4, 6, 9, 11, 14, 16, 18, 21, 23, 26, 28, 31, 33, 35, 38, 40, 43, 45,
+            47, 50, 52, 55, 57,
         ];
         for (i, max_precision) in expected_max_precision.iter().enumerate() {
             assert_eq!(

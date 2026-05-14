@@ -18,4 +18,5 @@ pub(crate) const READ_REQUEST_BYTES: usize = FRAME_HEADER_BYTES + 2 + 8 + 8 + 4;
 pub const READ_RESPONSE_PREFIX_BYTES: usize = FRAME_HEADER_BYTES + 2 + 1 + 4;
 
 /// Maximum in-band READ response body that still fits inside [`MAX_FRAME_BYTES`].
-pub const MAX_READ_RESPONSE_DATA_BYTES: usize = MAX_FRAME_BYTES - READ_RESPONSE_PREFIX_BYTES;
+pub const MAX_READ_RESPONSE_DATA_BYTES: usize =
+    MAX_FRAME_BYTES - READ_RESPONSE_PREFIX_BYTES;

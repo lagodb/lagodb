@@ -163,7 +163,9 @@ pub(crate) struct Residency {
 impl Residency {
     pub(crate) fn size(&self) -> u64 {
         match &self.body {
-            ResidencyBody::Small { meta, .. } | ResidencyBody::Complete { meta } => meta.size(),
+            ResidencyBody::Small { meta, .. } | ResidencyBody::Complete { meta } => {
+                meta.size()
+            }
             ResidencyBody::LargeFill { session } => session.info().size,
         }
     }
@@ -187,9 +189,16 @@ impl Residency {
 
 /// Payload of a [`Residency`] — carries whatever `READ` needs to serve bytes with zero KV calls.
 pub(crate) enum ResidencyBody {
-    Small { meta: CachedObjectMeta, payload: Arc<[u8]> },
-    Complete { meta: CachedObjectMeta },
-    LargeFill { session: Arc<LargeFillSession> },
+    Small {
+        meta: CachedObjectMeta,
+        payload: Arc<[u8]>,
+    },
+    Complete {
+        meta: CachedObjectMeta,
+    },
+    LargeFill {
+        session: Arc<LargeFillSession>,
+    },
 }
 
 /// Externally observable classification of a [`Residency`] — the tests and a few log sites care,

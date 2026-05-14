@@ -109,9 +109,18 @@ async fn list_objects() {
             .unwrap();
 
         let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"list/a.txt"), "missing list/a.txt in {keys:?}");
-        assert!(keys.contains(&"list/b.txt"), "missing list/b.txt in {keys:?}");
-        assert!(keys.contains(&"list/sub/c.txt"), "missing list/sub/c.txt in {keys:?}");
+        assert!(
+            keys.contains(&"list/a.txt"),
+            "missing list/a.txt in {keys:?}"
+        );
+        assert!(
+            keys.contains(&"list/b.txt"),
+            "missing list/b.txt in {keys:?}"
+        );
+        assert!(
+            keys.contains(&"list/sub/c.txt"),
+            "missing list/sub/c.txt in {keys:?}"
+        );
     })
     .await
     .unwrap();
@@ -156,7 +165,10 @@ async fn redb_index_read_path() {
         f.close().unwrap();
 
         let mut f2 = client.open(STORE_ID, TEST_BUCKET, "redb.txt").unwrap();
-        assert!(f2.is_direct_io(), "expected direct-IO on redb cached re-open");
+        assert!(
+            f2.is_direct_io(),
+            "expected direct-IO on redb cached re-open"
+        );
         assert_eq!(f2.read(payload.len() as u32).unwrap(), payload.as_ref());
         f2.close().unwrap();
     })
@@ -177,12 +189,18 @@ async fn redb_restart_recovers_cached_complete_file() {
         let client = StorageClient::connect(&socket).unwrap();
 
         let mut cold = client.open(STORE_ID, TEST_BUCKET, key).unwrap();
-        assert_eq!(cold.read(expected.len() as u32).unwrap(), expected.as_slice());
+        assert_eq!(
+            cold.read(expected.len() as u32).unwrap(),
+            expected.as_slice()
+        );
         cold.close().unwrap();
 
         let mut cached = client.open(STORE_ID, TEST_BUCKET, key).unwrap();
         assert!(cached.is_direct_io(), "expected direct-IO before restart");
-        assert_eq!(cached.read(expected.len() as u32).unwrap(), expected.as_slice());
+        assert_eq!(
+            cached.read(expected.len() as u32).unwrap(),
+            expected.as_slice()
+        );
         cached.close().unwrap();
     })
     .await
@@ -194,7 +212,10 @@ async fn redb_restart_recovers_cached_complete_file() {
     tokio::task::spawn_blocking(move || {
         let client = StorageClient::connect(&socket).unwrap();
         let mut file = client.open(STORE_ID, TEST_BUCKET, key).unwrap();
-        assert!(file.is_direct_io(), "expected direct-IO from persisted redb cache after restart");
+        assert!(
+            file.is_direct_io(),
+            "expected direct-IO from persisted redb cache after restart"
+        );
         assert_eq!(file.read(payload.len() as u32).unwrap(), payload.as_slice());
         file.close().unwrap();
     })

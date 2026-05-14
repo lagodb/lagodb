@@ -12,8 +12,9 @@ use tokio::sync::Notify;
 
 use crate::backend::{MemoryObjectBackend, ObjectBackend};
 use crate::cache::{
-    AdmitSmallOutcome, CacheIndex, CachedObjectMeta, LogicalCacheUsage, LruScanCursor, LruScanPage, MetaScanCursor,
-    MetaScanPage, OpenHit, SmallScanCursor, SmallScanPage,
+    AdmitSmallOutcome, CacheIndex, CachedObjectMeta, LogicalCacheUsage,
+    LruScanCursor, LruScanPage, MetaScanCursor, MetaScanPage, OpenHit,
+    SmallScanCursor, SmallScanPage,
 };
 use crate::error::StorageResult;
 use crate::object::{ObjectInfo, ObjectLocation};
@@ -57,7 +58,11 @@ impl ObjectBackend for BlockingRangeBackend {
         self.inner.head(key).await
     }
 
-    async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
+    async fn get_range(
+        &self,
+        key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
         self.range_gets.fetch_add(1, Ordering::AcqRel);
         if self.block_next_range_get.swap(false, Ordering::AcqRel) {
             self.first_range_get_started.notify_waiters();
@@ -80,7 +85,8 @@ impl ObjectBackend for BlockingRangeBackend {
         store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
-    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>> {
+    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
+    {
         self.inner.list(store_id, bucket, prefix)
     }
 
@@ -140,7 +146,8 @@ impl BlockingHeadBackend {
     /// Configure the first (blocked) HEAD to return `NotFound` once released. Subsequent HEADs
     /// fall through to the inner backend unchanged.
     pub(crate) fn fail_first_head_with_not_found(&self) {
-        self.fail_first_head_with_not_found.store(true, Ordering::Release);
+        self.fail_first_head_with_not_found
+            .store(true, Ordering::Release);
     }
 }
 
@@ -159,7 +166,11 @@ impl ObjectBackend for BlockingHeadBackend {
         self.inner.head(key).await
     }
 
-    async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
+    async fn get_range(
+        &self,
+        key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
         self.inner.get_range(key, range).await
     }
 
@@ -177,7 +188,8 @@ impl ObjectBackend for BlockingHeadBackend {
         store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
-    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>> {
+    ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
+    {
         self.inner.list(store_id, bucket, prefix)
     }
 
@@ -215,24 +227,40 @@ impl<I> CountingCompleteIndex<I> {
 
 #[async_trait]
 impl<I: CacheIndex> CacheIndex for CountingCompleteIndex<I> {
-    async fn get_meta(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>> {
+    async fn get_meta(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>> {
         self.inner.get_meta(key).await
     }
 
-    async fn scan_meta_page(&self, cursor: Option<MetaScanCursor>, limit: usize) -> StorageResult<MetaScanPage> {
+    async fn scan_meta_page(
+        &self,
+        cursor: Option<MetaScanCursor>,
+        limit: usize,
+    ) -> StorageResult<MetaScanPage> {
         self.inner.scan_meta_page(cursor, limit).await
     }
 
-    async fn put_new_complete(&self, meta: CachedObjectMeta) -> StorageResult<CachedObjectMeta> {
+    async fn put_new_complete(
+        &self,
+        meta: CachedObjectMeta,
+    ) -> StorageResult<CachedObjectMeta> {
         self.complete_puts.fetch_add(1, Ordering::AcqRel);
         self.inner.put_new_complete(meta).await
     }
 
-    async fn delete_meta(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>> {
+    async fn delete_meta(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>> {
         self.inner.delete_meta(key).await
     }
 
-    async fn get_small(&self, key: &ObjectLocation) -> StorageResult<Option<Vec<u8>>> {
+    async fn get_small(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<Vec<u8>>> {
         self.inner.get_small(key).await
     }
 
@@ -248,15 +276,24 @@ impl<I: CacheIndex> CacheIndex for CountingCompleteIndex<I> {
         self.inner.scan_small_entries_page(cursor, limit).await
     }
 
-    async fn remove_unclaimed_small_payload(&self, key: &ObjectLocation) -> StorageResult<()> {
+    async fn remove_unclaimed_small_payload(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<()> {
         self.inner.remove_unclaimed_small_payload(key).await
     }
 
-    async fn delete_meta_and_small(&self, key: &ObjectLocation) -> StorageResult<Option<CachedObjectMeta>> {
+    async fn delete_meta_and_small(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<Option<CachedObjectMeta>> {
         self.inner.delete_meta_and_small(key).await
     }
 
-    async fn replace_runtime_cache_usage(&self, usage: LogicalCacheUsage) -> StorageResult<()> {
+    async fn replace_runtime_cache_usage(
+        &self,
+        usage: LogicalCacheUsage,
+    ) -> StorageResult<()> {
         self.inner.replace_runtime_cache_usage(usage).await
     }
 
@@ -287,6 +324,8 @@ impl<I: CacheIndex> CacheIndex for CountingCompleteIndex<I> {
         payload: Vec<u8>,
         now_ns: u64,
     ) -> StorageResult<AdmitSmallOutcome> {
-        self.inner.admit_small_if_absent(meta, payload, now_ns).await
+        self.inner
+            .admit_small_if_absent(meta, payload, now_ns)
+            .await
     }
 }

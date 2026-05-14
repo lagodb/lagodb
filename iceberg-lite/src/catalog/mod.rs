@@ -38,8 +38,9 @@ use uuid::Uuid;
 
 use crate::spec::{
     EncryptedKey, FormatVersion, PartitionStatisticsFile, Schema, SchemaId, Snapshot,
-    SnapshotReference, SortOrder, StatisticsFile, TableMetadata, TableMetadataBuilder,
-    UnboundPartitionSpec, ViewFormatVersion, ViewRepresentations, ViewVersion,
+    SnapshotReference, SortOrder, StatisticsFile, TableMetadata,
+    TableMetadataBuilder, UnboundPartitionSpec, ViewFormatVersion,
+    ViewRepresentations, ViewVersion,
 };
 use crate::table::Table;
 use crate::{Error, ErrorKind, Result};
@@ -84,7 +85,11 @@ pub trait Catalog: Debug + Sync + Send {
     fn list_tables(&self, namespace: &NamespaceIdent) -> Result<Vec<TableIdent>>;
 
     /// Create a new table inside the namespace.
-    fn create_table(&self, namespace: &NamespaceIdent, creation: TableCreation) -> Result<Table>;
+    fn create_table(
+        &self,
+        namespace: &NamespaceIdent,
+        creation: TableCreation,
+    ) -> Result<Table>;
 
     /// Load table from the catalog.
     fn load_table(&self, table: &TableIdent) -> Result<Table>;
@@ -99,7 +104,11 @@ pub trait Catalog: Debug + Sync + Send {
     fn rename_table(&self, src: &TableIdent, dest: &TableIdent) -> Result<()>;
 
     /// Register an existing table to the catalog.
-    fn register_table(&self, table: &TableIdent, metadata_location: String) -> Result<Table>;
+    fn register_table(
+        &self,
+        table: &TableIdent,
+        metadata_location: String,
+    ) -> Result<Table>;
 
     /// Update a table to the catalog.
     fn update_table(&self, commit: TableCommit) -> Result<Table>;
@@ -110,7 +119,11 @@ pub trait CatalogBuilder: Default + Debug + Send + Sync {
     /// The catalog type that this builder creates.
     type C: Catalog;
     /// Create a new catalog instance.
-    fn load(self, name: impl Into<String>, props: HashMap<String, String>) -> Result<Self::C>;
+    fn load(
+        self,
+        name: impl Into<String>,
+        props: HashMap<String, String>,
+    ) -> Result<Self::C>;
 }
 
 /// NamespaceIdent represents the identifier of a namespace in the catalog.
@@ -118,7 +131,9 @@ pub trait CatalogBuilder: Default + Debug + Send + Sync {
 /// The namespace identifier is a list of strings, where each string is a
 /// component of the namespace. It's the catalog implementer's responsibility to
 /// handle the namespace identifier correctly.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord,
+)]
 pub struct NamespaceIdent(Vec<String>);
 
 impl NamespaceIdent {
@@ -194,7 +209,10 @@ impl Namespace {
     }
 
     /// Create a new namespace with properties.
-    pub fn with_properties(name: NamespaceIdent, properties: HashMap<String, String>) -> Self {
+    pub fn with_properties(
+        name: NamespaceIdent,
+        properties: HashMap<String, String>,
+    ) -> Self {
         Self { name, properties }
     }
 
@@ -216,7 +234,9 @@ impl Display for NamespaceIdent {
 }
 
 /// TableIdent represents the identifier of a table in the catalog.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 pub struct TableIdent {
     /// Namespace of the table.
     pub namespace: NamespaceIdent,
@@ -345,9 +365,10 @@ impl TableCommit {
         }
 
         // Bump the version of metadata
-        let new_metadata_location = MetadataLocation::from_str(current_metadata_location)?
-            .with_next_version()
-            .to_string();
+        let new_metadata_location =
+            MetadataLocation::from_str(current_metadata_location)?
+                .with_next_version()
+                .to_string();
 
         Ok(table
             .with_metadata(Arc::new(metadata_builder.build()?.metadata))
@@ -567,14 +588,23 @@ pub enum TableUpdate {
 
 impl TableUpdate {
     /// Applies the update to the table metadata builder.
-    pub fn apply(self, builder: TableMetadataBuilder) -> Result<TableMetadataBuilder> {
+    pub fn apply(
+        self,
+        builder: TableMetadataBuilder,
+    ) -> Result<TableMetadataBuilder> {
         match self {
             TableUpdate::AssignUuid { uuid } => Ok(builder.assign_uuid(uuid)),
             TableUpdate::AddSchema { schema, .. } => Ok(builder.add_schema(schema)?),
-            TableUpdate::SetCurrentSchema { schema_id } => builder.set_current_schema(schema_id),
+            TableUpdate::SetCurrentSchema { schema_id } => {
+                builder.set_current_schema(schema_id)
+            }
             TableUpdate::AddSpec { spec } => builder.add_partition_spec(spec),
-            TableUpdate::SetDefaultSpec { spec_id } => builder.set_default_partition_spec(spec_id),
-            TableUpdate::AddSortOrder { sort_order } => builder.add_sort_order(sort_order),
+            TableUpdate::SetDefaultSpec { spec_id } => {
+                builder.set_default_partition_spec(spec_id)
+            }
+            TableUpdate::AddSortOrder { sort_order } => {
+                builder.add_sort_order(sort_order)
+            }
             TableUpdate::SetDefaultSortOrder { sort_order_id } => {
                 builder.set_default_sort_order(sort_order_id)
             }
@@ -586,17 +616,25 @@ impl TableUpdate {
             TableUpdate::RemoveSnapshots { snapshot_ids } => {
                 Ok(builder.remove_snapshots(&snapshot_ids))
             }
-            TableUpdate::RemoveSnapshotRef { ref_name } => Ok(builder.remove_ref(&ref_name)),
-            TableUpdate::SetLocation { location } => Ok(builder.set_location(location)),
+            TableUpdate::RemoveSnapshotRef { ref_name } => {
+                Ok(builder.remove_ref(&ref_name))
+            }
+            TableUpdate::SetLocation { location } => {
+                Ok(builder.set_location(location))
+            }
             TableUpdate::SetProperties { updates } => builder.set_properties(updates),
-            TableUpdate::RemoveProperties { removals } => builder.remove_properties(&removals),
+            TableUpdate::RemoveProperties { removals } => {
+                builder.remove_properties(&removals)
+            }
             TableUpdate::UpgradeFormatVersion { format_version } => {
                 builder.upgrade_format_version(format_version)
             }
             TableUpdate::RemovePartitionSpecs { spec_ids } => {
                 builder.remove_partition_specs(&spec_ids)
             }
-            TableUpdate::SetStatistics { statistics } => Ok(builder.set_statistics(statistics)),
+            TableUpdate::SetStatistics { statistics } => {
+                Ok(builder.set_statistics(statistics))
+            }
             TableUpdate::RemoveStatistics { snapshot_id } => {
                 Ok(builder.remove_statistics(snapshot_id))
             }
@@ -606,7 +644,9 @@ impl TableUpdate {
             TableUpdate::RemovePartitionStatistics { snapshot_id } => {
                 Ok(builder.remove_partition_statistics(snapshot_id))
             }
-            TableUpdate::RemoveSchemas { schema_ids } => builder.remove_schemas(&schema_ids),
+            TableUpdate::RemoveSchemas { schema_ids } => {
+                builder.remove_schemas(&schema_ids)
+            }
             TableUpdate::AddEncryptionKey { encryption_key } => {
                 Ok(builder.add_encryption_key(encryption_key))
             }
@@ -661,7 +701,9 @@ impl TableRequirement {
                 TableRequirement::DefaultSortOrderIdMatch {
                     default_sort_order_id,
                 } => {
-                    if metadata.default_sort_order().order_id != *default_sort_order_id {
+                    if metadata.default_sort_order().order_id
+                        != *default_sort_order_id
+                    {
                         return Err(Error::new(
                             ErrorKind::CatalogCommitConflicts,
                             "Requirement failed: Default sort order id does not match",
@@ -987,7 +1029,9 @@ mod _serde_set_statistics {
         .serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<StatisticsFile, D::Error>
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<StatisticsFile, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -1016,23 +1060,24 @@ mod tests {
     use std::io::BufReader;
 
     use base64::Engine as _;
-    use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::de::DeserializeOwned;
     use uuid::uuid;
 
     use super::ViewUpdate;
     use crate::io::FileIO;
     use crate::spec::{
-        BlobMetadata, EncryptedKey, FormatVersion, NestedField, NullOrder, Operation,
-        PartitionStatisticsFile, PrimitiveType, Schema, Snapshot, SnapshotReference,
-        SnapshotRetention, SortDirection, SortField, SortOrder, SqlViewRepresentation,
-        StatisticsFile, Summary, TableMetadata, TableMetadataBuilder, Transform, Type,
-        UnboundPartitionSpec, ViewFormatVersion, ViewRepresentation, ViewRepresentations,
-        ViewVersion, MAIN_BRANCH,
+        BlobMetadata, EncryptedKey, FormatVersion, MAIN_BRANCH, NestedField,
+        NullOrder, Operation, PartitionStatisticsFile, PrimitiveType, Schema,
+        Snapshot, SnapshotReference, SnapshotRetention, SortDirection, SortField,
+        SortOrder, SqlViewRepresentation, StatisticsFile, Summary, TableMetadata,
+        TableMetadataBuilder, Transform, Type, UnboundPartitionSpec,
+        ViewFormatVersion, ViewRepresentation, ViewRepresentations, ViewVersion,
     };
     use crate::table::Table;
     use crate::{
-        NamespaceIdent, TableCommit, TableCreation, TableIdent, TableRequirement, TableUpdate,
+        NamespaceIdent, TableCommit, TableCreation, TableIdent, TableRequirement,
+        TableUpdate,
     };
 
     #[test]
@@ -1081,7 +1126,8 @@ mod tests {
         expected: T,
     ) {
         let json_str = json.to_string();
-        let actual: T = serde_json::from_str(&json_str).expect("Failed to parse from json");
+        let actual: T =
+            serde_json::from_str(&json_str).expect("Failed to parse from json");
         assert_eq!(actual, expected, "Parsed value is not equal to expected");
 
         let restored: T = serde_json::from_str(
@@ -1456,9 +1502,20 @@ mod tests {
             .with_schema_id(1)
             .with_identifier_field_ids(vec![2])
             .with_fields(vec![
-                NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(
+                    1,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    3,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -1584,9 +1641,17 @@ mod tests {
                 spec: UnboundPartitionSpec::builder()
                     .add_partition_field(4, "ts_day".to_string(), Transform::Day)
                     .unwrap()
-                    .add_partition_field(1, "id_bucket".to_string(), Transform::Bucket(16))
+                    .add_partition_field(
+                        1,
+                        "id_bucket".to_string(),
+                        Transform::Bucket(16),
+                    )
                     .unwrap()
-                    .add_partition_field(2, "id_truncate".to_string(), Transform::Truncate(4))
+                    .add_partition_field(
+                        2,
+                        "id_truncate".to_string(),
+                        Transform::Truncate(4),
+                    )
                     .unwrap()
                     .build(),
             },
@@ -1738,7 +1803,8 @@ mod tests {
                 .build(),
         };
 
-        let actual: TableUpdate = serde_json::from_str(json).expect("Failed to parse from json");
+        let actual: TableUpdate =
+            serde_json::from_str(json).expect("Failed to parse from json");
         assert_eq!(actual, update, "Parsed value is not equal to expected");
     }
 
@@ -1777,7 +1843,8 @@ mod tests {
                 .build(),
         };
 
-        let actual: TableUpdate = serde_json::from_value(json).expect("Failed to parse from json");
+        let actual: TableUpdate =
+            serde_json::from_value(json).expect("Failed to parse from json");
         assert_eq!(actual, update, "Parsed value is not equal to expected");
         let restored: TableUpdate = serde_json::from_str(
             &serde_json::to_string(&actual).expect("Failed to serialize to json"),
@@ -1940,11 +2007,12 @@ mod tests {
             .properties(HashMap::new())
             .schema(Schema::builder().build().unwrap())
             .build();
-        let table_metadata = TableMetadataBuilder::from_table_creation(table_creation)
-            .unwrap()
-            .build()
-            .unwrap()
-            .metadata;
+        let table_metadata =
+            TableMetadataBuilder::from_table_creation(table_creation)
+                .unwrap()
+                .build()
+                .unwrap()
+                .metadata;
         let table_metadata_builder = TableMetadataBuilder::new_from_metadata(
             table_metadata,
             Some("s3://db/table/metadata/metadata1.gz.json".to_string()),
@@ -1997,9 +2065,20 @@ mod tests {
             .with_schema_id(1)
             .with_identifier_field_ids(vec![2])
             .with_fields(vec![
-                NestedField::optional(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::optional(3, "baz", Type::Primitive(PrimitiveType::Boolean)).into(),
+                NestedField::optional(
+                    1,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::optional(
+                    3,
+                    "baz",
+                    Type::Primitive(PrimitiveType::Boolean),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
@@ -2212,9 +2291,12 @@ mod tests {
                         snapshot_id: 1940541653261589030,
                         sequence_number: 2,
                         fields: vec![1],
-                        properties: vec![("prop-key".to_string(), "prop-value".to_string())]
-                            .into_iter()
-                            .collect(),
+                        properties: vec![(
+                            "prop-key".to_string(),
+                            "prop-value".to_string(),
+                        )]
+                        .into_iter()
+                        .collect(),
                     }],
                 },
             },
@@ -2252,7 +2334,8 @@ mod tests {
             TableUpdate::SetPartitionStatistics {
                 partition_statistics: PartitionStatisticsFile {
                     snapshot_id: 1940541653261589030,
-                    statistics_path: "s3://bucket/warehouse/stats1.parquet".to_string(),
+                    statistics_path: "s3://bucket/warehouse/stats1.parquet"
+                        .to_string(),
                     file_size_in_bytes: 43,
                 },
             },
@@ -2388,10 +2471,12 @@ mod tests {
         );
 
         // metadata version should be bumped
-        assert!(updated_table
-            .metadata_location()
-            .unwrap()
-            .starts_with("s3://bucket/test/location/metadata/00001-"));
+        assert!(
+            updated_table
+                .metadata_location()
+                .unwrap()
+                .starts_with("s3://bucket/test/location/metadata/00001-")
+        );
 
         assert_eq!(
             updated_table.metadata().location,

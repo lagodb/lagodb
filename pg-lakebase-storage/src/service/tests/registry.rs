@@ -8,7 +8,7 @@ use crate::object::ObjectLocation;
 use crate::service::StorageService;
 use crate::session::handle_table::HandleTable;
 
-use super::fixtures::{close, open_named_file, read, test_cache_dir, BUCKET};
+use super::fixtures::{BUCKET, close, open_named_file, read, test_cache_dir};
 
 #[tokio::test]
 async fn register_store_routes_open_to_named_backend() {
@@ -17,9 +17,16 @@ async fn register_store_routes_open_to_named_backend() {
     let key = ObjectLocation::new("named", BUCKET, "file").unwrap();
     named_backend.insert(key.clone(), b"named-data".to_vec());
     let registry = StoreRegistry::new();
-    registry.register_shared_backend("default", default_backend).unwrap();
-    registry.register_shared_backend("named", named_backend).unwrap();
-    let cache = Arc::new(CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new()).with_limits(32, 4));
+    registry
+        .register_shared_backend("default", default_backend)
+        .unwrap();
+    registry
+        .register_shared_backend("named", named_backend)
+        .unwrap();
+    let cache = Arc::new(
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+            .with_limits(32, 4),
+    );
     cache.spawn_large_fill_reaper();
     let service = StorageService::with_registry(registry, cache);
     let handles = HandleTable::new();

@@ -37,9 +37,14 @@ impl ConnectionShutdown {
         writer: &mut ResponseWriter,
         client_addr: &str,
     ) -> StorageResult<()> {
-        debug!(client_addr, "storage connection inbound closed; draining request tasks");
+        debug!(
+            client_addr,
+            "storage connection inbound closed; draining request tasks"
+        );
         let drain_deadline = Instant::now() + self.drain_timeout;
-        if let Err(error) = request_tasks.drain_until(drain_deadline, client_addr).await {
+        if let Err(error) =
+            request_tasks.drain_until(drain_deadline, client_addr).await
+        {
             writer.close_sender();
             writer.abort().await;
             return Err(error);

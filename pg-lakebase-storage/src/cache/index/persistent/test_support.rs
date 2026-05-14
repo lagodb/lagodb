@@ -7,8 +7,8 @@
 //! ([`super::kv`]) that the rest of the crate is not supposed to reach into.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::client::PersistentCacheIndex;
@@ -182,7 +182,12 @@ impl<T: KvReadTxn> KvReadTxn for CountingReadTxn<T> {
         self.inner.get_len(table, key)
     }
 
-    fn scan_page(&self, table: KvTable, after_exclusive: Option<&str>, limit: usize) -> StorageResult<Vec<KvPair>> {
+    fn scan_page(
+        &self,
+        table: KvTable,
+        after_exclusive: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<KvPair>> {
         self.inner.scan_page(table, after_exclusive, limit)
     }
 }
@@ -203,7 +208,12 @@ impl<T: KvReadTxn> KvReadTxn for CountingWriteTxn<T> {
         self.inner.get_len(table, key)
     }
 
-    fn scan_page(&self, table: KvTable, after_exclusive: Option<&str>, limit: usize) -> StorageResult<Vec<KvPair>> {
+    fn scan_page(
+        &self,
+        table: KvTable,
+        after_exclusive: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<KvPair>> {
         self.inner.scan_page(table, after_exclusive, limit)
     }
 }
@@ -226,7 +236,9 @@ impl<T: KvWriteTxn> KvWriteTxn for CountingWriteTxn<T> {
 
 /// Opens a redb-backed persistent cache index wrapped in [`CountingKv`]. Returns the instrumented
 /// index and the shared [`KvCounts`] handle so tests can `.snapshot()` after each phase.
-pub(crate) fn counting_redb_index(path: PathBuf) -> (PersistentCacheIndex<CountingKv<RedbKv>>, Arc<KvCounts>) {
+pub(crate) fn counting_redb_index(
+    path: PathBuf,
+) -> (PersistentCacheIndex<CountingKv<RedbKv>>, Arc<KvCounts>) {
     let kv = CountingKv::new(RedbKv::open(path).unwrap());
     let counts = kv.counts();
     let index = PersistentCacheIndex::from_kv(kv).unwrap();
@@ -237,8 +249,13 @@ pub(crate) fn counting_redb_index(path: PathBuf) -> (PersistentCacheIndex<Counti
 /// lifecycle (the OS temp reaper normally cleans up after the test process).
 pub(crate) fn unique_redb_path(tag: &str) -> PathBuf {
     static TEST_DB_ID: AtomicU64 = AtomicU64::new(0);
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let id = TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
-    PathBuf::from("/tmp")
-        .join(format!("pg-lakebase-storage-kv-contract-{tag}-{}-{stamp}-{id}.redb", std::process::id()))
+    PathBuf::from("/tmp").join(format!(
+        "pg-lakebase-storage-kv-contract-{tag}-{}-{stamp}-{id}.redb",
+        std::process::id()
+    ))
 }

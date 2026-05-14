@@ -87,7 +87,9 @@ impl WireOp {
             13 => Ok(Self::List),
             14 => Ok(Self::Head),
             1000 => Ok(Self::Error),
-            _ => Err(StorageError::protocol(format!("unknown response op {code}"))),
+            _ => Err(StorageError::protocol(format!(
+                "unknown response op {code}"
+            ))),
         }
     }
 }

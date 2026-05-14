@@ -1,6 +1,7 @@
 //! Provides interface types and trait to develop Postgres table access method
 //!
 
+use crate::TableAmRoutine;
 use crate::data::Row;
 use crate::handles::{
     BufferAccessStrategyHandle, BulkInsertStateHandle, CallbackStateHandle,
@@ -11,7 +12,6 @@ use crate::handles::{
     TupleTableSlotHandle, VacuumParamsHandle, ValidateIndexStateHandle,
     VarlenaHandle,
 };
-use crate::TableAmRoutine;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::pg_sys::{self};
 

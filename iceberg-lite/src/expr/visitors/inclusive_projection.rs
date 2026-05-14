@@ -38,7 +38,9 @@ impl InclusiveProjection {
     }
 
     fn get_parts_for_field_id(&mut self, field_id: i32) -> &Vec<PartitionField> {
-        if let std::collections::hash_map::Entry::Vacant(e) = self.cached_parts.entry(field_id) {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.cached_parts.entry(field_id)
+        {
             let mut parts: Vec<PartitionField> = vec![];
             for partition_spec_field in self.partition_spec.fields() {
                 if partition_spec_field.source_id == field_id {
@@ -52,7 +54,10 @@ impl InclusiveProjection {
         &self.cached_parts[&field_id]
     }
 
-    pub(crate) fn project(&mut self, predicate: &BoundPredicate) -> crate::Result<Predicate> {
+    pub(crate) fn project(
+        &mut self,
+        predicate: &BoundPredicate,
+    ) -> crate::Result<Predicate> {
         visit(self, predicate)
     }
 
@@ -64,11 +69,13 @@ impl InclusiveProjection {
         let field_id = reference.field().id;
 
         // This could be made a bit neater if `try_reduce` ever becomes stable
-        self.get_parts_for_field_id(field_id)
-            .iter()
-            .try_fold(Predicate::AlwaysTrue, |res, part| {
+        self.get_parts_for_field_id(field_id).iter().try_fold(
+            Predicate::AlwaysTrue,
+            |res, part| {
                 Ok(
-                    if let Some(pred_for_part) = part.transform.project(&part.name, predicate)? {
+                    if let Some(pred_for_part) =
+                        part.transform.project(&part.name, predicate)?
+                    {
                         if res == Predicate::AlwaysTrue {
                             pred_for_part
                         } else {
@@ -78,7 +85,8 @@ impl InclusiveProjection {
                         res
                     },
                 )
-            })
+            },
+        )
     }
 }
 
@@ -283,13 +291,15 @@ mod tests {
             .and(Predicate::AlwaysFalse)
             .or(Predicate::AlwaysTrue);
 
-        let bound_predicate = unbound_predicate.bind(arc_schema.clone(), false).unwrap();
+        let bound_predicate =
+            unbound_predicate.bind(arc_schema.clone(), false).unwrap();
 
         // applying InclusiveProjection to bound_predicate
         // should result in the same Predicate as the original
         // `unbound_predicate`, since `InclusiveProjection`
         // simply unbinds logic ops, AlwaysTrue, and AlwaysFalse.
-        let mut inclusive_projection = InclusiveProjection::new(arc_partition_spec.clone());
+        let mut inclusive_projection =
+            InclusiveProjection::new(arc_partition_spec.clone());
         let result = inclusive_projection.project(&bound_predicate).unwrap();
 
         assert_eq!(result.to_string(), "TRUE".to_string())
@@ -318,7 +328,8 @@ mod tests {
 
         let unbound_predicate = Reference::new("a").less_than(Datum::int(10));
 
-        let bound_predicate = unbound_predicate.bind(arc_schema.clone(), false).unwrap();
+        let bound_predicate =
+            unbound_predicate.bind(arc_schema.clone(), false).unwrap();
 
         // applying InclusiveProjection to bound_predicate
         // should result in the same Predicate as the original
@@ -351,10 +362,11 @@ mod tests {
 
         let arc_partition_spec = Arc::new(partition_spec);
 
-        let unbound_predicate =
-            Reference::new("date").less_than(Datum::date_from_str("2024-01-01").unwrap());
+        let unbound_predicate = Reference::new("date")
+            .less_than(Datum::date_from_str("2024-01-01").unwrap());
 
-        let bound_predicate = unbound_predicate.bind(arc_schema.clone(), false).unwrap();
+        let bound_predicate =
+            unbound_predicate.bind(arc_schema.clone(), false).unwrap();
 
         // applying InclusiveProjection to bound_predicate
         // should result in a predicate that correctly handles
@@ -386,10 +398,11 @@ mod tests {
 
         let arc_partition_spec = Arc::new(partition_spec);
 
-        let unbound_predicate =
-            Reference::new("date").less_than(Datum::date_from_str("2024-01-01").unwrap());
+        let unbound_predicate = Reference::new("date")
+            .less_than(Datum::date_from_str("2024-01-01").unwrap());
 
-        let bound_predicate = unbound_predicate.bind(arc_schema.clone(), false).unwrap();
+        let bound_predicate =
+            unbound_predicate.bind(arc_schema.clone(), false).unwrap();
 
         // applying InclusiveProjection to bound_predicate
         // should result in a predicate that correctly handles
@@ -421,10 +434,11 @@ mod tests {
 
         let arc_partition_spec = Arc::new(partition_spec);
 
-        let unbound_predicate =
-            Reference::new("date").less_than(Datum::date_from_str("2024-01-01").unwrap());
+        let unbound_predicate = Reference::new("date")
+            .less_than(Datum::date_from_str("2024-01-01").unwrap());
 
-        let bound_predicate = unbound_predicate.bind(arc_schema.clone(), false).unwrap();
+        let bound_predicate =
+            unbound_predicate.bind(arc_schema.clone(), false).unwrap();
 
         // applying InclusiveProjection to bound_predicate
         // should result in a predicate that correctly handles
@@ -458,9 +472,11 @@ mod tests {
 
         let arc_partition_spec = Arc::new(partition_spec);
 
-        let unbound_predicate = Reference::new("name").starts_with(Datum::string("Testy McTest"));
+        let unbound_predicate =
+            Reference::new("name").starts_with(Datum::string("Testy McTest"));
 
-        let bound_predicate = unbound_predicate.bind(arc_schema.clone(), false).unwrap();
+        let bound_predicate =
+            unbound_predicate.bind(arc_schema.clone(), false).unwrap();
 
         // applying InclusiveProjection to bound_predicate
         // should result in the 'name STARTS WITH "Testy McTest"'
@@ -500,7 +516,8 @@ mod tests {
 
         let unbound_predicate = Reference::new("a").equal_to(Datum::int(10));
 
-        let bound_predicate = unbound_predicate.bind(arc_schema.clone(), false).unwrap();
+        let bound_predicate =
+            unbound_predicate.bind(arc_schema.clone(), false).unwrap();
 
         // applying InclusiveProjection to bound_predicate
         // should result in the "a = 10" predicate being

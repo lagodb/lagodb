@@ -51,32 +51,47 @@ impl ObjectBackend for MemoryObjectBackend {
     async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
         self.head_calls.fetch_add(1, Ordering::Relaxed);
         let objects = self.lock_objects();
-        let data = objects.get(key).ok_or_else(|| StorageError::not_found(key.to_string()))?;
+        let data = objects
+            .get(key)
+            .ok_or_else(|| StorageError::not_found(key.to_string()))?;
         Ok(ObjectInfo {
             size: data.len() as u64,
             etag: None,
         })
     }
 
-    async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
+    async fn get_range(
+        &self,
+        key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
         let objects = self.lock_objects();
-        let data = objects.get(key).ok_or_else(|| StorageError::not_found(key.to_string()))?;
+        let data = objects
+            .get(key)
+            .ok_or_else(|| StorageError::not_found(key.to_string()))?;
         let start = std::cmp::min(range.start as usize, data.len());
         let end = std::cmp::min(range.end as usize, data.len());
         if start > end {
-            return Err(StorageError::backend(format!("invalid range {range:?} for {key}")));
+            return Err(StorageError::backend(format!(
+                "invalid range {range:?} for {key}"
+            )));
         }
         Ok(bytes::Bytes::copy_from_slice(&data[start..end]))
     }
 
-    async fn put_from_file(&self, key: &ObjectLocation, path: &Path, len: u64) -> StorageResult<ObjectInfo> {
-        let mut file = tokio::fs::File::open(path)
-            .await
-            .map_err(|error| StorageError::io(format!("open staging file {}", path.display()), error))?;
+    async fn put_from_file(
+        &self,
+        key: &ObjectLocation,
+        path: &Path,
+        len: u64,
+    ) -> StorageResult<ObjectInfo> {
+        let mut file = tokio::fs::File::open(path).await.map_err(|error| {
+            StorageError::io(format!("open staging file {}", path.display()), error)
+        })?;
         let mut data = vec![0_u8; len as usize];
-        file.read_exact(&mut data)
-            .await
-            .map_err(|error| StorageError::io(format!("read staging file {}", path.display()), error))?;
+        file.read_exact(&mut data).await.map_err(|error| {
+            StorageError::io(format!("read staging file {}", path.display()), error)
+        })?;
         self.lock_objects().insert(key.clone(), data);
         Ok(ObjectInfo {
             size: len,
@@ -96,7 +111,9 @@ impl ObjectBackend for MemoryObjectBackend {
             objects
                 .iter()
                 .filter(|(key, _)| {
-                    key.store_id().as_str() == store_id && key.bucket() == bucket && key.key().starts_with(&prefix)
+                    key.store_id().as_str() == store_id
+                        && key.bucket() == bucket
+                        && key.key().starts_with(&prefix)
                 })
                 .map(|(key, value)| {
                     Ok(ListEntry {
@@ -158,11 +175,26 @@ mod tests {
     #[tokio::test]
     async fn list_filters_by_store_bucket_and_prefix() {
         let backend = MemoryObjectBackend::new();
-        backend.insert(ObjectLocation::new("store-a", "bucket", "x/1").unwrap(), b"a".to_vec());
-        backend.insert(ObjectLocation::new("store-a", "bucket", "x/2").unwrap(), b"b".to_vec());
-        backend.insert(ObjectLocation::new("store-a", "bucket", "y/3").unwrap(), b"c".to_vec());
-        backend.insert(ObjectLocation::new("store-b", "bucket", "x/1").unwrap(), b"d".to_vec());
-        backend.insert(ObjectLocation::new("store-a", "other", "x/1").unwrap(), b"e".to_vec());
+        backend.insert(
+            ObjectLocation::new("store-a", "bucket", "x/1").unwrap(),
+            b"a".to_vec(),
+        );
+        backend.insert(
+            ObjectLocation::new("store-a", "bucket", "x/2").unwrap(),
+            b"b".to_vec(),
+        );
+        backend.insert(
+            ObjectLocation::new("store-a", "bucket", "y/3").unwrap(),
+            b"c".to_vec(),
+        );
+        backend.insert(
+            ObjectLocation::new("store-b", "bucket", "x/1").unwrap(),
+            b"d".to_vec(),
+        );
+        backend.insert(
+            ObjectLocation::new("store-a", "other", "x/1").unwrap(),
+            b"e".to_vec(),
+        );
 
         let mut keys: Vec<String> = backend
             .list("store-a", "bucket", Some("x/"))
@@ -180,7 +212,10 @@ mod tests {
             .await
             .unwrap();
         all_keys.sort();
-        assert_eq!(all_keys, vec!["x/1".to_string(), "x/2".to_string(), "y/3".to_string()]);
+        assert_eq!(
+            all_keys,
+            vec!["x/1".to_string(), "x/2".to_string(), "y/3".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -196,17 +231,31 @@ mod tests {
     #[tokio::test]
     async fn delete_stream_removes_keys_and_drains_already_missing() {
         let backend = MemoryObjectBackend::new();
-        backend.insert(ObjectLocation::new(TEST_STORE_ID, "bucket", "a").unwrap(), b"1".to_vec());
-        backend.insert(ObjectLocation::new(TEST_STORE_ID, "bucket", "b").unwrap(), b"2".to_vec());
+        backend.insert(
+            ObjectLocation::new(TEST_STORE_ID, "bucket", "a").unwrap(),
+            b"1".to_vec(),
+        );
+        backend.insert(
+            ObjectLocation::new(TEST_STORE_ID, "bucket", "b").unwrap(),
+            b"2".to_vec(),
+        );
 
-        let keys = stream::iter(vec![Ok("a".to_string()), Ok("missing".to_string()), Ok("b".to_string())]).boxed();
+        let keys = stream::iter(vec![
+            Ok("a".to_string()),
+            Ok("missing".to_string()),
+            Ok("b".to_string()),
+        ])
+        .boxed();
         let mut deleted: Vec<String> = backend
             .delete_stream(TEST_STORE_ID, "bucket", keys)
             .try_collect()
             .await
             .unwrap();
         deleted.sort();
-        assert_eq!(deleted, vec!["a".to_string(), "b".to_string(), "missing".to_string()]);
+        assert_eq!(
+            deleted,
+            vec!["a".to_string(), "b".to_string(), "missing".to_string()]
+        );
 
         let remaining: Vec<String> = backend
             .list(TEST_STORE_ID, "bucket", None)

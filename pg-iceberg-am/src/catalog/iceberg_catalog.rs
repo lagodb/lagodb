@@ -192,11 +192,16 @@ impl Catalog for IcebergCatalog {
 
     fn load_table(&self, table_ident: &TableIdent) -> Result<Table> {
         let table = self.table.read().map_err(|_| {
-            Error::new(ErrorKind::Unexpected, "Failed to acquire read lock on table")
+            Error::new(
+                ErrorKind::Unexpected,
+                "Failed to acquire read lock on table",
+            )
         })?;
         table.as_ref().cloned().ok_or_else(|| {
-            Error::new(ErrorKind::DataInvalid,
-                format!("Table {} not found in catalog", table_ident))
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Table {} not found in catalog", table_ident),
+            )
         })
     }
 

@@ -46,7 +46,12 @@ pub trait CacheKv: Send + Sync + 'static {
 pub trait KvReadTxn {
     fn get(&self, table: KvTable, key: &str) -> StorageResult<Option<Vec<u8>>>;
     fn get_len(&self, table: KvTable, key: &str) -> StorageResult<Option<u64>>;
-    fn scan_page(&self, table: KvTable, after_exclusive: Option<&str>, limit: usize) -> StorageResult<Vec<KvPair>>;
+    fn scan_page(
+        &self,
+        table: KvTable,
+        after_exclusive: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<KvPair>>;
 }
 
 pub trait KvWriteTxn: KvReadTxn {

@@ -29,7 +29,10 @@ impl TransformFunction for Identity {
         Ok(input)
     }
 
-    fn transform_literal(&self, input: &crate::spec::Datum) -> Result<Option<crate::spec::Datum>> {
+    fn transform_literal(
+        &self,
+        input: &crate::spec::Datum,
+    ) -> Result<Option<crate::spec::Datum>> {
         Ok(Some(input.clone()))
     }
 }
@@ -37,8 +40,8 @@ impl TransformFunction for Identity {
 #[cfg(test)]
 mod test {
     use crate::spec::PrimitiveType::{
-        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time, Timestamp,
-        TimestampNs, Timestamptz, TimestamptzNs, Uuid,
+        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time,
+        Timestamp, TimestampNs, Timestamptz, TimestamptzNs, Uuid,
     };
     use crate::spec::Type::{Primitive, Struct};
     use crate::spec::{NestedField, StructType, Transform};

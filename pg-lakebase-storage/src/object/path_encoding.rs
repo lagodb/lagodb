@@ -39,9 +39,13 @@ pub(crate) fn encode_segment(segment: &str) -> String {
     let mut encoded = String::with_capacity(segment.len());
     for byte in segment.as_bytes() {
         match *byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => encoded.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => {
+                encoded.push(*byte as char)
+            }
             b'.' if segment != "." && segment != ".." => encoded.push('.'),
-            other => write!(encoded, "%{other:02x}").expect("infallible write to String"),
+            other => {
+                write!(encoded, "%{other:02x}").expect("infallible write to String")
+            }
         }
     }
     encoded
@@ -107,7 +111,10 @@ pub(crate) fn build_encoded_object_path(
             path.push(encode_segment(segment));
         }
     }
-    path.push(format!("{leaf_prefix}{}{leaf_suffix}", encode_segment(file_segment)));
+    path.push(format!(
+        "{leaf_prefix}{}{leaf_suffix}",
+        encode_segment(file_segment)
+    ));
     path
 }
 
@@ -116,7 +123,10 @@ pub(crate) fn build_encoded_object_path(
 /// Opens reject cache / staging keys whose derived on-disk path would exceed these bounds rather
 /// than silently truncating or hashing; the concrete resolvers call this from their `path_for`
 /// entry points.
-pub(crate) fn validate_portable_path(key: &ObjectLocation, path: &Path) -> StorageResult<()> {
+pub(crate) fn validate_portable_path(
+    key: &ObjectLocation,
+    path: &Path,
+) -> StorageResult<()> {
     if path.as_os_str().len() >= MAX_PATH_LEN {
         return Err(StorageError::invalid_path(format!(
             "path for {key} exceeds maximum path length of {MAX_PATH_LEN} bytes"

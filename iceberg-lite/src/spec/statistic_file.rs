@@ -83,7 +83,8 @@ mod test {
         expected: T,
     ) {
         let json_str = json.to_string();
-        let actual: T = serde_json::from_str(&json_str).expect("Failed to parse from json");
+        let actual: T =
+            serde_json::from_str(&json_str).expect("Failed to parse from json");
         assert_eq!(actual, expected, "Parsed value is not equal to expected");
 
         let restored: T = serde_json::from_str(

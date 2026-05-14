@@ -20,7 +20,9 @@
 use std::marker::PhantomData;
 
 use crate::Result;
-use crate::writer::{DefaultInput, DefaultOutput, IcebergWriter, IcebergWriterBuilder};
+use crate::writer::{
+    DefaultInput, DefaultOutput, IcebergWriter, IcebergWriterBuilder,
+};
 
 /// A simple wrapper around `IcebergWriterBuilder` for unpartitioned tables.
 ///
@@ -132,22 +134,30 @@ mod tests {
             crate::spec::Schema::builder()
                 .with_schema_id(1)
                 .with_fields(vec![
-                    NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                    NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "name",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
                 ])
                 .build()?,
         );
 
         // Build Arrow schema
         let arrow_schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                "1".to_string(),
-            )])),
-            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                "2".to_string(),
-            )])),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
+            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "2".to_string()),
+            ])),
         ]));
 
         // Build writer
@@ -155,29 +165,41 @@ mod tests {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), schema.clone());
-        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
-            parquet_writer_builder,
-            file_io,
-            location_gen,
-            file_name_gen,
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
         );
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            schema.clone(),
+        );
+        let rolling_writer_builder =
+            RollingFileWriterBuilder::new_with_default_file_size(
+                parquet_writer_builder,
+                file_io,
+                location_gen,
+                file_name_gen,
+            );
         let writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
 
         let mut writer = UnpartitionedWriter::new(writer_builder);
 
         // Write two batches
-        let batch1 = RecordBatch::try_new(arrow_schema.clone(), vec![
-            Arc::new(Int32Array::from(vec![1, 2])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob"])),
-        ])?;
-        let batch2 = RecordBatch::try_new(arrow_schema, vec![
-            Arc::new(Int32Array::from(vec![3, 4])),
-            Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
-        ])?;
+        let batch1 = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+            ],
+        )?;
+        let batch2 = RecordBatch::try_new(
+            arrow_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![3, 4])),
+                Arc::new(StringArray::from(vec!["Charlie", "Dave"])),
+            ],
+        )?;
 
         writer.write(batch1)?;
         writer.write(batch2)?;

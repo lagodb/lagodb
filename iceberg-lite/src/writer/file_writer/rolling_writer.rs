@@ -22,7 +22,9 @@ use arrow_array::RecordBatch;
 use crate::io::{FileIO, OutputFile};
 use crate::spec::{DataFileBuilder, PartitionKey, TableProperties};
 use crate::writer::CurrentFileStatus;
-use crate::writer::file_writer::location_generator::{FileNameGenerator, LocationGenerator};
+use crate::writer::file_writer::location_generator::{
+    FileNameGenerator, LocationGenerator,
+};
 use crate::writer::file_writer::{FileWriter, FileWriterBuilder};
 use crate::{Error, ErrorKind, Result};
 
@@ -95,7 +97,8 @@ where
     ) -> Self {
         Self {
             inner_builder,
-            target_file_size: TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT,
+            target_file_size:
+                TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT,
             file_io,
             location_generator,
             file_name_generator,
@@ -122,7 +125,11 @@ where
 /// This writer wraps another file writer that tracks the amount of data written.
 /// When the data size exceeds the target size, it closes the current file and
 /// starts writing to a new one.
-pub struct RollingFileWriter<B: FileWriterBuilder, L: LocationGenerator, F: FileNameGenerator> {
+pub struct RollingFileWriter<
+    B: FileWriterBuilder,
+    L: LocationGenerator,
+    F: FileNameGenerator,
+> {
     inner: Option<B::R>,
     inner_builder: B,
     target_file_size: usize,
@@ -161,7 +168,10 @@ where
         self.current_written_size() > self.target_file_size
     }
 
-    fn new_output_file(&self, partition_key: &Option<PartitionKey>) -> Result<OutputFile> {
+    fn new_output_file(
+        &self,
+        partition_key: &Option<PartitionKey>,
+    ) -> Result<OutputFile> {
         self.file_io
             .new_output(self.location_generator.generate_location(
                 partition_key.as_ref(),
@@ -236,8 +246,8 @@ where
     }
 }
 
-impl<B: FileWriterBuilder, L: LocationGenerator, F: FileNameGenerator> CurrentFileStatus
-    for RollingFileWriter<B, L, F>
+impl<B: FileWriterBuilder, L: LocationGenerator, F: FileNameGenerator>
+    CurrentFileStatus for RollingFileWriter<B, L, F>
 {
     fn current_file_path(&self) -> String {
         self.inner.as_ref().unwrap().current_file_path()
@@ -279,22 +289,26 @@ mod tests {
         Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::required(
+                    2,
+                    "name",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
             ])
             .build()
     }
 
     fn make_test_arrow_schema() -> ArrowSchema {
         ArrowSchema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                1.to_string(),
-            )])),
-            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([(
-                PARQUET_FIELD_ID_META_KEY.to_string(),
-                2.to_string(),
-            )])),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 1.to_string()),
+            ])),
+            Field::new("name", DataType::Utf8, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), 2.to_string()),
+            ])),
         ])
     }
 
@@ -305,15 +319,20 @@ mod tests {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         // Create schema
         let schema = make_test_schema()?;
 
         // Create writer builders
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), Arc::new(schema));
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            Arc::new(schema),
+        );
 
         // Set a large target size so no rolling occurs
         let rolling_file_writer_builder = RollingFileWriterBuilder::new(
@@ -324,7 +343,8 @@ mod tests {
             file_name_gen,
         );
 
-        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_file_writer_builder);
+        let data_file_writer_builder =
+            DataFileWriterBuilder::new(rolling_file_writer_builder);
 
         // Create writer
         let mut writer = data_file_writer_builder.build(None)?;
@@ -332,10 +352,13 @@ mod tests {
         // Create test data
         let arrow_schema = make_test_arrow_schema();
 
-        let batch = RecordBatch::try_new(Arc::new(arrow_schema), vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
-        ])?;
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow_schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
+            ],
+        )?;
 
         // Write data
         writer.write(batch.clone())?;
@@ -363,15 +386,20 @@ mod tests {
         let location_gen = DefaultLocationGenerator::with_data_location(
             temp_dir.path().to_str().unwrap().to_string(),
         );
-        let file_name_gen =
-            DefaultFileNameGenerator::new("test".to_string(), None, DataFileFormat::Parquet);
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "test".to_string(),
+            None,
+            DataFileFormat::Parquet,
+        );
 
         // Create schema
         let schema = make_test_schema()?;
 
         // Create writer builders
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(WriterProperties::builder().build(), Arc::new(schema));
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            WriterProperties::builder().build(),
+            Arc::new(schema),
+        );
 
         // Set a very small target size to trigger rolling
         let rolling_writer_builder = RollingFileWriterBuilder::new(
@@ -382,7 +410,8 @@ mod tests {
             file_name_gen,
         );
 
-        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+        let data_file_writer_builder =
+            DataFileWriterBuilder::new(rolling_writer_builder);
 
         // Create writer
         let mut writer = data_file_writer_builder.build(None)?;
@@ -392,8 +421,8 @@ mod tests {
         let arrow_schema_ref = Arc::new(arrow_schema.clone());
 
         let names = vec![
-            "Alice", "Bob", "Charlie", "Dave", "Eve", "Frank", "Grace", "Heidi", "Ivan", "Judy",
-            "Kelly", "Larry", "Mallory", "Shawn",
+            "Alice", "Bob", "Charlie", "Dave", "Eve", "Frank", "Grace", "Heidi",
+            "Ivan", "Judy", "Kelly", "Larry", "Mallory", "Shawn",
         ];
 
         let mut rng = rand::thread_rng();
@@ -402,7 +431,8 @@ mod tests {
         let expected_rows = batch_num * batch_rows;
 
         for i in 0..batch_num {
-            let int_values: Vec<i32> = (0..batch_rows).map(|row| i * batch_rows + row).collect();
+            let int_values: Vec<i32> =
+                (0..batch_rows).map(|row| i * batch_rows + row).collect();
             let str_values: Vec<&str> = (0..batch_rows)
                 .map(|_| *names.iter().choose(&mut rng).unwrap())
                 .collect();
@@ -410,9 +440,11 @@ mod tests {
             let int_array = Arc::new(Int32Array::from(int_values)) as ArrayRef;
             let str_array = Arc::new(StringArray::from(str_values)) as ArrayRef;
 
-            let batch =
-                RecordBatch::try_new(Arc::clone(&arrow_schema_ref), vec![int_array, str_array])
-                    .expect("Failed to create RecordBatch");
+            let batch = RecordBatch::try_new(
+                Arc::clone(&arrow_schema_ref),
+                vec![int_array, str_array],
+            )
+            .expect("Failed to create RecordBatch");
 
             writer.write(batch)?;
         }
@@ -428,7 +460,8 @@ mod tests {
         );
 
         // Verify total record count across all files
-        let total_records: u64 = data_files.iter().map(|file| file.record_count).sum();
+        let total_records: u64 =
+            data_files.iter().map(|file| file.record_count).sum();
         assert_eq!(
             total_records, expected_rows as u64,
             "Expected {expected_rows} total records across all files"

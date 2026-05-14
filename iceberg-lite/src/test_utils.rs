@@ -43,7 +43,8 @@ pub fn check_record_batches(
     // Combine record batches using the first batch's schema
     let first_batch = record_batches.first().unwrap();
     let record_batch =
-        arrow_select::concat::concat_batches(&first_batch.schema(), &record_batches).unwrap();
+        arrow_select::concat::concat_batches(&first_batch.schema(), &record_batches)
+            .unwrap();
 
     let mut columns = record_batch.columns().to_vec();
     if let Some(sort_column) = sort_column {
@@ -51,7 +52,9 @@ pub fn check_record_batches(
         let indices = arrow_ord::sort::sort_to_indices(column, None, None).unwrap();
         columns = columns
             .iter()
-            .map(|column| arrow_select::take::take(column.as_ref(), &indices, None).unwrap())
+            .map(|column| {
+                arrow_select::take::take(column.as_ref(), &indices, None).unwrap()
+            })
             .collect_vec();
     }
 

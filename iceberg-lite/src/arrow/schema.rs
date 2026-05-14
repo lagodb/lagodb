@@ -23,8 +23,8 @@ use std::sync::Arc;
 use arrow_array::types::{Decimal128Type, validate_decimal_precision_and_scale};
 use arrow_array::{
     BinaryArray, BooleanArray, Date32Array, Datum as ArrowDatum, Decimal128Array,
-    FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array, Scalar, StringArray,
-    TimestampMicrosecondArray,
+    FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array, Scalar,
+    StringArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType, Field, Fields, Schema as ArrowSchema, TimeUnit};
 use num_bigint::BigInt;
@@ -35,8 +35,8 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::spec::{
-    Datum, ListType, MapType, NestedField, NestedFieldRef, PrimitiveLiteral, PrimitiveType, Schema,
-    SchemaVisitor, StructType, Type,
+    Datum, ListType, MapType, NestedField, NestedFieldRef, PrimitiveLiteral,
+    PrimitiveType, Schema, SchemaVisitor, StructType, Type,
 };
 use crate::{Error, ErrorKind};
 
@@ -96,23 +96,36 @@ pub trait ArrowSchemaVisitor {
     }
 
     /// Called after schema's type visited.
-    fn schema(&mut self, schema: &ArrowSchema, values: Vec<Self::T>) -> Result<Self::U>;
+    fn schema(
+        &mut self,
+        schema: &ArrowSchema,
+        values: Vec<Self::T>,
+    ) -> Result<Self::U>;
 
     /// Called after struct's fields visited.
-    fn r#struct(&mut self, fields: &Fields, results: Vec<Self::T>) -> Result<Self::T>;
+    fn r#struct(&mut self, fields: &Fields, results: Vec<Self::T>)
+    -> Result<Self::T>;
 
     /// Called after list fields visited.
     fn list(&mut self, list: &DataType, value: Self::T) -> Result<Self::T>;
 
     /// Called after map's key and value fields visited.
-    fn map(&mut self, map: &DataType, key_value: Self::T, value: Self::T) -> Result<Self::T>;
+    fn map(
+        &mut self,
+        map: &DataType,
+        key_value: Self::T,
+        value: Self::T,
+    ) -> Result<Self::T>;
 
     /// Called when see a primitive type.
     fn primitive(&mut self, p: &DataType) -> Result<Self::T>;
 }
 
 /// Visiting a type in post order.
-fn visit_type<V: ArrowSchemaVisitor>(r#type: &DataType, visitor: &mut V) -> Result<V::T> {
+fn visit_type<V: ArrowSchemaVisitor>(
+    r#type: &DataType,
+    visitor: &mut V,
+) -> Result<V::T> {
     match r#type {
         p if p.is_primitive()
             || matches!(
@@ -130,8 +143,12 @@ fn visit_type<V: ArrowSchemaVisitor>(r#type: &DataType, visitor: &mut V) -> Resu
             visitor.primitive(p)
         }
         DataType::List(element_field) => visit_list(r#type, element_field, visitor),
-        DataType::LargeList(element_field) => visit_list(r#type, element_field, visitor),
-        DataType::FixedSizeList(element_field, _) => visit_list(r#type, element_field, visitor),
+        DataType::LargeList(element_field) => {
+            visit_list(r#type, element_field, visitor)
+        }
+        DataType::FixedSizeList(element_field, _) => {
+            visit_list(r#type, element_field, visitor)
+        }
         DataType::Map(field, _) => match field.data_type() {
             DataType::Struct(fields) => {
                 if fields.len() != 2 {
@@ -166,7 +183,9 @@ fn visit_type<V: ArrowSchemaVisitor>(r#type: &DataType, visitor: &mut V) -> Resu
             )),
         },
         DataType::Struct(fields) => visit_struct(fields, visitor),
-        DataType::Dictionary(_key_type, value_type) => visit_type(value_type, visitor),
+        DataType::Dictionary(_key_type, value_type) => {
+            visit_type(value_type, visitor)
+        }
         other => Err(Error::new(
             ErrorKind::DataInvalid,
             format!("Cannot visit Arrow data type: {other}"),
@@ -187,7 +206,10 @@ fn visit_list<V: ArrowSchemaVisitor>(
 }
 
 /// Visit struct type in post order.
-fn visit_struct<V: ArrowSchemaVisitor>(fields: &Fields, visitor: &mut V) -> Result<V::T> {
+fn visit_struct<V: ArrowSchemaVisitor>(
+    fields: &Fields,
+    visitor: &mut V,
+) -> Result<V::T> {
     let mut results = Vec::with_capacity(fields.len());
     for field in fields {
         visitor.before_field(field)?;
@@ -200,7 +222,10 @@ fn visit_struct<V: ArrowSchemaVisitor>(fields: &Fields, visitor: &mut V) -> Resu
 }
 
 /// Visit schema in post order.
-fn visit_schema<V: ArrowSchemaVisitor>(schema: &ArrowSchema, visitor: &mut V) -> Result<V::U> {
+fn visit_schema<V: ArrowSchemaVisitor>(
+    schema: &ArrowSchema,
+    visitor: &mut V,
+) -> Result<V::U> {
     let mut results = Vec::with_capacity(schema.fields().len());
     for field in schema.fields() {
         visitor.before_field(field)?;
@@ -260,7 +285,10 @@ impl ArrowSchemaConverter {
         Self {}
     }
 
-    fn convert_fields(fields: &Fields, field_results: &[Type]) -> Result<Vec<NestedFieldRef>> {
+    fn convert_fields(
+        fields: &Fields,
+        field_results: &[Type],
+    ) -> Result<Vec<NestedFieldRef>> {
         let mut results = Vec::with_capacity(fields.len());
         for i in 0..fields.len() {
             let field = &fields[i];
@@ -286,13 +314,21 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
     type T = Type;
     type U = Schema;
 
-    fn schema(&mut self, schema: &ArrowSchema, values: Vec<Self::T>) -> Result<Self::U> {
+    fn schema(
+        &mut self,
+        schema: &ArrowSchema,
+        values: Vec<Self::T>,
+    ) -> Result<Self::U> {
         let fields = Self::convert_fields(schema.fields(), &values)?;
         let builder = Schema::builder().with_fields(fields);
         builder.build()
     }
 
-    fn r#struct(&mut self, fields: &Fields, results: Vec<Self::T>) -> Result<Self::T> {
+    fn r#struct(
+        &mut self,
+        fields: &Fields,
+        results: Vec<Self::T>,
+    ) -> Result<Self::T> {
         let fields = Self::convert_fields(fields, &results)?;
         Ok(Type::Struct(StructType::new(fields)))
     }
@@ -312,8 +348,11 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
 
         let id = get_field_id(element_field)?;
         let doc = get_field_doc(element_field);
-        let mut element_field =
-            NestedField::list_element(id, value.clone(), !element_field.is_nullable());
+        let mut element_field = NestedField::list_element(
+            id,
+            value.clone(),
+            !element_field.is_nullable(),
+        );
         if let Some(doc) = doc {
             element_field = element_field.with_doc(doc);
         }
@@ -321,7 +360,12 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
         Ok(Type::List(ListType { element_field }))
     }
 
-    fn map(&mut self, map: &DataType, key_value: Self::T, value: Self::T) -> Result<Self::T> {
+    fn map(
+        &mut self,
+        map: &DataType,
+        key_value: Self::T,
+        value: Self::T,
+    ) -> Result<Self::T> {
         match map {
             DataType::Map(field, _) => match field.data_type() {
                 DataType::Struct(fields) => {
@@ -337,7 +381,8 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
 
                     let key_id = get_field_id(key_field)?;
                     let key_doc = get_field_doc(key_field);
-                    let mut key_field = NestedField::map_key_element(key_id, key_value.clone());
+                    let mut key_field =
+                        NestedField::map_key_element(key_id, key_value.clone());
                     if let Some(doc) = key_doc {
                         key_field = key_field.with_doc(doc);
                     }
@@ -378,7 +423,9 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
             DataType::Int8 | DataType::Int16 | DataType::Int32 => {
                 Ok(Type::Primitive(PrimitiveType::Int))
             }
-            DataType::UInt8 | DataType::UInt16 => Ok(Type::Primitive(PrimitiveType::Int)),
+            DataType::UInt8 | DataType::UInt16 => {
+                Ok(Type::Primitive(PrimitiveType::Int))
+            }
             DataType::UInt32 => Ok(Type::Primitive(PrimitiveType::Long)),
             DataType::Int64 => Ok(Type::Primitive(PrimitiveType::Long)),
             DataType::UInt64 => {
@@ -390,13 +437,14 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
             }
             DataType::Float32 => Ok(Type::Primitive(PrimitiveType::Float)),
             DataType::Float64 => Ok(Type::Primitive(PrimitiveType::Double)),
-            DataType::Decimal128(p, s) => Type::decimal(*p as u32, *s as u32).map_err(|e| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    "Failed to create decimal type".to_string(),
-                )
-                .with_source(e)
-            }),
+            DataType::Decimal128(p, s) => Type::decimal(*p as u32, *s as u32)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        "Failed to create decimal type".to_string(),
+                    )
+                    .with_source(e)
+                }),
             DataType::Date32 => Ok(Type::Primitive(PrimitiveType::Date)),
             DataType::Time64(unit) if unit == &TimeUnit::Microsecond => {
                 Ok(Type::Primitive(PrimitiveType::Time))
@@ -476,10 +524,14 @@ impl SchemaVisitor for ToArrowSchemaConverter {
                 (ARROW_FIELD_DOC_KEY.to_string(), doc.clone()),
             ])
         } else {
-            HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), field.id.to_string())])
+            HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                field.id.to_string(),
+            )])
         };
         Ok(ArrowSchemaOrFieldOrType::Field(
-            Field::new(field.name.clone(), ty, !field.required).with_metadata(metadata),
+            Field::new(field.name.clone(), ty, !field.required)
+                .with_metadata(metadata),
         ))
     }
 
@@ -562,8 +614,12 @@ impl SchemaVisitor for ToArrowSchemaConverter {
             crate::spec::PrimitiveType::Boolean => {
                 Ok(ArrowSchemaOrFieldOrType::Type(DataType::Boolean))
             }
-            crate::spec::PrimitiveType::Int => Ok(ArrowSchemaOrFieldOrType::Type(DataType::Int32)),
-            crate::spec::PrimitiveType::Long => Ok(ArrowSchemaOrFieldOrType::Type(DataType::Int64)),
+            crate::spec::PrimitiveType::Int => {
+                Ok(ArrowSchemaOrFieldOrType::Type(DataType::Int32))
+            }
+            crate::spec::PrimitiveType::Long => {
+                Ok(ArrowSchemaOrFieldOrType::Type(DataType::Int64))
+            }
             crate::spec::PrimitiveType::Float => {
                 Ok(ArrowSchemaOrFieldOrType::Type(DataType::Float32))
             }
@@ -572,13 +628,14 @@ impl SchemaVisitor for ToArrowSchemaConverter {
             }
             crate::spec::PrimitiveType::Decimal { precision, scale } => {
                 let (precision, scale) = {
-                    let precision: u8 = precision.to_owned().try_into().map_err(|err| {
-                        Error::new(
-                            crate::ErrorKind::DataInvalid,
-                            "incompatible precision for decimal type convert",
-                        )
-                        .with_source(err)
-                    })?;
+                    let precision: u8 =
+                        precision.to_owned().try_into().map_err(|err| {
+                            Error::new(
+                                crate::ErrorKind::DataInvalid,
+                                "incompatible precision for decimal type convert",
+                            )
+                            .with_source(err)
+                        })?;
                     let scale = scale.to_owned().try_into().map_err(|err| {
                         Error::new(
                             crate::ErrorKind::DataInvalid,
@@ -588,15 +645,16 @@ impl SchemaVisitor for ToArrowSchemaConverter {
                     })?;
                     (precision, scale)
                 };
-                validate_decimal_precision_and_scale::<Decimal128Type>(precision, scale).map_err(
-                    |err| {
-                        Error::new(
-                            crate::ErrorKind::DataInvalid,
-                            "incompatible precision and scale for decimal type convert",
-                        )
-                        .with_source(err)
-                    },
-                )?;
+                validate_decimal_precision_and_scale::<Decimal128Type>(
+                    precision, scale,
+                )
+                .map_err(|err| {
+                    Error::new(
+                        crate::ErrorKind::DataInvalid,
+                        "incompatible precision and scale for decimal type convert",
+                    )
+                    .with_source(err)
+                })?;
                 Ok(ArrowSchemaOrFieldOrType::Type(DataType::Decimal128(
                     precision, scale,
                 )))
@@ -607,31 +665,49 @@ impl SchemaVisitor for ToArrowSchemaConverter {
             crate::spec::PrimitiveType::Time => Ok(ArrowSchemaOrFieldOrType::Type(
                 DataType::Time64(TimeUnit::Microsecond),
             )),
-            crate::spec::PrimitiveType::Timestamp => Ok(ArrowSchemaOrFieldOrType::Type(
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-            )),
-            crate::spec::PrimitiveType::Timestamptz => Ok(ArrowSchemaOrFieldOrType::Type(
-                // Timestampz always stored as UTC
-                DataType::Timestamp(TimeUnit::Microsecond, Some(UTC_TIME_ZONE.into())),
-            )),
-            crate::spec::PrimitiveType::TimestampNs => Ok(ArrowSchemaOrFieldOrType::Type(
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-            )),
-            crate::spec::PrimitiveType::TimestamptzNs => Ok(ArrowSchemaOrFieldOrType::Type(
-                // Store timestamptz_ns as UTC
-                DataType::Timestamp(TimeUnit::Nanosecond, Some(UTC_TIME_ZONE.into())),
-            )),
+            crate::spec::PrimitiveType::Timestamp => {
+                Ok(ArrowSchemaOrFieldOrType::Type(DataType::Timestamp(
+                    TimeUnit::Microsecond,
+                    None,
+                )))
+            }
+            crate::spec::PrimitiveType::Timestamptz => {
+                Ok(ArrowSchemaOrFieldOrType::Type(
+                    // Timestampz always stored as UTC
+                    DataType::Timestamp(
+                        TimeUnit::Microsecond,
+                        Some(UTC_TIME_ZONE.into()),
+                    ),
+                ))
+            }
+            crate::spec::PrimitiveType::TimestampNs => {
+                Ok(ArrowSchemaOrFieldOrType::Type(DataType::Timestamp(
+                    TimeUnit::Nanosecond,
+                    None,
+                )))
+            }
+            crate::spec::PrimitiveType::TimestamptzNs => {
+                Ok(ArrowSchemaOrFieldOrType::Type(
+                    // Store timestamptz_ns as UTC
+                    DataType::Timestamp(
+                        TimeUnit::Nanosecond,
+                        Some(UTC_TIME_ZONE.into()),
+                    ),
+                ))
+            }
             crate::spec::PrimitiveType::String => {
                 Ok(ArrowSchemaOrFieldOrType::Type(DataType::Utf8))
             }
             crate::spec::PrimitiveType::Uuid => Ok(ArrowSchemaOrFieldOrType::Type(
                 DataType::FixedSizeBinary(16),
             )),
-            crate::spec::PrimitiveType::Fixed(len) => Ok(ArrowSchemaOrFieldOrType::Type(
-                len.to_i32()
-                    .map(DataType::FixedSizeBinary)
-                    .unwrap_or(DataType::LargeBinary),
-            )),
+            crate::spec::PrimitiveType::Fixed(len) => {
+                Ok(ArrowSchemaOrFieldOrType::Type(
+                    len.to_i32()
+                        .map(DataType::FixedSizeBinary)
+                        .unwrap_or(DataType::LargeBinary),
+                ))
+            }
             crate::spec::PrimitiveType::Binary => {
                 Ok(ArrowSchemaOrFieldOrType::Type(DataType::LargeBinary))
             }
@@ -640,7 +716,9 @@ impl SchemaVisitor for ToArrowSchemaConverter {
 }
 
 /// Convert iceberg schema to an arrow schema.
-pub fn schema_to_arrow_schema(schema: &crate::spec::Schema) -> crate::Result<ArrowSchema> {
+pub fn schema_to_arrow_schema(
+    schema: &crate::spec::Schema,
+) -> crate::Result<ArrowSchema> {
     let mut converter = ToArrowSchemaConverter;
     match crate::spec::visit_schema(schema, &mut converter)? {
         ArrowSchemaOrFieldOrType::Schema(schema) => Ok(schema),
@@ -658,7 +736,9 @@ pub fn type_to_arrow_type(ty: &crate::spec::Type) -> crate::Result<DataType> {
 }
 
 /// Convert Iceberg Datum to Arrow Datum.
-pub(crate) fn get_arrow_datum(datum: &Datum) -> Result<Arc<dyn ArrowDatum + Send + Sync>> {
+pub(crate) fn get_arrow_datum(
+    datum: &Datum,
+) -> Result<Arc<dyn ArrowDatum + Send + Sync>> {
     match (datum.data_type(), datum.literal()) {
         (PrimitiveType::Boolean, PrimitiveLiteral::Boolean(value)) => {
             Ok(Arc::new(BooleanArray::new_scalar(*value)))
@@ -687,10 +767,16 @@ pub(crate) fn get_arrow_datum(datum: &Datum) -> Result<Arc<dyn ArrowDatum + Send
         (PrimitiveType::Timestamp, PrimitiveLiteral::Long(value)) => {
             Ok(Arc::new(TimestampMicrosecondArray::new_scalar(*value)))
         }
-        (PrimitiveType::Timestamptz, PrimitiveLiteral::Long(value)) => Ok(Arc::new(Scalar::new(
-            TimestampMicrosecondArray::new(vec![*value; 1].into(), None).with_timezone_utc(),
-        ))),
-        (PrimitiveType::Decimal { precision, scale }, PrimitiveLiteral::Int128(value)) => {
+        (PrimitiveType::Timestamptz, PrimitiveLiteral::Long(value)) => {
+            Ok(Arc::new(Scalar::new(
+                TimestampMicrosecondArray::new(vec![*value; 1].into(), None)
+                    .with_timezone_utc(),
+            )))
+        }
+        (
+            PrimitiveType::Decimal { precision, scale },
+            PrimitiveLiteral::Int128(value),
+        ) => {
             let array = Decimal128Array::from_value(*value, 1)
                 .with_precision_and_scale(*precision as _, *scale as _)
                 .unwrap();
@@ -698,13 +784,16 @@ pub(crate) fn get_arrow_datum(datum: &Datum) -> Result<Arc<dyn ArrowDatum + Send
         }
         (PrimitiveType::Uuid, PrimitiveLiteral::UInt128(value)) => {
             let bytes = Uuid::from_u128(*value).into_bytes();
-            let array = FixedSizeBinaryArray::try_from_iter(vec![bytes].into_iter()).unwrap();
+            let array =
+                FixedSizeBinaryArray::try_from_iter(vec![bytes].into_iter()).unwrap();
             Ok(Arc::new(Scalar::new(array)))
         }
 
         (primitive_type, _) => Err(Error::new(
             ErrorKind::FeatureUnsupported,
-            format!("Converting datum from type {primitive_type:?} to arrow not supported yet."),
+            format!(
+                "Converting datum from type {primitive_type:?} to arrow not supported yet."
+            ),
         )),
     }
 }
@@ -786,12 +875,14 @@ pub(crate) fn get_parquet_stat_min_as_datum(
             let unscaled_value = BigInt::from_signed_bytes_be(bytes);
             Some(Datum::new(
                 primitive_type.clone(),
-                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!("Can't convert bytes to i128: {bytes:?}"),
-                    )
-                })?),
+                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(
+                    || {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            format!("Can't convert bytes to i128: {bytes:?}"),
+                        )
+                    },
+                )?),
             ))
         }
         (
@@ -933,12 +1024,14 @@ pub(crate) fn get_parquet_stat_max_as_datum(
             let unscaled_value = BigInt::from_signed_bytes_be(bytes);
             Some(Datum::new(
                 primitive_type.clone(),
-                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!("Can't convert bytes to i128: {bytes:?}"),
-                    )
-                })?),
+                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(
+                    || {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            format!("Can't convert bytes to i128: {bytes:?}"),
+                        )
+                    },
+                )?),
             ))
         }
         (
@@ -1103,7 +1196,8 @@ mod tests {
             Arc::new(simple_field(DEFAULT_MAP_FIELD_NAME, r#struct, false, "17")),
             false,
         );
-        let dictionary = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let dictionary =
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
 
         let fields = Fields::from(vec![
             simple_field("aa", DataType::Int32, false, "18"),
@@ -1700,14 +1794,18 @@ mod tests {
             );
 
             let arrow_type = DataType::Struct(Fields::from(vec![
-                Field::new("a", DataType::Int64, false).with_metadata(HashMap::from_iter([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    1.to_string(),
-                )])),
-                Field::new("b", DataType::Utf8, true).with_metadata(HashMap::from_iter([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    2.to_string(),
-                )])),
+                Field::new("a", DataType::Int64, false).with_metadata(
+                    HashMap::from_iter([(
+                        PARQUET_FIELD_ID_META_KEY.to_string(),
+                        1.to_string(),
+                    )]),
+                ),
+                Field::new("b", DataType::Utf8, true).with_metadata(
+                    HashMap::from_iter([(
+                        PARQUET_FIELD_ID_META_KEY.to_string(),
+                        2.to_string(),
+                    )]),
+                ),
             ]));
             let iceberg_type = Type::Struct(StructType::new(vec![
                 NestedField {
@@ -1742,7 +1840,9 @@ mod tests {
                     name: "a".to_string(),
                     required: true,
                     field_type: Box::new(Type::Primitive(PrimitiveType::Long)),
-                    initial_default: Some(Literal::Primitive(PrimitiveLiteral::Int(114514))),
+                    initial_default: Some(Literal::Primitive(PrimitiveLiteral::Int(
+                        114514,
+                    ))),
                     write_default: None,
                 }
                 .into(),
@@ -1753,9 +1853,9 @@ mod tests {
                     required: false,
                     field_type: Box::new(Type::Primitive(PrimitiveType::String)),
                     initial_default: None,
-                    write_default: Some(Literal::Primitive(PrimitiveLiteral::String(
-                        "514".to_string(),
-                    ))),
+                    write_default: Some(Literal::Primitive(
+                        PrimitiveLiteral::String("514".to_string()),
+                    )),
                 }
                 .into(),
             ]));
@@ -1764,8 +1864,10 @@ mod tests {
 
         // test dictionary type
         {
-            let arrow_type =
-                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Int8));
+            let arrow_type = DataType::Dictionary(
+                Box::new(DataType::Int32),
+                Box::new(DataType::Int8),
+            );
             let iceberg_type = Type::Primitive(PrimitiveType::Int);
             assert_eq!(
                 iceberg_type,
@@ -1773,8 +1875,10 @@ mod tests {
                 "Expected dictionary conversion to use the contained value"
             );
 
-            let arrow_type =
-                DataType::Dictionary(Box::new(DataType::Utf8), Box::new(DataType::Boolean));
+            let arrow_type = DataType::Dictionary(
+                Box::new(DataType::Utf8),
+                Box::new(DataType::Boolean),
+            );
             let iceberg_type = Type::Primitive(PrimitiveType::Boolean);
             assert_eq!(iceberg_type, arrow_type_to_type(&arrow_type).unwrap());
         }
@@ -1789,9 +1893,11 @@ mod tests {
         ];
 
         for (arrow_type, expected_iceberg_type) in test_cases {
-            let arrow_field = Field::new("test", arrow_type.clone(), false).with_metadata(
-                HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string())]),
-            );
+            let arrow_field = Field::new("test", arrow_type.clone(), false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "1".to_string(),
+                )]));
             let arrow_schema = ArrowSchema::new(vec![arrow_field]);
 
             let iceberg_schema = arrow_schema_to_schema(&arrow_schema).unwrap();
@@ -1805,9 +1911,11 @@ mod tests {
 
         // Test UInt64 blocking
         {
-            let arrow_field = Field::new("test", DataType::UInt64, false).with_metadata(
-                HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string())]),
-            );
+            let arrow_field = Field::new("test", DataType::UInt64, false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "1".to_string(),
+                )]));
             let arrow_schema = ArrowSchema::new(vec![arrow_field]);
 
             let result = arrow_schema_to_schema(&arrow_schema);
@@ -1911,7 +2019,8 @@ mod tests {
             assert_eq!(array.value(0), 42);
         }
         {
-            let datum = Datum::decimal_with_precision(Decimal::new(123, 2), 30).unwrap();
+            let datum =
+                Datum::decimal_with_precision(Decimal::new(123, 2), 30).unwrap();
             let arrow_datum = get_arrow_datum(&datum).unwrap();
             let (array, is_scalar) = arrow_datum.get();
             let array = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
@@ -1921,7 +2030,8 @@ mod tests {
             assert_eq!(array.value(0), 123);
         }
         {
-            let datum = Datum::uuid_from_str("42424242-4242-4242-4242-424242424242").unwrap();
+            let datum =
+                Datum::uuid_from_str("42424242-4242-4242-4242-424242424242").unwrap();
             let arrow_datum = get_arrow_datum(&datum).unwrap();
             let (array, is_scalar) = arrow_datum.get();
             let array = array

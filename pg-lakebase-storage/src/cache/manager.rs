@@ -9,7 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{StorageError, StorageResult};
-use crate::object::{normalize_chunk_size, ObjectLocation, StoreId, DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT};
+use crate::object::{
+    DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, ObjectLocation, StoreId,
+    normalize_chunk_size,
+};
 
 use super::chunks::ReaperInbox;
 use super::index::CacheIndex;
@@ -18,9 +21,13 @@ use super::janitor::{CacheJanitor, CleanupCoordinator};
 use super::object_state::{ObjectStateRegistry, PerObjectState};
 use super::path::CachePathResolver;
 use super::startup::StartupRecovery;
-use super::store::{CacheStore, FileCacheStore, PhysicalCacheEntryVisitor, SmallObjectStore};
+use super::store::{
+    CacheStore, FileCacheStore, PhysicalCacheEntryVisitor, SmallObjectStore,
+};
 use super::types::{CacheCleanupPolicy, CacheCleanupReport, CachePurgeReport};
-use super::usage::{CacheUsageSnapshot, LogicalCacheUsage, PhysicalCacheUsage, PhysicalUsageVisitor};
+use super::usage::{
+    CacheUsageSnapshot, LogicalCacheUsage, PhysicalCacheUsage, PhysicalUsageVisitor,
+};
 
 /// Triggers for `CacheManager`'s `run_cleanup` (the only path that takes `CleanupCoordinator`'s gate).
 ///
@@ -116,7 +123,10 @@ impl<I: CacheIndex> CacheManager<I> {
     }
 
     /// Placeholder for future per-store cache eviction; today it validates the API shape and leaves cache data intact.
-    pub async fn purge_store_cache(&self, _store_id: &StoreId) -> StorageResult<CachePurgeReport> {
+    pub async fn purge_store_cache(
+        &self,
+        _store_id: &StoreId,
+    ) -> StorageResult<CachePurgeReport> {
         Ok(CachePurgeReport::default())
     }
 
@@ -129,7 +139,10 @@ impl<I: CacheIndex> CacheManager<I> {
     }
 
     #[cfg(test)]
-    pub(crate) fn live_large_fill_partial_path(&self, key: &ObjectLocation) -> Option<PathBuf> {
+    pub(crate) fn live_large_fill_partial_path(
+        &self,
+        key: &ObjectLocation,
+    ) -> Option<PathBuf> {
         self.object_states
             .get_existing(key)
             .and_then(|state| state.live_fill_session())
@@ -148,17 +161,24 @@ impl<I: CacheIndex> CacheManager<I> {
     /// leader that is blocked mid-backend-I/O (for example, to exercise
     /// [`LargeFillSession::abort`] waking up chunk waiters). Do not use it in production code.
     #[cfg(test)]
-    pub(crate) async fn abort_live_large_fill_for_test(&self, key: &ObjectLocation) -> StorageResult<()> {
+    pub(crate) async fn abort_live_large_fill_for_test(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<()> {
         let session = self
             .object_states
             .get_existing(key)
             .and_then(|state| state.live_fill_session())
-            .ok_or_else(|| StorageError::cache(format!("no live large fill for {key}")))?;
+            .ok_or_else(|| {
+                StorageError::cache(format!("no live large fill for {key}"))
+            })?;
         self.abort_large_fill(&session).await
     }
 
     pub(crate) fn is_active(&self, key: &ObjectLocation) -> bool {
-        self.object_states.get_existing(key).is_some_and(|state| state.is_active())
+        self.object_states
+            .get_existing(key)
+            .is_some_and(|state| state.is_active())
     }
 
     /// Returns the per-object state for `key`, creating one if necessary. Every caller that
@@ -176,7 +196,9 @@ impl<I: CacheIndex> CacheManager<I> {
     ///
     /// This traverses the cache directories and small-object payload store, so its cost scales with
     /// the number of physical cache entries. Do not use it on write/cleanup hot paths.
-    pub async fn scan_physical_cache_usage(&self) -> StorageResult<PhysicalCacheUsage> {
+    pub async fn scan_physical_cache_usage(
+        &self,
+    ) -> StorageResult<PhysicalCacheUsage> {
         let mut visitor = PhysicalUsageVisitor::default();
         self.visit_physical_cache_entries(&mut visitor).await?;
         Ok(visitor.usage())
@@ -198,7 +220,9 @@ impl<I: CacheIndex> CacheManager<I> {
         self.orphan_candidates.clear_all();
     }
 
-    pub(in crate::cache) fn orphan_candidate_snapshot(&self) -> RuntimeOrphanCandidateSnapshot {
+    pub(in crate::cache) fn orphan_candidate_snapshot(
+        &self,
+    ) -> RuntimeOrphanCandidateSnapshot {
         self.orphan_candidates.snapshot()
     }
 
@@ -231,15 +255,23 @@ impl<I: CacheIndex> CacheManager<I> {
         StartupRecovery::new(self).recover().await
     }
 
-    pub async fn cleanup(&self, policy: CacheCleanupPolicy) -> StorageResult<CacheCleanupReport> {
+    pub async fn cleanup(
+        &self,
+        policy: CacheCleanupPolicy,
+    ) -> StorageResult<CacheCleanupReport> {
         self.run_cleanup(policy, CleanupTrigger::Manual)
             .await?
-            .ok_or_else(|| StorageError::cache("manual cleanup was unexpectedly skipped"))
+            .ok_or_else(|| {
+                StorageError::cache("manual cleanup was unexpectedly skipped")
+            })
     }
 
     /// Startup-only capacity cleanup. `recover` has already removed startup orphans, so this path
     /// deliberately skips the orphan pass and evicts only through the persistent LRU index.
-    pub(crate) async fn cleanup_capacity_only(&self, policy: CacheCleanupPolicy) -> StorageResult<CacheCleanupReport> {
+    pub(crate) async fn cleanup_capacity_only(
+        &self,
+        policy: CacheCleanupPolicy,
+    ) -> StorageResult<CacheCleanupReport> {
         CacheJanitor::new(self).cleanup_capacity(policy).await
     }
 
@@ -254,18 +286,19 @@ impl<I: CacheIndex> CacheManager<I> {
             CleanupTrigger::Manual => {
                 let _cleanup_guard = self.cleanup.lock().await;
                 Ok(Some(CacheJanitor::new(self).cleanup(policy).await?))
-            },
+            }
             CleanupTrigger::WritePath | CleanupTrigger::Periodic => {
                 let Some(_cleanup_guard) = self.cleanup.try_lock() else {
                     return Ok(None);
                 };
                 if trigger == CleanupTrigger::WritePath
-                    && self.index.logical_cache_usage().await?.resident_bytes <= policy.start_bytes()
+                    && self.index.logical_cache_usage().await?.resident_bytes
+                        <= policy.start_bytes()
                 {
                     return Ok(None);
                 }
                 Ok(Some(CacheJanitor::new(self).cleanup(policy).await?))
-            },
+            }
         }
     }
 
@@ -277,7 +310,10 @@ impl<I: CacheIndex> CacheManager<I> {
         self.paths.complete_path(key)
     }
 
-    pub fn validate_file_cache_paths(&self, key: &ObjectLocation) -> StorageResult<()> {
+    pub fn validate_file_cache_paths(
+        &self,
+        key: &ObjectLocation,
+    ) -> StorageResult<()> {
         self.partial_path(key)?;
         self.complete_path(key)?;
         Ok(())
@@ -295,7 +331,9 @@ impl<I: CacheIndex> CacheManager<I> {
         let Some(policy) = self.cleanup_policy else {
             return Ok(());
         };
-        if self.index.logical_cache_usage().await?.resident_bytes > policy.start_bytes() {
+        if self.index.logical_cache_usage().await?.resident_bytes
+            > policy.start_bytes()
+        {
             let _ = self.run_cleanup(policy, CleanupTrigger::WritePath).await?;
         }
         Ok(())

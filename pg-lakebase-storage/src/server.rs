@@ -27,8 +27,12 @@ pub struct StorageServer<I: CacheIndex> {
 }
 
 impl<I: CacheIndex + 'static> StorageServer<I> {
-    pub async fn bind(socket_path: impl AsRef<Path>, service: Arc<StorageService<I>>) -> StorageResult<Self> {
-        Self::bind_with_config(socket_path, service, StorageServerConfig::default()).await
+    pub async fn bind(
+        socket_path: impl AsRef<Path>,
+        service: Arc<StorageService<I>>,
+    ) -> StorageResult<Self> {
+        Self::bind_with_config(socket_path, service, StorageServerConfig::default())
+            .await
     }
 
     pub async fn bind_with_config(
@@ -36,7 +40,13 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
         service: Arc<StorageService<I>>,
         config: StorageServerConfig,
     ) -> StorageResult<Self> {
-        Self::bind_with_config_and_hooks(socket_path, service, config, RequestHooks::default()).await
+        Self::bind_with_config_and_hooks(
+            socket_path,
+            service,
+            config,
+            RequestHooks::default(),
+        )
+        .await
     }
 
     pub async fn bind_with_config_and_hooks(
@@ -68,13 +78,18 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
     }
 
     pub async fn serve_forever(&self) -> StorageResult<()> {
-        let connection_limiter = Arc::new(Semaphore::new(self.config.max_connections.max(1)));
+        let connection_limiter =
+            Arc::new(Semaphore::new(self.config.max_connections.max(1)));
         loop {
-            let connection_permit = connection_limiter
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|error| StorageError::io("connection limiter closed", std::io::Error::other(error)))?;
+            let connection_permit =
+                connection_limiter.clone().acquire_owned().await.map_err(
+                    |error| {
+                        StorageError::io(
+                            "connection limiter closed",
+                            std::io::Error::other(error),
+                        )
+                    },
+                )?;
             let (stream, _) = self.listener.accept().await?;
             let config = self.config.clone();
             let context = StorageContext::new_with_hooks_and_handle_limit(
@@ -83,10 +98,16 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
                 self.request_hooks.clone(),
                 config.max_open_handles_per_connection,
             );
-            info!(client_addr = &*context.client_addr, "accepted storage connection");
+            info!(
+                client_addr = &*context.client_addr,
+                "accepted storage connection"
+            );
             tokio::spawn(async move {
                 let _connection_permit = connection_permit;
-                if let Err(error) = process_connection_with_drain_timeout(stream, context, config).await {
+                if let Err(error) =
+                    process_connection_with_drain_timeout(stream, context, config)
+                        .await
+                {
                     debug!("storage connection closed: {error}");
                 }
             });

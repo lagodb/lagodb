@@ -29,24 +29,34 @@ use crate::ErrorKind;
 use crate::avro::schema_to_avro_schema;
 use crate::spec::Schema;
 use crate::spec::Type::Primitive;
-use crate::spec::datatypes::{ListType, MapType, NestedField, PrimitiveType, StructType, Type};
+use crate::spec::datatypes::{
+    ListType, MapType, NestedField, PrimitiveType, StructType, Type,
+};
 use crate::spec::values::datum::{INT_MAX, INT_MIN, LONG_MAX, LONG_MIN};
 use crate::spec::values::serde::_serde;
-use crate::spec::values::{Datum, Literal, Map, PrimitiveLiteral, RawLiteral, Struct};
+use crate::spec::values::{
+    Datum, Literal, Map, PrimitiveLiteral, RawLiteral, Struct,
+};
 
 fn check_json_serde(json: &str, expected_literal: Literal, expected_type: &Type) {
     let raw_json_value = serde_json::from_str::<JsonValue>(json).unwrap();
-    let desered_literal = Literal::try_from_json(raw_json_value.clone(), expected_type).unwrap();
+    let desered_literal =
+        Literal::try_from_json(raw_json_value.clone(), expected_type).unwrap();
     assert_eq!(desered_literal, Some(expected_literal.clone()));
 
-    let expected_json_value: JsonValue = expected_literal.try_into_json(expected_type).unwrap();
+    let expected_json_value: JsonValue =
+        expected_literal.try_into_json(expected_type).unwrap();
     let sered_json = serde_json::to_string(&expected_json_value).unwrap();
     let parsed_json_value = serde_json::from_str::<JsonValue>(&sered_json).unwrap();
 
     assert_eq!(parsed_json_value, raw_json_value);
 }
 
-fn check_avro_bytes_serde(input: Vec<u8>, expected_datum: Datum, expected_type: &PrimitiveType) {
+fn check_avro_bytes_serde(
+    input: Vec<u8>,
+    expected_datum: Datum,
+    expected_type: &PrimitiveType,
+) {
     let raw_schema = r#""bytes""#;
     let schema = apache_avro::Schema::parse_str(raw_schema).unwrap();
 
@@ -61,7 +71,8 @@ fn check_avro_bytes_serde(input: Vec<u8>, expected_datum: Datum, expected_type: 
 
     for record in reader {
         let result = apache_avro::from_value::<ByteBuf>(&record.unwrap()).unwrap();
-        let desered_datum = Datum::try_from_bytes(&result, expected_type.clone()).unwrap();
+        let desered_datum =
+            Datum::try_from_bytes(&result, expected_type.clone()).unwrap();
         assert_eq!(desered_datum, expected_datum);
     }
 }
@@ -74,10 +85,12 @@ fn check_convert_with_avro(expected_literal: Literal, expected_type: &Type) {
         .unwrap();
     let avro_schema = schema_to_avro_schema("test", &schema).unwrap();
     let struct_type = Type::Struct(StructType::new(fields));
-    let struct_literal = Literal::Struct(Struct::from_iter(vec![Some(expected_literal.clone())]));
+    let struct_literal =
+        Literal::Struct(Struct::from_iter(vec![Some(expected_literal.clone())]));
 
     let mut writer = apache_avro::Writer::new(&avro_schema, Vec::new());
-    let raw_literal = RawLiteral::try_from(struct_literal.clone(), &struct_type).unwrap();
+    let raw_literal =
+        RawLiteral::try_from(struct_literal.clone(), &struct_type).unwrap();
     writer.append_ser(raw_literal).unwrap();
     let encoded = writer.into_inner().unwrap();
 
@@ -99,9 +112,11 @@ fn check_serialize_avro(literal: Literal, ty: &Type, expect_value: Value) {
         .unwrap();
     let avro_schema = schema_to_avro_schema("test", &schema).unwrap();
     let struct_type = Type::Struct(StructType::new(fields));
-    let struct_literal = Literal::Struct(Struct::from_iter(vec![Some(literal.clone())]));
+    let struct_literal =
+        Literal::Struct(Struct::from_iter(vec![Some(literal.clone())]));
     let mut writer = apache_avro::Writer::new(&avro_schema, Vec::new());
-    let raw_literal = RawLiteral::try_from(struct_literal.clone(), &struct_type).unwrap();
+    let raw_literal =
+        RawLiteral::try_from(struct_literal.clone(), &struct_type).unwrap();
     let value = to_value(raw_literal)
         .unwrap()
         .resolve(&avro_schema)
@@ -265,9 +280,16 @@ fn json_struct() {
             None,
         ])),
         &Type::Struct(StructType::new(vec![
-            NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-            NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String)).into(),
-            NestedField::optional(3, "address", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int))
+                .into(),
+            NestedField::optional(2, "name", Type::Primitive(PrimitiveType::String))
+                .into(),
+            NestedField::optional(
+                3,
+                "address",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
         ])),
     );
 }
@@ -285,8 +307,12 @@ fn json_list() {
             None,
         ]),
         &Type::List(ListType {
-            element_field: NestedField::list_element(0, Type::Primitive(PrimitiveType::Int), true)
-                .into(),
+            element_field: NestedField::list_element(
+                0,
+                Type::Primitive(PrimitiveType::Int),
+                true,
+            )
+            .into(),
         }),
     );
 }
@@ -312,8 +338,11 @@ fn json_map() {
             ),
         ])),
         &Type::Map(MapType {
-            key_field: NestedField::map_key_element(0, Type::Primitive(PrimitiveType::String))
-                .into(),
+            key_field: NestedField::map_key_element(
+                0,
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
             value_field: NestedField::map_value_element(
                 1,
                 Type::Primitive(PrimitiveType::Int),
@@ -436,16 +465,21 @@ fn check_raw_literal_bytes_serde_via_avro(
 
     // Create an Avro bytes value and deserialize it through the RawLiteral path
     let avro_value = Value::Bytes(input_bytes);
-    let raw_literal: _serde::RawLiteral = apache_avro::from_value(&avro_value).unwrap();
+    let raw_literal: _serde::RawLiteral =
+        apache_avro::from_value(&avro_value).unwrap();
     let result = raw_literal.try_into(expected_type).unwrap();
     assert_eq!(result, Some(expected_literal));
 }
 
-fn check_raw_literal_bytes_error_via_avro(input_bytes: Vec<u8>, expected_type: &Type) {
+fn check_raw_literal_bytes_error_via_avro(
+    input_bytes: Vec<u8>,
+    expected_type: &Type,
+) {
     use apache_avro::types::Value;
 
     let avro_value = Value::Bytes(input_bytes);
-    let raw_literal: _serde::RawLiteral = apache_avro::from_value(&avro_value).unwrap();
+    let raw_literal: _serde::RawLiteral =
+        apache_avro::from_value(&avro_value).unwrap();
     let result = raw_literal.try_into(expected_type);
     assert!(result.is_err(), "Expected error but got: {result:?}");
 }
@@ -483,7 +517,10 @@ fn test_raw_literal_bytes_fixed_correct_length() {
 #[test]
 fn test_raw_literal_bytes_fixed_wrong_length() {
     let bytes = vec![1u8, 2u8, 3u8]; // 3 bytes, but expecting 4
-    check_raw_literal_bytes_error_via_avro(bytes, &Type::Primitive(PrimitiveType::Fixed(4)));
+    check_raw_literal_bytes_error_via_avro(
+        bytes,
+        &Type::Primitive(PrimitiveType::Fixed(4)),
+    );
 }
 
 #[test]
@@ -499,12 +536,12 @@ fn test_raw_literal_bytes_fixed_empty_correct_length() {
 #[test]
 fn test_raw_literal_bytes_uuid_correct_length() {
     let uuid_bytes = vec![
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
-        0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89,
+        0xab, 0xcd, 0xef,
     ];
     let expected_uuid = u128::from_be_bytes([
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
-        0xef,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89,
+        0xab, 0xcd, 0xef,
     ]);
     check_raw_literal_bytes_serde_via_avro(
         uuid_bytes,
@@ -516,7 +553,10 @@ fn test_raw_literal_bytes_uuid_correct_length() {
 #[test]
 fn test_raw_literal_bytes_uuid_wrong_length() {
     let bytes = vec![1u8, 2u8, 3u8]; // 3 bytes, but UUID needs 16
-    check_raw_literal_bytes_error_via_avro(bytes, &Type::Primitive(PrimitiveType::Uuid));
+    check_raw_literal_bytes_error_via_avro(
+        bytes,
+        &Type::Primitive(PrimitiveType::Uuid),
+    );
 }
 
 #[test]
@@ -583,8 +623,8 @@ fn test_raw_literal_bytes_decimal_precision_18_scale_2() {
 fn test_raw_literal_bytes_decimal_precision_38_scale_2() {
     // Precision 38 requires 16 bytes (maximum precision)
     let decimal_bytes = vec![
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
-        0xd2, // 1234 in 16 bytes
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x04, 0xd2, // 1234 in 16 bytes
     ];
     let expected_decimal = 1234i128;
     check_raw_literal_bytes_serde_via_avro(
@@ -656,7 +696,10 @@ fn test_raw_literal_bytes_decimal_wrong_length_too_few() {
 #[test]
 fn test_raw_literal_bytes_unsupported_type() {
     let bytes = vec![1u8, 2u8, 3u8, 4u8];
-    check_raw_literal_bytes_error_via_avro(bytes, &Type::Primitive(PrimitiveType::Int));
+    check_raw_literal_bytes_error_via_avro(
+        bytes,
+        &Type::Primitive(PrimitiveType::Int),
+    );
 }
 
 #[test]
@@ -741,8 +784,12 @@ fn avro_convert_test_list() {
             None,
         ]),
         &Type::List(ListType {
-            element_field: NestedField::list_element(0, Type::Primitive(PrimitiveType::Int), false)
-                .into(),
+            element_field: NestedField::list_element(
+                0,
+                Type::Primitive(PrimitiveType::Int),
+                false,
+            )
+            .into(),
         }),
     );
 
@@ -753,8 +800,12 @@ fn avro_convert_test_list() {
             Some(Literal::Primitive(PrimitiveLiteral::Int(3))),
         ]),
         &Type::List(ListType {
-            element_field: NestedField::list_element(0, Type::Primitive(PrimitiveType::Int), true)
-                .into(),
+            element_field: NestedField::list_element(
+                0,
+                Type::Primitive(PrimitiveType::Int),
+                true,
+            )
+            .into(),
         }),
     );
 }
@@ -767,10 +818,12 @@ fn check_convert_with_avro_map(expected_literal: Literal, expected_type: &Type) 
         .unwrap();
     let avro_schema = schema_to_avro_schema("test", &schema).unwrap();
     let struct_type = Type::Struct(StructType::new(fields));
-    let struct_literal = Literal::Struct(Struct::from_iter(vec![Some(expected_literal.clone())]));
+    let struct_literal =
+        Literal::Struct(Struct::from_iter(vec![Some(expected_literal.clone())]));
 
     let mut writer = apache_avro::Writer::new(&avro_schema, Vec::new());
-    let raw_literal = RawLiteral::try_from(struct_literal.clone(), &struct_type).unwrap();
+    let raw_literal =
+        RawLiteral::try_from(struct_literal.clone(), &struct_type).unwrap();
     writer.append_ser(raw_literal).unwrap();
     let encoded = writer.into_inner().unwrap();
 
@@ -811,7 +864,11 @@ fn avro_convert_test_map() {
             (Literal::Primitive(PrimitiveLiteral::Int(3)), None),
         ])),
         &Type::Map(MapType {
-            key_field: NestedField::map_key_element(2, Type::Primitive(PrimitiveType::Int)).into(),
+            key_field: NestedField::map_key_element(
+                2,
+                Type::Primitive(PrimitiveType::Int),
+            )
+            .into(),
             value_field: NestedField::map_value_element(
                 3,
                 Type::Primitive(PrimitiveType::Long),
@@ -837,7 +894,11 @@ fn avro_convert_test_map() {
             ),
         ])),
         &Type::Map(MapType {
-            key_field: NestedField::map_key_element(2, Type::Primitive(PrimitiveType::Int)).into(),
+            key_field: NestedField::map_key_element(
+                2,
+                Type::Primitive(PrimitiveType::Int),
+            )
+            .into(),
             value_field: NestedField::map_value_element(
                 3,
                 Type::Primitive(PrimitiveType::Long),
@@ -866,8 +927,11 @@ fn avro_convert_test_string_map() {
             ),
         ])),
         &Type::Map(MapType {
-            key_field: NestedField::map_key_element(2, Type::Primitive(PrimitiveType::String))
-                .into(),
+            key_field: NestedField::map_key_element(
+                2,
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
             value_field: NestedField::map_value_element(
                 3,
                 Type::Primitive(PrimitiveType::Int),
@@ -893,8 +957,11 @@ fn avro_convert_test_string_map() {
             ),
         ])),
         &Type::Map(MapType {
-            key_field: NestedField::map_key_element(2, Type::Primitive(PrimitiveType::String))
-                .into(),
+            key_field: NestedField::map_key_element(
+                2,
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
             value_field: NestedField::map_value_element(
                 3,
                 Type::Primitive(PrimitiveType::Int),
@@ -916,9 +983,16 @@ fn avro_convert_test_record() {
             None,
         ])),
         &Type::Struct(StructType::new(vec![
-            NestedField::required(2, "id", Type::Primitive(PrimitiveType::Int)).into(),
-            NestedField::optional(3, "name", Type::Primitive(PrimitiveType::String)).into(),
-            NestedField::optional(4, "address", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::required(2, "id", Type::Primitive(PrimitiveType::Int))
+                .into(),
+            NestedField::optional(3, "name", Type::Primitive(PrimitiveType::String))
+                .into(),
+            NestedField::optional(
+                4,
+                "address",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into(),
         ])),
     );
 }
@@ -942,7 +1016,8 @@ fn avro_convert_test_decimal_ser() {
         precision: 9,
         scale: 8,
     });
-    let expect_value = Value::Decimal(apache_avro::Decimal::from(12345_i128.to_be_bytes()));
+    let expect_value =
+        Value::Decimal(apache_avro::Decimal::from(12345_i128.to_be_bytes()));
     check_serialize_avro(literal, &ty, expect_value);
 }
 
@@ -1051,7 +1126,8 @@ fn test_datum_ser_deser() {
     test_fn(datum);
     let datum = Datum::timestamptz_micros(1510871468123456);
     test_fn(datum);
-    let datum = Datum::uuid(Uuid::parse_str("f79c3e09-677c-4bbd-a479-3f349cb785e7").unwrap());
+    let datum =
+        Datum::uuid(Uuid::parse_str("f79c3e09-677c-4bbd-a479-3f349cb785e7").unwrap());
     test_fn(datum);
     let datum = Datum::decimal(1420).unwrap();
     test_fn(datum);
@@ -1315,7 +1391,8 @@ fn test_date_from_json_as_number() {
     // Test Date as number (days since epoch) - used in initial-default from add_files
     let date_number = json!(18628); // 2021-01-01 is 18628 days since 1970-01-01
     let result =
-        Literal::try_from_json(date_number, &Type::Primitive(PrimitiveType::Date)).unwrap();
+        Literal::try_from_json(date_number, &Type::Primitive(PrimitiveType::Date))
+            .unwrap();
     assert_eq!(
         result,
         Some(Literal::Primitive(PrimitiveLiteral::Int(18628)))
@@ -1324,7 +1401,8 @@ fn test_date_from_json_as_number() {
     // Test Date as string - traditional format
     let date_string = json!("2021-01-01");
     let result =
-        Literal::try_from_json(date_string, &Type::Primitive(PrimitiveType::Date)).unwrap();
+        Literal::try_from_json(date_string, &Type::Primitive(PrimitiveType::Date))
+            .unwrap();
     assert_eq!(
         result,
         Some(Literal::Primitive(PrimitiveLiteral::Int(18628)))

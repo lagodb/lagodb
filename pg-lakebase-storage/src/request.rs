@@ -38,7 +38,10 @@ impl RequestHooks {
         self
     }
 
-    pub fn with_shared_observer(mut self, observer: Arc<dyn RequestObserver>) -> Self {
+    pub fn with_shared_observer(
+        mut self,
+        observer: Arc<dyn RequestObserver>,
+    ) -> Self {
         self.observer = observer;
         self
     }
@@ -79,7 +82,11 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
-    pub(crate) fn new(request_id: u64, client_addr: ClientAddr, payload: WireRequestPayload) -> Self {
+    pub(crate) fn new(
+        request_id: u64,
+        client_addr: ClientAddr,
+        payload: WireRequestPayload,
+    ) -> Self {
         Self {
             request_id,
             client_addr,
@@ -188,7 +195,12 @@ pub enum RequestStatus {
 pub trait RequestObserver: Send + Sync + 'static {
     fn on_request_start(&self, _context: &RequestContext) {}
 
-    fn on_request_finish(&self, _context: &RequestContext, _outcome: &RequestOutcome) {}
+    fn on_request_finish(
+        &self,
+        _context: &RequestContext,
+        _outcome: &RequestOutcome,
+    ) {
+    }
 }
 
 pub trait RequestPolicy: Send + Sync + 'static {
@@ -226,7 +238,7 @@ impl RequestObserver for TracingRequestObserver {
                     elapsed_us = elapsed_micros(outcome.elapsed()),
                     "storage request finished",
                 );
-            },
+            }
             RequestStatus::Error { kind } => {
                 warn!(
                     request_id = context.request_id(),
@@ -236,7 +248,7 @@ impl RequestObserver for TracingRequestObserver {
                     elapsed_us = elapsed_micros(outcome.elapsed()),
                     "storage request failed",
                 );
-            },
+            }
         }
     }
 }

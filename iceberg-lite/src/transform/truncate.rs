@@ -97,43 +97,48 @@ impl TransformFunction for Truncate {
                     .unwrap()
                     .unary(|v| Self::truncate_decimal_i128(v, width))
                     .with_precision_and_scale(*precision, *scale)
-                    .map_err(|err| Error::new(crate::ErrorKind::Unexpected, format!("{err}")))?;
+                    .map_err(|err| {
+                        Error::new(crate::ErrorKind::Unexpected, format!("{err}"))
+                    })?;
                 Ok(Arc::new(res))
             }
             DataType::Utf8 => {
                 let len = self.width as usize;
-                let res: arrow_array::StringArray = arrow_array::StringArray::from_iter(
-                    input
-                        .as_any()
-                        .downcast_ref::<arrow_array::StringArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.map(|v| Self::truncate_str(v, len))),
-                );
+                let res: arrow_array::StringArray =
+                    arrow_array::StringArray::from_iter(
+                        input
+                            .as_any()
+                            .downcast_ref::<arrow_array::StringArray>()
+                            .unwrap()
+                            .iter()
+                            .map(|v| v.map(|v| Self::truncate_str(v, len))),
+                    );
                 Ok(Arc::new(res))
             }
             DataType::LargeUtf8 => {
                 let len = self.width as usize;
-                let res: arrow_array::LargeStringArray = arrow_array::LargeStringArray::from_iter(
-                    input
-                        .as_any()
-                        .downcast_ref::<arrow_array::LargeStringArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.map(|v| Self::truncate_str(v, len))),
-                );
+                let res: arrow_array::LargeStringArray =
+                    arrow_array::LargeStringArray::from_iter(
+                        input
+                            .as_any()
+                            .downcast_ref::<arrow_array::LargeStringArray>()
+                            .unwrap()
+                            .iter()
+                            .map(|v| v.map(|v| Self::truncate_str(v, len))),
+                    );
                 Ok(Arc::new(res))
             }
             DataType::Binary => {
                 let len = self.width as usize;
-                let res: arrow_array::BinaryArray = arrow_array::BinaryArray::from_iter(
-                    input
-                        .as_any()
-                        .downcast_ref::<arrow_array::BinaryArray>()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.map(|v| Self::truncate_binary(v, len))),
-                );
+                let res: arrow_array::BinaryArray =
+                    arrow_array::BinaryArray::from_iter(
+                        input
+                            .as_any()
+                            .downcast_ref::<arrow_array::BinaryArray>()
+                            .unwrap()
+                            .iter()
+                            .map(|v| v.map(|v| Self::truncate_binary(v, len))),
+                    );
                 Ok(Arc::new(res))
             }
             _ => Err(crate::Error::new(
@@ -191,11 +196,13 @@ mod test {
     use crate::Result;
     use crate::expr::PredicateOperator;
     use crate::spec::PrimitiveType::{
-        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time, Timestamp,
-        TimestampNs, Timestamptz, TimestamptzNs, Uuid,
+        Binary, Date, Decimal, Fixed, Int, Long, String as StringType, Time,
+        Timestamp, TimestampNs, Timestamptz, TimestamptzNs, Uuid,
     };
     use crate::spec::Type::{Primitive, Struct};
-    use crate::spec::{Datum, NestedField, PrimitiveType, StructType, Transform, Type};
+    use crate::spec::{
+        Datum, NestedField, PrimitiveType, StructType, Transform, Type,
+    };
     use crate::transform::TransformFunction;
     use crate::transform::test::{TestProjectionFixture, TestTransformFixture};
 
@@ -261,23 +268,35 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::StartsWith, Datum::string(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::StartsWith,
+                Datum::string(value),
+            ),
             Some(r#"name = "abcde""#),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::NotStartsWith, Datum::string(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::NotStartsWith,
+                Datum::string(value),
+            ),
             Some(r#"name != "abcde""#),
         )?;
 
         let value = "abcdefg";
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::StartsWith, Datum::string(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::StartsWith,
+                Datum::string(value),
+            ),
             Some(r#"name STARTS WITH "abcde""#),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::NotStartsWith, Datum::string(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::NotStartsWith,
+                Datum::string(value),
+            ),
             None,
         )?;
 
@@ -295,22 +314,32 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::string(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThan, Datum::string(value)),
             Some(r#"name <= "abcde""#),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::string(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThanOrEq,
+                Datum::string(value),
+            ),
             Some(r#"name <= "abcde""#),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThan, Datum::string(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThan,
+                Datum::string(value),
+            ),
             Some(r#"name >= "abcde""#),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::string(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::string(value),
+            ),
             Some(r#"name >= "abcde""#),
         )?;
 
@@ -320,18 +349,18 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::string(value),
-                Datum::string(format!("{value}abc")),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![Datum::string(value), Datum::string(format!("{value}abc"))],
+            ),
             Some(r#"name IN ("abcde")"#),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::string(value),
-                Datum::string(format!("{value}abc")),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::string(value), Datum::string(format!("{value}abc"))],
+            ),
             None,
         )?;
 
@@ -358,7 +387,10 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThan,
+                Datum::decimal_from_str(curr)?,
+            ),
             Some("name <= 9990"),
         )?;
 
@@ -379,29 +411,41 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::Eq, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::Eq,
+                Datum::decimal_from_str(curr)?,
+            ),
             Some("name = 9990"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::NotEq, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::NotEq,
+                Datum::decimal_from_str(curr)?,
+            ),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::decimal_from_str(prev)?,
-                Datum::decimal_from_str(curr)?,
-                Datum::decimal_from_str(next)?,
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::decimal_from_str(prev)?,
+                    Datum::decimal_from_str(curr)?,
+                    Datum::decimal_from_str(next)?,
+                ],
+            ),
             Some("name IN (9890, 9990, 10090)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::decimal_from_str(curr)?,
-                Datum::decimal_from_str(next)?,
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![
+                    Datum::decimal_from_str(curr)?,
+                    Datum::decimal_from_str(next)?,
+                ],
+            ),
             None,
         )?;
 
@@ -428,7 +472,10 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThan,
+                Datum::decimal_from_str(curr)?,
+            ),
             Some("name <= 9990"),
         )?;
 
@@ -449,29 +496,41 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::Eq, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::Eq,
+                Datum::decimal_from_str(curr)?,
+            ),
             Some("name = 10000"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::NotEq, Datum::decimal_from_str(curr)?),
+            &fixture.binary_predicate(
+                PredicateOperator::NotEq,
+                Datum::decimal_from_str(curr)?,
+            ),
             None,
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::decimal_from_str(prev)?,
-                Datum::decimal_from_str(curr)?,
-                Datum::decimal_from_str(next)?,
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::decimal_from_str(prev)?,
+                    Datum::decimal_from_str(curr)?,
+                    Datum::decimal_from_str(next)?,
+                ],
+            ),
             Some("name IN (10000, 10100, 9900)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::decimal_from_str(curr)?,
-                Datum::decimal_from_str(next)?,
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![
+                    Datum::decimal_from_str(curr)?,
+                    Datum::decimal_from_str(next)?,
+                ],
+            ),
             None,
         )?;
 
@@ -489,17 +548,24 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::long(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThan, Datum::long(value)),
             Some("name <= 90"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::long(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThanOrEq,
+                Datum::long(value),
+            ),
             Some("name <= 90"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::long(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::long(value),
+            ),
             Some("name >= 90"),
         )?;
 
@@ -514,19 +580,22 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::long(value - 1),
-                Datum::long(value),
-                Datum::long(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::long(value - 1),
+                    Datum::long(value),
+                    Datum::long(value + 1),
+                ],
+            ),
             Some("name IN (100, 90)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::long(value),
-                Datum::long(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::long(value), Datum::long(value + 1)],
+            ),
             None,
         )?;
 
@@ -544,17 +613,24 @@ mod test {
         );
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThan, Datum::long(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThan, Datum::long(value)),
             Some("name <= 90"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::long(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::LessThanOrEq,
+                Datum::long(value),
+            ),
             Some("name <= 100"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::long(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::long(value),
+            ),
             Some("name >= 100"),
         )?;
 
@@ -569,19 +645,22 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::long(value - 1),
-                Datum::long(value),
-                Datum::long(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::long(value - 1),
+                    Datum::long(value),
+                    Datum::long(value + 1),
+                ],
+            ),
             Some("name IN (100, 90)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::long(value),
-                Datum::long(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::long(value), Datum::long(value + 1)],
+            ),
             None,
         )?;
 
@@ -604,12 +683,16 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::int(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThanOrEq, Datum::int(value)),
             Some("name <= 90"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::int(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::int(value),
+            ),
             Some("name >= 90"),
         )?;
 
@@ -624,19 +707,22 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::int(value - 1),
-                Datum::int(value),
-                Datum::int(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::int(value - 1),
+                    Datum::int(value),
+                    Datum::int(value + 1),
+                ],
+            ),
             Some("name IN (100, 90)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::int(value),
-                Datum::int(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::int(value), Datum::int(value + 1)],
+            ),
             None,
         )?;
 
@@ -659,12 +745,16 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::LessThanOrEq, Datum::int(value)),
+            &fixture
+                .binary_predicate(PredicateOperator::LessThanOrEq, Datum::int(value)),
             Some("name <= 100"),
         )?;
 
         fixture.assert_projection(
-            &fixture.binary_predicate(PredicateOperator::GreaterThanOrEq, Datum::int(value)),
+            &fixture.binary_predicate(
+                PredicateOperator::GreaterThanOrEq,
+                Datum::int(value),
+            ),
             Some("name >= 100"),
         )?;
 
@@ -679,19 +769,22 @@ mod test {
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::In, vec![
-                Datum::int(value - 1),
-                Datum::int(value),
-                Datum::int(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::In,
+                vec![
+                    Datum::int(value - 1),
+                    Datum::int(value),
+                    Datum::int(value + 1),
+                ],
+            ),
             Some("name IN (100, 90)"),
         )?;
 
         fixture.assert_projection(
-            &fixture.set_predicate(PredicateOperator::NotIn, vec![
-                Datum::int(value),
-                Datum::int(value + 1),
-            ]),
+            &fixture.set_predicate(
+                PredicateOperator::NotIn,
+                vec![Datum::int(value), Datum::int(value + 1)],
+            ),
             None,
         )?;
 

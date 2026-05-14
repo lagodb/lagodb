@@ -33,7 +33,10 @@ impl ServiceReply {
         }
     }
 
-    pub(crate) fn with_attachment(output: CommandOutput, attachment: ResponseAttachment) -> Self {
+    pub(crate) fn with_attachment(
+        output: CommandOutput,
+        attachment: ResponseAttachment,
+    ) -> Self {
         Self {
             output,
             attachment: Some(attachment),
@@ -176,14 +179,18 @@ impl ReadBody {
             Self::Bytes(data) => Ok(data.to_vec()),
             Self::FileRange(mut range) => {
                 let mut data = vec![0; range.len as usize];
-                range.file.seek(std::io::SeekFrom::Start(range.offset)).await?;
                 range
                     .file
-                    .read_exact(&mut data)
-                    .await
-                    .map_err(|error| StorageError::io("failed to materialize read file range for test", error))?;
+                    .seek(std::io::SeekFrom::Start(range.offset))
+                    .await?;
+                range.file.read_exact(&mut data).await.map_err(|error| {
+                    StorageError::io(
+                        "failed to materialize read file range for test",
+                        error,
+                    )
+                })?;
                 Ok(data)
-            },
+            }
         }
     }
 }

@@ -42,7 +42,10 @@ impl Default for StorageServerConfig {
 }
 
 impl StorageServerConfig {
-    pub fn with_max_in_flight_requests(mut self, max_in_flight_requests: usize) -> Self {
+    pub fn with_max_in_flight_requests(
+        mut self,
+        max_in_flight_requests: usize,
+    ) -> Self {
         self.max_in_flight_requests = max_in_flight_requests.max(1);
         self
     }
@@ -52,27 +55,42 @@ impl StorageServerConfig {
         self
     }
 
-    pub fn with_max_open_handles_per_connection(mut self, max_open_handles_per_connection: usize) -> Self {
+    pub fn with_max_open_handles_per_connection(
+        mut self,
+        max_open_handles_per_connection: usize,
+    ) -> Self {
         self.max_open_handles_per_connection = max_open_handles_per_connection.max(1);
         self
     }
 
-    pub fn with_connection_drain_timeout(mut self, connection_drain_timeout: Duration) -> Self {
+    pub fn with_connection_drain_timeout(
+        mut self,
+        connection_drain_timeout: Duration,
+    ) -> Self {
         self.connection_drain_timeout = connection_drain_timeout;
         self
     }
 
-    pub fn with_max_pending_responses(mut self, max_pending_responses: usize) -> Self {
+    pub fn with_max_pending_responses(
+        mut self,
+        max_pending_responses: usize,
+    ) -> Self {
         self.max_pending_responses = max_pending_responses.max(1);
         self
     }
 
-    pub fn with_max_pending_response_bytes(mut self, max_pending_response_bytes: usize) -> Self {
+    pub fn with_max_pending_response_bytes(
+        mut self,
+        max_pending_response_bytes: usize,
+    ) -> Self {
         self.max_pending_response_bytes = max_pending_response_bytes.max(1);
         self
     }
 
-    pub fn with_response_write_timeout(mut self, response_write_timeout: Duration) -> Self {
+    pub fn with_response_write_timeout(
+        mut self,
+        response_write_timeout: Duration,
+    ) -> Self {
         self.response_write_timeout = Some(response_write_timeout);
         self.normalized()
     }
@@ -85,7 +103,8 @@ impl StorageServerConfig {
     pub fn normalized(mut self) -> Self {
         self.max_in_flight_requests = self.max_in_flight_requests.max(1);
         self.max_connections = self.max_connections.max(1);
-        self.max_open_handles_per_connection = self.max_open_handles_per_connection.max(1);
+        self.max_open_handles_per_connection =
+            self.max_open_handles_per_connection.max(1);
         self.max_pending_responses = self.max_pending_responses.max(1);
         self.max_pending_response_bytes = self.max_pending_response_bytes.max(1);
         if self.response_write_timeout == Some(Duration::ZERO) {
@@ -94,7 +113,10 @@ impl StorageServerConfig {
         self
     }
 
-    pub(crate) fn validate_for_max_read_size(&self, max_read_size: u32) -> StorageResult<()> {
+    pub(crate) fn validate_for_max_read_size(
+        &self,
+        max_read_size: u32,
+    ) -> StorageResult<()> {
         let max_read_size = max_read_size as usize;
         if max_read_size > MAX_READ_RESPONSE_DATA_BYTES {
             return Err(StorageError::configuration(format!(
@@ -163,6 +185,10 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, StorageError::Configuration { .. }));
-        assert!(error.wire_message().contains("maximum in-band READ payload size"));
+        assert!(
+            error
+                .wire_message()
+                .contains("maximum in-band READ payload size")
+        );
     }
 }

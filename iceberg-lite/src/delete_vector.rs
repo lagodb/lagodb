@@ -17,9 +17,9 @@
 
 use std::ops::BitOrAssign;
 
+use roaring::RoaringTreemap;
 use roaring::bitmap::Iter;
 use roaring::treemap::BitmapIter;
-use roaring::RoaringTreemap;
 
 use crate::{Error, ErrorKind, Result};
 
@@ -95,7 +95,9 @@ impl Iterator for DeleteVectorIterator<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(inner) = &mut self.inner {
             if let Some(inner_next) = inner.bitmap_iter.next() {
-                return Some(u64::from(inner.high_bits) << 32 | u64::from(inner_next));
+                return Some(
+                    u64::from(inner.high_bits) << 32 | u64::from(inner_next),
+                );
             }
         }
 

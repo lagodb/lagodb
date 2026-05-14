@@ -8,16 +8,23 @@
 
 use std::sync::Arc;
 
-use crate::cache::{CacheActivityGuard, CacheIndex, CacheState, ChunkFillClaim, LargeFillSession, ResidencyBody};
+use crate::cache::{
+    CacheActivityGuard, CacheIndex, CacheState, ChunkFillClaim, LargeFillSession,
+    ResidencyBody,
+};
 use crate::error::{StorageError, StorageResult};
 use crate::handle::OpenFileState;
+use crate::service::StorageService;
 use crate::service::command::ReadCommand;
 use crate::service::reply::{CommandOutput, ServiceReply};
-use crate::service::StorageService;
 use crate::session::handle_table::{HandleTable, ReadHandleGuard};
 
 impl<I: CacheIndex + 'static> StorageService<I> {
-    pub(super) async fn handle_read(&self, handles: &HandleTable, command: ReadCommand) -> StorageResult<ServiceReply> {
+    pub(super) async fn handle_read(
+        &self,
+        handles: &HandleTable,
+        command: ReadCommand,
+    ) -> StorageResult<ServiceReply> {
         let read_handle = handles.begin_read(command.handle)?;
         self.handle_admitted_read(&read_handle, command).await
     }
@@ -32,7 +39,10 @@ impl<I: CacheIndex + 'static> StorageService<I> {
             return Err(StorageError::unsupported("handle is not readable"));
         }
         if command.len == 0 || command.offset >= state.size {
-            return Ok(ServiceReply::new(CommandOutput::read_bytes(bytes::Bytes::new(), true)));
+            return Ok(ServiceReply::new(CommandOutput::read_bytes(
+                bytes::Bytes::new(),
+                true,
+            )));
         }
         let len = command.len.min(self.max_read_size());
 
@@ -78,16 +88,23 @@ impl<I: CacheIndex + 'static> RangeReader<'_, I> {
                 let (file, offset, len, eof) = self
                     .service
                     .cache
-                    .open_file_range_for_meta(meta, CacheState::CompleteFile, self.offset, self.len)
+                    .open_file_range_for_meta(
+                        meta,
+                        CacheState::CompleteFile,
+                        self.offset,
+                        self.len,
+                    )
                     .await?;
-                Ok(ServiceReply::new(CommandOutput::read_file_range(file, offset, len, eof, read_guard)))
-            },
+                Ok(ServiceReply::new(CommandOutput::read_file_range(
+                    file, offset, len, eof, read_guard,
+                )))
+            }
             ResidencyBody::LargeFill { session } => {
                 // Same reasoning as the Complete branch: pins `is_active(key)` across the
                 // wire-response lifetime, beyond the handle's own `OpenLease`.
                 let read_guard = self.service.cache.read_guard(&self.state.key).await;
                 self.read_from_large_fill(session.clone(), read_guard).await
-            },
+            }
         }
     }
 
@@ -101,7 +118,11 @@ impl<I: CacheIndex + 'static> RangeReader<'_, I> {
         session: Arc<LargeFillSession>,
         read_guard: CacheActivityGuard,
     ) -> StorageResult<ServiceReply> {
-        for chunk in self.service.cache.chunks_for_read(self.offset, self.len, self.state.size) {
+        for chunk in
+            self.service
+                .cache
+                .chunks_for_read(self.offset, self.len, self.state.size)
+        {
             self.ensure_large_chunk(&session, chunk).await?;
         }
 
@@ -110,10 +131,16 @@ impl<I: CacheIndex + 'static> RangeReader<'_, I> {
             .cache
             .open_large_range_for_session(&session, self.offset, self.len)
             .await?;
-        Ok(ServiceReply::new(CommandOutput::read_file_range(file, offset, len, eof, read_guard)))
+        Ok(ServiceReply::new(CommandOutput::read_file_range(
+            file, offset, len, eof, read_guard,
+        )))
     }
 
-    async fn ensure_large_chunk(&self, session: &Arc<LargeFillSession>, chunk: u64) -> StorageResult<()> {
+    async fn ensure_large_chunk(
+        &self,
+        session: &Arc<LargeFillSession>,
+        chunk: u64,
+    ) -> StorageResult<()> {
         loop {
             match session.claim_chunk(chunk).await? {
                 ChunkFillClaim::Complete => return Ok(()),
@@ -121,18 +148,25 @@ impl<I: CacheIndex + 'static> RangeReader<'_, I> {
                     if waiter.wait().await? {
                         return Ok(());
                     }
-                },
+                }
                 ChunkFillClaim::Leader(leader) => {
-                    let _download_guard = self.service.cache.download_guard(&self.state.key).await;
+                    let _download_guard =
+                        self.service.cache.download_guard(&self.state.key).await;
                     let info = session.info();
                     let range = self.service.cache.chunk_range_for(info.size, chunk);
-                    let data = self.state.store.get_range(&self.state.key, range).await?;
+                    let data =
+                        self.state.store.get_range(&self.state.key, range).await?;
                     self.service
                         .cache
-                        .store_large_chunk_for_session(session.clone(), chunk, &data, leader)
+                        .store_large_chunk_for_session(
+                            session.clone(),
+                            chunk,
+                            &data,
+                            leader,
+                        )
                         .await?;
                     return Ok(());
-                },
+                }
             }
         }
     }

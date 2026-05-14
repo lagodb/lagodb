@@ -115,8 +115,7 @@ impl UtilityHook for IcebergTableHook {
         let guard =
             TableGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)?;
 
-        let metadata_location =
-            init_table_storage_metadata(&guard.as_handle())?;
+        let metadata_location = init_table_storage_metadata(&guard.as_handle())?;
 
         IcebergMetadata::new(oid)
             .with_metadata_location(metadata_location)

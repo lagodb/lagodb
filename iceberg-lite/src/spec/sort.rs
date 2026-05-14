@@ -148,7 +148,9 @@ impl SortOrderBuilder {
     pub fn build_unbound(&self) -> Result<SortOrder> {
         let fields = self.fields.clone().unwrap_or_default();
         match (self.order_id, fields.as_slice()) {
-            (Some(SortOrder::UNSORTED_ORDER_ID) | None, []) => Ok(SortOrder::unsorted_order()),
+            (Some(SortOrder::UNSORTED_ORDER_ID) | None, []) => {
+                Ok(SortOrder::unsorted_order())
+            }
             (_, []) => Err(Error::new(
                 ErrorKind::Unexpected,
                 format!("Unsorted order ID must be {}", SortOrder::UNSORTED_ORDER_ID),
@@ -174,14 +176,19 @@ impl SortOrderBuilder {
     }
 
     /// Returns the given sort order if it is compatible with the given schema
-    fn check_compatibility(sort_order: SortOrder, schema: &Schema) -> Result<SortOrder> {
+    fn check_compatibility(
+        sort_order: SortOrder,
+        schema: &Schema,
+    ) -> Result<SortOrder> {
         let sort_fields = &sort_order.fields;
         for sort_field in sort_fields {
             match schema.field_by_id(sort_field.source_id) {
                 None => {
                     return Err(Error::new(
                         ErrorKind::Unexpected,
-                        format!("Cannot find source column for sort field: {sort_field}"),
+                        format!(
+                            "Cannot find source column for sort field: {sort_field}"
+                        ),
                     ));
                 }
                 Some(source_field) => {
@@ -190,7 +197,9 @@ impl SortOrderBuilder {
                     if !source_type.is_primitive() {
                         return Err(Error::new(
                             ErrorKind::Unexpected,
-                            format!("Cannot sort by non-primitive source field: {source_type}"),
+                            format!(
+                                "Cannot sort by non-primitive source field: {source_type}"
+                            ),
                         ));
                     }
 
@@ -266,7 +275,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_unbound_should_return_err_if_unsorted_order_does_not_have_an_order_id_of_zero() {
+    fn test_build_unbound_should_return_err_if_unsorted_order_does_not_have_an_order_id_of_zero()
+     {
         assert_eq!(
             SortOrder::builder()
                 .with_order_id(1)
@@ -339,7 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_unbound_should_return_sort_order_with_given_order_id_and_sort_fields() {
+    fn test_build_unbound_should_return_sort_order_with_given_order_id_and_sort_fields()
+     {
         let sort_field = SortField::builder()
             .source_id(2)
             .direction(SortDirection::Ascending)
@@ -387,7 +398,8 @@ mod tests {
         let schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::required(1, "foo", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(1, "foo", Type::Primitive(PrimitiveType::Int))
+                    .into(),
             ])
             .build()
             .unwrap();
@@ -453,11 +465,13 @@ mod tests {
     }
 
     #[test]
-    fn test_build_should_return_err_if_source_field_type_is_not_supported_by_transform() {
+    fn test_build_should_return_err_if_source_field_type_is_not_supported_by_transform()
+     {
         let schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::required(1, "foo", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(1, "foo", Type::Primitive(PrimitiveType::Int))
+                    .into(),
             ])
             .build()
             .unwrap();
@@ -486,8 +500,14 @@ mod tests {
         let schema = Schema::builder()
             .with_schema_id(1)
             .with_fields(vec![
-                NestedField::required(1, "foo", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(
+                    1,
+                    "foo",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
+                NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                    .into(),
             ])
             .build()
             .unwrap();

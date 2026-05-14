@@ -48,11 +48,13 @@ pub(super) mod open {
         };
         let payload = match meta.cache_state() {
             CacheState::SmallKv => {
-                let bytes = txn
-                    .get(KvTable::Small, db_key)?
-                    .ok_or_else(|| StorageError::cache(format!("small object missing from cache: {db_key}")))?;
+                let bytes = txn.get(KvTable::Small, db_key)?.ok_or_else(|| {
+                    StorageError::cache(format!(
+                        "small object missing from cache: {db_key}"
+                    ))
+                })?;
                 Some(Arc::<[u8]>::from(bytes))
-            },
+            }
             CacheState::CompleteFile => None,
         };
         if !should_touch(meta.last_access_ns, now_ns, touch_granularity_ns) {
@@ -61,7 +63,10 @@ pub(super) mod open {
         drop(txn);
 
         let touched = touch_observed_meta(kv, tracking, &meta, now_ns)?;
-        Ok(Some(OpenHit { meta: touched, payload }))
+        Ok(Some(OpenHit {
+            meta: touched,
+            payload,
+        }))
     }
 
     fn touch_observed_meta(
@@ -129,7 +134,10 @@ pub(super) mod meta {
     ) -> StorageResult<CachedObjectMeta> {
         let meta = meta.normalized();
         if meta.cache_state() != CacheState::CompleteFile {
-            return Err(StorageError::cache(format!("metadata for {} is not complete-file residency", meta.key())));
+            return Err(StorageError::cache(format!(
+                "metadata for {} is not complete-file residency",
+                meta.key()
+            )));
         }
         let mut txn = kv.begin_write()?;
         let delta = {
@@ -160,7 +168,9 @@ pub(super) mod meta {
         txn: &impl KvReadTxn,
         db_key: &str,
     ) -> StorageResult<Option<CachedObjectMeta>> {
-        txn.get(KvTable::Meta, db_key)?.map(|value| decode_meta(&value)).transpose()
+        txn.get(KvTable::Meta, db_key)?
+            .map(|value| decode_meta(&value))
+            .transpose()
     }
 }
 
@@ -171,7 +181,9 @@ pub(super) mod small {
     use super::super::kv::{CacheKv, KvReadTxn, KvTable, KvWriteTxn};
     use super::super::tracking::RuntimeCacheTracking;
     use super::super::txn::MetaTxn;
-    use crate::cache::index::{AdmitSmallOutcome, SmallCacheEntry, SmallScanCursor, SmallScanPage};
+    use crate::cache::index::{
+        AdmitSmallOutcome, SmallCacheEntry, SmallScanCursor, SmallScanPage,
+    };
     use crate::cache::meta::CachedObjectMeta;
     use crate::error::{StorageError, StorageResult};
 
@@ -212,9 +224,13 @@ pub(super) mod small {
             meta_txn.read(db_key.as_str())?
         };
         if let Some(existing_meta) = existing {
-            let existing_payload = txn.get(KvTable::Small, db_key.as_str())?.ok_or_else(|| {
-                StorageError::cache(format!("small object missing from cache: {}", existing_meta.key()))
-            })?;
+            let existing_payload =
+                txn.get(KvTable::Small, db_key.as_str())?.ok_or_else(|| {
+                    StorageError::cache(format!(
+                        "small object missing from cache: {}",
+                        existing_meta.key()
+                    ))
+                })?;
             // Write txn aborts on drop; no commit needed on the race-loser path.
             return Ok(AdmitSmallOutcome::AlreadyPresent {
                 meta: existing_meta,
@@ -262,7 +278,10 @@ pub(super) mod small {
         if entries.len() < limit {
             next_cursor = None;
         }
-        Ok(SmallScanPage { entries, next_cursor })
+        Ok(SmallScanPage {
+            entries,
+            next_cursor,
+        })
     }
 
     pub(in crate::cache::index::persistent) fn remove_unclaimed_small_payload(
@@ -306,10 +325,12 @@ pub(super) mod usage {
         let txn = kv.begin_read()?;
         let mut metas = Vec::new();
         let limit = limit.max(1);
-        let mut after_lru_key = cursor.map(|cursor| lru_key(cursor.last_access_ns, &cursor.key));
+        let mut after_lru_key =
+            cursor.map(|cursor| lru_key(cursor.last_access_ns, &cursor.key));
 
         loop {
-            let rows = txn.scan_page(KvTable::Lru, after_lru_key.as_deref(), limit)?;
+            let rows =
+                txn.scan_page(KvTable::Lru, after_lru_key.as_deref(), limit)?;
             if rows.is_empty() {
                 return Ok(LruScanPage {
                     metas,
@@ -320,8 +341,9 @@ pub(super) mod usage {
 
             for row in rows {
                 after_lru_key = Some(row.key.clone());
-                let db_key = String::from_utf8(row.value)
-                    .map_err(|error| StorageError::cache_source("invalid lru metadata key", error))?;
+                let db_key = String::from_utf8(row.value).map_err(|error| {
+                    StorageError::cache_source("invalid lru metadata key", error)
+                })?;
                 let object_key = parse_db_key(&db_key)?;
                 let row_cursor = Some(LruScanCursor {
                     last_access_ns: lru_access_ns(&row.key)?,

@@ -6,7 +6,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::handle::FileHandle;
 use crate::protocol::{WireRequestPayload, WireResponsePayload};
 
-use super::{unexpected_response, StorageClient};
+use super::{StorageClient, unexpected_response};
 
 /// Seek position for [`StorageFile::seek`], mirroring [`std::io::SeekFrom`] without requiring
 /// `std::io` trait implementation.
@@ -37,7 +37,12 @@ pub struct StorageFile {
 }
 
 impl StorageFile {
-    pub(super) fn new(client: StorageClient, handle: FileHandle, size: u64, read_path: ReadPath) -> Self {
+    pub(super) fn new(
+        client: StorageClient,
+        handle: FileHandle,
+        size: u64,
+        read_path: ReadPath,
+    ) -> Self {
         Self {
             client,
             handle,
@@ -77,14 +82,14 @@ impl StorageFile {
                 } else {
                     self.cursor.saturating_sub(offset.unsigned_abs())
                 }
-            },
+            }
             SeekFrom::End(offset) => {
                 if offset >= 0 {
                     self.size.saturating_add(offset as u64)
                 } else {
                     self.size.saturating_sub(offset.unsigned_abs())
                 }
-            },
+            }
         };
         self.cursor = new_pos;
         new_pos
@@ -100,7 +105,8 @@ impl StorageFile {
         }
         if let ReadPath::Direct(reader) = &self.read_path {
             let offset = self.cursor;
-            let len = std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
+            let len =
+                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
             if len == 0 {
                 return Ok(Vec::new());
             }
@@ -127,7 +133,8 @@ impl StorageFile {
         }
         if let ReadPath::Direct(reader) = &self.read_path {
             let offset = self.cursor;
-            let clamped = std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
+            let clamped =
+                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
             if clamped == 0 {
                 return Ok(0);
             }
@@ -135,7 +142,12 @@ impl StorageFile {
             self.cursor += n as u64;
             return Ok(n);
         }
-        let result = self.client.read_into(self.handle, self.cursor, len, &mut buf[..len as usize])?;
+        let result = self.client.read_into(
+            self.handle,
+            self.cursor,
+            len,
+            &mut buf[..len as usize],
+        )?;
         self.cursor += result.bytes_read as u64;
         Ok(result.bytes_read)
     }
@@ -149,12 +161,14 @@ impl StorageFile {
         if self.closed {
             return Ok(());
         }
-        let response = self.client.request(WireRequestPayload::Close { handle: self.handle })?;
+        let response = self.client.request(WireRequestPayload::Close {
+            handle: self.handle,
+        })?;
         match response.0 {
             WireResponsePayload::Close => {
                 self.closed = true;
                 Ok(())
-            },
+            }
             other => Err(unexpected_response("close", &other)),
         }
     }

@@ -22,10 +22,14 @@ pub(crate) mod _serde {
     use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
     use serde::{Deserialize, Serialize};
     use serde_bytes::ByteBuf;
-    use serde_derive::{Deserialize as DeserializeDerive, Serialize as SerializeDerive};
+    use serde_derive::{
+        Deserialize as DeserializeDerive, Serialize as SerializeDerive,
+    };
 
     use crate::spec::values::{Literal, Map, PrimitiveLiteral, Struct};
-    use crate::spec::{MAP_KEY_FIELD_NAME, MAP_VALUE_FIELD_NAME, PrimitiveType, Type};
+    use crate::spec::{
+        MAP_KEY_FIELD_NAME, MAP_VALUE_FIELD_NAME, PrimitiveType, Type,
+    };
     use crate::{Error, ErrorKind};
 
     #[derive(SerializeDerive, DeserializeDerive, Debug)]
@@ -69,7 +73,9 @@ pub(crate) mod _serde {
 
     impl Serialize for Record {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: serde::Serializer {
+        where
+            S: serde::Serializer,
+        {
             let len = self.required.len() + self.optional.len();
             let mut record = serializer.serialize_struct("", len)?;
             for (k, v) in &self.required {
@@ -90,7 +96,9 @@ pub(crate) mod _serde {
 
     impl Serialize for List {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: serde::Serializer {
+        where
+            S: serde::Serializer,
+        {
             let mut seq = serializer.serialize_seq(Some(self.list.len()))?;
             for value in &self.list {
                 if self.required {
@@ -115,7 +123,9 @@ pub(crate) mod _serde {
 
     impl Serialize for StringMap {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: serde::Serializer {
+        where
+            S: serde::Serializer,
+        {
             let mut map = serializer.serialize_map(Some(self.raw.len()))?;
             for (k, v) in &self.raw {
                 if self.required {
@@ -137,68 +147,95 @@ pub(crate) mod _serde {
 
     impl<'de> Deserialize<'de> for RawLiteralEnum {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where D: serde::Deserializer<'de> {
+        where
+            D: serde::Deserializer<'de>,
+        {
             struct RawLiteralVisitor;
             impl<'de> Visitor<'de> for RawLiteralVisitor {
                 type Value = RawLiteralEnum;
 
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                fn expecting(
+                    &self,
+                    formatter: &mut std::fmt::Formatter,
+                ) -> std::fmt::Result {
                     formatter.write_str("expect")
                 }
 
                 fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Boolean(v))
                 }
 
                 fn visit_i32<E>(self, v: i32) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Int(v))
                 }
 
                 fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Long(v))
                 }
 
                 /// Used in json
                 fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Long(v as i64))
                 }
 
                 fn visit_f32<E>(self, v: f32) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Float(v))
                 }
 
                 fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Double(v))
                 }
 
                 fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::String(v.to_string()))
                 }
 
                 fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Bytes(ByteBuf::from(v)))
                 }
 
                 fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::String(v.to_string()))
                 }
 
                 fn visit_unit<E>(self) -> Result<Self::Value, E>
-                where E: serde::de::Error {
+                where
+                    E: serde::de::Error,
+                {
                     Ok(RawLiteralEnum::Null)
                 }
 
                 fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-                where A: serde::de::MapAccess<'de> {
+                where
+                    A: serde::de::MapAccess<'de>,
+                {
                     let mut required = Vec::new();
                     while let Some(key) = map.next_key::<String>()? {
                         let value = map.next_value::<RawLiteralEnum>()?;
@@ -211,7 +248,9 @@ pub(crate) mod _serde {
                 }
 
                 fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-                where A: serde::de::SeqAccess<'de> {
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
                     let mut list = Vec::new();
                     while let Some(value) = seq.next_element::<RawLiteralEnum>()? {
                         list.push(Some(value));
@@ -240,7 +279,9 @@ pub(crate) mod _serde {
                     PrimitiveLiteral::UInt128(v) => {
                         RawLiteralEnum::Bytes(ByteBuf::from(v.to_be_bytes()))
                     }
-                    PrimitiveLiteral::Binary(v) => RawLiteralEnum::Bytes(ByteBuf::from(v)),
+                    PrimitiveLiteral::Binary(v) => {
+                        RawLiteralEnum::Bytes(ByteBuf::from(v))
+                    }
                     PrimitiveLiteral::Int128(v) => {
                         RawLiteralEnum::Bytes(ByteBuf::from(v.to_be_bytes()))
                     }
@@ -255,12 +296,17 @@ pub(crate) mod _serde {
                     let mut required = Vec::new();
                     let mut optional = Vec::new();
                     if let Type::Struct(struct_ty) = ty {
-                        for (value, field) in r#struct.into_iter().zip(struct_ty.fields()) {
+                        for (value, field) in
+                            r#struct.into_iter().zip(struct_ty.fields())
+                        {
                             if field.required {
                                 if let Some(value) = value {
                                     required.push((
                                         field.name.clone(),
-                                        RawLiteralEnum::try_from(value, &field.field_type)?,
+                                        RawLiteralEnum::try_from(
+                                            value,
+                                            &field.field_type,
+                                        )?,
                                     ));
                                 } else {
                                     return Err(Error::new(
@@ -271,7 +317,10 @@ pub(crate) mod _serde {
                             } else if let Some(value) = value {
                                 optional.push((
                                     field.name.clone(),
-                                    Some(RawLiteralEnum::try_from(value, &field.field_type)?),
+                                    Some(RawLiteralEnum::try_from(
+                                        value,
+                                        &field.field_type,
+                                    )?),
                                 ));
                             } else {
                                 optional.push((field.name.clone(), None));
@@ -291,7 +340,10 @@ pub(crate) mod _serde {
                             .into_iter()
                             .map(|v| {
                                 v.map(|v| {
-                                    RawLiteralEnum::try_from(v, &list_ty.element_field.field_type)
+                                    RawLiteralEnum::try_from(
+                                        v,
+                                        &list_ty.element_field.field_type,
+                                    )
                                 })
                                 .transpose()
                             })
@@ -309,11 +361,15 @@ pub(crate) mod _serde {
                 }
                 Literal::Map(map) => {
                     if let Type::Map(map_ty) = ty {
-                        if let Type::Primitive(PrimitiveType::String) = *map_ty.key_field.field_type
+                        if let Type::Primitive(PrimitiveType::String) =
+                            *map_ty.key_field.field_type
                         {
                             let mut raw = Vec::with_capacity(map.len());
                             for (k, v) in map {
-                                if let Literal::Primitive(PrimitiveLiteral::String(k)) = k {
+                                if let Literal::Primitive(PrimitiveLiteral::String(
+                                    k,
+                                )) = k
+                                {
                                     raw.push((
                                         k,
                                         v.map(|v| {
@@ -401,8 +457,12 @@ pub(crate) mod _serde {
                 RawLiteralEnum::Boolean(v) => Ok(Some(Literal::bool(v))),
                 RawLiteralEnum::Int(v) => match ty {
                     Type::Primitive(PrimitiveType::Int) => Ok(Some(Literal::int(v))),
-                    Type::Primitive(PrimitiveType::Long) => Ok(Some(Literal::long(i64::from(v)))),
-                    Type::Primitive(PrimitiveType::Date) => Ok(Some(Literal::date(v))),
+                    Type::Primitive(PrimitiveType::Long) => {
+                        Ok(Some(Literal::long(i64::from(v))))
+                    }
+                    Type::Primitive(PrimitiveType::Date) => {
+                        Ok(Some(Literal::date(v)))
+                    }
                     _ => Err(invalid_err("int")),
                 },
                 RawLiteralEnum::Long(v) => match ty {
@@ -412,16 +472,24 @@ pub(crate) mod _serde {
                     Type::Primitive(PrimitiveType::Date) => Ok(Some(Literal::date(
                         i32::try_from(v).map_err(|_| invalid_err("long"))?,
                     ))),
-                    Type::Primitive(PrimitiveType::Long) => Ok(Some(Literal::long(v))),
-                    Type::Primitive(PrimitiveType::Time) => Ok(Some(Literal::time(v))),
-                    Type::Primitive(PrimitiveType::Timestamp) => Ok(Some(Literal::timestamp(v))),
+                    Type::Primitive(PrimitiveType::Long) => {
+                        Ok(Some(Literal::long(v)))
+                    }
+                    Type::Primitive(PrimitiveType::Time) => {
+                        Ok(Some(Literal::time(v)))
+                    }
+                    Type::Primitive(PrimitiveType::Timestamp) => {
+                        Ok(Some(Literal::timestamp(v)))
+                    }
                     Type::Primitive(PrimitiveType::Timestamptz) => {
                         Ok(Some(Literal::timestamptz(v)))
                     }
                     _ => Err(invalid_err("long")),
                 },
                 RawLiteralEnum::Float(v) => match ty {
-                    Type::Primitive(PrimitiveType::Float) => Ok(Some(Literal::float(v))),
+                    Type::Primitive(PrimitiveType::Float) => {
+                        Ok(Some(Literal::float(v)))
+                    }
                     Type::Primitive(PrimitiveType::Double) => {
                         Ok(Some(Literal::double(f64::from(v))))
                     }
@@ -439,15 +507,21 @@ pub(crate) mod _serde {
                         }
                         Ok(Some(Literal::float(v_32)))
                     }
-                    Type::Primitive(PrimitiveType::Double) => Ok(Some(Literal::double(v))),
+                    Type::Primitive(PrimitiveType::Double) => {
+                        Ok(Some(Literal::double(v)))
+                    }
                     _ => Err(invalid_err("double")),
                 },
                 RawLiteralEnum::String(v) => match ty {
-                    Type::Primitive(PrimitiveType::String) => Ok(Some(Literal::string(v))),
+                    Type::Primitive(PrimitiveType::String) => {
+                        Ok(Some(Literal::string(v)))
+                    }
                     _ => Err(invalid_err("string")),
                 },
                 RawLiteralEnum::Bytes(v) => match ty {
-                    Type::Primitive(PrimitiveType::Binary) => Ok(Some(Literal::binary(v.to_vec()))),
+                    Type::Primitive(PrimitiveType::Binary) => {
+                        Ok(Some(Literal::binary(v.to_vec())))
+                    }
                     Type::Primitive(PrimitiveType::Fixed(expected_len)) => {
                         if v.len() == *expected_len as usize {
                             Ok(Some(Literal::fixed(v.to_vec())))
@@ -464,9 +538,13 @@ pub(crate) mod _serde {
                     }
                     Type::Primitive(PrimitiveType::Uuid) => {
                         if v.len() == 16 {
-                            let bytes: [u8; 16] = v.as_slice().try_into().map_err(|_| {
-                                invalid_err_with_reason("bytes", "UUID must be exactly 16 bytes")
-                            })?;
+                            let bytes: [u8; 16] =
+                                v.as_slice().try_into().map_err(|_| {
+                                    invalid_err_with_reason(
+                                        "bytes",
+                                        "UUID must be exactly 16 bytes",
+                                    )
+                                })?;
                             Ok(Some(Literal::uuid(uuid::Uuid::from_bytes(bytes))))
                         } else {
                             Err(invalid_err_with_reason(
@@ -476,7 +554,8 @@ pub(crate) mod _serde {
                         }
                     }
                     Type::Primitive(PrimitiveType::Decimal { precision, .. }) => {
-                        let required_bytes = Type::decimal_required_bytes(*precision)? as usize;
+                        let required_bytes =
+                            Type::decimal_required_bytes(*precision)? as usize;
 
                         if v.len() == required_bytes {
                             // Pad the bytes to 16 bytes (i128 size) with sign extension
@@ -559,7 +638,9 @@ pub(crate) mod _serde {
                                             )
                                         })?;
                                         let value = v.try_into(value_ty)?;
-                                        if map_ty.value_field.required && value.is_none() {
+                                        if map_ty.value_field.required
+                                            && value.is_none()
+                                        {
                                             return Err(invalid_err_with_reason(
                                                 "list",
                                                 "Value element is required in this Map",
@@ -681,7 +762,10 @@ pub(crate) mod _serde {
                                     .ok_or_else(|| {
                                         invalid_err_with_reason(
                                             "record",
-                                            &format!("field {} is not exist", &field_name),
+                                            &format!(
+                                                "field {} is not exist",
+                                                &field_name
+                                            ),
                                         )
                                     })?;
                                 let value = value.try_into(&field.field_type)?;
@@ -691,7 +775,9 @@ pub(crate) mod _serde {
                         Ok(Some(Literal::Struct(Struct::from_iter(iters))))
                     }
                     Type::Map(map_ty) => {
-                        if *map_ty.key_field.field_type != Type::Primitive(PrimitiveType::String) {
+                        if *map_ty.key_field.field_type
+                            != Type::Primitive(PrimitiveType::String)
+                        {
                             return Err(invalid_err_with_reason(
                                 "record",
                                 "Map key must be string",

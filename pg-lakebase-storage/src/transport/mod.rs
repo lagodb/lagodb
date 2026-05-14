@@ -17,4 +17,4 @@ pub use bind::bind_storage_unix_listener;
 pub(crate) use blocking::BlockingFrameCursor;
 pub use blocking::{read_fd_blocking, read_frame_blocking, write_frame_blocking};
 pub use fd_channel::{FdReceiver, FdSender};
-pub use frame::{read_frame, write_frame, FrameReader, FrameWriter};
+pub use frame::{FrameReader, FrameWriter, read_frame, write_frame};

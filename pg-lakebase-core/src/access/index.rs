@@ -5,11 +5,11 @@
 
 use crate::api::AmIndex;
 use crate::data::Row;
+use crate::diag::ReportableError;
 use crate::handles::{
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
     RelationHandle, SnapshotHandle, TableScanDescHandle, ValidateIndexStateHandle,
 };
-use crate::diag::ReportableError;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;

@@ -7,7 +7,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path as ObjectPath;
-use object_store::{Error as ObjectStoreError, MultipartUpload, ObjectStore, ObjectStoreExt};
+use object_store::{
+    Error as ObjectStoreError, MultipartUpload, ObjectStore, ObjectStoreExt,
+};
 use tokio::io::AsyncReadExt;
 
 use super::ObjectBackend;
@@ -26,11 +28,17 @@ pub struct ObjectStoreBackend {
 impl ObjectStoreBackend {
     /// Wrap an [`ObjectStore`] that routes itself (e.g. a multi-bucket client).
     pub fn new(store: Arc<dyn ObjectStore>) -> Self {
-        Self { store, bucket: None }
+        Self {
+            store,
+            bucket: None,
+        }
     }
 
     /// Wrap an [`ObjectStore`] that is scoped to a single `bucket`.
-    pub fn for_bucket(store: Arc<dyn ObjectStore>, bucket: impl Into<String>) -> Self {
+    pub fn for_bucket(
+        store: Arc<dyn ObjectStore>,
+        bucket: impl Into<String>,
+    ) -> Self {
         Self {
             store,
             bucket: Some(bucket.into()),
@@ -70,45 +78,66 @@ impl ObjectStoreBackend {
 impl ObjectBackend for ObjectStoreBackend {
     async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
         let location = self.location(key)?;
-        let meta = self
-            .store
-            .head(&location)
-            .await
-            .map_err(|error| StorageError::backend_source(format!("head object {key}"), error))?;
+        let meta = self.store.head(&location).await.map_err(|error| {
+            StorageError::backend_source(format!("head object {key}"), error)
+        })?;
         Ok(ObjectInfo {
             size: meta.size,
             etag: meta.e_tag,
         })
     }
 
-    async fn get_range(&self, key: &ObjectLocation, range: Range<u64>) -> StorageResult<bytes::Bytes> {
+    async fn get_range(
+        &self,
+        key: &ObjectLocation,
+        range: Range<u64>,
+    ) -> StorageResult<bytes::Bytes> {
         let location = self.location(key)?;
         let data = self
             .store
             .get_range(&location, range.clone())
             .await
-            .map_err(|error| StorageError::backend_source(format!("read object range {range:?} for {key}"), error))?;
+            .map_err(|error| {
+                StorageError::backend_source(
+                    format!("read object range {range:?} for {key}"),
+                    error,
+                )
+            })?;
         Ok(data)
     }
 
-    async fn put_from_file(&self, key: &ObjectLocation, path: &Path, len: u64) -> StorageResult<ObjectInfo> {
+    async fn put_from_file(
+        &self,
+        key: &ObjectLocation,
+        path: &Path,
+        len: u64,
+    ) -> StorageResult<ObjectInfo> {
         let location = self.location(key)?;
-        let mut upload = self
-            .store
-            .put_multipart(&location)
-            .await
-            .map_err(|error| StorageError::backend_source(format!("start multipart upload for {key}"), error))?;
+        let mut upload =
+            self.store.put_multipart(&location).await.map_err(|error| {
+                StorageError::backend_source(
+                    format!("start multipart upload for {key}"),
+                    error,
+                )
+            })?;
 
-        if let Err(io_error) = stream_file_to_multipart(upload.as_mut(), path, len).await {
+        if let Err(io_error) =
+            stream_file_to_multipart(upload.as_mut(), path, len).await
+        {
             // Best-effort abort so the backend does not accumulate an orphan multipart upload.
             let _ = upload.abort().await;
-            return Err(StorageError::io(format!("upload staging file for {key}"), io_error));
+            return Err(StorageError::io(
+                format!("upload staging file for {key}"),
+                io_error,
+            ));
         }
 
-        let result = upload
-            .complete()
-            .await
-            .map_err(|error| StorageError::backend_source(format!("complete multipart upload for {key}"), error))?;
+        let result = upload.complete().await.map_err(|error| {
+            StorageError::backend_source(
+                format!("complete multipart upload for {key}"),
+                error,
+            )
+        })?;
 
         Ok(ObjectInfo {
             size: len,
@@ -138,9 +167,10 @@ impl ObjectBackend for ObjectStoreBackend {
                     size: meta.size,
                     etag: meta.e_tag,
                 }),
-                Err(error) => {
-                    Err(StorageError::backend_source(format!("list objects in bucket {bucket_label}"), error))
-                },
+                Err(error) => Err(StorageError::backend_source(
+                    format!("list objects in bucket {bucket_label}"),
+                    error,
+                )),
             })
             .boxed()
     }
@@ -150,7 +180,10 @@ impl ObjectBackend for ObjectStoreBackend {
         match self.store.delete(&location).await {
             Ok(()) => Ok(()),
             Err(ObjectStoreError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(StorageError::backend_source(format!("delete object {key}"), error)),
+            Err(error) => Err(StorageError::backend_source(
+                format!("delete object {key}"),
+                error,
+            )),
         }
     }
 
@@ -167,7 +200,9 @@ impl ObjectBackend for ObjectStoreBackend {
             return keys
                 .map(move |item| match item {
                     Err(error) => Err(error),
-                    Ok(_) => Err(StorageError::not_found(format!("bucket {bucket_label}"))),
+                    Ok(_) => {
+                        Err(StorageError::not_found(format!("bucket {bucket_label}")))
+                    }
                 })
                 .boxed();
         }
@@ -185,7 +220,7 @@ impl ObjectBackend for ObjectStoreBackend {
                         store: "pg-lakebase-storage",
                         source: Box::new(std::io::Error::other(error.to_string())),
                     })
-                },
+                }
             })
             .boxed();
 
@@ -195,9 +230,10 @@ impl ObjectBackend for ObjectStoreBackend {
             .map(move |result| match result {
                 Ok(path) => Ok(path.to_string()),
                 Err(ObjectStoreError::NotFound { path, .. }) => Ok(path),
-                Err(error) => {
-                    Err(StorageError::backend_source(format!("delete object in bucket {bucket_label}"), error))
-                },
+                Err(error) => Err(StorageError::backend_source(
+                    format!("delete object in bucket {bucket_label}"),
+                    error,
+                )),
             })
             .boxed()
     }
@@ -234,7 +270,8 @@ async fn stream_file_to_multipart<U: MultipartUpload + ?Sized>(
     let mut file = tokio::fs::File::open(path).await?;
     let mut remaining = expected_len;
     while remaining > 0 {
-        let part_len = std::cmp::min(remaining, COMMIT_UPLOAD_CHUNK_BYTES as u64) as usize;
+        let part_len =
+            std::cmp::min(remaining, COMMIT_UPLOAD_CHUNK_BYTES as u64) as usize;
         let mut chunk = vec![0_u8; part_len];
         if let Err(error) = file.read_exact(&mut chunk).await {
             return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -266,10 +303,14 @@ mod tests {
     async fn adapts_object_store_bucket_reads() {
         let store = Arc::new(InMemory::new());
         let location = ObjectPath::from("path/file.txt");
-        store.put(&location, b"hello object store".as_ref().into()).await.unwrap();
+        store
+            .put(&location, b"hello object store".as_ref().into())
+            .await
+            .unwrap();
 
         let backend = ObjectStoreBackend::for_bucket(store, "bucket");
-        let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "path/file.txt").unwrap();
+        let key =
+            ObjectLocation::new(TEST_STORE_ID, "bucket", "path/file.txt").unwrap();
 
         let info = backend.head(&key).await.unwrap();
         assert_eq!(info.size, 18);
@@ -300,9 +341,16 @@ mod tests {
         assert_eq!(keys, vec!["a/1".to_string(), "a/2".to_string()]);
 
         let entries = backend.list(TEST_STORE_ID, "bucket", None);
-        let mut keys: Vec<String> = entries.map_ok(|entry| entry.key).try_collect().await.unwrap();
+        let mut keys: Vec<String> = entries
+            .map_ok(|entry| entry.key)
+            .try_collect()
+            .await
+            .unwrap();
         keys.sort();
-        assert_eq!(keys, vec!["a/1".to_string(), "a/2".to_string(), "b/3".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["a/1".to_string(), "a/2".to_string(), "b/3".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -323,7 +371,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(keys.is_empty(), "list against an unrelated bucket must be empty");
+        assert!(
+            keys.is_empty(),
+            "list against an unrelated bucket must be empty"
+        );
     }
 
     #[tokio::test]
@@ -358,9 +409,13 @@ mod tests {
         let backend = ObjectStoreBackend::for_bucket(store.clone(), "bucket");
 
         let keys = stream::iter(
-            ["a/1".to_string(), "a/2".to_string(), "a/never-existed".to_string()]
-                .into_iter()
-                .map(Ok),
+            [
+                "a/1".to_string(),
+                "a/2".to_string(),
+                "a/never-existed".to_string(),
+            ]
+            .into_iter()
+            .map(Ok),
         )
         .boxed();
 
@@ -370,7 +425,14 @@ mod tests {
             .await
             .unwrap();
         deleted.sort();
-        assert_eq!(deleted, vec!["a/1".to_string(), "a/2".to_string(), "a/never-existed".to_string()]);
+        assert_eq!(
+            deleted,
+            vec![
+                "a/1".to_string(),
+                "a/2".to_string(),
+                "a/never-existed".to_string()
+            ]
+        );
 
         // Surviving object stays.
         let remaining: Vec<String> = backend
@@ -391,7 +453,10 @@ mod tests {
         static NONCE: AtomicU64 = AtomicU64::new(0);
 
         let tmp = {
-            let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
             let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
             std::path::PathBuf::from("/tmp").join(format!(
                 "pg-lakebase-storage-object-store-put-{}-{stamp}-{nonce}",
@@ -407,9 +472,13 @@ mod tests {
 
         let store = Arc::new(InMemory::new());
         let backend = ObjectStoreBackend::for_bucket(store.clone(), "bucket");
-        let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "uploaded.txt").unwrap();
+        let key =
+            ObjectLocation::new(TEST_STORE_ID, "bucket", "uploaded.txt").unwrap();
 
-        let info = backend.put_from_file(&key, &staging_path, data.len() as u64).await.unwrap();
+        let info = backend
+            .put_from_file(&key, &staging_path, data.len() as u64)
+            .await
+            .unwrap();
 
         assert_eq!(info.size, data.len() as u64);
         let readback = backend.get_range(&key, 0..info.size).await.unwrap();

@@ -61,7 +61,10 @@ impl PartitionValueCalculator {
     /// - The partition spec is unpartitioned
     /// - Transform function creation fails
     /// - Projector initialization fails
-    pub fn try_new(partition_spec: &PartitionSpec, table_schema: &Schema) -> Result<Self> {
+    pub fn try_new(
+        partition_spec: &PartitionSpec,
+        table_schema: &Schema,
+    ) -> Result<Self> {
         if partition_spec.is_unpartitioned() {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
@@ -91,7 +94,8 @@ impl PartitionValueCalculator {
 
         // Get partition type information
         let partition_type = partition_spec.partition_type(table_schema)?;
-        let partition_arrow_type = type_to_arrow_type(&Type::Struct(partition_type.clone()))?;
+        let partition_arrow_type =
+            type_to_arrow_type(&Type::Struct(partition_type.clone()))?;
 
         Ok(Self {
             projector,
@@ -149,19 +153,22 @@ impl PartitionValueCalculator {
 
         // Apply transforms to each source column
         let mut partition_values = Vec::with_capacity(self.transform_functions.len());
-        for (source_column, transform_fn) in source_columns.iter().zip(&self.transform_functions) {
+        for (source_column, transform_fn) in
+            source_columns.iter().zip(&self.transform_functions)
+        {
             let partition_value = transform_fn.transform(source_column.clone())?;
             partition_values.push(partition_value);
         }
 
         // Construct the StructArray
-        let struct_array = StructArray::try_new(expected_struct_fields, partition_values, None)
-            .map_err(|e| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!("Failed to create partition struct array: {e}"),
-                )
-            })?;
+        let struct_array =
+            StructArray::try_new(expected_struct_fields, partition_values, None)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!("Failed to create partition struct array: {e}"),
+                    )
+                })?;
 
         Ok(Arc::new(struct_array))
     }
@@ -182,19 +189,28 @@ mod tests {
         let table_schema = Schema::builder()
             .with_schema_id(0)
             .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
-                NestedField::required(2, "name", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int))
+                    .into(),
+                NestedField::required(
+                    2,
+                    "name",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
             ])
             .build()
             .unwrap();
 
-        let partition_spec = PartitionSpecBuilder::new(Arc::new(table_schema.clone()))
-            .add_partition_field("id", "id_partition", Transform::Identity)
-            .unwrap()
-            .build()
-            .unwrap();
+        let partition_spec =
+            PartitionSpecBuilder::new(Arc::new(table_schema.clone()))
+                .add_partition_field("id", "id_partition", Transform::Identity)
+                .unwrap()
+                .build()
+                .unwrap();
 
-        let calculator = PartitionValueCalculator::try_new(&partition_spec, &table_schema).unwrap();
+        let calculator =
+            PartitionValueCalculator::try_new(&partition_spec, &table_schema)
+                .unwrap();
 
         // Verify partition type
         assert_eq!(calculator.partition_type().fields().len(), 1);
@@ -206,10 +222,13 @@ mod tests {
             Field::new("name", DataType::Utf8, false),
         ]));
 
-        let batch = RecordBatch::try_new(arrow_schema, vec![
-            Arc::new(Int32Array::from(vec![10, 20, 30])),
-            Arc::new(StringArray::from(vec!["a", "b", "c"])),
-        ])
+        let batch = RecordBatch::try_new(
+            arrow_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
         .unwrap();
 
         // Calculate partition values
@@ -233,16 +252,19 @@ mod tests {
         let table_schema = Schema::builder()
             .with_schema_id(0)
             .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Int))
+                    .into(),
             ])
             .build()
             .unwrap();
 
-        let partition_spec = PartitionSpecBuilder::new(Arc::new(table_schema.clone()))
-            .build()
-            .unwrap();
+        let partition_spec =
+            PartitionSpecBuilder::new(Arc::new(table_schema.clone()))
+                .build()
+                .unwrap();
 
-        let result = PartitionValueCalculator::try_new(&partition_spec, &table_schema);
+        let result =
+            PartitionValueCalculator::try_new(&partition_spec, &table_schema);
         assert!(result.is_err());
         assert!(
             result
