@@ -14,6 +14,7 @@ pub mod wal;
 use access::dml::IcebergModify;
 use access::index::IcebergIndexFetch;
 use access::scan::IcebergScan;
+use pg_lakebase_core::worker::storage as storage_worker;
 
 /// Get the cached Iceberg TableAmRoutine pointer.
 /// This will initialize the routine if it hasn't been initialized yet.
@@ -46,6 +47,7 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 extern "C-unwind" fn _PG_init() {
     setup_rustls_default_crypto_provider();
     gucs::init();
+    storage_worker::init_for_extension("pg_iceberg_am");
     hooks::init_hooks();
     wal::init_wal_rmgr();
 }

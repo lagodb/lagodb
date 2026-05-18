@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::backend::StoreRegistry;
@@ -77,40 +78,76 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
         self.service.registry().clone()
     }
 
-    pub async fn serve_forever(&self) -> StorageResult<()> {
-        let connection_limiter =
-            Arc::new(Semaphore::new(self.config.max_connections.max(1)));
+    /// Accept connections until `shutdown` is cancelled, then stop accepting.
+    ///
+    /// Already-spawned connections are **not** awaited here; they continue running
+    /// until the peer closes or the Tokio runtime shuts down.
+    pub async fn serve_until(
+        &self,
+        shutdown: CancellationToken,
+    ) -> StorageResult<()> {
+        let limiter = Arc::new(Semaphore::new(self.config.max_connections.max(1)));
+
         loop {
-            let connection_permit =
-                connection_limiter.clone().acquire_owned().await.map_err(
-                    |error| {
-                        StorageError::io(
-                            "connection limiter closed",
-                            std::io::Error::other(error),
-                        )
-                    },
-                )?;
-            let (stream, _) = self.listener.accept().await?;
-            let config = self.config.clone();
-            let context = StorageContext::new_with_hooks_and_handle_limit(
-                "unix",
-                self.service.clone(),
-                self.request_hooks.clone(),
-                config.max_open_handles_per_connection,
-            );
-            info!(
-                client_addr = &*context.client_addr,
-                "accepted storage connection"
-            );
-            tokio::spawn(async move {
-                let _connection_permit = connection_permit;
-                if let Err(error) =
-                    process_connection_with_drain_timeout(stream, context, config)
-                        .await
-                {
-                    debug!("storage connection closed: {error}");
+            tokio::select! {
+                biased;
+
+                _ = shutdown.cancelled() => {
+                    info!("storage server shutdown requested");
+                    return Ok(());
                 }
-            });
+
+                accepted = self.accept_one(&limiter) => {
+                    let (stream, permit) = accepted?;
+                    self.spawn_connection(stream, permit);
+                }
+            }
         }
+    }
+
+    pub async fn serve_forever(&self) -> StorageResult<()> {
+        self.serve_until(CancellationToken::new()).await
+    }
+
+    async fn accept_one(
+        &self,
+        limiter: &Arc<Semaphore>,
+    ) -> StorageResult<(tokio::net::UnixStream, OwnedSemaphorePermit)> {
+        let permit = limiter.clone().acquire_owned().await.map_err(|error| {
+            StorageError::io(
+                "connection limiter closed",
+                std::io::Error::other(error),
+            )
+        })?;
+        let (stream, _) = self.listener.accept().await?;
+        Ok((stream, permit))
+    }
+
+    fn spawn_connection(
+        &self,
+        stream: tokio::net::UnixStream,
+        permit: OwnedSemaphorePermit,
+    ) {
+        let config = self.config.clone();
+        let context = StorageContext::new_with_hooks_and_handle_limit(
+            "unix",
+            self.service.clone(),
+            self.request_hooks.clone(),
+            config.max_open_handles_per_connection,
+        );
+
+        info!(
+            client_addr = &*context.client_addr,
+            "accepted storage connection"
+        );
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) =
+                process_connection_with_drain_timeout(stream, context, config).await
+            {
+                debug!("storage connection closed: {error}");
+            }
+        });
     }
 }

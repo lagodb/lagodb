@@ -57,10 +57,36 @@ This implementation allows for:
    cargo pgrx init --pg17=/path/to/pg_config
    ```
 
-2. Compile and run the extension:
+2. Build and install the extension into the target PostgreSQL instance:
    ```bash
-   cargo pgrx run pg17
+   cargo pgrx install --pg-config /path/to/pg_config --release
    ```
+
+### Required server configuration
+
+`pg-iceberg-am` registers a custom WAL resource manager and a static
+`pg-lakebase-storage` background worker during `_PG_init`. Both must be loaded
+at postmaster start, so the extension **must be listed in
+`shared_preload_libraries`** in `postgresql.conf`:
+
+```
+shared_preload_libraries = 'pg_iceberg_am'
+```
+
+`LOAD 'pg_iceberg_am'` and bare `CREATE EXTENSION pg_iceberg_am` after server
+start are not sufficient: the storage background worker is a static bgworker
+and the WAL resource manager registration only takes effect at postmaster
+startup.
+
+After updating `postgresql.conf`, restart PostgreSQL and then run
+`CREATE EXTENSION pg_iceberg_am;` once per database that needs the access
+method.
+
+> Note: `cargo pgrx run pg17` is convenient for ad-hoc development of pgrx
+> functions, but it does not configure `shared_preload_libraries`, so the
+> background worker and WAL resource manager will not be active under that
+> command. Use `cargo pgrx install` plus an explicit
+> `shared_preload_libraries` entry for any realistic test of `pg-iceberg-am`.
 
 ## Usage
 

@@ -61,6 +61,9 @@ mod wrapper;
 /// Catalog access and caching
 pub mod catalog;
 
+/// PostgreSQL background worker modules.
+pub mod worker;
+
 /// The prelude includes all necessary imports to make pg_lakebase_core work
 pub mod prelude {
     pub use crate::api::*;
