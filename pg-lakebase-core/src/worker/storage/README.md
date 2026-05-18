@@ -21,14 +21,21 @@ capability.
   `pgrx::error!` or PostgreSQL `errfinish()`.
 - Handle SIGHUP and SIGTERM through the normal bgworker latch loop.
 - Avoid automatic bgworker restart in the same postmaster lifetime.
+- Keep `pg_lakebase_storage::StoreRegistry` in sync with the distributed
+  tablespaces declared in `pg_tablespace`, using a controller-style
+  reconciler driven by syscache invalidation plus periodic full resync.
 
 ## Non-goals for the first version
 
-- Store register, unregister, and invalidation.
 - Backend-side `StorageEndpoint` integration.
 - Automatic reconnect of existing `StorageClient` handles.
 - Dynamic reload of storage worker GUCs.
 - Multiple AM extensions registering the same storage worker at the same time.
+- Generation-aware handle invalidation (existing `RegisteredStore` handles
+  remain usable after their store is unregistered or replaced; new requests
+  pick up the new state).
+- Per-store cache and staging cleanup on `DROP TABLESPACE`.
+- Encrypted catalog storage of object-store credentials.
 
 ## Ownership boundary
 
@@ -41,6 +48,11 @@ background worker process:
 - `supervisor.rs`: bgworker main-thread lifecycle, signals, Tokio runtime, and
   shutdown.
 - `logging.rs`: bounded `tracing` to PostgreSQL log bridge.
+- `catalog.rs`: PostgreSQL `pg_tablespace` scanner plus the syscache dirty
+  flag. The only file in this module that calls PostgreSQL FFI for the store
+  reconciler.
+- `reconciler.rs`: pure Rust diff/apply driving `StoreRegistry`. Must not
+  depend on `pgrx` or `pg_sys`.
 
 `pg-lakebase-storage` contains the storage server implementation. It exposes
 `serve_until(CancellationToken)` for cooperative shutdown, but remains independent
@@ -76,10 +88,15 @@ BackgroundWorkerBuilder::new("pg-lakebase-storage")
     .set_type("pg-lakebase-storage")
     .set_library(library_name)
     .set_function("pg_lakebase_storage_bgworker_main")
-    .set_start_time(BgWorkerStartTime::PostmasterStart)
+    .enable_spi_access()
     .set_restart_time(None)
     .load();
 ```
+
+`enable_spi_access()` sets `BGWORKER_BACKEND_DATABASE_CONNECTION |
+BGWORKER_SHMEM_ACCESS` and forces start time to `RecoveryFinished`. The
+worker therefore does not start until PostgreSQL leaves recovery; in standby
+mode the storage server does not bind its socket.
 
 `set_restart_time(None)` is intentional. `StorageServerBuilder::bind()` performs
 cache recovery and wipes the staging area. That is correct after PostgreSQL
@@ -114,7 +131,16 @@ The supervisor runs on the bgworker main thread:
 2. Set this worker process's `log_min_messages` to `INFO`.
 3. Install the `tracing` subscriber backed by the PostgreSQL log bridge.
 4. Build a multi-thread Tokio runtime.
-5. Spawn the async storage server task:
+5. Connect the worker to PostgreSQL with
+   `BackgroundWorker::connect_worker_to_spi(None, None)`. We do not bind a
+   user database; `pg_tablespace` is a shared catalog and reachable without
+   one.
+6. Construct a shared `StoreRegistry`, install the `pg_tablespace` syscache
+   invalidation callback, and run the **initial reconcile** inside
+   `BackgroundWorker::transaction`. A failure here logs at `PGERROR`
+   severity and calls `proc_exit(1)`; we do not bind the storage socket
+   when the desired tablespace state cannot be loaded.
+7. Spawn the async storage server task with the same `StoreRegistry`:
 
 ```rust
 let server = pg_lakebase_storage::StorageServerBuilder::new(
@@ -123,6 +149,7 @@ let server = pg_lakebase_storage::StorageServerBuilder::new(
 )
 .with_server_config(config.server_config)
 .with_service_config(config.service_config)
+.with_store_registry(server_registry)
 .with_tracing_request_observer()
 .bind()
 .await?;
@@ -130,14 +157,18 @@ let server = pg_lakebase_storage::StorageServerBuilder::new(
 server.serve_until(shutdown).await
 ```
 
-6. Enter the main loop:
+8. Enter the main loop:
 
 ```text
 drain PG log bridge
 if server task finished:
     log result
     proc_exit(1)
-wait_latch(100ms)
+AcceptInvalidationMessages
+if take_dirty() or periodic timer due:
+    BackgroundWorker::transaction { reconciler.apply() }
+    refresh next periodic deadline
+wait_latch(<= 100ms, clamped to next periodic deadline)
 if SIGHUP:
     log "restart required"
 if SIGTERM:
@@ -167,6 +198,10 @@ Current GUCs:
 - `pg_lakebase.storage_server.log_channel_capacity`
 - `pg_lakebase.storage_server.max_connections`
 - `pg_lakebase.storage_server.max_read_size`
+- `pg_lakebase.storage_server.tablespace_reconcile_interval_ms` &mdash; how
+  often the worker rescans `pg_tablespace` as a safety net behind syscache
+  invalidation. Default `30000`. `0` disables the periodic resync; the
+  reconciler then runs only on syscache wake-up.
 
 `StorageWorkerConfig::from_gucs()` must run on the bgworker main thread. It
 reads PostgreSQL state such as `DataDir`, resolves default paths, and returns a
@@ -176,6 +211,54 @@ Default paths are derived from `DataDir`:
 
 - socket: `$DataDir/pg_lakebase/storage.sock`
 - cache: `$DataDir/pg_lakebase/storage-cache`
+
+## Distributed tablespace reconciliation
+
+The storage worker keeps `pg_lakebase_storage::StoreRegistry` in sync with
+PostgreSQL `pg_tablespace.spcoptions` using a controller pattern.
+
+- **Desired state:** distributed tablespaces in `pg_tablespace`. Native
+  PostgreSQL tablespaces (no Lakebase storage options) are ignored.
+- **Actual state:** entries currently registered in the storage server's
+  `StoreRegistry`.
+- **Driver:** the bgworker main thread loops on `wait_latch`, takes the
+  `pg_tablespace` syscache dirty flag, optionally lets the periodic timer
+  expire, runs `BackgroundWorker::transaction { reconciler.apply() }`, and
+  applies the diff to the registry.
+
+`reconciler.rs` is pure Rust and unit-testable without a PostgreSQL
+backend; it must not depend on `pgrx` or `pg_sys`. `catalog.rs` is the only
+file in this module that performs PostgreSQL FFI for the reconciler.
+
+The syscache callback is intentionally minimal: it only sets a
+`thread_local!` `Cell<bool>`. It does not allocate, does not parse options,
+and does not touch the registry. Catalog reads happen on the next loop
+iteration.
+
+DDL behavior:
+
+- `CREATE TABLESPACE ... WITH (...)` &mdash; validated by the existing
+  `pg-iceberg-am` utility hook; `spcoptions` are persisted, the syscache
+  callback fires, and the next reconcile registers the new store.
+- `DROP TABLESPACE` &mdash; not intercepted; the next reconcile observes
+  the disappearance and unregisters the store.
+- `ALTER TABLESPACE name RENAME TO new_name` &mdash; rejected for
+  distributed tablespaces by `pg-iceberg-am`'s rename guard hook. The
+  store id is the tablespace name and renames would orphan
+  cache/staging directories.
+- `ALTER TABLESPACE name SET/RESET (...)` &mdash; rejected for distributed
+  tablespaces. Distributed tablespaces are immutable in this release;
+  changes go through `DROP` + `CREATE`.
+
+Failure modes:
+
+- **Initial reconcile fails on startup:** `proc_exit(1)`. The storage
+  socket is not bound; new connections fail with the standard
+  "connection refused" path.
+- **Runtime reconcile fails:** logged at `WARNING` and retried on the next
+  syscache wake-up or periodic timer. The previously applied registry
+  state is preserved; transient catalog errors do not turn into a partial
+  unregister.
 
 ## Logging bridge
 

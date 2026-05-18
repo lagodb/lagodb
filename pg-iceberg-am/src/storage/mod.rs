@@ -70,10 +70,11 @@ pub fn create_storage_context_with_wal(
     relation_needs_wal: bool,
 ) -> IcebergResult<StorageContext> {
     if get_tablespace(spc_oid)?.is_some() {
-        // TODO: This should not error out once we have a global StorageClient/Registry.
-        // The plan is to register all distributed stores during server startup and
-        // maintain them via syscache invalidation callbacks, rather than registering
-        // them here on-demand which is inefficient for per-file operations.
+        // Distributed tablespaces require a `StorageClient`; the storage
+        // worker's tablespace reconciler keeps the matching `StoreRegistry`
+        // entry up to date, so the *resolution* side is fine, but every code
+        // path that ends up here needs a connected client and should use
+        // `create_storage_context_with_client` instead.
         return Err(IcebergError::NotImplemented(
             "distributed storage requires a pg_lakebase_storage::StorageClient",
         ));
@@ -97,10 +98,10 @@ pub fn create_storage_context_with_client(
             storage_client,
         )?;
 
-        // TODO: Integration with global StoreRegistry.
-        // We shouldn't call register_store here on-demand. Instead, the registry
-        // should already have this store configured from startup or syscache updates.
-        // storage_client.register_store(store_id, opts.store_config())?;
+        // Distributed stores are registered by the storage bgworker's
+        // tablespace reconciler at startup and kept in sync via
+        // pg_tablespace syscache invalidation, so we deliberately do not
+        // register from this on-demand path.
 
         Ok(StorageContext {
             file_io: FileIO::new(Arc::new(storage)),

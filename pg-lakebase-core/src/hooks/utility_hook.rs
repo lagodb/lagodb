@@ -39,6 +39,16 @@ impl_utility_stmt_node!(
     pg_sys::CreateTableSpaceStmt,
     pg_sys::NodeTag::T_CreateTableSpaceStmt
 );
+impl_utility_stmt_node!(
+    RenameStmtNode,
+    pg_sys::RenameStmt,
+    pg_sys::NodeTag::T_RenameStmt
+);
+impl_utility_stmt_node!(
+    AlterTableSpaceOptionsStmtNode,
+    pg_sys::AlterTableSpaceOptionsStmt,
+    pg_sys::NodeTag::T_AlterTableSpaceOptionsStmt
+);
 
 /// A safe wrapper around `pg_sys::Node`
 pub struct UtilityNode<'a> {

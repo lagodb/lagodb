@@ -22,6 +22,10 @@ pub struct StorageWorkerConfig {
     pub worker_threads: usize,
     pub shutdown_timeout: Duration,
     pub log_channel_capacity: usize,
+    /// `Some(d)` enables a periodic full-resync of the tablespace store
+    /// reconciler every `d`. `None` disables the periodic resync; reconcile
+    /// then runs only on syscache wake-up.
+    pub tablespace_reconcile_interval: Option<Duration>,
 }
 
 impl StorageWorkerConfig {
@@ -53,6 +57,7 @@ impl StorageWorkerConfig {
             worker_threads: gucs::worker_threads(),
             shutdown_timeout: Duration::from_millis(gucs::shutdown_timeout_ms()),
             log_channel_capacity: gucs::log_channel_capacity(),
+            tablespace_reconcile_interval: gucs::tablespace_reconcile_interval(),
         }
     }
 }

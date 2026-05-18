@@ -109,4 +109,17 @@ INSERT INTO my_iceberg_table VALUES (1, 'hello', now());
 SELECT * FROM my_iceberg_table;
 ```
 
+### Distributed tablespace limitations
+
+Distributed tablespaces use the tablespace name as the object-storage
+`store_id`. This keeps `pg-lakebase-storage` cache and staging directories
+human-readable, but it also makes the tablespace name part of the storage
+identity. Do not rename distributed tablespaces after creation.
+
+Object-store credentials supplied through tablespace options are persisted in
+`pg_tablespace.spcoptions`. The Rust config types redact secrets from logs and
+debug output, but PostgreSQL still stores the catalog option value as plain
+text. Treat this as a current limitation until secret references or external
+credential providers are supported.
+
 Refer to the project documentation for advanced configuration options and storage backend setup.

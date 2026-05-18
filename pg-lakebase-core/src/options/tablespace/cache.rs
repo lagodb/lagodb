@@ -2,7 +2,7 @@ use super::storage::{
     TablespaceStorage, TablespaceStorageError, store_id_from_tablespace_name,
 };
 use crate::catalog::{SysCacheTuple, search_syscache1};
-use crate::diag::PgError;
+use crate::diag::{PgError, SqlStateError};
 use crate::wrapper::CacheRegisterSyscacheCallback;
 use pg_lakebase_storage::{StoreConfig, StoreId};
 use pgrx::pg_sys;
@@ -27,6 +27,17 @@ pub enum TablespaceCacheError {
     Storage(#[from] TablespaceStorageError),
 }
 
+impl SqlStateError for TablespaceCacheError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        match self {
+            // PgError already carries a real PostgreSQL sqlstate; surface it
+            // verbatim instead of papering over it with INTERNAL_ERROR.
+            Self::LookupFailed(error) => error.sql_error_code(),
+            Self::Storage(_) => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+        }
+    }
+}
+
 // ============================================================================
 //  CachedTablespaceOpts
 // ============================================================================
@@ -36,6 +47,11 @@ pub enum TablespaceCacheError {
 /// Instances only exist for tablespaces that have Lakebase storage options
 /// (protocol, bucket/container, credentials, etc.). Native PostgreSQL
 /// tablespaces (pg_default, pg_global) are represented as `None` in the cache.
+///
+/// The storage-service store id is intentionally the tablespace name, not the
+/// tablespace OID or a generated UUID, so cache and staging directories stay
+/// readable. That makes the tablespace name part of the storage identity:
+/// distributed tablespaces must not be renamed after creation.
 #[derive(Debug, Clone)]
 pub struct CachedTablespaceOpts {
     tablespace_name: String,
@@ -52,9 +68,18 @@ impl CachedTablespaceOpts {
     /// Returns the object-storage store id for this tablespace.
     ///
     /// Lakebase maps one distributed tablespace to one storage-service store.
-    /// The store id is intentionally the human-readable tablespace name.
+    /// The store id is intentionally the human-readable tablespace name; see
+    /// the type-level notes about the no-rename contract.
     pub fn store_id(&self) -> &str {
         self.store_id.as_str()
+    }
+
+    /// Returns the typed [`StoreId`] (same value as [`Self::store_id`]).
+    ///
+    /// Provided so callers that need to pass the id into
+    /// [`pg_lakebase_storage`] APIs do not have to revalidate the string.
+    pub(crate) fn store_id_owned(&self) -> StoreId {
+        self.store_id.clone()
     }
 
     /// Returns the storage protocol from the tablespace option.
@@ -103,9 +128,10 @@ unsafe extern "C" fn invalidate_tablespace_cache_callback(
     _cacheid: std::os::raw::c_int,
     _hashvalue: u32,
 ) {
-    // TODO: Maintain distributed store registry in pg-lakebase-storage.
-    // When a tablespace is modified/deleted, we should unregister or re-register
-    // its store config in the global storage service to keep them in sync.
+    // The storage bgworker installs its own `pg_tablespace` syscache
+    // callback that drives `StoreRegistry` reconciliation. This per-backend
+    // callback only invalidates the in-process option cache so subsequent
+    // queries pick up the latest catalog state.
     TABLESPACE_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
@@ -219,7 +245,14 @@ fn lookup_tablespace_name(
     Ok(name)
 }
 
-fn parse_options_to_cached(
+/// Parse tablespace name + raw `pg_tablespace.spcoptions` strings into a
+/// fully-built [`CachedTablespaceOpts`].
+///
+/// Returns `Ok(None)` for native PostgreSQL tablespaces whose options do not
+/// contain any Lakebase storage option. The same parser is used by the
+/// per-backend syscache and by the storage bgworker's catalog reconciler so
+/// both paths see identical validation and identical store identity rules.
+pub(crate) fn parse_options_to_cached(
     tablespace_name: String,
     options_vec: Vec<String>,
 ) -> Result<Option<CachedTablespaceOpts>, TablespaceCacheError> {

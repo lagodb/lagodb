@@ -24,6 +24,16 @@ static MAX_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(1024);
 
 static MAX_READ_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1024 * 1024);
 
+/// Periodic full-resync interval for the distributed tablespace store
+/// reconciler, in milliseconds.
+///
+/// Syscache invalidation already wakes the reconciler on every
+/// `pg_tablespace` change. The periodic resync exists only as a safety net
+/// against missed invalidation messages or future bugs; setting it to `0`
+/// disables periodic resync and relies entirely on syscache wake-ups.
+static TABLESPACE_RECONCILE_INTERVAL_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(30_000);
+
 pub fn init() {
     GucRegistry::define_bool_guc(
         c"pg_lakebase.storage_server.enabled",
@@ -106,6 +116,17 @@ pub fn init() {
         GucContext::Postmaster,
         GucFlags::default(),
     );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.tablespace_reconcile_interval_ms",
+        c"Periodic full-resync interval for the distributed tablespace store reconciler",
+        c"How often the storage worker rescans pg_tablespace as a safety net behind syscache invalidation. 0 disables the periodic resync; syscache wake-ups still apply.",
+        &TABLESPACE_RECONCILE_INTERVAL_MS,
+        0,
+        3_600_000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
 }
 
 pub fn enabled() -> bool {
@@ -144,4 +165,15 @@ pub fn max_connections() -> usize {
 
 pub fn max_read_size() -> u32 {
     MAX_READ_SIZE.get().max(1) as u32
+}
+
+/// Periodic full-resync interval as `Some(Duration)`, or `None` when
+/// `pg_lakebase.storage_server.tablespace_reconcile_interval_ms` is `0`.
+pub fn tablespace_reconcile_interval() -> Option<std::time::Duration> {
+    let raw = TABLESPACE_RECONCILE_INTERVAL_MS.get();
+    if raw <= 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(raw as u64))
+    }
 }

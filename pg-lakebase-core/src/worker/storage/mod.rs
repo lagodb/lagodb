@@ -16,14 +16,14 @@
 //! The worker entry point is [`pg_lakebase_storage_bgworker_main`], which must
 //! be exported from the final `.so` that PostgreSQL loads.
 
+mod catalog;
 mod config;
 pub(crate) mod gucs;
 pub(crate) mod logging;
+mod reconciler;
 mod supervisor;
 
-use pgrx::bgworkers::{
-    BackgroundWorker, BackgroundWorkerBuilder, BgWorkerStartTime, SignalWakeFlags,
-};
+use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 
 /// Register GUCs and (if enabled) a static storage background worker.
@@ -48,7 +48,11 @@ pub fn init_for_extension(library_name: &str) {
         .set_type("pg-lakebase-storage")
         .set_library(library_name)
         .set_function("pg_lakebase_storage_bgworker_main")
-        .set_start_time(BgWorkerStartTime::PostmasterStart)
+        // `enable_spi_access` sets BGWORKER_BACKEND_DATABASE_CONNECTION and
+        // forces start time to RecoveryFinished, which is what we need so the
+        // tablespace catalog reconciler can scan `pg_tablespace` (a shared
+        // catalog) before the storage server starts accepting requests.
+        .enable_spi_access()
         .set_restart_time(None)
         .load();
 }

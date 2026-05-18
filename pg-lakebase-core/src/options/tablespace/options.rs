@@ -3,6 +3,13 @@
 //! Storage options are accepted through `CREATE TABLESPACE ... WITH (...)` and
 //! persisted into `pg_tablespace.spcoptions`, where PostgreSQL already stores
 //! per-tablespace reloptions.
+//!
+//! This is intentionally simple for the pre-release storage integration, but it
+//! means access keys, secret keys, tokens, and service-account JSON supplied as
+//! tablespace options are stored as catalog text. `SecretString` prevents Rust
+//! debug/log leaks after parsing; it does not encrypt `spcoptions`. A later
+//! production hardening pass should add secret references or external
+//! credential providers.
 
 use super::defs;
 use super::storage::{

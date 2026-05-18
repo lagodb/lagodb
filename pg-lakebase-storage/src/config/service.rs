@@ -20,6 +20,14 @@ pub struct StorageServiceConfig {
     pub chunk_size: u64,
     pub touch_granularity: Duration,
     pub cache_cleanup: CacheCleanupConfig,
+    /// When `true`, the service rejects wire-level `RegisterStore` and
+    /// `UnregisterStore` requests because the [`crate::backend::StoreRegistry`]
+    /// is being driven by an external owner (such as the `pg-lakebase-core`
+    /// storage bgworker's tablespace reconciler).
+    ///
+    /// The default is `false` so that standalone deployments and tests that
+    /// register stores via the wire protocol keep working.
+    pub registry_managed_externally: bool,
 }
 
 impl Default for StorageServiceConfig {
@@ -30,6 +38,7 @@ impl Default for StorageServiceConfig {
             chunk_size: DEFAULT_CHUNK_SIZE,
             touch_granularity: DEFAULT_CACHE_TOUCH_GRANULARITY,
             cache_cleanup: CacheCleanupConfig::default(),
+            registry_managed_externally: false,
         }
     }
 }
@@ -68,6 +77,15 @@ impl StorageServiceConfig {
         self
     }
 
+    /// Mark the [`crate::backend::StoreRegistry`] as managed by an external
+    /// owner. The service will reject wire-level `RegisterStore` /
+    /// `UnregisterStore` requests so the external owner stays the single
+    /// writer.
+    pub fn with_externally_managed_registry(mut self) -> Self {
+        self.registry_managed_externally = true;
+        self
+    }
+
     pub fn normalized(mut self) -> Self {
         self.max_read_size = self.max_read_size.max(1);
         self.chunk_size = normalize_chunk_size(self.chunk_size);
@@ -95,6 +113,7 @@ mod tests {
                 max_cleanup_batch_bytes: 0,
                 cleanup_interval: Some(Duration::ZERO),
             },
+            registry_managed_externally: false,
         }
         .normalized();
 

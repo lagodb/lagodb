@@ -249,6 +249,15 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         &self,
         command: RegisterStoreCommand,
     ) -> StorageResult<ServiceReply> {
+        if self.config.registry_managed_externally {
+            warn!(
+                store_id = command.store_id.as_str(),
+                "rejecting RegisterStore: store registry is owned by an external reconciler"
+            );
+            return Err(StorageError::unsupported(
+                "RegisterStore is disabled: the store registry is managed by an external reconciler",
+            ));
+        }
         let store_id_str = command.store_id.clone();
         let previous = self
             .registry
@@ -267,6 +276,15 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         &self,
         command: UnregisterStoreCommand,
     ) -> StorageResult<ServiceReply> {
+        if self.config.registry_managed_externally {
+            warn!(
+                store_id = command.store_id.as_str(),
+                "rejecting UnregisterStore: store registry is owned by an external reconciler"
+            );
+            return Err(StorageError::unsupported(
+                "UnregisterStore is disabled: the store registry is managed by an external reconciler",
+            ));
+        }
         let store_id = StoreId::new(command.store_id)?;
         let removed = self.registry.unregister(&store_id).is_some();
         info!(store_id = %store_id, removed, "store unregistered");

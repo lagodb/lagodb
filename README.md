@@ -58,6 +58,17 @@ for PostgreSQL integration.
 - **Local storage**: reads and writes go directly through PostgreSQL's Virtual File Descriptor (VFD) system with optional WAL logging for crash consistency.
 - **Object storage**: the database process communicates with `pg-lakebase-storage` over **Unix domain sockets**. Reads are served from a local disk cache when possible; misses are transparently fetched from the remote object store. Writes go through an explicit **stage → commit** flow tied to database transaction boundaries.
 
+Object-storage tablespaces intentionally use the PostgreSQL tablespace name as
+the storage-service `store_id`, so cache and staging paths remain readable on
+disk. Because that name is part of the storage identity, renaming a distributed
+tablespace is unsupported.
+
+Distributed tablespace credentials are currently stored in
+`pg_tablespace.spcoptions`. They are redacted from Rust `Debug` output, but the
+catalog value itself is not encrypted; production deployments should prefer
+credential references, IAM-style ambient credentials, or another secret manager
+once that integration exists.
+
 ## Workspace
 
 | Crate | Purpose |

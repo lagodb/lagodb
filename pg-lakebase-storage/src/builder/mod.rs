@@ -88,6 +88,20 @@ impl StorageServerBuilder {
         self.db_path = Some(db_path.as_ref().to_path_buf());
         self
     }
+
+    /// Use a caller-supplied [`StoreRegistry`] instead of the default empty one.
+    ///
+    /// This lets the embedder pre-populate or share the registry before the
+    /// server starts accepting connections, so the first request never observes
+    /// a window where the server is bound but no stores are registered.
+    ///
+    /// The registry's internal state is shared (`Arc<RwLock<...>>`), so later
+    /// `register_config` / `unregister` calls on either the original handle or
+    /// the cloned handle held by the running server are observed by both.
+    pub fn with_store_registry(mut self, registry: StoreRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
 }
 
 // ---- Configuration (compose config objects, don't duplicate their methods) ----------------------
