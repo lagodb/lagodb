@@ -17,8 +17,8 @@ use std::cell::Cell;
 use std::ffi::CStr;
 use std::sync::Once;
 
-use pgrx::pg_sys;
 use pgrx::FromDatum;
+use pgrx::pg_sys;
 
 use super::reconciler::{StoreCatalogSource, TablespaceStoreSpec};
 use crate::catalog::{CatalogRelation, CatalogSnapshot};
@@ -148,19 +148,26 @@ fn scan_pg_tablespace() -> Result<Vec<TablespaceStoreSpec>, CatalogLoadError> {
         let tablespace_name = read_spcname(tuple.as_raw(), tup_desc);
         let options_vec = read_spcoptions(tuple.as_raw(), tup_desc);
 
-        let cached = parse_options_to_cached(tablespace_name.clone(), options_vec)
-            .map_err(|source| CatalogLoadError::InvalidTablespace {
-                tablespace: tablespace_name.clone(),
-                source,
-            })?;
-
-        let Some(cached) = cached else {
-            continue;
-        };
+        // `parse_options_to_cached` takes the name by value so the parser
+        // and reconciler-facing struct can keep their own copies. We pass
+        // `tablespace_name.clone()` and move the original into either the
+        // error variant or the resulting spec, eliminating the redundant
+        // `.to_string()` we used to do via `cached.tablespace_name()`.
+        let cached =
+            match parse_options_to_cached(tablespace_name.clone(), options_vec) {
+                Ok(Some(cached)) => cached,
+                Ok(None) => continue,
+                Err(source) => {
+                    return Err(CatalogLoadError::InvalidTablespace {
+                        tablespace: tablespace_name,
+                        source,
+                    });
+                }
+            };
 
         specs.push(TablespaceStoreSpec {
             store_id: cached.store_id_owned(),
-            tablespace_name: cached.tablespace_name().to_string(),
+            tablespace_name,
             object_namespace: cached.object_namespace().to_string(),
             base_url: cached.base_url(),
             config: cached.store_config(),

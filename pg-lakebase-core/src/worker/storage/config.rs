@@ -1,35 +1,59 @@
-//! Snapshot of GUC values into a plain Rust struct that can be sent to Tokio tasks.
+//! Snapshot of GUC values into plain Rust structs that can be sent to Tokio tasks.
+//!
+//! Configuration is split into two layers:
+//!
+//! - [`StorageWorkerStartupConfig`]: resources that cannot be safely changed at runtime
+//!   (socket path, cache directory, Tokio thread pool size, etc.).
+//! - [`StorageWorkerRuntimeConfig`]: parameters that the supervisor can hot-reload after
+//!   a SIGHUP signal without restarting the background worker.
 //!
 //! [`StorageWorkerConfig::from_gucs`] must be called from the bgworker main thread
-//! (the only Postgres-facing thread).  After construction the struct contains no
-//! references to Postgres internals and is safe to move across thread boundaries.
+//! (the only Postgres-facing thread).  After construction the structs contain no
+//! references to Postgres internals and are safe to move across thread boundaries.
 
 use std::ffi::CStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pg_lakebase_storage::{StorageServerConfig, StorageServiceConfig};
+use pg_lakebase_storage::{
+    CacheCleanupConfig, CacheRuntimeConfig, StorageRuntimeConfig,
+    StorageServerConfig, StorageServiceConfig,
+};
 use pgrx::pg_sys;
 
 use super::gucs;
 
-#[derive(Clone)]
+/// Combined startup + runtime configuration, built once at worker start.
 pub struct StorageWorkerConfig {
+    pub startup: StorageWorkerStartupConfig,
+    pub runtime: StorageWorkerRuntimeConfig,
+}
+
+/// Resources that require a PostgreSQL restart to change.
+pub struct StorageWorkerStartupConfig {
     pub socket_path: PathBuf,
     pub cache_dir: PathBuf,
     pub server_config: StorageServerConfig,
     pub service_config: StorageServiceConfig,
     pub worker_threads: usize,
-    pub shutdown_timeout: Duration,
     pub log_channel_capacity: usize,
+}
+
+/// Parameters the supervisor can reload via SIGHUP without restarting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorageWorkerRuntimeConfig {
+    pub shutdown_timeout: Duration,
     /// `Some(d)` enables a periodic full-resync of the tablespace store
     /// reconciler every `d`. `None` disables the periodic resync; reconcile
     /// then runs only on syscache wake-up.
     pub tablespace_reconcile_interval: Option<Duration>,
+    /// Runtime configuration for the storage server (cache parameters).
+    /// Pushed to `StorageRuntime::apply()` after SIGHUP.
+    pub storage: StorageRuntimeConfig,
 }
 
 impl StorageWorkerConfig {
-    /// Snapshot all storage-worker GUCs into a plain Rust struct.
+    /// Snapshot all storage-worker GUCs into plain Rust structs.
     ///
     /// # Safety
     ///
@@ -44,20 +68,46 @@ impl StorageWorkerConfig {
         let base = PathBuf::from(&data_dir).join("pg_lakebase");
 
         Self {
-            socket_path: gucs::socket_path()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| base.join("storage.sock")),
-            cache_dir: gucs::cache_dir()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| base.join("storage-cache")),
-            server_config: StorageServerConfig::default()
-                .with_max_connections(gucs::max_connections()),
-            service_config: StorageServiceConfig::default()
-                .with_max_read_size(gucs::max_read_size()),
-            worker_threads: gucs::worker_threads(),
+            startup: StorageWorkerStartupConfig {
+                socket_path: gucs::socket_path()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| base.join("storage.sock")),
+                cache_dir: gucs::cache_dir()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| base.join("storage-cache")),
+                server_config: StorageServerConfig::default()
+                    .with_max_connections(gucs::max_connections()),
+                service_config: StorageServiceConfig::default()
+                    .with_max_read_size(gucs::max_read_size()),
+                worker_threads: gucs::worker_threads(),
+                log_channel_capacity: gucs::log_channel_capacity(),
+            },
+            runtime: StorageWorkerRuntimeConfig::from_gucs(),
+        }
+    }
+}
+
+impl StorageWorkerRuntimeConfig {
+    /// Re-read the Sighup-scoped GUCs into a fresh runtime config.
+    ///
+    /// Call this after `ProcessConfigFile(PGC_SIGHUP)` to pick up new values.
+    pub fn from_gucs() -> Self {
+        Self {
             shutdown_timeout: Duration::from_millis(gucs::shutdown_timeout_ms()),
-            log_channel_capacity: gucs::log_channel_capacity(),
             tablespace_reconcile_interval: gucs::tablespace_reconcile_interval(),
+            storage: StorageRuntimeConfig {
+                cache: CacheRuntimeConfig {
+                    touch_granularity: gucs::cache_touch_granularity(),
+                    cleanup: CacheCleanupConfig {
+                        max_cache_bytes: gucs::cache_max_bytes(),
+                        cleanup_start_percent: gucs::cache_cleanup_start_percent(),
+                        cleanup_target_percent: gucs::cache_cleanup_target_percent(),
+                        cleanup_interval: gucs::cache_cleanup_interval(),
+                        max_cleanup_batch_items: gucs::cache_cleanup_batch_items(),
+                        max_cleanup_batch_bytes: gucs::cache_cleanup_batch_bytes(),
+                    },
+                },
+            },
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::backend::{
     MemoryObjectBackend, S3StoreConfig, StoreConfig, StoreRegistry,
 };
 use crate::cache::{CacheManager, InMemoryCacheIndex};
-use crate::config::StorageServiceConfig;
+use crate::config::{StorageRuntime, StorageRuntimeConfig, StorageServiceConfig};
 use crate::error::StorageErrorKind;
 use crate::object::{ObjectLocation, StoreId};
 use crate::service::StorageService;
@@ -31,8 +31,12 @@ async fn register_store_routes_open_to_named_backend() {
         .register_shared_backend("named", named_backend)
         .unwrap();
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-            .with_limits(32, 4),
+        CacheManager::new(
+            test_cache_dir(),
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(32, 4),
     );
     cache.spawn_large_fill_reaper();
     let service = StorageService::with_registry(registry, cache);
@@ -47,7 +51,6 @@ async fn register_store_routes_open_to_named_backend() {
     close(&service, &handles, open.handle).await;
 }
 
-
 #[tokio::test]
 async fn externally_managed_registry_rejects_register_and_unregister() {
     let registry = StoreRegistry::new();
@@ -56,13 +59,18 @@ async fn externally_managed_registry_rejects_register_and_unregister() {
         .unwrap();
 
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-            .with_limits(32, 4),
+        CacheManager::new(
+            test_cache_dir(),
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(32, 4),
     );
     cache.spawn_large_fill_reaper();
 
     let config = StorageServiceConfig::default().with_externally_managed_registry();
-    let service = StorageService::with_registry_config(registry.clone(), cache, config);
+    let service =
+        StorageService::with_registry_config(registry.clone(), cache, config);
     let handles = HandleTable::new();
 
     let register_result = service
@@ -89,8 +97,9 @@ async fn externally_managed_registry_rejects_register_and_unregister() {
             }),
         )
         .await;
-    let unregister_err =
-        unregister_result.err().expect("UnregisterStore should fail");
+    let unregister_err = unregister_result
+        .err()
+        .expect("UnregisterStore should fail");
     assert_eq!(unregister_err.kind(), StorageErrorKind::Unsupported);
     assert!(
         registry.contains(&StoreId::new("preexisting").unwrap()),

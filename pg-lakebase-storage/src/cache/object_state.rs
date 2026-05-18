@@ -357,10 +357,10 @@ impl ObjectStateRegistry {
         if entries.len() > Self::CLEANUP_THRESHOLD {
             entries.retain(|_, weak| weak.strong_count() > 0);
         }
-        if let Some(weak) = entries.get(key) {
-            if let Some(state) = weak.upgrade() {
-                return state;
-            }
+        if let Some(weak) = entries.get(key)
+            && let Some(state) = weak.upgrade()
+        {
+            return state;
         }
         let state = Arc::new(PerObjectState::new(key.clone()));
         entries.insert(key.clone(), Arc::downgrade(&state));

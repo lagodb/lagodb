@@ -46,10 +46,10 @@ impl ObjectStoreBackend {
     }
 
     fn location(&self, key: &ObjectLocation) -> StorageResult<ObjectPath> {
-        if let Some(bucket) = &self.bucket {
-            if bucket != key.bucket() {
-                return Err(StorageError::not_found(key.to_string()));
-            }
+        if let Some(bucket) = &self.bucket
+            && bucket != key.bucket()
+        {
+            return Err(StorageError::not_found(key.to_string()));
         }
         Ok(ObjectPath::from(key.key()))
     }

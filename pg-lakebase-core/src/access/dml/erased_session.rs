@@ -3,13 +3,12 @@
 //! `ErasedModifySession` lets the session manager store one dyn object per
 //! relation regardless of which concrete AM backs it.
 
-use crate::api::AmDmlSession;
+use crate::api::{AmDmlSession, AmResult};
 use crate::handles::{
     BulkInsertStateHandle, ItemPointer, SnapshotHandle, TM_FailureData,
 };
 use crate::tuple::Row;
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::ErrorReport;
 
 pub(super) struct ErasedModifySessionAdapter<T> {
     inner: T,
@@ -27,7 +26,7 @@ macro_rules! define_erased_modify_session {
     )*) => {
         pub(super) trait ErasedModifySession {
             $(
-                fn $method(&mut self $(, $arg: $arg_ty)*) -> Result<$ret, ErrorReport>;
+                fn $method(&mut self $(, $arg: $arg_ty)*) -> AmResult<$ret>;
             )*
 
             fn abort_modify(&mut self);
@@ -38,7 +37,7 @@ macro_rules! define_erased_modify_session {
             T: AmDmlSession + 'static,
         {
             $(
-                fn $method(&mut self $(, $arg: $arg_ty)*) -> Result<$ret, ErrorReport> {
+                fn $method(&mut self $(, $arg: $arg_ty)*) -> AmResult<$ret> {
                     self.inner.$method($($arg),*)
                 }
             )*

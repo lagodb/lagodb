@@ -7,6 +7,7 @@ use crate::backend::{
     StoreConfig, StoreRegistry,
 };
 use crate::cache::{CacheCleanupPolicy, CacheManager, InMemoryCacheIndex};
+use crate::config::{StorageRuntime, StorageRuntimeConfig};
 use crate::error::StorageErrorKind;
 use crate::object::ObjectLocation;
 use crate::server::StorageServer;
@@ -26,7 +27,12 @@ async fn client_reads_through_unix_socket_server() {
     let root = test_root("cache");
     let socket = test_root("storage.sock");
     let cache = Arc::new(
-        CacheManager::new(root.clone(), InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root.clone(),
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -64,7 +70,12 @@ async fn client_head_and_exists_do_not_admit_cache() {
     let root = test_root("head-cache");
     let socket = test_root("head.sock");
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -109,8 +120,12 @@ async fn client_head_returns_from_cache_after_open() {
     // small_object_limit must be >= data length so the object is admitted as SmallKv
     // (large-fill objects don't persist metadata to the index until fill completes).
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new())
-            .with_limits(data.len() as u64, 4096),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(data.len() as u64, 4096),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -160,18 +175,21 @@ async fn client_stage_write_commit_roundtrip_uploads_to_backend() {
 
     let backend = Arc::new(MemoryObjectBackend::new());
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
         .register_shared_backend(TEST_STORE_ID, backend.clone())
         .unwrap();
+    let config = crate::config::StorageServiceConfig::default();
     let service = Arc::new(StorageService::with_staging(
-        registry,
-        cache,
-        staging,
-        crate::config::StorageServiceConfig::default(),
+        registry, cache, staging, config,
     ));
     let server = StorageServer::bind(&socket, service).await.unwrap();
     let server_task = tokio::spawn(async move {
@@ -213,18 +231,24 @@ async fn client_stage_abort_removes_staging_file_without_upload() {
 
     let backend = Arc::new(MemoryObjectBackend::new());
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
         .register_shared_backend(TEST_STORE_ID, backend.clone())
         .unwrap();
+    let config = crate::config::StorageServiceConfig::default();
     let service = Arc::new(StorageService::with_staging(
         registry,
         cache,
         staging.clone(),
-        crate::config::StorageServiceConfig::default(),
+        config,
     ));
     let server = StorageServer::bind(&socket, service).await.unwrap();
     let server_task = tokio::spawn(async move {
@@ -275,18 +299,21 @@ async fn client_commit_can_be_issued_from_a_different_connection() {
 
     let backend = Arc::new(MemoryObjectBackend::new());
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
         .register_shared_backend(TEST_STORE_ID, backend.clone())
         .unwrap();
+    let config = crate::config::StorageServiceConfig::default();
     let service = Arc::new(StorageService::with_staging(
-        registry,
-        cache,
-        staging,
-        crate::config::StorageServiceConfig::default(),
+        registry, cache, staging, config,
     ));
     let server = StorageServer::bind(&socket, service).await.unwrap();
     let server_task = tokio::spawn(async move {
@@ -333,18 +360,21 @@ async fn stage_twice_without_finalize_returns_busy() {
     staging.wipe().await.unwrap();
     let backend = Arc::new(MemoryObjectBackend::new());
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new();
     registry
         .register_shared_backend(TEST_STORE_ID, backend)
         .unwrap();
+    let config = crate::config::StorageServiceConfig::default();
     let service = Arc::new(StorageService::with_staging(
-        registry,
-        cache,
-        staging,
-        crate::config::StorageServiceConfig::default(),
+        registry, cache, staging, config,
     ));
     let server = StorageServer::bind(&socket, service).await.unwrap();
     let server_task = tokio::spawn(async move {
@@ -377,7 +407,12 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
     let root = test_root("drop-close-cache");
     let socket = test_root("drop-close.sock");
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -414,7 +449,7 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
     let mut policy = CacheCleanupPolicy::new(16);
     policy.cleanup_start_ratio = 0.0;
     policy.cleanup_target_ratio = 0.0;
-    let report = cache.cleanup(policy).await.unwrap();
+    let report = cache.cleanup_with_capacity(policy).await.unwrap();
 
     assert_eq!(report.evicted_objects, 1);
     assert_eq!(cache.logical_cache_usage().await.unwrap().resident_bytes, 0);
@@ -433,7 +468,12 @@ async fn client_registers_unregisters_and_purges_store_over_wire() {
     let root = test_root("client-store-cache");
     let socket = test_root("client-store.sock");
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let service =
@@ -507,7 +547,12 @@ async fn client_delete_removes_object_from_backend_and_is_idempotent() {
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "doomed.txt").unwrap();
     backend.insert(key.clone(), b"bye".to_vec());
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -554,7 +599,12 @@ async fn client_delete_prefix_removes_all_matching_objects_and_rejects_empty_pre
         );
     }
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -615,7 +665,12 @@ async fn client_list_iterates_pages_and_returns_every_object() {
     }
     expected.sort();
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -657,7 +712,12 @@ async fn client_list_page_drives_pagination_explicitly() {
         );
     }
     let cache = Arc::new(
-        CacheManager::new(root, InMemoryCacheIndex::new()).with_limits(4, 4),
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()

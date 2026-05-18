@@ -14,12 +14,15 @@ use pgrx::bgworkers::BackgroundWorker;
 use pgrx::pg_sys;
 use tokio_util::sync::CancellationToken;
 
-use pg_lakebase_storage::StoreRegistry;
+use pg_lakebase_storage::{StorageRuntime, StorageRuntimeConfig, StoreRegistry};
 
 use super::catalog::{self, PgTablespaceStoreCatalog};
-use super::config::StorageWorkerConfig;
+use super::config::{StorageWorkerConfig, StorageWorkerRuntimeConfig};
 use super::logging::{self, PgLogBridge};
 use super::reconciler::{ReconcileReport, StoreCatalogReconciler};
+
+type ServerTask = tokio::task::JoinHandle<pg_lakebase_storage::StorageResult<()>>;
+type StorageReconciler = StoreCatalogReconciler<PgTablespaceStoreCatalog>;
 
 pub struct StorageWorkerSupervisor {
     config: StorageWorkerConfig,
@@ -35,7 +38,7 @@ impl StorageWorkerSupervisor {
         let config = StorageWorkerConfig::from_gucs();
 
         let (log_bridge, log_writer) =
-            logging::new_bridge(config.log_channel_capacity);
+            logging::new_bridge(config.startup.log_channel_capacity);
 
         unsafe { set_worker_log_min_messages() };
 
@@ -58,30 +61,58 @@ impl StorageWorkerSupervisor {
     ///
     /// This method does not return until the bgworker is ready to exit.
     pub fn run(mut self) {
-        // Attach to PostgreSQL with SPI access so the reconciler can scan
-        // `pg_tablespace`. We pass `None, None` to skip database binding;
-        // `pg_tablespace` is a shared catalog and is reachable without a
-        // connected database.
         BackgroundWorker::connect_worker_to_spi(None, None);
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(self.config.worker_threads)
+        let runtime = self.build_runtime();
+        let registry = StoreRegistry::new();
+        let mut reconciler = Self::build_reconciler(registry.clone());
+        self.initial_reconcile_or_exit(&mut reconciler);
+
+        // Clear any syscache dirty bit accumulated during connect / initial
+        // reconcile so the first main-loop iteration does not redundantly
+        // re-scan the catalog we just read.
+        let _ = catalog::take_dirty();
+
+        let storage_runtime = self.storage_runtime_or_exit();
+        let storage_runtime_control = storage_runtime.clone();
+        let mut server_handle =
+            Some(self.spawn_storage_server(&runtime, registry, storage_runtime));
+
+        logging::emit_pg_log(
+            pg_sys::INFO as i32,
+            "storage background worker started",
+        );
+
+        let mut runtime_state =
+            SupervisorRuntimeState::new(self.config.runtime.clone());
+        self.run_supervisor_loop(
+            &runtime,
+            &mut server_handle,
+            &mut reconciler,
+            &storage_runtime_control,
+            &mut runtime_state,
+        );
+        self.shutdown_storage_server(
+            runtime,
+            &mut server_handle,
+            runtime_state.config.shutdown_timeout,
+        );
+    }
+
+    fn build_runtime(&self) -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(self.config.startup.worker_threads)
             .enable_all()
             .build()
-            .expect("failed to create pg-lakebase-storage tokio runtime");
+            .expect("failed to create pg-lakebase-storage tokio runtime")
+    }
 
-        // Build the shared registry first. The reconciler and the storage
-        // server hold separate clones of the same internal Arc<RwLock<...>>,
-        // so initial-reconcile registrations are visible to the very first
-        // accepted connection.
-        let registry = StoreRegistry::new();
-        let mut reconciler =
-            StoreCatalogReconciler::new(PgTablespaceStoreCatalog::new(), registry.clone());
+    fn build_reconciler(registry: StoreRegistry) -> StorageReconciler {
+        StoreCatalogReconciler::new(PgTablespaceStoreCatalog::new(), registry)
+    }
 
-        // Initial reconcile must succeed before we bind the listening socket.
-        // Failing here is treated like a fatal startup error: the bgworker
-        // exits and PostgreSQL administrators see the cause in the log.
-        if let Err(error) = run_reconcile(&mut reconciler, "startup") {
+    fn initial_reconcile_or_exit(&mut self, reconciler: &mut StorageReconciler) {
+        if let Err(error) = run_reconcile(reconciler, "startup") {
             logging::emit_pg_log(
                 pg_sys::PGERROR as i32,
                 &format!("storage worker startup reconcile failed: {error}"),
@@ -89,89 +120,73 @@ impl StorageWorkerSupervisor {
             self.log_bridge.drain_to_pg_log();
             unsafe { pg_sys::proc_exit(1) };
         }
+    }
 
-        // Clear any syscache dirty bit accumulated during connect / initial
-        // reconcile so the first main-loop iteration does not redundantly
-        // re-scan the catalog we just read.
-        let _ = catalog::take_dirty();
+    fn storage_runtime_or_exit(&mut self) -> StorageRuntime {
+        match StorageRuntime::new(self.config.runtime.storage.clone()) {
+            Ok(rt) => rt,
+            Err(error) => {
+                logging::emit_pg_log(
+                    pg_sys::WARNING as i32,
+                    &format!(
+                        "storage runtime config invalid, worker cannot start: {error}",
+                    ),
+                );
+                self.log_bridge.drain_to_pg_log();
+                unsafe { pg_sys::proc_exit(1) };
+            }
+        }
+    }
 
+    fn spawn_storage_server(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+        registry: StoreRegistry,
+        storage_runtime: StorageRuntime,
+    ) -> ServerTask {
         let shutdown = self.shutdown.clone();
-        let config = self.config.clone();
-        let server_registry = registry.clone();
+        let startup_config = &self.config.startup;
 
-        let mut server_handle = Some(runtime.spawn(async move {
+        let socket_path = startup_config.socket_path.clone();
+        let cache_dir = startup_config.cache_dir.clone();
+        let server_config = startup_config.server_config.clone();
+        let service_config = startup_config.service_config.clone();
+
+        runtime.spawn(async move {
             let server = pg_lakebase_storage::StorageServerBuilder::new(
-                &config.socket_path,
-                &config.cache_dir,
+                &socket_path,
+                &cache_dir,
             )
-            .with_server_config(config.server_config)
-            // Tell the service layer that the registry is owned by the
-            // tablespace reconciler so wire-level RegisterStore /
-            // UnregisterStore requests are rejected. Without this gate the
-            // reconciler would not be the single writer of `StoreRegistry`
-            // and a client unregister would silently persist (the next
-            // reconcile would compute desired == applied and not restore).
-            .with_service_config(
-                config
-                    .service_config
-                    .with_externally_managed_registry(),
-            )
-            .with_store_registry(server_registry)
+            .with_server_config(server_config)
+            .with_service_config(service_config.with_externally_managed_registry())
+            .with_store_registry(registry)
+            .with_runtime(storage_runtime)
             .with_tracing_request_observer()
             .bind()
             .await?;
 
             server.serve_until(shutdown).await
-        }));
+        })
+    }
 
-        logging::emit_pg_log(
-            pg_sys::INFO as i32,
-            "storage background worker started",
-        );
-
-        let reconcile_interval = self.config.tablespace_reconcile_interval;
-        let mut next_periodic_reconcile = reconcile_interval.map(|d| Instant::now() + d);
-
+    fn run_supervisor_loop(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        server_handle: &mut Option<ServerTask>,
+        reconciler: &mut StorageReconciler,
+        storage_runtime: &StorageRuntime,
+        runtime_state: &mut SupervisorRuntimeState,
+    ) {
         loop {
             self.log_bridge.drain_to_pg_log();
+            self.exit_if_server_finished(runtime, server_handle);
 
-            if server_handle.as_ref().is_some_and(|h| h.is_finished()) {
-                let handle = server_handle.take().unwrap();
-                self.shutdown.cancel();
-
-                match runtime.block_on(handle) {
-                    Ok(Ok(())) => logging::emit_pg_log(
-                        pg_sys::INFO as i32,
-                        "storage server exited",
-                    ),
-                    Ok(Err(e)) => logging::emit_pg_log(
-                        pg_sys::PGERROR as i32,
-                        &format!("storage server failed: {e}"),
-                    ),
-                    Err(e) => logging::emit_pg_log(
-                        pg_sys::PGERROR as i32,
-                        &format!("storage server task panicked: {e}"),
-                    ),
-                }
-
-                self.log_bridge.drain_to_pg_log();
-                unsafe { pg_sys::proc_exit(1) };
-            }
-
-            // Pull any pending invalidation messages so the syscache callback
-            // we registered fires before we look at the dirty flag. Without
-            // this, the dirty flag could lag behind newly-committed catalog
-            // changes from other backends.
             unsafe { pg_sys::AcceptInvalidationMessages() };
 
-            let now = Instant::now();
-            let periodic_due = match next_periodic_reconcile {
-                Some(deadline) => now >= deadline,
-                None => false,
-            };
-
-            if catalog::take_dirty() || periodic_due {
-                if let Err(error) = run_reconcile(&mut reconciler, "runtime") {
+            if catalog::take_dirty()
+                || runtime_state.periodic_reconcile_due(Instant::now())
+            {
+                if let Err(error) = run_reconcile(reconciler, "runtime") {
                     // Runtime reconcile failures are non-fatal: we keep the
                     // last good registry state and try again the next time
                     // the syscache fires or the periodic timer expires.
@@ -181,19 +196,15 @@ impl StorageWorkerSupervisor {
                     );
                 }
 
-                if let Some(interval) = reconcile_interval {
-                    next_periodic_reconcile = Some(Instant::now() + interval);
-                }
+                runtime_state.schedule_next_reconcile(Instant::now());
             }
 
-            let timeout = wait_timeout(reconcile_interval, next_periodic_reconcile);
+            let timeout = runtime_state.wait_timeout();
             let should_continue = BackgroundWorker::wait_latch(Some(timeout));
 
             if BackgroundWorker::sighup_received() {
-                logging::emit_pg_log(
-                    pg_sys::INFO as i32,
-                    "SIGHUP received; storage worker GUC changes require PostgreSQL restart",
-                );
+                unsafe { process_config_reload() };
+                runtime_state.reload_from_gucs(storage_runtime, Instant::now());
             }
 
             if !should_continue {
@@ -205,13 +216,46 @@ impl StorageWorkerSupervisor {
                 break;
             }
         }
+    }
 
-        // Single shutdown budget shared by `wait_for_server_shutdown` and the
-        // final `runtime.shutdown_timeout` call.  Whatever the first phase did
-        // not consume becomes the hard cap on the second phase, so the GUC
-        // expresses one total stop budget rather than two implicit ones.
-        let deadline = Instant::now() + self.config.shutdown_timeout;
-        self.wait_for_server_shutdown(&runtime, &mut server_handle, deadline);
+    fn exit_if_server_finished(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        server_handle: &mut Option<ServerTask>,
+    ) {
+        if !server_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+
+        let handle = server_handle.take().unwrap();
+        self.shutdown.cancel();
+
+        match runtime.block_on(handle) {
+            Ok(Ok(())) => {
+                logging::emit_pg_log(pg_sys::INFO as i32, "storage server exited")
+            }
+            Ok(Err(e)) => logging::emit_pg_log(
+                pg_sys::PGERROR as i32,
+                &format!("storage server failed: {e}"),
+            ),
+            Err(e) => logging::emit_pg_log(
+                pg_sys::PGERROR as i32,
+                &format!("storage server task panicked: {e}"),
+            ),
+        }
+
+        self.log_bridge.drain_to_pg_log();
+        unsafe { pg_sys::proc_exit(1) };
+    }
+
+    fn shutdown_storage_server(
+        &mut self,
+        runtime: tokio::runtime::Runtime,
+        server_handle: &mut Option<ServerTask>,
+        shutdown_timeout: Duration,
+    ) {
+        let deadline = Instant::now() + shutdown_timeout;
+        self.wait_for_server_shutdown(&runtime, server_handle, deadline);
         let runtime_budget = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_millis(50));
@@ -227,9 +271,7 @@ impl StorageWorkerSupervisor {
     fn wait_for_server_shutdown(
         &mut self,
         runtime: &tokio::runtime::Runtime,
-        server_handle: &mut Option<
-            tokio::task::JoinHandle<pg_lakebase_storage::StorageResult<()>>,
-        >,
+        server_handle: &mut Option<ServerTask>,
         deadline: Instant,
     ) {
         while Instant::now() < deadline {
@@ -264,6 +306,104 @@ impl StorageWorkerSupervisor {
     }
 }
 
+struct SupervisorRuntimeState {
+    config: StorageWorkerRuntimeConfig,
+    reconcile_interval: Option<Duration>,
+    next_periodic_reconcile: Option<Instant>,
+}
+
+impl SupervisorRuntimeState {
+    fn new(config: StorageWorkerRuntimeConfig) -> Self {
+        let reconcile_interval = config.tablespace_reconcile_interval;
+        Self {
+            config,
+            reconcile_interval,
+            next_periodic_reconcile: next_reconcile_deadline(
+                reconcile_interval,
+                Instant::now(),
+            ),
+        }
+    }
+
+    fn periodic_reconcile_due(&self, now: Instant) -> bool {
+        self.next_periodic_reconcile
+            .is_some_and(|deadline| now >= deadline)
+    }
+
+    fn schedule_next_reconcile(&mut self, now: Instant) {
+        self.next_periodic_reconcile =
+            next_reconcile_deadline(self.reconcile_interval, now);
+    }
+
+    fn wait_timeout(&self) -> Duration {
+        wait_timeout(self.reconcile_interval, self.next_periodic_reconcile)
+    }
+
+    fn reload_from_gucs(&mut self, storage_runtime: &StorageRuntime, now: Instant) {
+        let new_config = StorageWorkerRuntimeConfig::from_gucs();
+        if new_config == self.config {
+            logging::emit_pg_log(
+                pg_sys::INFO as i32,
+                "SIGHUP received; runtime configuration unchanged",
+            );
+            return;
+        }
+
+        let old_config = self.config.clone();
+        let old_storage = old_config.storage.clone();
+        let interval_changed = new_config.tablespace_reconcile_interval
+            != old_config.tablespace_reconcile_interval;
+
+        let applied_storage = if new_config.storage != old_config.storage {
+            Self::apply_storage_config(storage_runtime, new_config.storage.clone())
+        } else {
+            None
+        };
+
+        self.config = new_config;
+        // For storage section, use the normalized value from the runtime if
+        // apply succeeded, or keep the old value for retry.
+        self.config.storage = applied_storage.unwrap_or(old_storage);
+
+        log_runtime_config_change(&old_config, &self.config);
+
+        if interval_changed {
+            self.reconcile_interval = self.config.tablespace_reconcile_interval;
+            self.next_periodic_reconcile =
+                next_reconcile_deadline(self.reconcile_interval, now);
+        }
+    }
+
+    fn apply_storage_config(
+        storage_runtime: &StorageRuntime,
+        config: StorageRuntimeConfig,
+    ) -> Option<StorageRuntimeConfig> {
+        match storage_runtime.apply(config) {
+            Ok(report) if report.changed => {
+                let snapshot = (*storage_runtime.snapshot()).clone();
+                logging::emit_pg_log(
+                    pg_sys::INFO as i32,
+                    &format!(
+                        "storage runtime config applied (version {})",
+                        report.version,
+                    ),
+                );
+                Some(snapshot)
+            }
+            Ok(_) => Some((*storage_runtime.snapshot()).clone()),
+            Err(error) => {
+                logging::emit_pg_log(
+                    pg_sys::WARNING as i32,
+                    &format!(
+                        "storage runtime config apply failed, keeping old values: {error}",
+                    ),
+                );
+                None
+            }
+        }
+    }
+}
+
 /// Run one reconcile pass.
 ///
 /// The PostgreSQL transaction wraps **only** the catalog scan
@@ -279,10 +419,9 @@ fn run_reconcile(
 ) -> Result<ReconcileReport, ReconcileRunError> {
     use std::panic::AssertUnwindSafe;
 
-    let desired = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-        reconciler.load_desired()
-    }))
-    .map_err(|error| ReconcileRunError(error.to_string()))?;
+    let desired =
+        BackgroundWorker::transaction(AssertUnwindSafe(|| reconciler.load_desired()))
+            .map_err(|error| ReconcileRunError(error.to_string()))?;
 
     let report = reconciler
         .apply_desired(desired)
@@ -317,6 +456,15 @@ impl std::fmt::Display for ReconcileRunError {
 
 impl std::error::Error for ReconcileRunError {}
 
+/// Compute the next periodic reconcile deadline, or `None` if periodic
+/// reconciliation is disabled.
+fn next_reconcile_deadline(
+    interval: Option<Duration>,
+    now: Instant,
+) -> Option<Instant> {
+    interval.map(|d| now + d)
+}
+
 /// Pick a `wait_latch` timeout for the next loop iteration.
 ///
 /// The 100 ms ceiling sets the worker's responsiveness floor for SIGTERM,
@@ -340,6 +488,24 @@ fn wait_timeout(
     base.min(until_periodic.max(Duration::from_millis(1)))
 }
 
+/// Tell PostgreSQL to re-read its configuration files and update GUC values
+/// in the current process.
+///
+/// Must be called on the bgworker main thread after `sighup_received()`
+/// returns `true`. Without this, `GucContext::Sighup` parameters would not
+/// pick up new values from `postgresql.conf` / `ALTER SYSTEM`.
+///
+/// # Safety
+///
+/// Calls PostgreSQL FFI. Must run on the bgworker main thread.
+unsafe fn process_config_reload() {
+    unsafe {
+        (&raw mut pg_sys::ConfigReloadPending)
+            .write_volatile(0 as pg_sys::sig_atomic_t);
+        pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
+    }
+}
+
 /// Set `log_min_messages` to INFO for this worker process so that INFO-level
 /// storage logs are visible in the PostgreSQL log.  This mirrors how the Neon
 /// communicator process configures its own log verbosity.
@@ -354,4 +520,76 @@ unsafe fn set_worker_log_min_messages() {
             pg_sys::GucSource::PGC_S_OVERRIDE,
         );
     }
+}
+
+fn log_runtime_config_change(
+    old: &StorageWorkerRuntimeConfig,
+    new: &StorageWorkerRuntimeConfig,
+) {
+    let mut parts = Vec::new();
+
+    if old.shutdown_timeout != new.shutdown_timeout {
+        parts.push(format!(
+            "shutdown_timeout: {}ms -> {}ms",
+            old.shutdown_timeout.as_millis(),
+            new.shutdown_timeout.as_millis(),
+        ));
+    }
+
+    if old.tablespace_reconcile_interval != new.tablespace_reconcile_interval {
+        let fmt = |v: &Option<Duration>| match v {
+            Some(d) => format!("{}ms", d.as_millis()),
+            None => "disabled".to_string(),
+        };
+        parts.push(format!(
+            "tablespace_reconcile_interval: {} -> {}",
+            fmt(&old.tablespace_reconcile_interval),
+            fmt(&new.tablespace_reconcile_interval),
+        ));
+    }
+
+    if old.storage != new.storage {
+        if old.storage.cache.touch_granularity != new.storage.cache.touch_granularity
+        {
+            parts.push(format!(
+                "cache_touch_granularity: {}ms -> {}ms",
+                old.storage.cache.touch_granularity.as_millis(),
+                new.storage.cache.touch_granularity.as_millis(),
+            ));
+        }
+        let oc = &old.storage.cache.cleanup;
+        let nc = &new.storage.cache.cleanup;
+        if oc != nc {
+            let fmt_bytes = |v: &Option<u64>| match v {
+                Some(b) => format!("{}MiB", b / (1024 * 1024)),
+                None => "disabled".to_string(),
+            };
+            let fmt_interval = |v: &Option<Duration>| match v {
+                Some(d) => format!("{}ms", d.as_millis()),
+                None => "disabled".to_string(),
+            };
+            parts.push(format!(
+                "cache_cleanup: max={}->{} start={}%->{}% target={}%->{}% interval={}->{} batch_items={}->{} batch_mb={}->{}",
+                fmt_bytes(&oc.max_cache_bytes), fmt_bytes(&nc.max_cache_bytes),
+                oc.cleanup_start_percent, nc.cleanup_start_percent,
+                oc.cleanup_target_percent, nc.cleanup_target_percent,
+                fmt_interval(&oc.cleanup_interval), fmt_interval(&nc.cleanup_interval),
+                oc.max_cleanup_batch_items, nc.max_cleanup_batch_items,
+                oc.max_cleanup_batch_bytes / (1024 * 1024),
+                nc.max_cleanup_batch_bytes / (1024 * 1024),
+            ));
+        }
+    }
+
+    if parts.is_empty() {
+        return;
+    }
+
+    logging::emit_pg_log(
+        pg_sys::INFO as i32,
+        &format!(
+            "SIGHUP: runtime configuration updated ({})",
+            parts.join(", ")
+        ),
+    );
 }

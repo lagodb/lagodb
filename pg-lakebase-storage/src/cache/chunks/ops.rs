@@ -60,7 +60,7 @@ impl<I: CacheIndex> CacheManager<I> {
         };
 
         if committed {
-            self.maybe_cleanup().await?;
+            self.nudge_cleanup_after_write();
         }
         Ok(())
     }

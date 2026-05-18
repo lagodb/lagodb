@@ -171,7 +171,10 @@ async fn last_large_fill_close_deletes_incomplete_partial() {
     })
     .await;
 
-    let report = cache.cleanup(CacheCleanupPolicy::new(1024)).await.unwrap();
+    let report = cache
+        .cleanup_with_capacity(CacheCleanupPolicy::new(1024))
+        .await
+        .unwrap();
 
     assert_eq!(report.orphan_partial_files_deleted, 0);
 }
@@ -566,14 +569,17 @@ async fn large_full_read_replaces_unclaimed_complete_payload() {
 #[tokio::test]
 async fn concurrent_large_reads_commit_complete_metadata_once() {
     use crate::cache::{CacheManager, InMemoryCacheIndex};
+    use crate::config::{StorageRuntime, StorageRuntimeConfig};
 
     let key = default_location(LARGE_KEY);
     let inner_backend = MemoryObjectBackend::new();
     inner_backend.insert(key.clone(), b"abcdefgh".to_vec());
     let backend = Arc::new(BlockingRangeBackend::new(inner_backend));
     let index = CountingCompleteIndex::new(InMemoryCacheIndex::new());
+    let runtime = StorageRuntime::new(StorageRuntimeConfig::default()).unwrap();
     let cache = Arc::new(
-        CacheManager::new(super::fixtures::test_cache_dir(), index).with_limits(4, 4),
+        CacheManager::new(super::fixtures::test_cache_dir(), index, runtime)
+            .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let service = Arc::new(StorageService::with_registry(

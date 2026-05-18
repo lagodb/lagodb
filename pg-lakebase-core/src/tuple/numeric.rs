@@ -7,7 +7,7 @@ pub const PG_EPOCH_DAYS_DIFF: i32 = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as
 
 /// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in microseconds.
 pub const PG_EPOCH_USECS_DIFF: i64 =
-    (PG_EPOCH_DAYS_DIFF as i64) * (pgrx::datum::USECS_PER_DAY as i64);
+    (PG_EPOCH_DAYS_DIFF as i64) * pgrx::datum::USECS_PER_DAY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NumericTypmod {

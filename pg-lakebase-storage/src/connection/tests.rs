@@ -13,7 +13,7 @@ use tokio::time::{sleep, timeout};
 
 use crate::backend::{MemoryObjectBackend, ObjectBackend, StoreRegistry};
 use crate::cache::{CacheManager, InMemoryCacheIndex};
-use crate::config::StorageServerConfig;
+use crate::config::{StorageRuntime, StorageRuntimeConfig, StorageServerConfig};
 use crate::error::StorageResult;
 use crate::handle::OpenFlags;
 use crate::object::{ObjectInfo, ObjectLocation};
@@ -46,8 +46,12 @@ async fn disconnect_aborts_in_flight_request_tasks() {
         dropped: Arc::new(Mutex::new(Some(dropped_send))),
     };
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-            .with_limits(4, 4),
+        CacheManager::new(
+            test_cache_dir(),
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -119,8 +123,12 @@ async fn write_half_shutdown_still_receives_in_flight_response() {
         release: Mutex::new(Some(release_recv)),
     };
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-            .with_limits(4, 4),
+        CacheManager::new(
+            test_cache_dir(),
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -185,8 +193,12 @@ async fn close_waits_for_prior_read_on_same_handle() {
         release: Mutex::new(Some(release_recv)),
     };
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-            .with_limits(4, 4),
+        CacheManager::new(
+            test_cache_dir(),
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()
@@ -282,8 +294,12 @@ async fn read_admission_precedes_response_budget_wait() {
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefghij".to_vec());
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-            .with_limits(4, 4),
+        CacheManager::new(
+            test_cache_dir(),
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let registry = StoreRegistry::new()

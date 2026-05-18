@@ -216,20 +216,49 @@ that later cleanup passes will remove.
 Eviction skips objects with active service reads, chunk downloads,
 promotions, or handle-scoped cache leases.
 
-Cleanup triggers:
+Cleanup splits into two responsibilities with different drivers:
 
-- **Startup**: recovery scan followed by capacity-only LRU pass.
-- **Write-path trigger** (automatic when `max_cache_bytes` is set): fires
-  right after a cache admission that crosses the start watermark. This is
-  event-driven — no wasted CPU when the cache is below capacity. For most
-  deployments, write-path cleanup alone is sufficient for capacity management.
-- **Periodic trigger** (opt-in via `cleanup_interval`): a background task
-  runs at a fixed interval. Useful as a safety net for orphan file cleanup
-  when long-lived processes may accumulate stale physical payloads.
-- **Manual**: explicit `cleanup()` call.
+- **Capacity eviction** — bring `resident_bytes` below the policy's target.
+  Threshold-driven; runs only when usage crosses `start_bytes`.
+- **Orphan reclamation** — delete partial files left by aborted fills and
+  complete payloads whose unlink failed during eviction. Correctness-driven,
+  not threshold-driven; runs on every periodic / reload / manual pass.
 
-Both write-path and periodic triggers use `try_lock` on an internal gate so
-concurrent cleanup traversals from different sources never pile up.
+The two are dispatched by a single background actor (`CleanupScheduler`)
+through four trigger paths:
+
+- **Startup**: `recover()` deletes startup-time orphans and then
+  `cleanup_capacity_only()` runs an LRU pass. The cleanup scheduler is
+  started **after** these run, so startup work never overlaps with
+  background work.
+- **Write-path nudge** (automatic when `max_cache_bytes` is set): after a
+  successful admit/promote, the write path calls `nudge_cleanup_after_write`
+  synchronously — zero awaits, zero allocations. The actor wakes and runs a
+  **capacity-only** pass when usage is over `start_bytes`. Nudges that fire
+  below the watermark or when no capacity cap is configured are no-ops.
+  Write nudges do **not** run the orphan walker — successful writes do not
+  create orphans, and routing every admit through the orphan-candidate
+  snapshot would cost a janitor pass per write with nothing to do.
+- **Periodic trigger** (opt-in via `cleanup_interval`): runs the orphan +
+  capacity pass on the configured interval. Without `cleanup_interval`,
+  runtime orphan reclamation runs only on hot-reload, manual cleanup, or
+  next startup. Embedders that disable both `cleanup_interval` and
+  `max_cache_bytes` accept that runtime orphan reclamation is dormant
+  between restarts; the trade-off keeps the write path free of unnecessary
+  scans when the cache is healthy.
+- **Hot-reload of `CacheRuntimeConfig`**: equivalent to a periodic tick.
+  A reload that opens or tightens caps takes effect immediately, without
+  waiting for a future nudge or interval.
+- **Manual**: `CacheManager::cleanup_orphans()` runs orphan reclamation
+  alone; `CacheManager::cleanup_with_capacity(policy)` runs orphan
+  reclamation followed by LRU eviction toward the policy's target. Manual
+  cleanup is not threshold-gated.
+
+The scheduler holds a single async gate that serialises janitor traversals.
+There is exactly one background actor; the only contender for the gate is
+`run_manual`. The actor uses `lock().await` with shutdown cancellation so a
+trigger that arrives while a manual cleanup is in flight is queued behind
+the gate rather than dropped.
 
 
 9  Crash Recovery

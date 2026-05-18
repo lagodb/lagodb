@@ -8,16 +8,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::{StorageError, StorageResult};
+use tokio_util::sync::CancellationToken;
+
+use crate::config::{CacheRuntimeHandle, StorageRuntime};
+use crate::error::StorageResult;
 use crate::object::{
     DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, ObjectLocation, StoreId,
     normalize_chunk_size,
 };
 
 use super::chunks::ReaperInbox;
+use super::cleanup_scheduler::CleanupScheduler;
 use super::index::CacheIndex;
 use super::inventory::{RuntimeOrphanCandidateSnapshot, RuntimeOrphanCandidates};
-use super::janitor::{CacheJanitor, CleanupCoordinator};
+use super::janitor::CacheJanitor;
 use super::object_state::{ObjectStateRegistry, PerObjectState};
 use super::path::CachePathResolver;
 use super::startup::StartupRecovery;
@@ -28,19 +32,6 @@ use super::types::{CacheCleanupPolicy, CacheCleanupReport, CachePurgeReport};
 use super::usage::{
     CacheUsageSnapshot, LogicalCacheUsage, PhysicalCacheUsage, PhysicalUsageVisitor,
 };
-
-/// Triggers for `CacheManager`'s `run_cleanup` (the only path that takes `CleanupCoordinator`'s gate).
-///
-/// There is no `Startup` variant by design: production startup runs
-/// `CacheManager::recover` then optional startup-only capacity cleanup in
-/// `StorageServerBuilder::bind` before accepting traffic and before spawning the periodic cleanup
-/// task. Runtime cleanup triggers below all operate after startup reconciliation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::cache) enum CleanupTrigger {
-    Manual,
-    WritePath,
-    Periodic,
-}
 
 /// Orchestrates on-disk cache files, small-object payloads, and index mutations for one cache root.
 ///
@@ -57,8 +48,10 @@ pub(in crate::cache) enum CleanupTrigger {
 ///   current residency, but it is not backend reconciliation.
 /// - **Derived cache:** Partial files may exist without metadata. Complete-file eviction deletes metadata before unlink
 ///   so logical resident bytes drop before orphaned bytes disappear from disk (see `cache/eviction.rs`).
-/// - **Cleanup gate:** an internal async mutex serializes janitor traversals from periodic/manual/write-triggered
-///   cleanup; startup [`Self::recover`] deliberately bypasses that gate.
+/// - **Cleanup scheduling:** the embedded [`CleanupScheduler`] owns the gate and the wake channel. Write paths only
+///   `nudge_cleanup_after_write()`; the scheduler actor (started by [`Self::spawn_cleanup_scheduler`]) and manual
+///   cleanup callers are the only routes that actually run [`CacheJanitor::cleanup`]. Startup [`Self::recover`]
+///   deliberately bypasses the gate.
 ///
 /// Implement [`crate::cache::index::CacheIndex`] so metadata, small rows, and LRU tracking stay mutually consistent.
 pub struct CacheManager<I: CacheIndex> {
@@ -66,46 +59,47 @@ pub struct CacheManager<I: CacheIndex> {
     pub(crate) index: I,
     pub(in crate::cache) small_object_limit: u64,
     pub(in crate::cache) chunk_size: u64,
-    pub(in crate::cache) cleanup_policy: Option<CacheCleanupPolicy>,
-    pub(crate) touch_granularity: Duration,
     pub(in crate::cache) object_states: ObjectStateRegistry,
     /// Receiver half of the large-fill reaper channel. `None` after
     /// [`Self::spawn_large_fill_reaper`] consumed it; double-spawn is a programmer error.
     pub(in crate::cache) reaper_inbox: std::sync::Mutex<Option<ReaperInbox>>,
-    pub(in crate::cache) cleanup: CleanupCoordinator,
+    pub(in crate::cache) cleanup_scheduler: Arc<CleanupScheduler>,
     pub(in crate::cache) orphan_candidates: RuntimeOrphanCandidates,
+    pub(in crate::cache) runtime: CacheRuntimeHandle,
 }
 
 impl<I: CacheIndex> CacheManager<I> {
-    pub fn new(root: PathBuf, index: I) -> Self {
+    pub fn new(root: PathBuf, index: I, runtime: StorageRuntime) -> Self {
+        Self::with_runtime_handle(root, index, runtime.cache_handle())
+    }
+
+    /// Variant of [`Self::new`] for code paths that already hold a [`CacheRuntimeHandle`] —
+    /// today the only consumer is [`Self::new`] itself; kept as a separate `pub(crate)`
+    /// constructor so future internal entry points can avoid going through `StorageRuntime`
+    /// when they already have the cache slice in hand. External callers always go through
+    /// [`Self::new`].
+    pub(crate) fn with_runtime_handle(
+        root: PathBuf,
+        index: I,
+        runtime: CacheRuntimeHandle,
+    ) -> Self {
         let (object_states, reaper_inbox) = ObjectStateRegistry::new();
         Self {
             paths: CachePathResolver::new(root),
             index,
             small_object_limit: DEFAULT_SMALL_OBJECT_LIMIT,
             chunk_size: DEFAULT_CHUNK_SIZE,
-            cleanup_policy: None,
-            touch_granularity: Duration::from_secs(60),
             object_states,
             reaper_inbox: std::sync::Mutex::new(Some(reaper_inbox)),
-            cleanup: CleanupCoordinator::default(),
+            cleanup_scheduler: Arc::new(CleanupScheduler::new()),
             orphan_candidates: RuntimeOrphanCandidates::default(),
+            runtime,
         }
     }
 
     pub fn with_limits(mut self, small_object_limit: u64, chunk_size: u64) -> Self {
         self.small_object_limit = small_object_limit;
         self.chunk_size = normalize_chunk_size(chunk_size);
-        self
-    }
-
-    pub fn with_cleanup_policy(mut self, cleanup_policy: CacheCleanupPolicy) -> Self {
-        self.cleanup_policy = Some(cleanup_policy);
-        self
-    }
-
-    pub fn with_touch_granularity(mut self, touch_granularity: Duration) -> Self {
-        self.touch_granularity = touch_granularity;
         self
     }
 
@@ -120,6 +114,15 @@ impl<I: CacheIndex> CacheManager<I> {
 
     pub fn chunk_size(&self) -> u64 {
         self.chunk_size
+    }
+
+    /// Snapshot of the cache touch granularity from the live runtime config.
+    ///
+    /// Returned in nanoseconds because every consumer (`open_hit` family) expects ns. This
+    /// is on the OPEN hot path; the implementation is a single ArcSwap load + a [`Duration`]
+    /// copy and allocates nothing.
+    pub(in crate::cache) fn touch_granularity_ns(&self) -> u64 {
+        duration_to_ns(self.runtime.touch_granularity())
     }
 
     /// Placeholder for future per-store cache eviction; today it validates the API shape and leaves cache data intact.
@@ -170,7 +173,9 @@ impl<I: CacheIndex> CacheManager<I> {
             .get_existing(key)
             .and_then(|state| state.live_fill_session())
             .ok_or_else(|| {
-                StorageError::cache(format!("no live large fill for {key}"))
+                crate::error::StorageError::cache(format!(
+                    "no live large fill for {key}"
+                ))
             })?;
         self.abort_large_fill(&session).await
     }
@@ -241,29 +246,40 @@ impl<I: CacheIndex> CacheManager<I> {
     }
 
     /// Install runtime logical usage and delete unclaimed physical payloads with one startup
-    /// physical scan and one paged metadata scan. This does **not** acquire the `CleanupCoordinator` gate used by
-    /// `cleanup` / `run_cleanup`.
+    /// physical scan and one paged metadata scan. This does **not** acquire the [`CleanupScheduler`]
+    /// gate used by `cleanup` and the background actor.
     ///
     /// **Production contract:** `StorageServerBuilder::bind` calls this once while the server is
     /// still private, then optional startup-only capacity cleanup, then wraps the manager in `Arc`
-    /// and starts the periodic task (`sleep` before first run). So recover never races startup
-    /// periodic cleanup on that default path.
+    /// and starts the scheduler actor (`sleep` before first run). So recover never races startup
+    /// background cleanup on that default path.
     ///
-    /// **Do not** call this while `cleanup` / periodic `spawn_cleanup_task` work may be active on
-    /// the same manager unless you deliberately accept overlapping janitor traversals.
+    /// **Do not** call this while `cleanup` / a spawned scheduler may be active on the same
+    /// manager unless you deliberately accept overlapping janitor traversals.
     pub async fn recover(&self) -> StorageResult<super::CacheRecoveryReport> {
         StartupRecovery::new(self).recover().await
     }
 
-    pub async fn cleanup(
+    /// Manual orphan reclamation pass.
+    ///
+    /// Drains the gate and runs [`crate::cache::janitor::CacheJanitor::cleanup`] without a
+    /// capacity policy — cached payloads are not evicted, only orphan candidates (partial
+    /// files left by aborted fills, complete payloads whose unlink failed) are removed.
+    pub async fn cleanup_orphans(&self) -> StorageResult<CacheCleanupReport> {
+        self.cleanup_scheduler.run_manual(self, None).await
+    }
+
+    /// Manual cleanup pass: orphan reclamation **plus** LRU capacity eviction toward the
+    /// supplied policy's target.
+    ///
+    /// Manual capacity cleanup is not threshold-gated; the policy's target is honoured
+    /// regardless of where the resident bytes currently sit relative to the policy's start
+    /// watermark. Callers that want orphan-only semantics use [`Self::cleanup_orphans`].
+    pub async fn cleanup_with_capacity(
         &self,
         policy: CacheCleanupPolicy,
     ) -> StorageResult<CacheCleanupReport> {
-        self.run_cleanup(policy, CleanupTrigger::Manual)
-            .await?
-            .ok_or_else(|| {
-                StorageError::cache("manual cleanup was unexpectedly skipped")
-            })
+        self.cleanup_scheduler.run_manual(self, Some(policy)).await
     }
 
     /// Startup-only capacity cleanup. `recover` has already removed startup orphans, so this path
@@ -275,31 +291,12 @@ impl<I: CacheIndex> CacheManager<I> {
         CacheJanitor::new(self).cleanup_capacity(policy).await
     }
 
-    /// Single place that takes `CleanupCoordinator`'s gate for `CacheJanitor::cleanup` (not for
-    /// `recover`). Write/periodic triggers use `try_lock` to avoid piling up traversals.
-    pub(in crate::cache) async fn run_cleanup(
-        &self,
-        policy: CacheCleanupPolicy,
-        trigger: CleanupTrigger,
-    ) -> StorageResult<Option<CacheCleanupReport>> {
-        match trigger {
-            CleanupTrigger::Manual => {
-                let _cleanup_guard = self.cleanup.lock().await;
-                Ok(Some(CacheJanitor::new(self).cleanup(policy).await?))
-            }
-            CleanupTrigger::WritePath | CleanupTrigger::Periodic => {
-                let Some(_cleanup_guard) = self.cleanup.try_lock() else {
-                    return Ok(None);
-                };
-                if trigger == CleanupTrigger::WritePath
-                    && self.index.logical_cache_usage().await?.resident_bytes
-                        <= policy.start_bytes()
-                {
-                    return Ok(None);
-                }
-                Ok(Some(CacheJanitor::new(self).cleanup(policy).await?))
-            }
-        }
+    /// Synchronous "the cache just grew" hint, called from admission and large-fill promote.
+    ///
+    /// Allocates nothing, never awaits. Wakes (or arms) the scheduler actor; the actor decides
+    /// whether the threshold is crossed and whether to acquire the gate.
+    pub(in crate::cache) fn nudge_cleanup_after_write(&self) {
+        self.cleanup_scheduler.nudge();
     }
 
     pub fn partial_path(&self, key: &ObjectLocation) -> StorageResult<PathBuf> {
@@ -326,35 +323,31 @@ impl<I: CacheIndex> CacheManager<I> {
     pub(crate) fn small_object_store(&self) -> SmallObjectStore<'_, I> {
         SmallObjectStore { index: &self.index }
     }
-
-    pub(crate) async fn maybe_cleanup(&self) -> StorageResult<()> {
-        let Some(policy) = self.cleanup_policy else {
-            return Ok(());
-        };
-        if self.index.logical_cache_usage().await?.resident_bytes
-            > policy.start_bytes()
-        {
-            let _ = self.run_cleanup(policy, CleanupTrigger::WritePath).await?;
-        }
-        Ok(())
-    }
 }
 
 impl<I: CacheIndex + 'static> CacheManager<I> {
-    pub fn spawn_cleanup_task(
-        self: Arc<Self>,
-        policy: CacheCleanupPolicy,
-        interval: Duration,
+    /// Spawns the cleanup scheduler actor. Call once after wrapping the manager in `Arc` and
+    /// before accepting traffic; double-spawn is harmless but wastes a task.
+    ///
+    /// `shutdown` is the cancellation token the embedder uses to stop the actor (the
+    /// [`crate::server::StorageServer`] passes its background-tasks token here). The actor also
+    /// exits if the manager's last strong reference drops.
+    ///
+    /// The runtime-config watch is subscribed **synchronously** here, before spawning the
+    /// actor task. If subscription happened inside the spawned future, a config `apply` racing
+    /// the scheduler's first poll could be lost — this matters in tests but also matters in
+    /// production for any embedder that applies an initial config before traffic starts.
+    pub fn spawn_cleanup_scheduler(
+        self: &Arc<Self>,
+        shutdown: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                let _ = self.run_cleanup(policy, CleanupTrigger::Periodic).await;
-            }
-        })
+        let scheduler = self.cleanup_scheduler.clone();
+        let runtime = self.runtime.clone();
+        let changes = runtime.subscribe();
+        let weak = Arc::downgrade(self);
+        tokio::spawn(scheduler.run(weak, runtime, changes, shutdown))
     }
 }
-
 pub(in crate::cache) fn duration_to_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }

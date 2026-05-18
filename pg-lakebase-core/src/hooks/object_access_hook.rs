@@ -483,7 +483,7 @@ unsafe extern "C-unwind" fn object_access_router(
                     .report_unwrap();
             }
         }
-        drop(event);
+        let _ = event;
 
         if let Some(Some(prev)) = PREV_OBJECT_ACCESS_HOOK.get() {
             invoke_prev_object_access_hook(
@@ -520,7 +520,7 @@ unsafe extern "C-unwind" fn object_access_str_router(
                     .report_unwrap();
             }
         }
-        drop(event);
+        let _ = event;
 
         if let Some(Some(prev)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
             invoke_prev_object_access_str_hook(

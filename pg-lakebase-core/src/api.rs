@@ -52,8 +52,8 @@
 //! ## Error boundary invariant
 //!
 //! Table-AM trait methods are PostgreSQL callback boundaries, so they return
-//! [`AmResult<T>`], whose error type is `pgrx`'s [`ErrorReport`]. This is a
-//! deliberate API boundary: framework errors such as "callback not supported"
+//! [`AmResult<T>`], whose error type owns a PostgreSQL [`ErrorReport`]. This is
+//! a deliberate API boundary: framework errors such as "callback not supported"
 //! are reported here, and AM-specific domain errors should convert into
 //! `ErrorReport` at this edge.
 //!
@@ -65,6 +65,7 @@
 //! with PostgreSQL.
 
 use crate::TableAmRoutine;
+use crate::diag::PgReportError;
 use crate::handles::{
     AttrWidthsHandle, BufferAccessStrategyHandle, BulkInsertStateHandle,
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
@@ -116,16 +117,17 @@ impl From<AmFrameworkError> for ErrorReport {
 
 /// Result type for table-AM callbacks.
 ///
-/// This is intentionally fixed to [`ErrorReport`]. Code below this API boundary
-/// may use richer domain errors, but callbacks should expose PostgreSQL errors
-/// directly and rely on `From<DomainError> for ErrorReport` plus `?` for
-/// conversion.
-pub type AmResult<T> = Result<T, ErrorReport>;
+/// This is intentionally fixed to a small PostgreSQL error handle. Code below
+/// this API boundary may use richer domain errors, but callbacks should expose
+/// PostgreSQL errors directly and rely on `From<DomainError> for ErrorReport`
+/// plus `?` for conversion.
+pub type AmError = PgReportError;
+pub type AmResult<T> = Result<T, AmError>;
 
 /// Return PostgreSQL `FEATURE_NOT_SUPPORTED` for a table-AM callback that the
 /// implementing AM explicitly does not support.
 pub fn unsupported_callback<T>(method: &'static str) -> AmResult<T> {
-    Err(ErrorReport::from(AmFrameworkError::not_implemented(method)))
+    Err(AmFrameworkError::not_implemented(method).into())
 }
 
 /// Root trait identifying a Postgres table access method implementation.

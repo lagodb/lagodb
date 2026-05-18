@@ -133,12 +133,12 @@ pub(crate) fn validate_portable_path(
         )));
     }
     for component in path.components() {
-        if let Component::Normal(value) = component {
-            if value.len() > MAX_COMPONENT_LEN {
-                return Err(StorageError::invalid_path(format!(
-                    "path component for {key} exceeds maximum component length of {MAX_COMPONENT_LEN} bytes"
-                )));
-            }
+        if let Component::Normal(value) = component
+            && value.len() > MAX_COMPONENT_LEN
+        {
+            return Err(StorageError::invalid_path(format!(
+                "path component for {key} exceeds maximum component length of {MAX_COMPONENT_LEN} bytes"
+            )));
         }
     }
     Ok(())

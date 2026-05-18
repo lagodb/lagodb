@@ -3,15 +3,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
+use crate::config::{StorageRuntime, StorageRuntimeConfig};
 use crate::object::{ObjectInfo, ObjectLocation};
+
+fn test_runtime() -> StorageRuntime {
+    StorageRuntime::new(StorageRuntimeConfig::default()).unwrap()
+}
 
 static TEST_CACHE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn maps_read_to_chunks() {
-    let cache =
-        CacheManager::new(PathBuf::from("/tmp/cache"), InMemoryCacheIndex::new())
-            .with_limits(4, 4);
+    let cache = CacheManager::new(
+        PathBuf::from("/tmp/cache"),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(4, 4);
     assert_eq!(cache.chunks_for_read(0, 1, 10), vec![0]);
     assert_eq!(cache.chunks_for_read(3, 2, 10), vec![0, 1]);
     assert_eq!(cache.chunks_for_read(8, 8, 10), vec![2]);
@@ -23,9 +31,12 @@ fn maps_read_to_chunks() {
 
 #[test]
 fn manager_normalizes_zero_chunk_size() {
-    let cache =
-        CacheManager::new(PathBuf::from("/tmp/cache"), InMemoryCacheIndex::new())
-            .with_limits(4, 0);
+    let cache = CacheManager::new(
+        PathBuf::from("/tmp/cache"),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(4, 0);
 
     assert_eq!(cache.chunk_size(), 1);
     assert_eq!(cache.chunks_for_read(0, 3, 3), vec![0, 1, 2]);
@@ -34,8 +45,12 @@ fn manager_normalizes_zero_chunk_size() {
 #[tokio::test]
 async fn admit_small_uses_small_meta_and_payload_transaction() {
     let key = ObjectLocation::new("default", "bucket", "tiny").unwrap();
-    let cache = CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-        .with_limits(8, 2);
+    let cache = CacheManager::new(
+        test_cache_dir(),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(8, 2);
     let info = ObjectInfo {
         size: 3,
         etag: Some("v1".to_string()),
@@ -76,8 +91,12 @@ async fn admit_small_uses_small_meta_and_payload_transaction() {
 #[tokio::test]
 async fn recovery_deletes_partial_payload_without_metadata() {
     let key = ObjectLocation::new("default", "bucket", "large-missing").unwrap();
-    let cache = CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-        .with_limits(4, 4);
+    let cache = CacheManager::new(
+        test_cache_dir(),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(4, 4);
     cache.prepare_dirs().await.unwrap();
     let partial_path = cache.partial_path(&key).unwrap();
     write_cache_file(partial_path.clone(), b"abcdefgh").await;
@@ -93,8 +112,12 @@ async fn recovery_deletes_partial_payload_without_metadata() {
 #[tokio::test]
 async fn recovery_does_not_repair_missing_complete_payload() {
     let key = ObjectLocation::new("default", "bucket", "large").unwrap();
-    let cache = CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-        .with_limits(4, 4);
+    let cache = CacheManager::new(
+        test_cache_dir(),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(4, 4);
     let meta = CachedObjectMeta::complete(
         key.clone(),
         ObjectInfo {
@@ -127,8 +150,12 @@ async fn cleanup_deletes_unclaimed_complete_and_partial_candidates() {
         ObjectLocation::new("default", "bucket", "complete-orphan").unwrap();
     let partial_orphan =
         ObjectLocation::new("default", "bucket", "partial-orphan").unwrap();
-    let cache = CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-        .with_limits(4, 4);
+    let cache = CacheManager::new(
+        test_cache_dir(),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(4, 4);
     cache.prepare_dirs().await.unwrap();
     let live_meta = CachedObjectMeta::complete(
         live_key.clone(),
@@ -151,7 +178,7 @@ async fn cleanup_deletes_unclaimed_complete_and_partial_candidates() {
         .record_file_candidate(partial_path.clone());
 
     let report = cache
-        .cleanup(CacheCleanupPolicy::new(u64::MAX))
+        .cleanup_with_capacity(CacheCleanupPolicy::new(u64::MAX))
         .await
         .unwrap();
 
@@ -186,8 +213,12 @@ async fn write_cache_file(path: PathBuf, data: &[u8]) {
 #[tokio::test]
 async fn best_effort_invalidate_reports_not_present_when_no_cache_entry() {
     let key = ObjectLocation::new("default", "bucket", "ghost").unwrap();
-    let cache = CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-        .with_limits(4, 4);
+    let cache = CacheManager::new(
+        test_cache_dir(),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(4, 4);
 
     let outcome = cache.invalidate_object_cache_best_effort(&key).await;
 
@@ -197,8 +228,12 @@ async fn best_effort_invalidate_reports_not_present_when_no_cache_entry() {
 #[tokio::test]
 async fn best_effort_invalidate_removes_cached_small_entry() {
     let key = ObjectLocation::new("default", "bucket", "tiny-best-effort").unwrap();
-    let cache = CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-        .with_limits(8, 2);
+    let cache = CacheManager::new(
+        test_cache_dir(),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(8, 2);
     let info = ObjectInfo {
         size: 3,
         etag: Some("v1".to_string()),
@@ -226,8 +261,12 @@ async fn best_effort_invalidate_removes_cached_small_entry() {
 #[tokio::test]
 async fn best_effort_invalidate_skips_when_object_is_active() {
     let key = ObjectLocation::new("default", "bucket", "busy").unwrap();
-    let cache = CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-        .with_limits(8, 2);
+    let cache = CacheManager::new(
+        test_cache_dir(),
+        InMemoryCacheIndex::new(),
+        test_runtime(),
+    )
+    .with_limits(8, 2);
     let info = ObjectInfo {
         size: 3,
         etag: None,
@@ -237,9 +276,6 @@ async fn best_effort_invalidate_skips_when_object_is_active() {
         crate::cache::OpenOutcome::Establish(leader) => leader,
         _ => panic!("expected establish"),
     };
-    // Holding the residency keeps an `OpenLease` activity guard alive, so `is_active(key)` is
-    // true and best-effort invalidation must skip rather than tear the entry out from under the
-    // (simulated) live reader.
     let _residency = cache
         .admit_small(&leader, b"abc".to_vec(), info)
         .await

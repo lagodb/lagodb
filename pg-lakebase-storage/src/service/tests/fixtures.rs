@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::CachedObjectMeta;
 use crate::cache::{CacheIndex, CacheManager, InMemoryCacheIndex};
+use crate::config::{StorageRuntime, StorageRuntimeConfig};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::object::{ObjectInfo, ObjectLocation};
 use crate::service::StorageService;
@@ -69,8 +70,9 @@ pub(crate) fn memory_cache_with_limits(
     small_limit: u64,
     large_limit: u64,
 ) -> Arc<CacheManager<InMemoryCacheIndex>> {
+    let runtime = StorageRuntime::new(StorageRuntimeConfig::default()).unwrap();
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new(), runtime)
             .with_limits(small_limit, large_limit),
     );
     cache.spawn_large_fill_reaper();

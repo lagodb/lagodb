@@ -32,12 +32,11 @@
 //! ERROR, abort, and rollback-to-savepoint are handled by `ResourceOwner`
 //! cleanup registered by the frame manager.
 
-use crate::diag::ReportableError;
+use crate::diag::{PgReportError, ReportableError};
 use crate::hooks::{
     CopyStmtNode, PostUtilityContext, UtilityHook, UtilityHookError, UtilityNode,
     register_utility_hook,
 };
-use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::{pg_guard, pg_sys};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -94,9 +93,9 @@ unsafe fn invoke_prev_executor_end(
     }
 }
 
-fn report_executor_finish_invariant(err: ErrorReport) {
+fn report_executor_finish_invariant(err: PgReportError) {
     #[cfg(debug_assertions)]
-    Err::<(), ErrorReport>(err).report_unwrap();
+    Err::<(), PgReportError>(err).report_unwrap();
 
     #[cfg(not(debug_assertions))]
     crate::diag::report_warning(&err.to_string());
@@ -235,10 +234,10 @@ unsafe extern "C-unwind" fn executor_finish_hook(query_desc: *mut pg_sys::QueryD
     // this EState is still on the active stack.
     if !query_desc.is_null() {
         let estate = unsafe { (*query_desc).estate };
-        if let Some(estate) = NonNull::new(estate) {
-            if let Err(err) = session::check_executor_finish_invariants(estate) {
-                report_executor_finish_invariant(err);
-            }
+        if let Some(estate) = NonNull::new(estate)
+            && let Err(err) = session::check_executor_finish_invariants(estate)
+        {
+            report_executor_finish_invariant(err);
         }
     }
 

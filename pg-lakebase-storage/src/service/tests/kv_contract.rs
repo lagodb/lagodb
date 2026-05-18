@@ -36,6 +36,7 @@ use crate::cache::index::persistent::RedbKv;
 use crate::cache::index::persistent::test_support::{
     CountingKv, KvCounts, KvCountsSnapshot, counting_redb_index, unique_redb_path,
 };
+use crate::config::{CacheRuntimeConfig, StorageRuntime, StorageRuntimeConfig};
 use crate::handle::OpenFlags;
 use crate::object::ObjectLocation;
 use crate::service::StorageService;
@@ -67,19 +68,23 @@ impl Harness {
         touch_granularity: Duration,
     ) -> Self {
         let (index, counts) = counting_redb_index(unique_redb_path("contract"));
-        // Small cap 8 bytes: our SMALL_KEY fixture payloads stay within that threshold; LARGE_KEY
-        // payloads exceed it to drive the large-fill path.
+        let runtime_cfg = StorageRuntimeConfig {
+            cache: CacheRuntimeConfig {
+                touch_granularity,
+                ..CacheRuntimeConfig::default()
+            },
+        };
+        let runtime = StorageRuntime::new(runtime_cfg).unwrap();
         let cache = Arc::new(
-            CacheManager::new(test_cache_dir(), index)
-                .with_limits(8, 4)
-                .with_touch_granularity(touch_granularity),
+            CacheManager::new(test_cache_dir(), index, runtime).with_limits(8, 4),
         );
         cache.spawn_large_fill_reaper();
-        let service = StorageService::with_registry(
+        let service = StorageService::with_registry_config(
             StoreRegistry::new()
                 .with_shared_backend(DEFAULT_STORE, backend)
                 .unwrap(),
             cache,
+            crate::config::StorageServiceConfig::default(),
         );
         let handles = HandleTable::new();
         Self {

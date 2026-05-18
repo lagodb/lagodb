@@ -82,9 +82,6 @@ impl<I: CacheIndex + 'static> StorageService<I> {
                 OpenOutcome::Hit(residency) => return Ok(residency),
                 OpenOutcome::Waiting(waiter) => {
                     waiter.wait().await?;
-                    // Leader published `Succeeded`; loop back and the next `lookup_for_open`
-                    // observes a hit (or, in the pathological case of an immediate invalidate
-                    // racing against the retry, another miss that this caller is free to lead).
                 }
                 OpenOutcome::Establish(leader) => {
                     return self.populate_as_leader(store, leader).await;
@@ -117,17 +114,12 @@ impl<I: CacheIndex + 'static> StorageService<I> {
     ) -> StorageResult<Residency> {
         let result = self.run_establishment(store, &leader).await;
         match &result {
-            // Outcome-ordering contract: publish `Succeeded` only after the residency is
-            // observable through the index / live fill session so followers that retry
-            // `lookup_for_open` are guaranteed to see a hit.
             Ok(_) => leader.succeed(),
             Err(error) => leader.fail(error),
         }
         result
     }
 
-    /// Head + admit the leader's residency without touching the flight outcome. The outer
-    /// [`Self::populate_as_leader`] observes the [`Result`] and publishes accordingly.
     async fn run_establishment(
         &self,
         store: &Arc<RegisteredStore>,

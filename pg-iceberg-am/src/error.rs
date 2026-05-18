@@ -2,7 +2,8 @@
 //!
 //! Keep Iceberg business logic on [`IcebergResult<T>`] and [`IcebergError`].
 //! The PostgreSQL table-AM callback boundary returns
-//! `pg_lakebase_core::api::AmResult<T>`, which is `Result<T, ErrorReport>`.
+//! `pg_lakebase_core::api::AmResult<T>`, which owns a PostgreSQL
+//! `ErrorReport` through a small error handle.
 //! The bridge is the `From<IcebergError> for ErrorReport` implementation in
 //! this file, so callback methods can use normal `?` propagation.
 //!

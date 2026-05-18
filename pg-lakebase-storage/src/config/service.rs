@@ -1,25 +1,26 @@
-//! Read clamps, cache geometry, touch cadence, and cleanup policy consumed by
-//! [`crate::service::StorageService`].
+//! Read clamps and cache geometry consumed by [`crate::service::StorageService`].
+//!
+//! Runtime-tunable cache parameters (touch granularity, cleanup policy) live in
+//! [`super::runtime::StorageRuntimeConfig`] and are hot-reloaded via
+//! [`super::runtime::StorageRuntime`].
 
-use std::time::Duration;
-
-use super::cleanup::CacheCleanupConfig;
 use crate::object::{
     DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, normalize_chunk_size,
 };
 
 pub const DEFAULT_MAX_READ_SIZE: u32 = 1024 * 1024;
-pub const DEFAULT_CACHE_TOUCH_GRANULARITY: Duration = Duration::from_secs(60);
+pub const DEFAULT_CACHE_TOUCH_GRANULARITY: std::time::Duration =
+    std::time::Duration::from_secs(60);
 
-/// Read clamps, cache geometry, touch cadence, and cleanup policy consumed by
-/// [`crate::service::StorageService`].
+/// Read clamps and cache geometry consumed by [`crate::service::StorageService`].
+///
+/// Cache runtime parameters (touch granularity, cleanup thresholds/intervals)
+/// are managed separately by [`super::runtime::StorageRuntime`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageServiceConfig {
     pub max_read_size: u32,
     pub small_object_limit: u64,
     pub chunk_size: u64,
-    pub touch_granularity: Duration,
-    pub cache_cleanup: CacheCleanupConfig,
     /// When `true`, the service rejects wire-level `RegisterStore` and
     /// `UnregisterStore` requests because the [`crate::backend::StoreRegistry`]
     /// is being driven by an external owner (such as the `pg-lakebase-core`
@@ -36,8 +37,6 @@ impl Default for StorageServiceConfig {
             max_read_size: DEFAULT_MAX_READ_SIZE,
             small_object_limit: DEFAULT_SMALL_OBJECT_LIMIT,
             chunk_size: DEFAULT_CHUNK_SIZE,
-            touch_granularity: DEFAULT_CACHE_TOUCH_GRANULARITY,
-            cache_cleanup: CacheCleanupConfig::default(),
             registry_managed_externally: false,
         }
     }
@@ -59,24 +58,6 @@ impl StorageServiceConfig {
         self
     }
 
-    pub fn with_max_cache_bytes(mut self, max_cache_bytes: u64) -> Self {
-        self.cache_cleanup.max_cache_bytes = Some(max_cache_bytes.max(1));
-        self
-    }
-
-    pub fn with_cache_cleanup_config(
-        mut self,
-        cache_cleanup: CacheCleanupConfig,
-    ) -> Self {
-        self.cache_cleanup = cache_cleanup.normalized();
-        self
-    }
-
-    pub fn with_touch_granularity(mut self, touch_granularity: Duration) -> Self {
-        self.touch_granularity = touch_granularity;
-        self
-    }
-
     /// Mark the [`crate::backend::StoreRegistry`] as managed by an external
     /// owner. The service will reject wire-level `RegisterStore` /
     /// `UnregisterStore` requests so the external owner stays the single
@@ -89,7 +70,6 @@ impl StorageServiceConfig {
     pub fn normalized(mut self) -> Self {
         self.max_read_size = self.max_read_size.max(1);
         self.chunk_size = normalize_chunk_size(self.chunk_size);
-        self.cache_cleanup = self.cache_cleanup.normalized();
         self
     }
 }
@@ -104,15 +84,6 @@ mod tests {
             max_read_size: 0,
             small_object_limit: 7,
             chunk_size: 0,
-            touch_granularity: Duration::ZERO,
-            cache_cleanup: CacheCleanupConfig {
-                max_cache_bytes: Some(0),
-                cleanup_start_percent: 0,
-                cleanup_target_percent: 100,
-                max_cleanup_batch_items: 0,
-                max_cleanup_batch_bytes: 0,
-                cleanup_interval: Some(Duration::ZERO),
-            },
             registry_managed_externally: false,
         }
         .normalized();
@@ -120,11 +91,5 @@ mod tests {
         assert_eq!(config.max_read_size, 1);
         assert_eq!(config.small_object_limit, 7);
         assert_eq!(config.chunk_size, 1);
-        assert_eq!(config.cache_cleanup.cleanup_start_percent, 1);
-        assert_eq!(config.cache_cleanup.cleanup_target_percent, 1);
-        assert_eq!(config.cache_cleanup.max_cache_bytes, Some(1));
-        assert_eq!(config.cache_cleanup.max_cleanup_batch_items, 1);
-        assert_eq!(config.cache_cleanup.max_cleanup_batch_bytes, 1);
-        assert_eq!(config.cache_cleanup.cleanup_interval, None);
     }
 }

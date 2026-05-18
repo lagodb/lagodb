@@ -47,7 +47,7 @@ struct ResourceEntry {
 }
 
 thread_local! {
-    static RESOURCES: RefCell<Vec<ResourceEntry>> = RefCell::new(Vec::new());
+    static RESOURCES: RefCell<Vec<ResourceEntry>> = const { RefCell::new(Vec::new()) };
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
     static CALLBACK_REGISTERED: Cell<bool> = const { Cell::new(false) };
 }

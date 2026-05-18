@@ -29,11 +29,12 @@
 //! observe directly.
 
 use crate::api::{AmDmlSession, DmlTarget, TableAccessMethod};
+use crate::diag::{PgReportError, ReportableError};
 use crate::handles::RelationHandle;
 use crate::resource::{self, ResourceHandle};
 use crate::tuple::Row;
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::{ErrorReport, ErrorReportable};
+use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -98,11 +99,11 @@ impl ModifySession {
     pub(super) fn finish_bulk_insert(
         &mut self,
         options: ::core::ffi::c_int,
-    ) -> Result<(), ErrorReport> {
+    ) -> Result<(), PgReportError> {
         self.state.finish_bulk_insert(options)
     }
 
-    fn finalize_success(&mut self) -> Result<(), ErrorReport> {
+    fn finalize_success(&mut self) -> Result<(), PgReportError> {
         self.state.end_modify()?;
         self.finalized = true;
         Ok(())
@@ -177,16 +178,18 @@ thread_local! {
     static NEXT_COPY_ID: Cell<u64> = const { Cell::new(1) };
 }
 
-fn internal_error(message: impl Into<String>) -> ErrorReport {
+fn internal_error(message: impl Into<String>) -> PgReportError {
     ErrorReport::new(PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, message.into(), "")
+        .into()
 }
 
-fn feature_not_supported(message: impl Into<String>) -> ErrorReport {
+fn feature_not_supported(message: impl Into<String>) -> PgReportError {
     ErrorReport::new(
         PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
         message.into(),
         "",
     )
+    .into()
 }
 
 fn next_copy_id() -> u64 {
@@ -197,7 +200,7 @@ fn next_copy_id() -> u64 {
     })
 }
 
-fn current_frame_key() -> Result<FrameKey, ErrorReport> {
+fn current_frame_key() -> Result<FrameKey, PgReportError> {
     CURRENT_FRAME_STACK.with(|stack| {
         stack.borrow().last().copied().ok_or_else(|| {
             feature_not_supported(
@@ -231,7 +234,7 @@ fn abort_frame_and_remove_stack(key: FrameKey) {
 
 fn lookup_node_adapter(
     ps: NonNull<pg_sys::PlanState>,
-) -> Result<NodeAdapter, ErrorReport> {
+) -> Result<NodeAdapter, PgReportError> {
     NODE_ADAPTERS.with(|adapters| {
         adapters.borrow().get(&ps).copied().ok_or_else(|| {
             internal_error("ModifyTable node adapter missing during DML execution")
@@ -239,7 +242,7 @@ fn lookup_node_adapter(
     })
 }
 
-fn cmd_type_for_key(key: FrameKey) -> Result<pg_sys::CmdType::Type, ErrorReport> {
+fn cmd_type_for_key(key: FrameKey) -> Result<pg_sys::CmdType::Type, PgReportError> {
     match key {
         FrameKey::ModifyTable(ps) => {
             lookup_node_adapter(ps).map(|adapter| adapter.cmd_type)
@@ -251,7 +254,7 @@ fn cmd_type_for_key(key: FrameKey) -> Result<pg_sys::CmdType::Type, ErrorReport>
 fn ensure_frame_exists(
     key: FrameKey,
     cmd_type: pg_sys::CmdType::Type,
-) -> Result<(), ErrorReport> {
+) -> Result<(), PgReportError> {
     FRAMES.with(|frames| {
         let mut frames = frames.borrow_mut();
         let frame = frames
@@ -270,7 +273,10 @@ fn is_borrowed(key: FrameKey) -> bool {
     BORROWED_KEYS.with(|keys| keys.borrow().contains(&key))
 }
 
-fn frame_has_session(key: FrameKey, relid: pg_sys::Oid) -> Result<bool, ErrorReport> {
+fn frame_has_session(
+    key: FrameKey,
+    relid: pg_sys::Oid,
+) -> Result<bool, PgReportError> {
     FRAMES.with(|frames| {
         let frames = frames.borrow();
         let frame = frames
@@ -284,7 +290,7 @@ fn insert_session(
     key: FrameKey,
     relid: pg_sys::Oid,
     session: Box<ModifySession>,
-) -> Result<(), ErrorReport> {
+) -> Result<(), PgReportError> {
     FRAMES.with(|frames| {
         let mut frames = frames.borrow_mut();
         let frame = frames.get_mut(&key).ok_or_else(|| {
@@ -308,7 +314,7 @@ struct BorrowedFrame {
 }
 
 impl BorrowedFrame {
-    fn take(key: FrameKey) -> Result<Self, ErrorReport> {
+    fn take(key: FrameKey) -> Result<Self, PgReportError> {
         // Closure-based session access is deliberately implemented by taking
         // the frame out of the TLS map.  Returning a long-lived raw pointer into
         // FRAMES would let RefCell borrows leak through arbitrary AM code and
@@ -337,7 +343,7 @@ impl BorrowedFrame {
     fn session_mut(
         &mut self,
         relid: pg_sys::Oid,
-    ) -> Result<&mut ModifySession, ErrorReport> {
+    ) -> Result<&mut ModifySession, PgReportError> {
         let frame = self
             .frame
             .as_mut()
@@ -374,8 +380,8 @@ impl Drop for BorrowedFrame {
 fn with_frame_session<R>(
     key: FrameKey,
     relid: pg_sys::Oid,
-    f: impl FnOnce(&mut ModifySession) -> Result<R, ErrorReport>,
-) -> Result<R, ErrorReport> {
+    f: impl FnOnce(&mut ModifySession) -> Result<R, PgReportError>,
+) -> Result<R, PgReportError> {
     let mut borrowed = BorrowedFrame::take(key)?;
     f(borrowed.session_mut(relid)?)
 }
@@ -383,7 +389,7 @@ fn with_frame_session<R>(
 fn create_session<A>(
     rel: pg_sys::Relation,
     cmd_type: pg_sys::CmdType::Type,
-) -> Result<Box<ModifySession>, ErrorReport>
+) -> Result<Box<ModifySession>, PgReportError>
 where
     A: TableAccessMethod,
 {
@@ -404,8 +410,8 @@ where
 
 pub(super) fn with_current_session<A, R>(
     rel: pg_sys::Relation,
-    f: impl FnOnce(&mut ModifySession) -> Result<R, ErrorReport>,
-) -> Result<R, ErrorReport>
+    f: impl FnOnce(&mut ModifySession) -> Result<R, PgReportError>,
+) -> Result<R, PgReportError>
 where
     A: TableAccessMethod,
 {
@@ -489,7 +495,7 @@ impl Drop for FinalizingGuard {
     }
 }
 
-pub(crate) fn finish_frame(key: FrameKey) -> Result<(), ErrorReport> {
+pub(crate) fn finish_frame(key: FrameKey) -> Result<(), PgReportError> {
     // Success path: remove the frame first so any callback during finalize is
     // either rejected by FINALIZING_KEYS or treated as a separate, explicit
     // frame.  Forget the ResourceOwner handle before calling AM code; if
@@ -527,7 +533,7 @@ pub(crate) fn begin_copy_from_frame() {
     COPY_FRAME_STACK.with(|stack| stack.borrow_mut().push(key));
 }
 
-pub(crate) fn finish_current_copy_frame() -> Result<(), ErrorReport> {
+pub(crate) fn finish_current_copy_frame() -> Result<(), PgReportError> {
     // The post-utility hook is a success path, so it finalizes the current COPY
     // frame.  Stack cleanup is retain-based because an ERROR path will skip this
     // function entirely and ResourceOwner cleanup may already have removed the
@@ -544,7 +550,7 @@ pub(crate) fn finish_current_copy_frame() -> Result<(), ErrorReport> {
 pub(crate) fn register_executor_adapter(
     estate: NonNull<pg_sys::EState>,
     nodes: Vec<NonNull<pg_sys::PlanState>>,
-) -> Result<(), ErrorReport> {
+) -> Result<(), PgReportError> {
     if nodes.is_empty() {
         return Ok(());
     }
@@ -594,7 +600,7 @@ pub(crate) fn register_executor_adapter(
 fn wrap_modifytable_node(
     estate: NonNull<pg_sys::EState>,
     ps: NonNull<pg_sys::PlanState>,
-) -> Result<(), ErrorReport> {
+) -> Result<(), PgReportError> {
     unsafe {
         if (*ps.as_ptr()).type_ != pg_sys::NodeTag::T_ModifyTableState {
             return Err(internal_error(
@@ -671,7 +677,7 @@ pub(crate) fn end_executor_adapter(estate: NonNull<pg_sys::EState>) {
 
 pub(crate) fn check_executor_finish_invariants(
     estate: NonNull<pg_sys::EState>,
-) -> Result<(), ErrorReport> {
+) -> Result<(), PgReportError> {
     // ExecutorFinish can run executor post-processing and triggers.  If a
     // ModifyTable frame for this executor is still on the current stack at this
     // point, our wrapper push/pop accounting is inconsistent.  In release builds
@@ -703,7 +709,7 @@ pub(crate) unsafe extern "C-unwind" fn lakebase_modifytable_wrapper(
     };
     let key = FrameKey::ModifyTable(ps_key);
 
-    let adapter = lookup_node_adapter(ps_key).unwrap_or_report();
+    let adapter = lookup_node_adapter(ps_key).report_unwrap();
 
     // This wrapper is the ModifyTable frame boundary.  While PostgreSQL is
     // executing the node, table-AM callbacks can resolve CURRENT_FRAME_STACK to
@@ -716,7 +722,7 @@ pub(crate) unsafe extern "C-unwind" fn lakebase_modifytable_wrapper(
 
     let mtstate = ps as *mut pg_sys::ModifyTableState;
     if slot.is_null() && unsafe { (*mtstate).mt_done } {
-        finish_frame(key).unwrap_or_report();
+        finish_frame(key).report_unwrap();
     }
 
     slot

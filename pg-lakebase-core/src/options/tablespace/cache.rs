@@ -200,28 +200,22 @@ fn lookup_tablespace_options(
         return Ok(None);
     };
 
-    let result = {
-        let tablespace_name = lookup_tablespace_name(&tp)?;
+    let tablespace_name = lookup_tablespace_name(&tp)?;
 
-        if let Some(datum) =
-            tp.get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16)?
-        {
-            // SAFETY: datum is valid while the syscache tuple guard is alive.
-            // Vec::from_datum copies the data out of Postgres memory before
-            // the guard releases the syscache tuple.
-            let options_vec = unsafe { Vec::<String>::from_datum(datum, false) }
-                .unwrap_or_default();
-            if options_vec.is_empty() {
-                Ok(None)
-            } else {
-                parse_options_to_cached(tablespace_name, options_vec)
-            }
-        } else {
+    if let Some(datum) = tp.get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16)? {
+        // SAFETY: datum is valid while the syscache tuple guard is alive.
+        // Vec::from_datum copies the data out of Postgres memory before
+        // the guard releases the syscache tuple.
+        let options_vec =
+            unsafe { Vec::<String>::from_datum(datum, false) }.unwrap_or_default();
+        if options_vec.is_empty() {
             Ok(None)
+        } else {
+            parse_options_to_cached(tablespace_name, options_vec)
         }
-    };
-
-    result
+    } else {
+        Ok(None)
+    }
 }
 
 fn lookup_tablespace_name(

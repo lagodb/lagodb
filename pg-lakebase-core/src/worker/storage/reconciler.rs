@@ -12,7 +12,8 @@
 //! [`super::catalog`]. The split keeps reconcile logic unit-testable from a
 //! plain `cargo test` without needing a PostgreSQL backend.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::error::Error as StdError;
 use std::fmt;
 
@@ -156,8 +157,7 @@ where
     /// `AssertUnwindSafe` in the supervisor.
     pub(crate) fn load_desired(
         &mut self,
-    ) -> Result<HashMap<StoreId, TablespaceStoreSpec>, ReconcileError<S::Error>>
-    {
+    ) -> Result<HashMap<StoreId, TablespaceStoreSpec>, ReconcileError<S::Error>> {
         let desired_vec = self.source.load().map_err(ReconcileError::Source)?;
         build_desired_map(desired_vec)
     }
@@ -180,23 +180,23 @@ where
     /// validation succeeds for every spec.
     pub(crate) fn apply_desired(
         &mut self,
-        desired: HashMap<StoreId, TablespaceStoreSpec>,
+        mut desired: HashMap<StoreId, TablespaceStoreSpec>,
     ) -> Result<ReconcileReport, ReconcileError<S::Error>> {
         let mut report = ReconcileReport::default();
 
-        // First pass: classify into adds, replaces, no-ops, and removals
-        // *without* touching the registry.
-        let mut to_register: Vec<&TablespaceStoreSpec> = Vec::new();
-        let mut to_unregister: Vec<StoreId> = Vec::new();
-
+        // First pass: classify each desired spec into add / replace / no-op
+        // by comparing against the last applied snapshot. We iterate
+        // `desired` by reference here so we can fall back to the second pass
+        // for up-front validation without taking ownership yet.
+        let mut to_register_ids: Vec<StoreId> = Vec::with_capacity(desired.len());
         for (id, spec) in desired.iter() {
             match self.applied.get(id) {
                 None => {
-                    to_register.push(spec);
+                    to_register_ids.push(id.clone());
                     report.added += 1;
                 }
                 Some(existing) if existing != spec => {
-                    to_register.push(spec);
+                    to_register_ids.push(id.clone());
                     report.replaced += 1;
                 }
                 Some(_) => {
@@ -205,6 +205,7 @@ where
             }
         }
 
+        let mut to_unregister: Vec<StoreId> = Vec::new();
         for id in self.applied.keys() {
             if !desired.contains_key(id) {
                 to_unregister.push(id.clone());
@@ -217,13 +218,16 @@ where
         // mode `register_config` can surface for a syntactically-valid
         // store_id, so doing it up front gives us true all-or-nothing
         // semantics for the validation phase.
-        for spec in &to_register {
-            spec.config.validate().map_err(|source| {
-                ReconcileError::Register {
-                    store_id: spec.store_id.clone(),
+        for id in &to_register_ids {
+            let spec = desired
+                .get(id)
+                .expect("to_register_ids derived from desired keys");
+            spec.config
+                .validate()
+                .map_err(|source| ReconcileError::Register {
+                    store_id: id.clone(),
                     source,
-                }
-            })?;
+                })?;
         }
 
         // Third pass: mutate the registry. After up-front validation the
@@ -231,13 +235,24 @@ where
         // unexpected internal error in the registry), we abort and report.
         // Already-registered entries in this same pass stay in the registry
         // and the next reconcile evaluates them against a fresh snapshot.
-        for spec in &to_register {
+        //
+        // We `remove` each spec out of `desired` so the owned value can be
+        // moved straight into `self.applied` after registration; the
+        // registry only needs a clone of `StoreConfig`, which itself owns
+        // its strings.
+        let mut registered: Vec<TablespaceStoreSpec> =
+            Vec::with_capacity(to_register_ids.len());
+        for id in &to_register_ids {
+            let spec = desired
+                .remove(id)
+                .expect("to_register_ids derived from desired keys");
             self.registry
                 .register_config(spec.store_id.as_str(), spec.config.clone())
                 .map_err(|source| ReconcileError::Register {
                     store_id: spec.store_id.clone(),
                     source,
                 })?;
+            registered.push(spec);
         }
 
         // TODO(per-store cache purge): when a tablespace disappears from the
@@ -253,8 +268,8 @@ where
         }
 
         // Update tracked state only after both registry passes succeed.
-        for spec in to_register {
-            self.applied.insert(spec.store_id.clone(), spec.clone());
+        for spec in registered {
+            self.applied.insert(spec.store_id.clone(), spec);
         }
         for id in to_unregister {
             self.applied.remove(&id);
@@ -276,14 +291,19 @@ where
     E: StdError + Send + Sync + 'static,
 {
     let mut map = HashMap::with_capacity(specs.len());
-    let mut seen = HashSet::with_capacity(specs.len());
     for spec in specs {
-        if !seen.insert(spec.store_id.clone()) {
-            return Err(ReconcileError::DuplicateStoreId {
-                store_id: spec.store_id,
-            });
+        match map.entry(spec.store_id.clone()) {
+            Entry::Occupied(_) => {
+                // Move the duplicate input's id into the error instead of
+                // cloning the entry's key.
+                return Err(ReconcileError::DuplicateStoreId {
+                    store_id: spec.store_id,
+                });
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(spec);
+            }
         }
-        map.insert(spec.store_id.clone(), spec);
     }
     Ok(map)
 }

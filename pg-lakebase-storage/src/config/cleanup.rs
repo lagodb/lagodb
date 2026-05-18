@@ -1,18 +1,25 @@
-//! Capacity / orphan cleanup policy layered onto [`super::StorageServiceConfig`].
+//! Capacity / orphan cleanup policy used by [`super::runtime::CacheRuntimeConfig`].
 //!
 //! Orphan cleanup is always enabled — it is a mandatory correctness feature, not a tunable.
+//! `cleanup_interval` drives the periodic janitor pass which **always** reclaims orphans;
+//! capacity eviction also happens on that tick when `max_cache_bytes` is set.
 
 use std::time::Duration;
 
-pub const DEFAULT_CACHE_CLEANUP_START_PERCENT: u8 = 80;
-pub const DEFAULT_CACHE_CLEANUP_TARGET_PERCENT: u8 = 70;
-pub const DEFAULT_CACHE_CLEANUP_BATCH_ITEMS: usize = 1024;
-pub const DEFAULT_CACHE_CLEANUP_BATCH_BYTES: u64 = u64::MAX;
+use crate::cache::{
+    CacheCleanupPolicy, DEFAULT_CACHE_CLEANUP_BATCH_BYTES,
+    DEFAULT_CACHE_CLEANUP_BATCH_ITEMS, DEFAULT_CACHE_CLEANUP_START_PERCENT,
+    DEFAULT_CACHE_CLEANUP_TARGET_PERCENT,
+};
 
-/// Capacity cleanup thresholds and periodic janitor knobs layered onto
-/// [`super::StorageServiceConfig`].
+/// Capacity cleanup thresholds and periodic janitor knobs used by
+/// [`super::runtime::CacheRuntimeConfig`].
 ///
-/// Orphan cleanup is unconditionally enabled and not exposed as a configuration knob.
+/// Orphan reclamation is unconditionally enabled and not exposed as a tunable; what this
+/// struct controls is when capacity eviction kicks in (the `cleanup_*_percent` fields and
+/// `max_cache_bytes`) and how often the periodic janitor pass runs (`cleanup_interval`).
+/// The interval is meaningful even without `max_cache_bytes`: the periodic tick still runs
+/// orphan reclamation, just without the capacity step.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheCleanupConfig {
     pub max_cache_bytes: Option<u64>,
@@ -31,6 +38,10 @@ impl Default for CacheCleanupConfig {
             cleanup_target_percent: DEFAULT_CACHE_CLEANUP_TARGET_PERCENT,
             max_cleanup_batch_items: DEFAULT_CACHE_CLEANUP_BATCH_ITEMS,
             max_cleanup_batch_bytes: DEFAULT_CACHE_CLEANUP_BATCH_BYTES,
+            // Disabled by default. Periodic orphan reclamation works without
+            // `max_cache_bytes`, but the GUC layer (bgworker path) sets both together for
+            // ease of operation. Embedders that want the periodic janitor without a
+            // capacity cap can opt in by calling `with_cleanup_interval` alone.
             cleanup_interval: None,
         }
     }
@@ -49,7 +60,7 @@ impl CacheCleanupConfig {
     ) -> Self {
         self.cleanup_start_percent = cleanup_start_percent;
         self.cleanup_target_percent = cleanup_target_percent;
-        self.normalized()
+        self
     }
 
     pub fn with_max_cleanup_batch_bytes(
@@ -57,7 +68,7 @@ impl CacheCleanupConfig {
         max_cleanup_batch_bytes: u64,
     ) -> Self {
         self.max_cleanup_batch_bytes = max_cleanup_batch_bytes;
-        self.normalized()
+        self
     }
 
     pub fn with_cleanup_interval(mut self, cleanup_interval: Duration) -> Self {
@@ -77,6 +88,24 @@ impl CacheCleanupConfig {
             self.cleanup_interval = None;
         }
         self
+    }
+
+    /// Derive a [`CacheCleanupPolicy`] from this config, returning `None`
+    /// when no capacity cap is configured.
+    ///
+    /// `None` means **only** "no capacity eviction" — orphan reclamation is unaffected and
+    /// will still run on the periodic tick / reload / manual paths. The scheduler treats
+    /// `None` as "skip the LRU walk", not "the cleanup subsystem is disabled".
+    pub fn to_policy(&self) -> Option<CacheCleanupPolicy> {
+        let config = self.clone().normalized();
+        let max_cache_bytes = config.max_cache_bytes?;
+        let mut policy = CacheCleanupPolicy::new(max_cache_bytes);
+        policy.cleanup_start_ratio = f64::from(config.cleanup_start_percent) / 100.0;
+        policy.cleanup_target_ratio =
+            f64::from(config.cleanup_target_percent) / 100.0;
+        policy.max_cleanup_batch_items = config.max_cleanup_batch_items.max(1);
+        policy.max_cleanup_batch_bytes = config.max_cleanup_batch_bytes.max(1);
+        Some(policy)
     }
 }
 

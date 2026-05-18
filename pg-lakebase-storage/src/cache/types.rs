@@ -25,12 +25,19 @@
 //!    without re-validating against the index.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::chunks::LargeFillSession;
 use super::establish::{EstablishLeader, EstablishWaiter};
 use super::meta::CachedObjectMeta;
 use super::object_state::CacheActivityGuard;
 use super::usage::{LogicalCacheUsage, PhysicalCacheUsage};
+
+pub const DEFAULT_CACHE_CLEANUP_START_PERCENT: u8 = 90;
+pub const DEFAULT_CACHE_CLEANUP_TARGET_PERCENT: u8 = 80;
+pub const DEFAULT_CACHE_CLEANUP_BATCH_ITEMS: usize = 256;
+pub const DEFAULT_CACHE_CLEANUP_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+pub const DEFAULT_CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Why cached payload deletion ran (capacity LRU, explicit invalidation, startup repair, etc.).
 ///
@@ -88,10 +95,10 @@ impl CacheCleanupPolicy {
     pub fn new(max_cache_bytes: u64) -> Self {
         Self {
             max_cache_bytes,
-            cleanup_start_ratio: 0.80,
-            cleanup_target_ratio: 0.70,
-            max_cleanup_batch_items: 1024,
-            max_cleanup_batch_bytes: u64::MAX,
+            cleanup_start_ratio: DEFAULT_CACHE_CLEANUP_START_PERCENT as f64 / 100.0,
+            cleanup_target_ratio: DEFAULT_CACHE_CLEANUP_TARGET_PERCENT as f64 / 100.0,
+            max_cleanup_batch_items: DEFAULT_CACHE_CLEANUP_BATCH_ITEMS,
+            max_cleanup_batch_bytes: DEFAULT_CACHE_CLEANUP_BATCH_BYTES,
         }
     }
 

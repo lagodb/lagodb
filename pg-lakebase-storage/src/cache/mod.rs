@@ -14,12 +14,13 @@
 
 mod admission;
 mod chunks;
+mod cleanup_scheduler;
 mod establish;
 mod eviction;
 pub mod index;
 mod inventory;
 mod janitor;
-mod manager;
+pub(crate) mod manager;
 mod meta;
 mod object_state;
 pub mod path;
@@ -47,6 +48,9 @@ pub use store::{
 pub use types::{
     BestEffortInvalidateOutcome, CacheCleanupPolicy, CacheCleanupReport,
     CacheDeleteReason, CacheInvalidateReport, CachePurgeReport, CacheRecoveryReport,
+    DEFAULT_CACHE_CLEANUP_BATCH_BYTES, DEFAULT_CACHE_CLEANUP_BATCH_ITEMS,
+    DEFAULT_CACHE_CLEANUP_INTERVAL, DEFAULT_CACHE_CLEANUP_START_PERCENT,
+    DEFAULT_CACHE_CLEANUP_TARGET_PERCENT,
 };
 pub(crate) use types::{
     CacheEvictionOutcome, OpenOutcome, Residency, ResidencyBody, ResidencyStateHint,

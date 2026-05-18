@@ -57,6 +57,8 @@ pub struct UtilityNode<'a> {
 }
 
 impl<'a> UtilityNode<'a> {
+    /// # Safety
+    /// `ptr` must be a valid pointer to a PostgreSQL Node with appropriate lifetime.
     pub unsafe fn new(ptr: *mut pg_sys::Node) -> Self {
         Self {
             ptr,

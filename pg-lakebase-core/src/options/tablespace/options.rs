@@ -75,7 +75,8 @@ impl TablespaceOptions {
                 .map_err(TablespaceError::InvalidOption)?
         };
 
-        let Some(options) = (!opts.is_empty()).then(|| Self { options: opts }) else {
+        let Some(options) = (!opts.is_empty()).then_some(Self { options: opts })
+        else {
             return Ok(None);
         };
 
@@ -96,7 +97,8 @@ impl TablespaceOptions {
             defs::extract_options(stmt).map_err(TablespaceError::InvalidOption)?
         };
 
-        let Some(options) = (!opts.is_empty()).then(|| Self { options: opts }) else {
+        let Some(options) = (!opts.is_empty()).then_some(Self { options: opts })
+        else {
             return Ok(None);
         };
 

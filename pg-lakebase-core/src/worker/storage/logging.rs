@@ -11,7 +11,6 @@
 //! Reference: Neon communicator logging bridge
 //! <https://github.com/neondatabase/neon/blob/main/pgxn/neon/communicator/src/worker_process/logging.rs>
 
-use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -117,16 +116,36 @@ impl PgLogBridge {
 /// failure), PostgreSQL's error recursion will call `proc_exit`, which is
 /// acceptable: the logging subsystem is broken and the bgworker should exit.
 pub(super) fn emit_pg_log(elevel: i32, message: &str) {
+    const PREFIX: &str = "[pg-lakebase-storage] ";
+
     unsafe {
         if !pg_sys::message_level_is_interesting(elevel) {
             return;
         }
 
-        let message = message.replace('\0', "\\0");
-        let Ok(c_message) = CString::new(format!("[pg-lakebase-storage] {message}"))
-        else {
-            return;
-        };
+        // Build the C string into a single `Vec<u8>` and hand its buffer
+        // to `CString` without revalidation. The vec is sized for
+        // `prefix + message + NUL`; if `message` contains embedded NULs
+        // they are rewritten as the two-byte literal `\0`, which can grow
+        // past the initial capacity and trigger a reallocation. That path
+        // is rare (NULs are not expected in tracing output), so the common
+        // case is one allocation and one move-into-CString.
+        let mut buf = Vec::with_capacity(PREFIX.len() + message.len() + 1);
+        buf.extend_from_slice(PREFIX.as_bytes());
+        for &byte in message.as_bytes() {
+            if byte == 0 {
+                buf.extend_from_slice(b"\\0");
+            } else {
+                buf.push(byte);
+            }
+        }
+        buf.push(0);
+
+        // SAFETY: We just appended a single trailing NUL, and the loop above
+        // rewrote any embedded NULs from `message` into a two-byte escape, so
+        // the buffer satisfies `CString::from_vec_with_nul_unchecked`'s
+        // contract (exactly one terminating NUL and no interior NULs).
+        let c_message = std::ffi::CString::from_vec_with_nul_unchecked(buf);
 
         let _hold = InterruptHoldoffGuard::enter();
 
@@ -162,8 +181,8 @@ impl Drop for InterruptHoldoffGuard {
 // tracing level to PG elevel mapping
 // ---------------------------------------------------------------------------
 
-fn tracing_level_to_pg(level: &Level) -> i32 {
-    match *level {
+fn tracing_level_to_pg(level: Level) -> i32 {
+    match level {
         Level::ERROR => pg_sys::PGERROR as i32,
         Level::WARN => pg_sys::WARNING as i32,
         Level::INFO => pg_sys::INFO as i32,
@@ -197,7 +216,43 @@ impl std::io::Write for EventBuffer<'_> {
 
 impl Drop for EventBuffer<'_> {
     fn drop(&mut self) {
-        let message = String::from_utf8_lossy(&self.bytes).trim().to_string();
+        // Convert the accumulated bytes into a `String` while reusing the
+        // existing `Vec<u8>` allocation on the common (valid-UTF-8) path:
+        //
+        // 1. Take ownership of `bytes`. `String::from_utf8` consumes the
+        //    vec and reuses its buffer; only validation runs.
+        // 2. Trim trailing whitespace in place via `truncate`. tracing's
+        //    fmt layer writes one event terminated by `\n`, so this is the
+        //    branch every event goes through.
+        // 3. Trim leading whitespace via `drain`, which is a memmove only
+        //    (no heap alloc). tracing's fmt layer does not emit leading
+        //    whitespace today, so this is effectively a no-op fast path.
+        // 4. Invalid UTF-8 falls back to a lossy copy.
+        //
+        // We use `str::trim_*` (Unicode whitespace) to match the original
+        // `from_utf8_lossy(...).trim()` semantics rather than the ASCII-only
+        // `u8::is_ascii_whitespace`.
+        let bytes = std::mem::take(&mut self.bytes);
+        if bytes.is_empty() {
+            return;
+        }
+
+        let mut message = match String::from_utf8(bytes) {
+            Ok(string) => string,
+            Err(error) => {
+                // Invalid UTF-8 path: replacement characters via `Cow`.
+                String::from_utf8_lossy(&error.into_bytes()).into_owned()
+            }
+        };
+
+        let trimmed_end_len = message.trim_end().len();
+        message.truncate(trimmed_end_len);
+
+        let leading = message.len() - message.trim_start().len();
+        if leading > 0 {
+            message.drain(..leading);
+        }
+
         if message.is_empty() {
             return;
         }
@@ -227,7 +282,7 @@ impl<'a> MakeWriter<'a> for PgLogWriter {
     fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
         EventBuffer {
             writer: self,
-            elevel: tracing_level_to_pg(meta.level()),
+            elevel: tracing_level_to_pg(*meta.level()),
             bytes: Vec::new(),
         }
     }

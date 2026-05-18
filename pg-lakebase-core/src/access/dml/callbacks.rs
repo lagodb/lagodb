@@ -121,8 +121,8 @@ pub(super) extern "C-unwind" fn multi_insert<A>(
         if session.multi_row_buffer.len() < nslots {
             session.multi_row_buffer.resize_with(nslots, Row::new);
         }
-        for i in 0..nslots {
-            session.multi_row_buffer[i].update_from_slot(slots_slice[i]);
+        for (i, slot) in slots_slice.iter().enumerate().take(nslots) {
+            session.multi_row_buffer[i].update_from_slot(*slot);
         }
 
         let bistate_handle =

@@ -1,6 +1,7 @@
 //! `Row`: a buffered representation of a PostgreSQL tuple plus the writer
 //! that materializes it back into a virtual `TupleTableSlot`.
 
+use crate::diag::PgReportError;
 use pgrx::FromDatum;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
@@ -95,6 +96,8 @@ impl Row {
         self.size = 0;
     }
 
+    /// # Safety
+    /// `slot` must be a valid, non-null pointer to an initialized TupleTableSlot.
     pub unsafe fn update_from_slot(&mut self, slot: *mut pg_sys::TupleTableSlot) {
         unsafe {
             // Ensure slot contents are accessible (deform tuple if needed)
@@ -124,6 +127,8 @@ impl Row {
         }
     }
 
+    /// # Safety
+    /// `slot` must be a valid, non-null pointer to an initialized TupleTableSlot.
     pub unsafe fn from_slot(slot: *mut pg_sys::TupleTableSlot) -> Self {
         unsafe {
             let mut row = Self::new();
@@ -162,7 +167,7 @@ impl TupleSlotWriter {
     ///
     /// The slot and memory context passed to [`Self::new`] must still be
     /// valid. The row is consumed in-place: written cells are taken from it.
-    pub unsafe fn write_row(&self, row: &mut Row) -> Result<(), ErrorReport> {
+    pub unsafe fn write_row(&self, row: &mut Row) -> Result<(), PgReportError> {
         unsafe {
             let tup_desc = (*self.slot).tts_tupleDescriptor;
             let natts = (*tup_desc).natts as usize;
@@ -176,7 +181,8 @@ impl TupleSlotWriter {
                         natts
                     ),
                     "",
-                ));
+                )
+                .into());
             }
 
             let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
@@ -193,14 +199,14 @@ impl TupleSlotWriter {
                             let datum = cell
                                 .into_datum_typed(attr.atttypid, attr.atttypmod)
                                 .ok_or_else(|| {
-                                    ErrorReport::new(
+                                    PgReportError::new(ErrorReport::new(
                                         PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
                                         format!(
                                             "failed to convert row column {} to datum",
                                             i + 1
                                         ),
                                         "",
-                                    )
+                                    ))
                                 })?;
 
                             slot_values[i] = datum;

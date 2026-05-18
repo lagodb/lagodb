@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::backend::{MemoryObjectBackend, StoreRegistry};
 use crate::cache::{CacheIndex, CacheManager, InMemoryCacheIndex};
 use crate::cache::{CacheState, CachedObjectMeta};
+use crate::config::{CacheRuntimeConfig, StorageRuntime, StorageRuntimeConfig};
 use crate::error::StorageError;
 use crate::handle::OpenFlags;
 use crate::object::ObjectInfo;
@@ -65,10 +66,16 @@ async fn complete_file_open_hit_touches_access_time_for_direct_io() {
     let key = default_location(LARGE_KEY);
     let backend = MemoryObjectBackend::new();
     backend.insert(key.clone(), b"abcdefgh".to_vec());
+    let runtime_cfg = StorageRuntimeConfig {
+        cache: CacheRuntimeConfig {
+            touch_granularity: Duration::ZERO,
+            ..CacheRuntimeConfig::default()
+        },
+    };
+    let runtime = StorageRuntime::new(runtime_cfg).unwrap();
     let cache = Arc::new(
-        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-            .with_limits(4, 4)
-            .with_touch_granularity(Duration::ZERO),
+        CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new(), runtime)
+            .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
     let mut meta = CachedObjectMeta::complete(
@@ -80,11 +87,12 @@ async fn complete_file_open_hit_touches_access_time_for_direct_io() {
     );
     meta.last_access_ns = 1;
     seed_complete_cache_with_meta(cache.as_ref(), &key, b"abcdefgh", meta).await;
-    let service = StorageService::with_registry(
+    let service = StorageService::with_registry_config(
         StoreRegistry::new()
             .with_shared_backend(DEFAULT_STORE, Arc::new(backend))
             .unwrap(),
         cache.clone(),
+        crate::config::StorageServiceConfig::default(),
     );
     let handles = HandleTable::new();
 

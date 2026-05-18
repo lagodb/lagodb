@@ -1,4 +1,8 @@
 //! Unix listener that accepts storage peers and runs each stream through the wire connection processor (`process_connection_with_drain_timeout`).
+//!
+//! [`StorageServer`] also owns a shared [`CancellationToken`] for the cache subsystem's
+//! background tasks (cleanup scheduler, large-fill reaper). The token is cancelled on
+//! [`Drop`] or explicit shutdown so the [`CacheManager`]-owned actors can exit cleanly.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +29,9 @@ pub struct StorageServer<I: CacheIndex> {
     service: Arc<StorageService<I>>,
     config: StorageServerConfig,
     request_hooks: RequestHooks,
+    /// Token shared with background tasks (cleanup, etc.) — cancelled on Drop
+    /// or explicit shutdown to ensure all owned tasks terminate.
+    background_shutdown: CancellationToken,
 }
 
 impl<I: CacheIndex + 'static> StorageServer<I> {
@@ -67,7 +74,18 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
             service,
             config,
             request_hooks,
+            background_shutdown: CancellationToken::new(),
         })
+    }
+
+    /// Cancellation token that gates every background task owned by the cache subsystem
+    /// (cleanup scheduler, large-fill reaper). Cancelled on [`Drop`] or explicit shutdown so
+    /// the actors exit deterministically.
+    ///
+    /// The builder hands this token to [`crate::cache::CacheManager::spawn_cleanup_scheduler`]
+    /// so the server's lifecycle wins over the actor's.
+    pub(crate) fn background_shutdown_token(&self) -> CancellationToken {
+        self.background_shutdown.clone()
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -93,6 +111,7 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
                 biased;
 
                 _ = shutdown.cancelled() => {
+                    self.background_shutdown.cancel();
                     info!("storage server shutdown requested");
                     return Ok(());
                 }
@@ -149,5 +168,11 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
                 debug!("storage connection closed: {error}");
             }
         });
+    }
+}
+
+impl<I: CacheIndex> Drop for StorageServer<I> {
+    fn drop(&mut self) {
+        self.background_shutdown.cancel();
     }
 }

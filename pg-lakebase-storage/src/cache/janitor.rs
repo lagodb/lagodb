@@ -1,4 +1,3 @@
-use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use tracing::info;
 
 use crate::cache::eviction::OrphanFileDeleted;
@@ -10,33 +9,24 @@ use crate::error::StorageResult;
 
 const CLEANUP_LRU_PAGE_SIZE: usize = 32;
 
-/// Serializes `CacheJanitor::cleanup` traversals that go through `CacheManager`'s `run_cleanup`.
-/// `recover()` is intentionally **not** routed here; see `CacheManager::recover`.
-#[derive(Default)]
-pub(super) struct CleanupCoordinator {
-    gate: AsyncMutex<()>,
-}
-
-impl CleanupCoordinator {
-    pub(super) async fn lock(&self) -> AsyncMutexGuard<'_, ()> {
-        self.gate.lock().await
-    }
-
-    pub(super) fn try_lock(&self) -> Option<AsyncMutexGuard<'_, ()>> {
-        self.gate.try_lock().ok()
-    }
-}
-
-/// Bounded cleanup pass invoked through [`crate::cache::CacheManager::run_cleanup`] (manual, write-triggered, or
-/// periodic).
+/// Bounded cleanup pass invoked through [`crate::cache::CacheManager::cleanup`] (manual) or
+/// [`crate::cache::cleanup_scheduler::CleanupScheduler`] (background).
 ///
-/// **Pipeline:** optional orphan deletes from [`crate::cache::inventory::RuntimeOrphanCandidates`], then LRU-driven
-/// eviction until logical resident bytes fall near [`crate::cache::CacheCleanupPolicy::target_bytes`] or batch caps
-/// trip.
+/// **Pipeline:** orphan deletes from [`crate::cache::inventory::RuntimeOrphanCandidates`] (always),
+/// then optional LRU-driven capacity eviction until logical resident bytes fall near
+/// [`crate::cache::CacheCleanupPolicy::target_bytes`] or batch caps trip.
 ///
-/// Eviction walks oldest-first pages from [`crate::cache::index::CacheIndex::oldest_cached_metas_page`];
-/// skipping [`crate::cache::object_state::PerObjectState`] activity may leave usage above target until the next
-/// pass.
+/// Orphan reclamation is a correctness-driven concern of the derived cache (partial files left
+/// behind by aborted fills, complete payloads whose unlink failed during eviction). It runs on
+/// every pass regardless of whether the operator has opted into capacity caps. Capacity eviction
+/// is opt-in: a [`None`] capacity argument means "no `max_cache_bytes` configured, skip the LRU
+/// walk entirely". Code paths that need both pass [`Some(policy)`]; code paths that only need
+/// orphan reclamation pass [`None`].
+///
+/// LRU eviction walks oldest-first pages from
+/// [`crate::cache::index::CacheIndex::oldest_cached_metas_page`]; skipping
+/// [`crate::cache::object_state::PerObjectState`] activity may leave usage above target until the
+/// next pass.
 pub(crate) struct CacheJanitor<'a, I: CacheIndex> {
     cache: &'a CacheManager<I>,
 }
@@ -46,9 +36,10 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
         Self { cache }
     }
 
+    /// Runs orphan reclamation, then capacity eviction if `capacity` is provided.
     pub(crate) async fn cleanup(
         &self,
-        policy: CacheCleanupPolicy,
+        capacity: Option<CacheCleanupPolicy>,
     ) -> StorageResult<CacheCleanupReport> {
         self.cache.prepare_dirs().await?;
         let mut report = CacheCleanupReport {
@@ -61,10 +52,20 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
             ..CacheCleanupReport::default()
         };
 
-        // Orphan cleanup is always performed unconditionally.
         self.delete_orphans(&mut report).await?;
 
-        let report = self.evict_by_lru(policy, report).await?;
+        let report = match capacity {
+            Some(policy) => self.evict_by_lru(policy, report).await?,
+            None => CacheCleanupReport {
+                bytes_after: self
+                    .cache
+                    .index
+                    .logical_cache_usage()
+                    .await?
+                    .resident_bytes,
+                ..report
+            },
+        };
         info!(
             bytes_before = report.bytes_before,
             bytes_after = report.bytes_after,
@@ -77,6 +78,8 @@ impl<'a, I: CacheIndex> CacheJanitor<'a, I> {
         Ok(report)
     }
 
+    /// Capacity-only pass used during startup, after `recover()` has already drained startup
+    /// orphans. Intentionally bypasses [`Self::delete_orphans`] to avoid a redundant traversal.
     pub(crate) async fn cleanup_capacity(
         &self,
         policy: CacheCleanupPolicy,
@@ -214,6 +217,7 @@ mod tests {
     use crate::cache::{
         CacheIndex, CacheManager, CachedObjectMeta, InMemoryCacheIndex,
     };
+    use crate::config::{StorageRuntime, StorageRuntimeConfig};
     use crate::object::{ObjectInfo, ObjectLocation};
 
     static TEST_CACHE_ID: AtomicU64 = AtomicU64::new(0);
@@ -226,7 +230,9 @@ mod tests {
         let deleted_partial_key =
             ObjectLocation::new("default", "bucket", "deleted-partial").unwrap();
 
-        let cache = CacheManager::new(test_cache_dir(), index).with_limits(4, 4);
+        let runtime = StorageRuntime::new(StorageRuntimeConfig::default()).unwrap();
+        let cache =
+            CacheManager::new(test_cache_dir(), index, runtime).with_limits(4, 4);
         cache.prepare_dirs().await.unwrap();
 
         let complete_meta = CachedObjectMeta::complete(
@@ -257,7 +263,7 @@ mod tests {
             .as_nanos();
         let id = TEST_CACHE_ID.fetch_add(1, Ordering::Relaxed);
         PathBuf::from("/tmp").join(format!(
-            "-cache-janitor-inventory-test-{}-{stamp}-{id}",
+            "pg-lakebase-storage-cache-janitor-test-{}-{stamp}-{id}",
             std::process::id()
         ))
     }

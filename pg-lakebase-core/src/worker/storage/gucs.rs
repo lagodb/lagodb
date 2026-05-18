@@ -1,9 +1,16 @@
 //! GUC definitions for the pg-lakebase storage background worker.
 //!
-//! All GUCs use `GucContext::Postmaster`; changes require a PostgreSQL restart.
+//! Most GUCs use `GucContext::Postmaster` (require a PostgreSQL restart).
+//! Runtime-tunable parameters use `GucContext::Sighup` and take effect after
+//! `pg_reload_conf()` or a SIGHUP signal.
 
 use std::ffi::CString;
 
+use pg_lakebase_storage::{
+    DEFAULT_CACHE_CLEANUP_BATCH_BYTES, DEFAULT_CACHE_CLEANUP_BATCH_ITEMS,
+    DEFAULT_CACHE_CLEANUP_INTERVAL, DEFAULT_CACHE_CLEANUP_START_PERCENT,
+    DEFAULT_CACHE_CLEANUP_TARGET_PERCENT, DEFAULT_CACHE_TOUCH_GRANULARITY,
+};
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
 static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -33,6 +40,23 @@ static MAX_READ_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1024 * 1024);
 /// disables periodic resync and relies entirely on syscache wake-ups.
 static TABLESPACE_RECONCILE_INTERVAL_MS: GucSetting<i32> =
     GucSetting::<i32>::new(30_000);
+
+// --- Cache runtime GUCs (Sighup-reloadable) ---
+
+static CACHE_TOUCH_GRANULARITY_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_CACHE_TOUCH_GRANULARITY.as_millis() as i32);
+static CACHE_MAX_MB: GucSetting<i32> = GucSetting::<i32>::new(0);
+static CACHE_CLEANUP_START_PERCENT: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_CACHE_CLEANUP_START_PERCENT as i32);
+static CACHE_CLEANUP_TARGET_PERCENT: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_CACHE_CLEANUP_TARGET_PERCENT as i32);
+static CACHE_CLEANUP_INTERVAL_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_CACHE_CLEANUP_INTERVAL.as_millis() as i32);
+static CACHE_CLEANUP_BATCH_ITEMS: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_CACHE_CLEANUP_BATCH_ITEMS as i32);
+static CACHE_CLEANUP_BATCH_MB: GucSetting<i32> = GucSetting::<i32>::new(
+    (DEFAULT_CACHE_CLEANUP_BATCH_BYTES / (1024 * 1024)) as i32,
+);
 
 pub fn init() {
     GucRegistry::define_bool_guc(
@@ -80,7 +104,7 @@ pub fn init() {
         &SHUTDOWN_TIMEOUT_MS,
         100,
         60000,
-        GucContext::Postmaster,
+        GucContext::Sighup,
         GucFlags::default(),
     );
 
@@ -124,7 +148,86 @@ pub fn init() {
         &TABLESPACE_RECONCILE_INTERVAL_MS,
         0,
         3_600_000,
-        GucContext::Postmaster,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    // --- Cache runtime GUCs (Sighup-reloadable) ---
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.cache_touch_granularity_ms",
+        c"Minimum interval between cache access-time updates for a single object",
+        c"Prevents excessive write I/O from frequent access-time touches. Set to 0 to touch on every access.",
+        &CACHE_TOUCH_GRANULARITY_MS,
+        0,
+        3_600_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.cache_max_mb",
+        c"Maximum cache size in MiB",
+        c"Capacity limit for the local object cache in mebibytes. 0 disables capacity-based cleanup.",
+        &CACHE_MAX_MB,
+        0,
+        i32::MAX,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.cache_cleanup_start_percent",
+        c"Cache usage percentage that triggers cleanup",
+        c"When resident bytes exceed this fraction of cache_max_mb, cleanup begins.",
+        &CACHE_CLEANUP_START_PERCENT,
+        1,
+        100,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.cache_cleanup_target_percent",
+        c"Target cache usage percentage after cleanup",
+        c"Cleanup evicts until resident bytes drop below this fraction of cache_max_mb.",
+        &CACHE_CLEANUP_TARGET_PERCENT,
+        0,
+        100,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.cache_cleanup_interval_ms",
+        c"Periodic cache cleanup interval in milliseconds",
+        c"How often the background cleanup task runs. 0 disables periodic cleanup.",
+        &CACHE_CLEANUP_INTERVAL_MS,
+        0,
+        3_600_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.cache_cleanup_batch_items",
+        c"Maximum number of items evicted per cleanup batch",
+        c"Limits work per cleanup iteration to avoid blocking cache access too long.",
+        &CACHE_CLEANUP_BATCH_ITEMS,
+        1,
+        1_000_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_server.cache_cleanup_batch_mb",
+        c"Maximum MiB evicted per cleanup batch",
+        c"Limits I/O work per cleanup iteration, in mebibytes.",
+        &CACHE_CLEANUP_BATCH_MB,
+        1,
+        i32::MAX,
+        GucContext::Sighup,
         GucFlags::default(),
     );
 }
@@ -134,17 +237,24 @@ pub fn enabled() -> bool {
 }
 
 pub fn socket_path() -> Option<String> {
-    SOCKET_PATH.get().and_then(|s| {
-        let v = s.to_string_lossy().to_string();
-        if v.is_empty() { None } else { Some(v) }
-    })
+    SOCKET_PATH.get().and_then(non_empty_lossy_string)
 }
 
 pub fn cache_dir() -> Option<String> {
-    CACHE_DIR.get().and_then(|s| {
-        let v = s.to_string_lossy().to_string();
-        if v.is_empty() { None } else { Some(v) }
-    })
+    CACHE_DIR.get().and_then(non_empty_lossy_string)
+}
+
+/// Convert a GUC `CString` into an owned `String`, returning `None` for
+/// empty values. Skips the `to_string_lossy().into_owned()` conversion when
+/// the value is empty so the common (unset) GUC path does no extra heap
+/// work inside this helper. The outer `GucSetting::<Option<CString>>::get`
+/// already owns its own `CString` clone, which we cannot influence.
+fn non_empty_lossy_string(value: CString) -> Option<String> {
+    if value.as_bytes().is_empty() {
+        None
+    } else {
+        Some(value.to_string_lossy().into_owned())
+    }
 }
 
 pub fn worker_threads() -> usize {
@@ -176,4 +286,45 @@ pub fn tablespace_reconcile_interval() -> Option<std::time::Duration> {
     } else {
         Some(std::time::Duration::from_millis(raw as u64))
     }
+}
+
+pub fn cache_touch_granularity() -> std::time::Duration {
+    std::time::Duration::from_millis(CACHE_TOUCH_GRANULARITY_MS.get().max(0) as u64)
+}
+
+/// Returns `None` (disabled) when the value is `0`; otherwise `Some(bytes)`
+/// converted from MiB.
+pub fn cache_max_bytes() -> Option<u64> {
+    let raw = CACHE_MAX_MB.get();
+    if raw <= 0 {
+        None
+    } else {
+        Some((raw as u64) * 1024 * 1024)
+    }
+}
+
+pub fn cache_cleanup_start_percent() -> u8 {
+    CACHE_CLEANUP_START_PERCENT.get().clamp(1, 100) as u8
+}
+
+pub fn cache_cleanup_target_percent() -> u8 {
+    CACHE_CLEANUP_TARGET_PERCENT.get().clamp(0, 100) as u8
+}
+
+/// Returns `None` (disabled) when the value is `0`; otherwise `Some(duration)`.
+pub fn cache_cleanup_interval() -> Option<std::time::Duration> {
+    let raw = CACHE_CLEANUP_INTERVAL_MS.get();
+    if raw <= 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(raw as u64))
+    }
+}
+
+pub fn cache_cleanup_batch_items() -> usize {
+    CACHE_CLEANUP_BATCH_ITEMS.get().max(1) as usize
+}
+
+pub fn cache_cleanup_batch_bytes() -> u64 {
+    (CACHE_CLEANUP_BATCH_MB.get().max(1) as u64) * 1024 * 1024
 }

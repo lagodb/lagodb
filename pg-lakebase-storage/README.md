@@ -68,11 +68,20 @@ Quick Start
 use std::sync::Arc;
 
 use pg_lakebase_storage::{
-    CacheCleanupConfig, StorageServerBuilder, StorageServerConfig, StorageServiceConfig,
+    CacheCleanupConfig, CacheRuntimeConfig, StorageRuntime, StorageRuntimeConfig,
+    StorageServerBuilder, StorageServerConfig, StorageServiceConfig,
 };
 
 async fn run() -> pg_lakebase_storage::StorageResult<()> {
     // 1. Build and bind the server (no backend at this point).
+    let runtime = StorageRuntime::new(StorageRuntimeConfig {
+        cache: CacheRuntimeConfig {
+            cleanup: CacheCleanupConfig::default()
+                .with_max_cache_bytes(100 * 1024 * 1024 * 1024)    // 100 GiB cache budget
+                .with_thresholds(80, 70),  // start at 80 GiB, evict to 70 GiB
+            ..CacheRuntimeConfig::default()
+        },
+    })?;
     let server = StorageServerBuilder::new("/tmp/storage.sock", "/tmp/storage-cache")
         .with_server_config(
             StorageServerConfig::default()
@@ -81,14 +90,9 @@ async fn run() -> pg_lakebase_storage::StorageResult<()> {
         )
         .with_service_config(
             StorageServiceConfig::default()
-                .with_max_read_size(1024 * 1024)
-                .with_max_cache_bytes(100 * 1024 * 1024 * 1024)  // 100 GiB cache budget
-                .with_cache_cleanup_config(
-                    CacheCleanupConfig::default()
-                        .with_max_cache_bytes(100 * 1024 * 1024 * 1024)
-                        .with_thresholds(80, 70),  // start at 80 GiB, evict to 70 GiB
-                ),
+                .with_max_read_size(1024 * 1024),
         )
+        .with_runtime(runtime)
         .bind()
         .await?;
 
@@ -116,10 +120,12 @@ same time):
   set): eviction fires right after a cache admission that crosses the start
   watermark. This is event-driven and only runs when necessary — no wasted
   CPU when the cache is below capacity.
-- **Periodic trigger** (opt-in via `with_cleanup_interval`): a background
-  janitor task runs at a fixed interval. Useful as a safety net for orphan
-  file cleanup, but the write-path trigger alone is usually sufficient for
-  capacity management.
+- **Periodic trigger** (opt-in via `cleanup_interval` in `CacheCleanupConfig`):
+  a background janitor task runs at a fixed interval. The task only schedules
+  periodic runs when **both** `cleanup_interval` and `max_cache_bytes` are set;
+  otherwise it parks idle. The `pg-lakebase-core` bgworker GUC layer sets both
+  together; standalone callers using `StorageRuntimeConfig::default()` get
+  periodic cleanup disabled until they explicitly configure a cache budget.
 
 Both triggers use `try_lock` on an internal gate so concurrent cleanup
 traversals from different triggers never pile up.
@@ -145,16 +151,17 @@ Configuration
 | max_read_size       | 1 MiB   | Server clamps each READ to this    |
 | small_object_limit  | 64 KiB  | Objects at or below this go to KV  |
 | chunk_size          | 4 MiB   | Large-object fetch granularity     |
-| touch_granularity   | 60 s    | LRU access-time refresh interval   |
 
-**Cache cleanup**
+**Runtime (hot-reloadable via `StorageRuntime::apply`)**
 
 | Knob                    | Default   | Description                           |
 |-------------------------|-----------|---------------------------------------|
+| touch_granularity       | 60 s      | LRU access-time refresh interval      |
 | max_cache_bytes         | unlimited | Total cache budget                    |
-| cleanup_start_percent   | 80%       | Begin eviction above this watermark   |
-| cleanup_target_percent  | 70%       | Evict down to this watermark          |
-| max_cleanup_batch_items | 1024      | Objects examined per cleanup pass     |
+| cleanup_start_percent   | 90%       | Begin eviction above this watermark   |
+| cleanup_target_percent  | 80%       | Evict down to this watermark          |
+| max_cleanup_batch_items | 256       | Objects examined per cleanup pass     |
+| max_cleanup_batch_bytes | 64 MiB    | Bytes evicted per cleanup pass        |
 | cleanup_interval        | disabled  | Optional periodic janitor (safety net)|
 
 Testing

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 //! pg-lakebase-core: A framework for building PostgreSQL Table Access Methods in Rust
 //!
 //! This library provides a safe, ergonomic API for implementing custom table access
@@ -68,7 +70,8 @@ pub mod worker;
 pub mod prelude {
     pub use crate::api::*;
     pub use crate::diag::{
-        PgError, PgErrorReport, PgErrorSource, ReportableError, SqlStateError,
+        PgError, PgErrorReport, PgErrorSource, PgReportError, ReportableError,
+        SqlStateError,
     };
     pub use crate::handles::*;
     pub use crate::pg_table_am;

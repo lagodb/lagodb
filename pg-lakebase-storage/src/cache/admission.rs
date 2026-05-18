@@ -52,13 +52,20 @@
 //! dead session or (worse) trigger a needless re-download. One `open_hit` transaction under the
 //! reacquired lock resolves that: if the row is already complete, admit binds the complete-file
 //! residency instead of building a new session.
+//!
+//! ## Cleanup is a fire-and-forget nudge
+//!
+//! `admit_small` calls [`CacheManager::nudge_cleanup_after_write`] only on the `Admitted`
+//! branch — the only path that raises resident byte totals. The `AlreadyPresent` race-loser
+//! path adds no bytes and skips the nudge. `admit_large` does not nudge: large-fill admission
+//! never writes payload bytes (the chunks land in [`crate::cache::chunks::ops`], which nudges
+//! after promote succeeds). Neither path ever awaits cleanup work.
 
 use std::sync::Arc;
 
 use crate::cache::CacheManager;
 use crate::cache::establish::{EstablishLeader, EstablishRole};
 use crate::cache::index::{AdmitSmallOutcome, CacheIndex, OpenHit};
-use crate::cache::manager::duration_to_ns;
 use crate::cache::meta::{CacheState, CachedObjectMeta};
 use crate::cache::object_state::{
     CacheActivityGuard, CacheActivityKind, ObjectLockGuard, PerObjectState,
@@ -115,7 +122,7 @@ impl<I: CacheIndex> CacheManager<I> {
         let object = self.lock_cache_object(key).await;
         if let Some(hit) = self
             .index
-            .open_hit(key, now_ns(), duration_to_ns(self.touch_granularity))
+            .open_hit(key, now_ns(), self.touch_granularity_ns())
             .await?
         {
             return Ok(OpenOutcome::Hit(residency_from_open_hit(
@@ -145,10 +152,8 @@ impl<I: CacheIndex> CacheManager<I> {
     /// minted inside the same per-object lock window that publishes the residency, so
     /// invalidation / eviction cannot race in between.
     ///
-    /// Capacity cleanup is invoked only on the `Admitted` branch — that is the only path that
-    /// raises resident byte totals. The `AlreadyPresent` race-loser path adds no bytes and
-    /// therefore skips `maybe_cleanup` to keep the fast path free of redundant gate
-    /// acquisitions.
+    /// On the `Admitted` branch the cleanup scheduler is nudged synchronously — the call does
+    /// not await anything; cleanup is the scheduler actor's responsibility.
     ///
     /// # On the `AlreadyPresent` branch
     ///
@@ -199,7 +204,7 @@ impl<I: CacheIndex> CacheManager<I> {
             }
         };
         if admitted {
-            self.maybe_cleanup().await?;
+            self.nudge_cleanup_after_write();
         }
         Ok(residency)
     }
@@ -210,17 +215,14 @@ impl<I: CacheIndex> CacheManager<I> {
     /// a complete-file meta row, the new OPEN binds that row instead of starting a fresh
     /// session. Otherwise joins (or creates) a live [`crate::cache::chunks::LargeFillSession`].
     ///
-    /// # Why no `maybe_cleanup` call
+    /// # Why no nudge here
     ///
-    /// Both return paths here are non-writing from the cache-capacity perspective:
+    /// Both return paths are non-writing from the cache-capacity perspective:
     /// * the "Hit on a racing promote" path observed an already-accounted `Complete` row,
     /// * the "join or create a live session" path stays entirely in process memory until the
     ///   final chunk is written (see
-    ///   [`crate::cache::CacheManager::store_large_chunk_for_session`], which calls
-    ///   `maybe_cleanup` itself after promotion succeeds).
-    ///
-    /// Skipping the call here keeps the symmetry "only paths that added resident bytes run the
-    /// cleanup gate" — matching the [`Self::admit_small`] rule above.
+    ///   [`crate::cache::CacheManager::store_large_chunk_for_session`], which nudges itself
+    ///   after promotion succeeds).
     pub(crate) async fn admit_large(
         &self,
         leader: &EstablishLeader,
@@ -233,7 +235,7 @@ impl<I: CacheIndex> CacheManager<I> {
         // bind directly.
         if let Some(hit) = self
             .index
-            .open_hit(key, now_ns(), duration_to_ns(self.touch_granularity))
+            .open_hit(key, now_ns(), self.touch_granularity_ns())
             .await?
         {
             return residency_from_open_hit(hit, object.open_lease());

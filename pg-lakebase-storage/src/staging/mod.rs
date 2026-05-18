@@ -169,17 +169,17 @@ impl StagingArea {
         let info = store.put_from_file(key, &path, size).await?;
         info!(key = %key, size, "staging file committed");
 
-        if let Err(error) = tokio::fs::remove_file(&path).await {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                // Upload already succeeded; the cleanup failure is best-effort diagnostic data.
-                // The next startup `wipe()` will remove the file.
-                tracing::warn!(
-                    key = %key,
-                    path = %path.display(),
-                    error = %error,
-                    "failed to remove staging file after successful commit; relying on startup wipe",
-                );
-            }
+        if let Err(error) = tokio::fs::remove_file(&path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            // Upload already succeeded; the cleanup failure is best-effort diagnostic data.
+            // The next startup `wipe()` will remove the file.
+            tracing::warn!(
+                key = %key,
+                path = %path.display(),
+                error = %error,
+                "failed to remove staging file after successful commit; relying on startup wipe",
+            );
         }
 
         Ok(info)

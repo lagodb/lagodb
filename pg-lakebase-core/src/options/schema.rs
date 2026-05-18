@@ -192,21 +192,21 @@ fn validate_option_value(
                 .parse::<i32>()
                 .map_err(|_| format!("invalid integer value \"{}\"", v))?;
 
-            if let Some(min_val) = min {
-                if int_val < *min_val {
-                    return Err(format!(
-                        "value {} is less than minimum {}",
-                        int_val, min_val
-                    ));
-                }
+            if let Some(min_val) = min
+                && int_val < *min_val
+            {
+                return Err(format!(
+                    "value {} is less than minimum {}",
+                    int_val, min_val
+                ));
             }
-            if let Some(max_val) = max {
-                if int_val > *max_val {
-                    return Err(format!(
-                        "value {} is greater than maximum {}",
-                        int_val, max_val
-                    ));
-                }
+            if let Some(max_val) = max
+                && int_val > *max_val
+            {
+                return Err(format!(
+                    "value {} is greater than maximum {}",
+                    int_val, max_val
+                ));
             }
             Ok(Some(int_val.to_string()))
         }

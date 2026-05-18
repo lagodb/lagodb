@@ -84,7 +84,7 @@ impl TableOptions {
                 .map_err(TableOptionError::InvalidOption)?
         };
 
-        Ok((!opts.is_empty()).then(|| Self { options: opts }))
+        Ok((!opts.is_empty()).then_some(Self { options: opts }))
     }
 
     pub fn read_from_stmt(
@@ -98,7 +98,7 @@ impl TableOptions {
                 .map_err(TableOptionError::InvalidOption)?
         };
 
-        Ok((!opts.is_empty()).then(|| Self { options: opts }))
+        Ok((!opts.is_empty()).then_some(Self { options: opts }))
     }
 
     pub fn persist_to_catalog(

@@ -23,8 +23,10 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::backend::StoreRegistry;
-use crate::cache::{CacheCleanupPolicy, CacheIndex, CacheManager, RedbCacheIndex};
-use crate::config::{CacheCleanupConfig, StorageServerConfig, StorageServiceConfig};
+use crate::cache::{CacheIndex, CacheManager, RedbCacheIndex};
+use crate::config::{
+    StorageRuntime, StorageRuntimeConfig, StorageServerConfig, StorageServiceConfig,
+};
 use crate::error::StorageResult;
 use crate::request::{
     RequestHooks, RequestObserver, RequestPolicy, TracingRequestObserver,
@@ -51,7 +53,6 @@ mod tests;
 ///     )
 ///     .with_service_config(
 ///         StorageServiceConfig::default()
-///             .with_max_cache_bytes(100 * 1024 * 1024 * 1024)
 ///             .with_max_read_size(1024 * 1024)
 ///     )
 ///     .bind()
@@ -65,6 +66,7 @@ pub struct StorageServerBuilder {
     server_config: StorageServerConfig,
     registry: StoreRegistry,
     request_hooks: RequestHooks,
+    runtime: Option<StorageRuntime>,
 }
 
 // ---- Construction & paths -----------------------------------------------------------------------
@@ -80,6 +82,7 @@ impl StorageServerBuilder {
             server_config: StorageServerConfig::default(),
             registry: StoreRegistry::new(),
             request_hooks: RequestHooks::default(),
+            runtime: None,
         }
     }
 
@@ -107,10 +110,11 @@ impl StorageServerBuilder {
 // ---- Configuration (compose config objects, don't duplicate their methods) ----------------------
 
 impl StorageServerBuilder {
-    /// Installs a complete service config (read clamps, cache geometry, cleanup policy).
+    /// Installs a complete service config (read clamps, cache geometry).
     ///
     /// Build the config with [`StorageServiceConfig::default()`] and its `with_*` methods,
-    /// then pass it here.
+    /// then pass it here. Cache runtime parameters (touch granularity, cleanup) are
+    /// configured via [`Self::with_runtime`] instead.
     pub fn with_service_config(
         mut self,
         service_config: StorageServiceConfig,
@@ -125,6 +129,20 @@ impl StorageServerBuilder {
     /// then pass it here.
     pub fn with_server_config(mut self, server_config: StorageServerConfig) -> Self {
         self.server_config = server_config.normalized();
+        self
+    }
+
+    /// Installs a [`StorageRuntime`] for hot-reloadable parameters.
+    ///
+    /// When provided, the service and background tasks read tunables (touch
+    /// granularity, cleanup policy, etc.) from this runtime handle. The
+    /// embedder can later call [`StorageRuntime::apply`] to push new values
+    /// without restarting the server.
+    ///
+    /// If not set, the builder creates a [`StorageRuntime`] seeded with
+    /// [`StorageRuntimeConfig::default()`](crate::config::StorageRuntimeConfig).
+    pub fn with_runtime(mut self, runtime: StorageRuntime) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 }
@@ -190,6 +208,7 @@ impl StorageServerBuilder {
             server_config,
             registry,
             request_hooks,
+            runtime,
         } = self;
         let service_config = service_config.normalized();
 
@@ -206,6 +225,7 @@ impl StorageServerBuilder {
             registry,
             index,
             request_hooks,
+            runtime,
         )
         .await
     }
@@ -225,6 +245,7 @@ impl StorageServerBuilder {
             server_config,
             registry,
             request_hooks,
+            runtime,
         } = self;
         let service_config = service_config.normalized();
 
@@ -237,6 +258,7 @@ impl StorageServerBuilder {
             registry,
             index,
             request_hooks,
+            runtime,
         )
         .await
     }
@@ -254,6 +276,7 @@ async fn prepare_dirs(socket_path: &Path, cache_dir: &Path) -> StorageResult<()>
 }
 
 /// Assembles and starts the server: cache manager → recover → cleanup → reaper → staging → bind.
+#[allow(clippy::too_many_arguments)]
 async fn start_server<I>(
     socket_path: PathBuf,
     cache_dir: PathBuf,
@@ -262,20 +285,18 @@ async fn start_server<I>(
     registry: StoreRegistry,
     index: I,
     request_hooks: RequestHooks,
+    runtime: Option<StorageRuntime>,
 ) -> StorageResult<StorageServer<I>>
 where
     I: CacheIndex + 'static,
 {
-    let cleanup_policy = derive_cleanup_policy(&service_config.cache_cleanup);
-    let cleanup_interval = service_config
-        .cache_cleanup
-        .clone()
-        .normalized()
-        .cleanup_interval;
+    let runtime = match runtime {
+        Some(rt) => rt,
+        None => StorageRuntime::new(StorageRuntimeConfig::default())?,
+    };
 
-    let mut cache_manager = CacheManager::new(cache_dir.clone(), index)
-        .with_limits(service_config.small_object_limit, service_config.chunk_size)
-        .with_touch_granularity(service_config.touch_granularity);
+    let cache_manager = CacheManager::new(cache_dir.clone(), index, runtime.clone())
+        .with_limits(service_config.small_object_limit, service_config.chunk_size);
 
     let recovery = cache_manager.recover().await?;
     info!(
@@ -285,7 +306,7 @@ where
         resident_bytes = recovery.logical_usage_after.resident_bytes,
         "startup cache recovery complete",
     );
-    if let Some(policy) = cleanup_policy {
+    if let Some(policy) = runtime.snapshot().cache.cleanup.to_policy() {
         let cleanup = cache_manager.cleanup_capacity_only(policy).await?;
         info!(
             bytes_before = cleanup.bytes_before,
@@ -294,14 +315,10 @@ where
             bytes_evicted = cleanup.bytes_evicted,
             "startup capacity cleanup complete",
         );
-        cache_manager = cache_manager.with_cleanup_policy(policy);
     }
 
     let cache = Arc::new(cache_manager);
     cache.spawn_large_fill_reaper();
-    if let (Some(policy), Some(interval)) = (cleanup_policy, cleanup_interval) {
-        cache.clone().spawn_cleanup_task(policy, interval);
-    }
 
     let staging = Arc::new(StagingArea::new(cache_dir));
     staging.prepare_dirs().await?;
@@ -310,28 +327,19 @@ where
 
     let service = Arc::new(StorageService::with_staging(
         registry,
-        cache,
+        cache.clone(),
         staging,
         service_config,
     ));
-    StorageServer::bind_with_config_and_hooks(
+    let server = StorageServer::bind_with_config_and_hooks(
         socket_path,
         service,
         server_config,
         request_hooks,
     )
-    .await
-}
+    .await?;
 
-/// Derives a [`CacheCleanupPolicy`] from the user-facing [`CacheCleanupConfig`], returning
-/// `None` when cleanup is entirely disabled (no capacity limit set).
-fn derive_cleanup_policy(config: &CacheCleanupConfig) -> Option<CacheCleanupPolicy> {
-    let config = config.clone().normalized();
-    let max_cache_bytes = config.max_cache_bytes?;
-    let mut policy = CacheCleanupPolicy::new(max_cache_bytes);
-    policy.cleanup_start_ratio = f64::from(config.cleanup_start_percent) / 100.0;
-    policy.cleanup_target_ratio = f64::from(config.cleanup_target_percent) / 100.0;
-    policy.max_cleanup_batch_items = config.max_cleanup_batch_items.max(1);
-    policy.max_cleanup_batch_bytes = config.max_cleanup_batch_bytes.max(1);
-    Some(policy)
+    cache.spawn_cleanup_scheduler(server.background_shutdown_token());
+
+    Ok(server)
 }

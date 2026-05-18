@@ -408,6 +408,7 @@ mod tests {
     use super::*;
     use crate::backend::{MemoryObjectBackend, StoreRegistry};
     use crate::cache::{CacheManager, InMemoryCacheIndex};
+    use crate::config::{StorageRuntime, StorageRuntimeConfig};
     use crate::error::{StorageError, StorageErrorKind, StorageResult};
     use crate::handle::{FileHandle, OpenFlags};
     use crate::object::ObjectLocation;
@@ -503,8 +504,12 @@ mod tests {
         let backend = MemoryObjectBackend::new();
         backend.insert(key, b"abc".to_vec());
         let cache = Arc::new(
-            CacheManager::new(test_cache_dir(), InMemoryCacheIndex::new())
-                .with_limits(4, 4),
+            CacheManager::new(
+                test_cache_dir(),
+                InMemoryCacheIndex::new(),
+                StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+            )
+            .with_limits(4, 4),
         );
         cache.spawn_large_fill_reaper();
         let registry = StoreRegistry::new()

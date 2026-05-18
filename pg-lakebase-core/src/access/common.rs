@@ -8,9 +8,9 @@
 
 use std::ffi::CStr;
 
+use crate::diag::PgReportError;
 use crate::tuple::{Row, TupleSlotWriter};
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::ErrorReport;
 
 use super::lifecycle;
 
@@ -132,7 +132,7 @@ impl<T> AmFfiSession<T> {
     pub(crate) unsafe fn write_row_to_slot(
         &mut self,
         slot: *mut pg_sys::TupleTableSlot,
-    ) -> Result<(), ErrorReport> {
+    ) -> Result<(), PgReportError> {
         unsafe { TupleSlotWriter::new(slot, self.tmp_ctx).write_row(&mut self.row) }
     }
 }

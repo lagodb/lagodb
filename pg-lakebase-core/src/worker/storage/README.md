@@ -29,7 +29,11 @@ capability.
 
 - Backend-side `StorageEndpoint` integration.
 - Automatic reconnect of existing `StorageClient` handles.
-- Dynamic reload of storage worker GUCs.
+- Online reload of connection-level parameters (`max_connections`,
+  `max_read_size`). These still require a PostgreSQL restart.
+  Cache runtime parameters (touch granularity, cleanup thresholds/interval)
+  and supervisor-owned parameters (reconcile interval, shutdown timeout)
+  are reloadable via SIGHUP.
 - Multiple AM extensions registering the same storage worker at the same time.
 - Generation-aware handle invalidation (existing `RegisteredStore` handles
   remain usable after their store is unregistered or replaced; new requests
@@ -43,7 +47,7 @@ capability.
 background worker process:
 
 - `mod.rs`: public initialization API and bgworker entry point.
-- `gucs.rs`: Postmaster-scope GUC definitions and accessors.
+- `gucs.rs`: GUC definitions (Postmaster and Sighup scopes) and accessors.
 - `config.rs`: GUC snapshot into `StorageWorkerConfig`.
 - `supervisor.rs`: bgworker main-thread lifecycle, signals, Tokio runtime, and
   shutdown.
@@ -170,7 +174,9 @@ if take_dirty() or periodic timer due:
     refresh next periodic deadline
 wait_latch(<= 100ms, clamped to next periodic deadline)
 if SIGHUP:
-    log "restart required"
+    ProcessConfigFile(PGC_SIGHUP)
+    reload runtime config (reconcile interval, shutdown timeout, cache runtime)
+    StorageRuntime::apply(new cache config) if changed
 if SIGTERM:
     cancel shutdown token
     wait for server task until shutdown timeout
@@ -183,29 +189,76 @@ behind latch sleeps. The loop uses `wait_latch` for signal handling; after
 supervisor uses the boolean return value instead of calling
 `sigterm_received()`.
 
-## GUC snapshot
+## GUC configuration
 
-All storage-worker GUCs are `GucContext::Postmaster`. Changes require a
-PostgreSQL restart. SIGHUP only logs that restart is required.
+Storage-worker GUCs are split into two categories by their PostgreSQL GUC
+context:
 
-Current GUCs:
+### Postmaster GUCs (require PostgreSQL restart)
 
 - `pg_lakebase.storage_server.enabled`
 - `pg_lakebase.storage_server.socket_path`
 - `pg_lakebase.storage_server.cache_dir`
 - `pg_lakebase.storage_server.worker_threads`
-- `pg_lakebase.storage_server.shutdown_timeout_ms`
 - `pg_lakebase.storage_server.log_channel_capacity`
 - `pg_lakebase.storage_server.max_connections`
 - `pg_lakebase.storage_server.max_read_size`
+
+### Sighup GUCs (hot-reloadable via `pg_reload_conf()` or SIGHUP)
+
+Supervisor-owned:
+
+- `pg_lakebase.storage_server.shutdown_timeout_ms`
 - `pg_lakebase.storage_server.tablespace_reconcile_interval_ms` &mdash; how
   often the worker rescans `pg_tablespace` as a safety net behind syscache
   invalidation. Default `30000`. `0` disables the periodic resync; the
   reconciler then runs only on syscache wake-up.
 
+Cache runtime (pushed to `StorageRuntime::apply()` inside the storage server):
+
+- `pg_lakebase.storage_server.cache_touch_granularity_ms` &mdash; minimum
+  interval between access-time updates. Default `60000`. `0` touches every access.
+- `pg_lakebase.storage_server.cache_max_mb` &mdash; capacity limit in MiB. `0` disables
+  capacity-based cleanup.
+- `pg_lakebase.storage_server.cache_cleanup_start_percent` &mdash; usage % that
+  triggers eviction. Default `90`.
+- `pg_lakebase.storage_server.cache_cleanup_target_percent` &mdash; target usage %
+  after eviction. Default `80`.
+- `pg_lakebase.storage_server.cache_cleanup_interval_ms` &mdash; periodic cleanup
+  interval. Default `60000`. `0` disables periodic cleanup.
+- `pg_lakebase.storage_server.cache_cleanup_batch_items` &mdash; max items evicted
+  per batch. Default `256`.
+- `pg_lakebase.storage_server.cache_cleanup_batch_mb` &mdash; max MiB evicted
+  per batch. Default `64`.
+
+**Cross-field constraint:** `cleanup_start_percent` must be &ge;
+`cleanup_target_percent`. PostgreSQL validates each GUC independently, so an
+invalid combination (e.g. start=50, target=80) passes `ALTER SYSTEM` but is
+rejected when the worker processes the reload. On startup this prevents the
+worker from starting; on SIGHUP it logs a WARNING and keeps the previous
+valid configuration.
+
+### Configuration reload flow
+
+On SIGHUP the supervisor:
+
+1. Calls `ProcessConfigFile(PGC_SIGHUP)` to let PostgreSQL update GUC values
+   in the bgworker process.
+2. Re-reads Sighup-scoped GUCs into a fresh `StorageWorkerRuntimeConfig`.
+3. Compares with the current runtime config; if unchanged, logs and skips.
+4. If the `storage` sub-config changed, calls `StorageRuntime::apply()` to
+   push the new cache parameters to the storage server. On failure, logs a
+   warning and keeps the previous values.
+5. Applies supervisor-owned changes: updates the reconcile interval/deadline
+   and records the new shutdown timeout for the next SIGTERM.
+6. If a Postmaster-scoped GUC was changed via `ALTER SYSTEM`, the new value is
+   recorded but does not take effect until the next PostgreSQL restart.
+
+### Config snapshot
+
 `StorageWorkerConfig::from_gucs()` must run on the bgworker main thread. It
-reads PostgreSQL state such as `DataDir`, resolves default paths, and returns a
-plain Rust struct that can be moved into Tokio tasks.
+reads PostgreSQL state such as `DataDir`, resolves default paths, and returns
+plain Rust structs that can be moved into Tokio tasks.
 
 Default paths are derived from `DataDir`:
 

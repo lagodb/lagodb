@@ -70,9 +70,9 @@ The public API separates callbacks by lifecycle:
 This keeps relation-level and DDL callbacks from requiring empty marker state,
 while preserving real per-operation state for scans, index fetches, and DML.
 
-`AmResult<T>` is fixed to PostgreSQL's `ErrorReport`. AM implementations can
-use richer internal error types, but they should convert to PostgreSQL errors
-at the callback boundary.
+`AmResult<T>` is fixed to a small PostgreSQL error handle that owns an
+`ErrorReport`. AM implementations can use richer internal error types, but they
+should convert to PostgreSQL errors at the callback boundary.
 
 ## DML Lifecycle
 

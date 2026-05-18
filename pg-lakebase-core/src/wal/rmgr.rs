@@ -14,7 +14,6 @@ use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 
 const MIN_CUSTOM_RMGR_ID: u8 = pg_sys::RM_MIN_CUSTOM_ID as u8;
-const MAX_CUSTOM_RMGR_ID: u8 = pg_sys::RM_MAX_CUSTOM_ID as u8;
 const MAX_CUSTOM_RMGRS: usize = pg_sys::RM_N_CUSTOM_IDS as usize;
 
 /// Custom Resource Manager ID
@@ -31,7 +30,7 @@ impl RmgrId {
     /// Panics if the ID is less than 128 (reserved for built-in resource managers)
     pub const fn new(id: u8) -> Self {
         assert!(
-            id >= MIN_CUSTOM_RMGR_ID && id <= MAX_CUSTOM_RMGR_ID,
+            id >= MIN_CUSTOM_RMGR_ID,
             "Custom resource manager IDs must be in PostgreSQL's custom rmgr range"
         );
         Self(id)
@@ -259,16 +258,16 @@ impl RegisteredRmgr {
             return std::ptr::null();
         };
 
-        if !identify_names.contains_key(&info) {
-            let Ok(c_name) = CString::new(name) else {
-                return std::ptr::null();
-            };
-            identify_names.insert(info, c_name);
+        use std::collections::hash_map::Entry;
+        match identify_names.entry(info) {
+            Entry::Occupied(e) => e.get().as_ptr(),
+            Entry::Vacant(e) => {
+                let Ok(c_name) = CString::new(name) else {
+                    return std::ptr::null();
+                };
+                e.insert(c_name).as_ptr()
+            }
         }
-
-        identify_names
-            .get(&info)
-            .map_or(std::ptr::null(), |c_name| c_name.as_ptr())
     }
 }
 
@@ -352,10 +351,10 @@ impl WalRmgrRegistry {
                 let mut desc = String::new();
                 registered.manager.desc(&wal_record, &mut desc);
 
-                if !desc.is_empty() {
-                    if let Ok(c_desc) = CString::new(desc) {
-                        pg_sys::appendStringInfoString(buf, c_desc.as_ptr());
-                    }
+                if !desc.is_empty()
+                    && let Ok(c_desc) = CString::new(desc)
+                {
+                    pg_sys::appendStringInfoString(buf, c_desc.as_ptr());
                 }
             }
         }
@@ -452,7 +451,7 @@ fn registered_rmgr(rmgr_id: u8) -> Option<&'static RegisteredRmgr> {
 pub fn register_wal_rmgr<const RMGR_ID: u8>(manager: Box<dyn WalResourceManager>) {
     const {
         assert!(
-            RMGR_ID >= MIN_CUSTOM_RMGR_ID && RMGR_ID <= MAX_CUSTOM_RMGR_ID,
+            RMGR_ID >= MIN_CUSTOM_RMGR_ID,
             "Custom resource manager IDs must be in PostgreSQL's custom rmgr range"
         );
     }
