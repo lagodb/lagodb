@@ -1,5 +1,9 @@
-use pg_lakebase_core::pg_wrapper::PgWrapper;
-use pg_lakebase_core::prelude::*;
+use pg_lakebase_core::catalog::get_tablespace_oid;
+use pg_lakebase_core::hooks::{
+    CreateTableSpaceStmtNode, PostUtilityContext, UtilityHook, UtilityHookError,
+    UtilityNode, register_utility_hook,
+};
+use pg_lakebase_core::options::TablespaceOptions;
 use pgrx::pg_sys;
 use std::ffi::CStr;
 
@@ -12,21 +16,22 @@ impl UtilityHook for IcebergTablespaceHook {
 
     fn on_pre(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
         let stmt = context
-            .is_a_mut::<pg_sys::CreateTableSpaceStmt>(pg_sys::NodeTag::T_CreateTableSpaceStmt)
+            .cast_mut::<CreateTableSpaceStmtNode>()
             .expect("Hook registered for T_CreateTableSpaceStmt but received different node type");
 
         TablespaceOptions::extract_from_stmt(stmt)?;
         Ok(())
     }
 
-    fn on_post(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
+    fn on_post(&self, context: &PostUtilityContext) -> Result<(), UtilityHookError> {
         let stmt = context
-            .is_a_mut::<pg_sys::CreateTableSpaceStmt>(pg_sys::NodeTag::T_CreateTableSpaceStmt)
+            .original_stmt()
+            .cast::<CreateTableSpaceStmtNode>()
             .expect("Hook registered for T_CreateTableSpaceStmt but received different node type");
 
-        if let Ok(Some(opts)) = TablespaceOptions::extract_from_stmt(stmt) {
+        if let Ok(Some(opts)) = TablespaceOptions::read_from_stmt(stmt) {
             let spcname = unsafe { CStr::from_ptr(stmt.tablespacename) };
-            let oid = PgWrapper::get_tablespace_oid(spcname, false)?;
+            let oid = get_tablespace_oid(spcname, false)?;
             opts.persist_to_catalog(oid)?;
         }
         Ok(())

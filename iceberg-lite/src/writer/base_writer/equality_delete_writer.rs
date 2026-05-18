@@ -408,12 +408,11 @@ mod test {
             1024
         ])) as ArrayRef;
         let col3 = Arc::new({
-            let list_parts = arrow_array::ListArray::from_iter_primitive::<
-                Int32Type,
-                _,
-                _,
-            >(vec![Some(vec![Some(1),]); 1024])
-            .into_parts();
+            let list_parts =
+                arrow_array::ListArray::from_iter_primitive::<Int32Type, _, _>(
+                    vec![Some(vec![Some(1),]); 1024],
+                )
+                .into_parts();
             arrow_array::ListArray::new(
                 if let DataType::List(field) =
                     arrow_schema.fields.get(3).unwrap().data_type()

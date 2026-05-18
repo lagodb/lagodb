@@ -3894,10 +3894,7 @@ dependencies = [
  "pg-lakebase-storage",
  "pgrx",
  "pgrx-tests",
- "serde_json",
  "thiserror 1.0.69",
- "tokio",
- "uuid",
 ]
 
 [[package]]

@@ -20,7 +20,7 @@ use crate::error::{IcebergError, IcebergResult};
 use iceberg_lite::spec::{
     ListType, NestedField, NestedFieldRef, PrimitiveType, Schema, Type,
 };
-use pg_lakebase_core::pg_wrapper::PgWrapper;
+use pg_lakebase_core::tuple::{NumericTypmod, numeric_precision_scale};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -33,7 +33,7 @@ use std::sync::Arc;
 const DEFAULT_NUMERIC_PRECISION: u32 = 38;
 
 /// Default scale for numeric types without explicit scale.
-const DEFAULT_NUMERIC_SCALE: u32 = 18;
+const DEFAULT_NUMERIC_SCALE: i32 = 18;
 
 /// Maximum supported decimal precision in Iceberg.
 const MAX_DECIMAL_PRECISION: u32 = 38;
@@ -81,8 +81,8 @@ impl PgType {
     /// `type_mod = ((precision << 16) | scale) + VARHDRSZ`
     ///
     /// Returns `None` if type_mod is not set (-1).
-    pub fn numeric_precision_scale(&self) -> Option<(u32, u32)> {
-        PgWrapper::numeric_precision_scale(self.type_mod)
+    pub fn numeric_precision_scale(&self) -> Option<NumericTypmod> {
+        numeric_precision_scale(self.type_mod)
     }
 
     /// Checks if this type is an array type.
@@ -111,9 +111,11 @@ impl PgType {
 /// Extracts precision and scale from the type modifier. If not specified,
 /// uses default values (38, 18) which is the maximum Iceberg supports.
 fn convert_numeric_type(pg_type: &PgType) -> IcebergResult<Type> {
-    let (precision, scale) = pg_type
-        .numeric_precision_scale()
-        .unwrap_or((DEFAULT_NUMERIC_PRECISION, DEFAULT_NUMERIC_SCALE));
+    let NumericTypmod { precision, scale } =
+        pg_type.numeric_precision_scale().unwrap_or(NumericTypmod {
+            precision: DEFAULT_NUMERIC_PRECISION,
+            scale: DEFAULT_NUMERIC_SCALE,
+        });
 
     // Validate precision is within Iceberg limits
     if precision > MAX_DECIMAL_PRECISION {
@@ -122,6 +124,15 @@ fn convert_numeric_type(pg_type: &PgType) -> IcebergResult<Type> {
             precision, scale, MAX_DECIMAL_PRECISION
         )));
     }
+
+    if scale < 0 {
+        return Err(IcebergError::UnsupportedColumnType(format!(
+            "numeric({}, {}) negative scale is not supported by Iceberg decimal",
+            precision, scale
+        )));
+    }
+
+    let scale = scale as u32;
 
     Ok(Type::Primitive(PrimitiveType::Decimal { precision, scale }))
 }
@@ -230,6 +241,12 @@ fn convert_primitive_type(pg_type: &PgType) -> IcebergResult<Type> {
         PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
             Ok(Type::Primitive(PrimitiveType::Timestamptz))
         }
+        // Iceberg does not have PostgreSQL json/jsonb types. We intentionally
+        // map json to string and jsonb to binary as a pg-iceberg-am private
+        // codec. jsonb binary values are PostgreSQL internal jsonb varlena
+        // bytes written and read by this extension, not a portable Iceberg
+        // JSON encoding. Revisit this mapping if Iceberg variant support is
+        // added.
         PgOid::BuiltIn(PgBuiltInOids::TEXTOID)
         | PgOid::BuiltIn(PgBuiltInOids::VARCHAROID)
         | PgOid::BuiltIn(PgBuiltInOids::BPCHAROID)
@@ -440,6 +457,7 @@ pub unsafe fn tuple_desc_to_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pg_lakebase_core::tuple::numeric_typmod;
 
     #[test]
     fn test_pg_type_new() {
@@ -457,15 +475,29 @@ mod tests {
     #[test]
     fn test_numeric_precision_scale_extraction() {
         // numeric(10, 2)
-        let type_mod = PgWrapper::numeric_typmod(10, 2);
+        let type_mod = numeric_typmod(10, 2);
         let pg_type = PgType::new(
             pg_sys::Oid::from(PgBuiltInOids::NUMERICOID.value()),
             type_mod,
         );
 
-        let (precision, scale) = pg_type.numeric_precision_scale().unwrap();
-        assert_eq!(precision, 10);
-        assert_eq!(scale, 2);
+        let typmod = pg_type.numeric_precision_scale().unwrap();
+        assert_eq!(typmod.precision, 10);
+        assert_eq!(typmod.scale, 2);
+    }
+
+    #[test]
+    fn test_numeric_precision_scale_sign_extends_negative_scale() {
+        // numeric(2, -3)
+        let type_mod = numeric_typmod(2, -3);
+        let pg_type = PgType::new(
+            pg_sys::Oid::from(PgBuiltInOids::NUMERICOID.value()),
+            type_mod,
+        );
+
+        let typmod = pg_type.numeric_precision_scale().unwrap();
+        assert_eq!(typmod.precision, 2);
+        assert_eq!(typmod.scale, -3);
     }
 
     #[test]

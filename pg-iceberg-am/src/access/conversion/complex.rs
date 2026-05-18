@@ -7,7 +7,7 @@ use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, Field};
 use iceberg_lite::spec::{ListType, PrimitiveType, Type};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
-use pg_lakebase_core::data::{Cell, Row};
+use pg_lakebase_core::tuple::{Cell, Row};
 
 use crate::access::conversion::schema::iceberg_type_to_arrow_type;
 use crate::access::traits::{ArrowToCell, RowsToArrow};

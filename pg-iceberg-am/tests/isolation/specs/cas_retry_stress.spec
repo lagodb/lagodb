@@ -23,11 +23,13 @@ teardown
 }
 
 # Session 1: First concurrent writer
+# Note: BEGIN is issued explicitly via s1_begin in each permutation rather
+# than in setup. Putting BEGIN in setup leaks an open transaction across
+# permutations that do not commit it, producing spurious
+# "there is already a transaction in progress" warnings.
 session s1
-setup { 
-  BEGIN; 
-  SET application_name = 'session1';
-}
+setup { SET application_name = 'session1'; }
+step s1_begin { BEGIN; }
 step s1_insert_batch { 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 1, 'session1_row_' || i 
@@ -49,10 +51,8 @@ step s1_update_touched {
 
 # Session 2: Second concurrent writer
 session s2
-setup { 
-  BEGIN; 
-  SET application_name = 'session2';
-}
+setup { SET application_name = 'session2'; }
+step s2_begin { BEGIN; }
 step s2_insert_batch { 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 2, 'session2_row_' || i 
@@ -68,10 +68,8 @@ step s2_verify {
 
 # Session 3: Third concurrent writer
 session s3
-setup { 
-  BEGIN; 
-  SET application_name = 'session3';
-}
+setup { SET application_name = 'session3'; }
+step s3_begin { BEGIN; }
 step s3_insert_batch { 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 3, 'session3_row_' || i 
@@ -81,10 +79,8 @@ step s3_commit { COMMIT; }
 
 # Session 4: Fourth writer for maximum contention
 session s4
-setup { 
-  BEGIN; 
-  SET application_name = 'session4';
-}
+setup { SET application_name = 'session4'; }
+step s4_begin { BEGIN; }
 step s4_insert_batch { 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 4, 'session4_row_' || i 
@@ -111,25 +107,25 @@ step s5_final_verify {
 # Permutation 1: Two-way concurrent commit
 # Expected: Both sessions insert, one commits first, the other
 # detects conflict in commit_all(), rebases, and retries CAS
-permutation s1_insert_batch s2_insert_batch s1_commit s2_commit s1_verify s2_verify s5_final_verify
+permutation s1_begin s1_insert_batch s2_begin s2_insert_batch s1_commit s2_commit s1_verify s2_verify s5_final_verify
 
 # Permutation 2: Maximum contention - 4 concurrent sessions
 # Expected: Multiple CAS retries, all should eventually succeed
 # This is the most aggressive test of the retry loop
-permutation s1_insert_batch s2_insert_batch s3_insert_batch s4_insert_batch s1_commit s2_commit s3_commit s4_commit s5_final_verify
+permutation s1_begin s1_insert_batch s2_begin s2_insert_batch s3_begin s3_insert_batch s4_begin s4_insert_batch s1_commit s2_commit s3_commit s4_commit s5_final_verify
 
 # Permutation 3: Sequential commits (baseline for comparison)
 # Expected: No conflicts, no retries
-permutation s1_insert_batch s1_commit s2_insert_batch s2_commit s3_insert_batch s3_commit s5_final_verify
+permutation s1_begin s1_insert_batch s1_commit s2_begin s2_insert_batch s2_commit s3_begin s3_insert_batch s3_commit s5_final_verify
 
 # Permutation 4: Interleaved inserts with delayed commits
 # Expected: Tests apply_updates_with_rebase optimization
 # (lines L222-L230: skip rebase if no new files and global unchanged)
-permutation s1_insert_batch s2_insert_batch s3_insert_batch s1_commit s5_count s2_commit s5_count s3_commit s5_final_verify
+permutation s1_begin s1_insert_batch s2_begin s2_insert_batch s3_begin s3_insert_batch s1_commit s5_count s2_commit s5_count s3_commit s5_final_verify
 
 # Permutation 5: Rapid-fire commits
 # Expected: Stress test the CAS loop with minimal delay
-permutation s1_insert_batch s1_commit s2_insert_batch s2_commit s3_insert_batch s3_commit s4_insert_batch s4_commit s5_final_verify
+permutation s1_begin s1_insert_batch s1_commit s2_begin s2_insert_batch s2_commit s3_begin s3_insert_batch s3_commit s4_begin s4_insert_batch s4_commit s5_final_verify
 
 # Permutation 6: Force Conflict using Explicit Locking (The "Sandwich" Attack)
 # Purpose: Strictly enforce the race condition that triggers the CAS retry loop (L370-L380 in metadata_tracking.rs).
@@ -141,7 +137,7 @@ permutation s1_insert_batch s1_commit s2_insert_batch s2_commit s3_insert_batch 
 # 3. S1 commits. This updates global to V1 and releases the lock.
 # 4. S2 wakes up. It expects V0 (from its Rebase) but sees V1 (from S1's commit).
 # 5. S2 triggers Conflict error, catches it, reprints "rebasing...", and retries.
-permutation s1_insert_batch s2_insert_batch s1_lock_share s2_commit s1_commit s5_final_verify
+permutation s1_begin s1_insert_batch s2_begin s2_insert_batch s1_lock_share s2_commit s1_commit s5_final_verify
 
 # Permutation 7: Force Conflict using Tuple Lock (Simulating L388-L393)
 # Purpose: Trigger the optimistic update failure logic (PgWrapper::catalog_tuple_update_optimistic returning false).
@@ -155,4 +151,4 @@ permutation s1_insert_batch s2_insert_batch s1_lock_share s2_commit s1_commit s5
 # 4. S1 commits.
 # 5. S2 wakes up. Sees tuple updated. L388 fails (status TM_Updated).
 # 6. S2 triggers Conflict logic (L400) and retries.
-permutation s1_update_touched s2_insert_batch s2_commit s1_commit s5_final_verify
+permutation s1_begin s1_update_touched s2_begin s2_insert_batch s2_commit s1_commit s5_final_verify

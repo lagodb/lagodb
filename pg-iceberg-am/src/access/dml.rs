@@ -22,9 +22,8 @@ use iceberg_lite::writer::file_writer::location_generator::{
 use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
-use pg_lakebase_core::data::Row;
-use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::prelude::*;
+use pg_lakebase_core::tuple::Row;
 use pgrx::pg_sys;
 
 use crate::access::{
@@ -35,7 +34,7 @@ use crate::catalog::{
     register_table_for_tracking,
 };
 use crate::error::{IcebergError, IcebergResult};
-use crate::storage::create_storage_context_for_relation;
+use crate::storage::create_storage_context_with_wal;
 
 /// Default batch size for buffering rows (64MB) before writing.
 const DEFAULT_BATCH_SIZE_IN_MB: usize = 64;
@@ -53,8 +52,16 @@ type ParquetDataFileWriter = DataFileWriter<
 /// - Writer for producing data files
 /// - Table schema and storage context
 pub struct IcebergModify {
-    /// The relation being modified
-    rel: pg_sys::Relation,
+    /// OID of the relation being modified.
+    rel_oid: pg_sys::Oid,
+    /// Namespace OID captured while the PostgreSQL Relation pointer is valid.
+    nsp_oid: pg_sys::Oid,
+    /// Relation file number captured for transaction-local metadata tracking.
+    rel_number: pg_sys::RelFileNumber,
+    /// Tablespace OID used to build the storage context.
+    spc_oid: pg_sys::Oid,
+    /// Whether the relation requires WAL for local storage writes.
+    relation_needs_wal: bool,
     /// Buffered rows waiting to be written
     row_buffer: Vec<Row>,
     /// Current size of buffered rows in bytes
@@ -73,14 +80,14 @@ pub struct IcebergModify {
     writer: Option<ParquetDataFileWriter>,
 }
 
-impl AmDml<IcebergError> for IcebergModify {
-    /// Create a new IcebergModify instance.
-    ///
-    /// At this point we only store the relation handle.
-    /// Actual initialization happens in `begin_modify`.
-    fn new(rel: pg_sys::Relation) -> IcebergResult<Self> {
-        Ok(IcebergModify {
-            rel,
+impl AmDmlSession for IcebergModify {
+    fn new(target: DmlTarget) -> AmResult<Self> {
+        Ok(Self {
+            rel_oid: target.rel_oid,
+            nsp_oid: target.namespace_oid,
+            rel_number: target.locator.rel_number,
+            spc_oid: target.locator.spc_oid,
+            relation_needs_wal: target.relation_needs_wal,
             row_buffer: Vec::new(),
             current_buffer_size: 0,
             data_files: Vec::new(),
@@ -92,68 +99,41 @@ impl AmDml<IcebergError> for IcebergModify {
         })
     }
 
-    /// Begin a modify operation.
-    ///
-    /// This method:
-    /// 1. Loads the Iceberg metadata from PostgreSQL catalog
-    /// 2. Reads the table metadata from storage
-    /// 3. Initializes the schema and prepares for writing
-    /// 4. Configures WAL logging based on relation properties
-    ///
-    /// WAL (Write-Ahead Logging) is enabled for local storage when:
-    /// - The PostgreSQL `wal_level` is at least `archive`
-    /// - The relation is not an unlogged or temporary table
-    ///
-    /// This follows PostgreSQL's `XLogIsNeeded() && RelationNeedsWAL(rel)` pattern.
-    fn begin_modify(&mut self) -> IcebergResult<()> {
+    fn begin_modify(&mut self) -> AmResult<()> {
         if self.initialized {
             return Ok(());
         }
 
-        let rel_handle = unsafe { RelationHandle::from_raw(self.rel) };
-        let rel_oid = unsafe { (*(*self.rel).rd_rel).oid };
-        let nsp_oid = unsafe { (*(*self.rel).rd_rel).relnamespace };
-        let rel_num = unsafe { (*self.rel).rd_locator.relNumber };
-
         // Register table for metadata tracking
-        register_table_for_tracking(rel_oid, nsp_oid, rel_num)?;
+        register_table_for_tracking(self.rel_oid, self.nsp_oid, self.rel_number)?;
 
-        // Create storage context for reading/writing with WAL support
-        // The context automatically determines if WAL is needed based on:
-        // - Whether this is local or distributed storage
-        // - The relation's persistence settings (permanent vs unlogged/temp)
-        let spc_oid = rel_handle.tablespace_oid();
-        let ctx = create_storage_context_for_relation(spc_oid, self.rel)?;
+        if self.file_io.is_none() {
+            let ctx = create_storage_context_with_wal(
+                self.spc_oid,
+                self.relation_needs_wal,
+            )?;
+            self.file_io = Some(ctx.file_io);
+        }
 
-        // Get Iceberg metadata location
-        // Since we just registered the table for tracking, we ensure we see the latest
-        // committed data (Read Committed) by calling the rebase-aware helper.
-        let metadata_location =
-            get_or_rebase_metadata_location(rel_oid, &ctx.file_io)?;
-
-        // Read table metadata from storage
-        let table_metadata =
-            TableMetadata::read_from(&ctx.file_io, &metadata_location)?;
-        let schema = table_metadata.current_schema().clone();
-        let arrow_schema = Arc::new(iceberg_schema_to_arrow_schema(&schema)?);
+        let (table_metadata, schema, arrow_schema) = self.load_table_metadata()?;
 
         self.iceberg_schema = Some(schema);
         self.arrow_schema = Some(arrow_schema);
-        self.file_io = Some(ctx.file_io);
         self.initialize_writer(&table_metadata)?;
         self.initialized = true;
 
         Ok(())
     }
 
-    /// End a modify operation.
-    ///
-    /// This method:
-    /// 1. Flushes any remaining buffered rows
-    /// 2. Closes the active writer (if any) and collects generated data files
-    /// 3. Commits the data files to the Iceberg table
-    /// 4. Stages the new metadata location in the transaction tracker
-    fn end_modify(&mut self) -> IcebergResult<()> {
+    fn abort_modify(&mut self) {
+        self.initialized = false;
+        self.row_buffer.clear();
+        self.current_buffer_size = 0;
+        self.data_files.clear();
+        self.writer.take();
+    }
+
+    fn end_modify(&mut self) -> AmResult<()> {
         if !self.initialized {
             return Ok(());
         }
@@ -167,16 +147,11 @@ impl AmDml<IcebergError> for IcebergModify {
 
         // Ensure writer is always taken and closed to avoid leaking file descriptors,
         // even if flushing failed.
-        let writer_res = if let Some(mut writer) = self.writer.take() {
-            writer.close()
-        } else {
-            Ok(Vec::new())
-        };
+        let writer_res = self.close_writer();
 
         // Propagate errors after ensuring resource cleanup attempt
         flush_res?;
-        let new_data_files = writer_res?;
-        self.data_files.extend(new_data_files);
+        self.data_files.extend(writer_res?);
 
         // If we have data files, apply them to the Iceberg table
         if !self.data_files.is_empty() {
@@ -186,21 +161,75 @@ impl AmDml<IcebergError> for IcebergModify {
         Ok(())
     }
 
-    /// Insert a single tuple.
-    ///
-    /// The row is buffered and will be written when the buffer is full
-    /// or when `end_modify` is called.
     fn tuple_insert(
         &mut self,
         row: &Row,
-        _cid: pg_sys::CommandId,
-        _options: i32,
-        _bistate: Option<&mut BulkInsertStateHandle>,
-    ) -> IcebergResult<()> {
+        cid: pg_sys::CommandId,
+        options: i32,
+        bistate: Option<&BulkInsertStateHandle>,
+    ) -> AmResult<()> {
+        let _ = (cid, options, bistate);
         if !self.initialized {
             self.begin_modify()?;
         }
 
+        self.buffer_row(row)?;
+        Ok(())
+    }
+
+    fn multi_insert(
+        &mut self,
+        rows: &[Row],
+        cid: pg_sys::CommandId,
+        options: i32,
+        bistate: Option<&BulkInsertStateHandle>,
+    ) -> AmResult<()> {
+        let _ = (cid, options, bistate);
+        if !self.initialized {
+            self.begin_modify()?;
+        }
+
+        for row in rows {
+            self.buffer_row(row)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl IcebergModify {
+    fn load_table_metadata(
+        &self,
+    ) -> IcebergResult<(TableMetadata, Arc<IcebergSchema>, Arc<arrow_schema::Schema>)>
+    {
+        let file_io = self
+            .file_io
+            .as_ref()
+            .ok_or(IcebergError::NotImplemented("file_io not initialized"))?;
+
+        // Get Iceberg metadata location
+        // Since we just registered the table for tracking, we ensure we see the latest
+        // committed data (Read Committed) by calling the rebase-aware helper.
+        let metadata_location =
+            get_or_rebase_metadata_location(self.rel_oid, file_io)?;
+
+        // Read table metadata from storage
+        let table_metadata = TableMetadata::read_from(file_io, &metadata_location)?;
+        let schema = table_metadata.current_schema().clone();
+        let arrow_schema = Arc::new(iceberg_schema_to_arrow_schema(&schema)?);
+
+        Ok((table_metadata, schema, arrow_schema))
+    }
+
+    fn close_writer(&mut self) -> IcebergResult<Vec<DataFile>> {
+        if let Some(mut writer) = self.writer.take() {
+            Ok(writer.close()?)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn buffer_row(&mut self, row: &Row) -> IcebergResult<()> {
         // Clone and buffer the row
         self.current_buffer_size += row.size;
         self.row_buffer.push(row.clone());
@@ -213,88 +242,6 @@ impl AmDml<IcebergError> for IcebergModify {
         Ok(())
     }
 
-    /// Insert multiple tuples at once.
-    ///
-    /// This is more efficient than calling `tuple_insert` repeatedly.
-    fn multi_insert(
-        &mut self,
-        rows: &[Row],
-        _cid: pg_sys::CommandId,
-        _options: i32,
-        _bistate: Option<&mut BulkInsertStateHandle>,
-    ) -> IcebergResult<()> {
-        if !self.initialized {
-            self.begin_modify()?;
-        }
-
-        for row in rows {
-            self.current_buffer_size += row.size;
-            self.row_buffer.push(row.clone());
-
-            // Flush if buffer is full (converting MB to bytes)
-            if self.current_buffer_size >= DEFAULT_BATCH_SIZE_IN_MB * 1024 * 1024 {
-                self.flush_buffer()?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Delete a tuple (not yet implemented for Iceberg).
-    ///
-    /// Iceberg supports deletes through delete files (position or equality deletes).
-    /// This requires additional implementation.
-    fn tuple_delete(
-        &mut self,
-        _tid: &ItemPointer,
-        _cid: pg_sys::CommandId,
-        _snapshot: &SnapshotHandle,
-        _crosscheck: Option<&SnapshotHandle>,
-        _wait: bool,
-        _tmfd: &mut TM_FailureData,
-        _changing_part: bool,
-    ) -> IcebergResult<pg_sys::TM_Result::Type> {
-        Err(IcebergError::NotImplemented("tuple_delete"))
-    }
-
-    /// Update a tuple (not yet implemented for Iceberg).
-    ///
-    /// Iceberg implements updates as delete + insert.
-    /// This requires additional implementation.
-    fn tuple_update(
-        &mut self,
-        _otid: &ItemPointer,
-        _row: &Row,
-        _cid: pg_sys::CommandId,
-        _snapshot: &SnapshotHandle,
-        _crosscheck: Option<&SnapshotHandle>,
-        _wait: bool,
-        _tmfd: &mut TM_FailureData,
-        _lockmode: &mut pg_sys::LockTupleMode::Type,
-        _update_indexes: &mut pg_sys::TU_UpdateIndexes::Type,
-    ) -> IcebergResult<pg_sys::TM_Result::Type> {
-        Err(IcebergError::NotImplemented("tuple_update"))
-    }
-
-    /// Lock a tuple (not applicable for Iceberg).
-    ///
-    /// Iceberg tables don't support row-level locking in the PostgreSQL sense.
-    fn tuple_lock(
-        &mut self,
-        _tid: &ItemPointer,
-        _snapshot: &SnapshotHandle,
-        _row: &mut Row,
-        _cid: pg_sys::CommandId,
-        _mode: pg_sys::LockTupleMode::Type,
-        _wait_policy: pg_sys::LockWaitPolicy::Type,
-        _flags: u8,
-        _tmfd: &mut TM_FailureData,
-    ) -> IcebergResult<pg_sys::TM_Result::Type> {
-        Err(IcebergError::NotImplemented("tuple_lock"))
-    }
-}
-
-impl IcebergModify {
     /// Initialize the data file writer components.
     ///
     /// This method sets up the location generator, file name generator, and
@@ -398,10 +345,8 @@ impl IcebergModify {
 
         // Capture the files locally
         let new_files: Vec<_> = self.data_files.drain(..).collect();
-        let rel_oid = unsafe { (*(*self.rel).rd_rel).oid };
-
         // Process files via tracker (handles rebase and metadata file generation)
-        process_new_data_files(rel_oid, new_files, file_io)?;
+        process_new_data_files(self.rel_oid, new_files, file_io)?;
 
         Ok(())
     }

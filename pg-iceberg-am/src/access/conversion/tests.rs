@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow_schema::{DataType, TimeUnit};
 use iceberg_lite::spec::{NestedField, PrimitiveType, Type};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
-use pg_lakebase_core::data::Row;
+use pg_lakebase_core::tuple::Row;
 
 use super::IcebergSchema;
 use super::rows_to_record_batch;
@@ -212,7 +212,7 @@ fn test_rows_to_record_batch_primitives() {
     use arrow_array::Array;
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int32Type;
-    use pg_lakebase_core::data::Cell;
+    use pg_lakebase_core::tuple::Cell;
 
     let iceberg_schema = create_test_iceberg_schema(vec![
         NestedField::required(1, "int_col", Type::Primitive(PrimitiveType::Int)),
@@ -223,14 +223,12 @@ fn test_rows_to_record_batch_primitives() {
         ),
     ]);
 
-    let row1 = Row {
-        cells: vec![Some(Cell::I32(42)), Some(Cell::String("hello".to_string()))],
-        size: 0,
-    };
-    let row2 = Row {
-        cells: vec![Some(Cell::I32(100)), None],
-        size: 0,
-    };
+    let mut row1 = Row::with_capacity(2);
+    row1.set_cell(0, Some(Cell::I32(42)));
+    row1.set_cell(1, Some(Cell::String("hello".to_string())));
+
+    let mut row2 = Row::with_capacity(2);
+    row2.set_cell(0, Some(Cell::I32(100)));
 
     let rows = vec![row1.clone(), row2];
     let batch = rows_to_record_batch(&rows, &iceberg_schema).unwrap();

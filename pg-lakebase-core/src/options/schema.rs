@@ -31,6 +31,50 @@ pub struct OptionDef {
     pub description: &'static str,
 }
 
+/// Try to match a single `DefElem` against the valid option definitions.
+///
+/// Returns `Ok(true)` if the option matched, `Ok(false)` if not.
+///
+/// # Safety
+///
+/// `def_elem_ptr` must point at a valid PostgreSQL `DefElem` node.
+unsafe fn try_extract_single_option(
+    def_elem_ptr: *mut pg_sys::DefElem,
+    def_name: &str,
+    valid_options: &[OptionDef],
+    custom_opts: &mut Vec<(String, Option<String>)>,
+) -> Result<bool, String> {
+    let Some(def) = valid_options.iter().find(|opt| opt.name == def_name) else {
+        return Ok(false);
+    };
+
+    // SAFETY: defGetString reads from a valid DefElem node.
+    let raw_val = unsafe {
+        if (*def_elem_ptr).arg.is_null() {
+            None
+        } else {
+            let val_ptr = pg_sys::defGetString(def_elem_ptr);
+            (!val_ptr.is_null())
+                .then(|| CStr::from_ptr(val_ptr).to_string_lossy().into_owned())
+        }
+    };
+
+    if custom_opts
+        .iter()
+        .any(|(k, _): &(String, _)| *k == def_name)
+    {
+        return Err(format!("option '{}' specified more than once", def_name));
+    }
+
+    match validate_option_value(def, raw_val) {
+        Ok(validated_val) => {
+            custom_opts.push((def_name.to_owned(), validated_val));
+            Ok(true)
+        }
+        Err(e) => Err(format!("Invalid value for option '{}': {}", def_name, e)),
+    }
+}
+
 /// Extract and remove custom options from a generic list of DefElem.
 ///
 /// Iterates the options list attached to a DDL statement, extracts entries
@@ -66,45 +110,19 @@ pub unsafe fn extract_and_remove_options(
         // SAFETY: i < length, so cell.add(i) is within the list allocation.
         let def_elem_ptr =
             unsafe { (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem };
-        // SAFETY: DefElem is a valid Postgres node with a C-string defname.
         let def_name_cstr = unsafe { CStr::from_ptr((*def_elem_ptr).defname) };
         let def_name = def_name_cstr.to_string_lossy();
 
-        if let Some(def) = valid_options.iter().find(|opt| opt.name == &*def_name) {
-            // SAFETY: defGetString reads from a valid DefElem node.
-            let raw_val = unsafe {
-                if (*def_elem_ptr).arg.is_null() {
-                    None
-                } else {
-                    let val_ptr = pg_sys::defGetString(def_elem_ptr);
-                    (!val_ptr.is_null()).then(|| {
-                        CStr::from_ptr(val_ptr).to_string_lossy().into_owned()
-                    })
-                }
-            };
+        let matched = unsafe {
+            try_extract_single_option(
+                def_elem_ptr,
+                &def_name,
+                valid_options,
+                &mut custom_opts,
+            )?
+        };
 
-            if custom_opts
-                .iter()
-                .any(|(k, _): &(String, _)| *k == *def_name)
-            {
-                return Err(format!(
-                    "option '{}' specified more than once",
-                    def_name
-                ));
-            }
-
-            match validate_option_value(def, raw_val) {
-                Ok(validated_val) => {
-                    custom_opts.push((def_name.into_owned(), validated_val));
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "Invalid value for option '{}': {}",
-                        def_name, e
-                    ));
-                }
-            }
-        } else {
+        if !matched {
             // SAFETY: lappend is safe for a valid (or null) list and node.
             new_pg_opts = unsafe {
                 pg_sys::lappend(new_pg_opts, def_elem_ptr as *mut std::ffi::c_void)
@@ -114,6 +132,46 @@ pub unsafe fn extract_and_remove_options(
 
     // SAFETY: caller guarantees `options_list_ptr` is writable.
     unsafe { *options_list_ptr = new_pg_opts };
+    Ok(custom_opts)
+}
+
+/// Extract custom options from a generic list of DefElem without modifying it.
+///
+/// # Safety
+///
+/// `options_list` must be either NULL or a valid PostgreSQL `List` of
+/// `DefElem` nodes allocated by PostgreSQL.
+pub unsafe fn extract_options(
+    options_list: *mut pg_sys::List,
+    valid_options: &[OptionDef],
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut custom_opts = Vec::new();
+
+    if options_list.is_null() {
+        return Ok(custom_opts);
+    }
+
+    // SAFETY: caller guarantees `options_list` is valid.
+    let (cell, length) =
+        unsafe { ((*options_list).elements, (*options_list).length) };
+
+    for i in 0..length {
+        // SAFETY: i < length, so cell.add(i) is within the list allocation.
+        let def_elem_ptr =
+            unsafe { (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem };
+        let def_name_cstr = unsafe { CStr::from_ptr((*def_elem_ptr).defname) };
+        let def_name = def_name_cstr.to_string_lossy();
+
+        unsafe {
+            try_extract_single_option(
+                def_elem_ptr,
+                &def_name,
+                valid_options,
+                &mut custom_opts,
+            )?;
+        }
+    }
+
     Ok(custom_opts)
 }
 

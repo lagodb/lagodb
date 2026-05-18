@@ -1,9 +1,14 @@
 use crate::catalog::iceberg_metadata::IcebergMetadata;
 use crate::catalog::init_table_storage_metadata;
 use crate::constants::ICEBERG_AM_NAME;
+use pg_lakebase_core::catalog::range_var_get_relid;
+use pg_lakebase_core::handles::RelationGuard;
+use pg_lakebase_core::hooks::{
+    CreateStmtNode, PostUtilityContext, UtilityHook, UtilityHookError, UtilityNode,
+    register_utility_hook,
+};
+use pg_lakebase_core::options::TableOptions;
 use pg_lakebase_core::options::{OptionDef, OptionKind};
-use pg_lakebase_core::pg_wrapper::PgWrapper;
-use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 use std::ffi::CStr;
 
@@ -80,7 +85,7 @@ impl UtilityHook for IcebergTableHook {
 
     fn on_pre(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
         let stmt = context
-            .is_a_mut::<pg_sys::CreateStmt>(pg_sys::NodeTag::T_CreateStmt)
+            .cast_mut::<CreateStmtNode>()
             .expect("Hook registered for T_CreateStmt");
 
         if !is_iceberg_access_method(stmt) {
@@ -91,29 +96,33 @@ impl UtilityHook for IcebergTableHook {
         Ok(())
     }
 
-    fn on_post(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
+    fn on_post(&self, context: &PostUtilityContext) -> Result<(), UtilityHookError> {
         let stmt = context
-            .is_a_mut::<pg_sys::CreateStmt>(pg_sys::NodeTag::T_CreateStmt)
+            .original_stmt()
+            .cast::<CreateStmtNode>()
             .expect("Hook registered for T_CreateStmt");
 
         if !is_iceberg_access_method(stmt) {
             return Ok(());
         }
 
-        let oid = PgWrapper::range_var_get_relid(
-            stmt.relation,
-            pg_sys::NoLock as pg_sys::LOCKMODE,
-            false,
-        )?;
+        // SAFETY: `stmt` is a live CreateStmt from the utility hook, and its
+        // RangeVar belongs to that PostgreSQL parse tree for this callback.
+        let oid = unsafe {
+            range_var_get_relid(
+                stmt.relation,
+                pg_sys::NoLock as pg_sys::LOCKMODE,
+                false,
+            )
+        }?;
 
-        if let Some(opts) =
-            TableOptions::extract_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?
+        if let Some(opts) = TableOptions::read_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?
         {
             opts.persist_to_catalog(oid)?;
         }
 
         let guard =
-            TableGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)?;
+            RelationGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)?;
 
         let metadata_location = init_table_storage_metadata(&guard.as_handle())?;
 

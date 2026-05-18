@@ -3,7 +3,7 @@ use super::record::{
     SIZE_OF_DELETE_FILE, SIZE_OF_WRITE_FILE, WriteFileHeader,
 };
 use pg_lakebase_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
-use pg_lakebase_core::{diag, pg_wrapper::PgWrapper};
+use pg_lakebase_core::{diag, wal};
 
 use pgrx::pg_sys;
 
@@ -19,7 +19,8 @@ static INVALID_PATHS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 /// Iceberg WAL Resource Manager ID
 ///
 /// Custom resource manager IDs must be >= 128. We use 128 as our base.
-pub const ICEBERG_RMGR_ID: RmgrId = RmgrId::new(128);
+pub const ICEBERG_RMGR_ID_U8: u8 = 128;
+pub const ICEBERG_RMGR_ID: RmgrId = RmgrId::new(ICEBERG_RMGR_ID_U8);
 
 /// Iceberg WAL Resource Manager implementation
 ///
@@ -203,7 +204,7 @@ impl IcebergRmgr {
         //
         // Note: Archive recovery (standby/PITR) still needs redo as files may
         // not exist on the target system.
-        if PgWrapper::is_crash_recovery_only() {
+        if wal::is_crash_recovery_only() {
             return Ok(());
         }
 

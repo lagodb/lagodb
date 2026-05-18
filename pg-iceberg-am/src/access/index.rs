@@ -1,29 +1,33 @@
-use crate::error::{IcebergError, IcebergResult};
+use crate::IcebergTableAm;
 use pg_lakebase_core::prelude::*;
 
-pub struct IcebergIndex;
+pub struct IcebergIndexFetch;
 
-impl AmIndex<IcebergError> for IcebergIndex {
-    fn new(_rel: &RelationHandle) -> IcebergResult<Self> {
-        Ok(IcebergIndex)
+impl AmIndexFetchSession for IcebergIndexFetch {
+    fn new(rel: &RelationHandle) -> AmResult<Self> {
+        let _ = rel;
+        Ok(Self)
     }
 
-    fn index_fetch_begin(&mut self) -> IcebergResult<()> {
-        Err(IcebergError::NotImplemented("index_fetch_begin"))
+    fn index_fetch_begin(&mut self) -> AmResult<()> {
+        unsupported_callback("index_fetch_begin")
     }
 
     fn index_fetch_tuple(
         &mut self,
-        _tid: &ItemPointer,
-        _snapshot: &SnapshotHandle,
-        _row: &mut Row,
-        _call_again: &mut bool,
-        _all_dead: &mut bool,
-    ) -> IcebergResult<bool> {
-        Err(IcebergError::NotImplemented("index_fetch_tuple"))
+        tid: &ItemPointer,
+        snapshot: &SnapshotHandle,
+        row: &mut Row,
+        call_again: &mut bool,
+        all_dead: &mut bool,
+    ) -> AmResult<bool> {
+        let _ = (tid, snapshot, row, call_again, all_dead);
+        unsupported_callback("index_fetch_tuple")
     }
 
-    fn index_fetch_end(&mut self) -> IcebergResult<()> {
-        Err(IcebergError::NotImplemented("index_fetch_end"))
+    fn index_fetch_end(&mut self) -> AmResult<()> {
+        unsupported_callback("index_fetch_end")
     }
 }
+
+impl AmIndexCallbacks for IcebergTableAm {}

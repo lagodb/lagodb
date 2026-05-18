@@ -1,7 +1,9 @@
 use super::storage::{
     TablespaceStorage, TablespaceStorageError, store_id_from_tablespace_name,
 };
-use crate::pg_wrapper::{CacheRegisterSyscacheCallback, PgWrapper, PgWrapperError};
+use crate::catalog::{SysCacheTuple, search_syscache1};
+use crate::diag::PgError;
+use crate::wrapper::CacheRegisterSyscacheCallback;
 use pg_lakebase_storage::{StoreConfig, StoreId};
 use pgrx::pg_sys;
 use pgrx::prelude::*;
@@ -19,7 +21,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum TablespaceCacheError {
     #[error("failed to lookup tablespace: {0}")]
-    LookupFailed(#[from] PgWrapperError),
+    LookupFailed(#[from] PgError),
 
     #[error("tablespace storage config: {0}")]
     Storage(#[from] TablespaceStorageError),
@@ -165,32 +167,22 @@ fn lookup_tablespace_options(
 ) -> Result<Option<CachedTablespaceOpts>, TablespaceCacheError> {
     let cache_id = pg_sys::SysCacheIdentifier::TABLESPACEOID as i32;
 
-    let tp = PgWrapper::search_sys_cache1(
-        cache_id,
-        pg_sys::Datum::from(u32::from(spcid) as usize),
-    )?;
+    let tp =
+        search_syscache1(cache_id, pg_sys::Datum::from(u32::from(spcid) as usize))?;
 
     let Some(tp) = tp else {
         return Ok(None);
     };
 
-    let result = (|| {
-        let tablespace_name = lookup_tablespace_name(cache_id, tp)?;
+    let result = {
+        let tablespace_name = lookup_tablespace_name(&tp)?;
 
-        let mut is_null = false;
-        let datum = PgWrapper::sys_cache_get_attr(
-            cache_id,
-            tp,
-            pg_sys::Anum_pg_tablespace_spcoptions as i16,
-            &mut is_null,
-        )?;
-
-        if is_null {
-            Ok(None)
-        } else {
-            // SAFETY: datum is valid (obtained from SysCacheGetAttr on a live tuple).
-            // Vec::from_datum copies the data out of Postgres memory before we
-            // release the syscache tuple below.
+        if let Some(datum) =
+            tp.get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16)?
+        {
+            // SAFETY: datum is valid while the syscache tuple guard is alive.
+            // Vec::from_datum copies the data out of Postgres memory before
+            // the guard releases the syscache tuple.
             let options_vec = unsafe { Vec::<String>::from_datum(datum, false) }
                 .unwrap_or_default();
             if options_vec.is_empty() {
@@ -198,32 +190,23 @@ fn lookup_tablespace_options(
             } else {
                 parse_options_to_cached(tablespace_name, options_vec)
             }
+        } else {
+            Ok(None)
         }
-    })();
-
-    let _ = PgWrapper::release_sys_cache(tp);
+    };
 
     result
 }
 
 fn lookup_tablespace_name(
-    cache_id: i32,
-    tuple: pg_sys::HeapTuple,
+    tuple: &SysCacheTuple,
 ) -> Result<String, TablespaceCacheError> {
-    let mut is_null = false;
-    let datum = PgWrapper::sys_cache_get_attr(
-        cache_id,
-        tuple,
-        pg_sys::Anum_pg_tablespace_spcname as i16,
-        &mut is_null,
-    )?;
+    let datum = tuple.get_attr(pg_sys::Anum_pg_tablespace_spcname as i16)?;
 
     // pg_tablespace.spcname is defined as `name NOT NULL` in the PostgreSQL
     // catalog schema. A null value here would indicate catalog corruption,
     // which is unrecoverable — panic is the correct response.
-    let datum = (!is_null)
-        .then_some(datum)
-        .expect("pg_tablespace.spcname is a NOT NULL catalog column");
+    let datum = datum.expect("pg_tablespace.spcname is a NOT NULL catalog column");
 
     // SAFETY: datum is non-null and points at a valid NameData within the
     // syscache tuple. We copy to an owned String before releasing the tuple.

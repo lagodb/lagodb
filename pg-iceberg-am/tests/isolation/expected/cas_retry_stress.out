@@ -1,11 +1,13 @@
 Parsed test spec with 5 sessions
 
-starting permutation: s1_insert_batch s2_insert_batch s1_commit s2_commit s1_verify s2_verify s5_final_verify
+starting permutation: s1_begin s1_insert_batch s2_begin s2_insert_batch s1_commit s2_commit s1_verify s2_verify s5_final_verify
+step s1_begin: BEGIN;
 step s1_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 1, 'session1_row_' || i 
   FROM generate_series(1, 100) i; 
 
+step s2_begin: BEGIN;
 step s2_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 2, 'session2_row_' || i 
@@ -51,24 +53,26 @@ total_rows|unique_sessions|min_id|max_id
 (1 row)
 
 
-starting permutation: s1_insert_batch s2_insert_batch s3_insert_batch s4_insert_batch s1_commit s2_commit s3_commit s4_commit s5_final_verify
-s3: WARNING:  there is already a transaction in progress
-s4: WARNING:  there is already a transaction in progress
+starting permutation: s1_begin s1_insert_batch s2_begin s2_insert_batch s3_begin s3_insert_batch s4_begin s4_insert_batch s1_commit s2_commit s3_commit s4_commit s5_final_verify
+step s1_begin: BEGIN;
 step s1_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 1, 'session1_row_' || i 
   FROM generate_series(1, 100) i; 
 
+step s2_begin: BEGIN;
 step s2_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 2, 'session2_row_' || i 
   FROM generate_series(1001, 1100) i; 
 
+step s3_begin: BEGIN;
 step s3_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 3, 'session3_row_' || i 
   FROM generate_series(2001, 2100) i; 
 
+step s4_begin: BEGIN;
 step s4_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 4, 'session4_row_' || i 
@@ -92,19 +96,22 @@ total_rows|unique_sessions|min_id|max_id
 (1 row)
 
 
-starting permutation: s1_insert_batch s1_commit s2_insert_batch s2_commit s3_insert_batch s3_commit s5_final_verify
+starting permutation: s1_begin s1_insert_batch s1_commit s2_begin s2_insert_batch s2_commit s3_begin s3_insert_batch s3_commit s5_final_verify
+step s1_begin: BEGIN;
 step s1_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 1, 'session1_row_' || i 
   FROM generate_series(1, 100) i; 
 
 step s1_commit: COMMIT;
+step s2_begin: BEGIN;
 step s2_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 2, 'session2_row_' || i 
   FROM generate_series(1001, 1100) i; 
 
 step s2_commit: COMMIT;
+step s3_begin: BEGIN;
 step s3_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 3, 'session3_row_' || i 
@@ -125,18 +132,20 @@ total_rows|unique_sessions|min_id|max_id
 (1 row)
 
 
-starting permutation: s1_insert_batch s2_insert_batch s3_insert_batch s1_commit s5_count s2_commit s5_count s3_commit s5_final_verify
-s4: WARNING:  there is already a transaction in progress
+starting permutation: s1_begin s1_insert_batch s2_begin s2_insert_batch s3_begin s3_insert_batch s1_commit s5_count s2_commit s5_count s3_commit s5_final_verify
+step s1_begin: BEGIN;
 step s1_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 1, 'session1_row_' || i 
   FROM generate_series(1, 100) i; 
 
+step s2_begin: BEGIN;
 step s2_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 2, 'session2_row_' || i 
   FROM generate_series(1001, 1100) i; 
 
+step s3_begin: BEGIN;
 step s3_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 3, 'session3_row_' || i 
@@ -171,26 +180,29 @@ total_rows|unique_sessions|min_id|max_id
 (1 row)
 
 
-starting permutation: s1_insert_batch s1_commit s2_insert_batch s2_commit s3_insert_batch s3_commit s4_insert_batch s4_commit s5_final_verify
-s4: WARNING:  there is already a transaction in progress
+starting permutation: s1_begin s1_insert_batch s1_commit s2_begin s2_insert_batch s2_commit s3_begin s3_insert_batch s3_commit s4_begin s4_insert_batch s4_commit s5_final_verify
+step s1_begin: BEGIN;
 step s1_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 1, 'session1_row_' || i 
   FROM generate_series(1, 100) i; 
 
 step s1_commit: COMMIT;
+step s2_begin: BEGIN;
 step s2_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 2, 'session2_row_' || i 
   FROM generate_series(1001, 1100) i; 
 
 step s2_commit: COMMIT;
+step s3_begin: BEGIN;
 step s3_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 3, 'session3_row_' || i 
   FROM generate_series(2001, 2100) i; 
 
 step s3_commit: COMMIT;
+step s4_begin: BEGIN;
 step s4_insert_batch: 
   INSERT INTO iceberg_test.txn_test (id, session_id, value) 
   SELECT i, 4, 'session4_row_' || i 
@@ -208,5 +220,70 @@ step s5_final_verify:
 total_rows|unique_sessions|min_id|max_id
 ----------+---------------+------+------
        400|              4|     1|  3100
+(1 row)
+
+
+starting permutation: s1_begin s1_insert_batch s2_begin s2_insert_batch s1_lock_share s2_commit s1_commit s5_final_verify
+step s1_begin: BEGIN;
+step s1_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 1, 'session1_row_' || i 
+  FROM generate_series(1, 100) i; 
+
+step s2_begin: BEGIN;
+step s2_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 2, 'session2_row_' || i 
+  FROM generate_series(1001, 1100) i; 
+
+step s1_lock_share: LOCK TABLE lakebase.iceberg_metadata IN SHARE MODE;
+step s2_commit: COMMIT; <waiting ...>
+step s1_commit: COMMIT;
+s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
+DETAIL:  pg_lakebase_core
+step s2_commit: <... completed>
+step s5_final_verify: 
+  SELECT 
+    count(*) as total_rows,
+    count(DISTINCT session_id) as unique_sessions,
+    min(id) as min_id,
+    max(id) as max_id
+  FROM iceberg_test.txn_test;
+
+total_rows|unique_sessions|min_id|max_id
+----------+---------------+------+------
+       200|              2|     1|  1100
+(1 row)
+
+
+starting permutation: s1_begin s1_update_touched s2_begin s2_insert_batch s2_commit s1_commit s5_final_verify
+step s1_begin: BEGIN;
+step s1_update_touched: 
+  UPDATE lakebase.iceberg_metadata
+  SET previous_metadata_location = previous_metadata_location
+  WHERE relid = 'iceberg_test.txn_test'::regclass;
+
+step s2_begin: BEGIN;
+step s2_insert_batch: 
+  INSERT INTO iceberg_test.txn_test (id, session_id, value) 
+  SELECT i, 2, 'session2_row_' || i 
+  FROM generate_series(1001, 1100) i; 
+
+step s2_commit: COMMIT; <waiting ...>
+step s1_commit: COMMIT;
+s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
+DETAIL:  pg_lakebase_core
+step s2_commit: <... completed>
+step s5_final_verify: 
+  SELECT 
+    count(*) as total_rows,
+    count(DISTINCT session_id) as unique_sessions,
+    min(id) as min_id,
+    max(id) as max_id
+  FROM iceberg_test.txn_test;
+
+total_rows|unique_sessions|min_id|max_id
+----------+---------------+------+------
+       100|              1|  1001|  1100
 (1 row)
 

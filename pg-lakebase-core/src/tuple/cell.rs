@@ -1,39 +1,42 @@
-//! PostgreSQL data types for Cell and Row
+//! `Cell`: a tagged value matching one PostgreSQL column type.
 //!
-//! This module provides high-level abstractions for PostgreSQL data values,
-//! including the `Cell` enum representing individual column values and
-//! the `Row` struct representing a complete table row.
+//! Includes zero-copy view types ([`StringView`], [`ByteaView`]) for varlena
+//! data borrowed from PostgreSQL or Arrow buffers, and the conversions to and
+//! from PostgreSQL `Datum`.
 
+use bytes::Bytes;
+use pgrx::pg_sys::{self, Datum, Oid, bytea};
 use pgrx::prelude::{Date, Interval, Time, Timestamp, TimestampWithTimeZone};
-
 use pgrx::{
-    AnyNumeric, FromDatum, IntoDatum, PgBuiltInOids, PgOid,
-    datum::Uuid,
-    fcinfo,
-    pg_sys::{self, Datum, Oid, POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE, bytea},
+    AnyNumeric, FromDatum, IntoDatum, PgBuiltInOids, PgOid, datum::Uuid, fcinfo,
 };
 use std::ffi::{CStr, CString};
 use std::fmt;
-use std::mem;
 
-use crate::pg_wrapper::PgWrapper;
-use bytes::Bytes;
+use crate::wrapper::{PgOutputCString, PgWrapper};
 
-/// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in days.
-pub const PG_EPOCH_DAYS_DIFF: i32 = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i32;
-
-/// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in microseconds.
-pub const PG_EPOCH_USECS_DIFF: i64 =
-    (PG_EPOCH_DAYS_DIFF as i64) * (pgrx::datum::USECS_PER_DAY as i64);
-
+/// A non-owning view into UTF-8 string data.
+///
+/// `StringView` is a raw pointer plus length; it does not own the underlying
+/// memory. The data typically lives in either:
+///
+/// - PostgreSQL palloc'd memory (e.g. a tuple slot's varlena buffer), in which
+///   case the view is valid only until the surrounding memory context is reset
+///   or the slot is reused.
+/// - An Arrow buffer held by an upstream `RecordBatch`, in which case the
+///   view is valid until that batch is dropped.
+///
+/// # Thread affinity
+///
+/// `StringView` intentionally does not implement `Send` or `Sync`. The value
+/// is just `(*const u8, usize)`, but the backing memory may be PostgreSQL
+/// palloc'd memory or an Arrow buffer owned by a scan batch. Keeping the view
+/// thread-affine makes the borrowing contract visible to the type system.
 #[derive(Debug, Clone, Copy)]
 pub struct StringView {
     pub ptr: *const u8,
     pub len: usize,
 }
-
-unsafe impl Send for StringView {}
-unsafe impl Sync for StringView {}
 
 impl StringView {
     /// # Safety
@@ -47,14 +50,16 @@ impl StringView {
     }
 }
 
+/// A non-owning view into a byte slice.
+///
+/// Same lifetime/thread-affinity caveats as [`StringView`]: the value is a
+/// raw pointer + length, and callers are responsible for keeping the backing
+/// allocation alive while the view is used.
 #[derive(Debug, Clone, Copy)]
 pub struct ByteaView {
     pub ptr: *const u8,
     pub len: usize,
 }
-
-unsafe impl Send for ByteaView {}
-unsafe impl Sync for ByteaView {}
 
 impl ByteaView {
     /// # Safety
@@ -65,7 +70,7 @@ impl ByteaView {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Cell {
     Bool(bool),
     I8(i8),
@@ -164,54 +169,39 @@ impl Cell {
     }
 }
 
-unsafe impl Send for Cell {}
-
-impl Clone for Cell {
-    fn clone(&self) -> Self {
-        match self {
-            Cell::Bool(v) => Cell::Bool(*v),
-            Cell::I8(v) => Cell::I8(*v),
-            Cell::I16(v) => Cell::I16(*v),
-            Cell::F32(v) => Cell::F32(*v),
-            Cell::I32(v) => Cell::I32(*v),
-            Cell::F64(v) => Cell::F64(*v),
-            Cell::I64(v) => Cell::I64(*v),
-            Cell::Numeric(v) => Cell::Numeric(v.clone()),
-            Cell::String(v) => Cell::String(v.clone()),
-            Cell::StringView(v) => Cell::StringView(*v),
-            Cell::Date(v) => Cell::Date(*v),
-            Cell::Time(v) => Cell::Time(*v),
-            Cell::Timestamp(v) => Cell::Timestamp(*v),
-            Cell::Timestamptz(v) => Cell::Timestamptz(*v),
-            Cell::Interval(v) => Cell::Interval(*v),
-            Cell::Json(v) => Cell::Json(v.clone()),
-            Cell::Bytea(v) => Cell::Bytea(v.clone()),
-            Cell::ByteaView(v) => Cell::ByteaView(*v),
-            Cell::Uuid(v) => Cell::Uuid(*v),
-            Cell::BoolArray(v) => Cell::BoolArray(v.clone()),
-            Cell::I16Array(v) => Cell::I16Array(v.clone()),
-            Cell::I32Array(v) => Cell::I32Array(v.clone()),
-            Cell::I64Array(v) => Cell::I64Array(v.clone()),
-            Cell::F32Array(v) => Cell::F32Array(v.clone()),
-            Cell::F64Array(v) => Cell::F64Array(v.clone()),
-            Cell::StringArray(v) => Cell::StringArray(v.clone()),
-        }
-    }
-}
-
 fn write_array<T: std::fmt::Display>(
     array: &[Option<T>],
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
-    let res = array
-        .iter()
-        .map(|e| match e {
-            Some(val) => format!("{}", val),
-            None => "null".to_owned(),
-        })
-        .collect::<Vec<String>>()
-        .join(",");
-    write!(f, "[{}]", res)
+    write!(f, "[")?;
+    for (i, e) in array.iter().enumerate() {
+        if i > 0 {
+            write!(f, ",")?;
+        }
+        match e {
+            Some(val) => write!(f, "{}", val)?,
+            None => write!(f, "null")?,
+        }
+    }
+    write!(f, "]")
+}
+
+unsafe fn write_pg_output(
+    f: &mut fmt::Formatter<'_>,
+    output_fn: unsafe fn(pg_sys::FunctionCallInfo) -> Datum,
+    arg: Option<Datum>,
+    context: &'static str,
+    quoted: bool,
+) -> fmt::Result {
+    let output = unsafe { PgOutputCString::from_function_call(output_fn, &[arg]) }
+        .expect(context);
+    let text = output.as_cstr().to_string_lossy();
+
+    if quoted {
+        write!(f, "'{}'", text)
+    } else {
+        write!(f, "{}", text)
+    }
 }
 
 impl fmt::Display for Cell {
@@ -246,71 +236,59 @@ impl fmt::Display for Cell {
                 write!(f, "'{}'", s)
             }
             Cell::Date(v) => unsafe {
-                let dt = fcinfo::direct_function_call_as_datum(
-                    pg_sys::date_out,
-                    &[(*v).into_datum()],
-                )
-                .expect("cell should be a valid date");
-                let dt_cstr = CStr::from_ptr(dt.cast_mut_ptr());
-                write!(
+                write_pg_output(
                     f,
-                    "'{}'",
-                    dt_cstr.to_str().expect("date should be a valid string")
+                    pg_sys::date_out,
+                    (*v).into_datum(),
+                    "cell should be a valid date",
+                    true,
                 )
             },
             Cell::Time(v) => unsafe {
-                let ts = fcinfo::direct_function_call_as_datum(
-                    pg_sys::time_out,
-                    &[(*v).into_datum()],
-                )
-                .expect("cell should be a valid time");
-                let ts_cstr = CStr::from_ptr(ts.cast_mut_ptr());
-                write!(
+                write_pg_output(
                     f,
-                    "'{}'",
-                    ts_cstr.to_str().expect("time should be a valid string")
+                    pg_sys::time_out,
+                    (*v).into_datum(),
+                    "cell should be a valid time",
+                    true,
                 )
             },
             Cell::Timestamp(v) => unsafe {
-                let ts = fcinfo::direct_function_call_as_datum(
-                    pg_sys::timestamp_out,
-                    &[(*v).into_datum()],
-                )
-                .expect("cell should be a valid timestamp");
-                let ts_cstr = CStr::from_ptr(ts.cast_mut_ptr());
-                write!(
+                write_pg_output(
                     f,
-                    "'{}'",
-                    ts_cstr
-                        .to_str()
-                        .expect("timestamp should be a valid string")
+                    pg_sys::timestamp_out,
+                    (*v).into_datum(),
+                    "cell should be a valid timestamp",
+                    true,
                 )
             },
             Cell::Timestamptz(v) => unsafe {
-                let ts = fcinfo::direct_function_call_as_datum(
-                    pg_sys::timestamptz_out,
-                    &[(*v).into_datum()],
-                )
-                .expect("cell should be a valid timestamptz");
-                let ts_cstr = CStr::from_ptr(ts.cast_mut_ptr());
-                write!(
+                write_pg_output(
                     f,
-                    "'{}'",
-                    ts_cstr
-                        .to_str()
-                        .expect("timestamptz should be a valid string")
+                    pg_sys::timestamptz_out,
+                    (*v).into_datum(),
+                    "cell should be a valid timestamptz",
+                    true,
                 )
             },
-            Cell::Interval(v) => write!(f, "{}", v),
+            Cell::Interval(v) => unsafe {
+                write_pg_output(
+                    f,
+                    pg_sys::interval_out,
+                    (*v).into_datum(),
+                    "cell should be a valid interval",
+                    false,
+                )
+            },
             Cell::Json(b) => unsafe {
                 let datum = Datum::from(b.as_ptr());
-                let out = fcinfo::direct_function_call_as_datum(
+                write_pg_output(
+                    f,
                     pg_sys::jsonb_out,
-                    &[Some(datum)],
+                    Some(datum),
+                    "jsonb_out failed",
+                    false,
                 )
-                .expect("jsonb_out failed");
-                let out_cstr = CStr::from_ptr(out.cast_mut_ptr());
-                write!(f, "{}", out_cstr.to_string_lossy())
             },
             Cell::Bytea(v) => write_hex_bytes!(v),
             Cell::ByteaView(v) => {
@@ -367,15 +345,15 @@ impl Cell {
                 _ => None,
             },
             PgOid::BuiltIn(PgBuiltInOids::INT2OID) => match self {
-                Cell::I16(v) => Some(v.into_datum().unwrap()),
-                Cell::I32(v) => Some((v as i16).into_datum().unwrap()),
-                Cell::I64(v) => Some((v as i16).into_datum().unwrap()),
+                Cell::I16(v) => v.into_datum(),
+                Cell::I32(v) => i16::try_from(v).ok().and_then(|v| v.into_datum()),
+                Cell::I64(v) => i16::try_from(v).ok().and_then(|v| v.into_datum()),
                 _ => self.into_datum(),
             },
             PgOid::BuiltIn(PgBuiltInOids::INT4OID) => match self {
-                Cell::I16(v) => Some((v as i32).into_datum().unwrap()),
-                Cell::I32(v) => Some(v.into_datum().unwrap()),
-                Cell::I64(v) => Some((v as i32).into_datum().unwrap()),
+                Cell::I16(v) => (v as i32).into_datum(),
+                Cell::I32(v) => v.into_datum(),
+                Cell::I64(v) => i32::try_from(v).ok().and_then(|v| v.into_datum()),
                 _ => self.into_datum(),
             },
             _ => self.into_datum(),
@@ -542,10 +520,10 @@ impl FromDatum for Cell {
                     }
                 }
                 PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => {
-                    let ptr = datum.cast_mut_ptr::<bytea>();
-                    if ptr.is_null() {
+                    if is_null {
                         None
                     } else {
+                        let ptr = datum.cast_mut_ptr::<bytea>();
                         // SAFETY: ptr is a valid pointer to varlena because it comes from a Datum of type BYTEAOID
                         let slice = pgrx::varlena::varlena_to_byte_slice(ptr);
                         Some(Cell::Bytea(Bytes::copy_from_slice(slice)))
@@ -582,99 +560,6 @@ impl FromDatum for Cell {
                 }
                 _ => None,
             }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Row {
-    pub cells: Vec<Option<Cell>>,
-    pub size: usize,
-}
-
-impl Row {
-    /// Create an empty row
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        let mut cells = Vec::with_capacity(capacity);
-        cells.resize_with(capacity, || None);
-        Self { cells, size: 0 }
-    }
-
-    pub fn push(&mut self, cell: Option<Cell>) {
-        if let Some(ref c) = cell {
-            self.size += c.mem_size();
-        }
-        self.cells.push(cell);
-    }
-
-    pub fn len(&self) -> usize {
-        self.cells.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
-    }
-
-    pub fn get(&self, index: usize) -> Option<&Option<Cell>> {
-        self.cells.get(index)
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<'_, Option<Cell>> {
-        self.cells.iter()
-    }
-
-    pub fn iter_with_index(&self) -> impl Iterator<Item = (usize, &Option<Cell>)> {
-        self.cells.iter().enumerate()
-    }
-
-    #[inline]
-    pub fn replace_with(&mut self, src: Row) {
-        let _ = mem::replace(self, src);
-    }
-
-    pub fn clear(&mut self) {
-        self.cells.clear();
-        self.size = 0;
-    }
-
-    pub unsafe fn update_from_slot(&mut self, slot: *mut pg_sys::TupleTableSlot) {
-        unsafe {
-            // Ensure slot contents are accessible (deform tuple if needed)
-            pg_sys::slot_getallattrs(slot);
-
-            let tup_desc = (*slot).tts_tupleDescriptor;
-            let natts = (*tup_desc).natts as usize;
-            let values = std::slice::from_raw_parts((*slot).tts_values, natts);
-            let nulls = std::slice::from_raw_parts((*slot).tts_isnull, natts);
-            let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
-
-            // Resize and fill
-            self.cells.resize_with(natts, || None);
-            self.size = 0;
-
-            for i in 0..natts {
-                self.cells[i] = if nulls[i] {
-                    None
-                } else {
-                    let attr = &attrs[i];
-                    Cell::from_polymorphic_datum(values[i], false, attr.atttypid)
-                        .inspect(|c| {
-                            self.size += c.mem_size();
-                        })
-                };
-            }
-        }
-    }
-
-    pub unsafe fn from_slot(slot: *mut pg_sys::TupleTableSlot) -> Self {
-        unsafe {
-            let mut row = Self::new();
-            row.update_from_slot(slot);
-            row
         }
     }
 }

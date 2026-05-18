@@ -8,8 +8,8 @@ use super::defs;
 use super::storage::{
     TablespaceStorage, TablespaceStorageError, store_id_from_tablespace_name,
 };
-use crate::diag::SqlStateError;
-use crate::pg_wrapper::{PgWrapper, PgWrapperError};
+use crate::catalog::{CatalogRelation, search_syscache_copy};
+use crate::diag::{PgError, SqlStateError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -29,7 +29,7 @@ pub enum TablespaceError {
     InvalidStorage(#[from] TablespaceStorageError),
 
     #[error("failed to update tablespace")]
-    UpdateFailed(#[source] PgWrapperError),
+    UpdateFailed(#[source] PgError),
 
     #[error("tablespace OID {0} not found in pg_tablespace")]
     NotFound(pg_sys::Oid),
@@ -80,6 +80,27 @@ impl TablespaceOptions {
         Ok(Some(options))
     }
 
+    pub fn read_from_stmt(
+        stmt: &pg_sys::CreateTableSpaceStmt,
+    ) -> Result<Option<Self>, TablespaceError> {
+        // SAFETY: `stmt` is a live PostgreSQL parse tree for this hook callback
+        // and the options list is only read by this call.
+        let opts = unsafe {
+            defs::extract_options(stmt).map_err(TablespaceError::InvalidOption)?
+        };
+
+        let Some(options) = (!opts.is_empty()).then(|| Self { options: opts }) else {
+            return Ok(None);
+        };
+
+        let tablespace_name = unsafe { CStr::from_ptr(stmt.tablespacename) }
+            .to_string_lossy()
+            .into_owned();
+        options.validate_storage_options(&tablespace_name)?;
+
+        Ok(Some(options))
+    }
+
     pub fn persist_to_catalog(
         &self,
         spcoid: pg_sys::Oid,
@@ -89,7 +110,7 @@ impl TablespaceOptions {
         }
 
         unsafe {
-            let rel_guard = crate::handles::TableGuard::open(
+            let rel_guard = CatalogRelation::open(
                 pg_sys::TableSpaceRelationId,
                 pg_sys::RowExclusiveLock as _,
             )
@@ -97,7 +118,7 @@ impl TablespaceOptions {
             let rel = rel_guard.as_raw();
 
             let oid_datum = spcoid.into_datum().unwrap();
-            let tuple = PgWrapper::search_sys_cache_copy(
+            let tuple = search_syscache_copy(
                 pg_sys::SysCacheIdentifier::TABLESPACEOID as i32,
                 oid_datum,
                 0.into(),
@@ -109,23 +130,15 @@ impl TablespaceOptions {
             let Some(tuple) = tuple else {
                 return Err(TablespaceError::NotFound(spcoid));
             };
-            let _tuple_guard = crate::handles::HeapTupleGuard::new(tuple);
 
             // Extract existing spcoptions
-            let mut is_null = false;
-            let existing_datum = PgWrapper::sys_cache_get_attr(
-                pg_sys::SysCacheIdentifier::TABLESPACEOID as i32,
-                tuple,
-                pg_sys::Anum_pg_tablespace_spcoptions as i16,
-                &mut is_null,
-            )
-            .map_err(TablespaceError::UpdateFailed)?;
+            let existing_datum = tuple
+                .get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16)
+                .map_err(TablespaceError::UpdateFailed)?;
 
-            let mut current_options: Vec<String> = if is_null {
-                Vec::new()
-            } else {
-                Vec::<String>::from_datum(existing_datum, false).unwrap_or_default()
-            };
+            let mut current_options: Vec<String> = existing_datum
+                .and_then(|datum| Vec::<String>::from_datum(datum, false))
+                .unwrap_or_default();
 
             current_options.extend(self.catalog_options());
 
@@ -144,15 +157,22 @@ impl TablespaceOptions {
             repls[spcoptions_idx] = true;
 
             let new_tuple = pg_sys::heap_modify_tuple(
-                tuple,
+                tuple.as_raw(),
                 tup_desc,
                 values.as_mut_ptr(),
                 nulls.as_mut_ptr(),
                 repls.as_mut_ptr(),
             );
-            let _new_tuple_guard = crate::handles::HeapTupleGuard::new(new_tuple);
+            // SAFETY: `heap_modify_tuple` returns a new heap tuple owned by the
+            // caller, and PostgreSQL expects it to be released with
+            // `heap_freetuple` after the catalog update.
+            let new_tuple_guard = crate::handles::HeapTupleGuard::new(new_tuple);
 
-            PgWrapper::catalog_tuple_update(rel, &mut (*tuple).t_self, new_tuple)
+            rel_guard
+                .catalog_update(
+                    crate::handles::HeapTupleRef::from_raw(tuple.as_raw()),
+                    &new_tuple_guard,
+                )
                 .map_err(TablespaceError::UpdateFailed)?;
         }
 

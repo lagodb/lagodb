@@ -6,7 +6,7 @@
 
 use arrow_array::{Array, ArrayRef, RecordBatch};
 use iceberg_lite::spec::{Schema as IcebergSchema, Type};
-use pg_lakebase_core::data::{Cell, Row};
+use pg_lakebase_core::tuple::{Cell, Row};
 use std::sync::Arc;
 
 use crate::access::traits::{ArrowToCell, RowsToArrow};
@@ -21,7 +21,7 @@ mod tests;
 
 pub use schema::iceberg_schema_to_arrow_schema;
 
-pub use pg_lakebase_core::data::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+pub use pg_lakebase_core::tuple::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 
 // --- Extraction (Arrow -> Row) ---
 
@@ -35,15 +35,14 @@ pub fn extract_row_from_batch(
     let fields = schema.as_struct().fields();
     let num_columns = fields.len();
 
-    // Ensure row has correct capacity
-    if row.cells.len() < num_columns {
-        row.cells.resize_with(num_columns, || None);
-    }
+    // Ensure row has enough slots without reallocating on the scan hot path
+    // after the first batch.
+    row.ensure_len(num_columns);
 
     for (col_idx, field) in fields.iter().enumerate() {
         let column = batch.column(col_idx);
         let cell = extract_cell_from_column(column, row_idx, &field.field_type)?;
-        row.cells[col_idx] = cell;
+        row.set_cell(col_idx, cell);
     }
 
     Ok(())

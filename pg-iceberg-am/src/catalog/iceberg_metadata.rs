@@ -14,10 +14,12 @@
 //! );
 //! ```
 
-use pg_lakebase_core::catalog::LAKEBASE_SCHEMA;
+use pg_lakebase_core::catalog::{
+    CatalogRelation, CatalogScanKey, CatalogSnapshot, CatalogUpdateResult,
+    LAKEBASE_SCHEMA, get_namespace_oid, get_relation_oid,
+};
 use pg_lakebase_core::diag::SqlStateError;
-use pg_lakebase_core::handles::{SysScanGuard, TableGuard};
-use pg_lakebase_core::pg_wrapper::{CatalogUpdateResult, PgWrapper};
+use pg_lakebase_core::handles::HeapTupleGuard;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
@@ -54,9 +56,9 @@ pub fn get_iceberg_metadata_oid() -> Result<pg_sys::Oid, IcebergMetadataError> {
         return Ok(oid);
     }
 
-    let schema_oid = PgWrapper::get_namespace_oid(LAKEBASE_SCHEMA, false)
+    let schema_oid = get_namespace_oid(LAKEBASE_SCHEMA, false)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
-    let oid = PgWrapper::get_relname_relid(ICEBERG_METADATA_TABLE, schema_oid)
+    let oid = get_relation_oid(ICEBERG_METADATA_TABLE, schema_oid)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
 
     let _ = ICEBERG_METADATA_OID.set(oid);
@@ -70,9 +72,9 @@ pub fn get_iceberg_metadata_pkey_oid() -> Result<pg_sys::Oid, IcebergMetadataErr
         return Ok(oid);
     }
 
-    let schema_oid = PgWrapper::get_namespace_oid(LAKEBASE_SCHEMA, false)
+    let schema_oid = get_namespace_oid(LAKEBASE_SCHEMA, false)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
-    let oid = PgWrapper::get_relname_relid(ICEBERG_METADATA_PKEY, schema_oid)
+    let oid = get_relation_oid(ICEBERG_METADATA_PKEY, schema_oid)
         .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
 
     let _ = ICEBERG_METADATA_PKEY_OID.set(oid);
@@ -186,44 +188,44 @@ impl IcebergMetadata {
     pub fn insert(&self) -> Result<(), IcebergMetadataError> {
         let table_oid = get_iceberg_metadata_oid()?;
 
-        unsafe {
-            let rel = PgWrapper::table_open(table_oid, pg_sys::RowExclusiveLock as _)
+        let table_guard =
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
                 .map_err(|e| IcebergMetadataError::InsertFailed(e.to_string()))?;
 
-            // Prepare datum values for all columns
-            let relid_datum = self.relid.into_datum().unwrap();
-            let metadata_location_datum = self.metadata_location.clone().into_datum();
-            let previous_metadata_location_datum =
-                self.previous_metadata_location.clone().into_datum();
-            let default_spec_id_datum = self.default_spec_id.into_datum();
+        let relid_datum = self.relid.into_datum().unwrap();
+        let metadata_location_datum = self.metadata_location.clone().into_datum();
+        let previous_metadata_location_datum =
+            self.previous_metadata_location.clone().into_datum();
+        let default_spec_id_datum = self.default_spec_id.into_datum();
 
-            let mut values = [
-                relid_datum,
-                metadata_location_datum.unwrap_or(pg_sys::Datum::from(0)),
-                previous_metadata_location_datum.unwrap_or(pg_sys::Datum::from(0)),
-                default_spec_id_datum.unwrap_or(pg_sys::Datum::from(0)),
-            ];
-            let mut nulls = [
-                false,
-                metadata_location_datum.is_none(),
-                previous_metadata_location_datum.is_none(),
-                default_spec_id_datum.is_none(),
-            ];
+        let mut values = [
+            relid_datum,
+            metadata_location_datum.unwrap_or(pg_sys::Datum::from(0)),
+            previous_metadata_location_datum.unwrap_or(pg_sys::Datum::from(0)),
+            default_spec_id_datum.unwrap_or(pg_sys::Datum::from(0)),
+        ];
+        let mut nulls = [
+            false,
+            metadata_location_datum.is_none(),
+            previous_metadata_location_datum.is_none(),
+            default_spec_id_datum.is_none(),
+        ];
 
-            let tup_desc = (*rel).rd_att;
+        // SAFETY: `table_guard.tuple_desc()` returns the relation's valid
+        // TupleDesc. `heap_form_tuple` returns an owned heap tuple that
+        // `HeapTupleGuard` will free via `heap_freetuple`.
+        let tuple_guard = unsafe {
             let tuple = pg_sys::heap_form_tuple(
-                tup_desc,
+                table_guard.tuple_desc(),
                 values.as_mut_ptr(),
                 nulls.as_mut_ptr(),
             );
+            HeapTupleGuard::new(tuple)
+        };
 
-            PgWrapper::catalog_tuple_insert(rel, tuple)
-                .map_err(|e| IcebergMetadataError::InsertFailed(e.to_string()))?;
-
-            pg_sys::heap_freetuple(tuple);
-            PgWrapper::table_close(rel, pg_sys::RowExclusiveLock as _)
-                .map_err(|e| IcebergMetadataError::InsertFailed(e.to_string()))?;
-        }
+        table_guard
+            .catalog_insert(&tuple_guard)
+            .map_err(|e| IcebergMetadataError::InsertFailed(e.to_string()))?;
 
         Ok(())
     }
@@ -237,47 +239,33 @@ impl IcebergMetadata {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
-        // RAII Guards automatically handle resources via Drop trait
         let table_guard =
-            TableGuard::open(table_oid, pg_sys::AccessShareLock as _)
+            CatalogRelation::open(table_oid, pg_sys::AccessShareLock as _)
                 .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
-        let rel = table_guard.as_raw();
 
-        unsafe {
-            let mut key: pg_sys::ScanKeyData = std::mem::zeroed();
-            PgWrapper::scan_key_init(
-                &mut key,
-                column::RELID as pg_sys::AttrNumber,
-                pg_sys::BTEqualStrategyNumber as _,
-                pg_sys::Oid::from(pg_sys::F_OIDEQ),
-                relid.into_datum().unwrap(),
-            );
-
-            let scan = PgWrapper::systable_beginscan(
-                rel,
+        let mut scan_guard = table_guard
+            .begin_scan(
                 index_oid,
                 true,
-                std::ptr::null_mut(),
-                1,
-                &key as *const _ as *mut _,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(column::RELID as _, relid)],
             )
             .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
 
-            // Guard the scan to ensure systable_endscan is called
-            let _scan_guard = SysScanGuard::from_raw(scan);
+        let tuple = scan_guard
+            .get_next()
+            .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
 
-            let tuple = PgWrapper::systable_getnext(scan)
-                .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
-
-            let result = if let Some(tuple) = tuple {
-                Some(Self::from_tuple(rel, tuple)?)
-            } else {
-                None
-            };
-
-            // Guards will automatically close scan and table
-
-            Ok(result)
+        match tuple {
+            Some(tuple) => {
+                // SAFETY: `table_guard.as_raw()` is a valid open relation and
+                // `tuple.as_raw()` points to a live scan result tuple.
+                let row = unsafe {
+                    Self::from_tuple(table_guard.as_raw(), tuple.as_raw())?
+                };
+                Ok(Some(row))
+            }
+            None => Ok(None),
         }
     }
 
@@ -301,123 +289,91 @@ impl IcebergMetadata {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
-        // RAII Guards automatically handle resources via Drop trait
-        let table_guard = TableGuard::open(table_oid, pg_sys::RowExclusiveLock as _)
-            .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
-        let rel = table_guard.as_raw();
+        let table_guard =
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
+                .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
 
-        unsafe {
-            // Find the existing tuple
-            let mut key: pg_sys::ScanKeyData = std::mem::zeroed();
-            PgWrapper::scan_key_init(
-                &mut key,
-                column::RELID as pg_sys::AttrNumber,
-                pg_sys::BTEqualStrategyNumber as _,
-                pg_sys::Oid::from(pg_sys::F_OIDEQ),
-                self.relid.into_datum().unwrap(),
-            );
-
-            let scan = PgWrapper::systable_beginscan(
-                rel,
+        let mut scan_guard = table_guard
+            .begin_scan(
                 index_oid,
                 true,
-                std::ptr::null_mut(),
-                1,
-                &key as *const _ as *mut _,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(column::RELID as _, self.relid)],
             )
             .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
 
-            // Guard the scan to ensure systable_endscan is called
-            let _scan_guard = SysScanGuard::from_raw(scan);
+        let old_tuple = scan_guard
+            .get_next()
+            .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
 
-            let old_tuple = PgWrapper::systable_getnext(scan)
-                .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
+        let old_tuple = match old_tuple {
+            Some(t) => t,
+            None => return Err(IcebergMetadataError::NotFound(self.relid)),
+        };
 
-            let old_tuple = match old_tuple {
-                Some(t) => t,
-                None => {
-                    // Guards will automatically close scan and table
-                    return Err(IcebergMetadataError::NotFound(self.relid));
-                }
-            };
+        // Optimistic Lock Check (CAS)
+        // SAFETY: relation and tuple are valid while the guards are alive.
+        let existing_metadata =
+            unsafe { Self::from_tuple(table_guard.as_raw(), old_tuple.as_raw())? };
+        if existing_metadata.metadata_location.as_deref()
+            != expected_previous_location
+        {
+            return Err(IcebergMetadataError::Conflict);
+        }
 
-            // Optimistic Lock Check (CAS)
-            // Parse existing tuple to check current value
-            let existing_metadata = Self::from_tuple(rel, old_tuple)?;
-            if existing_metadata.metadata_location.as_deref()
-                != expected_previous_location
-            {
-                // Guards will automatically close scan and table
-                return Err(IcebergMetadataError::Conflict);
-            }
+        // Prepare replacement column values
+        let tup_desc = table_guard.tuple_desc();
+        let natts = unsafe { (*tup_desc).natts } as usize;
 
-            // Prepare new values
-            let tup_desc = (*rel).rd_att;
-            let natts = (*tup_desc).natts as usize;
+        let mut values = vec![pg_sys::Datum::from(0); natts];
+        let mut nulls = vec![false; natts];
+        let mut repls = vec![false; natts];
 
-            let mut values = vec![pg_sys::Datum::from(0); natts];
-            let mut nulls = vec![false; natts];
-            let mut repls = vec![false; natts];
+        let metadata_location_datum = self.metadata_location.clone().into_datum();
+        values[(column::METADATA_LOCATION - 1) as usize] =
+            metadata_location_datum.unwrap_or(pg_sys::Datum::from(0));
+        nulls[(column::METADATA_LOCATION - 1) as usize] =
+            metadata_location_datum.is_none();
+        repls[(column::METADATA_LOCATION - 1) as usize] = true;
 
-            // Update metadata_location (column 2, index 1)
-            let metadata_location_datum = self.metadata_location.clone().into_datum();
-            values[(column::METADATA_LOCATION - 1) as usize] =
-                metadata_location_datum.unwrap_or(pg_sys::Datum::from(0));
-            nulls[(column::METADATA_LOCATION - 1) as usize] =
-                metadata_location_datum.is_none();
-            repls[(column::METADATA_LOCATION - 1) as usize] = true;
+        let previous_metadata_location_datum =
+            self.previous_metadata_location.clone().into_datum();
+        values[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] =
+            previous_metadata_location_datum.unwrap_or(pg_sys::Datum::from(0));
+        nulls[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] =
+            previous_metadata_location_datum.is_none();
+        repls[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] = true;
 
-            // Update previous_metadata_location (column 3, index 2)
-            let previous_metadata_location_datum =
-                self.previous_metadata_location.clone().into_datum();
-            values[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] =
-                previous_metadata_location_datum.unwrap_or(pg_sys::Datum::from(0));
-            nulls[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] =
-                previous_metadata_location_datum.is_none();
-            repls[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] = true;
+        let default_spec_id_datum = self.default_spec_id.into_datum();
+        values[(column::DEFAULT_SPEC_ID - 1) as usize] =
+            default_spec_id_datum.unwrap_or(pg_sys::Datum::from(0));
+        nulls[(column::DEFAULT_SPEC_ID - 1) as usize] =
+            default_spec_id_datum.is_none();
+        repls[(column::DEFAULT_SPEC_ID - 1) as usize] = true;
 
-            // Update default_spec_id (column 4, index 3)
-            let default_spec_id_datum = self.default_spec_id.into_datum();
-            values[(column::DEFAULT_SPEC_ID - 1) as usize] =
-                default_spec_id_datum.unwrap_or(pg_sys::Datum::from(0));
-            nulls[(column::DEFAULT_SPEC_ID - 1) as usize] =
-                default_spec_id_datum.is_none();
-            repls[(column::DEFAULT_SPEC_ID - 1) as usize] = true;
-
+        // SAFETY: `heap_modify_tuple` returns an owned heap tuple freed by
+        // `HeapTupleGuard` via `heap_freetuple`.
+        let new_tuple_guard = unsafe {
             let new_tuple = pg_sys::heap_modify_tuple(
-                old_tuple,
+                old_tuple.as_raw(),
                 tup_desc,
                 values.as_mut_ptr(),
                 nulls.as_mut_ptr(),
                 repls.as_mut_ptr(),
             );
+            HeapTupleGuard::new(new_tuple)
+        };
 
-            // Handle physical-level concurrent modification (PostgreSQL tuple version conflict)
-            // This complements the logical CAS check above - even if metadata_location matched
-            // our expectation, another transaction might have committed between our read and write.
-            // In this case, heap_update returns TM_Updated/TM_Deleted, and we return Conflict
-            // to trigger the retry/rebase logic in metadata_tracking.rs.
-            match PgWrapper::catalog_tuple_update_optimistic(
-                rel,
-                &mut (*old_tuple).t_self,
-                new_tuple,
-            ) {
-                Ok(CatalogUpdateResult::Success) => {
-                    pg_sys::heap_freetuple(new_tuple);
-                }
-                Ok(CatalogUpdateResult::Conflict) => {
-                    pg_sys::heap_freetuple(new_tuple);
-                    return Err(IcebergMetadataError::Conflict);
-                }
-                Err(e) => {
-                    pg_sys::heap_freetuple(new_tuple);
-                    return Err(IcebergMetadataError::UpdateFailed(e.to_string()));
-                }
-            }
-            // Guards will automatically close scan and table upon scope exit
+        // Handle physical-level concurrent modification (PostgreSQL tuple version conflict)
+        // This complements the logical CAS check above - even if metadata_location matched
+        // our expectation, another transaction might have committed between our read and write.
+        // In this case, heap_update returns TM_Updated/TM_Deleted, and we return Conflict
+        // to trigger the retry/rebase logic in metadata_tracking.rs.
+        match table_guard.catalog_update_optimistic(old_tuple, &new_tuple_guard) {
+            Ok(CatalogUpdateResult::Success) => Ok(()),
+            Ok(CatalogUpdateResult::Conflict) => Err(IcebergMetadataError::Conflict),
+            Err(e) => Err(IcebergMetadataError::UpdateFailed(e.to_string())),
         }
-
-        Ok(())
     }
 
     /// Delete the record for the given relid from the `lakebase.iceberg_metadata` table.
@@ -427,53 +383,31 @@ impl IcebergMetadata {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
-        unsafe {
-            let rel = PgWrapper::table_open(table_oid, pg_sys::RowExclusiveLock as _)
+        let table_guard =
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
                 .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
 
-            let mut key: pg_sys::ScanKeyData = std::mem::zeroed();
-            PgWrapper::scan_key_init(
-                &mut key,
-                column::RELID as pg_sys::AttrNumber,
-                pg_sys::BTEqualStrategyNumber as _,
-                pg_sys::Oid::from(pg_sys::F_OIDEQ),
-                relid.into_datum().unwrap(),
-            );
-
-            let scan = PgWrapper::systable_beginscan(
-                rel,
+        let mut scan_guard = table_guard
+            .begin_scan(
                 index_oid,
                 true,
-                std::ptr::null_mut(),
-                1,
-                &key as *const _ as *mut _,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(column::RELID as _, relid)],
             )
             .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
 
-            let tuple = PgWrapper::systable_getnext(scan)
-                .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
+        let tuple = scan_guard
+            .get_next()
+            .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
 
-            let tuple = match tuple {
-                Some(t) => t,
-                None => {
-                    PgWrapper::systable_endscan(scan).map_err(|e| {
-                        IcebergMetadataError::DeleteFailed(e.to_string())
-                    })?;
-                    PgWrapper::table_close(rel, pg_sys::RowExclusiveLock as _)
-                        .map_err(|e| {
-                            IcebergMetadataError::DeleteFailed(e.to_string())
-                        })?;
-                    return Err(IcebergMetadataError::NotFound(relid));
-                }
-            };
+        let tuple = match tuple {
+            Some(t) => t,
+            None => return Err(IcebergMetadataError::NotFound(relid)),
+        };
 
-            pg_sys::CatalogTupleDelete(rel, &mut (*tuple).t_self);
-
-            PgWrapper::systable_endscan(scan)
-                .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
-            PgWrapper::table_close(rel, pg_sys::RowExclusiveLock as _)
-                .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
-        }
+        table_guard
+            .catalog_delete(tuple)
+            .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
 
         Ok(())
     }

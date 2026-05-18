@@ -150,7 +150,7 @@ fn create_local_storage_context(
 ///
 /// # Safety
 /// The caller must ensure the relation pointer is valid.
-pub fn create_storage_context_for_relation(
+pub unsafe fn create_storage_context_for_relation(
     spc_oid: pg_sys::Oid,
     rel: pg_sys::Relation,
 ) -> IcebergResult<StorageContext> {

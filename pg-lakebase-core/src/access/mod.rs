@@ -8,9 +8,10 @@
 //! - `relation`: Relation-level operations
 //! - `scan`: Scan operations
 
+mod common;
 pub mod ddl;
 pub mod dml;
 pub mod index;
+mod lifecycle;
 pub mod relation;
 pub mod scan;
-pub mod xact;

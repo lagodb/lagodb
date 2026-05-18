@@ -6,7 +6,7 @@
 //!
 //! # Background
 //!
-//! This is an implementation of `pg_lakebase_core::access::xact::PendingDelete`
+//! This is an implementation of `pg_lakebase_core::transaction::cleanup::PendingDelete`
 //! tailored for Iceberg. It uses `iceberg_lite::io::FileIO` to physically
 //! remove table directories from storage (Local, S3, GCS, etc.) when
 //! the transaction reaches the appropriate state.
@@ -23,7 +23,9 @@
 
 use crate::storage::ObjectStorage;
 use crate::wal::record::log_delete_directory;
-use pg_lakebase_core::access::xact::{PendingDelete, register_pending_delete};
+use pg_lakebase_core::transaction::cleanup::{
+    CleanupTiming, PendingDelete, register_pending_delete,
+};
 
 use iceberg_lite::io::FileIO;
 
@@ -38,8 +40,8 @@ pub struct IcebergPendingDelete {
     location: String,
     /// The FileIO instance for performing the delete
     file_io: FileIO,
-    /// Whether to execute on commit (true) or abort (false)
-    at_commit: bool,
+    /// The transaction outcome that triggers the delete.
+    timing: CleanupTiming,
 }
 
 impl IcebergPendingDelete {
@@ -51,7 +53,7 @@ impl IcebergPendingDelete {
         Self {
             location,
             file_io,
-            at_commit: false,
+            timing: CleanupTiming::OnAbort,
         }
     }
 
@@ -63,7 +65,7 @@ impl IcebergPendingDelete {
         Self {
             location,
             file_io,
-            at_commit: true,
+            timing: CleanupTiming::OnCommit,
         }
     }
 
@@ -86,7 +88,7 @@ impl PendingDelete for IcebergPendingDelete {
         // For distributed storage, we skip WAL logging because:
         // 1. Storage is shared - primary deletion is sufficient
         // 2. Orphaned files are handled by garbage collection
-        if self.at_commit && self.is_local_storage() {
+        if self.timing == CleanupTiming::OnCommit && self.is_local_storage() {
             log_delete_directory(&self.location);
         }
 
@@ -99,8 +101,8 @@ impl PendingDelete for IcebergPendingDelete {
         }
     }
 
-    fn at_commit(&self) -> bool {
-        self.at_commit
+    fn timing(&self) -> CleanupTiming {
+        self.timing
     }
 }
 

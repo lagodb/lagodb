@@ -1,6 +1,6 @@
 use arrow_array::{Array, ArrayRef};
 use iceberg_lite::spec::Type;
-use pg_lakebase_core::data::{Cell, Row};
+use pg_lakebase_core::tuple::{Cell, Row};
 
 use crate::error::IcebergResult;
 

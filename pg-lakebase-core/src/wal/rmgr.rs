@@ -9,9 +9,13 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use pgrx::{pg_guard, pg_sys};
 use std::collections::HashMap;
-use std::ffi::CString;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::ffi::{CString, c_char};
+use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
+
+const MIN_CUSTOM_RMGR_ID: u8 = pg_sys::RM_MIN_CUSTOM_ID as u8;
+const MAX_CUSTOM_RMGR_ID: u8 = pg_sys::RM_MAX_CUSTOM_ID as u8;
+const MAX_CUSTOM_RMGRS: usize = pg_sys::RM_N_CUSTOM_IDS as usize;
 
 /// Custom Resource Manager ID
 ///
@@ -26,7 +30,10 @@ impl RmgrId {
     /// # Panics
     /// Panics if the ID is less than 128 (reserved for built-in resource managers)
     pub const fn new(id: u8) -> Self {
-        assert!(id >= 128, "Custom resource manager IDs must be >= 128");
+        assert!(
+            id >= MIN_CUSTOM_RMGR_ID && id <= MAX_CUSTOM_RMGR_ID,
+            "Custom resource manager IDs must be in PostgreSQL's custom rmgr range"
+        );
         Self(id)
     }
 
@@ -59,9 +66,6 @@ pub enum WalRmgrError {
     #[error("Invalid WAL record: {0}")]
     InvalidRecord(String),
 
-    #[error("Resource manager already registered: {0}")]
-    AlreadyRegistered(u8),
-
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -77,6 +81,13 @@ impl From<WalRmgrError> for ErrorReport {
 ///
 /// This trait defines the interface that PostgreSQL uses to handle
 /// WAL records during recovery and replication.
+///
+/// This framework supports multiple custom resource managers in one extension
+/// process. Each manager owns one PostgreSQL custom resource manager ID.
+/// PostgreSQL's `RmgrData` callbacks for `identify`, `startup`, `cleanup`, and
+/// `mask` do not receive the resource manager ID, so this module registers
+/// per-ID static trampolines and keeps the unsafe dispatch boundary inside the
+/// core WAL layer.
 ///
 /// # Required Methods
 ///
@@ -164,37 +175,252 @@ struct RmgrDataWrapper {
 unsafe impl Send for RmgrDataWrapper {}
 unsafe impl Sync for RmgrDataWrapper {}
 
+impl RmgrDataWrapper {
+    fn as_ptr(&self) -> *const pg_sys::RmgrData {
+        &self.data
+    }
+}
+
 // ============================================================================
 // Registry and C callback trampolines
 // ============================================================================
 
-/// Internal storage for registered resource managers
-struct RmgrRegistry {
-    managers: HashMap<u8, Arc<dyn WalResourceManager>>,
-    rmgr_data: HashMap<u8, RmgrDataWrapper>,
-    name_storage: HashMap<u8, CString>,
+#[derive(Clone, Copy)]
+struct RmgrTrampolines {
+    redo: unsafe extern "C-unwind" fn(*mut pg_sys::XLogReaderState),
+    desc: unsafe extern "C-unwind" fn(
+        *mut pg_sys::StringInfoData,
+        *mut pg_sys::XLogReaderState,
+    ),
+    identify: unsafe extern "C-unwind" fn(u8) -> *const c_char,
+    startup: unsafe extern "C-unwind" fn(),
+    cleanup: unsafe extern "C-unwind" fn(),
+    mask: unsafe extern "C-unwind" fn(*mut c_char, pg_sys::BlockNumber),
 }
 
-impl RmgrRegistry {
-    fn new() -> Self {
+impl RmgrTrampolines {
+    const fn for_id<const RMGR_ID: u8>() -> Self {
         Self {
-            managers: HashMap::new(),
-            rmgr_data: HashMap::new(),
-            name_storage: HashMap::new(),
+            redo: rmgr_redo_trampoline::<RMGR_ID>,
+            desc: rmgr_desc_trampoline::<RMGR_ID>,
+            identify: rmgr_identify_trampoline::<RMGR_ID>,
+            startup: rmgr_startup_trampoline::<RMGR_ID>,
+            cleanup: rmgr_cleanup_trampoline::<RMGR_ID>,
+            mask: rmgr_mask_trampoline::<RMGR_ID>,
         }
     }
 }
 
-static REGISTRY: OnceLock<RwLock<RmgrRegistry>> = OnceLock::new();
+struct RegisteredRmgr {
+    manager: Box<dyn WalResourceManager>,
+    rmgr_id: u8,
+    rmgr_data: RmgrDataWrapper,
+    _name_storage: CString,
+    identify_names: Mutex<HashMap<u8, CString>>,
+}
 
-fn get_registry() -> &'static RwLock<RmgrRegistry> {
-    REGISTRY.get_or_init(|| RwLock::new(RmgrRegistry::new()))
+impl RegisteredRmgr {
+    fn new(
+        manager: Box<dyn WalResourceManager>,
+        rmgr_id: u8,
+        trampolines: RmgrTrampolines,
+    ) -> Self {
+        let name = manager.name();
+        let name_storage =
+            CString::new(name).expect("Resource manager name contains null byte");
+        let rmgr_data = RmgrDataWrapper {
+            data: pg_sys::RmgrData {
+                rm_name: name_storage.as_ptr(),
+                rm_redo: Some(trampolines.redo),
+                rm_desc: Some(trampolines.desc),
+                rm_identify: Some(trampolines.identify),
+                rm_startup: Some(trampolines.startup),
+                rm_cleanup: Some(trampolines.cleanup),
+                rm_mask: Some(trampolines.mask),
+                rm_decode: None, // Logical decoding is complex, skip for now
+            },
+        };
+
+        Self {
+            manager,
+            rmgr_id,
+            rmgr_data,
+            _name_storage: name_storage,
+            identify_names: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn identify_ptr(&self, info: u8) -> *const c_char {
+        let Some(name) = self.manager.identify(info) else {
+            return std::ptr::null();
+        };
+
+        let Ok(mut identify_names) = self.identify_names.lock() else {
+            return std::ptr::null();
+        };
+
+        if !identify_names.contains_key(&info) {
+            let Ok(c_name) = CString::new(name) else {
+                return std::ptr::null();
+            };
+            identify_names.insert(info, c_name);
+        }
+
+        identify_names
+            .get(&info)
+            .map_or(std::ptr::null(), |c_name| c_name.as_ptr())
+    }
+}
+
+struct WalRmgrRegistry {
+    slots: [OnceLock<RegisteredRmgr>; MAX_CUSTOM_RMGRS],
+}
+
+impl WalRmgrRegistry {
+    const fn new() -> Self {
+        Self {
+            slots: [const { OnceLock::new() }; MAX_CUSTOM_RMGRS],
+        }
+    }
+
+    fn slot(&self, rmgr_id: u8) -> Option<&OnceLock<RegisteredRmgr>> {
+        let index = custom_rmgr_index(rmgr_id)?;
+        self.slots.get(index)
+    }
+
+    fn get(&self, rmgr_id: u8) -> Option<&RegisteredRmgr> {
+        self.slot(rmgr_id)?.get()
+    }
+
+    fn register(
+        &'static self,
+        registered: RegisteredRmgr,
+    ) -> Result<&'static RegisteredRmgr, u8> {
+        let rmgr_id = registered.rmgr_id;
+        let Some(slot) = self.slot(rmgr_id) else {
+            return Err(rmgr_id);
+        };
+
+        if slot.set(registered).is_err() {
+            return Err(rmgr_id);
+        }
+
+        Ok(slot
+            .get()
+            .expect("registered WAL resource manager must be initialized"))
+    }
+
+    unsafe fn redo(&'static self, rmgr_id: u8, record: *mut pg_sys::XLogReaderState) {
+        unsafe {
+            let record_rmgr_id = get_rmgr_id_from_record(record);
+            if record_rmgr_id != rmgr_id {
+                diag::report_error(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    &format!(
+                        "WAL record manager ID {} reached trampoline for ID {}",
+                        record_rmgr_id, rmgr_id
+                    ),
+                );
+                return;
+            }
+
+            if let Some(registered) = self.get(rmgr_id) {
+                let wal_record = WalRecord::from_raw(record);
+                registered.manager.redo(&wal_record).report_unwrap();
+            } else {
+                diag::report_error(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    &format!("No WAL resource manager registered for ID {}", rmgr_id),
+                );
+            }
+        }
+    }
+
+    unsafe fn desc(
+        &'static self,
+        rmgr_id: u8,
+        buf: *mut pg_sys::StringInfoData,
+        record: *mut pg_sys::XLogReaderState,
+    ) {
+        unsafe {
+            if get_rmgr_id_from_record(record) != rmgr_id {
+                return;
+            }
+
+            if let Some(registered) = self.get(rmgr_id) {
+                let wal_record = WalRecord::from_raw(record);
+                let mut desc = String::new();
+                registered.manager.desc(&wal_record, &mut desc);
+
+                if !desc.is_empty() {
+                    if let Ok(c_desc) = CString::new(desc) {
+                        pg_sys::appendStringInfoString(buf, c_desc.as_ptr());
+                    }
+                }
+            }
+        }
+    }
+
+    fn identify(&'static self, rmgr_id: u8, info: u8) -> *const c_char {
+        self.get(rmgr_id)
+            .map_or(std::ptr::null(), |registered| registered.identify_ptr(info))
+    }
+
+    fn startup(&'static self, rmgr_id: u8) {
+        if let Some(registered) = self.get(rmgr_id) {
+            registered.manager.startup().report_unwrap();
+        }
+    }
+
+    fn cleanup(&'static self, rmgr_id: u8) {
+        if let Some(registered) = self.get(rmgr_id) {
+            registered.manager.cleanup().report_unwrap();
+        }
+    }
+
+    unsafe fn mask(
+        &'static self,
+        rmgr_id: u8,
+        page: *mut c_char,
+        blkno: pg_sys::BlockNumber,
+    ) {
+        unsafe {
+            if let Some(registered) = self.get(rmgr_id)
+                && !page.is_null()
+            {
+                let page_slice = std::slice::from_raw_parts_mut(
+                    page as *mut u8,
+                    pg_sys::BLCKSZ as usize,
+                );
+                registered.manager.mask(page_slice, blkno);
+            }
+        }
+    }
+}
+
+static RMGR_REGISTRY: WalRmgrRegistry = WalRmgrRegistry::new();
+
+fn custom_rmgr_index(rmgr_id: u8) -> Option<usize> {
+    if rmgr_id < MIN_CUSTOM_RMGR_ID {
+        return None;
+    }
+
+    Some((rmgr_id - MIN_CUSTOM_RMGR_ID) as usize)
+}
+
+fn registered_rmgr(rmgr_id: u8) -> Option<&'static RegisteredRmgr> {
+    RMGR_REGISTRY.get(rmgr_id)
 }
 
 /// Register a custom WAL resource manager
 ///
 /// This function registers your resource manager with PostgreSQL's WAL system.
-/// It should be called from your extension's `_PG_init` function.
+/// It must be called from `_PG_init` while PostgreSQL is loading the extension
+/// through `shared_preload_libraries`. PostgreSQL will ERROR if a custom WAL
+/// resource manager is registered outside that initialization window.
+///
+/// This framework supports multiple custom WAL resource managers per extension
+/// process. Each manager must use a distinct custom resource manager ID.
 ///
 /// # Arguments
 /// * `manager` - Boxed instance of your resource manager
@@ -206,7 +432,8 @@ fn get_registry() -> &'static RwLock<RmgrRegistry> {
 /// ```rust,no_run
 /// use pg_lakebase_core::wal::{WalResourceManager, WalRecord, RmgrId, WalRmgrError, register_wal_rmgr};
 ///
-/// const MY_RMGR_ID: RmgrId = RmgrId::new(128);
+/// const MY_RMGR_ID_U8: u8 = 128;
+/// const MY_RMGR_ID: RmgrId = RmgrId::new(MY_RMGR_ID_U8);
 ///
 /// struct MyRmgr;
 ///
@@ -219,58 +446,64 @@ fn get_registry() -> &'static RwLock<RmgrRegistry> {
 ///     }
 /// }
 ///
-/// // In _PG_init:
-/// register_wal_rmgr(Box::new(MyRmgr));
+/// // In _PG_init, from an extension loaded via shared_preload_libraries:
+/// register_wal_rmgr::<MY_RMGR_ID_U8>(Box::new(MyRmgr));
 /// ```
-pub fn register_wal_rmgr(manager: Box<dyn WalResourceManager>) {
-    let rmgr_id = manager.rmgr_id().as_u8();
-    let name = manager.name();
+pub fn register_wal_rmgr<const RMGR_ID: u8>(manager: Box<dyn WalResourceManager>) {
+    const {
+        assert!(
+            RMGR_ID >= MIN_CUSTOM_RMGR_ID && RMGR_ID <= MAX_CUSTOM_RMGR_ID,
+            "Custom resource manager IDs must be in PostgreSQL's custom rmgr range"
+        );
+    }
 
-    let mut registry = get_registry().write().unwrap();
+    let rmgr_id = RMGR_ID;
 
-    if registry.managers.contains_key(&rmgr_id) {
+    let manager_rmgr_id = manager.rmgr_id().as_u8();
+    if manager_rmgr_id != rmgr_id {
+        diag::report_error(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            &format!(
+                "WAL resource manager '{}' declared ID {} but was registered for ID {}",
+                manager.name(),
+                manager_rmgr_id,
+                rmgr_id
+            ),
+        );
+        return;
+    }
+
+    if registered_rmgr(rmgr_id).is_some() {
         diag::report_error(
             PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
             &format!("WAL resource manager ID {} is already registered", rmgr_id),
         );
+        return;
     }
 
-    let manager_arc: Arc<dyn WalResourceManager> = Arc::from(manager);
-    registry.managers.insert(rmgr_id, manager_arc);
+    let registered =
+        RegisteredRmgr::new(manager, rmgr_id, RmgrTrampolines::for_id::<RMGR_ID>());
+    let name = registered.manager.name();
 
-    let c_name =
-        CString::new(name).expect("Resource manager name contains null byte");
-    registry.name_storage.insert(rmgr_id, c_name);
-
-    let rmgr_data = RmgrDataWrapper {
-        data: pg_sys::RmgrData {
-            rm_name: registry.name_storage.get(&rmgr_id).unwrap().as_ptr(),
-            rm_redo: Some(rmgr_redo_trampoline),
-            rm_desc: Some(rmgr_desc_trampoline),
-            rm_identify: Some(rmgr_identify_trampoline),
-            rm_startup: Some(rmgr_startup_trampoline),
-            rm_cleanup: Some(rmgr_cleanup_trampoline),
-            rm_mask: Some(rmgr_mask_trampoline),
-            rm_decode: None, // Logical decoding is complex, skip for now
-        },
+    let Ok(registered) = RMGR_REGISTRY.register(registered) else {
+        diag::report_error(
+            PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+            &format!("WAL resource manager ID {} is already registered", rmgr_id),
+        );
+        return;
     };
 
-    let rmgr_data_ptr = &rmgr_data.data as *const pg_sys::RmgrData;
-    registry.rmgr_data.insert(rmgr_id, rmgr_data);
-
     unsafe {
-        pg_sys::RegisterCustomRmgr(rmgr_id as pg_sys::RmgrId, rmgr_data_ptr);
+        pg_sys::RegisterCustomRmgr(
+            rmgr_id as pg_sys::RmgrId,
+            registered.rmgr_data.as_ptr(),
+        );
     }
 
     diag::log_debug1(&format!(
         "Registered WAL resource manager '{}' with ID {}",
         name, rmgr_id
     ));
-}
-
-/// Get a registered resource manager by ID
-fn get_manager(rmgr_id: u8) -> Option<Arc<dyn WalResourceManager>> {
-    get_registry().read().ok()?.managers.get(&rmgr_id).cloned()
 }
 
 // ============================================================================
@@ -280,6 +513,9 @@ fn get_manager(rmgr_id: u8) -> Option<Arc<dyn WalResourceManager>> {
 /// Get the resource manager ID from the XLogReaderState
 unsafe fn get_rmgr_id_from_record(record: *mut pg_sys::XLogReaderState) -> u8 {
     unsafe {
+        if record.is_null() {
+            return 0;
+        }
         let decoded = (*record).record;
         if decoded.is_null() {
             return 0;
@@ -289,93 +525,48 @@ unsafe fn get_rmgr_id_from_record(record: *mut pg_sys::XLogReaderState) -> u8 {
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn rmgr_redo_trampoline(
+unsafe extern "C-unwind" fn rmgr_redo_trampoline<const RMGR_ID: u8>(
     record: *mut pg_sys::XLogReaderState,
 ) {
     unsafe {
-        let rmgr_id = get_rmgr_id_from_record(record);
-        if let Some(manager) = get_manager(rmgr_id) {
-            let wal_record = WalRecord::from_raw(record);
-            manager.redo(&wal_record).report_unwrap();
-        } else {
-            diag::report_error(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                &format!("No WAL resource manager registered for ID {}", rmgr_id),
-            );
-        }
+        RMGR_REGISTRY.redo(RMGR_ID, record);
     }
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn rmgr_desc_trampoline(
+unsafe extern "C-unwind" fn rmgr_desc_trampoline<const RMGR_ID: u8>(
     buf: *mut pg_sys::StringInfoData,
     record: *mut pg_sys::XLogReaderState,
 ) {
     unsafe {
-        let rmgr_id = get_rmgr_id_from_record(record);
-        if let Some(manager) = get_manager(rmgr_id) {
-            let wal_record = WalRecord::from_raw(record);
-            let mut desc = String::new();
-            manager.desc(&wal_record, &mut desc);
-
-            if !desc.is_empty() {
-                if let Ok(c_desc) = CString::new(desc) {
-                    pg_sys::appendStringInfoString(buf, c_desc.as_ptr());
-                }
-            }
-        }
+        RMGR_REGISTRY.desc(RMGR_ID, buf, record);
     }
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn rmgr_identify_trampoline(
-    _info: u8,
-) -> *const std::ffi::c_char {
-    // We need the rmgr_id here but it's not passed to identify.
-    // PostgreSQL calls this after looking up the rmgr, so we need to track context.
-    // For simplicity, we'll return a generic response.
-    // A more complete implementation would use thread-local storage.
-    static GENERIC: &[u8] = b"Generic\0";
-    GENERIC.as_ptr() as *const std::ffi::c_char
+unsafe extern "C-unwind" fn rmgr_identify_trampoline<const RMGR_ID: u8>(
+    info: u8,
+) -> *const c_char {
+    RMGR_REGISTRY.identify(RMGR_ID, info)
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn rmgr_startup_trampoline() {
-    // Startup is called for each registered rmgr
-    // We iterate through all our managers
-    if let Ok(registry) = get_registry().read() {
-        for manager in registry.managers.values() {
-            manager.startup().report_unwrap();
-        }
-    }
+unsafe extern "C-unwind" fn rmgr_startup_trampoline<const RMGR_ID: u8>() {
+    RMGR_REGISTRY.startup(RMGR_ID);
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn rmgr_cleanup_trampoline() {
-    if let Ok(registry) = get_registry().read() {
-        for manager in registry.managers.values() {
-            manager.cleanup().report_unwrap();
-        }
-    }
+unsafe extern "C-unwind" fn rmgr_cleanup_trampoline<const RMGR_ID: u8>() {
+    RMGR_REGISTRY.cleanup(RMGR_ID);
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn rmgr_mask_trampoline(
-    page: *mut std::ffi::c_char,
+unsafe extern "C-unwind" fn rmgr_mask_trampoline<const RMGR_ID: u8>(
+    page: *mut c_char,
     blkno: pg_sys::BlockNumber,
 ) {
-    // Mask is also called without rmgr context, need to handle this differently
-    // For now, we'll iterate through all managers (not ideal but works)
     unsafe {
-        if let Ok(registry) = get_registry().read() {
-            for manager in registry.managers.values() {
-                let page_slice = std::slice::from_raw_parts_mut(
-                    page as *mut u8,
-                    pg_sys::BLCKSZ as usize,
-                );
-                manager.mask(page_slice, blkno);
-            }
-        }
+        RMGR_REGISTRY.mask(RMGR_ID, page, blkno);
     }
 }
 

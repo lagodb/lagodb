@@ -9,7 +9,9 @@ CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
 \! rm -rf /tmp/pg_iceberg_am_regress_spc/*
 
 -- Clean up just in case
+SET client_min_messages = warning;
 DROP TABLESPACE IF EXISTS iceberg_s3_test;
+RESET client_min_messages;
 
 -- Create tablespace with iceberg options
 CREATE TABLESPACE iceberg_s3_test LOCATION '/tmp/pg_iceberg_am_regress_spc' WITH (

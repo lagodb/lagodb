@@ -174,7 +174,9 @@ DROP TABLE iceberg_string_mapping;
 -- 5. Negative Test: Numeric Precision > 38
 -- ============================================================================
 -- This should fail because Iceberg only supports up to precision 38.
+\set VERBOSITY terse
 CREATE TABLE iceberg_numeric_fallback (
     id integer,
     n_huge numeric(40, 2)
 ) USING iceberg;
+\set VERBOSITY default

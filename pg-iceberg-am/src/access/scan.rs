@@ -11,12 +11,13 @@ use iceberg_lite::catalog::{NamespaceIdent, TableIdent};
 use iceberg_lite::scan::ArrowRecordBatchIterator;
 use iceberg_lite::spec::{Schema as IcebergSchema, TableMetadata};
 use iceberg_lite::table::Table;
-use pg_lakebase_core::data::Row;
+use pg_lakebase_core::catalog::get_namespace_name;
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::pg_wrapper::PgWrapper;
 use pg_lakebase_core::prelude::*;
+use pg_lakebase_core::tuple::Row;
 use pgrx::pg_sys;
 
+use crate::IcebergTableAm;
 use crate::access::conversion::extract_row_from_batch;
 use crate::catalog::get_or_rebase_metadata_location;
 use crate::error::{IcebergError, IcebergResult};
@@ -49,7 +50,9 @@ pub struct IcebergScan {
     initialized: bool,
 }
 
-impl AmScan<IcebergError> for IcebergScan {
+impl AmScan for IcebergTableAm {}
+
+impl AmScanSession for IcebergScan {
     /// Create a new IcebergScan instance.
     ///
     /// At this point we only store the relation information.
@@ -60,13 +63,12 @@ impl AmScan<IcebergError> for IcebergScan {
         _key: Option<&ScanKeyHandle>,
         _pscan: Option<&ParallelTableScanDescHandle>,
         _flags: u32,
-    ) -> IcebergResult<Self> {
+    ) -> AmResult<Self> {
         let rel_oid = unsafe { (*(*rel.as_raw()).rd_rel).oid };
         let spc_oid = rel.tablespace_oid();
         let rel_name = rel.relation_name();
         let nsp_oid = rel.namespace_oid();
-        let nsp_name = PgWrapper::get_namespace_name(nsp_oid)?
-            .ok_or(IcebergError::NamespaceNull)?;
+        let nsp_name = Self::namespace_name(nsp_oid)?;
 
         Ok(IcebergScan {
             rel_oid,
@@ -87,41 +89,12 @@ impl AmScan<IcebergError> for IcebergScan {
     /// 1. Loads the Iceberg metadata from PostgreSQL catalog
     /// 2. Reads the table metadata from storage
     /// 3. Creates a TableScan and obtains an Arrow iterator
-    fn scan_begin(&mut self) -> IcebergResult<()> {
+    fn scan_begin(&mut self) -> AmResult<()> {
         if self.initialized {
             return Ok(());
         }
 
-        // Create storage context for reading
-        let ctx = create_storage_context(self.spc_oid)?;
-
-        // Try to get metadata location, ensuring we see the latest committed data (Read Committed).
-        // This helper will trigger a rebase if the table has been modified in the current
-        // transaction but the global catalog has moved.
-        let metadata_location =
-            get_or_rebase_metadata_location(self.rel_oid, &ctx.file_io)?;
-
-        // Read table metadata from storage
-        let table_metadata =
-            TableMetadata::read_from(&ctx.file_io, &metadata_location)?;
-        let schema = table_metadata.current_schema().clone();
-
-        // Build the Table object with identifier
-        let table = Table::builder()
-            .file_io(ctx.file_io.clone())
-            .metadata_location(metadata_location)
-            .metadata(table_metadata)
-            .identifier(TableIdent::new(
-                NamespaceIdent::new(self.nsp_name.clone()),
-                self.rel_name.clone(),
-            ))
-            .build()?;
-
-        // Create a table scan (select all columns, no filter)
-        let table_scan = table.scan().select_all().build()?;
-
-        // Get the Arrow RecordBatch iterator
-        let batch_iterator = table_scan.to_arrow()?;
+        let (batch_iterator, schema) = self.open_table_scan()?;
 
         self.batch_iterator = Some(batch_iterator);
         self.iceberg_schema = Some(schema);
@@ -142,7 +115,7 @@ impl AmScan<IcebergError> for IcebergScan {
         &mut self,
         _direction: ScanDirection,
         row: &mut Row,
-    ) -> IcebergResult<bool> {
+    ) -> AmResult<bool> {
         if !self.initialized {
             return Ok(false);
         }
@@ -162,24 +135,13 @@ impl AmScan<IcebergError> for IcebergScan {
                 }
             }
 
-            // Need to fetch next batch
-            if let Some(ref mut iterator) = self.batch_iterator {
-                match iterator.next() {
-                    Some(Ok(batch)) => {
-                        self.current_batch = Some(batch);
-                        self.current_row_idx = 0;
-                        // Continue loop to read from new batch
-                    }
-                    Some(Err(e)) => {
-                        return Err(IcebergError::IcebergLiteError(e));
-                    }
-                    None => {
-                        // No more batches
-                        return Ok(false);
-                    }
+            match self.next_batch()? {
+                Some(batch) => {
+                    self.current_batch = Some(batch);
+                    self.current_row_idx = 0;
+                    // Continue loop to read from new batch
                 }
-            } else {
-                return Ok(false);
+                None => return Ok(false),
             }
         }
     }
@@ -195,7 +157,7 @@ impl AmScan<IcebergError> for IcebergScan {
         _allow_strat: bool,
         _allow_sync: bool,
         _allow_pagemode: bool,
-    ) -> IcebergResult<()> {
+    ) -> AmResult<()> {
         // Reset state
         self.batch_iterator = None;
         self.current_batch = None;
@@ -209,7 +171,7 @@ impl AmScan<IcebergError> for IcebergScan {
     /// End the scan operation.
     ///
     /// Cleans up resources used by the scan.
-    fn scan_end(&mut self) -> IcebergResult<()> {
+    fn scan_end(&mut self) -> AmResult<()> {
         self.batch_iterator = None;
         self.current_batch = None;
         self.current_row_idx = 0;
@@ -217,19 +179,46 @@ impl AmScan<IcebergError> for IcebergScan {
         self.initialized = false;
         Ok(())
     }
+}
 
-    fn scan_bitmap_next_block(
-        &mut self,
-        _tbmres: &TBMIterateResultHandle,
-    ) -> IcebergResult<bool> {
-        Err(IcebergError::NotImplemented("scan_bitmap_next_block"))
+impl IcebergScan {
+    fn namespace_name(nsp_oid: pg_sys::Oid) -> IcebergResult<String> {
+        get_namespace_name(nsp_oid)?.ok_or(IcebergError::NamespaceNull)
     }
 
-    fn scan_bitmap_next_tuple(
-        &mut self,
-        _tbmres: &TBMIterateResultHandle,
-        _row: &mut Row,
-    ) -> IcebergResult<bool> {
-        Err(IcebergError::NotImplemented("scan_bitmap_next_tuple"))
+    fn open_table_scan(
+        &self,
+    ) -> IcebergResult<(ArrowRecordBatchIterator, Arc<IcebergSchema>)> {
+        let ctx = create_storage_context(self.spc_oid)?;
+
+        // Ensure scans see the latest committed metadata when this transaction
+        // has already staged writes for the table.
+        let metadata_location =
+            get_or_rebase_metadata_location(self.rel_oid, &ctx.file_io)?;
+
+        let table_metadata =
+            TableMetadata::read_from(&ctx.file_io, &metadata_location)?;
+        let schema = table_metadata.current_schema().clone();
+
+        let table = Table::builder()
+            .file_io(ctx.file_io.clone())
+            .metadata_location(metadata_location)
+            .metadata(table_metadata)
+            .identifier(TableIdent::new(
+                NamespaceIdent::new(self.nsp_name.clone()),
+                self.rel_name.clone(),
+            ))
+            .build()?;
+
+        let table_scan = table.scan().select_all().build()?;
+        Ok((table_scan.to_arrow()?, schema))
+    }
+
+    fn next_batch(&mut self) -> IcebergResult<Option<RecordBatch>> {
+        let Some(iterator) = self.batch_iterator.as_mut() else {
+            return Ok(None);
+        };
+
+        iterator.next().transpose().map_err(IcebergError::from)
     }
 }

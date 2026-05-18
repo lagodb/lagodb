@@ -17,9 +17,8 @@ use syn::{
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use pg_lakebase_core::prelude::*;
-/// use pgrx::pg_sys::panic::ErrorReport;
 ///
 /// #[pg_table_am(
 ///     version = "0.1.0",
@@ -28,28 +27,26 @@ use syn::{
 /// )]
 /// pub struct MyTableAm;
 ///
-/// impl TableAccessMethod<ErrorReport> for MyTableAm {
-///     type ScanState = MyScan;
-///     type RelationState = MyRelation;
-///     type IndexState = MyIndex;
-///     type DdlState = MyDdl;
-///     type ModifyState = MyModify;
+/// impl TableAccessMethod for MyTableAm {
+///     type ScanSession = MyScan;
+///     type IndexFetchSession = MyIndexFetch;
+///     type DmlSession = MyModify;
 /// }
 ///
 /// struct MyScan;
-/// impl AmScan<ErrorReport> for MyScan { /* ... */ }
+/// impl AmScan for MyTableAm { /* ... */ }
+/// impl AmScanSession for MyScan { /* ... */ }
 ///
-/// struct MyRelation;
-/// impl AmRelation<ErrorReport> for MyRelation { /* ... */ }
+/// impl AmRelation for MyTableAm { /* ... */ }
 ///
-/// struct MyIndex;
-/// impl AmIndex<ErrorReport> for MyIndex { /* ... */ }
+/// struct MyIndexFetch;
+/// impl AmIndexFetchSession for MyIndexFetch { /* ... */ }
+/// impl AmIndexCallbacks for MyTableAm { /* ... */ }
 ///
-/// struct MyDdl;
-/// impl AmDdl<ErrorReport> for MyDdl { /* ... */ }
+/// impl AmDdl for MyTableAm { /* ... */ }
 ///
 /// struct MyModify;
-/// impl AmModify<ErrorReport> for MyModify { /* ... */ }
+/// impl AmDmlSession for MyModify { /* ... */ }
 /// ```
 ///
 /// then you can use those functions in Postgres,
@@ -100,16 +97,39 @@ pub fn pg_table_am(attr: TokenStream, item: TokenStream) -> TokenStream {
     let quoted = quote! {
         #item_tokens
 
+        impl #ident {
+            pub fn cached_am_routine() -> pg_lakebase_core::TableAmRoutine {
+                #module_ident::cached_am_routine()
+            }
+        }
+
         mod #module_ident {
             use super::#ident;
             use std::collections::HashMap;
-            use pgrx::pg_sys::panic::{ErrorReport, ErrorReportable};
+            use std::sync::OnceLock;
             use pgrx::prelude::*;
             use pg_lakebase_core::prelude::*;
 
+            struct AmRoutinePtr(*mut pgrx::pg_sys::TableAmRoutine);
+            unsafe impl Send for AmRoutinePtr {}
+            unsafe impl Sync for AmRoutinePtr {}
+
+            static AM_ROUTINE: OnceLock<AmRoutinePtr> = OnceLock::new();
+
+            pub(super) fn cached_am_routine() -> pg_lakebase_core::TableAmRoutine {
+                let ptr = AM_ROUTINE
+                    .get_or_init(|| {
+                        let routine = #ident::am_routine();
+                        AmRoutinePtr(routine.into_pg())
+                    })
+                    .0;
+
+                unsafe { pg_lakebase_core::TableAmRoutine::from_pg(ptr) }
+            }
+
             #[pg_extern(create_or_replace, sql = #sql_def_lit)]
             fn #fn_ident() -> pg_lakebase_core::TableAmRoutine {
-                #ident::am_routine()
+                #ident::cached_am_routine()
             }
 
             pub(super) fn #fn_get_meta_ident() -> HashMap<String, String> {

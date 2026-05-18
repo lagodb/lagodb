@@ -16,7 +16,7 @@ use crate::catalog::iceberg_catalog::IcebergCatalog;
 use crate::catalog::iceberg_metadata::{IcebergMetadata, IcebergMetadataError};
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
-use pg_lakebase_core::access::xact::{self, TransactionResource};
+use pg_lakebase_core::transaction::{self, TransactionResource};
 
 /// Represents the metadata location state for a single table within a transaction.
 #[derive(Debug, Clone)]
@@ -385,10 +385,9 @@ impl MetadataLocationTracker {
                         // - `IcebergMetadata::update` acts as the "Catalog" (Hive), enforcing strict CAS.
                         // - This loop acts as the "Client" (SnapshotProducer), handling the Retry/Rebase.
                         // In Read Committed mode, we MUST rebase Appends to prevent transaction aborts.
-                        diag::report_notice(&format!(
-                            "Concurrent Iceberg update detected for table {}, rebasing...",
-                            relid
-                        ));
+                        diag::report_notice(
+                            "Concurrent Iceberg update detected, rebasing...",
+                        );
                         continue;
                     }
                     Err(e) => return Err(IcebergError::MetadataError(e)),
@@ -504,14 +503,8 @@ impl TransactionResource for MetadataLocationResource {
         });
 
         // Resources registered at or above this level will be automatically removed
-        // by pg-lakebase-core's xact.rs framework.
+        // by pg-lakebase-core's transaction framework.
     }
-}
-
-/// Initialize the metadata location tracking system
-/// Should be called during extension initialization
-pub fn init_metadata_tracking() {
-    xact::init_xact_callback();
 }
 
 /// Ensure the metadata tracker is initialized for the current transaction
@@ -526,7 +519,7 @@ fn ensure_tracker_initialized() -> IcebergResult<()> {
             // survives any subtransaction aborts and can commit all changes
             // at the end of the top-level transaction.
             let resource = Rc::new(MetadataLocationResource::new(1));
-            xact::register_resource(resource);
+            transaction::register_resource(resource);
         }
         Ok(())
     })

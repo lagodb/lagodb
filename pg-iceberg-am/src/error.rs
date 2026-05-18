@@ -1,8 +1,21 @@
+//! Error layering for the Iceberg table access method.
+//!
+//! Keep Iceberg business logic on [`IcebergResult<T>`] and [`IcebergError`].
+//! The PostgreSQL table-AM callback boundary returns
+//! `pg_lakebase_core::api::AmResult<T>`, which is `Result<T, ErrorReport>`.
+//! The bridge is the `From<IcebergError> for ErrorReport` implementation in
+//! this file, so callback methods can use normal `?` propagation.
+//!
+//! Avoid adding `try_*` callback wrappers or scattered
+//! `.map_err(Into::into)` / `.into()` conversions in access-method code. If
+//! third-party errors need adaptation, keep that inside meaningful Iceberg
+//! object methods returning [`IcebergResult<T>`], then let the callback boundary
+//! perform the final conversion to PostgreSQL.
+
 use crate::catalog::iceberg_metadata::IcebergMetadataError;
-use pg_lakebase_core::diag::SqlStateError;
+use pg_lakebase_core::diag::{PgError, SqlStateError};
+use pg_lakebase_core::options::TablespaceError;
 use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
-use pg_lakebase_core::pg_wrapper::PgWrapperError;
-use pg_lakebase_core::prelude::{CreateRuntimeError, TablespaceError};
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -24,8 +37,8 @@ pub enum IcebergError {
     #[error("storage error: {0}")]
     StorageError(#[from] pg_lakebase_storage::StorageError),
 
-    #[error("pg wrapper error: {0}")]
-    PgWrapperError(#[from] PgWrapperError),
+    #[error("postgres error: {0}")]
+    PgError(#[from] PgError),
 
     #[error("tablespace options not found")]
     TablespaceNotFound,
@@ -87,9 +100,6 @@ pub enum IcebergError {
     JsonError(#[from] serde_json::Error),
 
     #[error("{0}")]
-    CreateRuntimeError(#[from] CreateRuntimeError),
-
-    #[error("{0}")]
     IoError(#[from] std::io::Error),
 
     #[error("feature not yet implemented: {0}")]
@@ -107,7 +117,7 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
 
-            IcebergError::PgWrapperError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            IcebergError::PgError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 
             IcebergError::NamespaceNull | IcebergError::MetadataLocationNull => {
                 PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
@@ -140,10 +150,6 @@ impl SqlStateError for IcebergError {
             | IcebergError::JsonError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 
             IcebergError::SpiError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-
-            IcebergError::CreateRuntimeError(_) => {
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
-            }
 
             IcebergError::IoError(_) => PgSqlErrorCode::ERRCODE_IO_ERROR,
 

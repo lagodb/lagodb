@@ -3,10 +3,9 @@
 //! Options are extracted from `CREATE TABLE`, validated against the table AM's
 //! schema, and persisted in `lakebase.table_options` for later rd_amcache load.
 
-use crate::catalog;
-use crate::diag::SqlStateError;
+use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
+use crate::diag::{PgError, SqlStateError};
 use crate::options::schema::{self, OptionDef};
-use crate::pg_wrapper::{PgWrapper, PgWrapperError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -24,10 +23,10 @@ pub enum TableOptionError {
     InvalidOption(String),
 
     #[error("failed to persist table options")]
-    PersistFailed(#[source] PgWrapperError),
+    PersistFailed(#[source] PgError),
 
     #[error("failed to load table options")]
-    LoadFailed(#[source] PgWrapperError),
+    LoadFailed(#[source] PgError),
 
     #[error("null relation pointer")]
     NullRelation,
@@ -88,6 +87,20 @@ impl TableOptions {
         Ok((!opts.is_empty()).then(|| Self { options: opts }))
     }
 
+    pub fn read_from_stmt(
+        stmt: &pg_sys::CreateStmt,
+        valid_options: &[OptionDef],
+    ) -> Result<Option<Self>, TableOptionError> {
+        // SAFETY: `stmt.options` belongs to a live PostgreSQL parse tree for
+        // this hook callback and is only read by this call.
+        let opts = unsafe {
+            schema::extract_options(stmt.options, valid_options)
+                .map_err(TableOptionError::InvalidOption)?
+        };
+
+        Ok((!opts.is_empty()).then(|| Self { options: opts }))
+    }
+
     pub fn persist_to_catalog(
         &self,
         relid: pg_sys::Oid,
@@ -101,11 +114,9 @@ impl TableOptions {
             .map_err(TableOptionError::PersistFailed)?;
 
         unsafe {
-            let rel_guard = crate::handles::TableGuard::open(
-                table_oid,
-                pg_sys::RowExclusiveLock as _,
-            )
-            .map_err(TableOptionError::PersistFailed)?;
+            let rel_guard =
+                CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
+                    .map_err(TableOptionError::PersistFailed)?;
             let rel = rel_guard.as_raw();
 
             let relid_datum = relid.into_datum().unwrap();
@@ -131,9 +142,13 @@ impl TableOptions {
                 values.as_mut_ptr(),
                 nulls.as_mut_ptr(),
             );
-            let _tuple_guard = crate::handles::HeapTupleGuard::new(tuple);
+            // SAFETY: `heap_form_tuple` returns a heap tuple owned by the
+            // caller, and PostgreSQL expects it to be released with
+            // `heap_freetuple` when we are done.
+            let tuple_guard = crate::handles::HeapTupleGuard::new(tuple);
 
-            PgWrapper::catalog_tuple_insert(rel, tuple)
+            rel_guard
+                .catalog_insert(&tuple_guard)
                 .map_err(TableOptionError::PersistFailed)?;
         }
 
@@ -149,35 +164,22 @@ impl TableOptions {
             .map_err(TableOptionError::LoadFailed)?;
 
         unsafe {
-            let rel_guard = crate::handles::TableGuard::open(
-                table_oid,
-                pg_sys::AccessShareLock as _,
-            )
-            .map_err(TableOptionError::LoadFailed)?;
+            let rel_guard =
+                CatalogRelation::open(table_oid, pg_sys::AccessShareLock as _)
+                    .map_err(TableOptionError::LoadFailed)?;
             let rel = rel_guard.as_raw();
 
-            let mut key: pg_sys::ScanKeyData = std::mem::zeroed();
+            let mut scan_guard = rel_guard
+                .begin_scan(
+                    index_oid,
+                    true,
+                    CatalogSnapshot::Default,
+                    [CatalogScanKey::oid_eq(1, relid)],
+                )
+                .map_err(TableOptionError::LoadFailed)?;
 
-            PgWrapper::scan_key_init(
-                &mut key,
-                1, // relid column
-                pg_sys::BTEqualStrategyNumber as _,
-                pg_sys::Oid::from(pg_sys::F_OIDEQ),
-                relid.into_datum().unwrap(),
-            );
-
-            let scan = PgWrapper::systable_beginscan(
-                rel,
-                index_oid,
-                true,
-                std::ptr::null_mut(),
-                1,
-                &key as *const _ as *mut _,
-            )
-            .map_err(TableOptionError::LoadFailed)?;
-            let scan_guard = crate::handles::SysScanGuard::from_raw(scan);
-
-            let tuple = PgWrapper::systable_getnext(scan_guard.as_raw())
+            let tuple = scan_guard
+                .get_next()
                 .map_err(TableOptionError::LoadFailed)?;
             let mut result = None;
 
@@ -185,7 +187,8 @@ impl TableOptions {
                 let tup_desc = (*rel).rd_att;
                 let mut is_null = false;
                 // options is column 2
-                let datum = pg_sys::heap_getattr(tuple, 2, tup_desc, &mut is_null);
+                let datum =
+                    pg_sys::heap_getattr(tuple.as_raw(), 2, tup_desc, &mut is_null);
 
                 if !is_null {
                     let options_vec = Vec::<String>::from_datum(datum, is_null);

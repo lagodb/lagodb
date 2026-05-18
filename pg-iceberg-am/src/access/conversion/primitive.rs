@@ -10,7 +10,7 @@ use arrow_array::types::{
 };
 use arrow_array::{Array, ArrayRef};
 use iceberg_lite::spec::PrimitiveType;
-use pg_lakebase_core::data::{ByteaView, Cell, Row, StringView};
+use pg_lakebase_core::tuple::{ByteaView, Cell, Row, StringView};
 use pgrx::datum::Uuid;
 use pgrx::datum::datetime_support::{DateTimeParts, HasExtractableParts};
 use pgrx::prelude::{AnyNumeric, Date, Time, Timestamp, TimestampWithTimeZone};

@@ -2,9 +2,9 @@ use crate::access::pending_deletes::register_drop_table_pending_delete;
 use crate::catalog::generate_table_location;
 use crate::catalog::is_iceberg_table;
 use crate::storage::create_storage_context;
-use pg_lakebase_core::handles::{RelationHandle, TableGuard};
+use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
 use pg_lakebase_core::hooks::{
-    self, ObjectAccessContext, ObjectAccessHook, ObjectAccessHookError,
+    self, ObjectAccessEvent, ObjectAccessHook, ObjectAccessHookError,
 };
 use pgrx::pg_sys;
 
@@ -13,13 +13,23 @@ pub struct IcebergObjectAccessHook;
 impl ObjectAccessHook for IcebergObjectAccessHook {
     fn on_access(
         &self,
-        context: &ObjectAccessContext,
+        event: &mut ObjectAccessEvent<'_>,
     ) -> Result<(), ObjectAccessHookError> {
         // Handle DROP event
         // Register pending delete for Iceberg table data cleanup on commit
         // sub_id == 0 means it's the main relation (not a column)
-        if context.is_drop() && context.is_relation() && context.sub_id() == 0 {
-            let oid = context.object_id();
+        let ObjectAccessEvent::Drop {
+            class_id,
+            object_id,
+            sub_id,
+            ..
+        } = event
+        else {
+            return Ok(());
+        };
+
+        if *class_id == pg_sys::RelationRelationId && *sub_id == 0 {
+            let oid = *object_id;
 
             // Check relation kind before opening to avoid "wrong object type" errors
             // when dropping indexes, sequences, etc.
@@ -32,14 +42,10 @@ impl ObjectAccessHook for IcebergObjectAccessHook {
 
             // Try to open the table with AccessShareLock
             // This is safe because OAT_DROP is called before the object is actually removed
-            let guard =
-                TableGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)
-                    .map_err(|e| {
-                        ObjectAccessHookError::Message(format!(
-                            "failed to open table: {}",
-                            e
-                        ))
-                    })?;
+            let guard = RelationGuard::open(
+                oid,
+                pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+            )?;
             let rel = guard.as_handle();
 
             // Check if this is an Iceberg table
@@ -61,12 +67,7 @@ fn handle_drop_relation(
 ) -> Result<(), ObjectAccessHookError> {
     // Create storage context based on tablespace type
     let spc_oid = rel.tablespace_oid();
-    let ctx = create_storage_context(spc_oid).map_err(|e| {
-        ObjectAccessHookError::Message(format!(
-            "failed to create storage context: {}",
-            e
-        ))
-    })?;
+    let ctx = create_storage_context(spc_oid)?;
 
     // Generate table location directly
     let table_location =

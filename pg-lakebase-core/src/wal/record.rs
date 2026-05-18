@@ -151,44 +151,19 @@ impl<'a> WalRecord<'a> {
 
     /// Check if a block reference exists at the given index
     pub fn has_block_ref(&self, block_id: u8) -> bool {
-        unsafe {
-            let decoded = (*self.record).record;
-            if decoded.is_null() {
-                return false;
-            }
-
-            if block_id as i8 > (*decoded).max_block_id as i8 {
-                return false;
-            }
-
-            // Using pointer arithmetic because .blocks is a flexible array member
-            let block_ptr = (*decoded).blocks.as_ptr().add(block_id as usize);
-            (*block_ptr).in_use
-        }
+        self.block_ref(block_id).is_some()
     }
 
     /// Check if a block reference has a full-page image associated with it
     pub fn has_block_image(&self, block_id: u8) -> bool {
-        unsafe {
-            let decoded = (*self.record).record;
-            if decoded.is_null() {
-                return false;
-            }
-            let block_ptr = (*decoded).blocks.as_ptr().add(block_id as usize);
-            (*block_ptr).has_image
-        }
+        self.block_ref(block_id)
+            .is_some_and(|block| unsafe { (*block).has_image })
     }
 
     /// Check if a block reference has incremental block data associated with it
     pub fn has_block_data(&self, block_id: u8) -> bool {
-        unsafe {
-            let decoded = (*self.record).record;
-            if decoded.is_null() {
-                return false;
-            }
-            let block_ptr = (*decoded).blocks.as_ptr().add(block_id as usize);
-            (*block_ptr).has_data
-        }
+        self.block_ref(block_id)
+            .is_some_and(|block| unsafe { (*block).has_data })
     }
 
     /// Get the block data for a given block reference
@@ -248,17 +223,39 @@ impl<'a> WalRecord<'a> {
             }
         }
     }
+
+    fn block_ref(&self, block_id: u8) -> Option<*const pg_sys::DecodedBkpBlock> {
+        unsafe {
+            let decoded = (*self.record).record;
+            if decoded.is_null() {
+                return None;
+            }
+
+            let max_block_id = (*decoded).max_block_id;
+            if max_block_id < 0 || block_id as i32 > max_block_id {
+                return None;
+            }
+
+            let block_ptr = (*decoded).blocks.as_ptr().add(block_id as usize);
+            if (*block_ptr).in_use {
+                Some(block_ptr)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Builder for creating WAL records
 ///
-/// This provides a safe interface for constructing WAL records
-/// before inserting them into the WAL stream.
-pub struct WalRecordBuilder {
+/// This provides a typed interface for constructing WAL records before
+/// inserting them into the WAL stream.
+pub struct WalRecordBuilder<'data> {
     started: bool,
+    _data: PhantomData<&'data [u8]>,
 }
 
-impl WalRecordBuilder {
+impl<'data> WalRecordBuilder<'data> {
     /// Begin a new WAL record insertion
     ///
     /// # Panics
@@ -267,13 +264,17 @@ impl WalRecordBuilder {
         unsafe {
             pg_sys::XLogBeginInsert();
         }
-        Self { started: true }
+        Self {
+            started: true,
+            _data: PhantomData,
+        }
     }
 
     /// Register main data for the WAL record
     ///
-    /// This is the primary payload of the record.
-    pub fn register_data(&mut self, data: &[u8]) -> &mut Self {
+    /// This is the primary payload of the record. PostgreSQL copies the data
+    /// during [`insert`](Self::insert), so `data` must stay alive until then.
+    pub fn register_data(&mut self, data: &'data [u8]) -> &mut Self {
         unsafe {
             // XLogRegisterData expects mutable pointer even though it doesn't modify
             pg_sys::XLogRegisterData(data.as_ptr() as *mut i8, data.len() as u32);
@@ -284,8 +285,11 @@ impl WalRecordBuilder {
     /// Register a typed value as main data
     ///
     /// # Safety
-    /// The type T must be safe to serialize as raw bytes (repr(C), no padding issues).
-    pub unsafe fn register_data_as<T>(&mut self, value: &T) -> &mut Self {
+    /// The type T must be safe to serialize as raw bytes (repr(C), no padding
+    /// issues), and the serialized representation must be valid for replay.
+    /// PostgreSQL copies the bytes during [`insert`](Self::insert), so `value`
+    /// must stay alive until then.
+    pub unsafe fn register_data_as<T>(&mut self, value: &'data T) -> &mut Self {
         unsafe {
             let data = std::slice::from_raw_parts(
                 value as *const T as *const u8,
@@ -300,8 +304,13 @@ impl WalRecordBuilder {
     /// # Arguments
     /// * `block_id` - Block reference ID (0-based)
     /// * `buffer` - The PostgreSQL buffer
-    /// * `flags` - Registration flags (REGBUF_STANDARD, REGBUF_FORCE_IMAGE, etc.)
-    pub fn register_buffer(
+    /// * `flags` - Registration flags from [`buffer_flags`]
+    ///
+    /// # Safety
+    /// `buffer` must be a valid PostgreSQL buffer that satisfies
+    /// `XLogRegisterBuffer`'s locking and dirty-state requirements for the
+    /// provided flags.
+    pub unsafe fn register_buffer(
         &mut self,
         block_id: u8,
         buffer: pg_sys::Buffer,
@@ -315,8 +324,14 @@ impl WalRecordBuilder {
 
     /// Register block-specific data
     ///
-    /// This data is associated with a specific block reference.
-    pub fn register_buf_data(&mut self, block_id: u8, data: &[u8]) -> &mut Self {
+    /// This data is associated with a specific block reference. PostgreSQL
+    /// copies the data during [`insert`](Self::insert), so `data` must stay
+    /// alive until then.
+    pub fn register_buf_data(
+        &mut self,
+        block_id: u8,
+        data: &'data [u8],
+    ) -> &mut Self {
         unsafe {
             pg_sys::XLogRegisterBufData(
                 block_id,
@@ -335,13 +350,16 @@ impl WalRecordBuilder {
     ///
     /// This consumes the builder and commits the record to WAL.
     pub fn insert(mut self, rmgr_id: u8, info: u8) -> XLogRecPtr {
+        let lsn = unsafe { pg_sys::XLogInsert(rmgr_id, info) };
         self.started = false;
-        unsafe { pg_sys::XLogInsert(rmgr_id, info) }
+        lsn
     }
 
-    /// Set this record as needing to be flushed before commit
+    /// Set PostgreSQL insert flags for this WAL record.
     ///
-    /// Typically used for operations that must be durable before proceeding.
+    /// Accepts values from [`record_flags`], such as
+    /// [`record_flags::XLOG_INCLUDE_ORIGIN`] and
+    /// [`record_flags::XLOG_MARK_UNIMPORTANT`].
     pub fn set_record_flags(&mut self, flags: u8) -> &mut Self {
         unsafe {
             pg_sys::XLogSetRecordFlags(flags);
@@ -350,13 +368,12 @@ impl WalRecordBuilder {
     }
 }
 
-impl Drop for WalRecordBuilder {
+impl Drop for WalRecordBuilder<'_> {
     fn drop(&mut self) {
         if self.started {
-            // If the builder is dropped without inserting, we need to cancel
-            // This is a safety measure to prevent WAL corruption
-            // Note: PostgreSQL doesn't have an explicit cancel, but the next
-            // XLogBeginInsert will reset state
+            unsafe {
+                pg_sys::XLogResetInsertion();
+            }
             diag::report_warning("WalRecordBuilder dropped without calling insert()");
         }
     }
@@ -366,15 +383,32 @@ impl Drop for WalRecordBuilder {
 pub mod record_flags {
     use pgrx::pg_sys;
 
+    /// Include replication origin information in the WAL record.
+    pub const XLOG_INCLUDE_ORIGIN: u8 = pg_sys::XLOG_INCLUDE_ORIGIN as u8;
+
+    /// Mark the WAL record as unimportant for durability.
+    pub const XLOG_MARK_UNIMPORTANT: u8 = pg_sys::XLOG_MARK_UNIMPORTANT as u8;
+}
+
+/// WAL buffer registration flags for XLogRegisterBuffer
+pub mod buffer_flags {
+    use pgrx::pg_sys;
+
     /// Force a full-page image of the buffer to be written
     pub const REGBUF_FORCE_IMAGE: u8 = pg_sys::REGBUF_FORCE_IMAGE as u8;
+
+    /// Don't take a full-page image for this buffer
+    pub const REGBUF_NO_IMAGE: u8 = pg_sys::REGBUF_NO_IMAGE as u8;
+
+    /// The page will be initialized during replay
+    pub const REGBUF_WILL_INIT: u8 = pg_sys::REGBUF_WILL_INIT as u8;
 
     /// Register a standard buffer (heap or index)
     pub const REGBUF_STANDARD: u8 = pg_sys::REGBUF_STANDARD as u8;
 
-    /// Don't log this record during recovery
-    pub const REGBUF_NO_IMAGE: u8 = pg_sys::REGBUF_NO_IMAGE as u8;
+    /// Include block data even if a full-page image is taken
+    pub const REGBUF_KEEP_DATA: u8 = pg_sys::REGBUF_KEEP_DATA as u8;
 
-    /// Mark this as a hint bit-only change
-    pub const REGBUF_NO_CHANGE: u8 = 0x20;
+    /// Intentionally register a clean buffer
+    pub const REGBUF_NO_CHANGE: u8 = pg_sys::REGBUF_NO_CHANGE as u8;
 }

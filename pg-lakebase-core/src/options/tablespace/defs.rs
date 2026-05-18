@@ -169,3 +169,9 @@ pub(crate) unsafe fn extract_and_remove_options(
         )
     }
 }
+
+pub(crate) unsafe fn extract_options(
+    stmt: *const pg_sys::CreateTableSpaceStmt,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    unsafe { schema::extract_options((*stmt).options, TABLESPACE_OPTION_DEFS) }
+}

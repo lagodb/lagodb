@@ -47,12 +47,12 @@ use pg_lakebase_core::wal::register_wal_rmgr;
 pub use record::{
     IcebergWalOp, log_delete_directory, log_delete_file, log_write_file,
 };
-pub use rmgr::{ICEBERG_RMGR_ID, IcebergRmgr};
+pub use rmgr::{ICEBERG_RMGR_ID, ICEBERG_RMGR_ID_U8, IcebergRmgr};
 
 /// Initialize the Iceberg WAL resource manager
 ///
 /// This should be called from `_PG_init` to register the custom WAL
 /// resource manager with PostgreSQL.
 pub fn init_wal_rmgr() {
-    register_wal_rmgr(Box::new(IcebergRmgr));
+    register_wal_rmgr::<ICEBERG_RMGR_ID_U8>(Box::new(IcebergRmgr));
 }

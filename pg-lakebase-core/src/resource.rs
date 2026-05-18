@@ -1,7 +1,19 @@
-//! Resource Manager mechanism for custom resource cleanup.
+//! ResourceOwner-scoped cleanup callbacks.
 //!
-//! This module implements a mechanism similar to C++'s `PaxResourceContext`
-//! for managing resource cleanup tied to `ResourceOwner`.
+//! This module intentionally mirrors PostgreSQL's `ResourceOwner` release
+//! callback mechanism (`RegisterResourceReleaseCallback`), not PostgreSQL's
+//! transaction callback mechanism.  In PostgreSQL 17, `ResourceOwner` is used
+//! for query/owner-lifespan resources and is released through
+//! `ResourceOwnerRelease(phase, isCommit, isTopLevel)`, while xact/subxact
+//! callbacks are separate transaction-event notifications registered via
+//! `RegisterXactCallback` and `RegisterSubXactCallback`.
+//!
+//! Keep this separate from [`crate::transaction`].  Transaction callbacks are
+//! appropriate for transaction-scoped state that needs pre-commit, commit,
+//! abort, or savepoint event handling.  ResourceOwner callbacks are appropriate
+//! for frame-, portal-, executor-, or other owner-scoped resources that must be
+//! cleaned up if PostgreSQL unwinds past normal Rust control flow, such as
+//! ERROR during DML or COPY.
 //!
 //! # Example
 //!
@@ -19,23 +31,23 @@
 //! ```
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
-use pgrx::pg_guard;
 use pgrx::pg_sys;
+use pgrx::{PgTryBuilder, pg_guard};
 
 /// A handle to a registered resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceHandle(u64);
 
 struct ResourceEntry {
+    id: u64,
     owner: pg_sys::ResourceOwner,
     callback: Box<dyn FnOnce() + 'static>,
 }
 
 thread_local! {
-    static RESOURCES: RefCell<HashMap<u64, ResourceEntry>> = RefCell::new(HashMap::new());
+    static RESOURCES: RefCell<Vec<ResourceEntry>> = RefCell::new(Vec::new());
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
     static CALLBACK_REGISTERED: Cell<bool> = const { Cell::new(false) };
 }
@@ -56,14 +68,16 @@ pub fn remember_resource<F>(callback: F) -> ResourceHandle
 where
     F: FnOnce() + 'static,
 {
+    init_resource_manager();
+
     // Capture the current resource owner.
     let owner = unsafe { pg_sys::CurrentResourceOwner };
 
-    // Ensure we have a valid resource owner
-    debug_assert!(
-        !owner.is_null(),
-        "CurrentResourceOwner is NULL - remember_resource called outside of a transaction?"
-    );
+    if owner.is_null() {
+        panic!(
+            "CurrentResourceOwner is NULL - remember_resource called outside of a transaction"
+        );
+    }
 
     // Generate a unique ID
     let id = NEXT_ID.with(|n| {
@@ -74,13 +88,11 @@ where
     let handle = ResourceHandle(id);
 
     RESOURCES.with(|resources| {
-        resources.borrow_mut().insert(
+        resources.borrow_mut().push(ResourceEntry {
             id,
-            ResourceEntry {
-                owner,
-                callback: Box::new(callback),
-            },
-        );
+            owner,
+            callback: Box::new(callback),
+        });
     });
 
     handle
@@ -91,7 +103,15 @@ where
 /// Returns `true` if the resource was found and forgotten.
 /// Returns `false` if the resource was not found (already triggered or never existed).
 pub fn forget_resource(handle: ResourceHandle) -> bool {
-    RESOURCES.with(|resources| resources.borrow_mut().remove(&handle.0).is_some())
+    RESOURCES.with(|resources| {
+        let mut vec = resources.borrow_mut();
+        if let Some(pos) = vec.iter().position(|e| e.id == handle.0) {
+            vec.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// Initialize the resource manager callback.
@@ -120,7 +140,7 @@ pub fn init_resource_manager() {
 unsafe extern "C-unwind" fn release_resource_callback(
     phase: pg_sys::ResourceReleasePhase::Type,
     is_commit: bool,
-    _is_top_level: bool,
+    is_top_level: bool,
     _arg: *mut std::ffi::c_void,
 ) {
     // Only process during post-lock phase, similar to C++ implementation
@@ -137,25 +157,33 @@ unsafe extern "C-unwind" fn release_resource_callback(
     // SAFETY: CurrentResourceOwner is set by PostgreSQL during transaction
     let current_owner = unsafe { pg_sys::CurrentResourceOwner };
 
-    // Identify resources belonging to the current owner
-    // We must extract them to avoid double borrowing RefCell during callback execution
+    if is_commit && !is_top_level {
+        let parent = unsafe { pg_sys::ResourceOwnerGetParent(current_owner) };
+        if !parent.is_null() {
+            RESOURCES.with(|resources| {
+                for entry in resources.borrow_mut().iter_mut() {
+                    if entry.owner == current_owner {
+                        entry.owner = parent;
+                    }
+                }
+            });
+        }
+        return;
+    }
+
+    // Extract matching resources in a single pass to avoid double borrowing
+    // RefCell during callback execution.
     let to_execute: Vec<(u64, Box<dyn FnOnce() + 'static>)> =
         RESOURCES.with(|resources| {
-            let mut map = resources.borrow_mut();
-            let mut matched_ids = Vec::new();
-
-            // Find IDs first
-            for (id, entry) in map.iter() {
-                if entry.owner == current_owner {
-                    matched_ids.push(*id);
-                }
-            }
-
-            // Remove and collect
+            let mut vec = resources.borrow_mut();
             let mut extracted = Vec::new();
-            for id in matched_ids {
-                if let Some(entry) = map.remove(&id) {
-                    extracted.push((id, entry.callback));
+            let mut i = 0;
+            while i < vec.len() {
+                if vec[i].owner == current_owner {
+                    let entry = vec.swap_remove(i);
+                    extracted.push((entry.id, entry.callback));
+                } else {
+                    i += 1;
                 }
             }
             extracted
@@ -171,12 +199,16 @@ unsafe extern "C-unwind" fn release_resource_callback(
             ));
         }
 
-        // Execute cleanup
-        if let Err(e) = catch_unwind(AssertUnwindSafe(callback)) {
+        PgTryBuilder::new(AssertUnwindSafe(move || {
+            callback();
+        }))
+        .catch_others(|err| {
             crate::diag::report_warning(&format!(
-                "panic during resource cleanup for handle {:?}: {:?}",
-                id, e
+                "error during resource cleanup for handle {:?}: {}",
+                id,
+                crate::diag::PgErrorReport::from_caught(err)
             ));
-        }
+        })
+        .execute();
     }
 }

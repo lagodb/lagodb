@@ -5,7 +5,7 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use pg_lakebase_core::prelude::*;
 //!
 //! #[pg_table_am(
@@ -15,12 +15,10 @@
 //! )]
 //! pub struct MyTableAm;
 //!
-//! impl TableAccessMethod<MyError> for MyTableAm {
-//!     type ScanState = MyScan;
-//!     type RelationState = MyRelation;
-//!     type IndexState = MyIndex;
-//!     type DdlState = MyDdl;
-//!     type ModifyState = MyModify;
+//! impl TableAccessMethod for MyTableAm {
+//!     type ScanSession = MyScan;
+//!     type IndexFetchSession = MyIndexFetch;
+//!     type DmlSession = MyModify;
 //! }
 //! ```
 
@@ -30,8 +28,8 @@ pub mod api;
 /// Safe wrapper types for PostgreSQL FFI types
 pub mod handles;
 
-/// PostgreSQL data types (Cell, Row)
-pub mod data;
+/// PostgreSQL tuple value abstractions (Cell, Row)
+pub mod tuple;
 
 /// Table access implementation modules (scan, index, dml, ddl, relation)
 pub mod access;
@@ -48,62 +46,34 @@ pub mod hooks;
 /// Custom WAL Resource Manager framework
 pub mod wal;
 
-/// Generic Resource Cleanup Manager (similar to PG's ResourceOwner callbacks)
+/// ResourceOwner-scoped cleanup callbacks.  Distinct from transaction events.
 pub mod resource;
+
+/// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.
+pub mod transaction;
 
 /// Helper functions and diagnostics
 pub mod diag;
 
-/// Wrapper for PostgreSQL functions
-pub mod pg_wrapper;
+/// Internal wrapper for PostgreSQL functions
+mod wrapper;
 
 /// Catalog access and caching
 pub mod catalog;
 
 /// The prelude includes all necessary imports to make pg_lakebase_core work
 pub mod prelude {
-    pub use crate::access::xact::{
-        PendingDelete, TransactionResource, init_xact_callback, pending_delete_size,
-        register_pending_delete, register_resource,
-    };
     pub use crate::api::*;
-    pub use crate::data::*;
     pub use crate::diag::{
-        CreateRuntimeError, create_async_runtime, log_debug1, report_error,
-        report_info, report_notice, report_warning,
+        PgError, PgErrorReport, PgErrorSource, ReportableError, SqlStateError,
     };
-    pub use crate::handles::{
-        AttrWidthsHandle, BufferAccessStrategyHandle, BulkInsertStateHandle,
-        CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
-        ParallelTableScanDescHandle, ReadStreamHandle, RelFileLocator,
-        RelationHandle, SampleScanStateHandle, ScanDirection, ScanKeyHandle,
-        SnapshotHandle, TBMIterateResultHandle, TM_FailureData, TableGuard,
-        TableScanDescHandle, TupleTableSlotHandle, VacuumParamsHandle,
-        ValidateIndexStateHandle, VarlenaHandle,
-    };
-    pub use crate::hooks::{
-        UtilityHook, UtilityHookError, UtilityNode, register_utility_hook,
-    };
-    pub use crate::options::{
-        TableOptionError, TableOptions, TablespaceError, TablespaceOptions,
-    };
+    pub use crate::handles::*;
     pub use crate::pg_table_am;
-    pub use crate::registry::make_table_am_routine;
-    pub use crate::resource::{
-        ResourceHandle, forget_resource, init_resource_manager, remember_resource,
-    };
-    pub use crate::wal::{
-        RmgrId, WalRecord, WalRecordBuilder, WalResourceManager, WalRmgrError,
-        XLogRecPtr, register_wal_rmgr,
-    };
-    pub use tokio::runtime::Runtime;
+    pub use crate::tuple::*;
 }
 
 use pgrx::AllocatedByPostgres;
 use pgrx::prelude::*;
-
-/// Internal memory context management
-mod memory;
 
 /// PgBox'ed `TableAmRoutine`, used in [`am_routine`](api::TableAccessMethod::am_routine)
 pub type TableAmRoutine<A = AllocatedByPostgres> = PgBox<pg_sys::TableAmRoutine, A>;
