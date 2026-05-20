@@ -131,17 +131,16 @@ impl ArtifactRegistry {
                 ref state,
                 ..
             } = entry.kind
+                && loc == location
             {
-                if loc == location {
-                    return match state {
-                        ObjectFileState::Staged => Ok(()),
-                        ObjectFileState::Uploaded => Err(format!(
-                            "object '{}' is already in Uploaded state; \
+                return match state {
+                    ObjectFileState::Staged => Ok(()),
+                    ObjectFileState::Uploaded => Err(format!(
+                        "object '{}' is already in Uploaded state; \
                              duplicate finalize_write?",
-                            location,
-                        )),
-                    };
-                }
+                        location,
+                    )),
+                };
             }
         }
         Err(format!(
@@ -161,17 +160,16 @@ impl ArtifactRegistry {
                 ref mut state,
                 ..
             } = entry.kind
+                && loc == location
             {
-                if loc == location {
-                    if *state == ObjectFileState::Staged {
-                        *state = ObjectFileState::Uploaded;
-                        return Ok(());
-                    } else {
-                        return Err(format!(
-                            "object '{}' is already Uploaded; state machine error",
-                            location,
-                        ));
-                    }
+                if *state == ObjectFileState::Staged {
+                    *state = ObjectFileState::Uploaded;
+                    return Ok(());
+                } else {
+                    return Err(format!(
+                        "object '{}' is already Uploaded; state machine error",
+                        location,
+                    ));
                 }
             }
         }
@@ -279,17 +277,17 @@ impl ArtifactRegistry {
                 ref client,
                 state,
             } => {
-                if state == ObjectFileState::Uploaded {
-                    if let Err(e) = client.delete(
+                if state == ObjectFileState::Uploaded
+                    && let Err(e) = client.delete(
                         location.store_id().as_str(),
                         location.bucket(),
                         location.key(),
-                    ) {
-                        pg_lakebase_core::diag::report_warning(&format!(
-                            "failed to delete uploaded object '{}': {}",
-                            location, e
-                        ));
-                    }
+                    )
+                {
+                    pg_lakebase_core::diag::report_warning(&format!(
+                        "failed to delete uploaded object '{}': {}",
+                        location, e
+                    ));
                 }
                 best_effort_unlink(staging_path);
             }

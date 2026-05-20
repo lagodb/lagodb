@@ -79,7 +79,6 @@ struct DmlFrame {
 pub(super) struct ModifySession {
     pub(super) state: Box<dyn ErasedModifySession>,
     pub(super) row_buffer: Row,
-    pub(super) multi_row_buffer: Vec<Row>,
     finalized: bool,
 }
 
@@ -91,7 +90,6 @@ impl ModifySession {
         Self {
             state: Box::new(ErasedModifySessionAdapter::<T>::new(state)),
             row_buffer: Row::new(),
-            multi_row_buffer: Vec::new(),
             finalized: false,
         }
     }

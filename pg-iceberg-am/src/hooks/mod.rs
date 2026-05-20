@@ -1,7 +1,6 @@
 use pg_lakebase_core::access::dml;
 
 pub mod object_access;
-pub mod table_option_cache;
 pub mod table_options;
 pub mod tablespace_options;
 

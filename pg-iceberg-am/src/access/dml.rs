@@ -22,6 +22,7 @@ use iceberg_lite::writer::file_writer::location_generator::{
 use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
+use pg_lakebase_core::batch::RowBatchBuffer;
 use pg_lakebase_core::prelude::*;
 use pg_lakebase_core::tuple::Row;
 use pgrx::pg_sys;
@@ -63,9 +64,7 @@ pub struct IcebergModify {
     /// Whether the relation requires WAL for local storage writes.
     relation_needs_wal: bool,
     /// Buffered rows waiting to be written
-    row_buffer: Vec<Row>,
-    /// Current size of buffered rows in bytes
-    current_buffer_size: usize,
+    row_buffer: RowBatchBuffer,
     /// Data files produced during this modify operation
     data_files: Vec<DataFile>,
     /// Iceberg schema for the table
@@ -88,8 +87,7 @@ impl AmDmlSession for IcebergModify {
             rel_number: target.locator.rel_number,
             spc_oid: target.locator.spc_oid,
             relation_needs_wal: target.relation_needs_wal,
-            row_buffer: Vec::new(),
-            current_buffer_size: 0,
+            row_buffer: RowBatchBuffer::new(),
             data_files: Vec::new(),
             iceberg_schema: None,
             arrow_schema: None,
@@ -128,7 +126,6 @@ impl AmDmlSession for IcebergModify {
     fn abort_modify(&mut self) {
         self.initialized = false;
         self.row_buffer.clear();
-        self.current_buffer_size = 0;
         self.data_files.clear();
         self.writer.take();
     }
@@ -165,7 +162,7 @@ impl AmDmlSession for IcebergModify {
 
     fn tuple_insert(
         &mut self,
-        row: &Row,
+        row: Row,
         cid: pg_sys::CommandId,
         options: i32,
         bistate: Option<&BulkInsertStateHandle>,
@@ -181,7 +178,7 @@ impl AmDmlSession for IcebergModify {
 
     fn multi_insert(
         &mut self,
-        rows: &[Row],
+        rows: Vec<Row>,
         cid: pg_sys::CommandId,
         options: i32,
         bistate: Option<&BulkInsertStateHandle>,
@@ -231,13 +228,14 @@ impl IcebergModify {
         }
     }
 
-    fn buffer_row(&mut self, row: &Row) -> IcebergResult<()> {
-        // Clone and buffer the row
-        self.current_buffer_size += row.size;
-        self.row_buffer.push(row.clone());
+    fn buffer_row(&mut self, row: Row) -> IcebergResult<()> {
+        self.row_buffer.push_row(row);
 
         // Flush if buffer is full (converting MB to bytes)
-        if self.current_buffer_size >= DEFAULT_BATCH_SIZE_IN_MB * 1024 * 1024 {
+        if self
+            .row_buffer
+            .should_flush(DEFAULT_BATCH_SIZE_IN_MB * 1024 * 1024)
+        {
             self.flush_buffer()?;
         }
 
@@ -316,8 +314,7 @@ impl IcebergModify {
 
         // Extract rows and reset size tracking immediately.
         // This ensures the buffer is cleared even if subsequent steps fail.
-        let rows = std::mem::take(&mut self.row_buffer);
-        self.current_buffer_size = 0;
+        let rows = self.row_buffer.take_rows();
 
         // Convert rows to Arrow RecordBatch using cached schema
         let record_batch =

@@ -181,14 +181,14 @@ fn test_iceberg_schema_to_arrow_schema_field_ids_in_metadata() {
     // Check field ID metadata
     let col1_meta = arrow_schema.field(0).metadata();
     assert_eq!(
-        col1_meta.get(PARQUET_FIELD_ID_META_KEY),
-        Some(&"42".to_string())
+        col1_meta.get(PARQUET_FIELD_ID_META_KEY).map(String::as_str),
+        Some("42")
     );
 
     let col2_meta = arrow_schema.field(1).metadata();
     assert_eq!(
-        col2_meta.get(PARQUET_FIELD_ID_META_KEY),
-        Some(&"99".to_string())
+        col2_meta.get(PARQUET_FIELD_ID_META_KEY).map(String::as_str),
+        Some("99")
     );
 }
 
@@ -230,7 +230,7 @@ fn test_rows_to_record_batch_primitives() {
     let mut row2 = Row::with_capacity(2);
     row2.set_cell(0, Some(Cell::I32(100)));
 
-    let rows = vec![row1.clone(), row2];
+    let rows = vec![row1, row2];
     let batch = rows_to_record_batch(&rows, &iceberg_schema).unwrap();
 
     assert_eq!(batch.num_rows(), 2);
@@ -239,11 +239,6 @@ fn test_rows_to_record_batch_primitives() {
     let int_col = batch.column(0).as_primitive::<Int32Type>();
     assert_eq!(int_col.value(0), 42);
     assert_eq!(int_col.value(1), 100);
-
-    // Check String column
-    let str_col = batch.column(1).as_string::<i32>();
-    assert_eq!(str_col.value(0), "hello");
-    assert!(str_col.is_null(1));
 
     // Check String column
     let str_col = batch.column(1).as_string::<i32>();

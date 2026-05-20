@@ -49,4 +49,3 @@ arrow-buffer = "57"
 
 [dev-dependencies]
 pgrx-tests = { workspace = true }
-postgres = "0.19"

@@ -122,17 +122,18 @@ impl AmScanSession for IcebergScan {
 
         loop {
             // Check if we have a current batch and rows to read
-            if let Some(ref batch) = self.current_batch {
-                if self.current_row_idx < batch.num_rows() {
-                    // Extract the current row from the batch
-                    let schema = self.iceberg_schema.as_ref().ok_or(
-                        IcebergError::NotImplemented("schema not initialized"),
-                    )?;
+            if let Some(ref batch) = self.current_batch
+                && self.current_row_idx < batch.num_rows()
+            {
+                // Extract the current row from the batch
+                let schema = self
+                    .iceberg_schema
+                    .as_ref()
+                    .ok_or(IcebergError::NotImplemented("schema not initialized"))?;
 
-                    extract_row_from_batch(batch, self.current_row_idx, schema, row)?;
-                    self.current_row_idx += 1;
-                    return Ok(true);
-                }
+                extract_row_from_batch(batch, self.current_row_idx, schema, row)?;
+                self.current_row_idx += 1;
+                return Ok(true);
             }
 
             match self.next_batch()? {

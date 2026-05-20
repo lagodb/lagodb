@@ -7,8 +7,180 @@ use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
+use std::marker::PhantomData;
 
 use super::cell::Cell;
+
+/// Borrowed view of one PostgreSQL datum in a tuple slot.
+///
+/// The value is valid only while the owning [`TupleSlotRow`] is valid. It is a
+/// source view, not an owned value: columnar encoders can inspect the PostgreSQL
+/// type metadata and append directly into their own builders without first
+/// materializing a [`Cell`].
+#[derive(Clone, Copy)]
+pub struct PgDatumRef<'slot> {
+    datum: pg_sys::Datum,
+    is_null: bool,
+    type_oid: pg_sys::Oid,
+    typmod: i32,
+    _marker: PhantomData<&'slot ()>,
+}
+
+impl<'slot> PgDatumRef<'slot> {
+    pub fn datum(&self) -> pg_sys::Datum {
+        self.datum
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.is_null
+    }
+
+    pub fn type_oid(&self) -> pg_sys::Oid {
+        self.type_oid
+    }
+
+    pub fn typmod(&self) -> i32 {
+        self.typmod
+    }
+
+    /// Materialize this datum into the framework's owned cell representation.
+    ///
+    /// This is the row-mode fallback. Columnar DML hot paths should prefer
+    /// appending the datum view directly to their builders.
+    pub fn to_cell(self) -> Option<Cell> {
+        unsafe {
+            Cell::from_polymorphic_datum(self.datum, self.is_null, self.type_oid)
+        }
+    }
+}
+
+/// Borrowed view of a PostgreSQL [`TupleTableSlot`](pg_sys::TupleTableSlot).
+///
+/// This view is scoped to the table-AM callback that received the slot. It must
+/// not be stored across callbacks because PostgreSQL can reuse the slot and
+/// reset the surrounding memory context.
+///
+/// The intended DML flow is:
+///
+/// - row-mode AMs call [`Self::to_owned_row`] and buffer owned values;
+/// - columnar AMs read [`PgDatumRef`] values with [`Self::datum_at`] and append
+///   them directly into AM-owned builders.
+#[derive(Clone, Copy)]
+pub struct TupleSlotRow<'slot> {
+    slot: *mut pg_sys::TupleTableSlot,
+    _marker: PhantomData<&'slot pg_sys::TupleTableSlot>,
+}
+
+impl<'slot> TupleSlotRow<'slot> {
+    /// # Safety
+    ///
+    /// `slot` must be a valid, non-null pointer to an initialized
+    /// `TupleTableSlot`, and it must remain valid for `'slot`.
+    pub unsafe fn from_raw(slot: *mut pg_sys::TupleTableSlot) -> Self {
+        unsafe {
+            pg_sys::slot_getallattrs(slot);
+        }
+        Self {
+            slot,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn as_raw(&self) -> *mut pg_sys::TupleTableSlot {
+        self.slot
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe {
+            let tup_desc = (*self.slot).tts_tupleDescriptor;
+            (*tup_desc).natts as usize
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn datum_at(&self, index: usize) -> Option<PgDatumRef<'slot>> {
+        unsafe {
+            let tup_desc = (*self.slot).tts_tupleDescriptor;
+            let natts = (*tup_desc).natts as usize;
+            if index >= natts {
+                return None;
+            }
+
+            let values = std::slice::from_raw_parts((*self.slot).tts_values, natts);
+            let nulls = std::slice::from_raw_parts((*self.slot).tts_isnull, natts);
+            let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
+            let attr = &attrs[index];
+
+            Some(PgDatumRef {
+                datum: values[index],
+                is_null: nulls[index],
+                type_oid: attr.atttypid,
+                typmod: attr.atttypmod,
+                _marker: PhantomData,
+            })
+        }
+    }
+
+    /// Materialize the slot view as an owned [`Row`].
+    ///
+    /// Use this only when the AM needs row-shaped values after the callback
+    /// returns. It intentionally performs the ownership conversion that
+    /// columnar DML paths avoid.
+    pub fn to_owned_row(&self) -> Row {
+        Row::from_slot_view(*self)
+    }
+}
+
+/// Borrowed view of a PostgreSQL multi-insert slot array.
+///
+/// Like [`TupleSlotRow`], this is callback-scoped. It should be consumed during
+/// the callback by either materializing owned rows or by appending each slot row
+/// into AM-owned column builders.
+#[derive(Clone, Copy)]
+pub struct TupleSlotBatch<'slot> {
+    slots: &'slot [*mut pg_sys::TupleTableSlot],
+}
+
+impl<'slot> TupleSlotBatch<'slot> {
+    /// # Safety
+    ///
+    /// `slots` must point to `len` valid `TupleTableSlot` pointers that remain
+    /// valid for `'slot`.
+    pub unsafe fn from_raw(
+        slots: *mut *mut pg_sys::TupleTableSlot,
+        len: usize,
+    ) -> Self {
+        let slots = unsafe { std::slice::from_raw_parts(slots, len) };
+        Self { slots }
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub fn row_at(&self, index: usize) -> Option<TupleSlotRow<'slot>> {
+        self.slots
+            .get(index)
+            .map(|slot| unsafe { TupleSlotRow::from_raw(*slot) })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = TupleSlotRow<'slot>> + '_ {
+        self.slots
+            .iter()
+            .map(|slot| unsafe { TupleSlotRow::from_raw(*slot) })
+    }
+
+    pub fn to_owned_rows(&self) -> Vec<Row> {
+        self.iter().map(|row| row.to_owned_row()).collect()
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Row {
@@ -96,6 +268,21 @@ impl Row {
         self.size = 0;
     }
 
+    pub fn from_slot_view(slot: TupleSlotRow<'_>) -> Self {
+        let natts = slot.len();
+        let mut row = Self::with_capacity(natts);
+        row.size = 0;
+
+        for index in 0..natts {
+            row.cells[index] = slot.datum_at(index).and_then(PgDatumRef::to_cell);
+            if let Some(cell) = &row.cells[index] {
+                row.size += cell.mem_size();
+            }
+        }
+
+        row
+    }
+
     /// # Safety
     /// `slot` must be a valid, non-null pointer to an initialized TupleTableSlot.
     pub unsafe fn update_from_slot(&mut self, slot: *mut pg_sys::TupleTableSlot) {
@@ -130,11 +317,7 @@ impl Row {
     /// # Safety
     /// `slot` must be a valid, non-null pointer to an initialized TupleTableSlot.
     pub unsafe fn from_slot(slot: *mut pg_sys::TupleTableSlot) -> Self {
-        unsafe {
-            let mut row = Self::new();
-            row.update_from_slot(slot);
-            row
-        }
+        unsafe { TupleSlotRow::from_raw(slot).to_owned_row() }
     }
 }
 

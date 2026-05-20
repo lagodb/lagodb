@@ -1,7 +1,13 @@
-//! PostgreSQL-based Iceberg Catalog implementation
+//! PostgreSQL-backed Iceberg Catalog adapter.
 //!
-//! This module provides a PostgreSQL-backed catalog implementation that stores
-//! Iceberg table metadata in PostgreSQL system catalogs.
+//! Long term, this should become a complete catalog implementation whose
+//! authoritative table and namespace state lives in PostgreSQL system catalogs.
+//! Today it is intentionally narrower: `iceberg-lite` is derived from
+//! iceberg-rust, whose transaction flow is built around the Iceberg `Catalog`
+//! trait, so pg-iceberg-am needs an adapter that can participate in
+//! `create_table`, `load_table`, and `update_table` while the PostgreSQL catalog
+//! layer remains the source of truth. Methods outside that integration surface
+//! return `FeatureUnsupported` instead of panicking.
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -16,10 +22,11 @@ use iceberg_lite::spec::TableMetadataBuilder;
 use iceberg_lite::table::Table;
 use iceberg_lite::{Error, ErrorKind, Result};
 
-/// PostgreSQL-based Iceberg Catalog implementation.
+/// PostgreSQL-backed Iceberg Catalog adapter.
 ///
-/// This catalog stores Iceberg table metadata in PostgreSQL system catalogs,
-/// allowing seamless integration between PostgreSQL and Iceberg tables.
+/// This type is not yet the complete PostgreSQL catalog implementation. It is
+/// the bridge required by iceberg-lite's `Catalog`-centric transaction API while
+/// pg-iceberg-am keeps authoritative metadata in PostgreSQL system catalogs.
 ///
 /// For transaction commits, the catalog maintains a cache of the current table
 /// being modified to support `load_table` and `update_table` operations.
@@ -85,6 +92,15 @@ impl IcebergCatalog {
     pub fn file_io(&self) -> FileIO {
         self.file_io.clone()
     }
+
+    fn unsupported_catalog_method<T>(method: &'static str) -> Result<T> {
+        Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            format!(
+                "PostgreSQL Iceberg catalog method `{method}` is not implemented yet"
+            ),
+        ))
+    }
 }
 
 /// Checks if provided `NamespaceIdent` is valid.
@@ -113,11 +129,11 @@ pub(crate) fn validate_namespace(namespace: &NamespaceIdent) -> Result<String> {
 }
 
 impl Catalog for IcebergCatalog {
-    fn list_namespaces<'a>(
+    fn list_namespaces(
         &self,
-        _parent: Option<&'a NamespaceIdent>,
+        _parent: Option<&NamespaceIdent>,
     ) -> Result<Vec<NamespaceIdent>> {
-        todo!("list_namespaces not yet implemented")
+        Self::unsupported_catalog_method("list_namespaces")
     }
 
     fn create_namespace(
@@ -125,15 +141,15 @@ impl Catalog for IcebergCatalog {
         _namespace: &NamespaceIdent,
         _properties: HashMap<String, String>,
     ) -> Result<Namespace> {
-        todo!("create_namespace not yet implemented")
+        Self::unsupported_catalog_method("create_namespace")
     }
 
     fn get_namespace(&self, _namespace: &NamespaceIdent) -> Result<Namespace> {
-        todo!("get_namespace not yet implemented")
+        Self::unsupported_catalog_method("get_namespace")
     }
 
     fn namespace_exists(&self, _namespace: &NamespaceIdent) -> Result<bool> {
-        todo!("namespace_exists not yet implemented")
+        Self::unsupported_catalog_method("namespace_exists")
     }
 
     fn update_namespace(
@@ -141,15 +157,15 @@ impl Catalog for IcebergCatalog {
         _namespace: &NamespaceIdent,
         _properties: HashMap<String, String>,
     ) -> Result<()> {
-        todo!("update_namespace not yet implemented")
+        Self::unsupported_catalog_method("update_namespace")
     }
 
     fn drop_namespace(&self, _namespace: &NamespaceIdent) -> Result<()> {
-        todo!("drop_namespace not yet implemented")
+        Self::unsupported_catalog_method("drop_namespace")
     }
 
     fn list_tables(&self, _namespace: &NamespaceIdent) -> Result<Vec<TableIdent>> {
-        todo!("list_tables not yet implemented")
+        Self::unsupported_catalog_method("list_tables")
     }
 
     fn create_table(
@@ -206,7 +222,7 @@ impl Catalog for IcebergCatalog {
     }
 
     fn drop_table(&self, _table: &TableIdent) -> Result<()> {
-        todo!("drop_table not yet implemented")
+        Self::unsupported_catalog_method("drop_table")
     }
 
     fn table_exists(&self, table_ident: &TableIdent) -> Result<bool> {
@@ -224,7 +240,7 @@ impl Catalog for IcebergCatalog {
     }
 
     fn rename_table(&self, _src: &TableIdent, _dest: &TableIdent) -> Result<()> {
-        todo!("rename_table not yet implemented")
+        Self::unsupported_catalog_method("rename_table")
     }
 
     fn register_table(
@@ -232,7 +248,7 @@ impl Catalog for IcebergCatalog {
         _table: &TableIdent,
         _metadata_location: String,
     ) -> Result<Table> {
-        todo!("register_table not yet implemented")
+        Self::unsupported_catalog_method("register_table")
     }
 
     fn update_table(&self, commit: TableCommit) -> Result<Table> {
@@ -285,5 +301,15 @@ mod tests {
         let catalog = IcebergCatalog::new("test_catalog", FileIO::memory());
 
         assert_eq!(catalog.name(), "test_catalog");
+    }
+
+    #[test]
+    fn unsupported_catalog_methods_return_feature_unsupported() {
+        let catalog = IcebergCatalog::default();
+        let namespace = NamespaceIdent::new("public".to_string());
+
+        let error = catalog.list_tables(&namespace).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::FeatureUnsupported);
     }
 }

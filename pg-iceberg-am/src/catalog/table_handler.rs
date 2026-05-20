@@ -1,15 +1,15 @@
 use super::schema_mapping::tuple_desc_to_schema;
 use crate::error::{IcebergError, IcebergResult};
-use crate::hooks::table_option_cache::IcebergTableOptionCache;
+use crate::options::IcebergTableOptionCache;
 use crate::storage::create_storage_context;
 use crate::storage::transactional_artifacts::register_table_dir_created;
 use iceberg_lite::catalog::{Catalog, NamespaceIdent, TableCreation};
-use iceberg_lite::spec::{FormatVersion, SortOrder, UnboundPartitionSpec};
+use iceberg_lite::spec::{SortOrder, UnboundPartitionSpec};
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::AmCache;
 use pgrx::pg_sys;
 
-use super::IcebergCatalog;
+use super::iceberg_catalog::IcebergCatalog;
 
 fn get_tablespace_version_directory() -> String {
     let major_version = pg_sys::PG_MAJORVERSION.to_string_lossy();
@@ -88,11 +88,7 @@ pub fn init_table_storage_metadata(rel: &RelationHandle) -> IcebergResult<String
     // Get table options from rd_amcache (loads from catalog if not cached)
     let table_option = AmCache::get::<IcebergTableOptionCache>(rel)?;
     let properties = table_option.to_properties();
-    let format_version = match table_option.format_version {
-        1 => FormatVersion::V1,
-        3 => FormatVersion::V3,
-        _ => FormatVersion::V2,
-    };
+    let format_version = table_option.iceberg_format_version()?;
 
     let rel_num = unsafe { (*rel.as_raw()).rd_locator.relNumber };
 

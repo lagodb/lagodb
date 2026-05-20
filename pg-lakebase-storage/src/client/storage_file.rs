@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::FileExt;
 
-use crate::error::{StorageError, StorageResult};
+use crate::error::{StorageResult};
 use crate::handle::FileHandle;
 use crate::protocol::{WireRequestPayload, WireResponsePayload};
 
@@ -99,9 +99,6 @@ impl StorageFile {
     ///
     /// Returns an empty `Vec` when `offset` is at or past EOF.
     pub fn read_at(&self, offset: u64, len: u32) -> StorageResult<Vec<u8>> {
-        if self.closed {
-            return Err(StorageError::closed_handle(self.handle.0));
-        }
         if let ReadPath::Direct(reader) = &self.read_path {
             let clamped =
                 std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
@@ -122,9 +119,6 @@ impl StorageFile {
             return Ok(0);
         }
         let len = std::cmp::min(buf.len(), u32::MAX as usize) as u32;
-        if self.closed {
-            return Err(StorageError::closed_handle(self.handle.0));
-        }
         if let ReadPath::Direct(reader) = &self.read_path {
             let clamped =
                 std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
@@ -147,9 +141,6 @@ impl StorageFile {
     /// The cursor advances by the number of bytes returned. Returns an empty `Vec` when the
     /// cursor is at or past EOF.
     pub fn read(&mut self, len: u32) -> StorageResult<Vec<u8>> {
-        if self.closed {
-            return Err(StorageError::closed_handle(self.handle.0));
-        }
         if let ReadPath::Direct(reader) = &self.read_path {
             let offset = self.cursor;
             let len =
@@ -175,9 +166,6 @@ impl StorageFile {
             return Ok(0);
         }
         let len = std::cmp::min(buf.len(), u32::MAX as usize) as u32;
-        if self.closed {
-            return Err(StorageError::closed_handle(self.handle.0));
-        }
         if let ReadPath::Direct(reader) = &self.read_path {
             let offset = self.cursor;
             let clamped =

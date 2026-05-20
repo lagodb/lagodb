@@ -6,16 +6,12 @@ pub mod table_handler;
 
 use crate::get_iceberg_am_routine_ptr;
 use pg_lakebase_core::handles::RelationHandle;
-use pgrx::pg_sys;
 
-pub use iceberg_catalog::*;
-pub use iceberg_metadata::*;
 pub use metadata_tracking::{
     get_or_rebase_metadata_location, process_new_data_files, record_metadata_change,
     register_table_for_tracking,
 };
-pub use schema_mapping::*;
-pub use table_handler::*;
+pub use table_handler::{generate_table_location, init_table_storage_metadata};
 
 #[inline]
 pub fn is_iceberg_table(rel: &RelationHandle) -> bool {
@@ -30,6 +26,6 @@ pub fn is_iceberg_table(rel: &RelationHandle) -> bool {
             return false;
         }
 
-        rd_tableam as *const pg_sys::TableAmRoutine == get_iceberg_am_routine_ptr()
+        std::ptr::eq(rd_tableam, get_iceberg_am_routine_ptr())
     }
 }

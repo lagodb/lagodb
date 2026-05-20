@@ -14,18 +14,17 @@
 //! );
 //! ```
 
+use crate::error::{
+    IcebergError, IcebergResult, MetadataCatalogOperation as CatalogOp,
+};
 use pg_lakebase_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, CatalogUpdateResult,
     LAKEBASE_SCHEMA, get_namespace_oid, get_relation_oid,
 };
-use pg_lakebase_core::diag::SqlStateError;
 use pg_lakebase_core::handles::HeapTupleGuard;
-use pgrx::pg_sys::panic::ErrorReport;
-use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 use std::ffi::CStr;
 use std::sync::OnceLock;
-use thiserror::Error;
 
 // ============================================================================
 //  Constants
@@ -51,15 +50,18 @@ static ICEBERG_METADATA_OID: OnceLock<pg_sys::Oid> = OnceLock::new();
 static ICEBERG_METADATA_PKEY_OID: OnceLock<pg_sys::Oid> = OnceLock::new();
 
 /// Get the OID of the `lakebase.iceberg_metadata` table.
-pub fn get_iceberg_metadata_oid() -> Result<pg_sys::Oid, IcebergMetadataError> {
+pub fn get_iceberg_metadata_oid() -> IcebergResult<pg_sys::Oid> {
     if let Some(&oid) = ICEBERG_METADATA_OID.get() {
         return Ok(oid);
     }
 
-    let schema_oid = get_namespace_oid(LAKEBASE_SCHEMA, false)
-        .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
-    let oid = get_relation_oid(ICEBERG_METADATA_TABLE, schema_oid)
-        .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
+    let schema_oid = get_namespace_oid(LAKEBASE_SCHEMA, false).map_err(|source| {
+        IcebergError::metadata_catalog(CatalogOp::Access, source)
+    })?;
+    let oid =
+        get_relation_oid(ICEBERG_METADATA_TABLE, schema_oid).map_err(|source| {
+            IcebergError::metadata_catalog(CatalogOp::Access, source)
+        })?;
 
     let _ = ICEBERG_METADATA_OID.set(oid);
 
@@ -67,74 +69,22 @@ pub fn get_iceberg_metadata_oid() -> Result<pg_sys::Oid, IcebergMetadataError> {
 }
 
 /// Get the OID of the primary key index on `lakebase.iceberg_metadata`.
-pub fn get_iceberg_metadata_pkey_oid() -> Result<pg_sys::Oid, IcebergMetadataError> {
+pub fn get_iceberg_metadata_pkey_oid() -> IcebergResult<pg_sys::Oid> {
     if let Some(&oid) = ICEBERG_METADATA_PKEY_OID.get() {
         return Ok(oid);
     }
 
-    let schema_oid = get_namespace_oid(LAKEBASE_SCHEMA, false)
-        .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
-    let oid = get_relation_oid(ICEBERG_METADATA_PKEY, schema_oid)
-        .map_err(|e| IcebergMetadataError::CatalogAccess(e.to_string()))?;
+    let schema_oid = get_namespace_oid(LAKEBASE_SCHEMA, false).map_err(|source| {
+        IcebergError::metadata_catalog(CatalogOp::Access, source)
+    })?;
+    let oid =
+        get_relation_oid(ICEBERG_METADATA_PKEY, schema_oid).map_err(|source| {
+            IcebergError::metadata_catalog(CatalogOp::Access, source)
+        })?;
 
     let _ = ICEBERG_METADATA_PKEY_OID.set(oid);
 
     Ok(oid)
-}
-
-// ============================================================================
-//  Error Type
-// ============================================================================
-
-/// Errors that can occur when operating on the iceberg_metadata table.
-#[derive(Error, Debug, Clone)]
-pub enum IcebergMetadataError {
-    #[error("catalog access error: {0}")]
-    CatalogAccess(String),
-
-    #[error("record not found for relid: {0}")]
-    NotFound(pg_sys::Oid),
-
-    #[error("record already exists for relid: {0}")]
-    AlreadyExists(pg_sys::Oid),
-
-    #[error("failed to insert record: {0}")]
-    InsertFailed(String),
-
-    #[error("failed to update record: {0}")]
-    UpdateFailed(String),
-
-    #[error("failed to delete record: {0}")]
-    DeleteFailed(String),
-
-    #[error("failed to read record: {0}")]
-    ReadFailed(String),
-
-    #[error("optimistic locking failed: metadata location changed concurrently")]
-    Conflict,
-}
-
-impl SqlStateError for IcebergMetadataError {
-    fn sql_error_code(&self) -> PgSqlErrorCode {
-        match self {
-            IcebergMetadataError::NotFound(_) => {
-                PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
-            }
-            IcebergMetadataError::AlreadyExists(_) => {
-                PgSqlErrorCode::ERRCODE_UNIQUE_VIOLATION
-            }
-            IcebergMetadataError::Conflict => {
-                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-            }
-            _ => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-        }
-    }
-}
-
-impl From<IcebergMetadataError> for ErrorReport {
-    fn from(value: IcebergMetadataError) -> Self {
-        ErrorReport::new(value.sql_error_code(), format!("{value}"), "")
-    }
 }
 
 // ============================================================================
@@ -185,17 +135,18 @@ impl IcebergMetadata {
     /// Insert this record into the `lakebase.iceberg_metadata` table.
     ///
     /// Returns an error if a record with the same relid already exists.
-    pub fn insert(&self) -> Result<(), IcebergMetadataError> {
+    pub fn insert(&self) -> IcebergResult<()> {
         let table_oid = get_iceberg_metadata_oid()?;
 
         let table_guard =
-            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
-                .map_err(|e| IcebergMetadataError::InsertFailed(e.to_string()))?;
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _).map_err(
+                |source| IcebergError::metadata_catalog(CatalogOp::Insert, source),
+            )?;
 
         let relid_datum = self.relid.into_datum().unwrap();
-        let metadata_location_datum = self.metadata_location.clone().into_datum();
+        let metadata_location_datum = self.metadata_location.as_deref().into_datum();
         let previous_metadata_location_datum =
-            self.previous_metadata_location.clone().into_datum();
+            self.previous_metadata_location.as_deref().into_datum();
         let default_spec_id_datum = self.default_spec_id.into_datum();
 
         let mut values = [
@@ -223,9 +174,9 @@ impl IcebergMetadata {
             HeapTupleGuard::new(tuple)
         };
 
-        table_guard
-            .catalog_insert(&tuple_guard)
-            .map_err(|e| IcebergMetadataError::InsertFailed(e.to_string()))?;
+        table_guard.catalog_insert(&tuple_guard).map_err(|source| {
+            IcebergError::metadata_catalog(CatalogOp::Insert, source)
+        })?;
 
         Ok(())
     }
@@ -233,15 +184,14 @@ impl IcebergMetadata {
     /// Find a record by relid from the `lakebase.iceberg_metadata` table.
     ///
     /// Returns `Ok(None)` if no record is found.
-    pub fn find_by_relid(
-        relid: pg_sys::Oid,
-    ) -> Result<Option<Self>, IcebergMetadataError> {
+    pub fn find_by_relid(relid: pg_sys::Oid) -> IcebergResult<Option<Self>> {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
         let table_guard =
-            CatalogRelation::open(table_oid, pg_sys::AccessShareLock as _)
-                .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
+            CatalogRelation::open(table_oid, pg_sys::AccessShareLock as _).map_err(
+                |source| IcebergError::metadata_catalog(CatalogOp::Read, source),
+            )?;
 
         let mut scan_guard = table_guard
             .begin_scan(
@@ -250,11 +200,13 @@ impl IcebergMetadata {
                 CatalogSnapshot::Default,
                 [CatalogScanKey::oid_eq(column::RELID as _, relid)],
             )
-            .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
+            .map_err(|source| {
+                IcebergError::metadata_catalog(CatalogOp::Read, source)
+            })?;
 
-        let tuple = scan_guard
-            .get_next()
-            .map_err(|e| IcebergMetadataError::ReadFailed(e.to_string()))?;
+        let tuple = scan_guard.get_next().map_err(|source| {
+            IcebergError::metadata_catalog(CatalogOp::Read, source)
+        })?;
 
         match tuple {
             Some(tuple) => {
@@ -269,11 +221,12 @@ impl IcebergMetadata {
         }
     }
 
-    pub fn get(relid: pg_sys::Oid) -> Result<Self, IcebergMetadataError> {
-        Self::find_by_relid(relid)?.ok_or(IcebergMetadataError::NotFound(relid))
+    pub fn get(relid: pg_sys::Oid) -> IcebergResult<Self> {
+        Self::find_by_relid(relid)?
+            .ok_or(IcebergError::MetadataCatalogNotFound(relid))
     }
 
-    pub fn exists(relid: pg_sys::Oid) -> Result<bool, IcebergMetadataError> {
+    pub fn exists(relid: pg_sys::Oid) -> IcebergResult<bool> {
         Ok(Self::find_by_relid(relid)?.is_some())
     }
 
@@ -285,13 +238,14 @@ impl IcebergMetadata {
     pub fn update(
         &self,
         expected_previous_location: Option<&str>,
-    ) -> Result<(), IcebergMetadataError> {
+    ) -> IcebergResult<()> {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
         let table_guard =
-            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
-                .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _).map_err(
+                |source| IcebergError::metadata_catalog(CatalogOp::Update, source),
+            )?;
 
         let mut scan_guard = table_guard
             .begin_scan(
@@ -300,15 +254,17 @@ impl IcebergMetadata {
                 CatalogSnapshot::Default,
                 [CatalogScanKey::oid_eq(column::RELID as _, self.relid)],
             )
-            .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
+            .map_err(|source| {
+                IcebergError::metadata_catalog(CatalogOp::Update, source)
+            })?;
 
-        let old_tuple = scan_guard
-            .get_next()
-            .map_err(|e| IcebergMetadataError::UpdateFailed(e.to_string()))?;
+        let old_tuple = scan_guard.get_next().map_err(|source| {
+            IcebergError::metadata_catalog(CatalogOp::Update, source)
+        })?;
 
         let old_tuple = match old_tuple {
             Some(t) => t,
-            None => return Err(IcebergMetadataError::NotFound(self.relid)),
+            None => return Err(IcebergError::MetadataCatalogNotFound(self.relid)),
         };
 
         // Optimistic Lock Check (CAS)
@@ -318,7 +274,7 @@ impl IcebergMetadata {
         if existing_metadata.metadata_location.as_deref()
             != expected_previous_location
         {
-            return Err(IcebergMetadataError::Conflict);
+            return Err(IcebergError::MetadataCatalogConflict);
         }
 
         // Prepare replacement column values
@@ -329,7 +285,7 @@ impl IcebergMetadata {
         let mut nulls = vec![false; natts];
         let mut repls = vec![false; natts];
 
-        let metadata_location_datum = self.metadata_location.clone().into_datum();
+        let metadata_location_datum = self.metadata_location.as_deref().into_datum();
         values[(column::METADATA_LOCATION - 1) as usize] =
             metadata_location_datum.unwrap_or(pg_sys::Datum::from(0));
         nulls[(column::METADATA_LOCATION - 1) as usize] =
@@ -337,7 +293,7 @@ impl IcebergMetadata {
         repls[(column::METADATA_LOCATION - 1) as usize] = true;
 
         let previous_metadata_location_datum =
-            self.previous_metadata_location.clone().into_datum();
+            self.previous_metadata_location.as_deref().into_datum();
         values[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] =
             previous_metadata_location_datum.unwrap_or(pg_sys::Datum::from(0));
         nulls[(column::PREVIOUS_METADATA_LOCATION - 1) as usize] =
@@ -371,21 +327,26 @@ impl IcebergMetadata {
         // to trigger the retry/rebase logic in metadata_tracking.rs.
         match table_guard.catalog_update_optimistic(old_tuple, &new_tuple_guard) {
             Ok(CatalogUpdateResult::Success) => Ok(()),
-            Ok(CatalogUpdateResult::Conflict) => Err(IcebergMetadataError::Conflict),
-            Err(e) => Err(IcebergMetadataError::UpdateFailed(e.to_string())),
+            Ok(CatalogUpdateResult::Conflict) => {
+                Err(IcebergError::MetadataCatalogConflict)
+            }
+            Err(source) => {
+                Err(IcebergError::metadata_catalog(CatalogOp::Update, source))
+            }
         }
     }
 
     /// Delete the record for the given relid from the `lakebase.iceberg_metadata` table.
     ///
     /// Returns an error if the record does not exist.
-    pub fn delete(relid: pg_sys::Oid) -> Result<(), IcebergMetadataError> {
+    pub fn delete(relid: pg_sys::Oid) -> IcebergResult<()> {
         let table_oid = get_iceberg_metadata_oid()?;
         let index_oid = get_iceberg_metadata_pkey_oid()?;
 
         let table_guard =
-            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
-                .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _).map_err(
+                |source| IcebergError::metadata_catalog(CatalogOp::Delete, source),
+            )?;
 
         let mut scan_guard = table_guard
             .begin_scan(
@@ -394,20 +355,22 @@ impl IcebergMetadata {
                 CatalogSnapshot::Default,
                 [CatalogScanKey::oid_eq(column::RELID as _, relid)],
             )
-            .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
+            .map_err(|source| {
+                IcebergError::metadata_catalog(CatalogOp::Delete, source)
+            })?;
 
-        let tuple = scan_guard
-            .get_next()
-            .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
+        let tuple = scan_guard.get_next().map_err(|source| {
+            IcebergError::metadata_catalog(CatalogOp::Delete, source)
+        })?;
 
         let tuple = match tuple {
             Some(t) => t,
-            None => return Err(IcebergMetadataError::NotFound(relid)),
+            None => return Err(IcebergError::MetadataCatalogNotFound(relid)),
         };
 
-        table_guard
-            .catalog_delete(tuple)
-            .map_err(|e| IcebergMetadataError::DeleteFailed(e.to_string()))?;
+        table_guard.catalog_delete(tuple).map_err(|source| {
+            IcebergError::metadata_catalog(CatalogOp::Delete, source)
+        })?;
 
         Ok(())
     }
@@ -420,7 +383,7 @@ impl IcebergMetadata {
     unsafe fn from_tuple(
         rel: pg_sys::Relation,
         tuple: pg_sys::HeapTuple,
-    ) -> Result<Self, IcebergMetadataError> {
+    ) -> IcebergResult<Self> {
         let tup_desc = unsafe { (*rel).rd_att };
 
         let mut is_null = false;
@@ -428,7 +391,7 @@ impl IcebergMetadata {
             pg_sys::heap_getattr(tuple, column::RELID as _, tup_desc, &mut is_null)
         };
         let relid = if is_null {
-            return Err(IcebergMetadataError::ReadFailed(
+            return Err(IcebergError::MetadataCatalogInvalidRecord(
                 "relid is null".to_string(),
             ));
         } else {

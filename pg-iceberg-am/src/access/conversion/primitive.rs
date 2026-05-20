@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use super::traits::{ArrowToCell, RowsToArrow};
 use super::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
-use crate::access::traits::{ArrowToCell, RowsToArrow};
 use crate::error::{IcebergError, IcebergResult};
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
@@ -12,7 +12,6 @@ use arrow_array::{Array, ArrayRef};
 use iceberg_lite::spec::PrimitiveType;
 use pg_lakebase_core::tuple::{ByteaView, Cell, Row, StringView};
 use pgrx::datum::Uuid;
-use pgrx::datum::datetime_support::{DateTimeParts, HasExtractableParts};
 use pgrx::prelude::{AnyNumeric, Date, Time, Timestamp, TimestampWithTimeZone};
 
 /// Implementation of ArrowToCell for PrimitiveType.
@@ -246,6 +245,9 @@ impl RowsToArrow for PrimitiveType {
                 for row in rows {
                     match row.get(col_idx).and_then(|c| c.as_ref()) {
                         Some(Cell::String(v)) => builder.append_value(v),
+                        Some(Cell::StringView(v)) => {
+                            builder.append_value(unsafe { v.as_str() })
+                        }
                         _ => builder.append_null(),
                     }
                 }
@@ -259,6 +261,9 @@ impl RowsToArrow for PrimitiveType {
                 for row in rows {
                     match row.get(col_idx).and_then(|c| c.as_ref()) {
                         Some(Cell::Bytea(bytes)) => builder.append_value(bytes),
+                        Some(Cell::ByteaView(bytes)) => {
+                            builder.append_value(unsafe { bytes.as_slice() });
+                        }
                         Some(Cell::Json(bytes)) => {
                             builder.append_value(bytes);
                         }
@@ -274,10 +279,20 @@ impl RowsToArrow for PrimitiveType {
                         rows.len(),
                         *len as i32,
                     );
+                let mut fixed = vec![0u8; fixed_len];
                 for row in rows {
                     match row.get(col_idx).and_then(|c| c.as_ref()) {
                         Some(Cell::Bytea(bytes)) => {
-                            let mut fixed = vec![0u8; fixed_len];
+                            fixed.fill(0);
+                            let copy_len = bytes.len().min(fixed_len);
+                            fixed[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                            builder
+                                .append_value(&fixed)
+                                .map_err(IcebergError::ArrowError)?;
+                        }
+                        Some(Cell::ByteaView(bytes)) => {
+                            fixed.fill(0);
+                            let bytes = unsafe { bytes.as_slice() };
                             let copy_len = bytes.len().min(fixed_len);
                             fixed[..copy_len].copy_from_slice(&bytes[..copy_len]);
                             builder
@@ -296,31 +311,15 @@ impl RowsToArrow for PrimitiveType {
             PrimitiveType::Time => build_array!(
                 arrow_array::builder::Time64MicrosecondBuilder,
                 [Some(Cell::Time(t)) => {
-                    let hour = t
-                        .extract_part(DateTimeParts::Hour)
-                        .and_then(|n| n.try_into().ok())
-                        .unwrap_or(0i64);
-                    let minute = t
-                        .extract_part(DateTimeParts::Minute)
-                        .and_then(|n| n.try_into().ok())
-                        .unwrap_or(0i64);
-                    let second: f64 = t
-                        .extract_part(DateTimeParts::Second)
-                        .and_then(|n| n.try_into().ok())
-                        .unwrap_or(0.0);
-                    hour * 3_600_000_000
-                        + minute * 60_000_000
-                        + (second * 1_000_000.0) as i64
+                    let pg_micros: i64 = (*t).into();
+                    pg_micros
                 }]
             ),
             PrimitiveType::Timestamp | PrimitiveType::TimestampNs => build_array!(
                 arrow_array::builder::TimestampMicrosecondBuilder,
                 [Some(Cell::Timestamp(ts)) => {
-                    let epoch: f64 = ts
-                        .extract_part(DateTimeParts::Epoch)
-                        .and_then(|n| n.try_into().ok())
-                        .unwrap_or(0.0);
-                    (epoch * 1_000_000.0) as i64
+                    let pg_micros: i64 = (*ts).into();
+                    pg_micros + PG_EPOCH_USECS_DIFF
                 }]
             ),
             PrimitiveType::Timestamptz | PrimitiveType::TimestamptzNs => {
@@ -331,11 +330,8 @@ impl RowsToArrow for PrimitiveType {
                 for row in rows {
                     match row.get(col_idx).and_then(|c| c.as_ref()) {
                         Some(Cell::Timestamptz(ts)) => {
-                            let epoch: f64 = ts
-                                .extract_part(DateTimeParts::Epoch)
-                                .and_then(|n| n.try_into().ok())
-                                .unwrap_or(0.0);
-                            builder.append_value((epoch * 1_000_000.0) as i64);
+                            let pg_micros: i64 = (*ts).into();
+                            builder.append_value(pg_micros + PG_EPOCH_USECS_DIFF);
                         }
                         _ => builder.append_null(),
                     }
@@ -361,7 +357,8 @@ impl RowsToArrow for PrimitiveType {
                 Ok(Arc::new(builder.finish()))
             }
             PrimitiveType::Decimal { precision, scale } => {
-                let target_scale = *scale as u32;
+                let target_scale = *scale;
+                let scale_factor = 10_i128.pow(target_scale);
                 let mut builder =
                     arrow_array::builder::Decimal128Builder::with_capacity(
                         rows.len(),
@@ -371,7 +368,6 @@ impl RowsToArrow for PrimitiveType {
                 for row in rows {
                     match row.get(col_idx).and_then(|c| c.as_ref()) {
                         Some(Cell::Numeric(n)) => {
-                            let scale_factor = 10_i128.pow(target_scale);
                             let scaled = n.clone() * scale_factor;
                             let truncated = scaled.floor();
                             match i128::try_from(truncated) {

@@ -9,12 +9,13 @@ use iceberg_lite::spec::{Schema as IcebergSchema, Type};
 use pg_lakebase_core::tuple::{Cell, Row};
 use std::sync::Arc;
 
-use crate::access::traits::{ArrowToCell, RowsToArrow};
+use self::traits::{ArrowToCell, RowsToArrow};
 use crate::error::{IcebergError, IcebergResult};
 
 pub mod complex;
 pub mod primitive;
 pub mod schema;
+pub mod traits;
 
 #[cfg(test)]
 mod tests;

@@ -56,6 +56,20 @@ impl FastAppendAction {
     }
 
     /// Add data files to the snapshot.
+    // TODO(append-api): This owned DataFile API forces callers that keep
+    // retryable append state to deep-clone DataFile values before every rebase
+    // or retry. Add a borrowed/Arc-backed replay API and thread that ownership
+    // model through SnapshotProducer/manifest writing.
+    //
+    // Sketch:
+    //   pub fn add_data_file_refs<'a>(
+    //       self,
+    //       data_files: impl IntoIterator<Item = &'a DataFile>,
+    //   ) -> Self
+    //
+    // The final design should avoid a loose helper and make append replay part
+    // of the action abstraction, so catalog retry can re-apply the same logical
+    // append without repeatedly allocating DataFile internals.
     pub fn add_data_files(
         mut self,
         data_files: impl IntoIterator<Item = DataFile>,

@@ -7,7 +7,7 @@ use crate::api::{AmDmlSession, AmResult};
 use crate::handles::{
     BulkInsertStateHandle, ItemPointer, SnapshotHandle, TM_FailureData,
 };
-use crate::tuple::Row;
+use crate::tuple::{Row, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
 
 pub(super) struct ErasedModifySessionAdapter<T> {
@@ -51,24 +51,24 @@ macro_rules! define_erased_modify_session {
 
 define_erased_modify_session! {
     fn end_modify(&mut self) -> ();
-    fn tuple_insert(
+    fn tuple_insert_slot(
         &mut self,
-        row: &Row,
+        row: TupleSlotRow<'_>,
         cid: pg_sys::CommandId,
         options: ::core::ffi::c_int,
         bistate: Option<&BulkInsertStateHandle>
     ) -> ();
-    fn tuple_insert_speculative(
+    fn tuple_insert_speculative_slot(
         &mut self,
-        row: &Row,
+        row: TupleSlotRow<'_>,
         cid: pg_sys::CommandId,
         options: ::core::ffi::c_int,
         bistate: Option<&BulkInsertStateHandle>,
         spec_token: u32
     ) -> ();
-    fn multi_insert(
+    fn multi_insert_slots(
         &mut self,
-        rows: &[Row],
+        rows: TupleSlotBatch<'_>,
         cid: pg_sys::CommandId,
         options: ::core::ffi::c_int,
         bistate: Option<&BulkInsertStateHandle>
@@ -83,10 +83,10 @@ define_erased_modify_session! {
         tmfd: &mut TM_FailureData,
         changing_part: bool
     ) -> pg_sys::TM_Result::Type;
-    fn tuple_update(
+    fn tuple_update_slot(
         &mut self,
         otid: &ItemPointer,
-        row: &Row,
+        row: TupleSlotRow<'_>,
         cid: pg_sys::CommandId,
         snapshot: &SnapshotHandle,
         crosscheck: Option<&SnapshotHandle>,
@@ -107,9 +107,9 @@ define_erased_modify_session! {
         tmfd: &mut TM_FailureData
     ) -> pg_sys::TM_Result::Type;
     fn finish_bulk_insert(&mut self, options: ::core::ffi::c_int) -> ();
-    fn tuple_complete_speculative(
+    fn tuple_complete_speculative_slot(
         &mut self,
-        row: &Row,
+        row: TupleSlotRow<'_>,
         spec_token: u32,
         succeeded: bool
     ) -> ();

@@ -5,6 +5,7 @@ members = [
     "pg-iceberg-am",
     "iceberg-lite",
     "pg-lakebase-storage",
+    "xtask",
 ]
 resolver = "2"
 

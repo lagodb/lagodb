@@ -27,6 +27,9 @@
 /// Core trait definitions for table access methods
 pub mod api;
 
+/// DML batch buffering abstractions and default row buffer.
+pub mod batch;
+
 /// Safe wrapper types for PostgreSQL FFI types
 pub mod handles;
 
@@ -69,6 +72,7 @@ pub mod worker;
 /// The prelude includes all necessary imports to make pg_lakebase_core work
 pub mod prelude {
     pub use crate::api::*;
+    pub use crate::batch::*;
     pub use crate::diag::{
         PgError, PgErrorReport, PgErrorSource, PgReportError, ReportableError,
         SqlStateError,

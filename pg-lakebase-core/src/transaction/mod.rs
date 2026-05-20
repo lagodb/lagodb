@@ -23,10 +23,13 @@ use std::cell::RefCell;
 use std::fmt::Debug;
 use std::rc::Rc;
 
+use crate::diag::PgReportError;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 pub mod cleanup;
+
+pub type TransactionResult<T> = Result<T, PgReportError>;
 
 /// Unified transaction resource callback interface.
 ///
@@ -40,7 +43,13 @@ pub trait TransactionResource: Debug {
     fn on_abort(&self) {}
 
     /// Called during the pre-commit phase of the top-level transaction.
-    fn on_pre_commit(&self) {}
+    ///
+    /// Returning `Err` reports a PostgreSQL `ERROR` and aborts the transaction.
+    /// The transaction framework is fail-fast here: later resources are not
+    /// guaranteed to receive `on_pre_commit` after a resource fails.
+    fn on_pre_commit(&self) -> TransactionResult<()> {
+        Ok(())
+    }
 
     /// Called when a subtransaction is committed (RELEASE SAVEPOINT).
     fn on_commit_sub(&self, _current_nest_level: i32) {}
@@ -147,7 +156,11 @@ unsafe extern "C-unwind" fn xact_callback(
                 RESOURCES.with(|res| res.borrow().clone());
             for r in &snapshot {
                 if r.nest_level() >= current_nest_level {
-                    r.on_pre_commit();
+                    if let Err(error) = r.on_pre_commit() {
+                        // PgReportError::report() raises PostgreSQL ERROR and
+                        // does not return, so this aborts the pre-commit loop.
+                        error.report();
+                    }
                 }
             }
         }

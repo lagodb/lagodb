@@ -8,11 +8,18 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::SeekFrom;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::storage::transactional_artifacts::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
 };
+
+// The storage wire protocol accepts a u32 read length per request, and the
+// service clamps each response to its configured max_read_size. Keep the
+// adapter chunk size aligned with the default service clamp so large Iceberg
+// `read_range` calls do not turn into multi-GB direct-I/O allocations.
+const OBJECT_READ_CHUNK_LEN: u32 = pg_lakebase_storage::DEFAULT_MAX_READ_SIZE;
 
 fn storage_err(e: StorageError) -> Error {
     let kind = match e.kind() {
@@ -50,10 +57,13 @@ impl ObjectStorage {
         client: StorageClient,
         staging_resolver: StagingPathResolver,
     ) -> StorageResult<Self> {
+        let scheme = scheme.into();
+        let bucket = bucket.into();
+
         Ok(Self {
-            scheme: Arc::from(scheme.into().as_str()),
+            scheme: Arc::from(scheme.into_boxed_str()),
             store_id: Arc::new(StoreId::new(store_id)?),
-            bucket: Arc::from(bucket.into().as_str()),
+            bucket: Arc::from(bucket.into_boxed_str()),
             client,
             staging_resolver,
         })
@@ -122,13 +132,13 @@ impl Storage for ObjectStorage {
 
     fn delete(&self, path: &str) -> Result<()> {
         self.client
-            .delete(self.store_id.as_str(), &*self.bucket, path)
+            .delete(self.store_id.as_str(), self.bucket.as_ref(), path)
             .map_err(storage_err)
     }
 
     fn remove_dir_all(&self, path: &str) -> Result<()> {
         self.client
-            .delete_prefix(self.store_id.as_str(), &*self.bucket, path)
+            .delete_prefix(self.store_id.as_str(), self.bucket.as_ref(), path)
             .map(|_| ())
             .map_err(storage_err)
     }
@@ -136,7 +146,7 @@ impl Storage for ObjectStorage {
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
         match self
             .client
-            .head(self.store_id.as_str(), &*self.bucket, path)
+            .head(self.store_id.as_str(), self.bucket.as_ref(), path)
         {
             Ok(info) => Ok(Some(FileMetadata { size: info.size })),
             Err(e) if e.kind() == pg_lakebase_storage::StorageErrorKind::NotFound => {
@@ -149,7 +159,7 @@ impl Storage for ObjectStorage {
     fn open_reader(&self, path: &str) -> Result<OpenedFile> {
         let file = self
             .client
-            .open(self.store_id.as_str(), &*self.bucket, path)
+            .open(self.store_id.as_str(), self.bucket.as_ref(), path)
             .map_err(storage_err)?;
         let metadata = FileMetadata { size: file.size() };
         Ok(OpenedFile {
@@ -168,13 +178,13 @@ impl Storage for ObjectStorage {
         let staging = StagingFile::create(
             &self.staging_resolver,
             self.store_id.as_str(),
-            &*self.bucket,
+            self.bucket.as_ref(),
             path,
         )
         .map_err(storage_err)?;
 
         let location =
-            ObjectLocation::new(self.store_id.as_str(), &*self.bucket, path)
+            ObjectLocation::new(self.store_id.as_str(), self.bucket.as_ref(), path)
                 .map_err(storage_err)?;
         register_object_file_staged(
             location,
@@ -189,7 +199,7 @@ impl Storage for ObjectStorage {
 
     fn finalize_write(&self, path: &str) -> Result<()> {
         let location =
-            ObjectLocation::new(self.store_id.as_str(), &*self.bucket, path)
+            ObjectLocation::new(self.store_id.as_str(), self.bucket.as_ref(), path)
                 .map_err(storage_err)?;
 
         // 1. Pre-check: staged entry MUST exist before we attempt upload.
@@ -200,7 +210,7 @@ impl Storage for ObjectStorage {
         //    On failure the registry stays Staged; abort will only unlink
         //    the local staging file without touching the remote store.
         self.client
-            .upload(self.store_id.as_str(), &*self.bucket, path)
+            .upload(self.store_id.as_str(), self.bucket.as_ref(), path)
             .map_err(storage_err)?;
 
         // 3. Transition Staged → Uploaded so commit cleans staging and
@@ -248,13 +258,106 @@ impl ObjectReader {
             file,
         }
     }
+
+    fn validate_read_range(&self, range: &Range<u64>) -> Result<usize> {
+        if range.start > range.end {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "invalid read range: start {} > end {}",
+                    range.start, range.end
+                ),
+            ));
+        }
+
+        let size = self.file.size();
+        if range.end > size {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "read range end {} exceeds object size {} for '{}'",
+                    range.end, size, &*self.key
+                ),
+            ));
+        }
+
+        usize::try_from(range.end - range.start).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "read range length {} exceeds addressable memory on this platform",
+                    range.end - range.start
+                ),
+            )
+        })
+    }
+
+    fn read_range_chunked(&self, range: Range<u64>) -> Result<bytes::Bytes> {
+        let len = self.validate_read_range(&range)?;
+        if len == 0 {
+            return Ok(bytes::Bytes::new());
+        }
+
+        // `FileRead` returns one Bytes value, so the full logical range still
+        // must fit in backend memory. Chunking keeps the storage protocol's
+        // u32 request length as a per-read detail instead of a file/range cap.
+        let mut data = Vec::new();
+        data.try_reserve_exact(len).map_err(|err| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!(
+                    "failed to reserve {} bytes for object read '{}': {}",
+                    len, &*self.key, err
+                ),
+            )
+        })?;
+        // Keep the buffer initialized: `read_at_into` accepts `&mut [u8]`,
+        // not a MaybeUninit-backed spare capacity slice.
+        data.resize(len, 0);
+
+        let mut offset = range.start;
+        let mut remaining = len;
+        let mut written = 0;
+
+        while remaining > 0 {
+            let request_len =
+                std::cmp::min(remaining, OBJECT_READ_CHUNK_LEN as usize);
+            let bytes_read = self
+                .file
+                .read_at_into(offset, &mut data[written..written + request_len])
+                .map_err(storage_err)?;
+
+            if bytes_read == 0 {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!(
+                        "object read for '{}' returned 0 bytes before range {}..{} completed",
+                        &*self.key, range.start, range.end
+                    ),
+                ));
+            }
+            if bytes_read > request_len {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!(
+                        "object read for '{}' returned {} bytes into a {} byte buffer",
+                        &*self.key, bytes_read, request_len
+                    ),
+                ));
+            }
+
+            offset += bytes_read as u64;
+            written += bytes_read;
+            remaining -= bytes_read;
+        }
+
+        Ok(bytes::Bytes::from(data))
+    }
 }
 
 impl std::io::Read for ObjectReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file
-            .read_into(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        self.file.read_into(buf).map_err(std::io::Error::other)
     }
 }
 
@@ -272,37 +375,24 @@ impl std::io::Seek for ObjectReader {
 }
 
 impl FileRead for ObjectReader {
-    fn read_range(&self, range: std::ops::Range<u64>) -> Result<bytes::Bytes> {
-        let offset = range.start;
-        let len = range.end - range.start;
-        let len_u32 = u32::try_from(len).map_err(|_| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("read_range length {} exceeds u32::MAX", len),
-            )
-        })?;
-        let data = self.file.read_at(offset, len_u32).map_err(storage_err)?;
-        Ok(bytes::Bytes::from(data))
+    fn read_range(&self, range: Range<u64>) -> Result<bytes::Bytes> {
+        self.read_range_chunked(range)
     }
 
     fn read_all(&self) -> Result<bytes::Bytes> {
-        let size = self.file.size();
-        let size_u32 = u32::try_from(size).map_err(|_| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("file size {} exceeds u32::MAX", size),
-            )
-        })?;
-        let data = self.file.read_at(0, size_u32).map_err(storage_err)?;
-        Ok(bytes::Bytes::from(data))
+        self.read_range_chunked(0..self.file.size())
     }
 
     fn try_clone(&self) -> std::io::Result<Box<dyn FileRead>> {
         let pos = self.file.position();
         let mut new_file = self
             .client
-            .open(self.store_id.as_str(), &*self.bucket, &*self.key)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .open(
+                self.store_id.as_str(),
+                self.bucket.as_ref(),
+                self.key.as_ref(),
+            )
+            .map_err(std::io::Error::other)?;
         new_file.seek(pg_lakebase_storage::SeekFrom::Start(pos));
         Ok(Box::new(ObjectReader::new(
             self.client.clone(),
@@ -320,20 +410,17 @@ pub struct ObjectWriter {
 
 impl std::io::Write for ObjectWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let staging = self.staging.as_mut().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "writer already closed")
-        })?;
-        staging
-            .write(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let staging = self
+            .staging
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("writer already closed"))?;
+        staging.write(buf).map_err(std::io::Error::other)?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         if let Some(staging) = &self.staging {
-            staging
-                .sync()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            staging.sync().map_err(std::io::Error::other)?;
         }
         Ok(())
     }

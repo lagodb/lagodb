@@ -86,6 +86,40 @@ external metadata commits, the safer pattern is to stage per-relation work and
 defer irreversible publication to transaction-scoped state with matching
 cleanup.
 
+## Tuple Ownership And Batching
+
+The DML callback boundary is intentionally slot-first.
+
+PostgreSQL gives the TableAM a `TupleTableSlot` for insert/update callbacks.
+The framework wraps that slot as a short-lived `TupleSlotRow` or
+`TupleSlotBatch` and dispatches the slot view to the AM session. Core must not
+materialize an owned `Row` before the AM has chosen its write strategy.
+
+This preserves two different hot paths:
+
+```text
+row-oriented AM:
+  TupleTableSlot -> TupleSlotRow -> Row -> RowBatchBuffer
+
+columnar AM:
+  TupleTableSlot -> TupleSlotRow -> PgDatumRef -> column builders
+```
+
+The row path materializes owned values because buffered rows must outlive the
+PostgreSQL slot callback. PostgreSQL can reuse tuple slots and reset memory
+contexts after the callback returns, so a row batch cannot safely keep borrowed
+`text`, `bytea`, array, or numeric data from the slot.
+
+The columnar path should not materialize `Row` or `Cell`. It should consume
+`PgDatumRef` values through a slot/datum batch buffer and append directly into
+the concrete column builders. Arrow-backed implementations still usually copy
+variable-width bytes into Arrow-owned buffers, but they avoid the intermediate
+`String`, `Vec`, `Bytes`, and `Cell` allocations.
+
+The default `AmDmlSession` slot methods fall back to the owned-row methods.
+That keeps row-oriented AMs simple while allowing columnar AMs to override the
+slot methods and stay on the direct datum path.
+
 ## Nested And Reentrant Execution
 
 PostgreSQL execution is not always a single flat statement. Triggers, SPI,
@@ -134,6 +168,12 @@ The DML lifecycle is built around these invariants:
 - every tuple write handled by this framework belongs to a current frame;
 - each frame owns zero or more relation-local sessions;
 - a relation has at most one session per frame;
+- DML callbacks dispatch slot views first; owned `Row` materialization is a
+  row-mode fallback, not a core callback default;
+- `TupleSlotRow`, `TupleSlotBatch`, and `PgDatumRef` are callback-scoped views
+  and must not be stored across callbacks;
+- row batches own their values; columnar DML fast paths append slot datums
+  directly into AM-owned builders;
 - successful frame completion finalizes touched sessions exactly once;
 - unfinalized sessions abort when their frame is cleaned up;
 - rollback-to-savepoint aborts only work owned by the rolled-back scope;

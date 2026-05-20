@@ -153,10 +153,11 @@ pub trait ToIcebergType {
     fn to_iceberg_field(
         &self,
         field_id: i32,
-        name: impl ToString,
+        name: impl Into<String>,
         required: bool,
     ) -> IcebergResult<NestedField> {
         let iceberg_type = self.to_iceberg_type()?;
+        let name = name.into();
         let field = if required {
             NestedField::required(field_id, name, iceberg_type)
         } else {
@@ -476,10 +477,7 @@ mod tests {
     fn test_numeric_precision_scale_extraction() {
         // numeric(10, 2)
         let type_mod = numeric_typmod(10, 2);
-        let pg_type = PgType::new(
-            pg_sys::Oid::from(PgBuiltInOids::NUMERICOID.value()),
-            type_mod,
-        );
+        let pg_type = PgType::new(PgBuiltInOids::NUMERICOID.value(), type_mod);
 
         let typmod = pg_type.numeric_precision_scale().unwrap();
         assert_eq!(typmod.precision, 10);
@@ -490,10 +488,7 @@ mod tests {
     fn test_numeric_precision_scale_sign_extends_negative_scale() {
         // numeric(2, -3)
         let type_mod = numeric_typmod(2, -3);
-        let pg_type = PgType::new(
-            pg_sys::Oid::from(PgBuiltInOids::NUMERICOID.value()),
-            type_mod,
-        );
+        let pg_type = PgType::new(PgBuiltInOids::NUMERICOID.value(), type_mod);
 
         let typmod = pg_type.numeric_precision_scale().unwrap();
         assert_eq!(typmod.precision, 2);
@@ -502,8 +497,7 @@ mod tests {
 
     #[test]
     fn test_numeric_precision_scale_none_when_no_typemod() {
-        let pg_type =
-            PgType::new(pg_sys::Oid::from(PgBuiltInOids::NUMERICOID.value()), -1);
+        let pg_type = PgType::new(PgBuiltInOids::NUMERICOID.value(), -1);
         assert!(pg_type.numeric_precision_scale().is_none());
     }
 

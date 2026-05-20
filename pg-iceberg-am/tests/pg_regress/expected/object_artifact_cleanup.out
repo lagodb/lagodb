@@ -117,7 +117,7 @@ COPY (
 ) TO '/tmp/_regress_abort_prefix.txt';
 -- Save object count before INSERT (baseline = initial metadata from CREATE TABLE)
 \! P=$(tr -d '\n' < /tmp/_regress_abort_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print(len(ks))" 2>/dev/null > /tmp/_count_before.txt || echo "0" > /tmp/_count_before.txt; cat /tmp/_count_before.txt
-2
+1
 BEGIN;
 INSERT INTO obj_abort_test SELECT g FROM generate_series(1, 10) AS g;
 ROLLBACK;
@@ -133,7 +133,7 @@ SELECT count(*) AS abort_row_count FROM obj_abort_test;
 parquet_after_abort: 0
 -- Verify object count returned to baseline (abort deleted uploaded objects)
 \! P=$(tr -d '\n' < /tmp/_regress_abort_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print(len(ks))" 2>/dev/null > /tmp/_count_after.txt || echo "0" > /tmp/_count_after.txt; cat /tmp/_count_after.txt
-2
+1
 \! diff -q /tmp/_count_before.txt /tmp/_count_after.txt >/dev/null 2>&1 && echo "abort_object_cleanup: objects_restored_to_baseline" || echo "abort_object_cleanup: OBJECTS_LEAKED"
 abort_object_cleanup: objects_restored_to_baseline
 -- Verify staging is clean after abort

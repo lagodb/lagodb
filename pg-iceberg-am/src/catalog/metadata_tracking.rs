@@ -9,14 +9,12 @@ use iceberg_lite::table::Table;
 use iceberg_lite::transaction::Transaction;
 use pg_lakebase_core::diag;
 use pgrx::pg_sys;
-use pgrx::prelude::PgSqlErrorCode;
 
 use crate::catalog::iceberg_catalog::IcebergCatalog;
-
-use crate::catalog::iceberg_metadata::{IcebergMetadata, IcebergMetadataError};
+use crate::catalog::iceberg_metadata::IcebergMetadata;
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
-use pg_lakebase_core::transaction::{self, TransactionResource};
+use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
 
 /// Represents the metadata location state for a single table within a transaction.
 #[derive(Debug, Clone)]
@@ -196,10 +194,10 @@ impl MetadataLocationTracker {
         file_io: &FileIO,
     ) -> IcebergResult<String> {
         let state = self.tables.get_mut(&relid).ok_or_else(|| {
-            IcebergError::MetadataError(IcebergMetadataError::ReadFailed(format!(
+            IcebergError::MetadataTracker(format!(
                 "Table {} not registered in metadata tracker",
                 relid
-            )))
+            ))
         })?;
 
         // Cache FileIO for final commit
@@ -211,8 +209,9 @@ impl MetadataLocationTracker {
         let current_global = IcebergMetadata::get(relid)?;
         let latest_global_location =
             current_global.metadata_location.ok_or_else(|| {
-                IcebergError::MetadataError(IcebergMetadataError::ReadFailed(
-                    format!("Metadata location is null for table {}", relid),
+                IcebergError::MetadataTracker(format!(
+                    "Metadata location is null for table {}",
+                    relid
                 ))
             })?;
 
@@ -225,8 +224,9 @@ impl MetadataLocationTracker {
                 == Some(&latest_global_location)
         {
             return state.current_metadata_location.clone().ok_or_else(|| {
-                IcebergError::MetadataError(IcebergMetadataError::ReadFailed(
-                    format!("Current metadata location is null for table {}", relid),
+                IcebergError::MetadataTracker(format!(
+                    "Current metadata location is null for table {}",
+                    relid
                 ))
             });
         }
@@ -251,6 +251,23 @@ impl MetadataLocationTracker {
         let tx = Transaction::new(&base_table);
         let mut append_action = tx.fast_append();
 
+        // TODO(metadata-rebase): Avoid deep-cloning accumulated DataFile values
+        // every time this transaction needs to rebase, especially inside CAS
+        // retry loops. The tracker should model pending writes as replayable
+        // append batches/log entries instead of rebuilding an owned Vec<DataFile>
+        // on each rebase.
+        //
+        // Sketch:
+        //   for batch in state.append_log.visible_batches() {
+        //       append_action = append_action.add_data_file_refs(batch.files());
+        //   }
+        //   append_action = append_action.add_data_file_refs(new_data_files.iter());
+        //
+        // This should be done together with an iceberg-lite API change that
+        // accepts borrowed or Arc-backed DataFile inputs. Otherwise the clone
+        // merely moves from this layer into the transaction API. Keep rollback
+        // semantics batch/nest-level aware so savepoint abort can truncate the
+        // append log without scanning or cloning the accumulated file list.
         // Add previously accumulated files
         if !state.accumulated_data_files.is_empty() {
             append_action =
@@ -297,7 +314,10 @@ impl MetadataLocationTracker {
         newly_added_files: Vec<DataFile>,
     ) -> IcebergResult<()> {
         let state = self.tables.get_mut(&relid).ok_or_else(|| {
-            IcebergError::MetadataError(IcebergMetadataError::NotFound(relid))
+            IcebergError::MetadataTracker(format!(
+                "Table {} not registered in metadata tracker",
+                relid
+            ))
         })?;
 
         state.record_change(nest_level, new_metadata_location, newly_added_files);
@@ -340,12 +360,10 @@ impl MetadataLocationTracker {
             // Loop for optimistic concurrency control (CAS)
             loop {
                 if retries > max_retries {
-                    return Err(IcebergError::MetadataError(
-                        IcebergMetadataError::UpdateFailed(format!(
-                            "Failed to commit after {} retries due to concurrent updates",
-                            max_retries
-                        )),
-                    ));
+                    return Err(IcebergError::MetadataCommitConflict {
+                        relid,
+                        max_retries,
+                    });
                 }
                 retries += 1;
                 // 0. Get FileIO from state
@@ -380,7 +398,7 @@ impl MetadataLocationTracker {
                 // still matches last_base, ensuring no concurrent modifications occurred.
                 match iceberg_meta.update(last_base.as_deref()) {
                     Ok(_) => break, // Success
-                    Err(IcebergMetadataError::Conflict) => {
+                    Err(IcebergError::MetadataCatalogConflict) => {
                         // Standard Iceberg Architecture alignment:
                         // - `IcebergMetadata::update` acts as the "Catalog" (Hive), enforcing strict CAS.
                         // - This loop acts as the "Client" (SnapshotProducer), handling the Retry/Rebase.
@@ -390,7 +408,7 @@ impl MetadataLocationTracker {
                         );
                         continue;
                     }
-                    Err(e) => return Err(IcebergError::MetadataError(e)),
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -417,6 +435,12 @@ impl MetadataLocationTracker {
                 true
             }
         });
+    }
+}
+
+impl Default for MetadataLocationTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -448,19 +472,13 @@ impl TransactionResource for MetadataLocationResource {
         self.nest_level.set(level);
     }
 
-    fn on_pre_commit(&self) {
+    fn on_pre_commit(&self) -> TransactionResult<()> {
         METADATA_TRACKER.with(|tracker| {
             if let Some(tracker) = tracker.borrow_mut().as_mut() {
-                // FileIO is now cached in the state, so we don't need to pass it
-                if let Err(e) = tracker.commit_all() {
-                    // Use report_error to abort the transaction with a specific error code
-                    diag::report_error(
-                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        &format!("Failed to commit metadata locations: {:?}", e),
-                    );
-                }
+                tracker.commit_all()?;
             }
-        });
+            Ok(())
+        })
     }
 
     fn on_commit(&self) {
@@ -600,25 +618,29 @@ pub fn get_or_rebase_metadata_location(
     relid: pg_sys::Oid,
     file_io: &FileIO,
 ) -> IcebergResult<String> {
-    ensure_tracker_initialized()?;
     let nest_level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
 
     METADATA_TRACKER.with(|tracker| {
         let mut tracker_borrow = tracker.borrow_mut();
-        let tracker = tracker_borrow.as_mut().unwrap();
-
-        if tracker.get_table_state(relid).is_some() {
+        if let Some(tracker) = tracker_borrow.as_mut()
+            && tracker.get_table_state(relid).is_some()
+        {
             // Already tracked (modified in this transaction).
             // Trigger rebase to incorporate any concurrent commits from other transactions
             // that occurred since our last statement in this transaction.
-            tracker.apply_updates_with_rebase(relid, nest_level, Vec::new(), file_io)
-        } else {
-            // Not tracked (not modified yet in this transaction).
-            // Just return latest from catalog - this respects statement-level snapshots in RC mode.
-            let iceberg_meta = IcebergMetadata::get(relid)?;
-            iceberg_meta
-                .metadata_location
-                .ok_or(IcebergError::MetadataLocationNull)
+            return tracker.apply_updates_with_rebase(
+                relid,
+                nest_level,
+                Vec::new(),
+                file_io,
+            );
         }
+
+        // Not tracked (not modified yet in this transaction).
+        // Just return latest from catalog - this respects statement-level snapshots in RC mode.
+        let iceberg_meta = IcebergMetadata::get(relid)?;
+        iceberg_meta
+            .metadata_location
+            .ok_or(IcebergError::MetadataLocationNull)
     })
 }

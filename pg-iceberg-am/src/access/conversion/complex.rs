@@ -9,8 +9,8 @@ use iceberg_lite::spec::{ListType, PrimitiveType, Type};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use pg_lakebase_core::tuple::{Cell, Row};
 
+use super::traits::{ArrowToCell, RowsToArrow};
 use crate::access::conversion::schema::iceberg_type_to_arrow_type;
-use crate::access::traits::{ArrowToCell, RowsToArrow};
 use crate::error::{IcebergError, IcebergResult};
 
 /// Helper to build a list array by appending values to a builder.

@@ -24,11 +24,17 @@ pub const ICEBERG_RMGR_ID: RmgrId = RmgrId::new(ICEBERG_RMGR_ID_U8);
 
 /// Iceberg WAL Resource Manager implementation
 ///
-/// This resource manager handles crash recovery for Iceberg table operations
-/// by replaying file system operations recorded in the WAL.
+/// This resource manager reconstructs local Iceberg files during
+/// standby/archive/PITR recovery by replaying file system operations recorded
+/// in the WAL.
 ///
-/// Note: This only handles local file system operations. Distributed storage
-/// (S3, GCS, Azure) doesn't need WAL-based redo because:
+/// Invariants:
+/// - Local crash-only recovery does not replay `WRITE_FILE` records. The normal
+///   write path performs `FileSync` during explicit writer close, so committed
+///   local files are already durable on the primary.
+/// - Standby/archive/PITR recovery does replay `WRITE_FILE` records because the
+///   target system may not have the local Iceberg files.
+/// - Distributed storage (S3, GCS, Azure) doesn't need WAL-based redo because:
 /// 1. The storage layer guarantees durability after successful write
 /// 2. Orphaned files should be cleaned via garbage collection (e.g., expire_snapshots)
 pub struct IcebergRmgr;
@@ -188,22 +194,22 @@ impl IcebergRmgr {
         Ok(())
     }
 
-    /// Redo a WRITE_FILE operation
+    /// Redo a WRITE_FILE operation for standby/archive/PITR recovery.
     ///
     /// Writes data to the file at the specified offset. If offset is 0,
     /// the file is created (or truncated if it exists), and any missing
     /// parent directories are created automatically.
     fn redo_write_file(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
-        // Do not perform redo for crash recovery mode. We do not need to
-        // replay Iceberg file write operations in this case because fsync
-        // (FileSync) is performed on file close (see PgFileWrite::close).
+        // Do not replay WRITE_FILE records during local crash-only recovery:
+        // fsync (FileSync) is performed by the explicit writer close path
+        // before a successful file write is reported.
         //
         // This is safe because:
         // 1. If the transaction committed, the file is already synced to disk.
         // 2. If the transaction aborted, we don't care about the file state.
         //
-        // Note: Archive recovery (standby/PITR) still needs redo as files may
-        // not exist on the target system.
+        // Standby/archive/PITR recovery still needs redo because the target
+        // system may not have the local Iceberg files.
         if wal::is_crash_recovery_only() {
             return Ok(());
         }
@@ -237,23 +243,23 @@ impl IcebergRmgr {
         }
 
         let file_path = Path::new(&path);
-        if let Some(parent) = file_path.parent() {
-            if !parent.exists() {
-                diag::log_debug1(&format!(
-                    "Creating parent directories: {}",
-                    parent.display()
-                ));
-                fs::create_dir_all(parent).map_err(|e| {
-                    WalRmgrError::RedoFailed(format!(
-                        "Failed to create parent directories during redo: {} - {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
-            }
+        if let Some(parent) = file_path.parent()
+            && !parent.exists()
+        {
+            diag::log_debug1(&format!(
+                "Creating parent directories: {}",
+                parent.display()
+            ));
+            fs::create_dir_all(parent).map_err(|e| {
+                WalRmgrError::RedoFailed(format!(
+                    "Failed to create parent directories during redo: {} - {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
         }
 
-        let c_path = CString::new(path.clone()).map_err(|e| {
+        let c_path = CString::new(path.as_bytes()).map_err(|e| {
             WalRmgrError::InvalidRecord(format!("Invalid path string: {}", e))
         })?;
 
@@ -293,7 +299,7 @@ impl IcebergRmgr {
                     file_data.as_ptr() as *const std::ffi::c_void,
                     file_data.len(),
                     offset as pg_sys::off_t,
-                    pg_sys::WaitEventIO::WAIT_EVENT_COPY_FILE_WRITE as u32,
+                    pg_sys::WaitEventIO::WAIT_EVENT_COPY_FILE_WRITE,
                 )
             };
 

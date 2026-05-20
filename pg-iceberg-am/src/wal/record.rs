@@ -8,15 +8,21 @@ use pg_lakebase_core::wal::{WalRecordBuilder, XLogRecPtr};
 /// WAL record operation types for Iceberg
 ///
 /// This enum defines the three basic file system operations that are logged
-/// to the WAL for crash recovery on local file systems:
+/// to the WAL for standby/archive/PITR recovery of local Iceberg files:
 /// - DeleteDirectory: Remove a directory and its contents
 /// - WriteFile: Write data to a file (creates file and parent directories if offset is 0)
 /// - DeleteFile: Remove a file
 ///
-/// Note: These WAL records are only used for local file systems. Distributed
-/// storage (S3, GCS, Azure) guarantees durability and doesn't need WAL-based
-/// redo. Orphaned files on distributed storage should be cleaned up via a
-/// separate garbage collection mechanism (e.g., Iceberg's expire_snapshots).
+/// Invariants:
+/// - These WAL records are only for local file systems. Distributed storage
+///   (S3, GCS, Azure) guarantees durability after successful writes and does
+///   not use WAL-based redo.
+/// - `WRITE_FILE` redo is skipped during local crash recovery because
+///   successful explicit writer close performs `FileSync`.
+/// - Standby/archive/PITR recovery still needs these records because local
+///   Iceberg files may not exist on the target system.
+/// - Orphaned files on distributed storage should be cleaned up via a separate
+///   garbage collection mechanism (e.g., Iceberg's expire_snapshots).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IcebergWalOp {
@@ -88,6 +94,8 @@ pub const SIZE_OF_DELETE_DIRECTORY: usize =
 pub struct WriteFileHeader {
     /// Length of the file path (not including null terminator)
     pub path_len: u32,
+    /// Explicit padding keeps the WAL header deterministic on all platforms.
+    pub _padding: u32,
     /// Offset in the file to write at
     /// If offset is 0, the file (and parent directories) will be created
     pub offset: i64,
@@ -121,8 +129,8 @@ pub const SIZE_OF_DELETE_FILE: usize = std::mem::size_of::<DeleteFileHeader>();
 /// This is typically used for TRUNCATE TABLE or DROP TABLE operations
 /// on local storage.
 ///
-/// Note: Only use this for local file systems. Distributed storage should
-/// rely on garbage collection mechanisms instead.
+/// Note: Only use this for local file systems. Distributed storage should rely
+/// on garbage collection mechanisms instead.
 ///
 /// # Arguments
 /// * `path` - The path of the directory to delete (absolute, or relative to DataDir)
@@ -150,8 +158,10 @@ pub fn log_delete_directory(path: &str) -> XLogRecPtr {
 /// created (along with any missing parent directories), or truncated if it
 /// already exists.
 ///
-/// Note: Only use this for local file systems. Distributed storage guarantees
-/// durability after successful write.
+/// Note: Only use this for local file systems when the owning relation requires
+/// WAL. The record is for standby/archive/PITR recovery, not local crash-only
+/// recovery. Distributed storage guarantees durability after successful write
+/// and does not use this WAL path.
 ///
 /// # Arguments
 /// * `path` - The path of the file to write (absolute, or relative to DataDir)
@@ -163,6 +173,7 @@ pub fn log_delete_directory(path: &str) -> XLogRecPtr {
 pub fn log_write_file(path: &str, offset: i64, data: &[u8]) -> XLogRecPtr {
     let header = WriteFileHeader {
         path_len: path.len() as u32,
+        _padding: 0,
         offset,
     };
 
@@ -185,8 +196,8 @@ pub fn log_write_file(path: &str, offset: i64, data: &[u8]) -> XLogRecPtr {
 ///
 /// Call this before deleting a data file on local storage.
 ///
-/// Note: Only use this for local file systems. Distributed storage should
-/// rely on garbage collection mechanisms instead.
+/// Note: Only use this for local file systems. Distributed storage should rely
+/// on garbage collection mechanisms instead.
 ///
 /// # Arguments
 /// * `path` - The path of the file to delete (absolute, or relative to DataDir)

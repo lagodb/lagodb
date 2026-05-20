@@ -2,8 +2,12 @@
 target/
 
 # Test data and results
+pg-iceberg-am/tests/isolation/output_iso/
+pg-iceberg-am/tests/pg_regress/log/
+pg-iceberg-am/tests/pg_regress/results/
+pg-iceberg-am/tests/pg_regress/regression.diffs
+pg-iceberg-am/tests/pg_regress/regression.out
 
 # OS generated files
 .DS_Store
 Thumbs.db
-

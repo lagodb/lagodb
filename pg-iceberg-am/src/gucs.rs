@@ -38,3 +38,9 @@ pub fn injection_point() -> Option<String> {
         .get()
         .map(|s| s.to_string_lossy().to_string())
 }
+
+pub fn injection_point_matches(name: &str) -> bool {
+    INJECTION_POINT
+        .get()
+        .is_some_and(|s| s.as_c_str().to_bytes() == name.as_bytes())
+}

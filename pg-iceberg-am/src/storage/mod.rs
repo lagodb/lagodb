@@ -19,6 +19,18 @@ use std::sync::Arc;
 ///
 /// This struct encapsulates all the information needed to interact with
 /// Iceberg table storage, whether local or distributed (S3, Azure, etc.).
+///
+/// # WAL invariants
+///
+/// - Distributed/object storage always has `needs_wal = false`; durability is
+///   owned by the object store and orphan cleanup is separate from PostgreSQL
+///   redo.
+/// - Local storage defaults to `needs_wal = false`. Writers that are tied to a
+///   WAL-logged PostgreSQL relation must opt in via
+///   [`create_storage_context_with_wal`] using `RelationNeedsWAL`.
+/// - Local Iceberg file WAL is for standby/archive/PITR reconstruction of local
+///   files. Local crash recovery relies on explicit writer close performing
+///   `FileSync`, so crash-only redo skips `WRITE_FILE` records.
 pub struct StorageContext {
     /// The FileIO instance for reading/writing files
     pub file_io: FileIO,
@@ -26,7 +38,7 @@ pub struct StorageContext {
     pub base_path: String,
     /// Whether this is a distributed storage (S3, Azure, etc.)
     pub is_distributed: bool,
-    /// Whether WAL logging is needed for this storage context
+    /// Whether Iceberg file WAL is needed for this storage context.
     pub needs_wal: bool,
 }
 
@@ -36,8 +48,8 @@ pub struct StorageContext {
 /// and returns the configured base URL. WAL is not needed for distributed storage.
 ///
 /// For local tablespaces (pg_default, pg_global, etc.), creates a LocalStorage-based FileIO
-/// and returns the PostgreSQL data directory as base path. WAL is enabled if the system
-/// requires it (i.e., `wal_level >= archive`).
+/// and returns the PostgreSQL data directory as base path. WAL is disabled by default;
+/// write paths that need relation-aware WAL must call [`create_storage_context_with_wal`].
 ///
 /// # Arguments
 /// * `spc_oid` - The tablespace OID to create storage context for
@@ -48,19 +60,23 @@ pub struct StorageContext {
 /// # Errors
 /// Returns an error if the tablespace is distributed but not found in cache
 pub fn create_storage_context(spc_oid: pg_sys::Oid) -> IcebergResult<StorageContext> {
-    // For read-only context, WAL is not needed
+    // Default contexts do not emit Iceberg file WAL. Relation-owned write
+    // paths must opt in through create_storage_context_with_wal.
     create_storage_context_with_wal(spc_oid, false)
 }
 
-/// Create a StorageContext with WAL support based on tablespace OID and relation requirements.
+/// Create a StorageContext with Iceberg file WAL support based on tablespace OID
+/// and relation requirements.
 ///
 /// This function is similar to `create_storage_context`, but allows specifying whether
-/// the relation needs WAL logging. WAL is only enabled for local storage when:
-/// - The caller indicates WAL is needed (typically based on `RelationNeedsWAL`)
+/// the relation needs WAL logging. WAL is only enabled for local storage when
+/// the caller indicates WAL is needed, typically from PostgreSQL's
+/// `RelationNeedsWAL`. Distributed/object storage ignores this flag and keeps
+/// `needs_wal = false`.
 ///
 /// # Arguments
 /// * `spc_oid` - The tablespace OID to create storage context for
-/// * `relation_needs_wal` - Whether the relation requires WAL logging
+/// * `relation_needs_wal` - Whether the relation requires Iceberg file WAL
 ///
 /// # Returns
 /// A `StorageContext` with appropriate WAL configuration
@@ -123,6 +139,9 @@ pub fn create_storage_context_with_client(
 fn create_local_storage_context(
     relation_needs_wal: bool,
 ) -> IcebergResult<StorageContext> {
+    // Local storage is the only backend that can emit Iceberg file WAL.
+    // The caller owns the relation-aware decision; the default helper passes
+    // false, and DML/write paths pass RelationNeedsWAL.
     let needs_wal = relation_needs_wal;
 
     let data_dir = unsafe {
@@ -139,15 +158,17 @@ fn create_local_storage_context(
     })
 }
 
-/// Create a StorageContext for a specific relation, automatically determining WAL requirements.
+/// Create a StorageContext for a specific relation, automatically determining
+/// Iceberg file WAL requirements.
 ///
-/// This is a convenience function that combines tablespace lookup with WAL requirement
-/// detection. It checks both the tablespace type and the relation's persistence settings
-/// to determine if WAL logging should be enabled.
+/// This is a convenience function that combines tablespace lookup with
+/// `RelationNeedsWAL`. Local storage uses that result to decide whether to emit
+/// Iceberg file WAL for standby/archive/PITR recovery; distributed/object
+/// storage still keeps WAL disabled.
 ///
 /// # Arguments
 /// * `spc_oid` - The tablespace OID
-/// * `rel` - The relation pointer (used to check if WAL is needed)
+/// * `rel` - The relation pointer used to check if local Iceberg file WAL is needed
 ///
 /// # Returns
 /// A `StorageContext` with appropriate configuration for the relation

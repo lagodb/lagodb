@@ -75,7 +75,7 @@ use crate::handles::{
     TableScanDescHandle, TupleTableSlotHandle, VacuumParamsHandle,
     ValidateIndexStateHandle, VarlenaHandle,
 };
-use crate::tuple::Row;
+use crate::tuple::{Row, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -576,15 +576,35 @@ pub trait AmDmlSession {
 
     fn tuple_insert(
         &mut self,
-        row: &Row,
+        row: Row,
         cid: pg_sys::CommandId,
         options: i32,
         bistate: Option<&BulkInsertStateHandle>,
-    ) -> AmResult<()>;
+    ) -> AmResult<()> {
+        let _ = (row, cid, options, bistate);
+        unsupported_callback("tuple_insert")
+    }
+
+    /// Insert from a PostgreSQL tuple-slot view.
+    ///
+    /// This is the first method reached by the TableAM callback. The default
+    /// implementation materializes an owned [`Row`] and calls
+    /// [`Self::tuple_insert`], which is appropriate for row-oriented AMs.
+    /// Columnar AMs should override this method and append `PgDatumRef` values
+    /// from `row` directly into their column builders.
+    fn tuple_insert_slot(
+        &mut self,
+        row: TupleSlotRow<'_>,
+        cid: pg_sys::CommandId,
+        options: i32,
+        bistate: Option<&BulkInsertStateHandle>,
+    ) -> AmResult<()> {
+        self.tuple_insert(row.to_owned_row(), cid, options, bistate)
+    }
 
     fn tuple_insert_speculative(
         &mut self,
-        row: &Row,
+        row: Row,
         cid: pg_sys::CommandId,
         options: i32,
         bistate: Option<&BulkInsertStateHandle>,
@@ -594,13 +614,48 @@ pub trait AmDmlSession {
         unsupported_callback("tuple_insert_speculative")
     }
 
-    fn multi_insert(
+    fn tuple_insert_speculative_slot(
         &mut self,
-        rows: &[Row],
+        row: TupleSlotRow<'_>,
         cid: pg_sys::CommandId,
         options: i32,
         bistate: Option<&BulkInsertStateHandle>,
-    ) -> AmResult<()>;
+        spec_token: u32,
+    ) -> AmResult<()> {
+        self.tuple_insert_speculative(
+            row.to_owned_row(),
+            cid,
+            options,
+            bistate,
+            spec_token,
+        )
+    }
+
+    fn multi_insert(
+        &mut self,
+        rows: Vec<Row>,
+        cid: pg_sys::CommandId,
+        options: i32,
+        bistate: Option<&BulkInsertStateHandle>,
+    ) -> AmResult<()> {
+        let _ = (rows, cid, options, bistate);
+        unsupported_callback("multi_insert")
+    }
+
+    /// Multi-insert from PostgreSQL tuple-slot views.
+    ///
+    /// The default implementation materializes a `Vec<Row>` and calls
+    /// [`Self::multi_insert`]. Columnar AMs should override this method to
+    /// append every slot row directly into their columnar batch buffer.
+    fn multi_insert_slots(
+        &mut self,
+        rows: TupleSlotBatch<'_>,
+        cid: pg_sys::CommandId,
+        options: i32,
+        bistate: Option<&BulkInsertStateHandle>,
+    ) -> AmResult<()> {
+        self.multi_insert(rows.to_owned_rows(), cid, options, bistate)
+    }
 
     fn tuple_delete(
         &mut self,
@@ -619,7 +674,7 @@ pub trait AmDmlSession {
     fn tuple_update(
         &mut self,
         otid: &ItemPointer,
-        row: &Row,
+        row: Row,
         cid: pg_sys::CommandId,
         snapshot: &SnapshotHandle,
         crosscheck: Option<&SnapshotHandle>,
@@ -640,6 +695,36 @@ pub trait AmDmlSession {
             update_indexes,
         );
         unsupported_callback("tuple_update")
+    }
+
+    /// Update from a PostgreSQL tuple-slot view.
+    ///
+    /// This mirrors [`Self::tuple_insert_slot`]: the default row-mode fallback
+    /// materializes an owned [`Row`], while columnar AMs can override it to
+    /// avoid intermediate row/cell allocation.
+    fn tuple_update_slot(
+        &mut self,
+        otid: &ItemPointer,
+        row: TupleSlotRow<'_>,
+        cid: pg_sys::CommandId,
+        snapshot: &SnapshotHandle,
+        crosscheck: Option<&SnapshotHandle>,
+        wait: bool,
+        tmfd: &mut TM_FailureData,
+        lockmode: &mut pg_sys::LockTupleMode::Type,
+        update_indexes: &mut pg_sys::TU_UpdateIndexes::Type,
+    ) -> AmResult<pg_sys::TM_Result::Type> {
+        self.tuple_update(
+            otid,
+            row.to_owned_row(),
+            cid,
+            snapshot,
+            crosscheck,
+            wait,
+            tmfd,
+            lockmode,
+            update_indexes,
+        )
     }
 
     fn tuple_lock(
@@ -664,12 +749,21 @@ pub trait AmDmlSession {
 
     fn tuple_complete_speculative(
         &mut self,
-        row: &Row,
+        row: Row,
         spec_token: u32,
         succeeded: bool,
     ) -> AmResult<()> {
         let _ = (row, spec_token, succeeded);
         unsupported_callback("tuple_complete_speculative")
+    }
+
+    fn tuple_complete_speculative_slot(
+        &mut self,
+        row: TupleSlotRow<'_>,
+        spec_token: u32,
+        succeeded: bool,
+    ) -> AmResult<()> {
+        self.tuple_complete_speculative(row.to_owned_row(), spec_token, succeeded)
     }
 }
 

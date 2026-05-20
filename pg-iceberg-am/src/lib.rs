@@ -8,6 +8,7 @@ pub mod constants;
 pub mod error;
 pub mod gucs;
 pub mod hooks;
+pub mod options;
 pub mod storage;
 pub mod wal;
 

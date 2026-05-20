@@ -16,7 +16,7 @@ use crate::diag::ReportableError;
 use crate::handles::{
     BulkInsertStateHandle, ItemPointer, SnapshotHandle, TM_FailureData,
 };
-use crate::tuple::Row;
+use crate::tuple::{TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
@@ -37,15 +37,11 @@ pub(super) extern "C-unwind" fn tuple_insert<A>(
         let bistate_handle =
             (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
 
-        // Update reused row buffer from slot
-        session.row_buffer.update_from_slot(slot);
+        let row = TupleSlotRow::from_raw(slot);
 
-        session.state.tuple_insert(
-            &session.row_buffer,
-            cid,
-            options,
-            bistate_handle.as_ref(),
-        )
+        session
+            .state
+            .tuple_insert_slot(row, cid, options, bistate_handle.as_ref())
     })
     .report_unwrap();
 }
@@ -65,11 +61,10 @@ pub(super) extern "C-unwind" fn tuple_insert_speculative<A>(
         let bistate_handle =
             (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
 
-        // Update reused row buffer from slot
-        session.row_buffer.update_from_slot(slot);
+        let row = TupleSlotRow::from_raw(slot);
 
-        session.state.tuple_insert_speculative(
-            &session.row_buffer,
+        session.state.tuple_insert_speculative_slot(
+            row,
             cid,
             options,
             bistate_handle.as_ref(),
@@ -89,14 +84,11 @@ pub(super) extern "C-unwind" fn tuple_complete_speculative<A>(
     A: TableAccessMethod,
 {
     with_current_session::<A, _>(rel, |session| unsafe {
-        // Update reused row buffer from slot
-        session.row_buffer.update_from_slot(slot);
+        let row = TupleSlotRow::from_raw(slot);
 
-        session.state.tuple_complete_speculative(
-            &session.row_buffer,
-            spec_token,
-            succeeded,
-        )
+        session
+            .state
+            .tuple_complete_speculative_slot(row, spec_token, succeeded)
     })
     .report_unwrap();
 }
@@ -113,27 +105,14 @@ pub(super) extern "C-unwind" fn multi_insert<A>(
     A: TableAccessMethod,
 {
     with_current_session::<A, _>(rel, |session| unsafe {
-        let nslots = nslots as usize;
-        let slots_slice = std::slice::from_raw_parts(slots, nslots);
-
-        // Reuse multi_row_buffer across calls to avoid per-batch Vec+Row
-        // allocations.
-        if session.multi_row_buffer.len() < nslots {
-            session.multi_row_buffer.resize_with(nslots, Row::new);
-        }
-        for (i, slot) in slots_slice.iter().enumerate().take(nslots) {
-            session.multi_row_buffer[i].update_from_slot(*slot);
-        }
+        let rows = TupleSlotBatch::from_raw(slots, nslots as usize);
 
         let bistate_handle =
             (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
 
-        session.state.multi_insert(
-            &session.multi_row_buffer[..nslots],
-            cid,
-            options,
-            bistate_handle.as_ref(),
-        )
+        session
+            .state
+            .multi_insert_slots(rows, cid, options, bistate_handle.as_ref())
     })
     .report_unwrap();
 }
@@ -200,11 +179,11 @@ where
             (!crosscheck.is_null()).then(|| SnapshotHandle::from_raw(crosscheck));
         let mut tmfd_rust = TM_FailureData::default();
 
-        session.row_buffer.update_from_slot(slot);
+        let row = TupleSlotRow::from_raw(slot);
 
-        let result = session.state.tuple_update(
+        let result = session.state.tuple_update_slot(
             &otid,
-            &session.row_buffer,
+            row,
             cid,
             &snapshot_handle,
             crosscheck_handle.as_ref(),

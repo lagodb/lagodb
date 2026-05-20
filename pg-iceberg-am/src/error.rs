@@ -13,18 +13,76 @@
 //! object methods returning [`IcebergResult<T>`], then let the callback boundary
 //! perform the final conversion to PostgreSQL.
 
-use crate::catalog::iceberg_metadata::IcebergMetadataError;
 use pg_lakebase_core::diag::{PgError, SqlStateError};
 use pg_lakebase_core::options::TablespaceError;
 use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
+use pg_lakebase_storage::{StorageError, StorageErrorKind};
+use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
+use std::fmt::{Display, Formatter};
 use thiserror::Error;
+
+// ============================================================================
+//  Metadata Catalog Operation
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataCatalogOperation {
+    Access,
+    Insert,
+    Read,
+    Update,
+    Delete,
+}
+
+impl Display for MetadataCatalogOperation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Access => f.write_str("access"),
+            Self::Insert => f.write_str("insert"),
+            Self::Read => f.write_str("read"),
+            Self::Update => f.write_str("update"),
+            Self::Delete => f.write_str("delete"),
+        }
+    }
+}
+
+// ============================================================================
+//  Iceberg Error
+// ============================================================================
 
 #[derive(Error, Debug)]
 pub enum IcebergError {
-    #[error("metadata error: {0}")]
-    MetadataError(#[from] IcebergMetadataError),
+    #[error("failed to {operation} lakebase.iceberg_metadata catalog: {source}")]
+    MetadataCatalog {
+        operation: MetadataCatalogOperation,
+        #[source]
+        source: PgError,
+    },
+
+    #[error("metadata catalog record not found for relid: {0}")]
+    MetadataCatalogNotFound(pg_sys::Oid),
+
+    #[error("metadata catalog record already exists for relid: {0}")]
+    MetadataCatalogAlreadyExists(pg_sys::Oid),
+
+    #[error("invalid metadata catalog record: {0}")]
+    MetadataCatalogInvalidRecord(String),
+
+    #[error("optimistic locking failed: metadata location changed concurrently")]
+    MetadataCatalogConflict,
+
+    #[error("metadata tracker error: {0}")]
+    MetadataTracker(String),
+
+    #[error(
+        "failed to commit metadata for relid {relid} after {max_retries} retries due to concurrent updates"
+    )]
+    MetadataCommitConflict {
+        relid: pg_sys::Oid,
+        max_retries: i32,
+    },
 
     #[error("tablespace error: {0}")]
     TablespaceError(#[from] TablespaceError),
@@ -110,15 +168,45 @@ pub enum IcebergError {
 impl SqlStateError for IcebergError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            IcebergError::TablespaceError(_)
-            | IcebergError::TablespaceCacheError(_)
-            | IcebergError::TableOptionError(_)
-            | IcebergError::StorageError(_)
-            | IcebergError::TablespaceNotFound => {
+            IcebergError::MetadataCatalog { source, .. } => source.sql_error_code(),
+
+            IcebergError::MetadataCatalogNotFound(_) => {
+                PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
+            }
+
+            IcebergError::MetadataCatalogAlreadyExists(_) => {
+                PgSqlErrorCode::ERRCODE_UNIQUE_VIOLATION
+            }
+
+            IcebergError::MetadataCatalogConflict => {
+                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+            }
+
+            IcebergError::MetadataCatalogInvalidRecord(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
+
+            IcebergError::TablespaceError(error) => error.sql_error_code(),
+
+            IcebergError::TablespaceCacheError(error) => error.sql_error_code(),
+
+            IcebergError::TableOptionError(error) => error.sql_error_code(),
+
+            IcebergError::StorageError(error) => storage_sql_error_code(error),
+
+            IcebergError::TablespaceNotFound => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
 
-            IcebergError::PgError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            IcebergError::PgError(error) => error.sql_error_code(),
+
+            IcebergError::MetadataTracker(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
+
+            IcebergError::MetadataCommitConflict { .. } => {
+                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+            }
 
             IcebergError::NamespaceNull | IcebergError::MetadataLocationNull => {
                 PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
@@ -145,8 +233,11 @@ impl SqlStateError for IcebergError {
             | IcebergError::UuidConversionError(_)
             | IcebergError::NumericError(_) => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
 
-            IcebergError::IcebergLiteError(_)
-            | IcebergError::ArrowError(_)
+            IcebergError::IcebergLiteError(error) => {
+                iceberg_lite_sql_error_code(error)
+            }
+
+            IcebergError::ArrowError(_)
             | IcebergError::ArrowTypeMismatch(_)
             | IcebergError::JsonError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 
@@ -157,8 +248,6 @@ impl SqlStateError for IcebergError {
             IcebergError::NotImplemented(_) => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
-
-            IcebergError::MetadataError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         }
     }
 }
@@ -170,3 +259,90 @@ impl From<IcebergError> for ErrorReport {
 }
 
 pub type IcebergResult<T> = Result<T, IcebergError>;
+
+impl IcebergError {
+    pub fn metadata_catalog(
+        operation: MetadataCatalogOperation,
+        source: PgError,
+    ) -> Self {
+        Self::MetadataCatalog { operation, source }
+    }
+}
+
+fn storage_sql_error_code(error: &StorageError) -> PgSqlErrorCode {
+    match error.kind() {
+        StorageErrorKind::InvalidPath | StorageErrorKind::Configuration => {
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+        }
+        StorageErrorKind::NotFound => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+        StorageErrorKind::Unsupported => {
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+        }
+        StorageErrorKind::Busy => PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+        StorageErrorKind::ResourceExhausted => {
+            PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
+        }
+        StorageErrorKind::Io
+        | StorageErrorKind::Backend
+        | StorageErrorKind::Cache
+        | StorageErrorKind::CacheFillAborted => PgSqlErrorCode::ERRCODE_IO_ERROR,
+        StorageErrorKind::Protocol | StorageErrorKind::ClosedHandle => {
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+        }
+    }
+}
+
+fn iceberg_lite_sql_error_code(error: &iceberg_lite::Error) -> PgSqlErrorCode {
+    match error.kind() {
+        iceberg_lite::ErrorKind::FeatureUnsupported => {
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+        }
+        _ => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_catalog_sqlstate_survives_iceberg_error_boundary() {
+        let conflict = IcebergError::MetadataCatalogConflict;
+        assert_eq!(
+            conflict.sql_error_code(),
+            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+        );
+
+        let not_found = IcebergError::MetadataCatalogNotFound(pg_sys::Oid::from(42));
+        assert_eq!(
+            not_found.sql_error_code(),
+            PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
+        );
+    }
+
+    #[test]
+    fn retry_exhaustion_reports_serialization_failure() {
+        let error = IcebergError::MetadataCommitConflict {
+            relid: pg_sys::Oid::from(42),
+            max_retries: 3,
+        };
+
+        assert_eq!(
+            error.sql_error_code(),
+            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+        );
+    }
+
+    #[test]
+    fn iceberg_lite_feature_unsupported_reports_feature_not_supported() {
+        let error = IcebergError::IcebergLiteError(iceberg_lite::Error::new(
+            iceberg_lite::ErrorKind::FeatureUnsupported,
+            "catalog method not implemented",
+        ));
+
+        assert_eq!(
+            error.sql_error_code(),
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+        );
+    }
+}

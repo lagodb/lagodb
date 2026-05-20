@@ -2,7 +2,6 @@
 -- Tests for transactional storage artifact cleanup on local tablespaces.
 -- Verifies that abort cleans up data files and savepoint semantics work.
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
-NOTICE:  extension "pg_iceberg_am" does not exist, skipping
 CREATE EXTENSION pg_iceberg_am;
 CREATE SCHEMA artifact_cleanup;
 --

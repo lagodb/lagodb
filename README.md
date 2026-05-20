@@ -78,6 +78,7 @@ once that integration exists.
 | [pg-lakebase-macros](./pg-lakebase-macros) | Procedural macro support, including `#[pg_table_am]`. |
 | [iceberg-lite](./iceberg-lite) | Synchronous, PostgreSQL-friendly Iceberg library used by the TAM. |
 | [pg-lakebase-storage](./pg-lakebase-storage) | Local object-storage caching service library. |
+| [xtask](./xtask) | Workspace maintenance commands, including isolation test orchestration. |
 
 ## Requirements
 
@@ -174,9 +175,23 @@ with expected output in [pg-iceberg-am/tests/pg_regress/expected](./pg-iceberg-a
 The isolation specs cover concurrent visibility, commit retry, and savepoint
 behavior. They live in [pg-iceberg-am/tests/isolation/specs](./pg-iceberg-am/tests/isolation/specs).
 
+Use the workspace `xtask` runner instead of `cargo test`: isolation tests need
+a PostgreSQL instance with `pg_iceberg_am` loaded through
+`shared_preload_libraries`, so the runner installs the extension into the pgrx
+PostgreSQL installation and runs `pg_isolation_regress` against a temporary
+instance. It does not depend on an already-running pgrx server.
+
 ```bash
-cargo test --package pg-iceberg-am --test isolation_test -- --nocapture
+cargo xtask isolation pg17
 ```
+
+To run a single spec:
+
+```bash
+cargo xtask isolation pg17 cas_retry_stress
+```
+
+Results are written under `target/isolation/pg17/output_iso/`.
 
 ## Install Into PostgreSQL
 

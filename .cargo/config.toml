@@ -1,6 +1,8 @@
+[alias]
+xtask = "run -p xtask --"
+
 [target.'cfg(target_os = "macos")']
 rustflags = [
     "-C", "link-arg=-undefined",
     "-C", "link-arg=dynamic_lookup",
 ]
-

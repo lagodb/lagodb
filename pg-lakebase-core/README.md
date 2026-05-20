@@ -45,8 +45,9 @@ pointers in their main business logic.
 |--------|---------|
 | `api` | Public TAM trait surface: scan, relation, index, DML, and DDL facets. |
 | `access` | PostgreSQL callback shims that adapt `TableAmRoutine` calls to the trait API. |
+| `batch` | DML batch abstractions: owned row batches and slot/datum columnar batch interfaces. |
 | `handles` | Typed wrappers around PostgreSQL-owned FFI objects such as relations, snapshots, scan keys, tuple slots, and DML state. |
-| `tuple` | `Cell`, `Row`, and `TupleSlotWriter` for moving tuple values across PostgreSQL and custom storage formats. |
+| `tuple` | Owned tuple values plus short-lived tuple-slot/datum views for DML hot paths. |
 | `options` | Table and tablespace option parsing, persistence, and cache helpers. |
 | `catalog` | Catalog scan/update helpers and Lakebase catalog object IDs. |
 | `wal` | Custom WAL resource-manager registration and WAL record helpers. |
@@ -93,6 +94,13 @@ frame fails, aborts, or rolls back
 `ResourceOwner` cleanup handles ERROR, abort, and rollback paths that normal
 Rust returns cannot observe reliably. Transaction-scoped publication should use
 the `transaction` module instead of relying on per-tuple callbacks.
+
+DML tuple flow is slot-first. The callback shims pass `TupleSlotRow` or
+`TupleSlotBatch` views into the AM session. Row-oriented AMs use the default
+fallback to materialize owned `Row` values and store them in `RowBatchBuffer`;
+columnar AMs can override the slot methods and append `PgDatumRef` values
+directly into format-specific column builders. Core does not depend on Arrow,
+Parquet, Iceberg, or any other concrete batch representation.
 
 See [access/dml/README.md](src/access/dml/README.md) for the lifecycle
 principles.
@@ -150,6 +158,9 @@ cargo pgrx init --pg17=/path/to/pg_config
 - This crate is a framework layer, not a storage format implementation.
 - Public APIs should model PostgreSQL lifecycle boundaries explicitly rather
   than leaking ad hoc helper functions into AM code.
+- DML hot paths should not materialize owned `Row` values until the AM has
+  chosen a row-oriented strategy. Columnar AMs should consume slot/datum views
+  directly and keep target-format type decisions outside core.
 - ResourceOwner cleanup and transaction callbacks are separate mechanisms and
   should stay separate.
 - Unsupported PostgreSQL write paths should fail clearly instead of bypassing

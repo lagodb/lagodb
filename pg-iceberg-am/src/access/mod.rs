@@ -4,6 +4,5 @@ pub mod dml;
 pub mod index;
 pub mod relation;
 pub mod scan;
-pub mod traits;
 
 pub use conversion::*;
