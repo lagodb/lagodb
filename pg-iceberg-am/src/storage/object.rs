@@ -1,20 +1,33 @@
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
 use pg_lakebase_storage::{
-    StagingFile, StagingPathResolver, StorageClient, StorageFile, StorageResult,
-    StoreId,
+    ObjectLocation, StagingFile, StagingPathResolver, StorageClient, StorageError,
+    StorageFile, StorageResult, StoreId,
 };
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::SeekFrom;
-use std::sync::Mutex;
+use std::sync::Arc;
+
+use crate::storage::transactional_artifacts::{
+    ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
+};
+
+fn storage_err(e: StorageError) -> Error {
+    let kind = match e.kind() {
+        pg_lakebase_storage::StorageErrorKind::NotFound => ErrorKind::DataInvalid,
+        pg_lakebase_storage::StorageErrorKind::InvalidPath => ErrorKind::DataInvalid,
+        _ => ErrorKind::IoError,
+    };
+    Error::new(kind, format!("{e}")).with_source(e)
+}
 
 #[derive(Clone)]
 pub struct ObjectStorage {
-    scheme: String,
-    store_id: StoreId,
-    bucket: String,
+    scheme: Arc<str>,
+    store_id: Arc<StoreId>,
+    bucket: Arc<str>,
     client: StorageClient,
     staging_resolver: StagingPathResolver,
 }
@@ -38,9 +51,9 @@ impl ObjectStorage {
         staging_resolver: StagingPathResolver,
     ) -> StorageResult<Self> {
         Ok(Self {
-            scheme: scheme.into(),
-            store_id: StoreId::new(store_id)?,
-            bucket: bucket.into(),
+            scheme: Arc::from(scheme.into().as_str()),
+            store_id: Arc::new(StoreId::new(store_id)?),
+            bucket: Arc::from(bucket.into().as_str()),
             client,
             staging_resolver,
         })
@@ -109,40 +122,43 @@ impl Storage for ObjectStorage {
 
     fn delete(&self, path: &str) -> Result<()> {
         self.client
-            .delete(self.store_id.as_str(), &self.bucket, path)
-            .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))
+            .delete(self.store_id.as_str(), &*self.bucket, path)
+            .map_err(storage_err)
     }
 
     fn remove_dir_all(&self, path: &str) -> Result<()> {
         self.client
-            .delete_prefix(self.store_id.as_str(), &self.bucket, path)
+            .delete_prefix(self.store_id.as_str(), &*self.bucket, path)
             .map(|_| ())
-            .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))
+            .map_err(storage_err)
     }
 
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
-        match self.client.head(self.store_id.as_str(), &self.bucket, path) {
+        match self
+            .client
+            .head(self.store_id.as_str(), &*self.bucket, path)
+        {
             Ok(info) => Ok(Some(FileMetadata { size: info.size })),
             Err(e) if e.kind() == pg_lakebase_storage::StorageErrorKind::NotFound => {
                 Ok(None)
             }
-            Err(e) => Err(Error::new(ErrorKind::IoError, e.to_string())),
+            Err(e) => Err(storage_err(e)),
         }
     }
 
     fn open_reader(&self, path: &str) -> Result<OpenedFile> {
         let file = self
             .client
-            .open(self.store_id.as_str(), &self.bucket, path)
-            .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))?;
+            .open(self.store_id.as_str(), &*self.bucket, path)
+            .map_err(storage_err)?;
         let metadata = FileMetadata { size: file.size() };
         Ok(OpenedFile {
             metadata,
             reader: Box::new(ObjectReader::new(
                 self.client.clone(),
-                self.store_id.clone(),
-                self.bucket.clone(),
-                path.to_string(),
+                Arc::clone(&self.store_id),
+                Arc::clone(&self.bucket),
+                Arc::from(path),
                 file,
             )),
         })
@@ -152,17 +168,47 @@ impl Storage for ObjectStorage {
         let staging = StagingFile::create(
             &self.staging_resolver,
             self.store_id.as_str(),
-            &self.bucket,
+            &*self.bucket,
             path,
         )
-        .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))?;
+        .map_err(storage_err)?;
+
+        let location =
+            ObjectLocation::new(self.store_id.as_str(), &*self.bucket, path)
+                .map_err(storage_err)?;
+        register_object_file_staged(
+            location,
+            staging.path().to_path_buf(),
+            self.client.clone(),
+        );
+
         Ok(Box::new(ObjectWriter {
-            client: self.client.clone(),
-            store_id: self.store_id.clone(),
-            bucket: self.bucket.clone(),
-            key: path.to_string(),
             staging: Some(staging),
         }))
+    }
+
+    fn finalize_write(&self, path: &str) -> Result<()> {
+        let location =
+            ObjectLocation::new(self.store_id.as_str(), &*self.bucket, path)
+                .map_err(storage_err)?;
+
+        // 1. Pre-check: staged entry MUST exist before we attempt upload.
+        ensure_object_file_staged(&location)
+            .map_err(|msg| Error::new(ErrorKind::Unexpected, msg))?;
+
+        // 2. Upload the staging file to object storage.
+        //    On failure the registry stays Staged; abort will only unlink
+        //    the local staging file without touching the remote store.
+        self.client
+            .upload(self.store_id.as_str(), &*self.bucket, path)
+            .map_err(storage_err)?;
+
+        // 3. Transition Staged → Uploaded so commit cleans staging and
+        //    abort knows to delete the remote object.
+        mark_object_file_uploaded(&location)
+            .map_err(|msg| Error::new(ErrorKind::Unexpected, msg))?;
+
+        Ok(())
     }
 
     fn initialize(&mut self, _props: HashMap<String, String>) -> Result<()> {
@@ -180,18 +226,18 @@ impl Storage for ObjectStorage {
 
 pub struct ObjectReader {
     client: StorageClient,
-    store_id: StoreId,
-    bucket: String,
-    key: String,
-    file: Mutex<StorageFile>,
+    store_id: Arc<StoreId>,
+    bucket: Arc<str>,
+    key: Arc<str>,
+    file: StorageFile,
 }
 
 impl ObjectReader {
     fn new(
         client: StorageClient,
-        store_id: StoreId,
-        bucket: String,
-        key: String,
+        store_id: Arc<StoreId>,
+        bucket: Arc<str>,
+        key: Arc<str>,
         file: StorageFile,
     ) -> Self {
         Self {
@@ -199,22 +245,21 @@ impl ObjectReader {
             store_id,
             bucket,
             key,
-            file: Mutex::new(file),
+            file,
         }
     }
 }
 
 impl std::io::Read for ObjectReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let file = self.file.get_mut().unwrap();
-        file.read_into(buf)
+        self.file
+            .read_into(buf)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 }
 
 impl std::io::Seek for ObjectReader {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        let file = self.file.get_mut().unwrap();
         let seek_pos = match pos {
             SeekFrom::Start(offset) => pg_lakebase_storage::SeekFrom::Start(offset),
             SeekFrom::End(offset) => pg_lakebase_storage::SeekFrom::End(offset),
@@ -222,54 +267,54 @@ impl std::io::Seek for ObjectReader {
                 pg_lakebase_storage::SeekFrom::Current(offset)
             }
         };
-        Ok(file.seek(seek_pos))
+        Ok(self.file.seek(seek_pos))
     }
 }
 
 impl FileRead for ObjectReader {
     fn read_range(&self, range: std::ops::Range<u64>) -> Result<bytes::Bytes> {
-        let mut file = self.file.lock().unwrap();
         let offset = range.start;
-        let len = (range.end - range.start) as u32;
-        file.seek(pg_lakebase_storage::SeekFrom::Start(offset));
-        let data = file
-            .read(len)
-            .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))?;
+        let len = range.end - range.start;
+        let len_u32 = u32::try_from(len).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("read_range length {} exceeds u32::MAX", len),
+            )
+        })?;
+        let data = self.file.read_at(offset, len_u32).map_err(storage_err)?;
         Ok(bytes::Bytes::from(data))
     }
 
     fn read_all(&self) -> Result<bytes::Bytes> {
-        let mut file = self.file.lock().unwrap();
-        let size = file.size();
-        file.seek(pg_lakebase_storage::SeekFrom::Start(0));
-        let data = file
-            .read(size as u32)
-            .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))?;
+        let size = self.file.size();
+        let size_u32 = u32::try_from(size).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("file size {} exceeds u32::MAX", size),
+            )
+        })?;
+        let data = self.file.read_at(0, size_u32).map_err(storage_err)?;
         Ok(bytes::Bytes::from(data))
     }
 
     fn try_clone(&self) -> std::io::Result<Box<dyn FileRead>> {
-        let pos = self.file.lock().unwrap().position();
+        let pos = self.file.position();
         let mut new_file = self
             .client
-            .open(self.store_id.as_str(), &self.bucket, &self.key)
+            .open(self.store_id.as_str(), &*self.bucket, &*self.key)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         new_file.seek(pg_lakebase_storage::SeekFrom::Start(pos));
         Ok(Box::new(ObjectReader::new(
             self.client.clone(),
-            self.store_id.clone(),
-            self.bucket.clone(),
-            self.key.clone(),
+            Arc::clone(&self.store_id),
+            Arc::clone(&self.bucket),
+            Arc::clone(&self.key),
             new_file,
         )))
     }
 }
 
 pub struct ObjectWriter {
-    client: StorageClient,
-    store_id: StoreId,
-    bucket: String,
-    key: String,
     staging: Option<StagingFile>,
 }
 
@@ -297,20 +342,9 @@ impl std::io::Write for ObjectWriter {
 impl FileWrite for ObjectWriter {
     fn close(&mut self) -> Result<()> {
         self.staging.take();
-        self.client
-            .upload(self.store_id.as_str(), &self.bucket, &self.key)
-            .map(|_| ())
-            .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))
+        Ok(())
     }
 }
-
-// SAFETY: StagingFile writes to a local file and StorageClient is internally mutex-protected.
-unsafe impl Send for ObjectWriter {}
-unsafe impl Sync for ObjectWriter {}
-
-// SAFETY: ObjectReader's StorageFile is protected by a Mutex.
-unsafe impl Send for ObjectReader {}
-unsafe impl Sync for ObjectReader {}
 
 #[cfg(test)]
 mod tests {

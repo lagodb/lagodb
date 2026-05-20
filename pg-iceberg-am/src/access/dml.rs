@@ -151,7 +151,9 @@ impl AmDmlSession for IcebergModify {
 
         // Propagate errors after ensuring resource cleanup attempt
         flush_res?;
-        self.data_files.extend(writer_res?);
+        let new_files = writer_res?;
+
+        self.data_files.extend(new_files);
 
         // If we have data files, apply them to the Iceberg table
         if !self.data_files.is_empty() {

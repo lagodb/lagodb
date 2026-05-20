@@ -18,9 +18,7 @@
 //! The module contains the file writer for parquet file format.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use itertools::Itertools;
@@ -34,7 +32,7 @@ use crate::arrow::{
     ArrowFileReader, DEFAULT_MAP_FIELD_NAME, FieldMatchMode, NanValueCountVisitor,
     get_parquet_stat_max_as_datum, get_parquet_stat_min_as_datum,
 };
-use crate::io::{FileIO, FileWrite, OutputFile};
+use crate::io::{FileIO, OutputFile, OutputFileWriter};
 use crate::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, Datum, ListType, Literal,
     MapType, NestedFieldRef, PartitionSpec, PrimitiveType, Schema, SchemaRef,
@@ -86,7 +84,6 @@ impl FileWriterBuilder for ParquetWriterBuilder {
             nan_value_count_visitor: NanValueCountVisitor::new_with_match_mode(
                 self.match_mode,
             ),
-            bytes_written: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -222,12 +219,10 @@ impl SchemaVisitor for IndexByParquetPathName {
 pub struct ParquetWriter {
     schema: SchemaRef,
     output_file: OutputFile,
-    inner_writer: Option<ArrowWriter<SyncFileWriter>>,
+    inner_writer: Option<ArrowWriter<OutputFileWriter>>,
     writer_properties: WriterProperties,
     current_row_num: usize,
     nan_value_count_visitor: NanValueCountVisitor,
-    /// Shared counter to track total bytes written (shared with SyncFileWriter)
-    bytes_written: Arc<AtomicUsize>,
 }
 
 /// Used to aggregate min and max value of each column.
@@ -519,11 +514,9 @@ impl FileWriter for ParquetWriter {
         } else {
             let arrow_schema: ArrowSchemaRef =
                 Arc::new(self.schema.as_ref().try_into()?);
-            let inner_writer = self.output_file.writer()?;
-            let sync_writer =
-                SyncFileWriter::new(inner_writer, self.bytes_written.clone());
+            let output_writer = self.output_file.create_writer()?;
             let writer = ArrowWriter::try_new(
-                sync_writer,
+                output_writer,
                 arrow_schema.clone(),
                 Some(self.writer_properties.clone()),
             )
@@ -547,20 +540,21 @@ impl FileWriter for ParquetWriter {
     }
 
     fn close(mut self) -> Result<Vec<DataFileBuilder>> {
-        let writer = match self.inner_writer.take() {
+        let mut writer = match self.inner_writer.take() {
             Some(writer) => writer,
             None => return Ok(vec![]),
         };
 
-        let metadata = writer.close().map_err(|err| {
+        let metadata = writer.finish().map_err(|err| {
             Error::new(ErrorKind::Unexpected, "Failed to close parquet writer.")
                 .with_source(err)
         })?;
 
         // Get written_size after close() to include all flushed data and parquet footer
-        let written_size = self.bytes_written.load(Ordering::Relaxed);
+        let written_size = writer.bytes_written();
 
         if self.current_row_num == 0 {
+            writer.inner_mut().close_local()?;
             self.output_file.delete().map_err(|err| {
                 Error::new(
                     ErrorKind::Unexpected,
@@ -570,6 +564,8 @@ impl FileWriter for ParquetWriter {
             })?;
             Ok(vec![])
         } else {
+            writer.inner_mut().finish()?;
+
             let parquet_metadata = Arc::new(metadata);
 
             Ok(vec![Self::parquet_to_data_file_builder(
@@ -600,58 +596,6 @@ impl CurrentFileStatus for ParquetWriter {
         } else {
             // inner writer is not initialized yet
             0
-        }
-    }
-}
-
-struct SyncFileWriter {
-    writer: Box<dyn FileWrite>,
-    /// Shared counter to track total bytes written
-    bytes_written: Arc<AtomicUsize>,
-}
-
-impl SyncFileWriter {
-    /// Create a new `SyncFileWriter` with the given writer and shared byte counter.
-    pub fn new(writer: Box<dyn FileWrite>, bytes_written: Arc<AtomicUsize>) -> Self {
-        Self {
-            writer,
-            bytes_written,
-        }
-    }
-}
-
-impl Write for SyncFileWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.writer.write(buf)?;
-        self.bytes_written.fetch_add(written, Ordering::Relaxed);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
-}
-
-// `parquet::arrow::ArrowWriter` only sees this adapter through the
-// `std::io::Write` trait, which has no `close` method. After
-// `ArrowWriter::close()` has written the parquet footer it drops the
-// `SyncFileWriter`, which in turn drops the inner `Box<dyn FileWrite>`.
-// Without an explicit hook here, the storage-level
-// `FileWrite::close()` would never run, and storage backends that
-// commit their data on close (e.g. memory storage's
-// buffer-into-map insert, or any future staging-then-commit
-// implementation) would silently lose the file.
-//
-// `Drop::drop` cannot return a `Result`, so a close failure here can
-// only be logged. Backends whose commit step needs propagatable
-// errors should not rely on this path; they should commit through a
-// dedicated explicit code path instead.
-impl Drop for SyncFileWriter {
-    fn drop(&mut self) {
-        if let Err(e) = self.writer.close() {
-            log::error!(
-                "Failed to close underlying FileWrite in SyncFileWriter::drop: {e}"
-            );
         }
     }
 }

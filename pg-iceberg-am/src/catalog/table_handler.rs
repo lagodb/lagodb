@@ -1,8 +1,8 @@
 use super::schema_mapping::tuple_desc_to_schema;
-use crate::access::pending_deletes::register_table_pending_delete;
 use crate::error::{IcebergError, IcebergResult};
 use crate::hooks::table_option_cache::IcebergTableOptionCache;
 use crate::storage::create_storage_context;
+use crate::storage::transactional_artifacts::register_table_dir_created;
 use iceberg_lite::catalog::{Catalog, NamespaceIdent, TableCreation};
 use iceberg_lite::spec::{FormatVersion, SortOrder, UnboundPartitionSpec};
 use pg_lakebase_core::handles::RelationHandle;
@@ -111,9 +111,13 @@ pub fn init_table_storage_metadata(rel: &RelationHandle) -> IcebergResult<String
     let catalog = IcebergCatalog::new_pg(ctx.file_io.clone());
     let namespace = NamespaceIdent::new(nsp_name);
 
-    let table = catalog.create_table(&namespace, creation)?;
+    // Register cleanup BEFORE creating table metadata so that if
+    // create_table fails mid-way (after creating the directory but
+    // before finishing), the directory is still cleaned up on abort.
+    // Deleting a non-existent directory is treated as OK by the cleanup handler.
+    register_table_dir_created(location, ctx.file_io.clone());
 
-    register_table_pending_delete(location, ctx.file_io);
+    let table = catalog.create_table(&namespace, creation)?;
 
     let metadata_location = table
         .metadata_location()

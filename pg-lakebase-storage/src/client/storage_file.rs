@@ -95,6 +95,53 @@ impl StorageFile {
         new_pos
     }
 
+    /// Reads up to `len` bytes from the given absolute offset, without modifying the cursor.
+    ///
+    /// Returns an empty `Vec` when `offset` is at or past EOF.
+    pub fn read_at(&self, offset: u64, len: u32) -> StorageResult<Vec<u8>> {
+        if self.closed {
+            return Err(StorageError::closed_handle(self.handle.0));
+        }
+        if let ReadPath::Direct(reader) = &self.read_path {
+            let clamped =
+                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
+            if clamped == 0 {
+                return Ok(Vec::new());
+            }
+            return reader.read_at_exact(offset, clamped);
+        }
+        self.client.read_alloc(self.handle, offset, len)
+    }
+
+    /// Reads into a caller-provided buffer from the given absolute offset, without modifying the
+    /// cursor.
+    ///
+    /// Returns the number of bytes written to `buf`. Returns `0` when `offset` is at or past EOF.
+    pub fn read_at_into(&self, offset: u64, buf: &mut [u8]) -> StorageResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let len = std::cmp::min(buf.len(), u32::MAX as usize) as u32;
+        if self.closed {
+            return Err(StorageError::closed_handle(self.handle.0));
+        }
+        if let ReadPath::Direct(reader) = &self.read_path {
+            let clamped =
+                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
+            if clamped == 0 {
+                return Ok(0);
+            }
+            return reader.read_at_into(offset, &mut buf[..clamped]);
+        }
+        let result = self.client.read_into(
+            self.handle,
+            offset,
+            len,
+            &mut buf[..len as usize],
+        )?;
+        Ok(result.bytes_read)
+    }
+
     /// Reads up to `len` bytes starting at the current cursor, returning them as a new `Vec`.
     ///
     /// The cursor advances by the number of bytes returned. Returns an empty `Vec` when the

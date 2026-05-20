@@ -1,8 +1,8 @@
--- Test: storage background worker (startup, SIGHUP reload, catalog scan, reconcile).
+-- Test: storage background worker (startup, catalog scan, reconcile).
 --
 -- Sections:
 --   A. Startup verification
---   B. SIGHUP configuration reload
+--   B. SIGHUP GUC reload
 --   C. Catalog scan (distributed registered, native ignored)
 --   D. Full reconcile lifecycle (CREATE → DROP)
 
@@ -24,35 +24,26 @@ COPY (SELECT current_setting('data_directory') || '/pg_lakebase/storage.sock') T
 \! rm -f /tmp/_regress_socket_path.txt
 
 -- A3. GUCs are readable with expected defaults
-SELECT current_setting('pg_lakebase.storage_server.enabled') AS enabled;
-SELECT current_setting('pg_lakebase.storage_server.shutdown_timeout_ms') AS shutdown_timeout_ms;
-SELECT current_setting('pg_lakebase.storage_server.tablespace_reconcile_interval_ms') AS reconcile_interval_ms;
-SELECT current_setting('pg_lakebase.storage_server.worker_threads') AS worker_threads;
+SELECT current_setting('pg_lakebase.storage_server_enabled') AS enabled;
+SELECT current_setting('pg_lakebase.storage_server_shutdown_timeout_ms') AS shutdown_timeout_ms;
+SELECT current_setting('pg_lakebase.storage_server_tablespace_reconcile_interval_ms') AS reconcile_interval_ms;
+SELECT current_setting('pg_lakebase.storage_server_worker_threads') AS worker_threads;
 
 -- ============================================================
--- B. SIGHUP configuration reload
+-- B. SIGHUP GUC reload
 -- ============================================================
 
--- B1. Reload a Sighup GUC (shutdown_timeout_ms)
-SELECT current_setting('pg_lakebase.storage_server.shutdown_timeout_ms') AS timeout_before;
-
-ALTER SYSTEM SET pg_lakebase.storage_server.shutdown_timeout_ms = 10000;
+-- B1. Change a Sighup-reloadable GUC via ALTER SYSTEM
+ALTER SYSTEM SET pg_lakebase.storage_server_shutdown_timeout_ms = 9999;
 SELECT pg_reload_conf();
-SELECT pg_sleep(0.3);
+SELECT pg_sleep(0.5);
+SELECT current_setting('pg_lakebase.storage_server_shutdown_timeout_ms') AS shutdown_timeout_after_reload;
 
-SELECT current_setting('pg_lakebase.storage_server.shutdown_timeout_ms') AS timeout_after;
-
--- B2. Reload tablespace_reconcile_interval_ms
-ALTER SYSTEM SET pg_lakebase.storage_server.tablespace_reconcile_interval_ms = 200;
+-- B2. Restore original default
+ALTER SYSTEM RESET pg_lakebase.storage_server_shutdown_timeout_ms;
 SELECT pg_reload_conf();
-SELECT pg_sleep(0.3);
-
-SELECT current_setting('pg_lakebase.storage_server.tablespace_reconcile_interval_ms') AS interval_after;
-
--- B3. Worker survived all reloads
-SELECT count(*) AS bgworker_after_reloads
-FROM pg_stat_activity
-WHERE backend_type = 'pg-lakebase-storage';
+SELECT pg_sleep(0.5);
+SELECT current_setting('pg_lakebase.storage_server_shutdown_timeout_ms') AS shutdown_timeout_after_reset;
 
 -- ============================================================
 -- C. Catalog scan (distributed registered, native ignored)
@@ -184,10 +175,6 @@ SELECT EXISTS (
 DROP TABLESPACE regress_bgw_dist1;
 DROP TABLESPACE regress_bgw_native1;
 DROP TABLESPACE regress_bgw_native2;
-
-ALTER SYSTEM RESET pg_lakebase.storage_server.shutdown_timeout_ms;
-ALTER SYSTEM RESET pg_lakebase.storage_server.tablespace_reconcile_interval_ms;
-SELECT pg_reload_conf();
 
 -- Final health check
 SELECT count(*) AS bgworker_final

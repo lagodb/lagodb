@@ -18,14 +18,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::Result;
-use crate::io::{FileWrite, OutputFile};
+use crate::io::{OutputFile, OutputFileWriter};
 use crate::puffin::blob::Blob;
 use crate::puffin::compression::CompressionCodec;
 use crate::puffin::metadata::{BlobMetadata, FileMetadata, Flag};
 
 /// Puffin writer
 pub struct PuffinWriter {
-    writer: Box<dyn FileWrite>,
+    writer: OutputFileWriter,
     is_header_written: bool,
     num_bytes_written: u64,
     written_blobs_metadata: Vec<BlobMetadata>,
@@ -37,7 +37,7 @@ pub struct PuffinWriter {
 impl PuffinWriter {
     /// Returns a new Puffin writer
     pub fn new(
-        output_file: &OutputFile,
+        output_file: OutputFile,
         properties: HashMap<String, String>,
         compress_footer: bool,
     ) -> Result<Self> {
@@ -49,8 +49,9 @@ impl PuffinWriter {
             CompressionCodec::None
         };
 
+        let writer = output_file.create_writer()?;
         Ok(Self {
-            writer: output_file.writer()?,
+            writer,
             is_header_written: false,
             num_bytes_written: 0,
             written_blobs_metadata: Vec::new(),
@@ -90,8 +91,7 @@ impl PuffinWriter {
     pub fn close(mut self) -> Result<()> {
         self.write_header_once()?;
         self.write_footer()?;
-        self.writer.close()?;
-        Ok(())
+        self.writer.finish()
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
@@ -176,13 +176,13 @@ mod tests {
         let temp_path = path_buf.to_str().unwrap();
         let output_file = file_io.new_output(temp_path)?;
 
-        let mut writer = PuffinWriter::new(&output_file, properties, false)?;
+        let mut writer = PuffinWriter::new(output_file, properties, false)?;
         for (blob, compression_codec) in blobs {
             writer.add(blob, compression_codec)?;
         }
         writer.close()?;
 
-        Ok(output_file)
+        file_io.new_output(temp_path)
     }
 
     fn read_all_blobs_from_puffin_file(input_file: InputFile) -> Vec<Blob> {

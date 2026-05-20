@@ -58,9 +58,12 @@ static CACHE_CLEANUP_BATCH_MB: GucSetting<i32> = GucSetting::<i32>::new(
     (DEFAULT_CACHE_CLEANUP_BATCH_BYTES / (1024 * 1024)) as i32,
 );
 
+static WORKER_DATABASE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
 pub fn init() {
     GucRegistry::define_bool_guc(
-        c"pg_lakebase.storage_server.enabled",
+        c"pg_lakebase.storage_server_enabled",
         c"Start pg-lakebase-storage background worker",
         c"When true, a background worker running the local storage service is started at postmaster startup.",
         &ENABLED,
@@ -69,7 +72,7 @@ pub fn init() {
     );
 
     GucRegistry::define_string_guc(
-        c"pg_lakebase.storage_server.socket_path",
+        c"pg_lakebase.storage_server_socket_path",
         c"Unix socket path for pg-lakebase-storage",
         c"Absolute path to the Unix socket. Empty or unset means derive from DataDir.",
         &SOCKET_PATH,
@@ -78,7 +81,7 @@ pub fn init() {
     );
 
     GucRegistry::define_string_guc(
-        c"pg_lakebase.storage_server.cache_dir",
+        c"pg_lakebase.storage_server_cache_dir",
         c"Cache directory for pg-lakebase-storage",
         c"Absolute path to the local cache directory. Empty or unset means derive from DataDir.",
         &CACHE_DIR,
@@ -86,8 +89,17 @@ pub fn init() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_string_guc(
+        c"pg_lakebase.storage_server_database",
+        c"Database for the storage background worker SPI connection",
+        c"The database the background worker connects to for catalog access. Defaults to 'postgres'.",
+        &WORKER_DATABASE,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.worker_threads",
+        c"pg_lakebase.storage_server_worker_threads",
         c"Number of Tokio worker threads for the storage server",
         c"Controls the size of the Tokio multi-thread runtime thread pool.",
         &WORKER_THREADS,
@@ -98,7 +110,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.shutdown_timeout_ms",
+        c"pg_lakebase.storage_server_shutdown_timeout_ms",
         c"Shutdown timeout in milliseconds for the storage worker",
         c"Maximum time to wait for in-flight connections during shutdown.",
         &SHUTDOWN_TIMEOUT_MS,
@@ -109,7 +121,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.log_channel_capacity",
+        c"pg_lakebase.storage_server_log_channel_capacity",
         c"Bounded log channel capacity for the storage worker",
         c"Number of log events buffered between Tokio threads and the PG log bridge.",
         &LOG_CHANNEL_CAPACITY,
@@ -120,7 +132,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.max_connections",
+        c"pg_lakebase.storage_server_max_connections",
         c"Maximum concurrent connections to the storage server",
         c"Limits the number of simultaneously connected backends.",
         &MAX_CONNECTIONS,
@@ -131,7 +143,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.max_read_size",
+        c"pg_lakebase.storage_server_max_read_size",
         c"Maximum read size in bytes per storage request",
         c"Upper bound on data returned in a single storage read response.",
         &MAX_READ_SIZE,
@@ -142,7 +154,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.tablespace_reconcile_interval_ms",
+        c"pg_lakebase.storage_server_tablespace_reconcile_interval_ms",
         c"Periodic full-resync interval for the distributed tablespace store reconciler",
         c"How often the storage worker rescans pg_tablespace as a safety net behind syscache invalidation. 0 disables the periodic resync; syscache wake-ups still apply.",
         &TABLESPACE_RECONCILE_INTERVAL_MS,
@@ -155,7 +167,7 @@ pub fn init() {
     // --- Cache runtime GUCs (Sighup-reloadable) ---
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.cache_touch_granularity_ms",
+        c"pg_lakebase.storage_server_cache_touch_granularity_ms",
         c"Minimum interval between cache access-time updates for a single object",
         c"Prevents excessive write I/O from frequent access-time touches. Set to 0 to touch on every access.",
         &CACHE_TOUCH_GRANULARITY_MS,
@@ -166,7 +178,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.cache_max_mb",
+        c"pg_lakebase.storage_server_cache_max_mb",
         c"Maximum cache size in MiB",
         c"Capacity limit for the local object cache in mebibytes. 0 disables capacity-based cleanup.",
         &CACHE_MAX_MB,
@@ -177,7 +189,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.cache_cleanup_start_percent",
+        c"pg_lakebase.storage_server_cache_cleanup_start_percent",
         c"Cache usage percentage that triggers cleanup",
         c"When resident bytes exceed this fraction of cache_max_mb, cleanup begins.",
         &CACHE_CLEANUP_START_PERCENT,
@@ -188,7 +200,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.cache_cleanup_target_percent",
+        c"pg_lakebase.storage_server_cache_cleanup_target_percent",
         c"Target cache usage percentage after cleanup",
         c"Cleanup evicts until resident bytes drop below this fraction of cache_max_mb.",
         &CACHE_CLEANUP_TARGET_PERCENT,
@@ -199,7 +211,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.cache_cleanup_interval_ms",
+        c"pg_lakebase.storage_server_cache_cleanup_interval_ms",
         c"Periodic cache cleanup interval in milliseconds",
         c"How often the background cleanup task runs. 0 disables periodic cleanup.",
         &CACHE_CLEANUP_INTERVAL_MS,
@@ -210,7 +222,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.cache_cleanup_batch_items",
+        c"pg_lakebase.storage_server_cache_cleanup_batch_items",
         c"Maximum number of items evicted per cleanup batch",
         c"Limits work per cleanup iteration to avoid blocking cache access too long.",
         &CACHE_CLEANUP_BATCH_ITEMS,
@@ -221,7 +233,7 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server.cache_cleanup_batch_mb",
+        c"pg_lakebase.storage_server_cache_cleanup_batch_mb",
         c"Maximum MiB evicted per cleanup batch",
         c"Limits I/O work per cleanup iteration, in mebibytes.",
         &CACHE_CLEANUP_BATCH_MB,
@@ -242,6 +254,15 @@ pub fn socket_path() -> Option<String> {
 
 pub fn cache_dir() -> Option<String> {
     CACHE_DIR.get().and_then(non_empty_lossy_string)
+}
+
+/// Database name for the storage background worker's SPI connection.
+/// Defaults to `"postgres"` when unset.
+pub fn worker_database() -> String {
+    WORKER_DATABASE
+        .get()
+        .and_then(non_empty_lossy_string)
+        .unwrap_or_else(|| "postgres".to_owned())
 }
 
 /// Convert a GUC `CString` into an owned `String`, returning `None` for
@@ -278,7 +299,7 @@ pub fn max_read_size() -> u32 {
 }
 
 /// Periodic full-resync interval as `Some(Duration)`, or `None` when
-/// `pg_lakebase.storage_server.tablespace_reconcile_interval_ms` is `0`.
+/// `pg_lakebase.storage_server_tablespace_reconcile_interval_ms` is `0`.
 pub fn tablespace_reconcile_interval() -> Option<std::time::Duration> {
     let raw = TABLESPACE_RECONCILE_INTERVAL_MS.get();
     if raw <= 0 {

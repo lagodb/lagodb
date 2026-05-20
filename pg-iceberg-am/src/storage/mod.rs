@@ -1,13 +1,15 @@
 pub mod local;
 pub mod object;
+pub mod transactional_artifacts;
 
 pub use local::LocalStorage;
 pub use object::ObjectStorage;
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergResult;
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::get_tablespace;
+use pg_lakebase_core::worker::storage as storage_worker;
 use pg_lakebase_storage::{StagingPathResolver, StorageClient};
 use pgrx::pg_sys;
 use std::ffi::CStr;
@@ -70,14 +72,16 @@ pub fn create_storage_context_with_wal(
     relation_needs_wal: bool,
 ) -> IcebergResult<StorageContext> {
     if get_tablespace(spc_oid)?.is_some() {
-        // Distributed tablespaces require a `StorageClient`; the storage
-        // worker's tablespace reconciler keeps the matching `StoreRegistry`
-        // entry up to date, so the *resolution* side is fine, but every code
-        // path that ends up here needs a connected client and should use
-        // `create_storage_context_with_client` instead.
-        return Err(IcebergError::NotImplemented(
-            "distributed storage requires a pg_lakebase_storage::StorageClient",
-        ));
+        let socket_path = storage_worker::resolved_socket_path();
+        let cache_dir = storage_worker::resolved_cache_dir();
+        let client = StorageClient::connect(&socket_path)?;
+        let resolver = StagingPathResolver::new(cache_dir);
+        return create_storage_context_with_client(
+            spc_oid,
+            relation_needs_wal,
+            client,
+            resolver,
+        );
     }
 
     create_local_storage_context(relation_needs_wal)

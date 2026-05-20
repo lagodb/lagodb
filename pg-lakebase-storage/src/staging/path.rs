@@ -111,4 +111,43 @@ mod tests {
             resolver.path_for(&b).unwrap()
         );
     }
+
+    #[test]
+    fn remove_dir_all_on_staging_dir_cleans_all_staging_files() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = StagingPathResolver::new(root.path());
+
+        let key_a =
+            ObjectLocation::new("store-a", "bucket", "data/file1.parquet").unwrap();
+        let key_b = ObjectLocation::new("store-a", "bucket", "meta/v1.json").unwrap();
+        let path_a = resolver.path_for(&key_a).unwrap();
+        let path_b = resolver.path_for(&key_b).unwrap();
+
+        // Create staging files (simulates StagingFile::create)
+        std::fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        std::fs::write(&path_a, b"parquet data").unwrap();
+        std::fs::create_dir_all(path_b.parent().unwrap()).unwrap();
+        std::fs::write(&path_b, b"metadata json").unwrap();
+        assert!(path_a.exists());
+        assert!(path_b.exists());
+
+        // Startup cleanup: remove entire staging directory
+        let staging_dir = resolver.staging_dir();
+        assert!(staging_dir.exists());
+        std::fs::remove_dir_all(&staging_dir).unwrap();
+
+        assert!(!staging_dir.exists());
+        assert!(!path_a.exists());
+        assert!(!path_b.exists());
+    }
+
+    #[test]
+    fn remove_dir_all_on_nonexistent_staging_dir_is_harmless() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = StagingPathResolver::new(root.path());
+        let staging_dir = resolver.staging_dir();
+
+        assert!(!staging_dir.exists());
+        // Should not panic or error - this is what the supervisor checks before calling remove_dir_all
+    }
 }

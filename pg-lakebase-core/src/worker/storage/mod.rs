@@ -23,6 +23,9 @@ pub(crate) mod logging;
 mod reconciler;
 mod supervisor;
 
+use std::ffi::CStr;
+use std::path::PathBuf;
+
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 
@@ -55,6 +58,43 @@ pub fn init_for_extension(library_name: &str) {
         .enable_spi_access()
         .set_restart_time(None)
         .load();
+}
+
+/// Resolved Unix socket path for the storage server, reading the GUC or
+/// falling back to `{DataDir}/pg_lakebase/storage.sock`.
+///
+/// # Safety
+///
+/// Must be called from a backend or bgworker process where `pg_sys::DataDir`
+/// is valid.
+pub fn resolved_socket_path() -> PathBuf {
+    if let Some(p) = gucs::socket_path() {
+        return PathBuf::from(p);
+    }
+    data_dir_base().join("storage.sock")
+}
+
+/// Resolved local cache directory for the storage server, reading the GUC or
+/// falling back to `{DataDir}/pg_lakebase/storage-cache`.
+///
+/// # Safety
+///
+/// Must be called from a backend or bgworker process where `pg_sys::DataDir`
+/// is valid.
+pub fn resolved_cache_dir() -> PathBuf {
+    if let Some(p) = gucs::cache_dir() {
+        return PathBuf::from(p);
+    }
+    data_dir_base().join("storage-cache")
+}
+
+fn data_dir_base() -> PathBuf {
+    let data_dir = unsafe {
+        CStr::from_ptr(pg_sys::DataDir)
+            .to_string_lossy()
+            .into_owned()
+    };
+    PathBuf::from(data_dir).join("pg_lakebase")
 }
 
 /// Background worker entry point called by PostgreSQL after forking.

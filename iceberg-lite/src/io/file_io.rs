@@ -37,6 +37,16 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     fn scheme(&self) -> &str;
     fn as_any(&self) -> &dyn Any;
 
+    /// Called after a file has been fully written and closed.
+    ///
+    /// Object-storage backends use this to upload the staging file to the
+    /// remote store. Local backends can treat it as a no-op. Errors are
+    /// propagated to the caller so that network or backend failures are
+    /// visible to the SQL statement that produced the file.
+    fn finalize_write(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Resolve a raw URI or path into a storage-relative key.
     ///
     /// Returns the byte offset into `uri` where the storage-relative key begins.
@@ -284,12 +294,229 @@ impl OutputFile {
 
     pub fn write(&self, bs: &[u8]) -> crate::Result<()> {
         use std::io::Write;
-        let mut writer = self.writer()?;
+        let mut writer = self.create_writer()?;
         writer.write_all(bs)?;
-        writer.close()
+        writer.finish()
     }
 
-    pub fn writer(&self) -> crate::Result<Box<dyn FileWrite>> {
+    /// Create a writer whose [`OutputFileWriter::finish`] method completes the
+    /// whole file lifecycle: local close first, then storage finalization.
+    pub fn create_writer(&self) -> crate::Result<OutputFileWriter> {
+        let writer = self.writer()?;
+        Ok(OutputFileWriter {
+            output_file: OutputFile {
+                op: Arc::clone(&self.op),
+                path: self.path.clone(),
+                relative_path_pos: self.relative_path_pos,
+            },
+            writer: Some(writer),
+            local_closed: false,
+            close_failed: false,
+            finished: false,
+        })
+    }
+
+    /// Notify the storage backend that the file has been fully written and
+    /// closed. Object-storage backends upload the staging file here; local
+    /// backends treat this as a no-op.
+    pub(crate) fn finalize_write(&self) -> crate::Result<()> {
+        self.op.finalize_write(&self.path[self.relative_path_pos..])
+    }
+
+    pub(crate) fn writer(&self) -> crate::Result<Box<dyn FileWrite>> {
         self.op.writer(&self.path[self.relative_path_pos..])
+    }
+}
+
+/// Writer for an [`OutputFile`] that makes finalization explicit and fallible.
+///
+/// Dropping this value only performs best-effort local close; it never calls
+/// storage finalization because object uploads must be reported through
+/// [`Self::finish`].
+pub struct OutputFileWriter {
+    output_file: OutputFile,
+    writer: Option<Box<dyn FileWrite>>,
+    local_closed: bool,
+    close_failed: bool,
+    finished: bool,
+}
+
+impl OutputFileWriter {
+    /// Close the local writer if it is still open. This does not finalize the
+    /// storage object and therefore does not upload object-storage staging files.
+    pub(crate) fn close_local(&mut self) -> crate::Result<()> {
+        if self.close_failed {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "output file writer close previously failed",
+            ));
+        }
+
+        if self.local_closed {
+            return Ok(());
+        }
+
+        let mut writer = self.writer.take().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "output file writer is missing its inner writer",
+            )
+        })?;
+        self.local_closed = true;
+        match writer.close() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.close_failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Finish the file and make it visible through the backing storage.
+    ///
+    /// This first closes the local writer, then invokes storage finalization.
+    /// Object-storage upload errors are returned to the caller from this method.
+    pub fn finish(&mut self) -> crate::Result<()> {
+        if self.finished {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "output file writer already finished",
+            ));
+        }
+
+        self.close_local()?;
+        self.output_file.finalize_write()?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl io::Write for OutputFileWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.writer.as_mut() {
+            Some(writer) => writer.write(buf),
+            None => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "output file writer is already closed",
+            )),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.writer.as_mut() {
+            Some(writer) => writer.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for OutputFileWriter {
+    fn drop(&mut self) {
+        if !self.local_closed {
+            if let Err(error) = self.close_local() {
+                log::error!(
+                    "failed to close output file writer during drop: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct FailingCloseStorage {
+        close_count: Arc<AtomicUsize>,
+        finalize_count: Arc<AtomicUsize>,
+    }
+
+    impl Storage for FailingCloseStorage {
+        fn delete(&self, _path: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn remove_dir_all(&self, _path: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn status(&self, _path: &str) -> Result<Option<FileMetadata>> {
+            Ok(None)
+        }
+
+        fn open_reader(&self, _path: &str) -> Result<OpenedFile> {
+            Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "test storage does not support reads",
+            ))
+        }
+
+        fn writer(&self, _path: &str) -> Result<Box<dyn FileWrite>> {
+            Ok(Box::new(FailingCloseWriter {
+                close_count: Arc::clone(&self.close_count),
+            }))
+        }
+
+        fn initialize(&mut self, _props: HashMap<String, String>) -> Result<()> {
+            Ok(())
+        }
+
+        fn scheme(&self) -> &str {
+            "failing-close"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn finalize_write(&self, _path: &str) -> Result<()> {
+            self.finalize_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct FailingCloseWriter {
+        close_count: Arc<AtomicUsize>,
+    }
+
+    impl io::Write for FailingCloseWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl FileWrite for FailingCloseWriter {
+        fn close(&mut self) -> Result<()> {
+            self.close_count.fetch_add(1, Ordering::SeqCst);
+            Err(Error::new(ErrorKind::Unexpected, "close failed"))
+        }
+    }
+
+    #[test]
+    fn finish_does_not_retry_or_finalize_after_close_failure() {
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let finalize_count = Arc::new(AtomicUsize::new(0));
+        let storage = Arc::new(FailingCloseStorage {
+            close_count: Arc::clone(&close_count),
+            finalize_count: Arc::clone(&finalize_count),
+        });
+        let output_file = FileIO::new(storage).new_output("data/file").unwrap();
+        let mut writer = output_file.create_writer().unwrap();
+
+        assert!(writer.finish().is_err());
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
+        assert_eq!(finalize_count.load(Ordering::SeqCst), 0);
+
+        assert!(writer.finish().is_err());
+        drop(writer);
+
+        assert_eq!(close_count.load(Ordering::SeqCst), 1);
+        assert_eq!(finalize_count.load(Ordering::SeqCst), 0);
     }
 }

@@ -137,13 +137,19 @@ unsafe extern "C-unwind" fn xact_callback(
             });
         }
         XACT_EVENT_PRE_COMMIT | XACT_EVENT_PARALLEL_PRE_COMMIT => {
-            RESOURCES.with(|res| {
-                for r in res.borrow().iter() {
-                    if r.nest_level() >= current_nest_level {
-                        r.on_pre_commit();
-                    }
+            // Snapshot the resource list before invoking callbacks to avoid
+            // holding the RefCell borrow during on_pre_commit(). A callback
+            // may register new resources (e.g. metadata commit writes files
+            // that register storage artifacts). New resources added during
+            // this loop will NOT receive on_pre_commit in this round, but
+            // they WILL receive the subsequent on_commit / on_abort.
+            let snapshot: Vec<Rc<dyn TransactionResource>> =
+                RESOURCES.with(|res| res.borrow().clone());
+            for r in &snapshot {
+                if r.nest_level() >= current_nest_level {
+                    r.on_pre_commit();
                 }
-            });
+            }
         }
         _ => {}
     }
@@ -163,23 +169,24 @@ unsafe extern "C-unwind" fn subxact_callback(
 
     match event {
         SUBXACT_EVENT_COMMIT_SUB => {
-            RESOURCES.with(|res| {
-                for r in res.borrow().iter() {
-                    r.on_commit_sub(current_nest_level);
-                    if r.nest_level() >= current_nest_level {
-                        // Promote to parent level
-                        r.set_nest_level(current_nest_level - 1);
-                    }
+            let snapshot: Vec<Rc<dyn TransactionResource>> =
+                RESOURCES.with(|res| res.borrow().clone());
+            for r in &snapshot {
+                r.on_commit_sub(current_nest_level);
+                if r.nest_level() >= current_nest_level {
+                    r.set_nest_level(current_nest_level - 1);
                 }
-            });
+            }
         }
         SUBXACT_EVENT_ABORT_SUB => {
+            let snapshot: Vec<Rc<dyn TransactionResource>> =
+                RESOURCES.with(|res| res.borrow().clone());
+            for r in &snapshot {
+                r.on_abort_sub(current_nest_level);
+            }
             RESOURCES.with(|res| {
-                let mut borrow = res.borrow_mut();
-                for r in borrow.iter() {
-                    r.on_abort_sub(current_nest_level);
-                }
-                borrow.retain(|r| r.nest_level() < current_nest_level);
+                res.borrow_mut()
+                    .retain(|r| r.nest_level() < current_nest_level);
             });
         }
         _ => {}

@@ -84,7 +84,7 @@ is `pg_iceberg_am`.
 `init_for_extension(library_name)` performs three operations:
 
 1. Register storage-worker GUCs.
-2. Return immediately if `pg_lakebase.storage_server.enabled = false`.
+2. Return immediately if `pg_lakebase.storage_server_enabled = false`.
 3. Register a static bgworker:
 
 ```rust
@@ -196,39 +196,39 @@ context:
 
 ### Postmaster GUCs (require PostgreSQL restart)
 
-- `pg_lakebase.storage_server.enabled`
-- `pg_lakebase.storage_server.socket_path`
-- `pg_lakebase.storage_server.cache_dir`
-- `pg_lakebase.storage_server.worker_threads`
-- `pg_lakebase.storage_server.log_channel_capacity`
-- `pg_lakebase.storage_server.max_connections`
-- `pg_lakebase.storage_server.max_read_size`
+- `pg_lakebase.storage_server_enabled`
+- `pg_lakebase.storage_server_socket_path`
+- `pg_lakebase.storage_server_cache_dir`
+- `pg_lakebase.storage_server_worker_threads`
+- `pg_lakebase.storage_server_log_channel_capacity`
+- `pg_lakebase.storage_server_max_connections`
+- `pg_lakebase.storage_server_max_read_size`
 
 ### Sighup GUCs (hot-reloadable via `pg_reload_conf()` or SIGHUP)
 
 Supervisor-owned:
 
-- `pg_lakebase.storage_server.shutdown_timeout_ms`
-- `pg_lakebase.storage_server.tablespace_reconcile_interval_ms` &mdash; how
+- `pg_lakebase.storage_server_shutdown_timeout_ms`
+- `pg_lakebase.storage_server_tablespace_reconcile_interval_ms` &mdash; how
   often the worker rescans `pg_tablespace` as a safety net behind syscache
   invalidation. Default `30000`. `0` disables the periodic resync; the
   reconciler then runs only on syscache wake-up.
 
 Cache runtime (pushed to `StorageRuntime::apply()` inside the storage server):
 
-- `pg_lakebase.storage_server.cache_touch_granularity_ms` &mdash; minimum
+- `pg_lakebase.storage_server_cache_touch_granularity_ms` &mdash; minimum
   interval between access-time updates. Default `60000`. `0` touches every access.
-- `pg_lakebase.storage_server.cache_max_mb` &mdash; capacity limit in MiB. `0` disables
+- `pg_lakebase.storage_server_cache_max_mb` &mdash; capacity limit in MiB. `0` disables
   capacity-based cleanup.
-- `pg_lakebase.storage_server.cache_cleanup_start_percent` &mdash; usage % that
+- `pg_lakebase.storage_server_cache_cleanup_start_percent` &mdash; usage % that
   triggers eviction. Default `90`.
-- `pg_lakebase.storage_server.cache_cleanup_target_percent` &mdash; target usage %
+- `pg_lakebase.storage_server_cache_cleanup_target_percent` &mdash; target usage %
   after eviction. Default `80`.
-- `pg_lakebase.storage_server.cache_cleanup_interval_ms` &mdash; periodic cleanup
+- `pg_lakebase.storage_server_cache_cleanup_interval_ms` &mdash; periodic cleanup
   interval. Default `60000`. `0` disables periodic cleanup.
-- `pg_lakebase.storage_server.cache_cleanup_batch_items` &mdash; max items evicted
+- `pg_lakebase.storage_server_cache_cleanup_batch_items` &mdash; max items evicted
   per batch. Default `256`.
-- `pg_lakebase.storage_server.cache_cleanup_batch_mb` &mdash; max MiB evicted
+- `pg_lakebase.storage_server_cache_cleanup_batch_mb` &mdash; max MiB evicted
   per batch. Default `64`.
 
 **Cross-field constraint:** `cleanup_start_percent` must be &ge;
@@ -382,7 +382,7 @@ peer closes, their own drain timeout fires, or the Tokio runtime is shut down.
 On SIGTERM the supervisor:
 
 1. Cancels the token.
-2. Treats `pg_lakebase.storage_server.shutdown_timeout_ms` as a single total
+2. Treats `pg_lakebase.storage_server_shutdown_timeout_ms` as a single total
    stop budget. The supervisor waits for the server task to finish within that
    deadline, draining logs while it waits.
 3. Whatever budget remains is then passed to `runtime.shutdown_timeout(...)` as

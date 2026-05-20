@@ -280,12 +280,8 @@ impl ManifestListWriter {
 
     /// Write the manifest list to the output file.
     pub fn close(self) -> Result<()> {
-        use std::io::Write;
         let data = self.avro_writer.into_inner()?;
-        let mut writer = self.output_file.writer()?;
-        writer.write_all(&data)?;
-        writer.close()?;
-        Ok(())
+        self.output_file.write(&data)
     }
 
     /// Assign sequence numbers to manifest if they are unassigned

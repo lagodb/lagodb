@@ -1,0 +1,206 @@
+-- object_artifact_cleanup.sql
+-- Tests for distributed (object-storage) artifact lifecycle:
+--   1. INSERT + COMMIT → objects exist in MinIO, staging files cleaned.
+--   2. INSERT + ROLLBACK → uploaded objects deleted from MinIO, staging cleaned.
+--   3. Savepoint rollback on distributed table → partial cleanup correct.
+--
+-- Prerequisites: docker, curl (>=7.75 for --aws-sigv4), python3
+--
+-- The test starts a MinIO Docker container, creates a distributed tablespace
+-- pointing at it, then exercises transactional artifact cleanup end-to-end.
+
+-- ============================================================
+-- A. MinIO Infrastructure Setup
+-- ============================================================
+
+-- A1. Clean up any leftover container from a previous failed run
+\! docker rm -f pgregress_minio >/dev/null 2>&1; echo "cleanup: done"
+
+-- A2. Start MinIO
+\! docker run -d --name pgregress_minio -p 19000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio:RELEASE.2024-01-16T16-07-38Z server /data >/dev/null 2>&1 && echo "minio: started" || echo "minio: FAILED - is Docker running?"
+
+-- A3. Wait for MinIO to be ready (up to 30s)
+\! for i in $(seq 1 30); do curl -sf http://127.0.0.1:19000/minio/health/ready >/dev/null 2>&1 && echo "minio: ready" && exit 0; sleep 1; done; echo "minio: TIMEOUT"
+
+-- A4. Create test bucket
+\! S=$(curl -s -o /dev/null -w "%{http_code}" --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin -X PUT http://127.0.0.1:19000/test-bucket 2>/dev/null); [ "$S" = "200" -o "$S" = "409" ] && echo "bucket: ready" || echo "bucket: ERROR $S"
+
+-- ============================================================
+-- B. PostgreSQL + Distributed Tablespace Setup
+-- ============================================================
+
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION pg_iceberg_am;
+
+-- Verify bgworker is running
+SELECT count(*) AS bgworker_running
+FROM pg_stat_activity
+WHERE backend_type = 'pg-lakebase-storage';
+
+-- Create local directory (required by PostgreSQL even for distributed tablespaces)
+\! mkdir -p /tmp/pg_regress_obj_cleanup && rm -rf /tmp/pg_regress_obj_cleanup/*
+
+SET client_min_messages = warning;
+DROP TABLESPACE IF EXISTS regress_obj_cleanup;
+RESET client_min_messages;
+
+CREATE TABLESPACE regress_obj_cleanup LOCATION '/tmp/pg_regress_obj_cleanup' WITH (
+    protocol = 's3',
+    bucket = 'test-bucket',
+    region = 'us-east-1',
+    endpoint = 'http://127.0.0.1:19000',
+    access_key_id = 'minioadmin',
+    secret_access_key = 'minioadmin',
+    allow_http = true
+);
+
+-- Speed up reconcile for test: use ALTER SYSTEM to shorten interval
+ALTER SYSTEM SET pg_lakebase.storage_server_tablespace_reconcile_interval_ms = 500;
+SELECT pg_reload_conf();
+SELECT pg_sleep(2);
+
+SELECT count(*) AS bgworker_after_tablespace
+FROM pg_stat_activity
+WHERE backend_type = 'pg-lakebase-storage';
+
+-- Save staging base path for later filesystem checks
+COPY (SELECT current_setting('data_directory') || '/pg_lakebase/storage-cache/staging/') TO '/tmp/_regress_staging_base.txt';
+
+-- ============================================================
+-- C. Test 1: INSERT + COMMIT → objects exist, staging clean
+-- ============================================================
+
+CREATE TABLE obj_commit_test (id integer) USING iceberg TABLESPACE regress_obj_cleanup;
+
+-- Capture the S3 key prefix for this table: <spc_oid>/<db_oid>/<relfilenode>_iceberg/
+COPY (
+    SELECT t.oid::text || '/' || d.oid::text || '/' || c.relfilenode::text || '_iceberg/'
+    FROM pg_tablespace t, pg_database d, pg_class c
+    WHERE t.spcname = 'regress_obj_cleanup'
+      AND d.datname = current_database()
+      AND c.relname = 'obj_commit_test'
+) TO '/tmp/_regress_commit_prefix.txt';
+
+INSERT INTO obj_commit_test SELECT g FROM generate_series(1, 10) AS g;
+
+-- Verify data is readable (full round-trip through MinIO)
+SELECT count(*) AS commit_row_count FROM obj_commit_test;
+
+-- Verify parquet data files exist in MinIO after commit
+\! P=$(tr -d '\n' < /tmp/_regress_commit_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print('parquet_after_commit: ' + ('true' if any('.parquet' in k for k in ks) else 'false'))" 2>/dev/null || echo "parquet_after_commit: error"
+
+-- Verify metadata files exist in MinIO
+\! P=$(tr -d '\n' < /tmp/_regress_commit_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print('metadata_after_commit: ' + ('true' if any('.metadata.json' in k for k in ks) else 'false'))" 2>/dev/null || echo "metadata_after_commit: error"
+
+-- Verify staging directory is clean after commit
+\! find "$(tr -d '\n' < /tmp/_regress_staging_base.txt)" -name "pgl-staging.*" 2>/dev/null | wc -l | tr -d ' '
+
+-- ============================================================
+-- D. Test 2: INSERT + ROLLBACK → uploaded objects deleted, staging clean
+-- ============================================================
+
+CREATE TABLE obj_abort_test (id integer) USING iceberg TABLESPACE regress_obj_cleanup;
+
+COPY (
+    SELECT t.oid::text || '/' || d.oid::text || '/' || c.relfilenode::text || '_iceberg/'
+    FROM pg_tablespace t, pg_database d, pg_class c
+    WHERE t.spcname = 'regress_obj_cleanup'
+      AND d.datname = current_database()
+      AND c.relname = 'obj_abort_test'
+) TO '/tmp/_regress_abort_prefix.txt';
+
+-- Save object count before INSERT (baseline = initial metadata from CREATE TABLE)
+\! P=$(tr -d '\n' < /tmp/_regress_abort_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print(len(ks))" 2>/dev/null > /tmp/_count_before.txt || echo "0" > /tmp/_count_before.txt; cat /tmp/_count_before.txt
+
+BEGIN;
+INSERT INTO obj_abort_test SELECT g FROM generate_series(1, 10) AS g;
+ROLLBACK;
+
+-- Verify zero rows after abort
+SELECT count(*) AS abort_row_count FROM obj_abort_test;
+
+-- Verify NO parquet data files remain after abort (uploaded objects must be deleted)
+\! P=$(tr -d '\n' < /tmp/_regress_abort_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; c=len([k for k in ks if '.parquet' in k]); print('parquet_after_abort: ' + str(c))" 2>/dev/null || echo "parquet_after_abort: error"
+
+-- Verify object count returned to baseline (abort deleted uploaded objects)
+\! P=$(tr -d '\n' < /tmp/_regress_abort_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print(len(ks))" 2>/dev/null > /tmp/_count_after.txt || echo "0" > /tmp/_count_after.txt; cat /tmp/_count_after.txt
+
+\! diff -q /tmp/_count_before.txt /tmp/_count_after.txt >/dev/null 2>&1 && echo "abort_object_cleanup: objects_restored_to_baseline" || echo "abort_object_cleanup: OBJECTS_LEAKED"
+
+-- Verify staging is clean after abort
+\! find "$(tr -d '\n' < /tmp/_regress_staging_base.txt)" -name "pgl-staging.*" 2>/dev/null | wc -l | tr -d ' '
+
+-- ============================================================
+-- E. Test 3: Savepoint rollback on distributed table
+-- ============================================================
+
+CREATE TABLE obj_savepoint_test (id integer) USING iceberg TABLESPACE regress_obj_cleanup;
+
+BEGIN;
+INSERT INTO obj_savepoint_test VALUES (1), (2), (3);
+SAVEPOINT sp1;
+INSERT INTO obj_savepoint_test VALUES (10), (20), (30);
+ROLLBACK TO SAVEPOINT sp1;
+COMMIT;
+
+-- Only outer rows survive
+SELECT count(*) AS savepoint_row_count FROM obj_savepoint_test;
+SELECT * FROM obj_savepoint_test ORDER BY id;
+
+-- Staging clean after commit
+\! find "$(tr -d '\n' < /tmp/_regress_staging_base.txt)" -name "pgl-staging.*" 2>/dev/null | wc -l | tr -d ' '
+
+-- ============================================================
+-- F. Test 4: Savepoint release + outer abort on distributed table
+-- ============================================================
+
+CREATE TABLE obj_release_abort_test (id integer) USING iceberg TABLESPACE regress_obj_cleanup;
+
+COPY (
+    SELECT t.oid::text || '/' || d.oid::text || '/' || c.relfilenode::text || '_iceberg/'
+    FROM pg_tablespace t, pg_database d, pg_class c
+    WHERE t.spcname = 'regress_obj_cleanup'
+      AND d.datname = current_database()
+      AND c.relname = 'obj_release_abort_test'
+) TO '/tmp/_regress_release_prefix.txt';
+
+-- Save baseline
+\! P=$(tr -d '\n' < /tmp/_regress_release_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print(len(ks))" 2>/dev/null > /tmp/_count_release_before.txt || echo "0" > /tmp/_count_release_before.txt
+
+BEGIN;
+SAVEPOINT sp2;
+INSERT INTO obj_release_abort_test VALUES (100), (200);
+RELEASE SAVEPOINT sp2;
+ROLLBACK;
+
+-- Zero rows: outer abort cleaned everything including promoted sub-xact artifacts
+SELECT count(*) AS release_abort_row_count FROM obj_release_abort_test;
+
+-- Objects restored to baseline
+\! P=$(tr -d '\n' < /tmp/_regress_release_prefix.txt); curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin "http://127.0.0.1:19000/test-bucket?list-type=2&prefix=$P" > /tmp/_s3_resp.xml 2>/dev/null; python3 -c "import xml.etree.ElementTree as ET; r=ET.parse('/tmp/_s3_resp.xml').getroot(); ns='{http://s3.amazonaws.com/doc/2006-03-01/}'; ks=[k.text for k in r.findall(f'.//{ns}Key')]; print(len(ks))" 2>/dev/null > /tmp/_count_release_after.txt || echo "0" > /tmp/_count_release_after.txt
+
+\! diff -q /tmp/_count_release_before.txt /tmp/_count_release_after.txt >/dev/null 2>&1 && echo "release_abort_cleanup: objects_restored_to_baseline" || echo "release_abort_cleanup: OBJECTS_LEAKED"
+
+-- Staging clean
+\! find "$(tr -d '\n' < /tmp/_regress_staging_base.txt)" -name "pgl-staging.*" 2>/dev/null | wc -l | tr -d ' '
+
+-- ============================================================
+-- G. Cleanup
+-- ============================================================
+
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS obj_commit_test;
+DROP TABLE IF EXISTS obj_abort_test;
+DROP TABLE IF EXISTS obj_savepoint_test;
+DROP TABLE IF EXISTS obj_release_abort_test;
+DROP TABLESPACE IF EXISTS regress_obj_cleanup;
+RESET client_min_messages;
+
+ALTER SYSTEM RESET pg_lakebase.storage_server_tablespace_reconcile_interval_ms;
+SELECT pg_reload_conf();
+
+-- Stop MinIO
+\! docker rm -f pgregress_minio >/dev/null 2>&1; echo "minio: stopped"
+
+-- Clean up temp files
+\! rm -f /tmp/_regress_*.txt /tmp/_s3_resp.xml /tmp/_count_*.txt

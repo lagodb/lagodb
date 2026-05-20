@@ -134,6 +134,11 @@ impl Storage for LocalStorage {
         }
         // Create writer with WAL support if enabled
         let writer = PgFileWrite::open_with_wal(path, self.needs_wal)?;
+
+        crate::storage::transactional_artifacts::register_local_file_created(
+            std::path::PathBuf::from(path),
+        );
+
         Ok(Box::new(writer))
     }
 

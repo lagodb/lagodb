@@ -61,7 +61,8 @@ impl StorageWorkerSupervisor {
     ///
     /// This method does not return until the bgworker is ready to exit.
     pub fn run(mut self) {
-        BackgroundWorker::connect_worker_to_spi(None, None);
+        let db = super::gucs::worker_database();
+        BackgroundWorker::connect_worker_to_spi(Some(&db), None);
 
         let runtime = self.build_runtime();
         let registry = StoreRegistry::new();
@@ -72,6 +73,13 @@ impl StorageWorkerSupervisor {
         // reconcile so the first main-loop iteration does not redundantly
         // re-scan the catalog we just read.
         let _ = catalog::take_dirty();
+
+        // Remove leftover staging files from a previous crash or unclean
+        // shutdown. The staging directory is owned by the database side
+        // (not the storage server), so cleanup happens here before the
+        // server starts accepting requests. There are no active
+        // transactions at this point, so no staging file is in use.
+        Self::cleanup_staging_dir(&self.config.startup.cache_dir);
 
         let storage_runtime = self.storage_runtime_or_exit();
         let storage_runtime_control = storage_runtime.clone();
@@ -97,6 +105,35 @@ impl StorageWorkerSupervisor {
             &mut server_handle,
             runtime_state.config.shutdown_timeout,
         );
+    }
+
+    fn cleanup_staging_dir(cache_dir: &std::path::Path) {
+        let staging_dir =
+            pg_lakebase_storage::StagingPathResolver::new(cache_dir.to_path_buf())
+                .staging_dir();
+        if staging_dir.exists() {
+            match std::fs::remove_dir_all(&staging_dir) {
+                Ok(()) => {
+                    logging::emit_pg_log(
+                        pg_sys::INFO as i32,
+                        &format!(
+                            "cleaned up staging directory: {}",
+                            staging_dir.display()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    logging::emit_pg_log(
+                        pg_sys::WARNING as i32,
+                        &format!(
+                            "failed to clean staging directory {}: {}",
+                            staging_dir.display(),
+                            e
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     fn build_runtime(&self) -> tokio::runtime::Runtime {

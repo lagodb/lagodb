@@ -1,7 +1,7 @@
-use crate::access::pending_deletes::register_drop_table_pending_delete;
 use crate::catalog::generate_table_location;
 use crate::catalog::is_iceberg_table;
 use crate::storage::create_storage_context;
+use crate::storage::transactional_artifacts::register_table_dir_dropped;
 use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
 use pg_lakebase_core::hooks::{
     self, ObjectAccessEvent, ObjectAccessHook, ObjectAccessHookError,
@@ -74,7 +74,7 @@ fn handle_drop_relation(
         generate_table_location(rel, &ctx.base_path, ctx.is_distributed);
 
     // Register pending delete for commit cleanup
-    register_drop_table_pending_delete(table_location, ctx.file_io);
+    register_table_dir_dropped(table_location, ctx.file_io);
 
     Ok(())
 }
