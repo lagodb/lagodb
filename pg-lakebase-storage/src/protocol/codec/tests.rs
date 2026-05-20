@@ -53,10 +53,10 @@ fn decode_rejects_previous_protocol_version() {
 }
 
 #[test]
-fn decode_rejects_stage_create_payload_length_claim_beyond_frame() {
+fn decode_rejects_upload_payload_length_claim_beyond_frame() {
     let mut frame = encode_request(&WireRequest {
         request_id: 1,
-        payload: WireRequestPayload::StageCreate {
+        payload: WireRequestPayload::Upload {
             store_id: "default".to_string(),
             bucket: "bucket".to_string(),
             key: "file".to_string(),
@@ -108,17 +108,7 @@ fn request_payloads_roundtrip() {
         WireRequestPayload::Close {
             handle: FileHandle(7),
         },
-        WireRequestPayload::StageCreate {
-            store_id: "default".to_string(),
-            bucket: "bucket".to_string(),
-            key: "upload.txt".to_string(),
-        },
-        WireRequestPayload::Commit {
-            store_id: "default".to_string(),
-            bucket: "bucket".to_string(),
-            key: "upload.txt".to_string(),
-        },
-        WireRequestPayload::Abort {
+        WireRequestPayload::Upload {
             store_id: "default".to_string(),
             bucket: "bucket".to_string(),
             key: "upload.txt".to_string(),
@@ -200,15 +190,10 @@ fn response_payloads_roundtrip() {
             eof: true,
         },
         WireResponsePayload::Close,
-        WireResponsePayload::StageCreate {
-            staging_path: "/tmp/cache/staging/default/bucket/pgl-staging.file"
-                .to_string(),
-        },
-        WireResponsePayload::Commit {
+        WireResponsePayload::Upload {
             size: 42,
             etag: Some("abc123".to_string()),
         },
-        WireResponsePayload::Abort,
         WireResponsePayload::RegisterStore { replaced: true },
         WireResponsePayload::UnregisterStore { removed: true },
         WireResponsePayload::PurgeStoreCache,

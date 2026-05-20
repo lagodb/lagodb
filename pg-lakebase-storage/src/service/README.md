@@ -3,7 +3,7 @@ Service Layer
 
 The service layer is the central request dispatcher. It maps inbound wire
 commands to typed outputs, wiring together the backend registry, cache,
-staging area, and per-connection handle tables.
+staging uploader, and per-connection handle tables.
 
 
 1  StorageService
@@ -14,7 +14,7 @@ staging area, and per-connection handle tables.
 ```
   registry        StoreRegistry         named backend resolution
   cache           Arc<CacheManager<I>>  residency, reads, eviction
-  staging         Arc<StagingArea>      client-writable staging files
+  staging_uploader Arc<StagingUploader> caller-owned staging upload path
   list_sessions   Arc<ListSessionTable> server-side list continuation
   config          StorageServiceConfig  limits (max_read_size, etc.)
 ```
@@ -36,9 +36,7 @@ Every inbound wire verb is parsed into a `StorageCommand` variant.
   Open               handle_open       open.rs
   Read               handle_read       range_reader.rs
   Close              handle_close      mod.rs
-  StageCreate        handle_stage_create   mod.rs
-  Commit             handle_commit     mod.rs
-  Abort              handle_abort      mod.rs
+  Upload             handle_upload     mod.rs
   RegisterStore      handle_register_store     mod.rs
   UnregisterStore    handle_unregister_store   mod.rs
   PurgeStoreCache    handle_purge_store_cache  mod.rs
@@ -103,12 +101,14 @@ Length clamping: every read is capped at `max_read_size()`.
 Staging is identity-keyed (`store_id`, `bucket`, `key`), not
 handle-based:
 
-- **StageCreate** — resolves the store (fail-fast), creates an empty
-  staging file, returns the absolute path for client-side writes.
-- **Commit** — re-resolves the store (registry may have changed),
-  uploads via `put_from_file`, returns size and etag. Does not touch
-  the cache — the caller must invalidate if needed.
-- **Abort** — unlinks the staging file. Idempotent.
+- **Upload** — re-resolves the store (registry may have changed),
+  uploads the caller-created staging file via `put_from_file`, and
+  returns size and etag. It does not touch the cache — the caller must
+  invalidate if needed.
+
+The server has no stage-create or abort wire verb. The database creates
+and removes staging files directly through the filesystem using
+`StagingFile` / `StagingPathResolver`.
 
 
 6  List Sessions

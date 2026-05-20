@@ -33,7 +33,7 @@ pub use cache::{
     PhysicalCacheId, PhysicalCacheStat, PhysicalCacheUsage, RedbCacheIndex,
 };
 pub use client::{
-    CommitInfo, ListIter, ListPage, SeekFrom, StagingFile, StorageClient, StorageFile,
+    ListIter, ListPage, SeekFrom, StagingFile, StorageClient, StorageFile, UploadInfo,
 };
 pub use config::{
     CacheCleanupConfig, CacheRuntimeConfig, DEFAULT_CACHE_CLEANUP_BATCH_BYTES,
@@ -60,5 +60,5 @@ pub use request::{
 pub use server::StorageServer;
 pub use service::StorageService;
 pub use session::StorageContext;
-pub use staging::{StagingArea, StagingPathResolver};
+pub use staging::StagingPathResolver;
 pub use tokio_util::sync::CancellationToken;

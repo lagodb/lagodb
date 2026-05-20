@@ -59,13 +59,15 @@ ordering assumptions.
      1   Open                     request / response
      2   Read                     request / response
      3   Close                    request / response
-     4   StageCreate              request / response
-     5   Commit                   request / response
-     6   Abort                    request / response
-     7   RegisterStore            request / response
-     8   UnregisterStore          request / response
-     9   PurgeStoreCache          request / response
-    10   InvalidateObjectCache    request / response
+     4   Upload                   request / response
+     5   RegisterStore            request / response
+     6   UnregisterStore          request / response
+     7   PurgeStoreCache          request / response
+     8   InvalidateObjectCache    request / response
+     9   Delete                   request / response
+    10   DeletePrefix             request / response
+    11   List                     request / response
+    12   Head                     request / response
   1000   Error                    response only
 ```
 

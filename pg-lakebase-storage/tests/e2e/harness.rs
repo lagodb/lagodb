@@ -10,7 +10,7 @@
 //!
 //! [`CacheIndexKind`] is an explicit harness dimension. Fast broad-path tests use
 //! [`CacheIndexKind::InMemory`], while production-wiring tests use [`CacheIndexKind::Redb`] for
-//! read, staging/commit, delete, concurrent access, and restart recovery.
+//! read, staging/upload, delete, concurrent access, and restart recovery.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -205,6 +205,10 @@ impl ServerFixture {
         &self.workspace.socket_path
     }
 
+    pub fn cache_dir(&self) -> &Path {
+        &self.workspace.cache_dir
+    }
+
     pub fn connect(&self) -> StorageClient {
         StorageClient::connect(&self.workspace.socket_path)
             .expect("failed to connect client")
@@ -326,6 +330,11 @@ impl E2eHarness {
     /// Socket path (for concurrent tests that open many connections).
     pub fn socket_path(&self) -> &Path {
         self.server.socket_path()
+    }
+
+    /// Cache directory (for constructing a [`StagingPathResolver`] in tests).
+    pub fn cache_dir(&self) -> &Path {
+        self.server.cache_dir()
     }
 
     /// Uploads an object directly to MinIO (bypasses the storage server).

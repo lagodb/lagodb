@@ -7,17 +7,16 @@ pub(crate) const KIND_RESPONSE: u8 = 2;
 
 /// Stable opcode embedded after the frame header; responses reuse request codes plus [`WireOp::Error`].
 ///
-/// Staging has a dedicated `StageCreate` opcode. `Commit` and `Abort` do **not** carry a server-side
-/// file handle: their requests carry `(store_id, bucket, key)` so they can be issued from a
-/// different connection than the `StageCreate` that produced the staging file.
+/// Staging is not represented on the wire. The database (caller) creates the staging file itself
+/// through the filesystem (using [`crate::staging::StagingPathResolver`] to derive the path),
+/// and `Upload` is the only staging-related verb — its request carries `(store_id, bucket, key)`
+/// so it can be issued from a different connection than the one that wrote the bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WireOp {
     Open,
     Read,
     Close,
-    StageCreate,
-    Commit,
-    Abort,
+    Upload,
     RegisterStore,
     UnregisterStore,
     PurgeStoreCache,
@@ -35,17 +34,15 @@ impl WireOp {
             Self::Open => 1,
             Self::Read => 2,
             Self::Close => 3,
-            Self::StageCreate => 4,
-            Self::Commit => 5,
-            Self::Abort => 6,
-            Self::RegisterStore => 7,
-            Self::UnregisterStore => 8,
-            Self::PurgeStoreCache => 9,
-            Self::InvalidateObjectCache => 10,
-            Self::Delete => 11,
-            Self::DeletePrefix => 12,
-            Self::List => 13,
-            Self::Head => 14,
+            Self::Upload => 4,
+            Self::RegisterStore => 5,
+            Self::UnregisterStore => 6,
+            Self::PurgeStoreCache => 7,
+            Self::InvalidateObjectCache => 8,
+            Self::Delete => 9,
+            Self::DeletePrefix => 10,
+            Self::List => 11,
+            Self::Head => 12,
             Self::Error => 1000,
         }
     }
@@ -55,17 +52,15 @@ impl WireOp {
             1 => Ok(Self::Open),
             2 => Ok(Self::Read),
             3 => Ok(Self::Close),
-            4 => Ok(Self::StageCreate),
-            5 => Ok(Self::Commit),
-            6 => Ok(Self::Abort),
-            7 => Ok(Self::RegisterStore),
-            8 => Ok(Self::UnregisterStore),
-            9 => Ok(Self::PurgeStoreCache),
-            10 => Ok(Self::InvalidateObjectCache),
-            11 => Ok(Self::Delete),
-            12 => Ok(Self::DeletePrefix),
-            13 => Ok(Self::List),
-            14 => Ok(Self::Head),
+            4 => Ok(Self::Upload),
+            5 => Ok(Self::RegisterStore),
+            6 => Ok(Self::UnregisterStore),
+            7 => Ok(Self::PurgeStoreCache),
+            8 => Ok(Self::InvalidateObjectCache),
+            9 => Ok(Self::Delete),
+            10 => Ok(Self::DeletePrefix),
+            11 => Ok(Self::List),
+            12 => Ok(Self::Head),
             _ => Err(StorageError::protocol(format!("unknown request op {code}"))),
         }
     }
@@ -75,17 +70,15 @@ impl WireOp {
             1 => Ok(Self::Open),
             2 => Ok(Self::Read),
             3 => Ok(Self::Close),
-            4 => Ok(Self::StageCreate),
-            5 => Ok(Self::Commit),
-            6 => Ok(Self::Abort),
-            7 => Ok(Self::RegisterStore),
-            8 => Ok(Self::UnregisterStore),
-            9 => Ok(Self::PurgeStoreCache),
-            10 => Ok(Self::InvalidateObjectCache),
-            11 => Ok(Self::Delete),
-            12 => Ok(Self::DeletePrefix),
-            13 => Ok(Self::List),
-            14 => Ok(Self::Head),
+            4 => Ok(Self::Upload),
+            5 => Ok(Self::RegisterStore),
+            6 => Ok(Self::UnregisterStore),
+            7 => Ok(Self::PurgeStoreCache),
+            8 => Ok(Self::InvalidateObjectCache),
+            9 => Ok(Self::Delete),
+            10 => Ok(Self::DeletePrefix),
+            11 => Ok(Self::List),
+            12 => Ok(Self::Head),
             1000 => Ok(Self::Error),
             _ => Err(StorageError::protocol(format!(
                 "unknown response op {code}"

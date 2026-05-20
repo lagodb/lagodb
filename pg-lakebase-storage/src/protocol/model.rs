@@ -40,10 +40,10 @@ pub struct WireListEntry {
 
 /// Client→server operation body after decode ([`crate::protocol::decode_request`]).
 ///
-/// Staging commit / abort intentionally carry `(store_id, bucket, key)` instead of a
-/// [`FileHandle`]: the server holds no per-staging-file state, so commit / abort are addressable
-/// by identity and can originate from a different connection than the `StageCreate` that created
-/// the staging file.
+/// Staging is invisible on the wire: the database (caller) writes its own files into the staging
+/// tree using [`crate::staging::StagingPathResolver`]. `Upload` is the only staging-related verb
+/// the server exposes; it carries `(store_id, bucket, key)` instead of a [`FileHandle`] so it can
+/// originate from a different connection than the one that wrote the bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WireRequestPayload {
     Open {
@@ -65,17 +65,7 @@ pub enum WireRequestPayload {
     Close {
         handle: FileHandle,
     },
-    StageCreate {
-        store_id: String,
-        bucket: String,
-        key: String,
-    },
-    Commit {
-        store_id: String,
-        bucket: String,
-        key: String,
-    },
-    Abort {
+    Upload {
         store_id: String,
         bucket: String,
         key: String,
@@ -144,20 +134,15 @@ pub enum WireResponsePayload {
         eof: bool,
     },
     Close,
-    /// Reply to `StageCreate`: the server returns the absolute path of a freshly created staging
-    /// file. The client opens that path with its own filesystem APIs to append the staged bytes.
-    StageCreate {
-        staging_path: String,
-    },
-    /// Reply to `Commit`: the upload size and backend etag (when the backend reported one). A
-    /// successful `Commit` does **not** touch cache state; if a cached entry for the same key
+    /// Reply to `Upload`: the upload size and backend etag (when the backend reported one). A
+    /// successful `Upload` does **not** touch cache state; if a cached entry for the same key
     /// already exists, callers who want to observe the newly uploaded bytes must follow up with
-    /// `InvalidateObjectCache`.
-    Commit {
+    /// `InvalidateObjectCache`. The staging file is left on disk; the database (caller) owns
+    /// staging-directory cleanup.
+    Upload {
         size: u64,
         etag: Option<String>,
     },
-    Abort,
     RegisterStore {
         replaced: bool,
     },

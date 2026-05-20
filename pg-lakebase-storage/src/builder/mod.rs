@@ -15,7 +15,7 @@
 //! `RegisterStore` protocol message), so the builder does not accept backend configuration.
 //!
 //! [`Self::bind`] / [`Self::bind_with_index`] perform the async startup sequence: directory
-//! creation, cache recovery, optional startup cleanup, staging wipe, and finally socket bind.
+//! creation, cache recovery, optional startup cleanup, and finally socket bind.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +33,7 @@ use crate::request::{
 };
 use crate::server::StorageServer;
 use crate::service::StorageService;
-use crate::staging::StagingArea;
+use crate::staging::StagingUploader;
 
 #[cfg(test)]
 mod tests;
@@ -198,7 +198,7 @@ impl StorageServerBuilder {
     /// Binds the server with the default [`RedbCacheIndex`].
     ///
     /// Performs the full startup sequence: directory creation → cache recovery → optional
-    /// startup cleanup → staging wipe → socket bind.
+    /// startup cleanup → socket bind.
     pub async fn bind(self) -> StorageResult<StorageServer<RedbCacheIndex>> {
         let Self {
             socket_path,
@@ -320,15 +320,12 @@ where
     let cache = Arc::new(cache_manager);
     cache.spawn_large_fill_reaper();
 
-    let staging = Arc::new(StagingArea::new(cache_dir));
-    staging.prepare_dirs().await?;
-    staging.wipe().await?;
-    info!(staging_dir = %staging.paths().staging_dir().display(), "staging directory wiped on startup");
+    let staging_uploader = Arc::new(StagingUploader::new(cache_dir));
 
-    let service = Arc::new(StorageService::with_staging(
+    let service = Arc::new(StorageService::with_staging_uploader(
         registry,
         cache.clone(),
-        staging,
+        staging_uploader,
         service_config,
     ));
     let server = StorageServer::bind_with_config_and_hooks(

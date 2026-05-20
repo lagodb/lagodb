@@ -24,8 +24,9 @@ design optimizes for a narrow workload:
   given `(bucket, key)` pair always returns the same bytes and the same
   `(size, etag)`.
 - Reads are sequential or range-sequential within a single object.
-- Writes go through an explicit stage→commit flow driven by database
-  transaction boundaries.
+- Writes go through an explicit stage→upload flow: the database creates a
+  local staging file, writes bytes, and then asks the server to upload the
+  closed file to the backend.
 - The caller (database engine) knows when cached content is stale and
   explicitly invalidates.
 
@@ -107,19 +108,22 @@ so non-Rust clients and cross-endian hosts can share the protocol.
 -------------------------------------------------
 
 The staging subsystem is designed for database transaction workflows where a
-write may happen hours before a commit. Instead of streaming bytes through
-the server, the server creates an empty local file and returns its path. The
-client writes bytes with standard filesystem calls. At commit time, the
-server reads the file and uploads it to the backend.
+write may be produced inside a long-running transaction, but object upload
+should happen promptly after the local file is closed. Instead of streaming
+bytes through the server, the database creates an empty local staging file
+using `StagingFile::create`, writes bytes with standard filesystem calls, and
+then asks the server to `Upload` the closed file to the backend.
 
 This design means:
 
-- The server holds no per-staging-file state between `StageCreate` and
-  `Commit`/`Abort`.
-- A database transaction can write from one connection, drop it, and
-  commit from a different connection hours later.
-- Orphan staging files from crashed clients are cleaned up by a single
-  mechanism: startup wipe of the staging directory.
+- The server holds no per-staging-file state between local file creation and
+  `Upload`.
+- A database transaction can write from one connection, drop it, and upload
+  from a different connection.
+- The database (caller) owns the staging directory's lifecycle. Cleanup —
+  after upload, on transaction abort before upload, and on crash recovery —
+  is performed by the database directly through the filesystem. The server
+  has no stage-create verb, no abort verb, and no startup wipe.
 
 See `src/staging/README.md` for the full staging lifecycle.
 
@@ -212,41 +216,52 @@ reads zero-KV-operation after the initial open.
 =======================
 
 ```
-  StageCreate(store_id, bucket, key)
+  StagingFile::create(store_id, bucket, key)
    |
-   +--- server creates empty file under staging/
-   |    returns absolute path to client
+   +--- caller creates empty file under staging/
+   |    using StagingPathResolver-derived path
    |
    v
   Client writes bytes with local filesystem calls (append-only)
    |
-   +--- hours may pass (database transaction in progress)
+   +--- close local staging file
    |
    v
-  Commit(store_id, bucket, key)           or    Abort(store_id, bucket, key)
-   |                                              |
-   +--- server reads staging file                 +--- server unlinks staging file
-   |    uploads to backend via put_from_file              (idempotent)
-   |    unlinks staging file on success
+  Upload(store_id, bucket, key)
+   |
+   +--- server reads staging file
+   |    uploads to backend via put_from_file
+   |    *** does NOT unlink the staging file ***
    |    returns {size, etag}
    |
    +--- NOTE: does NOT invalidate cache
         caller must call invalidate_object_cache
         if they want new opens to see the upload
+
+  Cleanup (caller-driven, no server involvement):
+   |
+   +--- after successful upload:  caller may unlink the staging file
+   +--- on transaction abort
+   |   before upload:             caller unlinks the staged path
+   +--- on database restart:      caller removes leftover staging files
 ```
 
 Staging semantic contract (client-side):
 
 - **Append-only.** The client opens the staging file with `O_APPEND`.
 - **Single writer.** Only one staging file per `(store_id, bucket, key)` at
-  a time (enforced server-side by `O_EXCL` on create).
-- **No readers before commit.** Staged bytes are invisible to the database
-  until the transaction commits and metadata is published. It is the caller's
-  responsibility not to open the staged key before commit.
+  a time (`StagingFile::create` uses `O_EXCL`).
+- **No readers before upload/publication.** Staged bytes are invisible to the
+  database until `Upload` succeeds; metadata publication is still controlled
+  by the database transaction. It is the caller's responsibility not to open
+  the staged key too early.
 
-Cleanup: the entire staging directory is wiped on server startup. There is no
-online orphan reaper for staging. A database process that crashes leaves
-staging files that will be removed on the next restart.
+Cleanup ownership: the database owns the staging directory. The server never
+wipes the staging tree at startup, never runs an online orphan reaper, and
+exposes no stage-create or abort verb. The database removes local staging
+files through ordinary filesystem syscalls after upload, on abort before
+upload, or during crash recovery. Uploaded-but-unpublished backend objects
+are handled at the database/catalog layer, not by the storage worker.
 
 
 6  Concurrency Model
@@ -297,5 +312,3 @@ server does not attempt repair.
   capacity decisions.
 - **Minimum-free-disk pressure.** A policy that triggers eviction when host
   free disk drops below a threshold, independent of cache byte budgets.
-- **Online staging orphan reaper.** Periodic cleanup of staging files that
-  have been abandoned beyond a configurable timeout.

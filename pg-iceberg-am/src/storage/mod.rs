@@ -8,7 +8,7 @@ use crate::error::{IcebergError, IcebergResult};
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::get_tablespace;
-use pg_lakebase_storage::StorageClient;
+use pg_lakebase_storage::{StagingPathResolver, StorageClient};
 use pgrx::pg_sys;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -87,6 +87,7 @@ pub fn create_storage_context_with_client(
     spc_oid: pg_sys::Oid,
     relation_needs_wal: bool,
     storage_client: StorageClient,
+    staging_resolver: StagingPathResolver,
 ) -> IcebergResult<StorageContext> {
     if let Some(opts) = get_tablespace(spc_oid)? {
         let store_id = opts.store_id();
@@ -96,6 +97,7 @@ pub fn create_storage_context_with_client(
             store_id,
             object_namespace,
             storage_client,
+            staging_resolver,
         )?;
 
         // Distributed stores are registered by the storage bgworker's

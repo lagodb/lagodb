@@ -23,20 +23,20 @@ use crate::handle::FileHandle;
 use crate::object::{ObjectLocation, StoreId};
 use crate::protocol::WireListEntry;
 use crate::service::command::{
-    AbortCommand, CloseCommand, CommitCommand, DeleteCommand, DeletePrefixCommand,
-    HeadCommand, InvalidateObjectCacheCommand, ListCommand, PurgeStoreCacheCommand,
-    RegisterStoreCommand, StageCreateCommand, StorageCommand, UnregisterStoreCommand,
+    CloseCommand, DeleteCommand, DeletePrefixCommand, HeadCommand,
+    InvalidateObjectCacheCommand, ListCommand, PurgeStoreCacheCommand,
+    RegisterStoreCommand, StorageCommand, UnregisterStoreCommand, UploadCommand,
 };
 use crate::service::list_session::{
     DEFAULT_PAGE_SIZE, ListSessionError, ListSessionTable, MAX_PAGE_SIZE,
 };
 use crate::service::reply::{
-    CommandOutput, CommitOutput, DeletePrefixOutput, HeadOutput,
-    InvalidateObjectCacheOutput, ListOutput, RegisterStoreOutput, ServiceReply,
-    StageCreateOutput, UnregisterStoreOutput,
+    CommandOutput, DeletePrefixOutput, HeadOutput, InvalidateObjectCacheOutput,
+    ListOutput, RegisterStoreOutput, ServiceReply, UnregisterStoreOutput,
+    UploadOutput,
 };
 use crate::session::handle_table::HandleTable;
-use crate::staging::StagingArea;
+use crate::staging::StagingUploader;
 
 pub(crate) mod command;
 mod list_session;
@@ -44,7 +44,7 @@ mod open;
 mod range_reader;
 pub(crate) mod reply;
 
-/// Holds the backend registry, the [`CacheManager`], the [`StagingArea`], and per-service limits.
+/// Holds the backend registry, the [`CacheManager`], the staging uploader, and per-service limits.
 ///
 /// Each inbound wire operation maps to one internally dispatched [`StorageCommand`]. Execution
 /// is [`execute`](Self::execute) for most verbs, with one specialization —
@@ -53,7 +53,7 @@ pub(crate) mod reply;
 pub struct StorageService<I: CacheIndex> {
     registry: StoreRegistry,
     pub(super) cache: Arc<CacheManager<I>>,
-    staging: Arc<StagingArea>,
+    staging_uploader: Arc<StagingUploader>,
     list_sessions: Arc<ListSessionTable>,
     config: StorageServiceConfig,
 }
@@ -66,34 +66,35 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         Self::with_registry_config(registry, cache, StorageServiceConfig::default())
     }
 
-    /// Constructs a service with a default in-memory [`StagingArea`] rooted under the cache
+    /// Constructs a service with a default staging uploader rooted under the cache
     /// directory. Tests that exercise the service directly (without going through
     /// [`crate::builder::StorageServerBuilder`]) use this entry point; production code routes
-    /// through `with_staging` below so the staging root matches the builder's on-disk layout.
+    /// through `with_staging_uploader` below so the staging root matches the builder's on-disk
+    /// layout.
     pub fn with_registry_config(
         registry: StoreRegistry,
         cache: Arc<CacheManager<I>>,
         config: StorageServiceConfig,
     ) -> Self {
         let staging_root = cache.paths.root().to_path_buf();
-        Self::with_staging(
+        Self::with_staging_uploader(
             registry,
             cache,
-            Arc::new(StagingArea::new(staging_root)),
+            Arc::new(StagingUploader::new(staging_root)),
             config,
         )
     }
 
-    pub fn with_staging(
+    pub(crate) fn with_staging_uploader(
         registry: StoreRegistry,
         cache: Arc<CacheManager<I>>,
-        staging: Arc<StagingArea>,
+        staging_uploader: Arc<StagingUploader>,
         config: StorageServiceConfig,
     ) -> Self {
         Self {
             registry,
             cache,
-            staging,
+            staging_uploader,
             list_sessions: Arc::new(ListSessionTable::new()),
             config: config.normalized(),
         }
@@ -120,11 +121,7 @@ impl<I: CacheIndex + 'static> StorageService<I> {
             StorageCommand::Close(command) => {
                 self.handle_close(handles, command).await
             }
-            StorageCommand::StageCreate(command) => {
-                self.handle_stage_create(command).await
-            }
-            StorageCommand::Commit(command) => self.handle_commit(command).await,
-            StorageCommand::Abort(command) => self.handle_abort(command).await,
+            StorageCommand::Upload(command) => self.handle_upload(command).await,
             StorageCommand::RegisterStore(command) => {
                 self.handle_register_store(command)
             }
@@ -203,44 +200,17 @@ impl<I: CacheIndex + 'static> StorageService<I> {
 
     // -- staging ---------------------------------------------------------------------------------
 
-    async fn handle_stage_create(
+    async fn handle_upload(
         &self,
-        command: StageCreateCommand,
-    ) -> StorageResult<ServiceReply> {
-        let key = ObjectLocation::new(command.store_id, command.bucket, command.key)?;
-        // Resolving the store up front gives the caller a crisp error at StageCreate time rather
-        // than after they have already written bytes to the staging file. Commit re-resolves the
-        // store because the registry can change between StageCreate and Commit.
-        let _ = self.registry.resolve(key.store_id())?;
-        let path = self.staging.create(&key).await?;
-        let staging_path = path.into_os_string().into_string().map_err(|_| {
-            StorageError::invalid_path("staging path contains non-UTF-8 components and cannot be returned over the wire")
-        })?;
-        Ok(ServiceReply::new(CommandOutput::StageCreate(
-            StageCreateOutput { staging_path },
-        )))
-    }
-
-    async fn handle_commit(
-        &self,
-        command: CommitCommand,
+        command: UploadCommand,
     ) -> StorageResult<ServiceReply> {
         let key = ObjectLocation::new(command.store_id, command.bucket, command.key)?;
         let store = self.registry.resolve(key.store_id())?;
-        let info = self.staging.commit(&key, &store).await?;
-        Ok(ServiceReply::new(CommandOutput::Commit(CommitOutput {
+        let info = self.staging_uploader.upload(&key, &store).await?;
+        Ok(ServiceReply::new(CommandOutput::Upload(UploadOutput {
             size: info.size,
             etag: info.etag,
         })))
-    }
-
-    async fn handle_abort(
-        &self,
-        command: AbortCommand,
-    ) -> StorageResult<ServiceReply> {
-        let key = ObjectLocation::new(command.store_id, command.bucket, command.key)?;
-        self.staging.abort(&key).await?;
-        Ok(ServiceReply::new(CommandOutput::Abort))
     }
 
     // -- store registry --------------------------------------------------------------------------

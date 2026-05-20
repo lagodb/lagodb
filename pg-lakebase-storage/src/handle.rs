@@ -16,7 +16,7 @@ pub struct FileHandle(pub u64);
 /// Open-mode flags sent with [`crate::protocol::WireRequestPayload::Open`].
 ///
 /// Open is **read-only** in this service: write-side flows do not open a server-side handle at
-/// all (see `StageCreate` in [`crate::protocol::WireRequestPayload`]). `OpenFlags` exists for
+/// all (they create local staging files and later call `Upload`). `OpenFlags` exists for
 /// symmetry with typical file APIs and to leave room for future read-side mode bits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenFlags {

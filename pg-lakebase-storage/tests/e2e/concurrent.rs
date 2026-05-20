@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use pg_lakebase_storage::StorageClient;
+use pg_lakebase_storage::{StagingFile, StagingPathResolver, StorageClient};
 
 use crate::harness::{CacheIndexKind, E2eHarness, STORE_ID, TEST_BUCKET};
 
@@ -91,34 +91,39 @@ async fn concurrent_reads_on_different_objects_on(kind: CacheIndexKind) {
 }
 
 #[tokio::test]
-async fn concurrent_stage_commit() {
-    concurrent_stage_commit_on(CacheIndexKind::InMemory).await;
+async fn concurrent_stage_upload() {
+    concurrent_stage_upload_on(CacheIndexKind::InMemory).await;
 }
 
 #[tokio::test]
-async fn redb_concurrent_stage_commit() {
-    concurrent_stage_commit_on(CacheIndexKind::Redb).await;
+async fn redb_concurrent_stage_upload() {
+    concurrent_stage_upload_on(CacheIndexKind::Redb).await;
 }
 
-async fn concurrent_stage_commit_on(kind: CacheIndexKind) {
+async fn concurrent_stage_upload_on(kind: CacheIndexKind) {
     let h = E2eHarness::start_with_index(kind).await;
     let socket = h.socket_path().to_path_buf();
+    let cache_dir = h.cache_dir().to_path_buf();
 
     let handles: Vec<_> = (0..4)
         .map(|i| {
             let socket = socket.clone();
+            let cache_dir = cache_dir.clone();
             tokio::task::spawn_blocking(move || {
+                let resolver = StagingPathResolver::new(cache_dir);
                 let client = StorageClient::connect(&socket).unwrap();
 
                 let key = format!("concurrent-stage/file-{i}.txt");
                 let payload = format!("payload for concurrent file {i}");
 
-                let mut staging = client.stage(STORE_ID, TEST_BUCKET, &key).unwrap();
+                let mut staging =
+                    StagingFile::create(&resolver, STORE_ID, TEST_BUCKET, &key)
+                        .unwrap();
                 staging.write(payload.as_bytes()).unwrap();
                 staging.sync().unwrap();
                 drop(staging);
 
-                let info = client.commit(STORE_ID, TEST_BUCKET, &key).unwrap();
+                let info = client.upload(STORE_ID, TEST_BUCKET, &key).unwrap();
                 assert_eq!(info.size, payload.len() as u64);
 
                 client

@@ -264,14 +264,14 @@ async fn stream_file_to_multipart<U: MultipartUpload + ?Sized>(
     expected_len: u64,
 ) -> std::io::Result<()> {
     /// 8 MiB: comfortably above the S3/R2 5 MiB minimum part size so multipart uploads are
-    /// valid, and small enough that memory pressure per concurrent commit stays bounded.
-    const COMMIT_UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+    /// valid, and small enough that memory pressure per concurrent upload stays bounded.
+    const MULTIPART_UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
     let mut file = tokio::fs::File::open(path).await?;
     let mut remaining = expected_len;
     while remaining > 0 {
         let part_len =
-            std::cmp::min(remaining, COMMIT_UPLOAD_CHUNK_BYTES as u64) as usize;
+            std::cmp::min(remaining, MULTIPART_UPLOAD_CHUNK_BYTES as u64) as usize;
         let mut chunk = vec![0_u8; part_len];
         if let Err(error) = file.read_exact(&mut chunk).await {
             return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {

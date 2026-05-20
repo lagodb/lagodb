@@ -60,9 +60,9 @@ pub trait ObjectBackend: Send + Sync {
     /// may use it to size multipart parts, pre-allocate buffers, or set HTTP content-length and
     /// must stream exactly `len` bytes from the front of the file.
     ///
-    /// Used today only by the staging commit path in [`crate::staging::StagingArea::commit`],
-    /// which always writes the full file; other callers that need partial or in-memory uploads
-    /// should grow a new method rather than reusing this one.
+    /// Used today only by the service's staging upload path, which always writes the full file;
+    /// other callers that need partial or in-memory uploads should grow a new method rather than
+    /// reusing this one.
     async fn put_from_file(
         &self,
         key: &ObjectLocation,

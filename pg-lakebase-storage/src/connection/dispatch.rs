@@ -14,10 +14,10 @@ use crate::protocol::{
 };
 use crate::request::{RequestContext, RequestOutcome};
 use crate::service::command::{
-    AbortCommand, CloseCommand, CommitCommand, DeleteCommand, DeletePrefixCommand,
-    HeadCommand, InvalidateObjectCacheCommand, ListCommand, OpenCommand,
-    PurgeStoreCacheCommand, ReadCommand, RegisterStoreCommand, StageCreateCommand,
-    StorageCommand, UnregisterStoreCommand,
+    CloseCommand, DeleteCommand, DeletePrefixCommand, HeadCommand,
+    InvalidateObjectCacheCommand, ListCommand, OpenCommand, PurgeStoreCacheCommand,
+    ReadCommand, RegisterStoreCommand, StorageCommand, UnregisterStoreCommand,
+    UploadCommand,
 };
 use crate::service::reply::{
     CommandOutput, ReadBody, ResponseAttachment, ServiceReply,
@@ -250,29 +250,11 @@ impl From<WireRequestPayload> for StorageCommand {
             WireRequestPayload::Close { handle } => {
                 Self::Close(CloseCommand { handle })
             }
-            WireRequestPayload::StageCreate {
+            WireRequestPayload::Upload {
                 store_id,
                 bucket,
                 key,
-            } => Self::StageCreate(StageCreateCommand {
-                store_id,
-                bucket,
-                key,
-            }),
-            WireRequestPayload::Commit {
-                store_id,
-                bucket,
-                key,
-            } => Self::Commit(CommitCommand {
-                store_id,
-                bucket,
-                key,
-            }),
-            WireRequestPayload::Abort {
-                store_id,
-                bucket,
-                key,
-            } => Self::Abort(AbortCommand {
+            } => Self::Upload(UploadCommand {
                 store_id,
                 bucket,
                 key,
@@ -347,18 +329,12 @@ impl From<CommandOutput> for StorageHandlerPayload {
                 eof: output.eof,
             },
             CommandOutput::Close => Self::Wire(WireResponsePayload::Close),
-            CommandOutput::StageCreate(output) => {
-                Self::Wire(WireResponsePayload::StageCreate {
-                    staging_path: output.staging_path,
-                })
-            }
-            CommandOutput::Commit(output) => {
-                Self::Wire(WireResponsePayload::Commit {
+            CommandOutput::Upload(output) => {
+                Self::Wire(WireResponsePayload::Upload {
                     size: output.size,
                     etag: output.etag,
                 })
             }
-            CommandOutput::Abort => Self::Wire(WireResponsePayload::Abort),
             CommandOutput::RegisterStore(output) => {
                 Self::Wire(WireResponsePayload::RegisterStore {
                     replaced: output.replaced,

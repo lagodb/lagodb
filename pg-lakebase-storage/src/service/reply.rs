@@ -55,9 +55,7 @@ pub(crate) enum CommandOutput {
     Head(HeadOutput),
     Read(ReadOutput),
     Close,
-    StageCreate(StageCreateOutput),
-    Commit(CommitOutput),
-    Abort,
+    Upload(UploadOutput),
     RegisterStore(RegisterStoreOutput),
     UnregisterStore(UnregisterStoreOutput),
     PurgeStoreCache,
@@ -137,12 +135,7 @@ pub(crate) struct ListOutput {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StageCreateOutput {
-    pub staging_path: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommitOutput {
+pub(crate) struct UploadOutput {
     pub size: u64,
     pub etag: Option<String>,
 }

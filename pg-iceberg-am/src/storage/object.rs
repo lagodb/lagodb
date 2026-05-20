@@ -1,7 +1,8 @@
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
 use pg_lakebase_storage::{
-    StagingFile, StorageClient, StorageFile, StorageResult, StoreId,
+    StagingFile, StagingPathResolver, StorageClient, StorageFile, StorageResult,
+    StoreId,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ pub struct ObjectStorage {
     store_id: StoreId,
     bucket: String,
     client: StorageClient,
+    staging_resolver: StagingPathResolver,
 }
 
 impl fmt::Debug for ObjectStorage {
@@ -33,12 +35,14 @@ impl ObjectStorage {
         store_id: impl Into<String>,
         bucket: impl Into<String>,
         client: StorageClient,
+        staging_resolver: StagingPathResolver,
     ) -> StorageResult<Self> {
         Ok(Self {
             scheme: scheme.into(),
             store_id: StoreId::new(store_id)?,
             bucket: bucket.into(),
             client,
+            staging_resolver,
         })
     }
 }
@@ -145,10 +149,13 @@ impl Storage for ObjectStorage {
     }
 
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
-        let staging = self
-            .client
-            .stage(self.store_id.as_str(), &self.bucket, path)
-            .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))?;
+        let staging = StagingFile::create(
+            &self.staging_resolver,
+            self.store_id.as_str(),
+            &self.bucket,
+            path,
+        )
+        .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))?;
         Ok(Box::new(ObjectWriter {
             client: self.client.clone(),
             store_id: self.store_id.clone(),
@@ -291,7 +298,7 @@ impl FileWrite for ObjectWriter {
     fn close(&mut self) -> Result<()> {
         self.staging.take();
         self.client
-            .commit(self.store_id.as_str(), &self.bucket, &self.key)
+            .upload(self.store_id.as_str(), &self.bucket, &self.key)
             .map(|_| ())
             .map_err(|e| Error::new(ErrorKind::IoError, e.to_string()))
     }

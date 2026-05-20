@@ -12,7 +12,7 @@ use crate::error::StorageErrorKind;
 use crate::object::ObjectLocation;
 use crate::server::StorageServer;
 use crate::service::StorageService;
-use crate::staging::StagingArea;
+use crate::staging::{StagingPathResolver, StagingUploader};
 
 use super::*;
 
@@ -166,12 +166,11 @@ async fn client_head_returns_from_cache_after_open() {
 }
 
 #[tokio::test]
-async fn client_stage_write_commit_roundtrip_uploads_to_backend() {
+async fn client_stage_write_upload_roundtrip_uploads_to_backend() {
     let root = test_root("staging-cache");
     let socket = test_root("staging.sock");
-    let staging = Arc::new(StagingArea::new(root.clone()));
-    staging.prepare_dirs().await.unwrap();
-    staging.wipe().await.unwrap();
+    let staging_uploader = Arc::new(StagingUploader::new(root.clone()));
+    let staging_root = root.clone();
 
     let backend = Arc::new(MemoryObjectBackend::new());
     let cache = Arc::new(
@@ -188,8 +187,11 @@ async fn client_stage_write_commit_roundtrip_uploads_to_backend() {
         .register_shared_backend(TEST_STORE_ID, backend.clone())
         .unwrap();
     let config = crate::config::StorageServiceConfig::default();
-    let service = Arc::new(StorageService::with_staging(
-        registry, cache, staging, config,
+    let service = Arc::new(StorageService::with_staging_uploader(
+        registry,
+        cache,
+        staging_uploader,
+        config,
     ));
     let server = StorageServer::bind(&socket, service).await.unwrap();
     let server_task = tokio::spawn(async move {
@@ -197,37 +199,40 @@ async fn client_stage_write_commit_roundtrip_uploads_to_backend() {
     });
 
     let client_socket = socket.clone();
-    let commit_info = tokio::task::spawn_blocking(move || {
+    let upload_info = tokio::task::spawn_blocking(move || {
+        let resolver = StagingPathResolver::new(staging_root);
         let client = StorageClient::connect(&client_socket).unwrap();
-        let mut staging = client
-            .stage(TEST_STORE_ID, "bucket", "uploaded.txt")
-            .unwrap();
-        staging.write(b"hello ").unwrap();
-        staging.write(b"commit").unwrap();
-        staging.sync().unwrap();
-        drop(staging);
+        let mut staging_file =
+            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "uploaded.txt")
+                .unwrap();
+        staging_file.write(b"hello ").unwrap();
+        staging_file.write(b"upload").unwrap();
+        staging_file.sync().unwrap();
+        drop(staging_file);
         client
-            .commit(TEST_STORE_ID, "bucket", "uploaded.txt")
+            .upload(TEST_STORE_ID, "bucket", "uploaded.txt")
             .unwrap()
     })
     .await
     .unwrap();
 
-    assert_eq!(commit_info.size, b"hello commit".len() as u64);
+    assert_eq!(upload_info.size, b"hello upload".len() as u64);
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "uploaded.txt").unwrap();
-    let data = backend.get_range(&key, 0..commit_info.size).await.unwrap();
-    assert_eq!(&data[..], b"hello commit");
+    let data = backend.get_range(&key, 0..upload_info.size).await.unwrap();
+    assert_eq!(&data[..], b"hello upload");
 
     server_task.abort();
 }
 
 #[tokio::test]
-async fn client_stage_abort_removes_staging_file_without_upload() {
-    let root = test_root("staging-abort-cache");
-    let socket = test_root("staging-abort.sock");
-    let staging = Arc::new(StagingArea::new(root.clone()));
-    staging.prepare_dirs().await.unwrap();
-    staging.wipe().await.unwrap();
+async fn caller_unlinks_staging_file_to_discard_without_upload() {
+    // The database (caller) owns the staging directory: a transaction abort, or any other
+    // reason to discard a staged file before upload, is implemented by unlinking the path
+    // it created via `StagingFile::create`. The server has no abort verb.
+    let root = test_root("staging-discard-cache");
+    let socket = test_root("staging-discard.sock");
+    let staging_uploader = Arc::new(StagingUploader::new(root.clone()));
+    let staging_root = root.clone();
 
     let backend = Arc::new(MemoryObjectBackend::new());
     let cache = Arc::new(
@@ -244,10 +249,10 @@ async fn client_stage_abort_removes_staging_file_without_upload() {
         .register_shared_backend(TEST_STORE_ID, backend.clone())
         .unwrap();
     let config = crate::config::StorageServiceConfig::default();
-    let service = Arc::new(StorageService::with_staging(
+    let service = Arc::new(StorageService::with_staging_uploader(
         registry,
         cache,
-        staging.clone(),
+        staging_uploader,
         config,
     ));
     let server = StorageServer::bind(&socket, service).await.unwrap();
@@ -257,20 +262,17 @@ async fn client_stage_abort_removes_staging_file_without_upload() {
 
     let client_socket = socket.clone();
     let staging_path = tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let mut staging_file = client
-            .stage(TEST_STORE_ID, "bucket", "aborted.txt")
-            .unwrap();
+        let resolver = StagingPathResolver::new(staging_root);
+        let _client = StorageClient::connect(&client_socket).unwrap();
+        let mut staging_file =
+            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "discarded.txt")
+                .unwrap();
         staging_file.write(b"doomed").unwrap();
         let path = staging_file.path().to_path_buf();
         drop(staging_file);
-        client
-            .abort(TEST_STORE_ID, "bucket", "aborted.txt")
-            .unwrap();
-        // Second abort is a no-op.
-        client
-            .abort(TEST_STORE_ID, "bucket", "aborted.txt")
-            .unwrap();
+        // Caller-side cleanup: ordinary filesystem unlink. Idempotent because the database is
+        // the only writer of this path.
+        std::fs::remove_file(&path).unwrap();
         path
     })
     .await
@@ -278,24 +280,23 @@ async fn client_stage_abort_removes_staging_file_without_upload() {
 
     assert!(
         !tokio::fs::try_exists(&staging_path).await.unwrap(),
-        "abort must remove the staging file"
+        "caller-issued unlink must remove the staging file",
     );
-    let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "aborted.txt").unwrap();
+    let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "discarded.txt").unwrap();
     assert!(
         backend.get_range(&key, 0..1).await.is_err(),
-        "aborted key must not have been uploaded to the backend"
+        "discarded key must not have been uploaded to the backend"
     );
 
     server_task.abort();
 }
 
 #[tokio::test]
-async fn client_commit_can_be_issued_from_a_different_connection() {
+async fn client_upload_can_be_issued_from_a_different_connection() {
     let root = test_root("staging-xconn-cache");
     let socket = test_root("staging-xconn.sock");
-    let staging = Arc::new(StagingArea::new(root.clone()));
-    staging.prepare_dirs().await.unwrap();
-    staging.wipe().await.unwrap();
+    let staging_uploader = Arc::new(StagingUploader::new(root.clone()));
+    let staging_root = root.clone();
 
     let backend = Arc::new(MemoryObjectBackend::new());
     let cache = Arc::new(
@@ -312,41 +313,42 @@ async fn client_commit_can_be_issued_from_a_different_connection() {
         .register_shared_backend(TEST_STORE_ID, backend.clone())
         .unwrap();
     let config = crate::config::StorageServiceConfig::default();
-    let service = Arc::new(StorageService::with_staging(
-        registry, cache, staging, config,
+    let service = Arc::new(StorageService::with_staging_uploader(
+        registry,
+        cache,
+        staging_uploader,
+        config,
     ));
     let server = StorageServer::bind(&socket, service).await.unwrap();
     let server_task = tokio::spawn(async move {
         let _ = server.serve_forever().await;
     });
 
-    let socket_for_writer = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let writer_client = StorageClient::connect(&socket_for_writer).unwrap();
-        let mut staging_file = writer_client
-            .stage(TEST_STORE_ID, "bucket", "cross-conn.txt")
-            .unwrap();
-        staging_file.write(b"cross-connection commit").unwrap();
+        let resolver = StagingPathResolver::new(staging_root);
+        let mut staging_file =
+            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "cross-conn.txt")
+                .unwrap();
+        staging_file.write(b"cross-connection upload").unwrap();
         drop(staging_file);
-        drop(writer_client);
     })
     .await
     .unwrap();
 
-    let socket_for_committer = socket.clone();
-    let commit_info = tokio::task::spawn_blocking(move || {
-        let committer = StorageClient::connect(&socket_for_committer).unwrap();
-        committer
-            .commit(TEST_STORE_ID, "bucket", "cross-conn.txt")
+    let socket_for_uploader = socket.clone();
+    let upload_info = tokio::task::spawn_blocking(move || {
+        let uploader = StorageClient::connect(&socket_for_uploader).unwrap();
+        uploader
+            .upload(TEST_STORE_ID, "bucket", "cross-conn.txt")
             .unwrap()
     })
     .await
     .unwrap();
 
-    assert_eq!(commit_info.size, b"cross-connection commit".len() as u64);
+    assert_eq!(upload_info.size, b"cross-connection upload".len() as u64);
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "cross-conn.txt").unwrap();
-    let readback = backend.get_range(&key, 0..commit_info.size).await.unwrap();
-    assert_eq!(&readback[..], b"cross-connection commit");
+    let readback = backend.get_range(&key, 0..upload_info.size).await.unwrap();
+    assert_eq!(&readback[..], b"cross-connection upload");
 
     server_task.abort();
 }
@@ -354,48 +356,18 @@ async fn client_commit_can_be_issued_from_a_different_connection() {
 #[tokio::test]
 async fn stage_twice_without_finalize_returns_busy() {
     let root = test_root("staging-busy-cache");
-    let socket = test_root("staging-busy.sock");
-    let staging = Arc::new(StagingArea::new(root.clone()));
-    staging.prepare_dirs().await.unwrap();
-    staging.wipe().await.unwrap();
-    let backend = Arc::new(MemoryObjectBackend::new());
-    let cache = Arc::new(
-        CacheManager::new(
-            root,
-            InMemoryCacheIndex::new(),
-            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
-        )
-        .with_limits(4, 4),
-    );
-    cache.spawn_large_fill_reaper();
-    let registry = StoreRegistry::new();
-    registry
-        .register_shared_backend(TEST_STORE_ID, backend)
-        .unwrap();
-    let config = crate::config::StorageServiceConfig::default();
-    let service = Arc::new(StorageService::with_staging(
-        registry, cache, staging, config,
-    ));
-    let server = StorageServer::bind(&socket, service).await.unwrap();
-    let server_task = tokio::spawn(async move {
-        let _ = server.serve_forever().await;
-    });
-
-    let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let _first = client
-            .stage(TEST_STORE_ID, "bucket", "duplicate.txt")
-            .unwrap();
-        let error = client
-            .stage(TEST_STORE_ID, "bucket", "duplicate.txt")
-            .unwrap_err();
+        let resolver = StagingPathResolver::new(root);
+        let _first =
+            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "duplicate.txt")
+                .unwrap();
+        let error =
+            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "duplicate.txt")
+                .unwrap_err();
         assert_eq!(error.kind(), StorageErrorKind::Busy);
     })
     .await
     .unwrap();
-
-    server_task.abort();
 }
 
 #[tokio::test]

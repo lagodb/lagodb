@@ -14,9 +14,7 @@ pub(crate) enum StorageCommand {
     Head(HeadCommand),
     Read(ReadCommand),
     Close(CloseCommand),
-    StageCreate(StageCreateCommand),
-    Commit(CommitCommand),
-    Abort(AbortCommand),
+    Upload(UploadCommand),
     RegisterStore(RegisterStoreCommand),
     UnregisterStore(UnregisterStoreCommand),
     PurgeStoreCache(PurgeStoreCacheCommand),
@@ -76,26 +74,14 @@ pub(crate) struct CloseCommand {
     pub handle: FileHandle,
 }
 
-/// StageCreate / Commit / Abort are all addressed by `(store_id, bucket, key)`. They never carry
-/// a server-side handle because staging is intentionally stateless on the server: the client
-/// writes to the returned path directly, and commit/abort are identity-addressable from any
-/// future connection.
+/// `Upload` is addressed by `(store_id, bucket, key)` rather than a server-side handle: staging
+/// is intentionally stateless on the server. The database (caller) wrote the file directly into
+/// the staging directory through the filesystem (paths derived via
+/// [`crate::staging::StagingPathResolver`]) and Upload just asks the server to upload that local
+/// file to the backend. Cleanup of the staging directory is the database's responsibility — the
+/// server has neither a stage-create nor an abort verb.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StageCreateCommand {
-    pub store_id: String,
-    pub bucket: String,
-    pub key: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommitCommand {
-    pub store_id: String,
-    pub bucket: String,
-    pub key: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AbortCommand {
+pub(crate) struct UploadCommand {
     pub store_id: String,
     pub bucket: String,
     pub key: String,

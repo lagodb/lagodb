@@ -6,20 +6,19 @@
 //!   share one underlying Unix stream protected by a mutex, so concurrent calls from different
 //!   clones are safe but serialize on the lock.
 //! * [`StorageFile`]   — open read handle returned by [`StorageClient::open`]. Seek / read / close.
-//! * [`StagingFile`]   — local file handle returned by [`StorageClient::stage`]. The server is not
-//!   in the data path for writes: the client appends to the returned path directly. Finalization
-//!   (commit / abort) is issued through [`StorageClient`] and is addressed by
-//!   `(store_id, bucket, key)` — it does not need the same connection that created the staging
-//!   file.
+//! * [`StagingFile`]   — local file handle constructed by the caller via
+//!   [`StagingFile::create`](crate::client::StagingFile::create) using a
+//!   [`StagingPathResolver`](crate::staging::StagingPathResolver) rooted at the storage
+//!   server's `cache_dir`. The server is not in the data path for writes — the caller creates
+//!   the file, appends bytes, and later issues `Upload` through [`StorageClient`]. Cleanup of
+//!   the staging directory is the caller's responsibility.
 //!
 //! That last property is the whole point of the staging surface: a database transaction can
-//! write a staging file from one short-lived client connection, close the connection, and hours
-//! later commit or abort from any other connection so long as it knows the identity tuple.
+//! write a staging file, close any client connection it had, and hours later upload from any
+//! other connection so long as it knows the identity tuple.
 
-use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -86,9 +85,9 @@ impl ClientInner {
     }
 }
 
-/// Reported outcome of a successful [`StorageClient::commit`].
+/// Reported outcome of a successful [`StorageClient::upload`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommitInfo {
+pub struct UploadInfo {
     pub size: u64,
     pub etag: Option<String>,
 }
@@ -198,94 +197,34 @@ impl StorageClient {
         }
     }
 
-    /// Creates a staging file for `(store_id, bucket, key)` and returns a [`StagingFile`] pointed
-    /// at the server-supplied absolute path.
-    ///
-    /// The file is opened locally in append-only mode to match the documented single-writer
-    /// semantic. The server never sees writes to the file — only the subsequent
-    /// [`StorageClient::commit`] or [`StorageClient::abort`] for the same key.
-    pub fn stage(
-        &self,
-        store_id: impl Into<String>,
-        bucket: impl Into<String>,
-        key: impl Into<String>,
-    ) -> StorageResult<StagingFile> {
-        let (response, _) = self.request(WireRequestPayload::StageCreate {
-            store_id: store_id.into(),
-            bucket: bucket.into(),
-            key: key.into(),
-        })?;
-        match response {
-            WireResponsePayload::StageCreate { staging_path } => {
-                let path = PathBuf::from(&staging_path);
-                // O_APPEND guarantees the "append-only, single writer" semantic we document: even
-                // a misbehaving caller cannot rewind over bytes it already wrote. `create(false)`
-                // keeps the client honest about the fact that StageCreate already created the
-                // file — if another process somehow removed the file between StageCreate and
-                // here, we want to surface the error rather than silently re-creating it.
-                let file = OpenOptions::new()
-                    .append(true)
-                    .read(false)
-                    .create(false)
-                    .custom_flags(libc::O_CLOEXEC)
-                    .open(&path)
-                    .map_err(|error| {
-                        StorageError::io(
-                            format!(
-                                "open staging file returned by server {}",
-                                path.display()
-                            ),
-                            error,
-                        )
-                    })?;
-                Ok(StagingFile::new(file, path))
-            }
-            other => Err(unexpected_response("stage create", &other)),
-        }
-    }
-
     /// Finalizes a previously staged write by asking the server to upload the staging file to
     /// the backend. Returns the size and (when available) the backend etag of the newly
     /// uploaded object.
     ///
-    /// Commit does **not** invalidate any cached copy of `(store_id, bucket, key)`. If the
+    /// Upload is object-publication only: the staging file is left on disk regardless of whether the upload
+    /// succeeds. The caller (database) is responsible for unlinking the staging file once it
+    /// no longer needs the local bytes: after a successful upload, on transaction abort before
+    /// upload, or during crash recovery on database restart.
+    ///
+    /// Upload does **not** invalidate any cached copy of `(store_id, bucket, key)`. If the
     /// caller wants new opens to observe the just-uploaded bytes they must call
     /// [`Self::invalidate_object_cache`] explicitly.
-    pub fn commit(
+    pub fn upload(
         &self,
         store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
-    ) -> StorageResult<CommitInfo> {
-        let (response, _) = self.request(WireRequestPayload::Commit {
+    ) -> StorageResult<UploadInfo> {
+        let (response, _) = self.request(WireRequestPayload::Upload {
             store_id: store_id.into(),
             bucket: bucket.into(),
             key: key.into(),
         })?;
         match response {
-            WireResponsePayload::Commit { size, etag } => {
-                Ok(CommitInfo { size, etag })
+            WireResponsePayload::Upload { size, etag } => {
+                Ok(UploadInfo { size, etag })
             }
-            other => Err(unexpected_response("commit", &other)),
-        }
-    }
-
-    /// Deletes the staging file for `(store_id, bucket, key)` without uploading. Missing
-    /// staging files are treated as success so aborting twice is safe.
-    pub fn abort(
-        &self,
-        store_id: impl Into<String>,
-        bucket: impl Into<String>,
-        key: impl Into<String>,
-    ) -> StorageResult<()> {
-        let (response, _) = self.request(WireRequestPayload::Abort {
-            store_id: store_id.into(),
-            bucket: bucket.into(),
-            key: key.into(),
-        })?;
-        match response {
-            WireResponsePayload::Abort => Ok(()),
-            other => Err(unexpected_response("abort", &other)),
+            other => Err(unexpected_response("upload", &other)),
         }
     }
 

@@ -55,32 +55,12 @@ impl WireEncode for WireRequestPayload {
                 out.put_u16(WireOp::Close.code());
                 handle.encode(out)
             }
-            Self::StageCreate {
+            Self::Upload {
                 store_id,
                 bucket,
                 key,
             } => {
-                out.put_u16(WireOp::StageCreate.code());
-                store_id.encode(out)?;
-                bucket.encode(out)?;
-                key.encode(out)
-            }
-            Self::Commit {
-                store_id,
-                bucket,
-                key,
-            } => {
-                out.put_u16(WireOp::Commit.code());
-                store_id.encode(out)?;
-                bucket.encode(out)?;
-                key.encode(out)
-            }
-            Self::Abort {
-                store_id,
-                bucket,
-                key,
-            } => {
-                out.put_u16(WireOp::Abort.code());
+                out.put_u16(WireOp::Upload.code());
                 store_id.encode(out)?;
                 bucket.encode(out)?;
                 key.encode(out)
@@ -169,17 +149,7 @@ impl WireDecode for WireRequestPayload {
             WireOp::Close => Self::Close {
                 handle: WireDecode::decode(input)?,
             },
-            WireOp::StageCreate => Self::StageCreate {
-                store_id: WireDecode::decode(input)?,
-                bucket: WireDecode::decode(input)?,
-                key: WireDecode::decode(input)?,
-            },
-            WireOp::Commit => Self::Commit {
-                store_id: WireDecode::decode(input)?,
-                bucket: WireDecode::decode(input)?,
-                key: WireDecode::decode(input)?,
-            },
-            WireOp::Abort => Self::Abort {
+            WireOp::Upload => Self::Upload {
                 store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 key: WireDecode::decode(input)?,
@@ -269,18 +239,10 @@ impl WireEncode for WireResponsePayload {
                 out.put_u16(WireOp::Close.code());
                 Ok(())
             }
-            Self::StageCreate { staging_path } => {
-                out.put_u16(WireOp::StageCreate.code());
-                staging_path.encode(out)
-            }
-            Self::Commit { size, etag } => {
-                out.put_u16(WireOp::Commit.code());
+            Self::Upload { size, etag } => {
+                out.put_u16(WireOp::Upload.code());
                 size.encode(out)?;
                 etag.encode(out)
-            }
-            Self::Abort => {
-                out.put_u16(WireOp::Abort.code());
-                Ok(())
             }
             Self::RegisterStore { replaced } => {
                 out.put_u16(WireOp::RegisterStore.code());
@@ -341,14 +303,10 @@ impl WireDecode for WireResponsePayload {
                 data: WireDecode::decode(input)?,
             },
             WireOp::Close => Self::Close,
-            WireOp::StageCreate => Self::StageCreate {
-                staging_path: WireDecode::decode(input)?,
-            },
-            WireOp::Commit => Self::Commit {
+            WireOp::Upload => Self::Upload {
                 size: WireDecode::decode(input)?,
                 etag: WireDecode::decode(input)?,
             },
-            WireOp::Abort => Self::Abort,
             WireOp::RegisterStore => Self::RegisterStore {
                 replaced: WireDecode::decode(input)?,
             },

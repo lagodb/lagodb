@@ -5,7 +5,8 @@ A local object-storage caching service for database workloads. The server
 accepts connections over Unix domain sockets, caches remote object-store
 objects on local disk, and serves reads from cache when possible. A thin
 staging subsystem lets database transactions write new objects through the
-local filesystem and upload them on commit.
+local filesystem and upload them explicitly before the database publishes
+metadata that references those objects.
 
 Architecture
 ============
@@ -44,7 +45,9 @@ frame and file-descriptor ordering predictable.
 Read requests are served from an on-disk cache (backed by redb for metadata
 and small objects) or fetched from a remote object store on miss. A separate
 staging tree lets clients write files locally and upload them to the backend
-in a single commit step.
+with a single `upload(store_id, bucket, key)` request. Upload is not a
+database transaction commit; it only copies the closed staging file into the
+object backend and returns object facts such as size and etag.
 
 API
 ===
@@ -53,7 +56,7 @@ API
 `open(store_id, bucket, key)` / `read(len)` / `seek(offset)` / `close()`
 
 **Staging writes:**
-`stage(store_id, bucket, key)` / local writes / `commit(store_id, bucket, key)` / `abort(store_id, bucket, key)`
+`StagingFile::create(...)` / local writes / close / `upload(store_id, bucket, key)` / caller-side unlink
 
 **Store management:**
 `register_store(store_id, config)` / `unregister_store(store_id)` /
@@ -179,8 +182,6 @@ Current Limitations
 - No kernel mount integration.
 - Cache cleanup uses logical payload bytes, not filesystem block accounting.
 - No minimum-free-disk pressure policy.
-- Staging cleanup is startup-wipe only; no online orphan reaper for the
-  staging tree.
 
 Documentation
 =============

@@ -230,20 +230,21 @@ async fn builder_can_bind_with_custom_cache_index() {
 }
 
 #[tokio::test]
-async fn builder_wipes_staging_tree_on_startup_so_crashed_client_bytes_do_not_persist()
- {
+async fn builder_does_not_touch_existing_staging_files_on_startup() {
+    // The database owns the staging directory's lifecycle. Server startup must not create,
+    // wipe, or reconcile staging contents; crash recovery is the database's job.
     use crate::staging::StagingPathResolver;
 
     let root = test_root("staging-boot-cache");
     let socket = test_root("staging-boot.sock");
     tokio::fs::create_dir_all(&root).await.unwrap();
     let staging_resolver = StagingPathResolver::new(root.clone());
-    let stale_key = ObjectLocation::new("default", "bucket", "crashed.txt").unwrap();
+    let stale_key = ObjectLocation::new("default", "bucket", "leftover.txt").unwrap();
     let stale_path = staging_resolver.path_for(&stale_key).unwrap();
     if let Some(parent) = stale_path.parent() {
         tokio::fs::create_dir_all(parent).await.unwrap();
     }
-    tokio::fs::write(&stale_path, b"crashed bytes")
+    tokio::fs::write(&stale_path, b"left over from a prior process")
         .await
         .unwrap();
 
@@ -253,7 +254,10 @@ async fn builder_wipes_staging_tree_on_startup_so_crashed_client_bytes_do_not_pe
         .await
         .unwrap();
 
-    assert!(!tokio::fs::try_exists(&stale_path).await.unwrap());
+    assert!(
+        tokio::fs::try_exists(&stale_path).await.unwrap(),
+        "server startup must not touch staging files; the database owns staging cleanup",
+    );
 
     drop(server);
 }

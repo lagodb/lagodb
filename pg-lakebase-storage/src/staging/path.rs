@@ -3,8 +3,7 @@
 //! Staging files mirror the `objects/` layout (same segment encoding, same store / bucket / key
 //! partitioning) so operator debugging is obvious, but live under a completely separate root
 //! (`<cache_dir>/staging/`) that the cache never scans. That separation is how we get the
-//! "clean-on-restart, never touched online" lifecycle for staging without teaching the cache
-//! layer anything new.
+//! external lifecycle for staging without teaching the cache layer anything new.
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +16,7 @@ use crate::object::path_encoding::{
 /// Maps [`ObjectLocation`] to deterministic staging paths under `<root>/staging/`.
 ///
 /// The resolver is intentionally tiny: there is exactly one path shape per key, so the interface
-/// is a single `path_for` + an accessor for the staging root (used by `wipe`).
+/// is a single `path_for` plus root accessors for callers that own staging cleanup.
 #[derive(Clone, Debug)]
 pub struct StagingPathResolver {
     root: PathBuf,
@@ -35,8 +34,7 @@ impl StagingPathResolver {
         &self.root
     }
 
-    /// Single staging-file directory. Everything below this is transient and safe to wipe on
-    /// startup.
+    /// Single staging-file directory. The database owns creation and cleanup of this tree.
     pub fn staging_dir(&self) -> PathBuf {
         self.root.join(Self::STAGING_DIR)
     }

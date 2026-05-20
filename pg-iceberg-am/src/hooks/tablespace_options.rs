@@ -21,9 +21,7 @@ use pg_lakebase_core::hooks::{
     PostUtilityContext, RenameStmtNode, UtilityHook, UtilityHookError, UtilityNode,
     register_utility_hook,
 };
-use pg_lakebase_core::options::{
-    TablespaceOptions, is_distributed_tablespace,
-};
+use pg_lakebase_core::options::{TablespaceOptions, is_distributed_tablespace};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use std::ffi::CStr;
@@ -78,9 +76,9 @@ impl UtilityHook for IcebergRenameTablespaceGuard {
     }
 
     fn on_pre(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
-        let stmt = context
-            .cast::<RenameStmtNode>()
-            .expect("Hook registered for T_RenameStmt but received different node type");
+        let stmt = context.cast::<RenameStmtNode>().expect(
+            "Hook registered for T_RenameStmt but received different node type",
+        );
 
         if stmt.renameType != pg_sys::ObjectType::OBJECT_TABLESPACE {
             return Ok(());

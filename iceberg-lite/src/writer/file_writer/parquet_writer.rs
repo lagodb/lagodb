@@ -632,6 +632,30 @@ impl Write for SyncFileWriter {
     }
 }
 
+// `parquet::arrow::ArrowWriter` only sees this adapter through the
+// `std::io::Write` trait, which has no `close` method. After
+// `ArrowWriter::close()` has written the parquet footer it drops the
+// `SyncFileWriter`, which in turn drops the inner `Box<dyn FileWrite>`.
+// Without an explicit hook here, the storage-level
+// `FileWrite::close()` would never run, and storage backends that
+// commit their data on close (e.g. memory storage's
+// buffer-into-map insert, or any future staging-then-commit
+// implementation) would silently lose the file.
+//
+// `Drop::drop` cannot return a `Result`, so a close failure here can
+// only be logged. Backends whose commit step needs propagatable
+// errors should not rely on this path; they should commit through a
+// dedicated explicit code path instead.
+impl Drop for SyncFileWriter {
+    fn drop(&mut self) {
+        if let Err(e) = self.writer.close() {
+            log::error!(
+                "Failed to close underlying FileWrite in SyncFileWriter::drop: {e}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
