@@ -7,11 +7,12 @@ use pg_lakebase_core::wal::{WalRecordBuilder, XLogRecPtr};
 
 /// WAL record operation types for Iceberg
 ///
-/// This enum defines the three basic file system operations that are logged
-/// to the WAL for standby/archive/PITR recovery of local Iceberg files:
-/// - DeleteDirectory: Remove a directory and its contents
-/// - WriteFile: Write data to a file (creates file and parent directories if offset is 0)
-/// - DeleteFile: Remove a file
+/// This enum defines the file system operations that are logged
+/// to the WAL for standby WAL replay or archive recovery of local Iceberg files:
+/// - WriteFile: Write data to a file (creates file and parent directories if
+///   offset is 0)
+/// - DeleteDirectory: Remove a directory and its contents after the PostgreSQL
+///   transaction has committed
 ///
 /// Invariants:
 /// - These WAL records are only for local file systems. Distributed storage
@@ -19,10 +20,15 @@ use pg_lakebase_core::wal::{WalRecordBuilder, XLogRecPtr};
 ///   not use WAL-based redo.
 /// - `WRITE_FILE` redo is skipped during local crash recovery because
 ///   successful explicit writer close performs `FileSync`.
-/// - Standby/archive/PITR recovery still needs these records because local
-///   Iceberg files may not exist on the target system.
+/// - Standby WAL replay or archive recovery uses these records for best-effort,
+///   lossy reconstruction because local Iceberg files may not exist on the
+///   target system.
+/// - `DELETE_DIRECTORY` is post-commit cleanup. PostgreSQL extensions cannot
+///   add arbitrary AM paths to core commit/abort records, and PostgreSQL's
+///   `smgr` switch is not extension-customizable, so we must never log a delete
+///   record before the transaction outcome is known.
 /// - Orphaned files on distributed storage should be cleaned up via a separate
-///   garbage collection mechanism (e.g., Iceberg's expire_snapshots).
+///   garbage collection mechanism (e.g., Iceberg's remove_orphan_files).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IcebergWalOp {
@@ -30,8 +36,6 @@ pub enum IcebergWalOp {
     DeleteDirectory = 0x00,
     /// Write data to a file (creates file and parent directories if offset is 0)
     WriteFile = 0x10,
-    /// Delete a file
-    DeleteFile = 0x20,
 }
 
 impl IcebergWalOp {
@@ -45,7 +49,6 @@ impl IcebergWalOp {
         match op {
             0x00 => Some(Self::DeleteDirectory),
             0x10 => Some(Self::WriteFile),
-            0x20 => Some(Self::DeleteFile),
             _ => None,
         }
     }
@@ -55,7 +58,6 @@ impl IcebergWalOp {
         match self {
             Self::DeleteDirectory => "DELETE_DIRECTORY",
             Self::WriteFile => "WRITE_FILE",
-            Self::DeleteFile => "DELETE_FILE",
         }
     }
 }
@@ -104,21 +106,6 @@ pub struct WriteFileHeader {
 /// Size of WriteFileHeader in bytes
 pub const SIZE_OF_WRITE_FILE: usize = std::mem::size_of::<WriteFileHeader>();
 
-/// WAL record header for DeleteFile operation
-///
-/// Layout in WAL record:
-/// - DeleteFileHeader (this struct)
-/// - path bytes (path_len bytes)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct DeleteFileHeader {
-    /// Length of the file path (not including null terminator)
-    pub path_len: u32,
-}
-
-/// Size of DeleteFileHeader in bytes
-pub const SIZE_OF_DELETE_FILE: usize = std::mem::size_of::<DeleteFileHeader>();
-
 // ============================================================================
 // WAL Logging Helper Functions
 // ============================================================================
@@ -126,8 +113,12 @@ pub const SIZE_OF_DELETE_FILE: usize = std::mem::size_of::<DeleteFileHeader>();
 /// Log a directory deletion to WAL
 ///
 /// Call this before deleting a directory and all its contents.
-/// This is typically used for TRUNCATE TABLE or DROP TABLE operations
-/// on local storage.
+/// This is used for post-commit cleanup of local table directories. It must not
+/// be called from pre-commit or abort cleanup paths: unlike PostgreSQL's native
+/// relation storage, extension-owned Iceberg paths cannot be embedded in the
+/// core transaction commit/abort WAL record, and `smgr` cannot be registered by
+/// this AM. Logging the delete before the transaction outcome is known would let
+/// standby WAL replay or archive recovery delete data for a transaction that later aborts.
 ///
 /// Note: Only use this for local file systems. Distributed storage should rely
 /// on garbage collection mechanisms instead.
@@ -159,9 +150,9 @@ pub fn log_delete_directory(path: &str) -> XLogRecPtr {
 /// already exists.
 ///
 /// Note: Only use this for local file systems when the owning relation requires
-/// WAL. The record is for standby/archive/PITR recovery, not local crash-only
-/// recovery. Distributed storage guarantees durability after successful write
-/// and does not use this WAL path.
+/// WAL. The record is for standby WAL replay or archive recovery, not local
+/// crash-only recovery. Distributed storage guarantees durability after
+/// successful write and does not use this WAL path.
 ///
 /// # Arguments
 /// * `path` - The path of the file to write (absolute, or relative to DataDir)
@@ -190,31 +181,4 @@ pub fn log_write_file(path: &str, offset: i64, data: &[u8]) -> XLogRecPtr {
     }
 
     builder.insert(ICEBERG_RMGR_ID.as_u8(), IcebergWalOp::WriteFile as u8)
-}
-
-/// Log a file deletion to WAL
-///
-/// Call this before deleting a data file on local storage.
-///
-/// Note: Only use this for local file systems. Distributed storage should rely
-/// on garbage collection mechanisms instead.
-///
-/// # Arguments
-/// * `path` - The path of the file to delete (absolute, or relative to DataDir)
-///
-/// # Returns
-/// The LSN of the WAL record
-pub fn log_delete_file(path: &str) -> XLogRecPtr {
-    let header = DeleteFileHeader {
-        path_len: path.len() as u32,
-    };
-
-    let mut builder = WalRecordBuilder::begin();
-
-    unsafe {
-        builder.register_data_as(&header);
-    }
-    builder.register_data(path.as_bytes());
-
-    builder.insert(ICEBERG_RMGR_ID.as_u8(), IcebergWalOp::DeleteFile as u8)
 }

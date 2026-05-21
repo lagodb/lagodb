@@ -180,3 +180,35 @@ CREATE TABLE iceberg_numeric_fallback (
     n_huge numeric(40, 2)
 ) USING iceberg;
 \set VERBOSITY default
+
+-- ============================================================================
+-- 6. Numeric with Negative Scale: round-trip via decimal(p+|s|, 0)
+-- ============================================================================
+-- PostgreSQL allows numeric(p, -k): values are stored as multiples of 10^k.
+-- We map that to Iceberg decimal(p+k, 0), which is a strict superset and
+-- preserves every PG-representable value with no loss in either direction.
+CREATE TABLE iceberg_numeric_negscale (
+    id integer,
+    n_neg numeric(2, -3)   -- multiples of 1000, up to 2 significant digits
+) USING iceberg;
+
+INSERT INTO iceberg_numeric_negscale VALUES
+    (1, 0),
+    (2, 1000),
+    (3, -99000),
+    (4, 12000);   -- 12 * 10^3, 2 significant digits
+
+SELECT * FROM iceberg_numeric_negscale ORDER BY id;
+
+DROP TABLE iceberg_numeric_negscale;
+
+-- ============================================================================
+-- 7. Negative Test: Numeric Negative Scale Widens Beyond 38
+-- ============================================================================
+-- numeric(20, -20) would map to decimal(40, 0) which exceeds Iceberg's cap.
+\set VERBOSITY terse
+CREATE TABLE iceberg_numeric_negscale_overflow (
+    id integer,
+    n_too_wide numeric(20, -20)
+) USING iceberg;
+\set VERBOSITY default

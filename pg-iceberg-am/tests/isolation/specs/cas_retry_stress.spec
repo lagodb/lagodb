@@ -119,7 +119,7 @@ permutation s1_begin s1_insert_batch s2_begin s2_insert_batch s3_begin s3_insert
 permutation s1_begin s1_insert_batch s1_commit s2_begin s2_insert_batch s2_commit s3_begin s3_insert_batch s3_commit s5_final_verify
 
 # Permutation 4: Interleaved inserts with delayed commits
-# Expected: Tests apply_updates_with_rebase optimization
+# Expected: Tests rebase_for_statement / rebase_for_commit fast-path optimization
 # (lines L222-L230: skip rebase if no new files and global unchanged)
 permutation s1_begin s1_insert_batch s2_begin s2_insert_batch s3_begin s3_insert_batch s1_commit s5_count s2_commit s5_count s3_commit s5_final_verify
 

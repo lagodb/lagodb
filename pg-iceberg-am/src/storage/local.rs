@@ -10,8 +10,8 @@
 //! - **VFD Pool Management**: PostgreSQL's VFD system manages file descriptor limits
 //!   transparently, automatically closing/reopening files as needed.
 //! - **Consistent Error Handling**: Uses PostgreSQL's error reporting mechanisms.
-//! - **WAL Support**: Optional Iceberg file WAL for standby/archive/PITR
-//!   recovery of local files.
+//! - **WAL Support**: Optional Iceberg file WAL for standby WAL replay or
+//!   archive recovery of local files.
 //!
 //! # WAL invariants
 //!
@@ -21,9 +21,10 @@
 //! - `LocalStorage::default()` and [`LocalStorage::new`] both disable Iceberg
 //!   file WAL. Callers must opt in with [`LocalStorage::with_wal`] when
 //!   PostgreSQL says the owning relation needs WAL.
-//! - When WAL is enabled, `WRITE_FILE` records are for standby/archive/PITR
-//!   recovery. Local crash recovery intentionally skips replaying them because
-//!   successful explicit close performs `FileSync`.
+//! - When WAL is enabled, `WRITE_FILE` records are for best-effort, lossy
+//!   reconstruction during standby WAL replay or archive recovery. Local crash
+//!   recovery intentionally skips replaying them because successful explicit
+//!   close performs `FileSync`.
 //! - Dropping [`PgFileWrite`] only closes the VFD. Callers must drive the normal
 //!   `FileWrite::close`/`OutputFileWriter::finish` path to observe `FileSync`
 //!   errors.
@@ -55,9 +56,10 @@ use crate::wal::log_write_file;
 ///
 /// By default, `LocalStorage` does not enable Iceberg file WAL. Use
 /// [`LocalStorage::with_wal`] to create a storage instance that logs writes for
-/// standby/archive/PITR recovery of local Iceberg files. This WAL is not needed
-/// for object storage, and local crash recovery relies on explicit close-time
-/// `FileSync` instead of replaying `WRITE_FILE` records.
+/// best-effort reconstruction during standby WAL replay or archive recovery of
+/// local Iceberg files. This WAL is not needed for object storage, and local
+/// crash recovery relies on explicit close-time `FileSync` instead of replaying
+/// `WRITE_FILE` records.
 ///
 /// ```ignore
 /// // Without WAL (default)
@@ -87,7 +89,7 @@ impl LocalStorage {
     /// ```ignore
     /// use pg_iceberg_am::storage::LocalStorage;
     ///
-    /// // Enable WAL for standby/archive/PITR recovery
+    /// // Enable WAL for standby WAL replay or archive recovery
     /// let storage = LocalStorage::with_wal(true);
     /// ```
     pub fn with_wal(needs_wal: bool) -> Self {
@@ -198,11 +200,13 @@ pub struct PgFileRead {
     file: Arc<VfdOwner>,
     /// Total file size in bytes
     size: i64,
+    /// Logical cursor used by the std::io::Read/Seek implementation.
+    position: i64,
 }
 
-// Note: PgFileRead is intentionally NOT Send/Sync.
-// PostgreSQL's VFD system is thread-local and bound to the current backend.
-// Using VFD handles across threads is undefined behavior.
+// PgFileRead implements Send/Sync because FileRead requires those bounds.
+// The underlying PostgreSQL VFD is still backend-local in practice; callers
+// must not move it across backend threads.
 
 impl PgFileRead {
     /// Open a file for reading using PostgreSQL's VFD system.
@@ -240,18 +244,16 @@ impl PgFileRead {
             path: path.to_string(),
             file: Arc::new(VfdOwner(file)),
             size: size as i64,
+            position: 0,
         })
     }
 
-    /// Read bytes from a specific offset in the file.
-    fn read_at(&self, offset: i64, len: usize) -> io::Result<Vec<u8>> {
-        let mut buffer = vec![0u8; len];
-
+    fn read_into_at(&self, offset: i64, buf: &mut [u8]) -> io::Result<usize> {
         let result = unsafe {
             pg_sys::FileRead(
                 self.file.0,
-                buffer.as_mut_ptr() as *mut std::ffi::c_void,
-                len,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len(),
                 offset as pg_sys::off_t,
                 pg_sys::WaitEventIO::WAIT_EVENT_DATA_FILE_READ,
             )
@@ -268,7 +270,18 @@ impl PgFileRead {
             ));
         }
 
-        buffer.truncate(result as usize);
+        Ok(result as usize)
+    }
+
+    /// Read bytes from a specific offset in the file.
+    fn read_at(&self, offset: i64, len: usize) -> io::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buffer = vec![0u8; len];
+        let result = self.read_into_at(offset, &mut buffer)?;
+        buffer.truncate(result);
         Ok(buffer)
     }
 }
@@ -309,61 +322,75 @@ impl FileRead for PgFileRead {
             path: self.path.clone(),
             file: self.file.clone(),
             size: self.size,
+            position: self.position,
         }))
     }
 }
 
 impl Read for PgFileRead {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let fd = unsafe { pg_sys::FileGetRawDesc(self.file.0) };
-        if fd < 0 {
-            return Err(io::Error::other(format!(
-                "invalid file descriptor for file '{}'",
-                self.path
-            )));
+        if buf.is_empty() {
+            return Ok(0);
         }
 
-        let ret = unsafe {
-            libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as _)
-        };
-
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            return Err(io::Error::new(
-                err.kind(),
-                format!("failed to read from file '{}': {}", self.path, err),
-            ));
+        let bytes_read = self.read_into_at(self.position, buf)?;
+        if bytes_read > 0 {
+            let bytes_read = i64::try_from(bytes_read).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("read length is too large for file '{}'", self.path),
+                )
+            })?;
+            self.position =
+                self.position
+                    .checked_add(bytes_read)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "read position overflow for file '{}'",
+                                self.path
+                            ),
+                        )
+                    })?;
         }
-
-        Ok(ret as usize)
+        Ok(bytes_read)
     }
 }
 
 impl Seek for PgFileRead {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let fd = unsafe { pg_sys::FileGetRawDesc(self.file.0) };
-        if fd < 0 {
-            return Err(io::Error::other(format!(
-                "invalid file descriptor for file '{}'",
-                self.path
-            )));
-        }
-
-        let (whence, offset) = match pos {
-            SeekFrom::Start(off) => (libc::SEEK_SET, off as i64),
-            SeekFrom::End(off) => (libc::SEEK_END, off),
-            SeekFrom::Current(off) => (libc::SEEK_CUR, off),
+        let new_pos = match pos {
+            SeekFrom::Start(off) => i64::try_from(off).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("seek offset {} is too large for '{}'", off, self.path),
+                )
+            })?,
+            SeekFrom::End(off) => self.size.checked_add(off).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("seek offset overflows for '{}'", self.path),
+                )
+            })?,
+            SeekFrom::Current(off) => {
+                self.position.checked_add(off).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("seek offset overflows for '{}'", self.path),
+                    )
+                })?
+            }
         };
 
-        let new_pos = unsafe { libc::lseek(fd, offset as libc::off_t, whence) };
         if new_pos < 0 {
-            let err = io::Error::last_os_error();
             return Err(io::Error::new(
-                err.kind(),
-                format!("failed to seek in file '{}': {}", self.path, err),
+                io::ErrorKind::InvalidInput,
+                format!("invalid seek before start of file '{}'", self.path),
             ));
         }
 
+        self.position = new_pos;
         Ok(new_pos as u64)
     }
 }
@@ -377,12 +404,12 @@ impl Seek for PgFileRead {
 /// # WAL Support
 ///
 /// When `needs_wal` is true, the writer logs local Iceberg file writes to
-/// PostgreSQL WAL for standby/archive/PITR recovery. Following PostgreSQL's
-/// convention, the write is performed first, and then the WAL record is
-/// written. This order ensures that:
+/// PostgreSQL WAL for standby WAL replay or archive recovery. Following
+/// PostgreSQL's convention, the write is performed first, and then the WAL
+/// record is written. This order ensures that:
 /// - If the write fails (e.g., disk full), no WAL record is created
-/// - During standby/archive/PITR recovery, the WAL record can be replayed to
-///   restore the file
+/// - During standby WAL replay or archive recovery, the WAL record can be
+///   replayed to restore the file
 ///
 /// Local crash recovery does not replay `WRITE_FILE` records; successful
 /// explicit close calls `FileSync`. Distributed storage (S3, etc.) provides its
@@ -398,9 +425,9 @@ pub struct PgFileWrite {
     needs_wal: bool,
 }
 
-// Note: PgFileWrite is intentionally NOT Send/Sync.
-// PostgreSQL's VFD system is thread-local and bound to the current backend.
-// Using VFD handles across threads is undefined behavior.
+// PgFileWrite implements Send/Sync because FileWrite requires those bounds.
+// The underlying PostgreSQL VFD is still backend-local in practice; callers
+// must not move it across backend threads.
 
 impl PgFileWrite {
     /// Open a file for writing using PostgreSQL's VFD system.
@@ -423,7 +450,8 @@ impl PgFileWrite {
     ///
     /// # Arguments
     /// * `path` - Path to the file to open or create
-    /// * `needs_wal` - Whether to log writes for standby/archive/PITR recovery
+    /// * `needs_wal` - Whether to log writes for standby WAL replay or archive
+    ///   recovery
     ///
     /// # Returns
     /// A new `PgFileWrite` instance on success, or an error if the file cannot be opened.
@@ -503,9 +531,9 @@ impl Write for PgFileWrite {
         self.position += bytes_written as i64;
 
         // Step 2: Log to WAL after successful write. The WAL record contains
-        // the file path, offset, and data written. Standby/archive/PITR redo
-        // can replay it to restore the file; local crash recovery skips
-        // WRITE_FILE redo and relies on close-time FileSync.
+        // the file path, offset, and data written. Standby WAL replay or
+        // archive recovery can replay it to restore the file; local crash
+        // recovery skips WRITE_FILE redo and relies on close-time FileSync.
         if self.needs_wal && bytes_written > 0 {
             log_write_file(&self.path, write_position, &buf[..bytes_written]);
 

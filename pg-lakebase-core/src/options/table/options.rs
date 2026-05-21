@@ -28,6 +28,9 @@ pub enum TableOptionError {
     #[error("failed to load table options")]
     LoadFailed(#[source] PgError),
 
+    #[error("failed to delete table options")]
+    DeleteFailed(#[source] PgError),
+
     #[error("null relation pointer")]
     NullRelation,
 }
@@ -209,5 +212,36 @@ impl TableOptions {
 
             Ok(result)
         }
+    }
+
+    /// Delete persisted options for a relation if they exist.
+    pub fn delete_from_catalog(relid: pg_sys::Oid) -> Result<(), TableOptionError> {
+        let table_oid = catalog::get_table_options_oid()
+            .map_err(TableOptionError::DeleteFailed)?;
+        let index_oid = catalog::get_table_options_pkey_oid()
+            .map_err(TableOptionError::DeleteFailed)?;
+
+        let rel_guard =
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
+                .map_err(TableOptionError::DeleteFailed)?;
+
+        let mut scan_guard = rel_guard
+            .begin_scan(
+                index_oid,
+                true,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(1, relid)],
+            )
+            .map_err(TableOptionError::DeleteFailed)?;
+
+        if let Some(tuple) =
+            scan_guard.get_next().map_err(TableOptionError::DeleteFailed)?
+        {
+            rel_guard
+                .catalog_delete(tuple)
+                .map_err(TableOptionError::DeleteFailed)?;
+        }
+
+        Ok(())
     }
 }

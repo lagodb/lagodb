@@ -122,4 +122,37 @@ debug output, but PostgreSQL still stores the catalog option value as plain
 text. Treat this as a current limitation until secret references or external
 credential providers are supported.
 
+### Type mapping limitations
+
+PostgreSQL types are mapped to Iceberg types when a column is added (CREATE
+TABLE / ALTER TABLE ... ADD COLUMN). The mapping is not always lossless;
+the cases worth knowing about:
+
+- **`numeric` without `(p, s)`**: Iceberg `decimal` requires a fixed
+  precision and scale, but PostgreSQL `numeric` without a modifier is
+  arbitrary-precision. pg-iceberg-am falls back to `decimal(38, 18)` and
+  emits a `WARNING` per column at CREATE TABLE time so the choice is
+  visible. Values whose unscaled integer part exceeds 20 digits, or whose
+  fractional part exceeds 18 digits after rounding, will fail at INSERT
+  time. Declare `numeric(p, s)` explicitly to avoid this.
+- **`numeric(p, -k)` (negative scale)**: maps to `decimal(p + |k|, 0)`.
+  The mapping is round-trip-safe — PostgreSQL only stores values that are
+  multiples of `10^k`, which the widened decimal can represent exactly.
+  CREATE TABLE is rejected when `p + |k| > 38`.
+- **`numeric(p, s)` with `p > 38`**: rejected at CREATE TABLE. Iceberg's
+  `decimal` is capped at 38-digit precision.
+- **`json`** is stored as Iceberg `string`. The encoding is the textual
+  output of PostgreSQL's `json_out`, which is portable JSON.
+- **`jsonb`** is stored as Iceberg `binary` using PostgreSQL's internal
+  `jsonb` varlena format. **This is a pg-iceberg-am private codec**, not a
+  portable Iceberg JSON encoding — other Iceberg readers cannot decode
+  these bytes. Will be revisited when Iceberg variant types land.
+- **Unsupported types**: types without an explicit PostgreSQL-to-Iceberg
+  mapping are rejected at CREATE TABLE. Examples currently include `pg_lsn`,
+  `tsvector`, range types, geometric types, custom enum types, and composite
+  types.
+
+The full mapping is defined in
+[`pg-iceberg-am/src/catalog/schema_mapping.rs`](pg-iceberg-am/src/catalog/schema_mapping.rs).
+
 Refer to the project documentation for advanced configuration options and storage backend setup.

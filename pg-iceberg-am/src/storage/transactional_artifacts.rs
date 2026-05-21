@@ -10,7 +10,9 @@
 //! [`TransactionResource`] the first time any artifact is recorded.
 //!
 //! **Commit behaviour:**
-//! - `DroppedTableDir` → remove the table directory (WAL-logged for local).
+//! - `DroppedTableDir` → after PostgreSQL commit, WAL-log local deletion only
+//!   when the relation WAL policy requires it, then remove the table directory
+//!   or object-storage prefix.
 //! - `ObjectFile(Uploaded)` → unlink the staging file (best-effort).
 //! - `ObjectFile(Staged)` → warn, then unlink the staging file (best-effort).
 //! - Everything else → no-op.
@@ -21,6 +23,13 @@
 //! - `ObjectFile(Staged)` → unlink the staging file.
 //! - `ObjectFile(Uploaded)` → delete the remote object, then unlink the staging file.
 //! - `DroppedTableDir` → no-op (table survived).
+//!
+//! Abort cleanup is deliberately primary-local best effort. We do not emit
+//! `DELETE_FILE` WAL for `CreatedLocalFile`: extensions cannot attach those
+//! paths to PostgreSQL's core abort record, and a separate post-abort maintenance
+//! stream would still have a crash gap. If a prior `WRITE_FILE` is replayed by
+//! standby WAL replay or archive recovery for an aborted transaction, the file
+//! is an Iceberg orphan because committed table metadata never references it.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -28,10 +37,11 @@ use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::transaction::{self, TransactionResource};
+use pg_lakebase_core::wal::flush_wal;
 use pg_lakebase_storage::{ObjectLocation, StorageClient};
 use pgrx::pg_sys;
 
-use crate::storage::ObjectStorage;
+use crate::storage::LocalStorage;
 use crate::wal::record::log_delete_directory;
 
 // ---------------------------------------------------------------------------
@@ -181,16 +191,12 @@ impl ArtifactRegistry {
 
     // -- transaction callbacks ------------------------------------------------
 
-    fn handle_commit(&mut self) {
-        for entry in self.entries.drain(..) {
-            Self::commit_one(entry);
-        }
+    fn take_commit_entries(&mut self) -> Vec<ArtifactEntry> {
+        self.entries.drain(..).collect()
     }
 
-    fn handle_abort(&mut self) {
-        for entry in self.entries.drain(..) {
-            Self::abort_one(entry);
-        }
+    fn take_abort_entries(&mut self) -> Vec<ArtifactEntry> {
+        self.entries.drain(..).collect()
     }
 
     fn handle_commit_sub(&mut self, nest_level: i32) {
@@ -201,16 +207,18 @@ impl ArtifactRegistry {
         }
     }
 
-    fn handle_abort_sub(&mut self, nest_level: i32) {
+    fn take_abort_sub_entries(&mut self, nest_level: i32) -> Vec<ArtifactEntry> {
+        let mut aborted = Vec::new();
         let mut kept = Vec::new();
         for entry in self.entries.drain(..) {
             if entry.nest_level >= nest_level {
-                Self::abort_one(entry);
+                aborted.push(entry);
             } else {
                 kept.push(entry);
             }
         }
         self.entries = kept;
+        aborted
     }
 
     // -- per-entry actions ----------------------------------------------------
@@ -221,8 +229,25 @@ impl ArtifactRegistry {
                 ref location,
                 ref file_io,
             } => {
-                if Self::is_local_storage(file_io) {
-                    log_delete_directory(location);
+                if Self::local_needs_wal(file_io) {
+                    // PostgreSQL does not let extensions attach arbitrary paths
+                    // to core commit/abort records, and PG17 smgr is not
+                    // extension-customizable. XACT_EVENT_COMMIT is invoked
+                    // after RecordTransactionCommit(), so this delete WAL is a
+                    // separate post-commit cleanup fact and cannot be embedded
+                    // in the transaction commit record.
+                    //
+                    // Flush the delete WAL before removing the primary
+                    // directory. With synchronous_commit=off, this flush may
+                    // also force the preceding commit WAL. If XLogFlush panics
+                    // because of an I/O failure, crash recovery either loses the
+                    // async commit together with the cleanup, or replays the
+                    // committed transaction while missing this cleanup fact. The
+                    // latter is the documented cleanup gap; it is preferable to
+                    // deleting the primary directory before standby WAL replay or
+                    // archive recovery can learn about the deletion.
+                    let lsn = log_delete_directory(location);
+                    flush_wal(lsn);
                 }
                 if let Err(e) = file_io.remove_dir_all(location) {
                     pg_lakebase_core::diag::report_warning(&format!(
@@ -295,12 +320,13 @@ impl ArtifactRegistry {
         }
     }
 
-    fn is_local_storage(file_io: &FileIO) -> bool {
+    fn local_needs_wal(file_io: &FileIO) -> bool {
         file_io
             .storage()
             .as_any()
-            .downcast_ref::<ObjectStorage>()
-            .is_none()
+            .downcast_ref::<LocalStorage>()
+            .map(LocalStorage::needs_wal)
+            .unwrap_or(false)
     }
 }
 
@@ -343,12 +369,18 @@ impl TransactionResource for StorageArtifactResource {
     }
 
     fn on_commit(&self) {
-        self.inner.borrow_mut().handle_commit();
+        let entries = self.inner.borrow_mut().take_commit_entries();
+        for entry in entries {
+            ArtifactRegistry::commit_one(entry);
+        }
         REGISTRY.with(|r| *r.borrow_mut() = None);
     }
 
     fn on_abort(&self) {
-        self.inner.borrow_mut().handle_abort();
+        let entries = self.inner.borrow_mut().take_abort_entries();
+        for entry in entries {
+            ArtifactRegistry::abort_one(entry);
+        }
         REGISTRY.with(|r| *r.borrow_mut() = None);
     }
 
@@ -359,7 +391,13 @@ impl TransactionResource for StorageArtifactResource {
     }
 
     fn on_abort_sub(&self, current_nest_level: i32) {
-        self.inner.borrow_mut().handle_abort_sub(current_nest_level);
+        let entries = self
+            .inner
+            .borrow_mut()
+            .take_abort_sub_entries(current_nest_level);
+        for entry in entries {
+            ArtifactRegistry::abort_one(entry);
+        }
     }
 }
 

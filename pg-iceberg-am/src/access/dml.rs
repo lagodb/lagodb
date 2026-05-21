@@ -30,12 +30,9 @@ use pgrx::pg_sys;
 use crate::access::{
     iceberg_schema_to_arrow_schema, rows_to_record_batch_with_schema,
 };
-use crate::catalog::{
-    get_or_rebase_metadata_location, process_new_data_files,
-    register_table_for_tracking,
-};
+use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
-use crate::storage::create_storage_context_with_wal;
+use crate::storage::StorageContext;
 
 /// Default batch size for buffering rows (64MB) before writing.
 const DEFAULT_BATCH_SIZE_IN_MB: usize = 64;
@@ -55,10 +52,6 @@ type ParquetDataFileWriter = DataFileWriter<
 pub struct IcebergModify {
     /// OID of the relation being modified.
     rel_oid: pg_sys::Oid,
-    /// Namespace OID captured while the PostgreSQL Relation pointer is valid.
-    nsp_oid: pg_sys::Oid,
-    /// Relation file number captured for transaction-local metadata tracking.
-    rel_number: pg_sys::RelFileNumber,
     /// Tablespace OID used to build the storage context.
     spc_oid: pg_sys::Oid,
     /// Whether the relation requires WAL for local storage writes.
@@ -83,8 +76,6 @@ impl AmDmlSession for IcebergModify {
     fn new(target: DmlTarget) -> AmResult<Self> {
         Ok(Self {
             rel_oid: target.rel_oid,
-            nsp_oid: target.namespace_oid,
-            rel_number: target.locator.rel_number,
             spc_oid: target.locator.spc_oid,
             relation_needs_wal: target.relation_needs_wal,
             row_buffer: RowBatchBuffer::new(),
@@ -103,10 +94,10 @@ impl AmDmlSession for IcebergModify {
         }
 
         // Register table for metadata tracking
-        register_table_for_tracking(self.rel_oid, self.nsp_oid, self.rel_number)?;
+        TxMetadata::current().register_table(self.rel_oid)?;
 
         if self.file_io.is_none() {
-            let ctx = create_storage_context_with_wal(
+            let ctx = StorageContext::for_tablespace_with_wal(
                 self.spc_oid,
                 self.relation_needs_wal,
             )?;
@@ -208,9 +199,9 @@ impl IcebergModify {
 
         // Get Iceberg metadata location
         // Since we just registered the table for tracking, we ensure we see the latest
-        // committed data (Read Committed) by calling the rebase-aware helper.
+        // committed data (Read Committed) by going through the tracker.
         let metadata_location =
-            get_or_rebase_metadata_location(self.rel_oid, file_io)?;
+            TxMetadata::current().current_metadata_location(self.rel_oid, file_io)?;
 
         // Read table metadata from storage
         let table_metadata = TableMetadata::read_from(file_io, &metadata_location)?;
@@ -345,7 +336,7 @@ impl IcebergModify {
         // Capture the files locally
         let new_files: Vec<_> = self.data_files.drain(..).collect();
         // Process files via tracker (handles rebase and metadata file generation)
-        process_new_data_files(self.rel_oid, new_files, file_io)?;
+        TxMetadata::current().rebase_for_statement(self.rel_oid, new_files, file_io)?;
 
         Ok(())
     }

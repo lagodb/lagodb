@@ -141,7 +141,7 @@ fn scan_pg_tablespace() -> Result<Vec<TablespaceStoreSpec>, CatalogLoadError> {
         )
         .map_err(CatalogLoadError::CatalogScan)?;
 
-    let tup_desc = rel.tuple_desc();
+    let tup_desc = rel.as_handle().tuple_desc();
     let mut specs = Vec::new();
 
     while let Some(tuple) = scan.get_next().map_err(CatalogLoadError::CatalogScan)? {

@@ -1,6 +1,8 @@
 use crate::IcebergTableAm;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
+use pgrx::pg_sys::panic::ErrorReport;
+use pgrx::prelude::PgSqlErrorCode;
 
 impl AmDdl for IcebergTableAm {
     fn relation_set_new_filelocator(
@@ -11,7 +13,15 @@ impl AmDdl for IcebergTableAm {
         Ok((pg_sys::InvalidTransactionId, 0u32.into()))
     }
 
-    fn relation_nontransactional_truncate(_rel: &RelationHandle) -> AmResult<()> {
-        Ok(())
+    fn relation_nontransactional_truncate(rel: &RelationHandle) -> AmResult<()> {
+        Err(ErrorReport::new(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "cannot TRUNCATE Iceberg table \"{}\": Iceberg truncate requires metadata rewrite support",
+                rel.relation_name()
+            ),
+            "",
+        )
+        .into())
     }
 }

@@ -108,11 +108,6 @@ impl CatalogRelation {
         self.guard.as_raw()
     }
 
-    #[inline]
-    pub fn tuple_desc(&self) -> pg_sys::TupleDesc {
-        unsafe { (*self.as_raw()).rd_att }
-    }
-
     /// Insert an owned heap tuple into this catalog relation.
     pub fn catalog_insert(&self, tuple: &HeapTupleGuard) -> Result<(), PgError> {
         unsafe { PgWrapper::catalog_tuple_insert_raw(self.as_raw(), tuple.as_raw()) }

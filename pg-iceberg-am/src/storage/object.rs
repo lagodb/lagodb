@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::storage::transactional_artifacts::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
 };
+use crate::storage::wait_event::{StorageWaitEvent, StorageWaitGuard};
 
 // The storage wire protocol accepts a u32 read length per request, and the
 // service clamps each response to its configured max_read_size. Keep the
@@ -209,9 +210,12 @@ impl Storage for ObjectStorage {
         // 2. Upload the staging file to object storage.
         //    On failure the registry stays Staged; abort will only unlink
         //    the local staging file without touching the remote store.
-        self.client
-            .upload(self.store_id.as_str(), self.bucket.as_ref(), path)
-            .map_err(storage_err)?;
+        {
+            let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectUpload);
+            self.client
+                .upload(self.store_id.as_str(), self.bucket.as_ref(), path)
+                .map_err(storage_err)?;
+        }
 
         // 3. Transition Staged → Uploaded so commit cleans staging and
         //    abort knows to delete the remote object.
@@ -319,6 +323,7 @@ impl ObjectReader {
         let mut remaining = len;
         let mut written = 0;
 
+        let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectRead);
         while remaining > 0 {
             let request_len =
                 std::cmp::min(remaining, OBJECT_READ_CHUNK_LEN as usize);
@@ -357,6 +362,7 @@ impl ObjectReader {
 
 impl std::io::Read for ObjectReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectRead);
         self.file.read_into(buf).map_err(std::io::Error::other)
     }
 }
@@ -414,12 +420,14 @@ impl std::io::Write for ObjectWriter {
             .staging
             .as_mut()
             .ok_or_else(|| std::io::Error::other("writer already closed"))?;
+        let _wait = StorageWaitGuard::start(StorageWaitEvent::StagingFileWrite);
         staging.write(buf).map_err(std::io::Error::other)?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         if let Some(staging) = &self.staging {
+            let _wait = StorageWaitGuard::start(StorageWaitEvent::StagingFileSync);
             staging.sync().map_err(std::io::Error::other)?;
         }
         Ok(())
@@ -428,6 +436,12 @@ impl std::io::Write for ObjectWriter {
 
 impl FileWrite for ObjectWriter {
     fn close(&mut self) -> Result<()> {
+        // Intentionally do not call `flush()` here. Object writes stage bytes in
+        // a local file that `Storage::finalize_write` uploads in the same
+        // statement path; a crash before upload aborts the transaction and leaves
+        // only cleanup work. Callers that need durable staged bytes before upload
+        // can call `flush()` explicitly, but making close fsync every object file
+        // would add latency without improving the committed object-store state.
         self.staging.take();
         Ok(())
     }

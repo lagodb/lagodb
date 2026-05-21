@@ -251,7 +251,12 @@ impl InputFile {
 /// standard Rust I/O operations while also supporting the `close` method
 /// for proper resource cleanup.
 pub trait FileWrite: std::io::Write + Send + Sync {
-    /// Close the file writer and flush any remaining data.
+    /// Close the writer's local handle.
+    ///
+    /// Implementations must make bytes accepted by prior `write` calls visible
+    /// to the backend-specific finalization path. Durable local sync semantics
+    /// are backend-specific and should be exposed through `Write::flush` when
+    /// the backend supports them.
     fn close(&mut self) -> Result<()>;
 }
 

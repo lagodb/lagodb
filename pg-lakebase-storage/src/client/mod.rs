@@ -3,8 +3,7 @@
 //! The client exposes three surfaces:
 //!
 //! * [`StorageClient`] — connection-bound request/response primitive. Cloneable; all clones
-//!   share one underlying Unix stream protected by a mutex, so concurrent calls from different
-//!   clones are safe but serialize on the lock.
+//!   share one underlying non-multiplexed Unix connection for single-threaded blocking use.
 //! * [`StorageFile`]   — open read handle returned by [`StorageClient::open`]. Seek / read / close.
 //! * [`StagingFile`]   — local file handle constructed by the caller via
 //!   [`StagingFile::create`](crate::client::StagingFile::create) using a
@@ -17,10 +16,10 @@
 //! write a staging file, close any client connection it had, and hours later upload from any
 //! other connection so long as it knows the identity tuple.
 
+use std::cell::{RefCell, RefMut};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::rc::Rc;
 
 use crate::backend::StoreConfig;
 use crate::error::{StorageError, StorageResult};
@@ -54,34 +53,66 @@ fn unexpected_response(operation: &str, got: &WireResponsePayload) -> StorageErr
 
 /// Connection-bound request/response handle to a storage server over a Unix socket.
 ///
-/// Cloneable: all clones share one underlying stream protected by a mutex. Concurrent calls
-/// from different clones are thread-safe but serialize on the internal lock — this is
-/// intentional for a blocking test/tool client. For high-throughput concurrent access, open
-/// multiple connections instead.
+/// Cloneable: all clones share one underlying connection state. This blocking client is
+/// intentionally single-threaded and non-multiplexed: each call writes one request and reads its
+/// matching response before the next call may use the connection. For independent concurrent work,
+/// open multiple `StorageClient` connections instead of cloning one client.
 ///
 /// # Long-running calls
 ///
 /// Some methods can occupy the connection for a long time (notably
 /// [`Self::delete_prefix`], which lists and deletes every matching object before returning).
-/// While such a call is in flight, every other call on the same `StorageClient` (or any
-/// clone of it) blocks on the internal stream mutex. If a workload mixes long-running
-/// admin calls with latency-sensitive reads, dedicate separate `StorageClient`
-/// instances to each.
+/// While such a call is in flight, the same `StorageClient` connection cannot be used for another
+/// request. If a workload mixes long-running admin calls with latency-sensitive reads, dedicate
+/// separate `StorageClient` instances to each.
 #[derive(Clone)]
 pub struct StorageClient {
-    inner: Arc<ClientInner>,
+    // One client is one blocking protocol state machine. Clones share it within one thread
+    // without pretending the connection is safe for concurrent use.
+    inner: Rc<RefCell<ClientConnection>>,
 }
 
-struct ClientInner {
-    stream: Mutex<UnixStream>,
-    next_request_id: AtomicU64,
+// SAFETY: this is a temporary compatibility boundary for `pg-iceberg-am`, whose
+// `iceberg-lite` storage traits still inherit upstream `Send + Sync` bounds. The
+// PostgreSQL AM integration uses `StorageClient` only from one backend thread with
+// blocking, non-multiplexed calls. `StorageClient` must not be moved to a worker
+// thread or shared for concurrent use; doing so would violate the `Rc<RefCell<_>>`
+// invariants. Keep this unsafe impl local to the client type until the upstream
+// trait boundary can be reconciled with the PostgreSQL single-threaded model.
+unsafe impl Send for StorageClient {}
+unsafe impl Sync for StorageClient {}
+
+struct ClientConnection {
+    stream: UnixStream,
+    request_ids: RequestIdGenerator,
 }
 
-impl ClientInner {
-    fn lock_stream(&self) -> StorageResult<MutexGuard<'_, UnixStream>> {
-        self.stream.lock().map_err(|_| {
-            StorageError::protocol("client stream mutex poisoned; client connection state is no longer trustworthy")
-        })
+impl ClientConnection {
+    fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            request_ids: RequestIdGenerator::new(),
+        }
+    }
+
+    fn next_request_id(&mut self) -> u64 {
+        self.request_ids.next()
+    }
+}
+
+struct RequestIdGenerator {
+    next: u64,
+}
+
+impl RequestIdGenerator {
+    fn new() -> Self {
+        Self { next: 1 }
+    }
+
+    fn next(&mut self) -> u64 {
+        let request_id = self.next;
+        self.next = self.next.wrapping_add(1);
+        request_id
     }
 }
 
@@ -118,10 +149,16 @@ impl StorageClient {
     pub fn connect(socket_path: impl AsRef<Path>) -> StorageResult<Self> {
         let stream = UnixStream::connect(socket_path)?;
         Ok(Self {
-            inner: Arc::new(ClientInner {
-                stream: Mutex::new(stream),
-                next_request_id: AtomicU64::new(1),
-            }),
+            inner: Rc::new(RefCell::new(ClientConnection::new(stream))),
+        })
+    }
+
+    fn connection(&self) -> StorageResult<RefMut<'_, ClientConnection>> {
+        self.inner.try_borrow_mut().map_err(|_| {
+            StorageError::protocol(
+                "client connection is already in use; StorageClient is single-threaded and \
+                 does not support reentrant calls",
+            )
         })
     }
 
@@ -317,10 +354,9 @@ impl StorageClient {
     /// — a subsequent call simply finds nothing left to delete.
     ///
     /// **Connection ownership**: this call is a single RPC that runs to completion before
-    /// returning. Because [`StorageClient`] serializes all requests on the underlying socket
-    /// (see the type-level docs), every other call made through the same `StorageClient` (or any
-    /// of its clones) will block until `delete_prefix` finishes. For large prefixes that is the
-    /// dominant cost.
+    /// returning. Because one [`StorageClient`] owns one non-multiplexed connection state machine,
+    /// the same client (or any clone of it) should not be reused for another request until
+    /// `delete_prefix` finishes. For large prefixes that is the dominant cost.
     ///
     /// **Scaling out**: for prefixes large enough that the single-RPC duration matters
     /// (millions of objects, or interleaving with concurrent reads on the same client), prefer
@@ -415,16 +451,16 @@ impl StorageClient {
     /// Sends a READ request and decodes the response header/prefix, returning the cursor
     /// positioned at the body start plus the decoded prefix.
     fn send_read_request<'a>(
-        &self,
         handle: FileHandle,
         offset: u64,
         len: u32,
-        stream: &'a mut std::os::unix::net::UnixStream,
+        connection: &'a mut ClientConnection,
     ) -> StorageResult<(
         BlockingFrameCursor<'a, std::os::unix::net::UnixStream>,
         ReadResponsePrefix,
     )> {
-        let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = connection.next_request_id();
+        let stream = &mut connection.stream;
         let frame = encode_read_request(request_id, handle, offset, len);
         write_frame_blocking(&mut *stream, &frame)?;
 
@@ -470,9 +506,9 @@ impl StorageClient {
         len: u32,
         buf: &mut [u8],
     ) -> StorageResult<ReadIntoOutcome> {
-        let mut stream = self.inner.lock_stream()?;
+        let mut connection = self.connection()?;
         let (mut response_frame, prefix) =
-            self.send_read_request(handle, offset, len, &mut stream)?;
+            Self::send_read_request(handle, offset, len, &mut connection)?;
         if prefix.data_len > buf.len() {
             response_frame.discard_remaining()?;
             return Err(StorageError::protocol(format!(
@@ -495,9 +531,9 @@ impl StorageClient {
         offset: u64,
         len: u32,
     ) -> StorageResult<Vec<u8>> {
-        let mut stream = self.inner.lock_stream()?;
+        let mut connection = self.connection()?;
         let (mut response_frame, prefix) =
-            self.send_read_request(handle, offset, len, &mut stream)?;
+            Self::send_read_request(handle, offset, len, &mut connection)?;
         let mut data = vec![0u8; prefix.data_len];
         response_frame.read_exact(&mut data)?;
         Ok(data)
@@ -507,15 +543,15 @@ impl StorageClient {
         &self,
         payload: WireRequestPayload,
     ) -> StorageResult<(WireResponsePayload, Option<std::os::fd::OwnedFd>)> {
-        let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let mut connection = self.connection()?;
+        let request_id = connection.next_request_id();
         let request = WireRequest {
             request_id,
             payload,
         };
         let frame = encode_request(&request)?;
-        let mut stream = self.inner.lock_stream()?;
-        write_frame_blocking(&mut *stream, &frame)?;
-        let response_frame = read_frame_blocking(&mut *stream)?
+        write_frame_blocking(&mut connection.stream, &frame)?;
+        let response_frame = read_frame_blocking(&mut connection.stream)?
             .ok_or_else(|| StorageError::protocol("connection closed"))?;
         let response = decode_response(&response_frame)?;
         if response.request_id != request_id {
@@ -532,7 +568,7 @@ impl StorageClient {
                 ..
             }
         ) {
-            Some(read_fd_blocking(&mut stream)?)
+            Some(read_fd_blocking(&mut connection.stream)?)
         } else {
             None
         };

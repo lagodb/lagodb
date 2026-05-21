@@ -52,7 +52,7 @@ impl UtilityHook for IcebergCreateTablespaceHook {
             .cast::<CreateTableSpaceStmtNode>()
             .expect("Hook registered for T_CreateTableSpaceStmt but received different node type");
 
-        if let Ok(Some(opts)) = TablespaceOptions::read_from_stmt(stmt) {
+        if let Some(opts) = TablespaceOptions::read_from_stmt(stmt)? {
             let spcname = unsafe { CStr::from_ptr(stmt.tablespacename) };
             let oid = get_tablespace_oid(spcname, false)?;
             opts.persist_to_catalog(oid)?;

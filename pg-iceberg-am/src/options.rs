@@ -4,6 +4,11 @@
 //! definitions, and the `rd_amcache` layout. By living at the crate root it
 //! breaks the former bidirectional dependency between `catalog` (which reads
 //! options) and `hooks` (which validates and persists options during DDL).
+//!
+//! This is the *schema* layer for reloptions: it defines what is valid and
+//! how cached options are laid out in shared memory. The *DDL path* that
+//! parses, validates, and persists those options on `CREATE TABLE` lives in
+//! `crate::hooks::table_ddl`.
 
 use iceberg_lite::spec::FormatVersion;
 use pg_lakebase_core::options::table::{

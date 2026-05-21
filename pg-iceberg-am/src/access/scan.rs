@@ -7,11 +7,9 @@
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use iceberg_lite::catalog::{NamespaceIdent, TableIdent};
 use iceberg_lite::scan::ArrowRecordBatchIterator;
 use iceberg_lite::spec::{Schema as IcebergSchema, TableMetadata};
 use iceberg_lite::table::Table;
-use pg_lakebase_core::catalog::get_namespace_name;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::prelude::*;
 use pg_lakebase_core::tuple::Row;
@@ -19,9 +17,10 @@ use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
 use crate::access::conversion::extract_row_from_batch;
-use crate::catalog::get_or_rebase_metadata_location;
+use crate::catalog::bridge::IcebergTableId;
+use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
-use crate::storage::create_storage_context;
+use crate::storage::StorageContext;
 
 /// Iceberg sequential scan state.
 ///
@@ -34,10 +33,6 @@ pub struct IcebergScan {
     rel_oid: pg_sys::Oid,
     /// The tablespace OID for storage context
     spc_oid: pg_sys::Oid,
-    /// The relation name
-    rel_name: String,
-    /// The namespace name
-    nsp_name: String,
     /// Arrow RecordBatch iterator from iceberg scan
     batch_iterator: Option<ArrowRecordBatchIterator>,
     /// Current RecordBatch being read
@@ -66,15 +61,10 @@ impl AmScanSession for IcebergScan {
     ) -> AmResult<Self> {
         let rel_oid = unsafe { (*(*rel.as_raw()).rd_rel).oid };
         let spc_oid = rel.tablespace_oid();
-        let rel_name = rel.relation_name();
-        let nsp_oid = rel.namespace_oid();
-        let nsp_name = Self::namespace_name(nsp_oid)?;
 
         Ok(IcebergScan {
             rel_oid,
             spc_oid,
-            rel_name,
-            nsp_name,
             batch_iterator: None,
             current_batch: None,
             current_row_idx: 0,
@@ -183,32 +173,31 @@ impl AmScanSession for IcebergScan {
 }
 
 impl IcebergScan {
-    fn namespace_name(nsp_oid: pg_sys::Oid) -> IcebergResult<String> {
-        get_namespace_name(nsp_oid)?.ok_or(IcebergError::NamespaceNull)
-    }
-
     fn open_table_scan(
         &self,
     ) -> IcebergResult<(ArrowRecordBatchIterator, Arc<IcebergSchema>)> {
-        let ctx = create_storage_context(self.spc_oid)?;
+        let ctx = StorageContext::for_tablespace(self.spc_oid)?;
 
         // Ensure scans see the latest committed metadata when this transaction
         // has already staged writes for the table.
         let metadata_location =
-            get_or_rebase_metadata_location(self.rel_oid, &ctx.file_io)?;
+            TxMetadata::current().current_metadata_location(self.rel_oid, &ctx.file_io)?;
 
         let table_metadata =
             TableMetadata::read_from(&ctx.file_io, &metadata_location)?;
         let schema = table_metadata.current_schema().clone();
 
+        // Identity is synthesized from the PG OID through `IcebergTableId`,
+        // matching the ident used by the commit path. Anything else would
+        // produce a different `TableIdent` for the same relation depending
+        // on which path observed it, which would break `StagedCatalog`'s
+        // `base.identifier() == ident` check the moment scan-produced
+        // tables ever flowed back into commit.
         let table = Table::builder()
             .file_io(ctx.file_io.clone())
             .metadata_location(metadata_location)
             .metadata(table_metadata)
-            .identifier(TableIdent::new(
-                NamespaceIdent::new(self.nsp_name.clone()),
-                self.rel_name.clone(),
-            ))
+            .identifier(IcebergTableId::for_relation(self.rel_oid).into_table_ident())
             .build()?;
 
         let table_scan = table.scan().select_all().build()?;

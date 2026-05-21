@@ -1,6 +1,6 @@
 -- Test custom table options for Iceberg access method.
 -- This test verifies that the IcebergTableHook correctly extracts and persists
--- table options defined in table_options.rs.
+-- table options defined in options.rs.
 
 -- Clean slate: drop and recreate extension
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;

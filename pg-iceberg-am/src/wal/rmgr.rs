@@ -1,6 +1,6 @@
 use super::record::{
-    DeleteDirectoryHeader, DeleteFileHeader, IcebergWalOp, SIZE_OF_DELETE_DIRECTORY,
-    SIZE_OF_DELETE_FILE, SIZE_OF_WRITE_FILE, WriteFileHeader,
+    DeleteDirectoryHeader, IcebergWalOp, SIZE_OF_DELETE_DIRECTORY,
+    SIZE_OF_WRITE_FILE, WriteFileHeader,
 };
 use pg_lakebase_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
 use pg_lakebase_core::{diag, wal};
@@ -11,10 +11,15 @@ use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
-// Global state for invalid paths
-static INVALID_PATHS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+// Paths whose WRITE_FILE replay has entered lossy mode because recovery saw a
+// later chunk (offset > 0) but the base file was missing. This is intentionally
+// not called "invalid": under the local Iceberg WAL contract, missing files are
+// an availability-first replay outcome that will surface later as unreadable
+// Iceberg data if committed metadata references them.
+static LOSSY_SKIPPED_WRITE_PATHS: OnceLock<Mutex<HashSet<String>>> =
+    OnceLock::new();
 
 /// Iceberg WAL Resource Manager ID
 ///
@@ -24,19 +29,26 @@ pub const ICEBERG_RMGR_ID: RmgrId = RmgrId::new(ICEBERG_RMGR_ID_U8);
 
 /// Iceberg WAL Resource Manager implementation
 ///
-/// This resource manager reconstructs local Iceberg files during
-/// standby/archive/PITR recovery by replaying file system operations recorded
-/// in the WAL.
+/// This resource manager reconstructs local Iceberg files during standby WAL
+/// replay or archive recovery by replaying file system operations recorded in
+/// the WAL.
 ///
 /// Invariants:
 /// - Local crash-only recovery does not replay `WRITE_FILE` records. The normal
 ///   write path performs `FileSync` during explicit writer close, so committed
 ///   local files are already durable on the primary.
-/// - Standby/archive/PITR recovery does replay `WRITE_FILE` records because the
-///   target system may not have the local Iceberg files.
+/// - Standby WAL replay or archive recovery replays `WRITE_FILE` records on a
+///   best-effort basis because the target system may not have local Iceberg
+///   files. Missing base files are skipped in lossy mode rather than aborting
+///   PostgreSQL recovery.
+/// - Directory deletes are post-commit cleanup records. PostgreSQL does not let
+///   an extension attach arbitrary paths to core transaction commit/abort
+///   records, and PG17 `smgr` is not extension-customizable, so delete WAL is
+///   emitted only after commit is known to have succeeded.
 /// - Distributed storage (S3, GCS, Azure) doesn't need WAL-based redo because:
 /// 1. The storage layer guarantees durability after successful write
-/// 2. Orphaned files should be cleaned via garbage collection (e.g., expire_snapshots)
+/// 2. Orphaned files should be cleaned via garbage collection
+///    (e.g., remove_orphan_files)
 pub struct IcebergRmgr;
 
 impl WalResourceManager for IcebergRmgr {
@@ -64,7 +76,6 @@ impl WalResourceManager for IcebergRmgr {
         match op {
             IcebergWalOp::DeleteDirectory => self.redo_delete_directory(record),
             IcebergWalOp::WriteFile => self.redo_write_file(record),
-            IcebergWalOp::DeleteFile => self.redo_delete_file(record),
         }
     }
 
@@ -94,12 +105,6 @@ impl WalResourceManager for IcebergRmgr {
                             );
                         }
                     }
-                    IcebergWalOp::DeleteFile => {
-                        if let Some(path) = self.extract_delete_file_path(data) {
-                            let _ =
-                                std::fmt::write(buf, format_args!(" path={}", path));
-                        }
-                    }
                 }
             }
         } else {
@@ -118,43 +123,41 @@ impl WalResourceManager for IcebergRmgr {
 
     fn cleanup(&self) -> Result<(), WalRmgrError> {
         diag::log_debug1("Iceberg WAL resource manager cleaning up");
-        Self::check_consistency();
+        Self::clear_lossy_skipped_write_paths();
         Ok(())
     }
 }
 
 impl IcebergRmgr {
-    fn get_invalid_paths() -> &'static Mutex<HashSet<String>> {
-        INVALID_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
+    fn lossy_skipped_write_paths() -> &'static Mutex<HashSet<String>> {
+        LOSSY_SKIPPED_WRITE_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
     }
 
-    fn log_invalid_path(path: String) {
-        let mut paths = Self::get_invalid_paths().lock().unwrap();
-        if paths.insert(path.clone()) {
-            diag::log_debug1(&format!("Marking path as invalid: {}", path));
-        }
+    fn lock_lossy_skipped_write_paths() -> MutexGuard<'static, HashSet<String>> {
+        Self::lossy_skipped_write_paths()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn is_path_usable(path: &str) -> bool {
-        let paths = Self::get_invalid_paths().lock().unwrap();
-        !paths.contains(path)
+    fn mark_lossy_skipped_write_path(path: &str) -> bool {
+        Self::lock_lossy_skipped_write_paths()
+            .insert(path.to_string())
     }
 
-    fn check_consistency() {
-        if let Some(mutex) = INVALID_PATHS.get() {
-            let mut paths = mutex.lock().unwrap();
-            if !paths.is_empty() {
-                for p in paths.iter() {
-                    diag::report_warning(&format!(
-                        "Iceberg WAL invalid path detected: {}",
-                        p
-                    ));
-                }
-                diag::report_warning(
-                    "Iceberg WAL contains references to invalid files",
-                );
-                paths.clear();
-            }
+    fn is_lossy_skipped_write_path(path: &str) -> bool {
+        Self::lock_lossy_skipped_write_paths().contains(path)
+    }
+
+    fn unmark_lossy_skipped_write_path(path: &str) {
+        Self::lock_lossy_skipped_write_paths().remove(path);
+    }
+
+    fn clear_lossy_skipped_write_paths() {
+        if let Some(paths) = LOSSY_SKIPPED_WRITE_PATHS.get() {
+            paths
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
         }
     }
 
@@ -162,10 +165,10 @@ impl IcebergRmgr {
     // Redo Functions (Local Storage Only)
     // ========================================================================
 
-    /// Redo a DELETE_DIRECTORY operation
+    /// Redo a DELETE_DIRECTORY operation.
     ///
-    /// Removes the directory and all its contents. If the directory doesn't
-    /// exist, this is a no-op (idempotent).
+    /// Directory deletion is cleanup, not file reconstruction. In lossy replay
+    /// mode failures are reported but do not stop PostgreSQL recovery.
     fn redo_delete_directory(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
         let data = record
             .main_data()
@@ -177,24 +180,40 @@ impl IcebergRmgr {
 
         diag::log_debug1(&format!("Iceberg DELETE_DIRECTORY redo: path={}", path));
 
-        let dir_path = Path::new(&path);
-        if dir_path.exists() {
-            if let Err(e) = fs::remove_dir_all(dir_path) {
+        let path_ref = Path::new(&path);
+        let delete_result = match fs::metadata(path_ref) {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path_ref),
+            Ok(_) => fs::remove_file(path_ref),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                diag::log_debug1(&format!("Directory does not exist: {}", path));
+                return Ok(());
+            }
+            Err(e) => {
                 diag::report_warning(&format!(
-                    "Failed to delete directory during redo: {} - {}",
+                    "Failed to stat directory during redo: {} - {}",
                     path, e
                 ));
-            } else {
-                diag::log_debug1(&format!("Deleted directory: {}", path));
+                return Ok(());
             }
-        } else {
-            diag::log_debug1(&format!("Directory does not exist: {}", path));
+        };
+
+        match delete_result {
+            Ok(()) => diag::log_debug1(&format!("Deleted path during redo: {}", path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                diag::log_debug1(&format!("Directory disappeared during redo: {}", path));
+            }
+            Err(e) => {
+                diag::report_warning(&format!(
+                    "Failed to delete directory during lossy redo: {} - {}",
+                    path, e
+                ));
+            }
         }
 
         Ok(())
     }
 
-    /// Redo a WRITE_FILE operation for standby/archive/PITR recovery.
+    /// Redo a WRITE_FILE operation for standby WAL replay or archive recovery.
     ///
     /// Writes data to the file at the specified offset. If offset is 0,
     /// the file is created (or truncated if it exists), and any missing
@@ -208,8 +227,11 @@ impl IcebergRmgr {
         // 1. If the transaction committed, the file is already synced to disk.
         // 2. If the transaction aborted, we don't care about the file state.
         //
-        // Standby/archive/PITR recovery still needs redo because the target
-        // system may not have the local Iceberg files.
+        // Standby WAL replay or archive recovery still needs redo because the
+        // target system may not have the local Iceberg files. This is
+        // availability-first lossy replay: if recovery starts from a point where
+        // the base file is missing, later chunks for that path are skipped and
+        // any committed metadata reference will fail at read time.
         if wal::is_crash_recovery_only() {
             return Ok(());
         }
@@ -236,9 +258,11 @@ impl IcebergRmgr {
             file_data.len()
         ));
 
-        // Block subsequent operations if path is invalid
-        if !Self::is_path_usable(&path) {
-            diag::log_debug1(&format!("Skipping write to invalid path: {}", path));
+        if offset > 0 && Self::is_lossy_skipped_write_path(&path) {
+            diag::log_debug1(&format!(
+                "Skipping WRITE_FILE chunk during lossy redo: path={}, offset={}",
+                path, offset
+            ));
             return Ok(());
         }
 
@@ -271,16 +295,30 @@ impl IcebergRmgr {
         let file = unsafe { pg_sys::PathNameOpenFile(c_path.as_ptr(), flags) };
         if file < 0 {
             let err = std::io::Error::last_os_error();
-            // Handle ENOENT specifically: mark file as invalid
-            if err.kind() == std::io::ErrorKind::NotFound {
-                diag::log_debug1(&format!("File does not exist: {}", path));
-                Self::log_invalid_path(path);
+            if offset > 0 && err.kind() == std::io::ErrorKind::NotFound {
+                let first_skip = Self::mark_lossy_skipped_write_path(&path);
+                if first_skip {
+                    diag::report_warning(&format!(
+                        "Skipping local Iceberg file during lossy WAL replay because \
+                         base file is missing: path={}, offset={}",
+                        path, offset
+                    ));
+                } else {
+                    diag::log_debug1(&format!(
+                        "Skipping WRITE_FILE chunk for missing local Iceberg file: \
+                         path={}, offset={}",
+                        path, offset
+                    ));
+                }
                 return Ok(());
             }
             return Err(WalRmgrError::RedoFailed(format!(
                 "Failed to open file during redo (offset={}): {} - {}",
                 offset, path, err
             )));
+        }
+        if offset == 0 {
+            Self::unmark_lossy_skipped_write_path(&path);
         }
 
         // Ensure file is closed when we drop this guard
@@ -326,37 +364,6 @@ impl IcebergRmgr {
         Ok(())
     }
 
-    /// Redo a DELETE_FILE operation
-    ///
-    /// Removes the file. If the file doesn't exist, this is a no-op (idempotent).
-    fn redo_delete_file(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
-        let data = record
-            .main_data()
-            .ok_or_else(|| WalRmgrError::InvalidRecord("Missing main data".into()))?;
-
-        let path = self.extract_delete_file_path(data).ok_or_else(|| {
-            WalRmgrError::InvalidRecord("Failed to extract file path".into())
-        })?;
-
-        diag::log_debug1(&format!("Iceberg DELETE_FILE redo: path={}", path));
-
-        let file_path = Path::new(&path);
-        if file_path.exists() {
-            if let Err(e) = fs::remove_file(file_path) {
-                diag::report_warning(&format!(
-                    "Failed to delete file during redo: {} - {}",
-                    path, e
-                ));
-            } else {
-                diag::log_debug1(&format!("Deleted file: {}", path));
-            }
-        } else {
-            diag::log_debug1(&format!("File does not exist: {}", path));
-        }
-
-        Ok(())
-    }
-
     // ========================================================================
     // Helper Functions for Parsing WAL Records
     // ========================================================================
@@ -367,35 +374,15 @@ impl IcebergRmgr {
             return None;
         }
 
-        // Safe unaligned read of the header
+        // Safe unaligned read of the header. PostgreSQL WAL is trusted input for
+        // this cluster, but record parsing still bounds-checks lengths so corrupt
+        // records fail as InvalidRecord instead of reading past the byte slice.
         let header = unsafe {
             std::ptr::read_unaligned(data.as_ptr() as *const DeleteDirectoryHeader)
         };
 
         let path_start = SIZE_OF_DELETE_DIRECTORY;
-        let path_end = path_start + header.path_len as usize;
-
-        if data.len() < path_end {
-            return None;
-        }
-
-        let path_bytes = &data[path_start..path_end];
-        std::str::from_utf8(path_bytes).ok().map(|s| s.to_string())
-    }
-
-    /// Extract file path from DeleteFileHeader + data
-    fn extract_delete_file_path(&self, data: &[u8]) -> Option<String> {
-        if data.len() < SIZE_OF_DELETE_FILE {
-            return None;
-        }
-
-        // Safe unaligned read of the header
-        let header = unsafe {
-            std::ptr::read_unaligned(data.as_ptr() as *const DeleteFileHeader)
-        };
-
-        let path_start = SIZE_OF_DELETE_FILE;
-        let path_end = path_start + header.path_len as usize;
+        let path_end = path_start.checked_add(header.path_len as usize)?;
 
         if data.len() < path_end {
             return None;
@@ -411,13 +398,15 @@ impl IcebergRmgr {
             return None;
         }
 
-        // Safe unaligned read of the header
+        // Safe unaligned read of the header. PostgreSQL WAL is trusted input for
+        // this cluster, but record parsing still bounds-checks lengths so corrupt
+        // records fail as InvalidRecord instead of reading past the byte slice.
         let header = unsafe {
             std::ptr::read_unaligned(data.as_ptr() as *const WriteFileHeader)
         };
 
         let path_start = SIZE_OF_WRITE_FILE;
-        let path_end = path_start + header.path_len as usize;
+        let path_end = path_start.checked_add(header.path_len as usize)?;
 
         if data.len() < path_end {
             return None;
@@ -429,5 +418,124 @@ impl IcebergRmgr {
         let data_len = data.len() - path_end;
 
         Some((path.to_string(), header.offset, data_len))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header_bytes<T>(header: &T) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                header as *const T as *const u8,
+                std::mem::size_of::<T>(),
+            )
+        }
+    }
+
+    fn delete_directory_record(path: &[u8], path_len: u32) -> Vec<u8> {
+        let header = DeleteDirectoryHeader { path_len };
+        let mut data = Vec::new();
+        data.extend_from_slice(header_bytes(&header));
+        data.extend_from_slice(path);
+        data
+    }
+
+    fn write_file_record(path: &[u8], offset: i64, payload: &[u8]) -> Vec<u8> {
+        let header = WriteFileHeader {
+            path_len: path.len() as u32,
+            _padding: 0,
+            offset,
+        };
+        let mut data = Vec::new();
+        data.extend_from_slice(header_bytes(&header));
+        data.extend_from_slice(path);
+        data.extend_from_slice(payload);
+        data
+    }
+
+    #[test]
+    fn wal_op_from_info_masks_postgres_flags() {
+        assert_eq!(
+            IcebergWalOp::from_info(IcebergWalOp::DeleteDirectory as u8 | 0x0f),
+            Some(IcebergWalOp::DeleteDirectory)
+        );
+        assert_eq!(
+            IcebergWalOp::from_info(IcebergWalOp::WriteFile as u8 | 0x0f),
+            Some(IcebergWalOp::WriteFile)
+        );
+        assert_eq!(IcebergWalOp::from_info(0x20), None);
+    }
+
+    #[test]
+    fn extracts_delete_directory_path() {
+        let rmgr = IcebergRmgr;
+        let data = delete_directory_record(b"base/1/2_iceberg", 16);
+
+        assert_eq!(
+            rmgr.extract_delete_directory_path(&data),
+            Some("base/1/2_iceberg".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_delete_directory_records() {
+        let rmgr = IcebergRmgr;
+
+        assert_eq!(rmgr.extract_delete_directory_path(&[]), None);
+        assert_eq!(
+            rmgr.extract_delete_directory_path(&delete_directory_record(b"abc", 4)),
+            None
+        );
+        assert_eq!(
+            rmgr.extract_delete_directory_path(&delete_directory_record(b"", u32::MAX)),
+            None
+        );
+        assert_eq!(
+            rmgr.extract_delete_directory_path(&delete_directory_record(&[0xff], 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_write_file_info() {
+        let rmgr = IcebergRmgr;
+        let data = write_file_record(b"base/1/data.parquet", 128, b"payload");
+
+        assert_eq!(
+            rmgr.extract_write_file_info(&data),
+            Some(("base/1/data.parquet".to_string(), 128, 7))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_write_file_records() {
+        let rmgr = IcebergRmgr;
+
+        assert_eq!(rmgr.extract_write_file_info(&[]), None);
+
+        let mut short_path = write_file_record(b"abc", 0, b"");
+        let header = WriteFileHeader {
+            path_len: 4,
+            _padding: 0,
+            offset: 0,
+        };
+        short_path[..SIZE_OF_WRITE_FILE].copy_from_slice(header_bytes(&header));
+        assert_eq!(rmgr.extract_write_file_info(&short_path), None);
+
+        let long_path_header = WriteFileHeader {
+            path_len: u32::MAX,
+            _padding: 0,
+            offset: 0,
+        };
+        let mut long_path = Vec::new();
+        long_path.extend_from_slice(header_bytes(&long_path_header));
+        assert_eq!(rmgr.extract_write_file_info(&long_path), None);
+
+        assert_eq!(
+            rmgr.extract_write_file_info(&write_file_record(&[0xff], 0, b"")),
+            None
+        );
     }
 }

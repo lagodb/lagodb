@@ -25,6 +25,16 @@ impl<'a> RelationHandle<'a> {
     }
 
     #[inline]
+    pub fn oid(&self) -> pg_sys::Oid {
+        unsafe { self.inner.as_ref().rd_id }
+    }
+
+    #[inline]
+    pub fn access_method_oid(&self) -> pg_sys::Oid {
+        unsafe { (*self.rd_rel()).relam }
+    }
+
+    #[inline]
     pub fn tablespace_oid(&self) -> pg_sys::Oid {
         unsafe { (*self.rd_rel()).reltablespace }
     }
@@ -55,6 +65,15 @@ impl<'a> RelationHandle<'a> {
     #[inline]
     pub fn needs_wal(&self) -> bool {
         unsafe { PgWrapper::relation_needs_wal(self.as_raw()) }
+    }
+
+    /// The relation's tuple descriptor (`rd_att`).
+    ///
+    /// Borrowed for the lifetime of `self`; PostgreSQL guarantees `rd_att`
+    /// stays valid as long as the relation is held open by this handle.
+    #[inline]
+    pub fn tuple_desc(&self) -> pg_sys::TupleDesc {
+        unsafe { self.inner.as_ref().rd_att }
     }
 
     #[inline]

@@ -30,6 +30,21 @@ macro_rules! impl_utility_stmt_node {
 
 impl_utility_stmt_node!(CopyStmtNode, pg_sys::CopyStmt, pg_sys::NodeTag::T_CopyStmt);
 impl_utility_stmt_node!(
+    AlterTableStmtNode,
+    pg_sys::AlterTableStmt,
+    pg_sys::NodeTag::T_AlterTableStmt
+);
+impl_utility_stmt_node!(
+    AlterTableMoveAllStmtNode,
+    pg_sys::AlterTableMoveAllStmt,
+    pg_sys::NodeTag::T_AlterTableMoveAllStmt
+);
+impl_utility_stmt_node!(
+    CreateTableAsStmtNode,
+    pg_sys::CreateTableAsStmt,
+    pg_sys::NodeTag::T_CreateTableAsStmt
+);
+impl_utility_stmt_node!(
     CreateStmtNode,
     pg_sys::CreateStmt,
     pg_sys::NodeTag::T_CreateStmt

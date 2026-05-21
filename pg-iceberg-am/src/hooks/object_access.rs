@@ -1,12 +1,13 @@
-use crate::catalog::generate_table_location;
-use crate::catalog::is_iceberg_table;
-use crate::storage::create_storage_context;
-use crate::storage::transactional_artifacts::register_table_dir_dropped;
+use crate::catalog::IcebergRelationExt;
+use crate::catalog::metadata_table::IcebergMetadata;
+use crate::catalog::table_lifecycle::IcebergTableLifecycle;
 use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
 use pg_lakebase_core::hooks::{
-    self, ObjectAccessEvent, ObjectAccessHook, ObjectAccessHookError,
+    self, HookError, ObjectAccessEvent, ObjectAccessHook, ObjectAccessHookError,
 };
+use pg_lakebase_core::options::TableOptions;
 use pgrx::pg_sys;
+use pgrx::prelude::PgSqlErrorCode;
 
 pub struct IcebergObjectAccessHook;
 
@@ -15,68 +16,87 @@ impl ObjectAccessHook for IcebergObjectAccessHook {
         &self,
         event: &mut ObjectAccessEvent<'_>,
     ) -> Result<(), ObjectAccessHookError> {
-        // Handle DROP event
-        // Register pending delete for Iceberg table data cleanup on commit
-        // sub_id == 0 means it's the main relation (not a column)
-        let ObjectAccessEvent::Drop {
-            class_id,
-            object_id,
-            sub_id,
-            ..
-        } = event
-        else {
-            return Ok(());
-        };
-
-        if *class_id == pg_sys::RelationRelationId && *sub_id == 0 {
-            let oid = *object_id;
-
-            // Check relation kind before opening to avoid "wrong object type" errors
-            // when dropping indexes, sequences, etc.
-            let relkind = unsafe { pg_sys::get_rel_relkind(oid) } as i8;
-            if relkind != pg_sys::RELKIND_RELATION as i8
-                && relkind != pg_sys::RELKIND_MATVIEW as i8
-            {
-                return Ok(());
+        match event {
+            // sub_id == 0 means the main relation, not a column.
+            ObjectAccessEvent::Drop {
+                class_id,
+                object_id,
+                sub_id,
+                ..
+            } if *class_id == pg_sys::RelationRelationId && *sub_id == 0 => {
+                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)? else {
+                    return Ok(());
+                };
+                Self::handle_drop_relation(&guard.as_handle())?;
             }
-
-            // Try to open the table with AccessShareLock
-            // This is safe because OAT_DROP is called before the object is actually removed
-            let guard = RelationGuard::open(
-                oid,
-                pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-            )?;
-            let rel = guard.as_handle();
-
-            // Check if this is an Iceberg table
-            if !is_iceberg_table(&rel) {
-                return Ok(());
+            ObjectAccessEvent::Truncate { object_id } => {
+                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)? else {
+                    return Ok(());
+                };
+                Self::handle_truncate_relation(&guard.as_handle())?;
             }
-
-            handle_drop_relation(&rel)?;
+            _ => {}
         }
 
         Ok(())
     }
 }
 
-/// Handle DROP event for a relation.
-/// If the relation is an Iceberg table, register a pending delete for cleanup.
-fn handle_drop_relation(
-    rel: &RelationHandle<'_>,
-) -> Result<(), ObjectAccessHookError> {
-    // Create storage context based on tablespace type
-    let spc_oid = rel.tablespace_oid();
-    let ctx = create_storage_context(spc_oid)?;
+impl IcebergObjectAccessHook {
+    fn open_iceberg_physical_relation(
+        oid: pg_sys::Oid,
+    ) -> Result<Option<RelationGuard>, ObjectAccessHookError> {
+        // Check relation kind before opening to avoid "wrong object type"
+        // errors when dropping indexes, sequences, etc.
+        let relkind = unsafe { pg_sys::get_rel_relkind(oid) } as u8;
+        if relkind != pg_sys::RELKIND_RELATION
+            && relkind != pg_sys::RELKIND_MATVIEW
+        {
+            return Ok(None);
+        }
 
-    // Generate table location directly
-    let table_location =
-        generate_table_location(rel, &ctx.base_path, ctx.is_distributed);
+        // OAT_DROP is called before the object is removed, and OAT_TRUNCATE is
+        // called while PostgreSQL is operating on the live relation.
+        let guard =
+            RelationGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)?;
 
-    // Register pending delete for commit cleanup
-    register_table_dir_dropped(table_location, ctx.file_io);
+        let is_iceberg = guard.as_handle().is_iceberg();
 
-    Ok(())
+        Ok(is_iceberg.then_some(guard))
+    }
+
+    /// Handle DROP event for a relation by removing transactional catalog
+    /// state and registering a pending storage delete for commit cleanup.
+    fn handle_drop_relation(
+        rel: &RelationHandle<'_>,
+    ) -> Result<(), ObjectAccessHookError> {
+        // `regclass NOT NULL PRIMARY KEY` stores an OID value; it is not a
+        // PostgreSQL dependency or foreign key. These Lakebase catalog rows
+        // must be deleted explicitly in the same transaction as DROP TABLE.
+        IcebergMetadata::delete_if_exists(rel.oid())?;
+        TableOptions::delete_from_catalog(rel.oid())?;
+
+        // DROP directory cleanup is a post-commit WAL action for local
+        // permanent relations. `IcebergTableStorage` resolves the storage
+        // context with the relation-aware WAL policy and computes the table
+        // location in exactly the same way as CREATE TABLE, so DROP can
+        // never disagree with CREATE on layout.
+        IcebergTableLifecycle::new(rel)?.register_drop_cleanup();
+
+        Ok(())
+    }
+
+    fn handle_truncate_relation(
+        rel: &RelationHandle<'_>,
+    ) -> Result<(), ObjectAccessHookError> {
+        Err(HookError::with_code(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "cannot TRUNCATE Iceberg table \"{}\": Iceberg truncate requires metadata rewrite support",
+                rel.relation_name()
+            ),
+        ))
+    }
 }
 
 pub fn init_hook() {

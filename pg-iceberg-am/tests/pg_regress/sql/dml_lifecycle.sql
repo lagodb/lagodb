@@ -210,10 +210,12 @@ INSERT INTO dml_lifecycle.trigger_src VALUES (7), (8);
 SELECT * FROM dml_lifecycle.trigger_src ORDER BY id;
 SELECT * FROM dml_lifecycle.trigger_audit ORDER BY id;
 
--- CTAS currently bypasses managed ModifyTable/COPY frames and must fail loudly.
+-- CTAS does not have an Iceberg create lifecycle yet and must fail loudly.
 \set VERBOSITY sqlstate
 CREATE TABLE dml_lifecycle.ctas_t USING iceberg AS
 SELECT 1::integer AS id;
+CREATE TABLE dml_lifecycle.ctas_no_data_t USING iceberg AS
+SELECT 1::integer AS id WITH NO DATA;
 \set VERBOSITY default
 
 -- The unsupported CTAS path must not leave backend-local DML state poisoned.
@@ -223,6 +225,13 @@ CREATE TABLE dml_lifecycle.after_ctas_t (
 
 INSERT INTO dml_lifecycle.after_ctas_t VALUES (99);
 SELECT * FROM dml_lifecycle.after_ctas_t ORDER BY id;
+
+-- Storage identity changes and truncate need explicit Iceberg lifecycle support.
+\set VERBOSITY sqlstate
+ALTER TABLE dml_lifecycle.after_ctas_t SET ACCESS METHOD heap;
+ALTER TABLE dml_lifecycle.after_ctas_t SET TABLESPACE pg_default;
+TRUNCATE dml_lifecycle.after_ctas_t;
+\set VERBOSITY default
 
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;

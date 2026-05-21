@@ -167,8 +167,57 @@ COMMIT;
 -- Verify all data persists after commit
 SELECT * FROM test_multi_insert ORDER BY id;
 
+--
+-- Scenario 8: Sibling savepoint after RELEASE, then ROLLBACK TO sibling
+--
+-- Exercises RELEASE-time promotion of per-table state to the parent
+-- subtransaction. Without promotion, the released savepoint's writes
+-- alias the sibling savepoint's nest level and get rolled back.
+--
+CREATE TABLE test_sibling_rb (id int) USING iceberg;
+INSERT INTO test_sibling_rb VALUES (0); -- pre-existing baseline outside the txn
+
+BEGIN;
+  SAVEPOINT s1;
+    INSERT INTO test_sibling_rb VALUES (100);
+  RELEASE SAVEPOINT s1;        -- 100 must promote from level 2 to level 1
+
+  SAVEPOINT s2;
+    INSERT INTO test_sibling_rb VALUES (200);
+  ROLLBACK TO SAVEPOINT s2;    -- must drop only 200, never touch 100
+COMMIT;
+
+-- Expected: {0, 100}; 200 was rolled back, 100 was already promoted out.
+SELECT id FROM test_sibling_rb ORDER BY id;
+
+--
+-- Scenario 9: Table first registered inside a released savepoint
+--
+-- The table is touched for the first time inside s1 (so
+-- `first_modified_at_level` would be 2 without promotion). After RELEASE s1
+-- the state belongs to the parent. A sibling savepoint at level 2 must
+-- not be able to delete the table state.
+--
+CREATE TABLE test_sibling_first (id int) USING iceberg;
+
+BEGIN;
+  SAVEPOINT s1;
+    INSERT INTO test_sibling_first VALUES (1); -- first touch at level 2
+  RELEASE SAVEPOINT s1;        -- promote first_modified_at_level to 1
+
+  SAVEPOINT s2;
+    INSERT INTO test_sibling_first VALUES (2);
+  ROLLBACK TO SAVEPOINT s2;    -- must keep 1; without promotion, the
+                               -- whole TableState would be discarded.
+COMMIT;
+
+-- Expected: {1}; 2 was rolled back, 1 must survive.
+SELECT id FROM test_sibling_first ORDER BY id;
+
 -- Cleanup
 DROP TABLE test_multi_insert;
 DROP TABLE test_meta;
 DROP TABLE test_meta_2;
+DROP TABLE test_sibling_rb;
+DROP TABLE test_sibling_first;
 DROP FUNCTION get_meta_info(text);
