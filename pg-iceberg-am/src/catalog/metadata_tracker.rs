@@ -186,6 +186,18 @@ impl TableState {
 // Transaction-level metadata context
 // =============================================================================
 
+/// Outcome of a metadata read for one table inside the current transaction.
+///
+/// Pairs the resolved metadata location with the parsed `TableMetadata` so
+/// callers do not have to perform the same `read_from` against `FileIO`
+/// twice. Returned by [`TxMetadata::current_table_metadata`] and
+/// [`TxMetadata::begin_table_modify`].
+#[derive(Debug)]
+pub struct LoadedTableMetadata {
+    pub location: String,
+    pub metadata: TableMetadata,
+}
+
 /// Mutable state hidden inside [`TxMetadata`]'s `RefCell`.
 #[derive(Debug, Default)]
 struct TxMetadataInner {
@@ -235,7 +247,12 @@ impl TxMetadata {
     }
 
     /// Register a table the first time this transaction touches it. Idempotent.
-    pub fn register_table(&self, relid: pg_sys::Oid) -> IcebergResult<()> {
+    ///
+    /// Module-private because external callers must go through
+    /// [`TxMetadata::begin_table_modify`] to acquire write-side metadata; that
+    /// method bundles registration with the metadata read so callers cannot
+    /// accidentally bypass tracking by reading without registering first.
+    fn register_table(&self, relid: pg_sys::Oid) -> IcebergResult<()> {
         let mut inner = self.inner.borrow_mut();
         if inner.tables.contains_key(&relid) {
             return Ok(());
@@ -261,6 +278,21 @@ impl TxMetadata {
     ///
     /// Under Read Committed isolation we continuously rebase on the latest
     /// global state to absorb concurrent commits.
+    ///
+    /// TODO(metadata-preview): This currently materializes an intermediate
+    /// Iceberg metadata file for both write-side staging
+    /// (`end_modify` -> `stage_data_files`) and read-side rebases
+    /// (`current_table_metadata` with no new files). That preserves
+    /// PostgreSQL-like Read Committed semantics: a later statement must see
+    /// the latest committed snapshot plus this transaction's accumulated
+    /// appends. Do not replace this with "return the current tracked
+    /// metadata" because that would miss concurrent committed rows.
+    ///
+    /// The long-term shape should live in iceberg-lite: expose a read-only
+    /// fast-append preview that returns a scan-ready in-memory Table/snapshot
+    /// without writing metadata artifacts. We keep this crate-local TODO
+    /// because iceberg-lite is periodically merged from upstream iceberg-rust,
+    /// so changing that API here would create recurring merge cost.
     pub fn rebase_for_statement(
         &self,
         relid: pg_sys::Oid,
@@ -313,8 +345,10 @@ impl TxMetadata {
     ///   statement, then return the intermediate metadata location.
     /// - Otherwise, return the catalog's latest metadata location directly.
     ///
-    /// This is the single read entry point for both DML startup and scans.
-    pub fn current_metadata_location(
+    /// Module-private. Read-side callers should use
+    /// [`TxMetadata::current_table_metadata`]; write-side callers should use
+    /// [`TxMetadata::begin_table_modify`].
+    fn current_metadata_location(
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
@@ -326,6 +360,43 @@ impl TxMetadata {
         IcebergMetadata::get(relid)?
             .metadata_location
             .ok_or(IcebergError::MetadataLocationNull)
+    }
+
+    /// Read-side entry point for scans and planner statistics.
+    ///
+    /// Resolves the metadata location appropriate for this transaction
+    /// (already-written tables go through `rebase_for_statement`; untouched
+    /// ones return the catalog's latest committed location) and parses the
+    /// metadata file in one IO step. Does *not* register the table — pure
+    /// reads must not enroll a relation in the per-transaction tracker.
+    pub fn current_table_metadata(
+        &self,
+        relid: pg_sys::Oid,
+        file_io: &FileIO,
+    ) -> IcebergResult<LoadedTableMetadata> {
+        let location = self.current_metadata_location(relid, file_io)?;
+        let metadata = TableMetadata::read_from(file_io, &location)?;
+        Ok(LoadedTableMetadata { location, metadata })
+    }
+
+    /// Write-side entry point for DML.
+    ///
+    /// Registers the relation with this transaction's tracker (idempotent),
+    /// rebases pending changes onto the latest committed metadata so the
+    /// caller observes concurrent commits, and returns the metadata file
+    /// the writer should base its appends on.
+    ///
+    /// This is the single supported way for a writer to obtain its base
+    /// snapshot: it bundles `register_table` with the metadata read so a
+    /// caller cannot accidentally observe metadata without enrolling the
+    /// table in the tracker.
+    pub fn begin_table_modify(
+        &self,
+        relid: pg_sys::Oid,
+        file_io: &FileIO,
+    ) -> IcebergResult<LoadedTableMetadata> {
+        self.register_table(relid)?;
+        self.current_table_metadata(relid, file_io)
     }
 
     // -------------------------------------------------------------------------
@@ -427,6 +498,30 @@ impl TxMetadata {
         }
 
         // 5. Commit the transaction to materialise a new metadata file.
+        //
+        // TODO(metadata-preview): This is the storage write we would like to
+        // eliminate from non-final statement processing. iceberg-lite's current
+        // transaction API only exposes the "base snapshot + pending appends"
+        // view by committing through a Catalog, which writes manifest,
+        // manifest-list, and metadata files. That affects both SELECT after a
+        // write (read-side rebase with `new_data_files` empty) and INSERT
+        // statement finalization (`end_modify` staging newly written data
+        // files). Once iceberg-lite exposes a read-only/in-memory append
+        // preview, this tracker should record logical DataFiles during
+        // statement execution and defer physical metadata materialization to
+        // top-level pre-commit, except when a real catalog-visible commit is
+        // being attempted.
+        //
+        // Possible interim storage-layer mitigation: add a "local-only"
+        // staging mode in pg-lakebase-storage for derived intermediate
+        // metadata/manifest artifacts. That would require more than skipping
+        // the object-store PUT in upload/finalize: `open_reader`/`status` must
+        // be able to resolve the same object key to the local staging file for
+        // the current transaction/backend, the artifact registry needs a
+        // LocalOnly state with savepoint/abort cleanup, and `commit_all` must
+        // still write/upload a normal catalog-visible metadata chain before
+        // CAS. Never publish a metadata_location that depends on local-only
+        // files.
         use iceberg_lite::transaction::ApplyTransactionAction;
         let tx = append_action.apply(tx)?;
         let updated_table = tx.commit(&catalog)?;

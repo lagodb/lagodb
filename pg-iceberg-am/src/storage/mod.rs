@@ -36,13 +36,13 @@ use std::sync::Arc;
 ///   `WRITE_FILE` records.
 pub struct StorageContext {
     /// The FileIO instance for reading/writing files
-    pub file_io: FileIO,
+    file_io: FileIO,
     /// Base path for table storage (DataDir for local, base URL for distributed)
-    pub base_path: String,
+    base_path: String,
     /// Whether this is a distributed storage (S3, Azure, etc.)
-    pub is_distributed: bool,
+    is_distributed: bool,
     /// Whether Iceberg file WAL is needed for this storage context.
-    pub needs_wal: bool,
+    needs_wal: bool,
 }
 
 impl StorageContext {
@@ -93,6 +93,26 @@ impl StorageContext {
         let relation_needs_wal =
             unsafe { RelationHandle::from_raw(rel).needs_wal() };
         Self::for_tablespace_with_wal(spc_oid, relation_needs_wal)
+    }
+
+    pub fn file_io(&self) -> &FileIO {
+        &self.file_io
+    }
+
+    pub fn into_file_io(self) -> FileIO {
+        self.file_io
+    }
+
+    pub fn base_path(&self) -> &str {
+        &self.base_path
+    }
+
+    pub fn is_distributed(&self) -> bool {
+        self.is_distributed
+    }
+
+    pub fn needs_wal(&self) -> bool {
+        self.needs_wal
     }
 
     fn distributed(

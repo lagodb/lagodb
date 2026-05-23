@@ -4,6 +4,23 @@
 //! operations are currently not yet implemented.
 //! It uses the `iceberg-lite` writer module to write data files in Parquet format
 //! and commits the changes through the transaction API.
+//!
+//! # Initialization model
+//!
+//! Storage IO, schema resolution, and writer construction all happen up-front in
+//! [`AmDmlSession::new`]. The session is therefore *always* fully initialized
+//! once it has been handed back to the framework, and every field is non-`Option`.
+//! `begin_modify` is a no-op kept around to satisfy the trait contract.
+//!
+//! This is a deliberate choice. The framework calls `new()` and `begin_modify()`
+//! back-to-back inside `create_session` (see
+//! `pg-lakebase-core/src/access/dml/session.rs`), and there is no information
+//! available at `begin_modify` time that is not already available at `new` time:
+//! `DmlTarget` carries the `rel_oid`, the `RelFileLocator` (which contains
+//! `spc_oid`), and `relation_needs_wal`, which is everything the constructor
+//! needs. Splitting initialization across `new` / `begin_modify` would only
+//! re-introduce a state machine encoded as `Option<T>` fields without buying any
+//! deferred-IO benefit.
 
 use std::sync::Arc;
 
@@ -27,15 +44,11 @@ use pg_lakebase_core::prelude::*;
 use pg_lakebase_core::tuple::Row;
 use pgrx::pg_sys;
 
-use crate::access::{
-    iceberg_schema_to_arrow_schema, rows_to_record_batch_with_schema,
-};
+use crate::access::conversion::RowRecordBatchBuilder;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
+use crate::gucs;
 use crate::storage::StorageContext;
-
-/// Default batch size for buffering rows (64MB) before writing.
-const DEFAULT_BATCH_SIZE_IN_MB: usize = 64;
 
 type ParquetDataFileWriter = DataFileWriter<
     ParquetWriterBuilder,
@@ -45,92 +58,90 @@ type ParquetDataFileWriter = DataFileWriter<
 
 /// Iceberg DML state for INSERT/UPDATE/DELETE operations.
 ///
-/// This struct holds the state needed during a modify operation:
-/// - Buffered rows waiting to be written
-/// - Writer for producing data files
-/// - Table schema and storage context
+/// Constructed eagerly: by the time this struct exists, the storage context,
+/// schemas, and writer are all wired up. See module docs for the rationale.
 pub struct IcebergModify {
     /// OID of the relation being modified.
     rel_oid: pg_sys::Oid,
-    /// Tablespace OID used to build the storage context.
-    spc_oid: pg_sys::Oid,
-    /// Whether the relation requires WAL for local storage writes.
-    relation_needs_wal: bool,
-    /// Buffered rows waiting to be written
+    /// Schema-bound builder that turns buffered `Row`s into Arrow
+    /// `RecordBatch`es. Owns the resolved Arrow schema and the per-column
+    /// dispatch plan.
+    ///
+    /// TODO(rowless-dml): replace this fallback with an Iceberg-owned Arrow
+    /// batch buffer that implements the slot/datum model from
+    /// `pg_lakebase_core::batch::SlotColumnarBatchBuffer`. `IcebergModify`
+    /// should override `tuple_insert_slot` and `multi_insert_slots`, append
+    /// `PgDatumRef` values into schema-bound Arrow column appenders, finish a
+    /// `RecordBatch`, and hand it to the existing writer. That removes the hot
+    /// path `TupleTableSlot -> Row -> Cell -> RowBatchBuffer -> Arrow builder`
+    /// conversion and especially avoids per-row array/list/string
+    /// materialization. Keep the current `RowRecordBatchBuilder` only as a
+    /// row-mode fallback or test utility once the slot path is in place.
+    batch_builder: RowRecordBatchBuilder,
+    /// File IO for writing data files.
+    file_io: FileIO,
+    /// Buffered rows waiting to be written.
     row_buffer: RowBatchBuffer,
-    /// Data files produced during this modify operation
+    /// Row-buffer memory threshold captured for this DML session.
+    flush_threshold_bytes: usize,
+    /// Data files produced during this modify operation.
     data_files: Vec<DataFile>,
-    /// Iceberg schema for the table
-    iceberg_schema: Option<Arc<IcebergSchema>>,
-    /// Arrow schema for the table
-    arrow_schema: Option<Arc<arrow_schema::Schema>>,
-    /// File IO for writing
-    file_io: Option<FileIO>,
-    /// Whether the modify operation has been initialized
-    initialized: bool,
-    /// Current active writer for creating data files
+    /// Active rolling Parquet writer.
+    ///
+    /// `Option` here is *not* an initialization flag; it is consumed by
+    /// [`Self::close_writer`] (which calls `IcebergWriter::close`, taking the
+    /// writer by `&mut self` and invalidating it). After `close_writer`, the
+    /// session is finished from the writer's perspective and only `data_files`
+    /// remains relevant.
     writer: Option<ParquetDataFileWriter>,
 }
 
 impl AmDmlSession for IcebergModify {
     fn new(target: DmlTarget) -> AmResult<Self> {
-        Ok(Self {
-            rel_oid: target.rel_oid,
-            spc_oid: target.locator.spc_oid,
-            relation_needs_wal: target.relation_needs_wal,
-            row_buffer: RowBatchBuffer::new(),
-            data_files: Vec::new(),
-            iceberg_schema: None,
-            arrow_schema: None,
-            file_io: None,
-            initialized: false,
-            writer: None,
-        })
+        // Funnel the IO-bearing work through a single `IcebergResult`-returning
+        // entry point so all `iceberg_lite::Error -> IcebergError` conversions
+        // happen in one place; `new` itself only crosses the
+        // `IcebergError -> AmResult` boundary.
+        Ok(Self::open(target)?)
     }
 
     fn begin_modify(&mut self) -> AmResult<()> {
-        if self.initialized {
-            return Ok(());
-        }
-
-        // Register table for metadata tracking
-        TxMetadata::current().register_table(self.rel_oid)?;
-
-        if self.file_io.is_none() {
-            let ctx = StorageContext::for_tablespace_with_wal(
-                self.spc_oid,
-                self.relation_needs_wal,
-            )?;
-            self.file_io = Some(ctx.file_io);
-        }
-
-        let (table_metadata, schema, arrow_schema) = self.load_table_metadata()?;
-
-        self.iceberg_schema = Some(schema);
-        self.arrow_schema = Some(arrow_schema);
-        self.initialize_writer(&table_metadata)?;
-        self.initialized = true;
-
+        // Intentionally empty: see module docs. All initialization happens in
+        // `new` so that every field on `Self` is non-`Option` and the
+        // PostgreSQL-facing tuple callbacks have nothing to validate.
         Ok(())
     }
 
     fn abort_modify(&mut self) {
-        self.initialized = false;
+        // Best-effort cleanup of in-memory buffers. The session itself is
+        // dropped by the framework after this returns, so we don't need to
+        // reset to a "reusable" state; just release whatever we can cheaply.
+        //
+        // Persistent artifacts (staged or already-uploaded data files) are
+        // tracked through `StorageArtifactResource` and unwound by
+        // ResourceOwner cleanup; see the orphan-file note in `end_modify`.
         self.row_buffer.clear();
         self.data_files.clear();
         self.writer.take();
     }
 
     fn end_modify(&mut self) -> AmResult<()> {
-        if !self.initialized {
-            return Ok(());
-        }
-
-        // Reset initialized state immediately to ensure idempotent cleanup
-        // and prevent double-clearing if an error occurs and this is called again.
-        self.initialized = false;
-
-        // Flush remaining buffered rows
+        // Flush remaining buffered rows.
+        //
+        // Orphan-file note: if a previous batch in this `end_modify` already
+        // rolled over a data file and uploaded it to remote storage, and a
+        // later `flush_buffer` / `close_writer` then fails, returning the
+        // error here is NOT going to leak a remote object. Every data file
+        // produced by the underlying writer goes through
+        // `ObjectStorage::writer()` -> `register_object_file_staged()` and,
+        // on successful upload, `finalize_write()` -> `mark_object_file_uploaded()`
+        // (see `storage/object.rs` and `storage/transactional_artifacts.rs`).
+        // When this method returns an error and the transaction aborts, the
+        // `StorageArtifactResource::on_abort` callback walks every registered
+        // artifact and either unlinks the staging file (Staged) or issues a
+        // remote delete (Uploaded). Local writers are tracked the same way via
+        // `register_local_file_created`. Please do not "fix" the apparent
+        // orphan risk by re-introducing a separate cleanup list here.
         let flush_res = self.flush_buffer();
 
         // Ensure writer is always taken and closed to avoid leaking file descriptors,
@@ -143,9 +154,9 @@ impl AmDmlSession for IcebergModify {
 
         self.data_files.extend(new_files);
 
-        // If we have data files, apply them to the Iceberg table
+        // If we have data files, stage them for transaction-level commit.
         if !self.data_files.is_empty() {
-            self.apply_iceberg_changes()?;
+            self.stage_data_files()?;
         }
 
         Ok(())
@@ -159,10 +170,6 @@ impl AmDmlSession for IcebergModify {
         bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
         let _ = (cid, options, bistate);
-        if !self.initialized {
-            self.begin_modify()?;
-        }
-
         self.buffer_row(row)?;
         Ok(())
     }
@@ -175,117 +182,78 @@ impl AmDmlSession for IcebergModify {
         bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
         let _ = (cid, options, bistate);
-        if !self.initialized {
-            self.begin_modify()?;
-        }
-
-        for row in rows {
-            self.buffer_row(row)?;
-        }
-
+        self.buffer_rows(rows)?;
         Ok(())
     }
 }
 
 impl IcebergModify {
-    fn load_table_metadata(
-        &self,
-    ) -> IcebergResult<(TableMetadata, Arc<IcebergSchema>, Arc<arrow_schema::Schema>)>
-    {
-        let file_io = self
-            .file_io
-            .as_ref()
-            .ok_or(IcebergError::NotImplemented("file_io not initialized"))?;
+    /// Construct a fully-initialized session, performing all storage IO and
+    /// schema/writer setup inline. Errors flow as `IcebergError` so the caller
+    /// in `AmDmlSession::new` only has one error-domain hop to make.
+    fn open(target: DmlTarget) -> IcebergResult<Self> {
+        let ctx = StorageContext::for_tablespace_with_wal(
+            target.locator.spc_oid,
+            target.relation_needs_wal,
+        )?;
+        let file_io = ctx.into_file_io();
 
-        // Get Iceberg metadata location
-        // Since we just registered the table for tracking, we ensure we see the latest
-        // committed data (Read Committed) by going through the tracker.
-        let metadata_location =
-            TxMetadata::current().current_metadata_location(self.rel_oid, file_io)?;
+        // Single write-side entry point: registers the relation with the
+        // per-transaction tracker, rebases pending changes, and returns the
+        // base metadata in one step. Bundling these means a writer cannot
+        // accidentally read metadata without enrolling in tracking.
+        let loaded =
+            TxMetadata::current().begin_table_modify(target.rel_oid, &file_io)?;
+        let iceberg_schema = loaded.metadata.current_schema().clone();
+        let batch_builder = RowRecordBatchBuilder::new(&iceberg_schema)?;
 
-        // Read table metadata from storage
-        let table_metadata = TableMetadata::read_from(file_io, &metadata_location)?;
-        let schema = table_metadata.current_schema().clone();
-        let arrow_schema = Arc::new(iceberg_schema_to_arrow_schema(&schema)?);
+        let writer = build_writer(&file_io, &iceberg_schema, &loaded.metadata)?;
 
-        Ok((table_metadata, schema, arrow_schema))
+        Ok(Self {
+            rel_oid: target.rel_oid,
+            batch_builder,
+            file_io,
+            row_buffer: RowBatchBuffer::new(),
+            flush_threshold_bytes: gucs::dml_buffer_flush_bytes(),
+            data_files: Vec::new(),
+            writer: Some(writer),
+        })
     }
 
     fn close_writer(&mut self) -> IcebergResult<Vec<DataFile>> {
-        if let Some(mut writer) = self.writer.take() {
-            Ok(writer.close()?)
-        } else {
-            Ok(Vec::new())
+        match self.writer.take() {
+            Some(mut writer) => Ok(writer.close()?),
+            None => Ok(Vec::new()),
         }
     }
 
     fn buffer_row(&mut self, row: Row) -> IcebergResult<()> {
         self.row_buffer.push_row(row);
+        self.flush_buffer_if_needed()
+    }
 
-        // Flush if buffer is full (converting MB to bytes)
-        if self
-            .row_buffer
-            .should_flush(DEFAULT_BATCH_SIZE_IN_MB * 1024 * 1024)
-        {
+    fn buffer_rows(&mut self, rows: Vec<Row>) -> IcebergResult<()> {
+        for row in rows {
+            self.row_buffer.push_row(row);
+            self.flush_buffer_if_needed()?;
+        }
+        Ok(())
+    }
+
+    fn flush_buffer_if_needed(&mut self) -> IcebergResult<()> {
+        // Flush when the row buffer's estimated memory footprint crosses the
+        // configured threshold. This is a backend-side memory-pressure guard,
+        // not a Parquet file-size target: the rolling file writer downstream
+        // owns data-file sizing independently of when we flush this buffer.
+        if self.row_buffer.should_flush(self.flush_threshold_bytes) {
             self.flush_buffer()?;
         }
 
         Ok(())
     }
 
-    /// Initialize the data file writer components.
-    ///
-    /// This method sets up the location generator, file name generator, and
-    /// Parquet writer builder to prepare for writing data files.
-    fn initialize_writer(
-        &mut self,
-        table_metadata: &TableMetadata,
-    ) -> IcebergResult<()> {
-        let file_io = self
-            .file_io
-            .as_ref()
-            .ok_or(IcebergError::NotImplemented("file_io not initialized"))?;
-
-        let schema = self
-            .iceberg_schema
-            .as_ref()
-            .ok_or(IcebergError::NotImplemented("schema not initialized"))?;
-
-        // Create writer components
-        let location_generator =
-            DefaultLocationGenerator::new(table_metadata.clone())?;
-        let file_name_generator = DefaultFileNameGenerator::new(
-            format!("insert-{}", uuid::Uuid::now_v7()),
-            None,
-            DataFileFormat::Parquet,
-        );
-
-        // Create Parquet writer builder
-        let parquet_writer_builder = ParquetWriterBuilder::new(
-            WriterProperties::builder().build(),
-            schema.clone(),
-        );
-
-        // Create rolling file writer builder
-        let rolling_writer_builder =
-            RollingFileWriterBuilder::new_with_default_file_size(
-                parquet_writer_builder,
-                file_io.clone(),
-                location_generator,
-                file_name_generator,
-            );
-
-        // Create and use data file writer
-        let data_file_writer_builder =
-            DataFileWriterBuilder::new(rolling_writer_builder);
-        self.writer = Some(data_file_writer_builder.build(None)?);
-
-        Ok(())
-    }
-
     /// Flush the row buffer to a data file.
     ///
-    /// This method:
     /// 1. Converts buffered rows to an Arrow RecordBatch
     /// 2. Writes the RecordBatch to the active writer
     fn flush_buffer(&mut self) -> IcebergResult<()> {
@@ -293,51 +261,78 @@ impl IcebergModify {
             return Ok(());
         }
 
-        let schema = self
-            .iceberg_schema
-            .as_ref()
-            .ok_or(IcebergError::NotImplemented("schema not initialized"))?;
-
-        let arrow_schema = self
-            .arrow_schema
-            .as_ref()
-            .ok_or(IcebergError::NotImplemented("arrow_schema not initialized"))?;
-
         // Extract rows and reset size tracking immediately.
         // This ensures the buffer is cleared even if subsequent steps fail.
         let rows = self.row_buffer.take_rows();
 
-        // Convert rows to Arrow RecordBatch using cached schema
-        let record_batch =
-            rows_to_record_batch_with_schema(&rows, schema, arrow_schema.clone())?;
+        // Convert rows to Arrow RecordBatch using the schema-bound builder.
+        let record_batch = self.batch_builder.build(&rows)?;
 
-        // Write the batch
-        if let Some(writer) = &mut self.writer {
-            writer.write(record_batch)?;
-        } else {
-            return Err(IcebergError::NotImplemented("writer not initialized"));
+        // Writer is only `None` after `close_writer` has run, which only
+        // happens during `end_modify` / `abort_modify`. The buffer is cleared
+        // before either of those, so reaching this branch with `None` means
+        // a tuple callback fired after the session was finalized — a framework
+        // bug worth surfacing as `InvariantViolated`.
+        match self.writer.as_mut() {
+            Some(writer) => writer.write(record_batch)?,
+            None => {
+                return Err(IcebergError::InvariantViolated(
+                    "tuple callback after writer close",
+                ));
+            }
         }
 
         Ok(())
     }
 
-    /// Apply pending data files and update Iceberg table metadata.
+    /// Stage pending data files into transaction-local Iceberg metadata.
     ///
     /// This method:
     /// 1. Collects all data files generated during this modify operation
     /// 2. Delegates to the metadata tracker to process these files (handles
     ///    rebasing, generating new metadata file, and staging the change)
-    fn apply_iceberg_changes(&mut self) -> IcebergResult<()> {
-        let file_io = self
-            .file_io
-            .as_ref()
-            .ok_or(IcebergError::NotImplemented("file_io not initialized"))?;
-
+    fn stage_data_files(&mut self) -> IcebergResult<()> {
         // Capture the files locally
-        let new_files: Vec<_> = self.data_files.drain(..).collect();
+        let new_files = std::mem::take(&mut self.data_files);
         // Process files via tracker (handles rebase and metadata file generation)
-        TxMetadata::current().rebase_for_statement(self.rel_oid, new_files, file_io)?;
+        TxMetadata::current().rebase_for_statement(
+            self.rel_oid,
+            new_files,
+            &self.file_io,
+        )?;
 
         Ok(())
     }
+}
+
+/// Build the rolling Parquet data file writer for this DML session.
+///
+/// Free function (not a method) because it has no need for `&self` state and
+/// composes several builders that we'd otherwise have to thread through ad-hoc
+/// helpers; keeping it private to this module makes the call site in `new`
+/// readable without polluting the type's API.
+fn build_writer(
+    file_io: &FileIO,
+    schema: &Arc<IcebergSchema>,
+    table_metadata: &TableMetadata,
+) -> IcebergResult<ParquetDataFileWriter> {
+    let location_generator = DefaultLocationGenerator::new(table_metadata.clone())?;
+    let file_name_generator = DefaultFileNameGenerator::new(
+        format!("insert-{}", uuid::Uuid::now_v7()),
+        None,
+        DataFileFormat::Parquet,
+    );
+
+    let parquet_writer_builder =
+        ParquetWriterBuilder::new(WriterProperties::builder().build(), schema.clone());
+
+    let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
+        parquet_writer_builder,
+        file_io.clone(),
+        location_generator,
+        file_name_generator,
+    );
+
+    let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
+    Ok(data_file_writer_builder.build(None)?)
 }

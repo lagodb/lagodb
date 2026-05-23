@@ -49,7 +49,8 @@ impl<'a> IcebergTableLifecycle<'a> {
             rel.tablespace_oid(),
             rel.needs_wal(),
         )?;
-        let location = compute_table_location(rel, &ctx.base_path, ctx.is_distributed);
+        let location =
+            compute_table_location(rel, ctx.base_path(), ctx.is_distributed());
         Ok(Self { rel, ctx, location })
     }
 
@@ -58,7 +59,8 @@ impl<'a> IcebergTableLifecycle<'a> {
     /// performs internally for CREATE TABLE, so the hook layer never has to
     /// touch the storage artifact registry directly.
     pub(crate) fn register_drop_cleanup(self) {
-        register_table_dir_dropped(self.location, self.ctx.file_io);
+        let Self { ctx, location, .. } = self;
+        register_table_dir_dropped(location, ctx.into_file_io());
     }
 
     /// Bootstrap Iceberg metadata for this relation.
@@ -93,13 +95,13 @@ impl<'a> IcebergTableLifecycle<'a> {
             .format_version(format_version)
             .build();
 
-        let writer = BootstrapWriter::new(ctx.file_io.clone());
+        let writer = BootstrapWriter::new(ctx.file_io().clone());
 
         // Register cleanup BEFORE creating table metadata so that if the
         // write fails mid-way (after creating the directory but before
         // finishing), the directory is still cleaned up on abort. Deleting
         // a non-existent directory is treated as OK by the cleanup handler.
-        register_table_dir_created(location, ctx.file_io);
+        register_table_dir_created(location, ctx.into_file_io());
 
         let table = writer.write_initial_metadata(id, creation)?;
         let metadata_location = table

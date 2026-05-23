@@ -7,8 +7,8 @@ use super::common::FfiContainer;
 use crate::api::{AmScanSession, TableAccessMethod};
 use crate::diag::ReportableError;
 use crate::handles::{
-    ItemPointer, ParallelTableScanDescHandle, ReadStreamHandle, RelationHandle,
-    SampleScanStateHandle, ScanDirection, ScanKeyHandle, SnapshotHandle,
+    ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle,
+    RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
     TBMIterateResultHandle,
 };
 use pgrx::prelude::*;
@@ -48,45 +48,66 @@ where
             pg_sys::CurrentMemoryContext,
             LIFECYCLE_CTX_NAME,
         );
-        {
-            let base = (*scan_desc).base_mut();
-            base.rs_rd = rel;
-            base.rs_snapshot = snapshot;
-            base.rs_nkeys = nkeys;
-            base.rs_key = key;
-            base.rs_flags = flags;
-            base.rs_parallel = pscan;
-        }
+        // Copy the borrowed scan keys into a dispatcher-owned buffer once.
+        // From here on the AM only sees the owned set; this matches the
+        // PostgreSQL heap AM, which copies into rs_key in `initscan` and
+        // never re-reads the caller's borrowed pointer.
+        let scan_keys = OwnedScanKeys::copy_from_raw(key, nkeys);
 
         // Convert raw C pointers to safe Handle types
         let rel_handle = RelationHandle::from_raw(rel);
         let snapshot_handle = SnapshotHandle::from_raw(snapshot);
-        let key_handle = if key.is_null() {
-            None
-        } else {
-            Some(ScanKeyHandle::from_raw(key, nkeys))
-        };
         let pscan_handle = if pscan.is_null() {
             None
         } else {
             Some(ParallelTableScanDescHandle::from_raw(pscan))
         };
 
-        let mut instance = <A::ScanSession as AmScanSession>::new(
+        let instance = <A::ScanSession as AmScanSession>::new(
             &rel_handle,
             &snapshot_handle,
-            key_handle.as_ref(),
             pscan_handle.as_ref(),
             flags,
         )
         .report_unwrap();
-        instance.scan_begin().report_unwrap();
 
         let tup_desc = (*rel).rd_att;
         let natts = (*tup_desc).natts as usize;
 
         const TMP_CTX_NAME: &core::ffi::CStr = c"pg-lakebase TableScan tmp";
-        (*scan_desc).init_session(instance, TMP_CTX_NAME, natts);
+        // Move ownership of the keys into the FFI session container so that
+        // the AM's scan_begin sees the same buffer that scan_rescan will
+        // later mutate in place.
+        (*scan_desc).init_session(instance, scan_keys, TMP_CTX_NAME, natts);
+
+        // Wire the PostgreSQL TableScanDescData up to point at the AM-owned
+        // key buffer (mirroring heap AM, where rs_key is allocated by the
+        // AM in `heap_beginscan`). Doing this *after* init_session means
+        // the descriptor's rs_key never transiently aliases the caller's
+        // borrowed pointer. The pointer remains valid for the lifetime of
+        // the FFI session, which is the lifecycle context that owns the
+        // descriptor itself. `rs_key_ptr` returns `NULL` when the buffer
+        // is empty, matching PG heap AM convention.
+        let session = (*scan_desc).session_mut();
+        let owned_keys = &mut session.scan_keys;
+        let nkeys = owned_keys.len() as core::ffi::c_int;
+        let rs_key = owned_keys.rs_key_ptr();
+        let base = (*scan_desc).base_mut();
+        base.rs_rd = rel;
+        base.rs_snapshot = snapshot;
+        base.rs_nkeys = nkeys;
+        base.rs_key = rs_key;
+        base.rs_flags = flags;
+        base.rs_parallel = pscan;
+
+        // Now drive the AM's scan_begin, with the schema-aware AM able to
+        // see the initial effective keys. Disjoint borrowing lets us hand
+        // out `&scan_keys` while `&mut am_instance` is in flight.
+        let session = (*scan_desc).session_mut();
+        session
+            .am_instance
+            .scan_begin(&session.scan_keys)
+            .report_unwrap();
 
         scan_desc as pg_sys::TableScanDesc
     }
@@ -124,23 +145,38 @@ pub extern "C-unwind" fn scan_rescan<A>(
         let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let nkeys = (*custom_scan).base().rs_nkeys;
         if let Some(state) = (*custom_scan).session_mut_if_initialized() {
-            // Convert raw pointer to safe Handle type
-            let key_handle = if key.is_null() {
-                None
-            } else {
-                Some(ScanKeyHandle::from_raw(key, nkeys))
-            };
+            // PostgreSQL heap-AM rescan semantics: a non-null `key` argument
+            // *replaces* the previously stored keys (memcpy in
+            // `initscan`); a null `key` keeps the prior keys. We apply the
+            // same rule on the dispatcher-owned buffer before handing it to
+            // the AM, so AM implementations only ever see the *effective*
+            // key set for the upcoming scan.
+            if !key.is_null() {
+                state.scan_keys.replace_with(key, nkeys);
+            }
 
             state
                 .am_instance
                 .scan_rescan(
-                    key_handle.as_ref(),
+                    &state.scan_keys,
                     set_params,
                     allow_strat,
                     allow_sync,
                     allow_pagemode,
                 )
-                .report_unwrap()
+                .report_unwrap();
+
+            // Re-publish the AM-owned buffer to the descriptor. The heap-AM
+            // contract fixes `rs_nkeys` at `scan_begin` time and never
+            // changes it, so the length here is unchanged; we only need to
+            // refresh `rs_key` because `Vec` may reallocate inside
+            // `replace_with`. `rs_key_ptr` returns `NULL` when the buffer
+            // is empty, matching PG heap AM convention.
+            let new_nkeys = state.scan_keys.len() as core::ffi::c_int;
+            let new_ptr = state.scan_keys.rs_key_ptr();
+            let base = (*custom_scan).base_mut();
+            base.rs_nkeys = new_nkeys;
+            base.rs_key = new_ptr;
         }
     }
 }
@@ -161,7 +197,7 @@ where
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
 
-        let direction_handle = ScanDirection::from_raw(direction);
+        let direction_handle = ScanDirection::try_from_raw(direction).report_unwrap();
         let found = state
             .am_instance
             .scan_getnextslot(direction_handle, &mut state.row)
@@ -216,7 +252,7 @@ where
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
 
-        let direction_handle = ScanDirection::from_raw(direction);
+        let direction_handle = ScanDirection::try_from_raw(direction).report_unwrap();
         let found = state
             .am_instance
             .scan_getnextslot_tidrange(direction_handle, &mut state.row)

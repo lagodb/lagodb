@@ -18,7 +18,7 @@ mod row;
 
 pub use cell::{ByteaView, Cell, StringView};
 pub use numeric::{
-    NumericTypmod, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF, numeric_precision_scale,
-    numeric_typmod,
+    Decimal128NumericCodec, DecimalCodecError, NumericTypmod, PG_EPOCH_DAYS_DIFF,
+    PG_EPOCH_USECS_DIFF, numeric_precision_scale, numeric_typmod,
 };
 pub use row::{PgDatumRef, Row, TupleSlotBatch, TupleSlotRow, TupleSlotWriter};

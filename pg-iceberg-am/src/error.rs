@@ -158,8 +158,25 @@ pub enum IcebergError {
     #[error("json error: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    #[error("{0}")]
-    IoError(#[from] std::io::Error),
+    /// AM-internal invariant violation. Used for "cannot happen" branches
+    /// where a runtime guard remains because the type system does not yet
+    /// encode the invariant. Surfacing one of these in production is a bug
+    /// in `pg_iceberg_am`, not a user error.
+    ///
+    /// Prefer expressing invariants directly in the type system (for
+    /// example, an enum-based state machine) over guarding with this
+    /// variant when the unreachable case can be made unrepresentable.
+    #[error("invariant violation in pg_iceberg_am: {0}")]
+    InvariantViolated(&'static str),
+
+    /// Indicates the Decimal128/NUMERIC codec produced bytes that
+    /// PostgreSQL's `numeric_recv` rejected as malformed. Like
+    /// [`Self::InvariantViolated`] this represents a bug in pg_iceberg_am
+    /// (the wire format must always match `numeric.c`), but the message is
+    /// the dynamic ereport text from the backend, so it cannot use the
+    /// `&'static str` form.
+    #[error("internal codec error in pg_iceberg_am: {0}")]
+    DecimalCodecBug(String),
 
     #[error("feature not yet implemented: {0}")]
     NotImplemented(&'static str),
@@ -243,7 +260,10 @@ impl SqlStateError for IcebergError {
 
             IcebergError::SpiError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 
-            IcebergError::IoError(_) => PgSqlErrorCode::ERRCODE_IO_ERROR,
+            IcebergError::InvariantViolated(_)
+            | IcebergError::DecimalCodecBug(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
 
             IcebergError::NotImplemented(_) => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
@@ -266,6 +286,43 @@ impl IcebergError {
         source: PgError,
     ) -> Self {
         Self::MetadataCatalog { operation, source }
+    }
+}
+
+/// Routes [`pg_lakebase_core::tuple::DecimalCodecError`] to the appropriate
+/// `IcebergError` layer:
+///
+/// - `Precision*` / `Scale*`: caller passed a column shape we cannot map.
+///   That's a schema problem; surface it as `IncompatibleColumnType` so the
+///   user sees an `ERRCODE_DATATYPE_MISMATCH`.
+/// - `ValueOutOfRange`: user data does not fit the declared `NUMERIC(p, s)`.
+///   Stay at `DatumConversionError` -> `ERRCODE_DATA_EXCEPTION`.
+/// - `InvalidBinaryRepresentation`: `numeric_recv` rejected our wire bytes;
+///   the codec is broken. Surface it as a codec bug
+///   (`ERRCODE_INTERNAL_ERROR`), not as a user data error.
+impl From<pg_lakebase_core::tuple::DecimalCodecError> for IcebergError {
+    fn from(err: pg_lakebase_core::tuple::DecimalCodecError) -> Self {
+        use pg_lakebase_core::tuple::DecimalCodecError;
+        match err {
+            DecimalCodecError::PrecisionOutOfRange { precision } => {
+                IcebergError::IncompatibleColumnType(
+                    format!("decimal(precision={precision})"),
+                    err.to_string(),
+                )
+            }
+            DecimalCodecError::ScaleOutOfRange { precision, scale } => {
+                IcebergError::IncompatibleColumnType(
+                    format!("decimal({precision}, {scale})"),
+                    err.to_string(),
+                )
+            }
+            DecimalCodecError::ValueOutOfRange { .. } => {
+                IcebergError::DatumConversionError(err.to_string())
+            }
+            DecimalCodecError::InvalidBinaryRepresentation { .. } => {
+                IcebergError::DecimalCodecBug(err.to_string())
+            }
+        }
     }
 }
 

@@ -69,8 +69,8 @@ use crate::diag::PgReportError;
 use crate::handles::{
     AttrWidthsHandle, BufferAccessStrategyHandle, BulkInsertStateHandle,
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
-    ParallelTableScanDescHandle, ReadStreamHandle, RelFileLocator, RelationHandle,
-    SampleScanStateHandle, ScanDirection, ScanKeyHandle, SnapshotHandle,
+    OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle, RelFileLocator,
+    RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
     TBMIterateResultHandle, TM_FailureData, TMIndexDeleteOpHandle,
     TableScanDescHandle, TupleTableSlotHandle, VacuumParamsHandle,
     ValidateIndexStateHandle, VarlenaHandle,
@@ -237,27 +237,67 @@ pub trait AmScan {
 }
 
 pub trait AmScanSession {
+    /// Create a new scan session.
+    ///
+    /// `new()` runs before any storage IO and therefore before the AM has
+    /// resolved its physical schema. Predicate keys are deliberately not
+    /// passed here: many access methods can only translate them once the
+    /// schema is known. They are surfaced to [`Self::scan_begin`] instead,
+    /// where the AM is expected to do schema-aware work.
     fn new(
         rel: &RelationHandle,
         snapshot: &SnapshotHandle,
-        key: Option<&ScanKeyHandle>,
         pscan: Option<&ParallelTableScanDescHandle>,
         flags: u32,
     ) -> AmResult<Self>
     where
         Self: Sized;
 
-    fn scan_begin(&mut self) -> AmResult<()>;
+    /// Begin the scan.
+    ///
+    /// `keys` is the dispatcher-owned, dispatcher-copied set of effective
+    /// scan keys for the *initial* scan. The reference is only valid for
+    /// the duration of this call; the AM must consume the keys (e.g.
+    /// translate them into its native predicate language) here rather than
+    /// retaining the borrow. The owned buffer behind it lives in the FFI
+    /// session container and is what later [`Self::scan_rescan`] calls will
+    /// see updated in place; AMs that need to refer back to "the current
+    /// effective keys" outside of these callbacks should re-translate from
+    /// the keys argument they receive on the next callback.
+    fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()>;
 
+    /// Fetch the next tuple into the dispatcher-owned row buffer.
+    ///
+    /// TODO(rowless-scan): this is still the row-mode scan boundary. A columnar
+    /// AM that reads Arrow/columnar batches should eventually be able to
+    /// override a slot-first scan callback, analogous to
+    /// [`AmDmlSession::tuple_insert_slot`], and write values directly into the
+    /// PostgreSQL `TupleTableSlot`. The default implementation can keep this
+    /// `Row` path for row-oriented AMs, but the slot-first path should avoid
+    /// `Arrow -> Cell -> Row -> Datum` materialization for varlena and list
+    /// columns.
     fn scan_getnextslot(
         &mut self,
         direction: ScanDirection,
         row: &mut Row,
     ) -> AmResult<bool>;
 
+    /// Restart the scan.
+    ///
+    /// `keys` reflects the dispatcher's PostgreSQL-aligned semantics: a
+    /// non-null `key` argument from `scan_rescan` *replaces* the previously
+    /// stored keys (PostgreSQL's heap AM does the same with `memcpy` in
+    /// `initscan`); a null `key` keeps the prior keys unchanged. The
+    /// dispatcher has already applied that rule before calling this method,
+    /// so `keys` is always the *effective* key set for the upcoming scan.
+    /// Like in `scan_begin`, the reference is only valid for this call.
+    ///
+    /// `set_params` and the `allow_*` flags are heap-AM scan strategy
+    /// hints (BufferAccessStrategy, sync scan, page mode). AMs that do not
+    /// implement those strategies may safely ignore them.
     fn scan_rescan(
         &mut self,
-        key: Option<&ScanKeyHandle>,
+        keys: &OwnedScanKeys,
         set_params: bool,
         allow_strat: bool,
         allow_sync: bool,

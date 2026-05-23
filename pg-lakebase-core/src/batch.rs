@@ -49,6 +49,16 @@ pub trait BatchBuffer {
         self.len() == 0
     }
 
+    /// Returns `true` when the buffer's estimated in-memory footprint has
+    /// reached `max_bytes` and the caller should flush.
+    ///
+    /// This is a **memory-pressure** signal, not a target file-size signal:
+    /// `estimated_size` reflects the Rust representation of buffered rows
+    /// (cell sizes, owned bytes, etc.), which has only a loose relationship
+    /// to the size of any file that may eventually be produced from those
+    /// rows (Parquet, for example, is column-encoded, dictionary-compressed,
+    /// and Snappy/ZSTD-compressed). Concrete output file sizing belongs to
+    /// the writer layer (e.g. the rolling file writer's target file size).
     fn should_flush(&self, max_bytes: usize) -> bool {
         self.estimated_size() >= max_bytes
     }
@@ -213,6 +223,12 @@ impl RowBatchBuffer {
         self.estimated_size
     }
 
+    /// Returns `true` when the estimated in-memory footprint of buffered rows
+    /// has reached `max_bytes`.
+    ///
+    /// See [`BatchBuffer::should_flush`] for the semantic contract: this is a
+    /// memory-pressure trigger, not a Parquet (or other output-format) file
+    /// size trigger.
     pub fn should_flush(&self, max_bytes: usize) -> bool {
         self.estimated_size >= max_bytes
     }

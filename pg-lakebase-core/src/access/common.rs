@@ -9,6 +9,7 @@
 use std::ffi::CStr;
 
 use crate::diag::PgReportError;
+use crate::handles::OwnedScanKeys;
 use crate::tuple::{Row, TupleSlotWriter};
 use pgrx::pg_sys;
 
@@ -24,6 +25,21 @@ pub(crate) struct FfiContainer<B, T> {
 pub(crate) struct AmFfiSession<T> {
     pub(crate) am_instance: T,
     pub(crate) row: Row,
+    /// Dispatcher-owned scan keys.
+    ///
+    /// Populated for table-scan sessions (built once in `scan_begin` and
+    /// rewritten in `scan_rescan` when PostgreSQL passes a non-null key
+    /// pointer). Always empty for index-fetch sessions, which never receive
+    /// scan keys; the field is shared rather than gated by a generic so the
+    /// FFI container layout stays uniform across access-method facets.
+    ///
+    /// TODO: this is a small amount of scan-specific state living on the
+    /// shared FFI session container. The cost is one empty `Vec` per
+    /// index-fetch session, which is fine, but if more facet-specific
+    /// fields appear we should split the session struct (e.g. a generic
+    /// `AmFfiSession<T, Extra>` or two separate session types) rather than
+    /// keep accumulating fields here.
+    pub(crate) scan_keys: OwnedScanKeys,
     tmp_ctx: pg_sys::MemoryContext,
 }
 
@@ -56,13 +72,14 @@ impl<B, T> FfiContainer<B, T> {
     pub(crate) unsafe fn init_session(
         &mut self,
         am_instance: T,
+        scan_keys: OwnedScanKeys,
         tmp_ctx_name: &'static CStr,
         natts: usize,
     ) {
         unsafe {
             let tmp_ctx =
                 lifecycle::create_child_context(self.lifecycle_ctx, tmp_ctx_name);
-            let session = AmFfiSession::new(am_instance, tmp_ctx, natts);
+            let session = AmFfiSession::new(am_instance, scan_keys, tmp_ctx, natts);
             self.session =
                 lifecycle::leak_state_in_context(self.lifecycle_ctx, session);
         }
@@ -115,10 +132,16 @@ impl<B, T> FfiContainer<B, T> {
 }
 
 impl<T> AmFfiSession<T> {
-    fn new(am_instance: T, tmp_ctx: pg_sys::MemoryContext, natts: usize) -> Self {
+    fn new(
+        am_instance: T,
+        scan_keys: OwnedScanKeys,
+        tmp_ctx: pg_sys::MemoryContext,
+        natts: usize,
+    ) -> Self {
         Self {
             am_instance,
             row: Row::with_capacity(natts),
+            scan_keys,
             tmp_ctx,
         }
     }

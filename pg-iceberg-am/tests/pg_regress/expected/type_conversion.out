@@ -153,6 +153,58 @@ SELECT * FROM iceberg_numeric_edge ORDER BY id;
 
 DROP TABLE iceberg_numeric_edge;
 -- ============================================================================
+-- 3.1. Decimal128 read codec: negative + i128-extreme values
+-- ============================================================================
+-- These values exercise the read-side `numeric_recv` codec branches that
+-- section 3 does not cover:
+--   * negative magnitude with non-zero `scale_padding`
+--   * largest negative integer at scale=0 (the codec uses unsigned magnitude
+--     internally to avoid `i128::abs()` overflow on near-min values)
+--   * smallest representable positive value at high scale
+--
+-- The check is intentionally a boolean round-trip rather than printing the
+-- full numeric value, so the expected output is robust against psql column
+-- alignment differences.
+CREATE TABLE iceberg_numeric_codec_edges (
+    label text,
+    n     numeric(38, 18)
+) USING iceberg;
+INSERT INTO iceberg_numeric_codec_edges VALUES
+    ('neg_fraction',        -12345678901234567890.123456789012345678),
+    ('neg_smallest_scale',  -0.000000000000000001),
+    ('pos_smallest_scale',   0.000000000000000001);
+SELECT label,
+       n::text = (CASE label
+                    WHEN 'neg_fraction'        THEN '-12345678901234567890.123456789012345678'
+                    WHEN 'neg_smallest_scale'  THEN '-0.000000000000000001'
+                    WHEN 'pos_smallest_scale'  THEN '0.000000000000000001'
+                  END) AS round_trip_ok
+FROM iceberg_numeric_codec_edges
+ORDER BY label;
+       label        | round_trip_ok 
+--------------------+---------------
+ neg_fraction       | t
+ neg_smallest_scale | t
+ pos_smallest_scale | t
+(3 rows)
+
+DROP TABLE iceberg_numeric_codec_edges;
+-- Largest in-range negative at scale=0 (Decimal128 magnitude limit, which is
+-- what the codec must handle without computing `unscaled.abs()`).
+CREATE TABLE iceberg_numeric_codec_extreme (
+    n numeric(38, 0)
+) USING iceberg;
+INSERT INTO iceberg_numeric_codec_extreme VALUES
+    (-99999999999999999999999999999999999999);
+SELECT n::text = '-99999999999999999999999999999999999999' AS round_trip_ok
+FROM iceberg_numeric_codec_extreme;
+ round_trip_ok 
+---------------
+ t
+(1 row)
+
+DROP TABLE iceberg_numeric_codec_extreme;
+-- ============================================================================
 -- 4. String-like Mapping Variation
 -- ============================================================================
 -- Test that various PG types correctly map to Iceberg String and back.
@@ -218,3 +270,125 @@ CREATE TABLE iceberg_numeric_negscale_overflow (
 ) USING iceberg;
 ERROR:  column 'numeric(20, -20) maps to decimal(40, 0) which exceeds maximum supported precision (38)' data type is not supported
 \set VERBOSITY default
+-- ============================================================================
+-- 8. Timestamp Round Trip Across the Unix and PG Epochs
+-- ============================================================================
+-- Pre-1970 values exercise the negative side of unix_micros (write-side
+-- checked_add and read-side checked_sub against PG_EPOCH_USECS_DIFF in
+-- TemporalCodec). 2000-01-01 is the PG epoch boundary itself; values either
+-- side of it exercise the sign of the offset. The microsecond_max value
+-- asserts µs resolution survives the round trip.
+--
+-- Asserting through boolean predicates (`actual = literal`) rather than
+-- printing values directly keeps the expected output independent of
+-- DateStyle, the same pattern section 3.1 already uses for decimal codecs.
+SET timezone = 'UTC';
+CREATE TABLE iceberg_ts_round_trip (
+    label text,
+    ts    timestamp
+) USING iceberg;
+INSERT INTO iceberg_ts_round_trip VALUES
+    ('pre_unix_epoch',  '1900-01-01 00:00:00'),
+    ('unix_epoch',      '1970-01-01 00:00:00'),
+    ('pre_pg_epoch',    '1999-12-31 23:59:59.999999'),
+    ('pg_epoch',        '2000-01-01 00:00:00'),
+    ('post_pg_epoch',   '2024-06-15 12:34:56.789012'),
+    ('microsecond_max', '2024-06-15 12:34:56.999999');
+SELECT label,
+       ts = (CASE label
+                WHEN 'pre_unix_epoch'  THEN TIMESTAMP '1900-01-01 00:00:00'
+                WHEN 'unix_epoch'      THEN TIMESTAMP '1970-01-01 00:00:00'
+                WHEN 'pre_pg_epoch'    THEN TIMESTAMP '1999-12-31 23:59:59.999999'
+                WHEN 'pg_epoch'        THEN TIMESTAMP '2000-01-01 00:00:00'
+                WHEN 'post_pg_epoch'   THEN TIMESTAMP '2024-06-15 12:34:56.789012'
+                WHEN 'microsecond_max' THEN TIMESTAMP '2024-06-15 12:34:56.999999'
+            END) AS round_trip_ok
+FROM iceberg_ts_round_trip
+ORDER BY label;
+      label      | round_trip_ok 
+-----------------+---------------
+ microsecond_max | t
+ pg_epoch        | t
+ post_pg_epoch   | t
+ pre_pg_epoch    | t
+ pre_unix_epoch  | t
+ unix_epoch      | t
+(6 rows)
+
+DROP TABLE iceberg_ts_round_trip;
+-- ============================================================================
+-- 9. Timestamptz Round Trip is Independent of Session Timezone
+-- ============================================================================
+-- The writer pins the Arrow column timezone to '+00:00' via
+-- TimestampMicrosecondBuilder::with_timezone. With the session set to a
+-- non-UTC zone, comparing against the same absolute instant (expressed
+-- with `+00`) must still return true.
+SET timezone = 'America/Los_Angeles';
+CREATE TABLE iceberg_tstz_round_trip (
+    label text,
+    tstz  timestamptz
+) USING iceberg;
+INSERT INTO iceberg_tstz_round_trip VALUES
+    ('utc_input',    '2024-06-15 12:34:56.789012+00'),
+    ('east_input',   '2024-06-15 12:34:56.789012+09'),
+    ('west_input',   '2024-06-15 12:34:56.789012-08'),
+    ('pre_unix_utc', '1900-01-01 00:00:00+00');
+SELECT label,
+       tstz = (CASE label
+                  WHEN 'utc_input'    THEN TIMESTAMPTZ '2024-06-15 12:34:56.789012+00'
+                  WHEN 'east_input'   THEN TIMESTAMPTZ '2024-06-15 12:34:56.789012+09'
+                  WHEN 'west_input'   THEN TIMESTAMPTZ '2024-06-15 12:34:56.789012-08'
+                  WHEN 'pre_unix_utc' THEN TIMESTAMPTZ '1900-01-01 00:00:00+00'
+              END) AS round_trip_ok
+FROM iceberg_tstz_round_trip
+ORDER BY label;
+    label     | round_trip_ok 
+--------------+---------------
+ east_input   | t
+ pre_unix_utc | t
+ utc_input    | t
+ west_input   | t
+(4 rows)
+
+DROP TABLE iceberg_tstz_round_trip;
+SET timezone = 'UTC';
+-- ============================================================================
+-- 10. Binary Round Trip with LargeBinary Writer
+-- ============================================================================
+-- The Iceberg → Arrow type table is now sourced from
+-- iceberg_lite::arrow::type_to_arrow_type, which maps Iceberg `Binary` to
+-- Arrow `LargeBinary`. This must continue to round-trip BYTEA values
+-- including embedded zero bytes and empty strings. (The reader still
+-- accepts both `Binary` and `LargeBinary` for compatibility with externally
+-- produced files.)
+CREATE TABLE iceberg_binary_round_trip (
+    label text,
+    payload bytea
+) USING iceberg;
+INSERT INTO iceberg_binary_round_trip VALUES
+    ('empty',           '\x'),
+    ('one_byte',        '\x00'),
+    ('with_nul_middle', '\x01020003fe'),
+    ('all_high',        '\xfffefdfcfb');
+SELECT label, encode(payload, 'hex') AS payload_hex
+FROM iceberg_binary_round_trip
+ORDER BY label;
+      label      | payload_hex 
+-----------------+-------------
+ all_high        | fffefdfcfb
+ empty           | 
+ one_byte        | 00
+ with_nul_middle | 01020003fe
+(4 rows)
+
+DROP TABLE iceberg_binary_round_trip;
+-- ============================================================================
+-- Documented limitation
+-- ============================================================================
+-- Iceberg `timestamp_ns` / `timestamptz_ns` cannot be exercised end-to-end
+-- through this harness: PostgreSQL `timestamp` / `timestamptz` map to
+-- Iceberg `Timestamp` / `Timestamptz` in
+-- `pg-iceberg-am/src/catalog/schema_builder.rs`, and there is currently no
+-- SQL surface that materializes a column with the `_ns` Iceberg primitive.
+-- When such a surface is added (e.g. importing an external Iceberg metadata
+-- file that declares `_ns`), an end-to-end `_ns` test should be added here.

@@ -41,7 +41,12 @@ where
         let natts = (*tup_desc).natts as usize;
 
         const TMP_CTX_NAME: &core::ffi::CStr = c"pg-lakebase IndexFetch tmp";
-        (*fetch_data).init_session(instance, TMP_CTX_NAME, natts);
+        (*fetch_data).init_session(
+            instance,
+            crate::handles::OwnedScanKeys::empty(),
+            TMP_CTX_NAME,
+            natts,
+        );
 
         fetch_data as *mut pg_sys::IndexFetchTableData
     }

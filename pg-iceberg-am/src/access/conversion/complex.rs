@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
-use arrow_array::{Array, ArrayRef};
+use arrow_array::{Array, ArrayRef, GenericStringArray, OffsetSizeTrait};
 use arrow_schema::{DataType, Field};
 use iceberg_lite::spec::{ListType, PrimitiveType, Type};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
@@ -13,25 +13,73 @@ use super::traits::{ArrowToCell, RowsToArrow};
 use crate::access::conversion::schema::iceberg_type_to_arrow_type;
 use crate::error::{IcebergError, IcebergResult};
 
+#[derive(Clone, Copy)]
+pub(crate) enum SupportedListElement {
+    Boolean,
+    Int,
+    Long,
+    Float,
+    Double,
+    String,
+}
+
+impl SupportedListElement {
+    pub(crate) fn from_primitive(p: &PrimitiveType) -> Option<Self> {
+        match p {
+            PrimitiveType::Boolean => Some(Self::Boolean),
+            PrimitiveType::Int => Some(Self::Int),
+            PrimitiveType::Long => Some(Self::Long),
+            PrimitiveType::Float => Some(Self::Float),
+            PrimitiveType::Double => Some(Self::Double),
+            PrimitiveType::String => Some(Self::String),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Int => "int",
+            Self::Long => "long",
+            Self::Float => "float",
+            Self::Double => "double",
+            Self::String => "string",
+        }
+    }
+}
+
 /// Helper to build a list array by appending values to a builder.
 fn build_list_array<B, F>(
     rows: &[Row],
     col_idx: usize,
     element_field: Field,
+    expected_element: &'static str,
     mut append_fn: F,
 ) -> IcebergResult<ArrayRef>
 where
     B: arrow_array::builder::ArrayBuilder + Default,
-    F: FnMut(&mut B, Option<&Cell>),
+    F: FnMut(&mut B, &Cell) -> bool,
 {
     let mut builder =
         arrow_array::builder::ListBuilder::with_capacity(B::default(), rows.len())
             .with_field(Arc::new(element_field));
 
-    for row in rows {
+    for (row_idx, row) in rows.iter().enumerate() {
         let cell = row.get(col_idx).and_then(|c| c.as_ref());
-        append_fn(builder.values(), cell);
-        builder.append(cell.is_some());
+        match cell {
+            Some(cell) => {
+                if !append_fn(builder.values(), cell) {
+                    return Err(IcebergError::IncompatibleColumnType(
+                        format!(
+                            "List<{expected_element}> for row {row_idx} column {col_idx}"
+                        ),
+                        "row cell has incompatible array type".to_string(),
+                    ));
+                }
+                builder.append(true);
+            }
+            None => builder.append(false),
+        }
     }
     Ok(Arc::new(builder.finish()) as ArrayRef)
 }
@@ -52,6 +100,18 @@ where
                 Some(U::from(array.value(i)))
             }
         })
+        .collect()
+}
+
+fn extract_string_array_to_vec<O>(
+    array: &GenericStringArray<O>,
+) -> Vec<Option<String>>
+where
+    O: OffsetSizeTrait,
+{
+    array
+        .iter()
+        .map(|value| value.map(ToOwned::to_owned))
         .collect()
 }
 
@@ -110,15 +170,12 @@ impl ArrowToCell for ListType {
             }
             DataType::Utf8 => {
                 let arr = values.as_string::<i32>();
-                let vec: Vec<Option<String>> = (0..arr.len())
-                    .map(|i| {
-                        if arr.is_null(i) {
-                            None
-                        } else {
-                            Some(arr.value(i).to_string())
-                        }
-                    })
-                    .collect();
+                let vec = extract_string_array_to_vec(arr);
+                Ok(Some(Cell::StringArray(vec)))
+            }
+            DataType::LargeUtf8 => {
+                let arr = values.as_string::<i64>();
+                let vec = extract_string_array_to_vec(arr);
                 Ok(Some(Cell::StringArray(vec)))
             }
             DataType::Int16 => {
@@ -149,95 +206,119 @@ impl RowsToArrow for ListType {
         )]));
 
         match element_iceberg_type.as_ref() {
-            Type::Primitive(p) => match p {
-                PrimitiveType::Boolean => build_list_array(
-                    rows,
-                    col_idx,
-                    element_field,
-                    |builder: &mut arrow_array::builder::BooleanBuilder, cell| {
-                        if let Some(Cell::BoolArray(arr)) = cell {
+            Type::Primitive(p) => {
+                let Some(element) = SupportedListElement::from_primitive(p) else {
+                    return Err(IcebergError::UnsupportedColumnType(format!(
+                        "Unsupported element type in List for column {}: {:?}",
+                        col_idx, p
+                    )));
+                };
+                let expected_element = element.name();
+
+                match element {
+                    SupportedListElement::Boolean => build_list_array(
+                        rows,
+                        col_idx,
+                        element_field,
+                        expected_element,
+                        |builder: &mut arrow_array::builder::BooleanBuilder, cell| {
+                            let Cell::BoolArray(arr) = cell else {
+                                return false;
+                            };
                             for v in arr {
                                 builder.append_option(*v);
                             }
-                        }
-                    },
-                ),
-                PrimitiveType::Int => build_list_array(
-                    rows,
-                    col_idx,
-                    element_field,
-                    |builder: &mut arrow_array::builder::Int32Builder, cell| {
-                        match cell {
-                            Some(Cell::I32Array(arr)) => {
-                                for v in arr {
-                                    builder.append_option(*v);
+                            true
+                        },
+                    ),
+                    SupportedListElement::Int => build_list_array(
+                        rows,
+                        col_idx,
+                        element_field,
+                        expected_element,
+                        |builder: &mut arrow_array::builder::Int32Builder, cell| {
+                            match cell {
+                                Cell::I32Array(arr) => {
+                                    for v in arr {
+                                        builder.append_option(*v);
+                                    }
+                                    true
                                 }
-                            }
-                            Some(Cell::I16Array(arr)) => {
-                                for v in arr {
-                                    builder.append_option(v.map(|x| x as i32));
+                                Cell::I16Array(arr) => {
+                                    for v in arr {
+                                        builder.append_option(v.map(|x| x as i32));
+                                    }
+                                    true
                                 }
+                                _ => false,
                             }
-                            _ => {}
-                        }
-                    },
-                ),
-                PrimitiveType::Long => build_list_array(
-                    rows,
-                    col_idx,
-                    element_field,
-                    |builder: &mut arrow_array::builder::Int64Builder, cell| {
-                        if let Some(Cell::I64Array(arr)) = cell {
+                        },
+                    ),
+                    SupportedListElement::Long => build_list_array(
+                        rows,
+                        col_idx,
+                        element_field,
+                        expected_element,
+                        |builder: &mut arrow_array::builder::Int64Builder, cell| {
+                            let Cell::I64Array(arr) = cell else {
+                                return false;
+                            };
                             for v in arr {
                                 builder.append_option(*v);
                             }
-                        }
-                    },
-                ),
-                PrimitiveType::Float => build_list_array(
-                    rows,
-                    col_idx,
-                    element_field,
-                    |builder: &mut arrow_array::builder::Float32Builder, cell| {
-                        if let Some(Cell::F32Array(arr)) = cell {
+                            true
+                        },
+                    ),
+                    SupportedListElement::Float => build_list_array(
+                        rows,
+                        col_idx,
+                        element_field,
+                        expected_element,
+                        |builder: &mut arrow_array::builder::Float32Builder, cell| {
+                            let Cell::F32Array(arr) = cell else {
+                                return false;
+                            };
                             for v in arr {
                                 builder.append_option(*v);
                             }
-                        }
-                    },
-                ),
-                PrimitiveType::Double => build_list_array(
-                    rows,
-                    col_idx,
-                    element_field,
-                    |builder: &mut arrow_array::builder::Float64Builder, cell| {
-                        if let Some(Cell::F64Array(arr)) = cell {
+                            true
+                        },
+                    ),
+                    SupportedListElement::Double => build_list_array(
+                        rows,
+                        col_idx,
+                        element_field,
+                        expected_element,
+                        |builder: &mut arrow_array::builder::Float64Builder, cell| {
+                            let Cell::F64Array(arr) = cell else {
+                                return false;
+                            };
                             for v in arr {
                                 builder.append_option(*v);
                             }
-                        }
-                    },
-                ),
-                PrimitiveType::String => build_list_array(
-                    rows,
-                    col_idx,
-                    element_field,
-                    |builder: &mut arrow_array::builder::StringBuilder, cell| {
-                        if let Some(Cell::StringArray(arr)) = cell {
+                            true
+                        },
+                    ),
+                    SupportedListElement::String => build_list_array(
+                        rows,
+                        col_idx,
+                        element_field,
+                        expected_element,
+                        |builder: &mut arrow_array::builder::StringBuilder, cell| {
+                            let Cell::StringArray(arr) = cell else {
+                                return false;
+                            };
                             for val in arr {
                                 match val {
                                     Some(s) => builder.append_value(s),
                                     None => builder.append_null(),
                                 }
                             }
-                        }
-                    },
-                ),
-                _ => Err(IcebergError::UnsupportedColumnType(format!(
-                    "Unsupported element type in List for column {}: {:?}",
-                    col_idx, p
-                ))),
-            },
+                            true
+                        },
+                    ),
+                }
+            }
             _ => Err(IcebergError::UnsupportedColumnType(format!(
                 "Nested lists are not supported for column {}: {:?}",
                 col_idx, element_iceberg_type

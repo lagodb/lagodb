@@ -41,7 +41,8 @@ pub use relation::{
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
 };
 pub use scan::{
-    ParallelTableScanDescHandle, ReadStreamHandle, SampleScanStateHandle,
-    ScanDirection, ScanKeyHandle, TBMIterateResultHandle, TableScanDescHandle,
+    OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle,
+    SampleScanStateHandle, ScanDirection, ScanKeyEntry, ScanKeyIter,
+    TBMIterateResultHandle, TableScanDescHandle,
 };
 pub use tuple::{HeapTupleGuard, HeapTupleRef, ItemPointer, TupleTableSlotHandle};

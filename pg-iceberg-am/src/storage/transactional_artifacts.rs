@@ -24,6 +24,19 @@
 //! - `ObjectFile(Uploaded)` → delete the remote object, then unlink the staging file.
 //! - `DroppedTableDir` → no-op (table survived).
 //!
+//! This abort behaviour is what makes a mid-statement writer failure safe with
+//! respect to remote orphan files. A typical concern: a rolling writer flushes
+//! batch N successfully (staging file uploaded to S3, registered as
+//! `Uploaded`), then batch N+1 fails inside `flush_buffer` / `close_writer`.
+//! The error propagates out of `end_modify`, the transaction aborts, and
+//! `on_abort` walks every registered `Uploaded` entry and issues a remote
+//! `delete`. The partial staging file from batch N+1 is `Staged` and gets
+//! unlinked locally. So the remote store does not accumulate orphan data
+//! files from aborted transactions on this primary; orphan-file maintenance
+//! flows are still required for cases this registry cannot cover (process
+//! crashes between upload and `mark_object_file_uploaded`, lost backend on a
+//! standby, prior `WRITE_FILE` redo on aborted xacts, etc.).
+//!
 //! Abort cleanup is deliberately primary-local best effort. We do not emit
 //! `DELETE_FILE` WAL for `CreatedLocalFile`: extensions cannot attach those
 //! paths to PostgreSQL's core abort record, and a separate post-abort maintenance

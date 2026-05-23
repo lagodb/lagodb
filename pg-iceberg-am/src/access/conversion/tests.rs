@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, TimeUnit};
-use iceberg_lite::spec::{NestedField, PrimitiveType, Type};
+use iceberg_lite::spec::{NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use pg_lakebase_core::tuple::Row;
 
-use super::IcebergSchema;
-use super::rows_to_record_batch;
+use super::RowRecordBatchBuilder;
 use super::schema::iceberg_schema_to_arrow_schema;
 
 /// Helper function to create an Iceberg schema with given fields
@@ -114,7 +113,12 @@ fn test_iceberg_schema_to_arrow_schema_binary_types() {
 
     let arrow_schema = iceberg_schema_to_arrow_schema(&iceberg_schema).unwrap();
 
-    assert_eq!(arrow_schema.field(0).data_type(), &DataType::Binary);
+    // pg-iceberg-am delegates the Iceberg → Arrow type table to
+    // `iceberg_lite::arrow`, which maps Iceberg `Binary` to Arrow
+    // `LargeBinary`. The `ArrowToCell` read path accepts both `Binary` and
+    // `LargeBinary` so external producers using the narrow variant are still
+    // readable.
+    assert_eq!(arrow_schema.field(0).data_type(), &DataType::LargeBinary);
     assert_eq!(
         arrow_schema.field(1).data_type(),
         &DataType::FixedSizeBinary(16)
@@ -201,7 +205,10 @@ fn test_rows_to_record_batch_empty() {
     )]);
 
     let rows: Vec<Row> = vec![];
-    let batch = rows_to_record_batch(&rows, &iceberg_schema).unwrap();
+    let batch = RowRecordBatchBuilder::new(&iceberg_schema)
+        .unwrap()
+        .build(&rows)
+        .unwrap();
 
     assert_eq!(batch.num_rows(), 0);
     assert_eq!(batch.num_columns(), 1);
@@ -231,7 +238,10 @@ fn test_rows_to_record_batch_primitives() {
     row2.set_cell(0, Some(Cell::I32(100)));
 
     let rows = vec![row1, row2];
-    let batch = rows_to_record_batch(&rows, &iceberg_schema).unwrap();
+    let batch = RowRecordBatchBuilder::new(&iceberg_schema)
+        .unwrap()
+        .build(&rows)
+        .unwrap();
 
     assert_eq!(batch.num_rows(), 2);
 
