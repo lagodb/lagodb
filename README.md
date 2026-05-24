@@ -56,7 +56,7 @@ for PostgreSQL integration.
 `pg-iceberg-am` supports two storage paths depending on the tablespace:
 
 - **Local storage**: reads and writes go directly through PostgreSQL's Virtual File Descriptor (VFD) system with optional WAL logging for crash consistency.
-- **Object storage**: the database process communicates with `pg-lakebase-storage` over **Unix domain sockets**. Reads are served from a local disk cache when possible; misses are transparently fetched from the remote object store. Writes go through an explicit **stage → commit** flow tied to database transaction boundaries.
+- **Object storage**: the database process communicates with `pg-lakebase-storage` over **Unix domain sockets**. Reads of cached files use a local `pread` fast path that bypasses the socket entirely; control operations (open, head, miss fetch, upload) go over the socket. Cache misses are transparently fetched from the remote object store. Writes go through an explicit **stage → commit** flow tied to database transaction boundaries.
 
 Object-storage tablespaces intentionally use the PostgreSQL tablespace name as
 the storage-service `store_id`, so cache and staging paths remain readable on
