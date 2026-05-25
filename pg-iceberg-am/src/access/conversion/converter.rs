@@ -21,7 +21,7 @@ use arrow_array::{ArrayRef, RecordBatch};
 use iceberg_lite::spec::{NestedFieldRef, Schema as IcebergSchema};
 use pg_lakebase_core::tuple::Row;
 
-use super::schema::{iceberg_schema_to_arrow_schema, ValidateSupported};
+use super::schema::{ValidateSupported, iceberg_schema_to_arrow_schema};
 use super::traits::{ArrowToCell, RowsToArrow};
 use crate::error::{IcebergError, IcebergResult};
 

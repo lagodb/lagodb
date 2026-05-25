@@ -24,13 +24,15 @@ impl ObjectAccessHook for IcebergObjectAccessHook {
                 sub_id,
                 ..
             } if *class_id == pg_sys::RelationRelationId && *sub_id == 0 => {
-                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)? else {
+                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)?
+                else {
                     return Ok(());
                 };
                 Self::handle_drop_relation(&guard.as_handle())?;
             }
             ObjectAccessEvent::Truncate { object_id } => {
-                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)? else {
+                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)?
+                else {
                     return Ok(());
                 };
                 Self::handle_truncate_relation(&guard.as_handle())?;
@@ -49,9 +51,7 @@ impl IcebergObjectAccessHook {
         // Check relation kind before opening to avoid "wrong object type"
         // errors when dropping indexes, sequences, etc.
         let relkind = unsafe { pg_sys::get_rel_relkind(oid) } as u8;
-        if relkind != pg_sys::RELKIND_RELATION
-            && relkind != pg_sys::RELKIND_MATVIEW
-        {
+        if relkind != pg_sys::RELKIND_RELATION && relkind != pg_sys::RELKIND_MATVIEW {
             return Ok(None);
         }
 

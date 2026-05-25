@@ -260,8 +260,7 @@ impl SqlStateError for IcebergError {
 
             IcebergError::SpiError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 
-            IcebergError::InvariantViolated(_)
-            | IcebergError::DecimalCodecBug(_) => {
+            IcebergError::InvariantViolated(_) | IcebergError::DecimalCodecBug(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
 

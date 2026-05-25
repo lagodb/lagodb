@@ -308,11 +308,9 @@ impl IcebergMetadata {
     /// for CREATE TABLE) hold a lock on the target relation OID, so the row
     /// cannot be inserted between our check and our insert.
     pub fn insert(&self) -> IcebergResult<()> {
-        let table_guard = CatalogRelation::open(
-            Self::table_oid()?,
-            pg_sys::RowExclusiveLock as _,
-        )
-        .map_catalog_err(CatalogOp::Insert)?;
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
+                .map_catalog_err(CatalogOp::Insert)?;
 
         let tup_desc = table_guard.as_handle().tuple_desc();
 
@@ -403,11 +401,9 @@ impl IcebergMetadata {
         expected_previous_location: Option<&str>,
         new: CasUpdate<'_>,
     ) -> IcebergResult<()> {
-        let table_guard = CatalogRelation::open(
-            Self::table_oid()?,
-            pg_sys::RowExclusiveLock as _,
-        )
-        .map_catalog_err(CatalogOp::Update)?;
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
+                .map_catalog_err(CatalogOp::Update)?;
 
         let mut scan = table_guard
             .begin_scan(
@@ -430,7 +426,11 @@ impl IcebergMetadata {
         // covers the race window between this read and the write.
         // SAFETY: `tup_desc` and `old_tuple` come from the same open relation.
         let current_location: Option<String> = unsafe {
-            get_attr::<String>(old_tuple.as_raw(), tup_desc, column::METADATA_LOCATION)
+            get_attr::<String>(
+                old_tuple.as_raw(),
+                tup_desc,
+                column::METADATA_LOCATION,
+            )
         };
         if current_location.as_deref() != expected_previous_location {
             return Err(IcebergError::MetadataCatalogConflict);
@@ -477,11 +477,9 @@ impl IcebergMetadata {
     /// deliberate internal detail; the public surface above uses semantic
     /// names.
     fn delete_inner(relid: pg_sys::Oid, missing_ok: bool) -> IcebergResult<()> {
-        let table_guard = CatalogRelation::open(
-            Self::table_oid()?,
-            pg_sys::RowExclusiveLock as _,
-        )
-        .map_catalog_err(CatalogOp::Delete)?;
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
+                .map_catalog_err(CatalogOp::Delete)?;
 
         let mut scan = table_guard
             .begin_scan(

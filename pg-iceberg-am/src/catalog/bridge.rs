@@ -193,7 +193,7 @@ fn unsupported<T>(method: &'static str) -> Result<T> {
 /// [`StagedCatalog`] does not service. See the module-level doc for why
 /// these stubs are kept local instead of being pushed into iceberg-lite.
 macro_rules! unsupported_catalog_method {
-    ($method:ident, fn($($arg:ident: $argty:ty),*) -> $ret:ty) => {
+    ($method:ident, fn($($arg:ident: $argty:ty),* $(,)?) -> $ret:ty) => {
         fn $method(&self, $($arg: $argty),*) -> Result<$ret> {
             let _ = ($($arg,)*);
             unsupported(stringify!($method))
@@ -273,7 +273,10 @@ impl Catalog for StagedCatalog {
     );
     unsupported_catalog_method!(
         create_namespace,
-        fn(namespace: &NamespaceIdent, properties: HashMap<String, String>) -> Namespace
+        fn(
+            namespace: &NamespaceIdent,
+            properties: HashMap<String, String>,
+        ) -> Namespace
     );
     unsupported_catalog_method!(
         get_namespace,
@@ -287,10 +290,7 @@ impl Catalog for StagedCatalog {
         update_namespace,
         fn(namespace: &NamespaceIdent, properties: HashMap<String, String>) -> ()
     );
-    unsupported_catalog_method!(
-        drop_namespace,
-        fn(namespace: &NamespaceIdent) -> ()
-    );
+    unsupported_catalog_method!(drop_namespace, fn(namespace: &NamespaceIdent) -> ());
     unsupported_catalog_method!(
         list_tables,
         fn(namespace: &NamespaceIdent) -> Vec<TableIdent>

@@ -153,8 +153,7 @@ impl TableState {
             }
             let frame = self.level_history.pop().unwrap();
             self.current_metadata_location = frame.prev_metadata_location;
-            self.accumulated_data_files
-                .truncate(frame.prev_files_count);
+            self.accumulated_data_files.truncate(frame.prev_files_count);
             self.last_base_metadata_location = frame.prev_last_base;
         }
     }
@@ -240,7 +239,9 @@ impl TxMetadata {
             let me = Rc::new(TxMetadata {
                 inner: RefCell::new(TxMetadataInner::default()),
             });
-            transaction::register_resource(Rc::clone(&me) as Rc<dyn TransactionResource>);
+            transaction::register_resource(
+                Rc::clone(&me) as Rc<dyn TransactionResource>
+            );
             *slot = Some(Rc::clone(&me));
             me
         })
@@ -259,7 +260,8 @@ impl TxMetadata {
         }
         let nest_level = current_nest_level();
         let iceberg_meta = IcebergMetadata::get(relid)?;
-        let state = TableState::new(relid, nest_level, iceberg_meta.metadata_location);
+        let state =
+            TableState::new(relid, nest_level, iceberg_meta.metadata_location);
         inner.tables.insert(relid, state);
         Ok(())
     }
@@ -486,10 +488,7 @@ impl TxMetadata {
         let mut append_action = tx.fast_append();
         if !state.accumulated_data_files.is_empty() {
             append_action = append_action.add_data_files(
-                state
-                    .accumulated_data_files
-                    .iter()
-                    .map(|f| (**f).clone()),
+                state.accumulated_data_files.iter().map(|f| (**f).clone()),
             );
         }
         if !new_data_files.is_empty() {

@@ -18,7 +18,7 @@
 //!
 //! [`SchemaBuilder`] owns field-id allocation and the recursion into nested
 //! types. [`PgType`] is the thin `(oid, typmod)` wrapper that handles only
-//! conversions independent of field ids (e.g. `to_decimal`).
+//! conversions independent of field ids (e.g. decimal conversion).
 
 use crate::error::{IcebergError, IcebergResult};
 use iceberg_lite::spec::{
@@ -98,7 +98,7 @@ impl PgType {
     /// required (i.e. primitives only). Returns
     /// [`IcebergError::UnsupportedColumnType`] for arrays — those need a
     /// [`SchemaBuilder`] because the list-element field needs a fresh id.
-    fn to_primitive(&self) -> IcebergResult<Type> {
+    fn primitive_type(&self) -> IcebergResult<Type> {
         let pg_oid = PgOid::from(self.oid);
         match pg_oid {
             PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
@@ -147,7 +147,7 @@ impl PgType {
             PgOid::BuiltIn(PgBuiltInOids::UUIDOID) => {
                 Ok(Type::Primitive(PrimitiveType::Uuid))
             }
-            PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => self.to_decimal(),
+            PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => self.decimal_type(),
             _ => Err(IcebergError::UnsupportedColumnType(format!(
                 "PostgreSQL OID {}",
                 u32::from(self.oid)
@@ -172,7 +172,7 @@ impl PgType {
     ///    the same integer, which is a valid `numeric(p, -k)` value.
     ///
     /// Errors when the resulting precision exceeds Iceberg's 38-digit cap.
-    fn to_decimal(&self) -> IcebergResult<Type> {
+    fn decimal_type(&self) -> IcebergResult<Type> {
         let (precision, scale) = match self.numeric_precision_scale() {
             None => (DEFAULT_NUMERIC_PRECISION, DEFAULT_NUMERIC_SCALE),
             Some(NumericTypmod { precision, scale }) if scale >= 0 => {
@@ -302,7 +302,7 @@ impl SchemaBuilder {
         if let Some(elem_oid) = pg_type.element_type_oid() {
             return self.convert_array(elem_oid, pg_type.type_mod);
         }
-        pg_type.to_primitive()
+        pg_type.primitive_type()
     }
 
     fn convert_array(
@@ -386,14 +386,16 @@ mod tests {
 
     #[test]
     fn numeric_typmod_round_trips_positive_scale() {
-        let pg = PgType::new(PgBuiltInOids::NUMERICOID.value(), numeric_typmod(10, 2));
+        let pg =
+            PgType::new(PgBuiltInOids::NUMERICOID.value(), numeric_typmod(10, 2));
         let typmod = pg.numeric_precision_scale().unwrap();
         assert_eq!((typmod.precision, typmod.scale), (10, 2));
     }
 
     #[test]
     fn numeric_typmod_sign_extends_negative_scale() {
-        let pg = PgType::new(PgBuiltInOids::NUMERICOID.value(), numeric_typmod(2, -3));
+        let pg =
+            PgType::new(PgBuiltInOids::NUMERICOID.value(), numeric_typmod(2, -3));
         let typmod = pg.numeric_precision_scale().unwrap();
         assert_eq!((typmod.precision, typmod.scale), (2, -3));
     }
@@ -408,7 +410,7 @@ mod tests {
     fn numeric_without_modifier_falls_back_to_default_decimal() {
         let pg = PgType::new(PgBuiltInOids::NUMERICOID.value(), -1);
         assert!(matches!(
-            pg.to_decimal().unwrap(),
+            pg.decimal_type().unwrap(),
             Type::Primitive(PrimitiveType::Decimal {
                 precision: DEFAULT_NUMERIC_PRECISION,
                 scale: DEFAULT_NUMERIC_SCALE,
@@ -419,8 +421,9 @@ mod tests {
     #[test]
     fn numeric_negative_scale_widens_precision_and_zeroes_scale() {
         // numeric(2, -3) -> decimal(5, 0)
-        let pg = PgType::new(PgBuiltInOids::NUMERICOID.value(), numeric_typmod(2, -3));
-        match pg.to_decimal().unwrap() {
+        let pg =
+            PgType::new(PgBuiltInOids::NUMERICOID.value(), numeric_typmod(2, -3));
+        match pg.decimal_type().unwrap() {
             Type::Primitive(PrimitiveType::Decimal { precision, scale }) => {
                 assert_eq!((precision, scale), (5, 0));
             }
@@ -434,7 +437,7 @@ mod tests {
         let pg =
             PgType::new(PgBuiltInOids::NUMERICOID.value(), numeric_typmod(20, -20));
         assert!(matches!(
-            pg.to_decimal(),
+            pg.decimal_type(),
             Err(IcebergError::UnsupportedColumnType(_))
         ));
     }

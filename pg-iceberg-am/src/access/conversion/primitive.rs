@@ -53,9 +53,7 @@ impl TemporalCodec {
         })
     }
 
-    fn timestamp_from_unix_micros(
-        unix_micros: i64,
-    ) -> IcebergResult<Timestamp> {
+    fn timestamp_from_unix_micros(unix_micros: i64) -> IcebergResult<Timestamp> {
         let pg_micros = Self::unix_micros_to_pg_micros(unix_micros)?;
         Timestamp::try_from(pg_micros).map_err(|_| {
             Self::invalid_datum(format!(
@@ -199,9 +197,8 @@ impl DecimalCodec {
             ));
         }
 
-        let encoded = i128::try_from(integral).map_err(|_| {
-            self.error(value, "cannot be encoded as Decimal128")
-        })?;
+        let encoded = i128::try_from(integral)
+            .map_err(|_| self.error(value, "cannot be encoded as Decimal128"))?;
 
         if !self.fits_precision(encoded) {
             return Err(self.error(value, "exceeds target precision"));

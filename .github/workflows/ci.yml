@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  MINIO_IMAGE: minio/minio:RELEASE.2024-01-16T16-07-38Z
+  PGRX_POSTGRES_CACHE_VERSION: "v1"
+  PGRX_VERSION: "0.18.0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  test:
+    name: PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres:
+          - "17"
+
+    env:
+      PG_FEATURE: pg${{ matrix.postgres }}
+      PG_VERSION: ${{ matrix.postgres }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Cache Cargo build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/git/db
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            target
+          key: cargo-${{ runner.os }}-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-
+            cargo-${{ runner.os }}-pg${{ matrix.postgres }}-
+
+      - name: Cache cargo-pgrx
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-pgrx
+          key: cargo-pgrx-${{ runner.os }}-${{ env.PGRX_VERSION }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Install PostgreSQL build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            clang \
+            curl \
+            bison \
+            flex \
+            libclang-dev \
+            libicu-dev \
+            libreadline-dev \
+            libssl-dev \
+            pkg-config \
+            python3 \
+            zlib1g-dev
+
+      - name: Install cargo-pgrx
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-pgrx >/dev/null 2>&1; then
+            cargo install --locked cargo-pgrx --version "${PGRX_VERSION}"
+          elif ! cargo pgrx --version | grep -q "cargo-pgrx ${PGRX_VERSION}"; then
+            cargo install --locked --force cargo-pgrx --version "${PGRX_VERSION}"
+          fi
+          cargo pgrx --version
+
+      - name: Cache pgrx-managed PostgreSQL
+        uses: actions/cache@v5
+        with:
+          path: ~/.pgrx
+          key: pgrx-postgres-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PGRX_POSTGRES_CACHE_VERSION }}
+
+      - name: Initialize pgrx
+        run: |
+          set -euo pipefail
+          if ! cargo pgrx info pg-config "pg${PG_VERSION}" >/dev/null 2>&1; then
+            cargo pgrx init "--pg${PG_VERSION}=download"
+          fi
+          PG_CONFIG="$(cargo pgrx info pg-config "pg${PG_VERSION}")"
+          echo "PG_CONFIG=${PG_CONFIG}" >> "${GITHUB_ENV}"
+          echo "$(dirname "${PG_CONFIG}")" >> "${GITHUB_PATH}"
+          cargo pgrx info pg-config "pg${PG_VERSION}"
+          test -x "$("${PG_CONFIG}" --pkglibdir)/pgxs/src/test/isolation/pg_isolation_regress"
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked --exclude iceberg-lite --no-deps --no-default-features --features "${PG_FEATURE}" -- -D warnings
+
+      - name: Verify Docker
+        run: |
+          set -euo pipefail
+          docker version
+          docker info
+          docker pull "${MINIO_IMAGE}"
+
+      - name: Run test suite
+        run: cargo xtask test-all "pg${PG_VERSION}" --docker
+
+      - name: Upload PostgreSQL test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: postgres-test-artifacts-pg${{ matrix.postgres }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            pg-iceberg-am/tests/pg_regress/regression.diffs
+            pg-iceberg-am/tests/pg_regress/regression.out
+            pg-iceberg-am/tests/pg_regress/log/
+            pg-iceberg-am/tests/pg_regress/results/
+            target/isolation/pg${{ matrix.postgres }}/output_iso/

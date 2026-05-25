@@ -90,8 +90,7 @@ impl StorageContext {
         spc_oid: pg_sys::Oid,
         rel: pg_sys::Relation,
     ) -> IcebergResult<Self> {
-        let relation_needs_wal =
-            unsafe { RelationHandle::from_raw(rel).needs_wal() };
+        let relation_needs_wal = unsafe { RelationHandle::from_raw(rel).needs_wal() };
         Self::for_tablespace_with_wal(spc_oid, relation_needs_wal)
     }
 

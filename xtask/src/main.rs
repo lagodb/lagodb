@@ -40,8 +40,7 @@ fn run() -> Result<(), String> {
             let pg_version = args
                 .next()
                 .ok_or_else(|| usage_error("missing PostgreSQL version"))?;
-            let flags: Vec<OsString> = args.collect();
-            let include_docker = flags.iter().any(|f| f == "--docker");
+            let include_docker = parse_test_all_flags(args)?;
             run_test_all(&pg_version, include_docker)
         }
         Some(command) => Err(usage_error(&format!(
@@ -66,12 +65,32 @@ fn usage_error(message: &str) -> String {
     )
 }
 
+fn parse_test_all_flags(
+    args: impl Iterator<Item = OsString>,
+) -> Result<bool, String> {
+    let mut include_docker = false;
+
+    for arg in args {
+        if arg == "--docker" {
+            include_docker = true;
+        } else {
+            return Err(usage_error(&format!(
+                "unknown test-all flag '{}'",
+                arg.to_string_lossy()
+            )));
+        }
+    }
+
+    Ok(include_docker)
+}
+
 // ============================================================================
 //  test-all: orchestrate the full test suite
 // ============================================================================
 
 fn run_test_all(pg_version: &OsStr, include_docker: bool) -> Result<(), String> {
     let pg_ver_str = pg_version.to_string_lossy();
+    let pg_feature = pg_feature(pg_version)?;
     let mut skipped: Vec<String> = Vec::new();
 
     println!("=== Phase 1: Workspace unit tests (no external deps) ===\n");
@@ -80,7 +99,10 @@ fn run_test_all(pg_version: &OsStr, include_docker: bool) -> Result<(), String> 
             .arg("test")
             .arg("--workspace")
             .arg("--exclude")
-            .arg("pg-lakebase-core-tests"),
+            .arg("pg-lakebase-core-tests")
+            .arg("--no-default-features")
+            .arg("--features")
+            .arg(&pg_feature),
     )?;
 
     println!("\n=== Phase 2: pg-lakebase-core pg_test (PostgreSQL) ===\n");
@@ -121,9 +143,29 @@ fn run_test_all(pg_version: &OsStr, include_docker: bool) -> Result<(), String> 
         println!("=== All tests passed! ({pg_ver_str}) ===");
     } else {
         println!("=== All tests passed! ({pg_ver_str}) ===");
-        println!("    Not executed (require --docker): {}", skipped.join(", "));
+        println!(
+            "    Not executed (require --docker): {}",
+            skipped.join(", ")
+        );
     }
     Ok(())
+}
+
+fn pg_feature(pg_version: &OsStr) -> Result<String, String> {
+    let major = pg_major(pg_version)?;
+    Ok(format!("pg{major}"))
+}
+
+fn pg_major(pg_version: &OsStr) -> Result<String, String> {
+    let value = pg_version.to_string_lossy();
+    let major = value.strip_prefix("pg").unwrap_or(&value);
+
+    match major {
+        "16" | "17" => Ok(major.to_string()),
+        _ => Err(format!(
+            "unsupported PostgreSQL version '{value}'; expected pg16 or pg17"
+        )),
+    }
 }
 
 // ============================================================================
@@ -131,15 +173,20 @@ fn run_test_all(pg_version: &OsStr, include_docker: bool) -> Result<(), String> 
 // ============================================================================
 
 /// Returns the list of test names that were skipped (Docker-dependent).
-fn run_regress(pg_version: &OsStr, include_docker: bool) -> Result<Vec<String>, String> {
+fn run_regress(
+    pg_version: &OsStr,
+    include_docker: bool,
+) -> Result<Vec<String>, String> {
     let workspace = workspace_root();
     let regress_dir = workspace.join("pg-iceberg-am/tests/pg_regress");
 
-    let docker_tests = discover_docker_tests(&regress_dir);
+    let docker_tests = discover_docker_tests(&regress_dir)?;
 
-    if !include_docker && !docker_tests.is_empty() {
-        hide_docker_tests(&regress_dir, &docker_tests)?;
-    }
+    let mut hidden_docker_tests = if !include_docker && !docker_tests.is_empty() {
+        Some(HiddenDockerTests::hide(&regress_dir, &docker_tests)?)
+    } else {
+        None
+    };
 
     let result = run_command(
         Command::new("cargo")
@@ -153,11 +200,20 @@ fn run_regress(pg_version: &OsStr, include_docker: bool) -> Result<Vec<String>, 
             .arg(format!("shared_preload_libraries='{EXTENSION_NAME}'")),
     );
 
-    if !include_docker && !docker_tests.is_empty() {
-        restore_docker_tests(&regress_dir, &docker_tests);
-    }
+    let restore_result = hidden_docker_tests
+        .as_mut()
+        .map_or(Ok(()), HiddenDockerTests::restore);
 
-    result?;
+    match (result, restore_result) {
+        (Ok(()), Ok(())) => {}
+        (Err(test_error), Ok(())) => return Err(test_error),
+        (Ok(()), Err(restore_error)) => return Err(restore_error),
+        (Err(test_error), Err(restore_error)) => {
+            return Err(format!(
+                "{test_error}\n\nalso failed to restore hidden Docker regression tests:\n{restore_error}"
+            ));
+        }
+    }
 
     let skipped: Vec<String> = if !include_docker {
         docker_tests
@@ -171,55 +227,120 @@ fn run_regress(pg_version: &OsStr, include_docker: bool) -> Result<Vec<String>, 
 }
 
 /// Discover Docker-dependent tests by scanning sql/ for files with the `docker_` prefix.
-fn discover_docker_tests(regress_dir: &Path) -> Vec<String> {
+fn discover_docker_tests(regress_dir: &Path) -> Result<Vec<String>, String> {
     let sql_dir = regress_dir.join("sql");
     let mut tests = Vec::new();
-    if let Ok(entries) = fs::read_dir(&sql_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(DOCKER_TEST_PREFIX) && name.ends_with(".sql") {
-                let stem = name.strip_suffix(".sql").unwrap();
-                tests.push(stem.to_string());
-            }
+    let entries = fs::read_dir(&sql_dir)
+        .map_err(|error| format!("failed to read {}: {error}", sql_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("failed to read entry in {}: {error}", sql_dir.display())
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(DOCKER_TEST_PREFIX) && name.ends_with(".sql") {
+            let stem = name.strip_suffix(".sql").unwrap();
+            tests.push(stem.to_string());
         }
     }
+
     tests.sort();
-    tests
+    Ok(tests)
 }
 
 /// Temporarily rename Docker-dependent test files so pg_regress won't discover them.
-fn hide_docker_tests(regress_dir: &Path, tests: &[String]) -> Result<(), String> {
-    for test_name in tests {
-        let sql = regress_dir.join(format!("sql/{test_name}.sql"));
-        let expected = regress_dir.join(format!("expected/{test_name}.out"));
-
-        if sql.exists() {
-            let dest = regress_dir.join(format!("sql/{test_name}.sql.skip"));
-            fs::rename(&sql, &dest)
-                .map_err(|e| format!("failed to hide {}: {e}", sql.display()))?;
-        }
-        if expected.exists() {
-            let dest = regress_dir.join(format!("expected/{test_name}.out.skip"));
-            fs::rename(&expected, &dest)
-                .map_err(|e| format!("failed to hide {}: {e}", expected.display()))?;
-        }
-    }
-    Ok(())
+struct HiddenDockerTests {
+    files: Vec<(PathBuf, PathBuf)>,
 }
 
-/// Restore hidden test files back to their original names.
-fn restore_docker_tests(regress_dir: &Path, tests: &[String]) {
-    for test_name in tests {
-        let sql_skip = regress_dir.join(format!("sql/{test_name}.sql.skip"));
-        let expected_skip = regress_dir.join(format!("expected/{test_name}.out.skip"));
+impl HiddenDockerTests {
+    fn hide(regress_dir: &Path, tests: &[String]) -> Result<Self, String> {
+        let mut hidden = Self { files: Vec::new() };
 
-        if sql_skip.exists() {
-            let _ = fs::rename(&sql_skip, regress_dir.join(format!("sql/{test_name}.sql")));
+        for test_name in tests {
+            hidden.hide_file(
+                regress_dir.join(format!("sql/{test_name}.sql")),
+                regress_dir.join(format!("sql/{test_name}.sql.skip")),
+            )?;
+            hidden.hide_file(
+                regress_dir.join(format!("expected/{test_name}.out")),
+                regress_dir.join(format!("expected/{test_name}.out.skip")),
+            )?;
         }
-        if expected_skip.exists() {
-            let _ =
-                fs::rename(&expected_skip, regress_dir.join(format!("expected/{test_name}.out")));
+
+        Ok(hidden)
+    }
+
+    fn hide_file(
+        &mut self,
+        original: PathBuf,
+        hidden: PathBuf,
+    ) -> Result<(), String> {
+        if !original.exists() {
+            return Ok(());
+        }
+
+        if hidden.exists() {
+            return Err(format!(
+                "refusing to hide {}; destination already exists: {}",
+                original.display(),
+                hidden.display()
+            ));
+        }
+
+        fs::rename(&original, &hidden).map_err(|error| {
+            format!("failed to hide {}: {error}", original.display())
+        })?;
+        self.files.push((hidden, original));
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        let mut remaining = Vec::new();
+
+        while let Some((hidden, original)) = self.files.pop() {
+            if !hidden.exists() {
+                continue;
+            }
+
+            if original.exists() {
+                errors.push(format!(
+                    "cannot restore {}; original path already exists: {}",
+                    hidden.display(),
+                    original.display()
+                ));
+                remaining.push((hidden, original));
+                continue;
+            }
+
+            if let Err(error) = fs::rename(&hidden, &original) {
+                errors.push(format!(
+                    "failed to restore {} to {}: {error}",
+                    hidden.display(),
+                    original.display()
+                ));
+                remaining.push((hidden, original));
+            }
+        }
+
+        self.files = remaining;
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
+    }
+}
+
+impl Drop for HiddenDockerTests {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            eprintln!(
+                "warning: failed to restore hidden Docker regression tests:\n{error}"
+            );
         }
     }
 }
@@ -229,6 +350,8 @@ fn restore_docker_tests(regress_dir: &Path, tests: &[String]) {
 // ============================================================================
 
 fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
+    pg_major(pg_version)?;
+
     let workspace = workspace_root();
     let tests_dir = workspace.join("pg-iceberg-am/tests/isolation");
     let target_dir = workspace
@@ -241,7 +364,8 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
     let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
     let bindir = pg_config_value(&pg_config, "--bindir")?;
     let pkglibdir = pg_config_value(&pg_config, "--pkglibdir")?;
-    let isolation_regress = pkglibdir.join("pgxs/src/test/isolation/pg_isolation_regress");
+    let isolation_regress =
+        pkglibdir.join("pgxs/src/test/isolation/pg_isolation_regress");
 
     if !isolation_regress.exists() {
         return Err(format!(
@@ -251,7 +375,10 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
         ));
     }
 
-    println!("Installing {EXTENSION_PACKAGE} into {}", pg_config.display());
+    println!(
+        "Installing {EXTENSION_PACKAGE} into {}",
+        pg_config.display()
+    );
     run_command(
         Command::new("cargo")
             .arg("pgrx")
@@ -264,8 +391,9 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
 
     reset_dir(&output_dir)?;
     reset_dir(&temp_instance_dir)?;
-    fs::create_dir_all(&target_dir)
-        .map_err(|error| format!("failed to create {}: {error}", target_dir.display()))?;
+    fs::create_dir_all(&target_dir).map_err(|error| {
+        format!("failed to create {}: {error}", target_dir.display())
+    })?;
     fs::write(
         &temp_config,
         format!("shared_preload_libraries = '{EXTENSION_NAME}'\n"),
@@ -273,10 +401,7 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
     .map_err(|error| format!("failed to write {}: {error}", temp_config.display()))?;
 
     let specs: Vec<OsString> = if specs.is_empty() {
-        DEFAULT_ISOLATION_SPECS
-            .iter()
-            .map(OsString::from)
-            .collect()
+        DEFAULT_ISOLATION_SPECS.iter().map(OsString::from).collect()
     } else {
         specs.to_vec()
     };
@@ -340,10 +465,9 @@ fn cargo_pgrx_info(pg_version: &OsStr, key: &str) -> Result<PathBuf, String> {
 }
 
 fn pg_config_value(pg_config: &Path, arg: &str) -> Result<PathBuf, String> {
-    let output = Command::new(pg_config)
-        .arg(arg)
-        .output()
-        .map_err(|error| format!("failed to run {} {arg}: {error}", pg_config.display()))?;
+    let output = Command::new(pg_config).arg(arg).output().map_err(|error| {
+        format!("failed to run {} {arg}: {error}", pg_config.display())
+    })?;
 
     if !output.status.success() {
         return Err(format!(
@@ -362,7 +486,9 @@ fn reset_dir(path: &Path) -> Result<(), String> {
     match fs::remove_dir_all(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("failed to remove {}: {error}", path.display())),
+        Err(error) => {
+            return Err(format!("failed to remove {}: {error}", path.display()));
+        }
     }
 
     fs::create_dir_all(path)
@@ -376,7 +502,9 @@ fn run_command(command: &mut Command) -> Result<(), String> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|error| format!("failed to run {}: {error}", display_command(command)))?;
+        .map_err(|error| {
+            format!("failed to run {}: {error}", display_command(command))
+        })?;
 
     if status.success() {
         Ok(())
@@ -397,10 +525,9 @@ fn display_command(command: &Command) -> String {
 
 fn shell_quote(value: &OsStr) -> String {
     let value = value.to_string_lossy();
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '='))
-    {
+    if value.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '=')
+    }) {
         value.into_owned()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))

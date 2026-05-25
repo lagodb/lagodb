@@ -69,10 +69,7 @@ impl OwnedScanKeys {
     /// responsible for ensuring those entries have been initialized by
     /// PostgreSQL (e.g. by `ScanKeyInit` or by the executor) before this
     /// call.
-    pub unsafe fn copy_from_raw(
-        ptr: *const pg_sys::ScanKeyData,
-        nkeys: i32,
-    ) -> Self {
+    pub unsafe fn copy_from_raw(ptr: *const pg_sys::ScanKeyData, nkeys: i32) -> Self {
         if ptr.is_null() || nkeys <= 0 {
             return Self::empty();
         }
@@ -392,7 +389,9 @@ impl ScanDirection {
     ) -> Result<Self, InvalidScanDirection> {
         match direction {
             pg_sys::ScanDirection::ForwardScanDirection => Ok(ScanDirection::Forward),
-            pg_sys::ScanDirection::BackwardScanDirection => Ok(ScanDirection::Backward),
+            pg_sys::ScanDirection::BackwardScanDirection => {
+                Ok(ScanDirection::Backward)
+            }
             pg_sys::ScanDirection::NoMovementScanDirection => {
                 Ok(ScanDirection::NoMovement)
             }
@@ -450,10 +449,8 @@ mod tests {
         let buf = [make_key(2, 5), make_key(7, 1)];
         let keys = unsafe { OwnedScanKeys::copy_from_raw(buf.as_ptr(), 2) };
         assert_eq!(keys.len(), 2);
-        let collected: Vec<_> = keys
-            .iter()
-            .map(|e| (e.attno(), e.strategy()))
-            .collect();
+        let collected: Vec<_> =
+            keys.iter().map(|e| (e.attno(), e.strategy())).collect();
         assert_eq!(collected, vec![(2, 5), (7, 1)]);
     }
 

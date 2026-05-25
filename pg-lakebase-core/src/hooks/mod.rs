@@ -15,8 +15,8 @@ pub use object_access_hook::{
     register_object_access_hook, register_object_access_str_hook,
 };
 pub use utility_hook::{
-    AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode,
-    AlterTableStmtNode, CopyStmtNode, CreateStmtNode, CreateTableAsStmtNode,
-    CreateTableSpaceStmtNode, PostUtilityContext, RenameStmtNode, UtilityHook,
-    UtilityNode, UtilityStmtNode, register_utility_hook,
+    AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode, AlterTableStmtNode,
+    CopyStmtNode, CreateStmtNode, CreateTableAsStmtNode, CreateTableSpaceStmtNode,
+    PostUtilityContext, RenameStmtNode, UtilityHook, UtilityNode, UtilityStmtNode,
+    register_utility_hook,
 };

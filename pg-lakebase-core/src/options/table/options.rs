@@ -234,8 +234,9 @@ impl TableOptions {
             )
             .map_err(TableOptionError::DeleteFailed)?;
 
-        if let Some(tuple) =
-            scan_guard.get_next().map_err(TableOptionError::DeleteFailed)?
+        if let Some(tuple) = scan_guard
+            .get_next()
+            .map_err(TableOptionError::DeleteFailed)?
         {
             rel_guard
                 .catalog_delete(tuple)

@@ -60,13 +60,12 @@ impl RelationStats {
 
     fn try_load(rel: &RelationHandle) -> IcebergResult<Self> {
         let ctx = StorageContext::for_tablespace(rel.tablespace_oid())?;
-        let loaded = TxMetadata::current()
-            .current_table_metadata(rel.oid(), ctx.file_io())?;
+        let loaded =
+            TxMetadata::current().current_table_metadata(rel.oid(), ctx.file_io())?;
 
         Ok(Self {
             rows: Self::summary_u64(&loaded.metadata, TOTAL_RECORDS).unwrap_or(0),
-            bytes: Self::summary_u64(&loaded.metadata, TOTAL_FILES_SIZE)
-                .unwrap_or(0),
+            bytes: Self::summary_u64(&loaded.metadata, TOTAL_FILES_SIZE).unwrap_or(0),
         })
     }
 

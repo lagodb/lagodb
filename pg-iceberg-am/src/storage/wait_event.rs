@@ -31,12 +31,10 @@ impl StorageWaitEvent {
             Self::StagingFileSync => *STAGING_FILE_SYNC.get_or_init(|| {
                 register_extension_event(c"PgLakebaseStagingFileSync")
             }),
-            Self::ObjectRead => *OBJECT_READ.get_or_init(|| {
-                register_extension_event(c"PgLakebaseObjectRead")
-            }),
-            Self::ObjectUpload => *OBJECT_UPLOAD.get_or_init(|| {
-                register_extension_event(c"PgLakebaseObjectUpload")
-            }),
+            Self::ObjectRead => *OBJECT_READ
+                .get_or_init(|| register_extension_event(c"PgLakebaseObjectRead")),
+            Self::ObjectUpload => *OBJECT_UPLOAD
+                .get_or_init(|| register_extension_event(c"PgLakebaseObjectUpload")),
         })
     }
 

@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::FileExt;
 
-use crate::error::{StorageResult};
+use crate::error::StorageResult;
 use crate::handle::FileHandle;
 use crate::protocol::{WireRequestPayload, WireResponsePayload};
 

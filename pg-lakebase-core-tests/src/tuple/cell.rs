@@ -18,9 +18,8 @@ mod tests {
     fn test_cell_into_datum_and_from_datum_i32() {
         let cell = Cell::I32(42);
         let datum = cell.into_datum().expect("i32 should convert to datum");
-        let recovered = unsafe {
-            Cell::from_polymorphic_datum(datum, false, pg_sys::INT4OID)
-        };
+        let recovered =
+            unsafe { Cell::from_polymorphic_datum(datum, false, pg_sys::INT4OID) };
         match recovered {
             Some(Cell::I32(v)) => assert_eq!(v, 42),
             other => panic!("expected Cell::I32(42), got {:?}", other),
@@ -31,9 +30,8 @@ mod tests {
     fn test_cell_into_datum_and_from_datum_i64() {
         let cell = Cell::I64(123_456_789_012);
         let datum = cell.into_datum().expect("i64 should convert to datum");
-        let recovered = unsafe {
-            Cell::from_polymorphic_datum(datum, false, pg_sys::INT8OID)
-        };
+        let recovered =
+            unsafe { Cell::from_polymorphic_datum(datum, false, pg_sys::INT8OID) };
         match recovered {
             Some(Cell::I64(v)) => assert_eq!(v, 123_456_789_012),
             other => panic!("expected Cell::I64, got {:?}", other),
@@ -42,13 +40,13 @@ mod tests {
 
     #[pg_test]
     fn test_cell_into_datum_and_from_datum_f64() {
-        let cell = Cell::F64(3.14159);
+        let expected = 12.375_f64;
+        let cell = Cell::F64(expected);
         let datum = cell.into_datum().expect("f64 should convert to datum");
-        let recovered = unsafe {
-            Cell::from_polymorphic_datum(datum, false, pg_sys::FLOAT8OID)
-        };
+        let recovered =
+            unsafe { Cell::from_polymorphic_datum(datum, false, pg_sys::FLOAT8OID) };
         match recovered {
-            Some(Cell::F64(v)) => assert!((v - 3.14159).abs() < 1e-10),
+            Some(Cell::F64(v)) => assert!((v - expected).abs() < 1e-10),
             other => panic!("expected Cell::F64, got {:?}", other),
         }
     }
@@ -57,9 +55,8 @@ mod tests {
     fn test_cell_into_datum_and_from_datum_bool() {
         let cell = Cell::Bool(true);
         let datum = cell.into_datum().expect("bool should convert to datum");
-        let recovered = unsafe {
-            Cell::from_polymorphic_datum(datum, false, pg_sys::BOOLOID)
-        };
+        let recovered =
+            unsafe { Cell::from_polymorphic_datum(datum, false, pg_sys::BOOLOID) };
         match recovered {
             Some(Cell::Bool(v)) => assert!(v),
             other => panic!("expected Cell::Bool(true), got {:?}", other),
@@ -70,9 +67,8 @@ mod tests {
     fn test_cell_into_datum_and_from_datum_text() {
         let cell = Cell::String("hello world".to_string());
         let datum = cell.into_datum().expect("String should convert to datum");
-        let recovered = unsafe {
-            Cell::from_polymorphic_datum(datum, false, pg_sys::TEXTOID)
-        };
+        let recovered =
+            unsafe { Cell::from_polymorphic_datum(datum, false, pg_sys::TEXTOID) };
         match recovered {
             Some(Cell::String(v)) => assert_eq!(v, "hello world"),
             other => panic!("expected Cell::String, got {:?}", other),
@@ -84,9 +80,8 @@ mod tests {
         let date = Date::new(2024, 6, 15).unwrap();
         let cell = Cell::Date(date);
         let datum = cell.into_datum().expect("Date should convert to datum");
-        let recovered = unsafe {
-            Cell::from_polymorphic_datum(datum, false, pg_sys::DATEOID)
-        };
+        let recovered =
+            unsafe { Cell::from_polymorphic_datum(datum, false, pg_sys::DATEOID) };
         match recovered {
             Some(Cell::Date(v)) => assert_eq!(v, date),
             other => panic!("expected Cell::Date, got {:?}", other),
@@ -144,9 +139,8 @@ mod tests {
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
         let cell = Cell::Bytea(Bytes::from(data.clone()));
         let datum = cell.into_datum().expect("Bytea should convert to datum");
-        let recovered = unsafe {
-            Cell::from_polymorphic_datum(datum, false, pg_sys::BYTEAOID)
-        };
+        let recovered =
+            unsafe { Cell::from_polymorphic_datum(datum, false, pg_sys::BYTEAOID) };
         match recovered {
             Some(Cell::Bytea(v)) => assert_eq!(v.as_ref(), &data[..]),
             other => panic!("expected Cell::Bytea, got {:?}", other),

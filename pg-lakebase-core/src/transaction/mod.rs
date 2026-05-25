@@ -155,12 +155,12 @@ unsafe extern "C-unwind" fn xact_callback(
             let snapshot: Vec<Rc<dyn TransactionResource>> =
                 RESOURCES.with(|res| res.borrow().clone());
             for r in &snapshot {
-                if r.nest_level() >= current_nest_level {
-                    if let Err(error) = r.on_pre_commit() {
-                        // PgReportError::report() raises PostgreSQL ERROR and
-                        // does not return, so this aborts the pre-commit loop.
-                        error.report();
-                    }
+                if r.nest_level() >= current_nest_level
+                    && let Err(error) = r.on_pre_commit()
+                {
+                    // PgReportError::report() raises PostgreSQL ERROR and
+                    // does not return, so this aborts the pre-commit loop.
+                    error.report();
                 }
             }
         }

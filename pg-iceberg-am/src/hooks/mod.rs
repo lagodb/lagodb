@@ -3,15 +3,15 @@
 //! Files are organized by the DDL surface they cover, not by which option
 //! parser they happen to call:
 //!
-//! - `table_ddl`        — `CREATE TABLE` lifecycle plus guards against DDL
-//!                        forms we do not support yet (`CREATE TABLE AS`,
-//!                        `ALTER TABLE SET ACCESS METHOD/TABLESPACE`,
-//!                        `ALTER TABLE ALL IN TABLESPACE`).
-//! - `tablespace_ddl`   — `CREATE TABLESPACE` option persistence plus
-//!                        guards that protect the distributed-tablespace
-//!                        storage identity (RENAME / ALTER ... SET / RESET).
-//! - `object_access`    — `OAT_DROP` / `OAT_TRUNCATE` callbacks for relation
-//!                        teardown and unsupported-truncate rejection.
+//! - `table_ddl` — `CREATE TABLE` lifecycle plus guards against DDL forms we
+//!   do not support yet (`CREATE TABLE AS`,
+//!   `ALTER TABLE SET ACCESS METHOD/TABLESPACE`,
+//!   `ALTER TABLE ALL IN TABLESPACE`).
+//! - `tablespace_ddl` — `CREATE TABLESPACE` option persistence plus guards
+//!   that protect the distributed-tablespace storage identity (RENAME /
+//!   ALTER ... SET / RESET).
+//! - `object_access` — `OAT_DROP` / `OAT_TRUNCATE` callbacks for relation
+//!   teardown and unsupported-truncate rejection.
 //!
 //! Reloption schemas and `rd_amcache` layout live in `crate::options`; this
 //! module only routes PostgreSQL hook events into those parsers and into the

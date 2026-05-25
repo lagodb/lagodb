@@ -195,7 +195,12 @@ impl ScanCursor {
                 return Ok(true);
             }
 
-            match self.iterator.next().transpose().map_err(IcebergError::from)? {
+            match self
+                .iterator
+                .next()
+                .transpose()
+                .map_err(IcebergError::from)?
+            {
                 Some(batch) => {
                     self.current_batch = Some(batch);
                     self.current_row_idx = 0;

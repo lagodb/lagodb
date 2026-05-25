@@ -342,17 +342,12 @@ impl Read for PgFileRead {
                 )
             })?;
             self.position =
-                self.position
-                    .checked_add(bytes_read)
-                    .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "read position overflow for file '{}'",
-                                self.path
-                            ),
-                        )
-                    })?;
+                self.position.checked_add(bytes_read).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("read position overflow for file '{}'", self.path),
+                    )
+                })?;
         }
         Ok(bytes_read)
     }

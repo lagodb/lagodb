@@ -84,7 +84,9 @@ pub enum DecimalCodecError {
     /// `(precision, scale)` constraint. The message is the PostgreSQL ereport
     /// text. Other categories of `ereport(ERROR, ...)` (OOM, query cancel,
     /// internal errors, ...) are *not* mapped here; they propagate.
-    #[error("Decimal128 value out of range for NUMERIC({precision}, {scale}): {message}")]
+    #[error(
+        "Decimal128 value out of range for NUMERIC({precision}, {scale}): {message}"
+    )]
     ValueOutOfRange {
         precision: u32,
         scale: u32,
@@ -94,7 +96,9 @@ pub enum DecimalCodecError {
     /// `numeric_recv` rejected the wire bytes as malformed. This indicates a
     /// codec bug rather than a data error and is surfaced as its own variant
     /// so the caller can react accordingly (typically: log + abort).
-    #[error("Decimal128 codec produced an invalid NUMERIC binary representation: {message}")]
+    #[error(
+        "Decimal128 codec produced an invalid NUMERIC binary representation: {message}"
+    )]
     InvalidBinaryRepresentation { message: String },
 }
 
@@ -145,7 +149,7 @@ impl NumericExternal {
 
         let (sign, magnitude) = if unscaled < 0 {
             // Negate via unsigned to avoid `i128::MIN.unsigned_abs()` panic.
-            (NUMERIC_NEG, (unscaled as i128).unsigned_abs())
+            (NUMERIC_NEG, unscaled.unsigned_abs())
         } else {
             (NUMERIC_POS, unscaled as u128)
         };
@@ -160,12 +164,7 @@ impl NumericExternal {
     /// `dweight = nweight - scale - 1` is the decimal weight of the
     /// most-significant digit (`numeric.c::int64_to_numericvar`). From there
     /// the base-NBASE weight and the partial leading-digit padding follow.
-    fn from_unsigned(
-        magnitude: u128,
-        sign: u16,
-        scale: u32,
-        dscale: u16,
-    ) -> Self {
+    fn from_unsigned(magnitude: u128, sign: u16, scale: u32, dscale: u16) -> Self {
         debug_assert!(magnitude != 0);
 
         // Decimal-digit weight of the most-significant digit.
@@ -402,18 +401,21 @@ unsafe fn numeric_recv_external(
             pg_sys::pfree(datum.cast_mut_ptr());
             Ok(any)
         })
-        .catch_when(PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, move |e| {
-            // Only Postgres-side ereport(ERROR, ...) is converted; anything
-            // raised by Rust is rethrown so callers see the original cause.
-            let CaughtError::PostgresError(ref ereport) = e else {
-                e.rethrow();
-            };
-            Err(DecimalCodecError::ValueOutOfRange {
-                precision,
-                scale,
-                message: ereport.message().to_string(),
-            })
-        })
+        .catch_when(
+            PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+            move |e| {
+                // Only Postgres-side ereport(ERROR, ...) is converted; anything
+                // raised by Rust is rethrown so callers see the original cause.
+                let CaughtError::PostgresError(ref ereport) = e else {
+                    e.rethrow();
+                };
+                Err(DecimalCodecError::ValueOutOfRange {
+                    precision,
+                    scale,
+                    message: ereport.message().to_string(),
+                })
+            },
+        )
         .catch_when(
             PgSqlErrorCode::ERRCODE_INVALID_BINARY_REPRESENTATION,
             move |e| {
@@ -458,7 +460,11 @@ mod tests {
         } else {
             value /= 10i128.pow((-exponent) as u32);
         }
-        if ext.sign == NUMERIC_NEG { -value } else { value }
+        if ext.sign == NUMERIC_NEG {
+            -value
+        } else {
+            value
+        }
     }
 
     #[test]

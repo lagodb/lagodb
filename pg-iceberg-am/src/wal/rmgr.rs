@@ -18,8 +18,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 // not called "invalid": under the local Iceberg WAL contract, missing files are
 // an availability-first replay outcome that will surface later as unreadable
 // Iceberg data if committed metadata references them.
-static LOSSY_SKIPPED_WRITE_PATHS: OnceLock<Mutex<HashSet<String>>> =
-    OnceLock::new();
+static LOSSY_SKIPPED_WRITE_PATHS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 /// Iceberg WAL Resource Manager ID
 ///
@@ -140,8 +139,7 @@ impl IcebergRmgr {
     }
 
     fn mark_lossy_skipped_write_path(path: &str) -> bool {
-        Self::lock_lossy_skipped_write_paths()
-            .insert(path.to_string())
+        Self::lock_lossy_skipped_write_paths().insert(path.to_string())
     }
 
     fn is_lossy_skipped_write_path(path: &str) -> bool {
@@ -198,9 +196,14 @@ impl IcebergRmgr {
         };
 
         match delete_result {
-            Ok(()) => diag::log_debug1(&format!("Deleted path during redo: {}", path)),
+            Ok(()) => {
+                diag::log_debug1(&format!("Deleted path during redo: {}", path))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                diag::log_debug1(&format!("Directory disappeared during redo: {}", path));
+                diag::log_debug1(&format!(
+                    "Directory disappeared during redo: {}",
+                    path
+                ));
             }
             Err(e) => {
                 diag::report_warning(&format!(
@@ -489,7 +492,10 @@ mod tests {
             None
         );
         assert_eq!(
-            rmgr.extract_delete_directory_path(&delete_directory_record(b"", u32::MAX)),
+            rmgr.extract_delete_directory_path(&delete_directory_record(
+                b"",
+                u32::MAX
+            )),
             None
         );
         assert_eq!(
