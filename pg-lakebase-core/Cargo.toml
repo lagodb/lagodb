@@ -12,13 +12,12 @@ edition = { workspace = true }
 rust-version = { workspace = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrx_embed)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg17"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
-pg_test = []
 
 [dependencies]
 pgrx = { workspace = true }

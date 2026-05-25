@@ -75,21 +75,22 @@ once that integration exists.
 |-------|---------|
 | [pg-iceberg-am](./pg-iceberg-am) | PostgreSQL extension implementing the Iceberg table access method. |
 | [pg-lakebase-core](./pg-lakebase-core) | Framework crate for PostgreSQL TAM implementations. |
+| [pg-lakebase-core-tests](./pg-lakebase-core-tests) | PostgreSQL integration tests (`#[pg_test]`) for `pg-lakebase-core`. |
 | [pg-lakebase-macros](./pg-lakebase-macros) | Procedural macro support, including `#[pg_table_am]`. |
 | [iceberg-lite](./iceberg-lite) | Synchronous, PostgreSQL-friendly Iceberg library used by the TAM. |
 | [pg-lakebase-storage](./pg-lakebase-storage) | Local object-storage caching service library. |
-| [xtask](./xtask) | Workspace maintenance commands, including isolation test orchestration. |
+| [xtask](./xtask) | Workspace maintenance commands: `test-all`, `isolation`. |
 
 ## Requirements
 
 - Rust 1.95.0 or later
 - PostgreSQL 17, including server development files
-- `cargo-pgrx` 0.17.0
+- `cargo-pgrx` 0.18.0
 
 Install `cargo-pgrx`:
 
 ```bash
-cargo install --locked cargo-pgrx --version 0.17.0
+cargo install --locked cargo-pgrx --version 0.18.0
 ```
 
 Initialize pgrx for PostgreSQL 17. Use either an existing `pg_config` or let
@@ -156,42 +157,65 @@ INSERT INTO events VALUES
 SELECT * FROM events ORDER BY id;
 ```
 
-## SQL Regression Tests
+## Testing
 
-Run the `pg_regress` suite for `pg-iceberg-am`:
+### Run everything
+
+After modifying code, run the full test suite with a single command:
 
 ```bash
+cargo xtask test-all pg17
+```
+
+This executes four phases in order:
+
+| Phase | What it tests | External deps |
+|-------|---------------|---------------|
+| 1. Unit tests | All workspace crates (`cargo test --workspace`) | None |
+| 2. pg_test | `pg-lakebase-core` Datum/PG-function tests | PostgreSQL |
+| 3. SQL regression | `pg-iceberg-am` SQL behavior (`pg_regress`) | PostgreSQL |
+| 4. Isolation | Concurrency specs (`pg_isolation_regress`) | PostgreSQL |
+
+To also run tests that require Docker (storage E2E, some regress suites that
+start MinIO):
+
+```bash
+cargo xtask test-all pg17 --docker
+```
+
+### Individual test commands
+
+```bash
+# Unit tests only (fast, no PostgreSQL)
+cargo test --workspace
+
+# pg-lakebase-core integration tests
+cargo pgrx test pg17 --package pg-lakebase-core-tests
+
+# SQL regression
 cargo pgrx regress pg17 \
   --package pg-iceberg-am \
   --resetdb \
   --postgresql-conf "shared_preload_libraries='pg_iceberg_am'"
-```
 
-The regression SQL lives in [pg-iceberg-am/tests/pg_regress/sql](./pg-iceberg-am/tests/pg_regress/sql),
-with expected output in [pg-iceberg-am/tests/pg_regress/expected](./pg-iceberg-am/tests/pg_regress/expected).
-
-## Isolation Tests
-
-The isolation specs cover concurrent visibility, commit retry, and savepoint
-behavior. They live in [pg-iceberg-am/tests/isolation/specs](./pg-iceberg-am/tests/isolation/specs).
-
-Use the workspace `xtask` runner instead of `cargo test`: isolation tests need
-a PostgreSQL instance with `pg_iceberg_am` loaded through
-`shared_preload_libraries`, so the runner installs the extension into the pgrx
-PostgreSQL installation and runs `pg_isolation_regress` against a temporary
-instance. It does not depend on an already-running pgrx server.
-
-```bash
+# Isolation tests (all specs or specific ones)
 cargo xtask isolation pg17
-```
-
-To run a single spec:
-
-```bash
 cargo xtask isolation pg17 cas_retry_stress
+
+# Storage E2E (requires Docker for MinIO)
+cargo test --package pg-lakebase-storage --features integration --test e2e
 ```
 
-Results are written under `target/isolation/pg17/output_iso/`.
+### Adding new regression tests
+
+Regression SQL lives in [pg-iceberg-am/tests/pg_regress/sql](./pg-iceberg-am/tests/pg_regress/sql),
+isolation specs in [pg-iceberg-am/tests/isolation/specs](./pg-iceberg-am/tests/isolation/specs),
+and isolation results are written to `target/isolation/pg17/output_iso/`.
+
+**Naming convention for Docker-dependent tests:** regression tests whose filename
+starts with `docker_` (e.g. `docker_object_artifact_cleanup.sql`) require Docker
+and are automatically skipped when `--docker` is not passed. No Rust code changes
+are needed — just follow the naming convention.
 
 ## Install Into PostgreSQL
 
@@ -226,22 +250,10 @@ CREATE TABLE events (
 ) USING iceberg;
 ```
 
-## Other Useful Test Commands
-
-Rust-only crates can be tested without starting PostgreSQL:
-
-```bash
-cargo test --package iceberg-lite
-cargo test --package pg-lakebase-storage
-cargo test --package pg-lakebase-core
-```
-
-For `pg-iceberg-am`, prefer `cargo pgrx regress` for SQL behavior because it
-starts PostgreSQL with the required preload configuration.
-
 ## Documentation
 
 - [Core framework](./pg-lakebase-core/README.md)
+- [Core integration tests](./pg-lakebase-core-tests/README.md)
 - [Iceberg access method](./pg-iceberg-am/README.md)
 - [Storage service](./pg-lakebase-storage/README.md)
 - [Storage design](./pg-lakebase-storage/doc/design.md)

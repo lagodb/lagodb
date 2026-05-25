@@ -563,3 +563,4 @@ impl FromDatum for Cell {
         }
     }
 }
+

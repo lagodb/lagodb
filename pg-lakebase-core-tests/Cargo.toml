@@ -1,0 +1,31 @@
+[package]
+name = "pg-lakebase-core-tests"
+version = { workspace = true }
+publish = false
+authors = ["Robert Mu. https://github.com/robertmu"]
+license = { workspace = true }
+description = "Integration tests for pg-lakebase-core that require a running PostgreSQL instance."
+homepage = { workspace = true }
+repository = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [] }
+
+[features]
+default = ["pg17"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakebase-core/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakebase-core/pg17"]
+pg_test = []
+
+[dependencies]
+pgrx = { workspace = true }
+pg-lakebase-core = { path = "../pg-lakebase-core" }
+bytes = "1.10"
+
+[dev-dependencies]
+pgrx-tests = { workspace = true }

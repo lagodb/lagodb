@@ -135,7 +135,61 @@ session types implement their corresponding lifecycle traits. See
 
 - Rust 1.95.0 or later
 - PostgreSQL 16 or 17
-- pgrx 0.17.x
+- pgrx 0.18.x
+
+## Testing
+
+This crate has two categories of tests:
+
+### Pure Rust unit tests (no PostgreSQL required)
+
+These tests exercise logic that does not call PostgreSQL backend functions
+(e.g. batch buffer sizing, scan key copy semantics, option parsing):
+
+```bash
+cargo test -p pg-lakebase-core
+```
+
+### PostgreSQL integration tests (`#[pg_test]`)
+
+Some functionality — like `Cell`'s `IntoDatum`/`FromDatum` round-tripping and
+`Display` formatting via `pg_sys::date_out` etc. — requires a real PostgreSQL
+backend. These tests live in a **dedicated test extension crate**
+[`pg-lakebase-core-tests`](../pg-lakebase-core-tests) and are run with:
+
+```bash
+cargo pgrx test pg17 --package pg-lakebase-core-tests
+```
+
+#### Why a separate test crate?
+
+`pg-lakebase-core` is a pure library (`lib`) consumed by downstream extension
+crates like `pg-iceberg-am`. pgrx's `#[pg_test]` requires loading the code as
+a PostgreSQL extension (`cdylib` with `pg_module_magic!()`). Embedding these
+extension artifacts directly in `pg-lakebase-core` would risk symbol conflicts
+(duplicate `Pg_magic_func`) with downstream extensions that also define
+`pg_module_magic!()`.
+
+The separate `pg-lakebase-core-tests` crate isolates all extension plumbing
+(`pg_module_magic!()`, `.control` file) so that `pg-lakebase-core` remains a
+clean library with zero chance of downstream conflicts.
+
+#### Writing new `#[pg_test]` tests
+
+Test modules in `pg-lakebase-core-tests` mirror this crate's source structure.
+For example, tests for `pg_lakebase_core::tuple::Cell` live at
+`pg-lakebase-core-tests/src/tuple/cell.rs`.
+
+See the [pg-lakebase-core-tests README](../pg-lakebase-core-tests/README.md)
+for the full guide on adding new test modules.
+
+#### Prerequisites
+
+Initialize pgrx with the target PostgreSQL installation:
+
+```bash
+cargo pgrx init --pg17=/path/to/pg_config
+```
 
 ## Building
 
@@ -143,14 +197,7 @@ From the workspace root:
 
 ```bash
 cargo check --workspace
-cargo test -p pg-lakebase-core
-```
-
-For PostgreSQL integration work, initialize `pgrx` with the target PostgreSQL
-installation before running extension tests:
-
-```bash
-cargo pgrx init --pg17=/path/to/pg_config
+cargo build -p pg-lakebase-core
 ```
 
 ## Design Notes

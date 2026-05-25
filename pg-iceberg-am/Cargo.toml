@@ -8,13 +8,10 @@ edition = { workspace = true }
 rust-version = { workspace = true }
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["cdylib"]
 
-[[bin]]
-name = "pgrx_embed_pg_iceberg_am"
-path = "./src/bin/pgrx_embed.rs"
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrx_embed)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg17"]

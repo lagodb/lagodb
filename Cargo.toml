@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "pg-lakebase-core",
+    "pg-lakebase-core-tests",
     "pg-lakebase-macros",
     "pg-iceberg-am",
     "iceberg-lite",
@@ -19,9 +20,9 @@ homepage = "https://github.com/robertmu/pg-lakebase"
 repository = "https://github.com/robertmu/pg-lakebase"
 
 [workspace.dependencies]
-pgrx = { version = "0.17.0" }
-pgrx-pg-sys = { version = "0.17.0" }
-pgrx-tests = { version = "=0.17.0"}
+pgrx = { version = "0.18.0" }
+pgrx-pg-sys = { version = "0.18.0" }
+pgrx-tests = { version = "=0.18.0"}
 
 # The 'dev' profile is used when you run `cargo build`.
 [profile.dev]
