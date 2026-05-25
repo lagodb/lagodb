@@ -1,6 +1,9 @@
 [alias]
 xtask = "run -p xtask --"
 
+# pgrx extension crates reference PostgreSQL backend symbols that are resolved
+# when PostgreSQL loads the extension. macOS requires dynamic_lookup for that
+# extension-style linking model.
 [target.'cfg(target_os = "macos")']
 rustflags = [
     "-C", "link-arg=-undefined",

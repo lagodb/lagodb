@@ -24,10 +24,10 @@ that extension plumbing in a separate crate means:
 cargo pgrx test pg17 --package pg-lakebase-core-tests
 ```
 
-Or as part of the full workspace test suite:
+Or as part of the CI-grade full workspace test suite:
 
 ```bash
-cargo xtask test-all pg17
+cargo xtask test-all pg17 --docker
 ```
 
 ## Directory structure

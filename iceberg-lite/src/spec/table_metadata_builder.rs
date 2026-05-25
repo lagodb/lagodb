@@ -1132,9 +1132,14 @@ impl TableMetadataBuilder {
 
     /// Build the table metadata.
     pub fn build(mut self) -> Result<TableMetadataBuildResult> {
-        self.metadata.last_updated_ms = self
-            .last_updated_ms
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        self.metadata.last_updated_ms = self.last_updated_ms.unwrap_or_else(|| {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            self.previous_history_entry
+                .as_ref()
+                .map_or(now_ms, |entry| {
+                    now_ms.max(entry.timestamp_ms.saturating_add(1))
+                })
+        });
 
         // Check compatibility of the current schema to the default partition spec and sort order.
         // We use the `get_xxx` methods from the builder to avoid using the panicking

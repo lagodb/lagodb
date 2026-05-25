@@ -77,6 +77,6 @@ pub mod pg_test {
     }
 
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec![]
+        vec!["shared_preload_libraries = 'pg_iceberg_am'"]
     }
 }

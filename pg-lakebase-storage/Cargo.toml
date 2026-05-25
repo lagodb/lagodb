@@ -2,6 +2,7 @@
 name = "pg-lakebase-storage"
 edition.workspace = true
 license.workspace = true
+version = { workspace = true }
 authors = ["Robert Mu. https://github.com/robertmu"]
 description = "pg-lakebase-storage: local object-storage backed file service"
 readme = "README.md"

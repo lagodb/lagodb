@@ -14,6 +14,7 @@
 - [Key Features](#key-features)
 - [Architecture](#architecture)
 - [Getting Started](#getting-started)
+- [Testing](#testing)
 - [Usage](#usage)
 
 ## Overview
@@ -87,6 +88,12 @@ method.
 > background worker and WAL resource manager will not be active under that
 > command. Use `cargo pgrx install` plus an explicit
 > `shared_preload_libraries` entry for any realistic test of `pg-iceberg-am`.
+
+## Testing
+
+See [docs/testing.md](docs/testing.md) for the pgrx testing model used by
+this crate, including when to use ordinary `#[test]` versus
+`#[pgrx::pg_test]`.
 
 ## Usage
 

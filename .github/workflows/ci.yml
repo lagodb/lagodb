@@ -141,7 +141,7 @@ jobs:
           docker pull "${MINIO_IMAGE}"
 
       - name: Run test suite
-        run: cargo xtask test-all "pg${PG_VERSION}" --docker
+        run: cargo xtask test-all "pg${PG_VERSION}"
 
       - name: Upload PostgreSQL test artifacts
         if: failure()

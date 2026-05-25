@@ -20,4 +20,7 @@ mod traits;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "pg_test")]
+mod pg_test;
+
 pub use converter::{RecordBatchRowReader, RowRecordBatchBuilder};
