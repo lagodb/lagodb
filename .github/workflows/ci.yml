@@ -18,7 +18,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   MINIO_IMAGE: minio/minio:RELEASE.2024-01-16T16-07-38Z
-  PGRX_POSTGRES_CACHE_VERSION: "v1"
+  PGRX_POSTGRES_CACHE_VERSION: "v2"
   PGRX_VERSION: "0.18.0"
   RUST_BACKTRACE: "1"
 
@@ -115,7 +115,9 @@ jobs:
       - name: Cache pgrx-managed PostgreSQL
         uses: actions/cache@v5
         with:
-          path: ~/.pgrx
+          path: |
+            ~/.pgrx/config.toml
+            ~/.pgrx/${{ matrix.postgres }}.[0-9]*
           key: pgrx-postgres-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PGRX_POSTGRES_CACHE_VERSION }}
 
       - name: Initialize pgrx
