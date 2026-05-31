@@ -3,8 +3,55 @@
 //! Table access methods and tablespaces define their own option schemas, while
 //! this module owns the PostgreSQL list-walking and value-normalization logic.
 
+use crate::diag::SqlStateError;
 use pgrx::pg_sys;
+use pgrx::prelude::PgSqlErrorCode;
 use std::ffi::CStr;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum OptionSchemaError {
+    #[error("option '{option}' specified more than once")]
+    Duplicate { option: String },
+
+    #[error("option '{option}' requires a value")]
+    MissingValue { option: String },
+
+    #[error("invalid boolean value \"{value}\" for option '{option}'")]
+    InvalidBool { option: String, value: String },
+
+    #[error("invalid integer value \"{value}\" for option '{option}'")]
+    InvalidInteger { option: String, value: String },
+
+    #[error("value {value} for option '{option}' is less than minimum {min}")]
+    IntBelowMin {
+        option: String,
+        value: i32,
+        min: i32,
+    },
+
+    #[error("value {value} for option '{option}' is greater than maximum {max}")]
+    IntAboveMax {
+        option: String,
+        value: i32,
+        max: i32,
+    },
+
+    #[error(
+        "invalid value \"{value}\" for option '{option}'. Allowed values are: {allowed}"
+    )]
+    InvalidEnum {
+        option: String,
+        value: String,
+        allowed: String,
+    },
+}
+
+impl SqlStateError for OptionSchemaError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum OptionKind {
@@ -43,7 +90,7 @@ unsafe fn try_extract_single_option(
     def_name: &str,
     valid_options: &[OptionDef],
     custom_opts: &mut Vec<(String, Option<String>)>,
-) -> Result<bool, String> {
+) -> Result<bool, OptionSchemaError> {
     let Some(def) = valid_options.iter().find(|opt| opt.name == def_name) else {
         return Ok(false);
     };
@@ -63,15 +110,17 @@ unsafe fn try_extract_single_option(
         .iter()
         .any(|(k, _): &(String, _)| *k == def_name)
     {
-        return Err(format!("option '{}' specified more than once", def_name));
+        return Err(OptionSchemaError::Duplicate {
+            option: def_name.to_owned(),
+        });
     }
 
-    match validate_option_value(def, raw_val) {
+    match validate_option_value(def, def_name, raw_val) {
         Ok(validated_val) => {
             custom_opts.push((def_name.to_owned(), validated_val));
             Ok(true)
         }
-        Err(e) => Err(format!("Invalid value for option '{}': {}", def_name, e)),
+        Err(err) => Err(err),
     }
 }
 
@@ -91,7 +140,7 @@ unsafe fn try_extract_single_option(
 pub unsafe fn extract_and_remove_options(
     options_list_ptr: *mut *mut pg_sys::List,
     valid_options: &[OptionDef],
-) -> Result<Vec<(String, Option<String>)>, String> {
+) -> Result<Vec<(String, Option<String>)>, OptionSchemaError> {
     let mut custom_opts = Vec::new();
     let mut new_pg_opts: *mut pg_sys::List = std::ptr::null_mut();
 
@@ -144,7 +193,7 @@ pub unsafe fn extract_and_remove_options(
 pub unsafe fn extract_options(
     options_list: *mut pg_sys::List,
     valid_options: &[OptionDef],
-) -> Result<Vec<(String, Option<String>)>, String> {
+) -> Result<Vec<(String, Option<String>)>, OptionSchemaError> {
     let mut custom_opts = Vec::new();
 
     if options_list.is_null() {
@@ -177,36 +226,47 @@ pub unsafe fn extract_options(
 
 fn validate_option_value(
     def: &OptionDef,
+    option: &str,
     raw_val: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, OptionSchemaError> {
     match &def.kind {
         OptionKind::Bool { .. } => {
             let v = raw_val.as_deref().unwrap_or("true");
-            let parsed = parse_bool(v)
-                .ok_or_else(|| format!("invalid boolean value \"{}\"", v))?;
+            let parsed =
+                parse_bool(v).ok_or_else(|| OptionSchemaError::InvalidBool {
+                    option: option.to_owned(),
+                    value: v.to_owned(),
+                })?;
             Ok(Some(parsed.to_string()))
         }
         OptionKind::Int { min, max, .. } => {
-            let v = raw_val.ok_or("numeric option requires a value")?;
-            let int_val = v
-                .parse::<i32>()
-                .map_err(|_| format!("invalid integer value \"{}\"", v))?;
+            let v = raw_val.ok_or_else(|| OptionSchemaError::MissingValue {
+                option: option.to_owned(),
+            })?;
+            let int_val =
+                v.parse::<i32>()
+                    .map_err(|_| OptionSchemaError::InvalidInteger {
+                        option: option.to_owned(),
+                        value: v.clone(),
+                    })?;
 
             if let Some(min_val) = min
                 && int_val < *min_val
             {
-                return Err(format!(
-                    "value {} is less than minimum {}",
-                    int_val, min_val
-                ));
+                return Err(OptionSchemaError::IntBelowMin {
+                    option: option.to_owned(),
+                    value: int_val,
+                    min: *min_val,
+                });
             }
             if let Some(max_val) = max
                 && int_val > *max_val
             {
-                return Err(format!(
-                    "value {} is greater than maximum {}",
-                    int_val, max_val
-                ));
+                return Err(OptionSchemaError::IntAboveMax {
+                    option: option.to_owned(),
+                    value: int_val,
+                    max: *max_val,
+                });
             }
             Ok(Some(int_val.to_string()))
         }
@@ -217,11 +277,11 @@ fn validate_option_value(
         OptionKind::Enum { default, values } => {
             let val = raw_val.unwrap_or_else(|| (*default).to_string());
             if !values.contains(&val.as_str()) {
-                return Err(format!(
-                    "invalid value \"{}\". Allowed values are: {}",
-                    val,
-                    values.join(", ")
-                ));
+                return Err(OptionSchemaError::InvalidEnum {
+                    option: option.to_owned(),
+                    value: val,
+                    allowed: values.join(", "),
+                });
             }
             Ok(Some(val))
         }

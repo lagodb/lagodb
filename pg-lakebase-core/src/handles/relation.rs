@@ -76,6 +76,61 @@ impl<'a> RelationHandle<'a> {
         unsafe { self.inner.as_ref().rd_att }
     }
 
+    /// Number of attributes in the relation's tuple descriptor (`rd_att->natts`).
+    ///
+    /// Lets providers size row buffers without dereferencing the raw `rd_att`
+    /// pointer themselves.
+    #[inline]
+    pub fn natts(&self) -> usize {
+        let tup_desc = self.tuple_desc();
+        debug_assert!(!tup_desc.is_null(), "RelationHandle::natts: rd_att is NULL");
+        unsafe { (*tup_desc).natts as usize }
+    }
+
+    /// Live (non-dropped) columns of the relation, in ascending attno order.
+    ///
+    /// Each entry pairs the column's 1-based attribute number with its name
+    /// (the same string PostgreSQL stores in `attname`). Dropped columns are
+    /// skipped, so the result may be shorter than [`natts`](Self::natts).
+    ///
+    /// This owns the `TupleDesc` / `attrs` / `attname` unsafe boundary so
+    /// callers stay on safe Rust. Names are copied into owned `String`s, so
+    /// they survive any later memory-context reset.
+    pub fn live_columns(&self) -> Vec<(pg_sys::AttrNumber, String)> {
+        let tup_desc = self.tuple_desc();
+        debug_assert!(
+            !tup_desc.is_null(),
+            "RelationHandle::live_columns: rd_att is NULL"
+        );
+        // SAFETY: a live RelationHandle yields a valid `TupleDesc`; `attrs` is a
+        // contiguous array of length `natts` for the descriptor's lifetime,
+        // which outlives this borrow.
+        let attrs = unsafe {
+            std::slice::from_raw_parts(
+                (*tup_desc).attrs.as_ptr(),
+                (*tup_desc).natts as usize,
+            )
+        };
+
+        let mut live = Vec::with_capacity(attrs.len());
+        for attr in attrs {
+            if attr.attisdropped {
+                continue;
+            }
+            // SAFETY: `attname.data` is a NUL-terminated `NameData` array owned
+            // by the descriptor and valid for the borrow of `attrs`. Copied
+            // into an owned `String` immediately so it survives later context
+            // resets.
+            let name = unsafe {
+                std::ffi::CStr::from_ptr(attr.attname.data.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            live.push((attr.attnum, name));
+        }
+        live
+    }
+
     #[inline]
     fn rd_rel(&self) -> *mut pg_sys::FormData_pg_class {
         unsafe { self.inner.as_ref().rd_rel }

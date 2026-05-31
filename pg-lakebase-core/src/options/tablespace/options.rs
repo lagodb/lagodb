@@ -16,7 +16,8 @@ use super::storage::{
     TablespaceStorage, TablespaceStorageError, store_id_from_tablespace_name,
 };
 use crate::catalog::{CatalogRelation, search_syscache_copy};
-use crate::diag::{PgError, SqlStateError};
+use crate::diag::{PgError, SqlStateError, domain_error_report};
+use crate::options::schema::OptionSchemaError;
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -29,8 +30,8 @@ use thiserror::Error;
 // ============================================================================
 #[derive(Error, Debug)]
 pub enum TablespaceError {
-    #[error("invalid tablespace option: {0}")]
-    InvalidOption(String),
+    #[error("invalid tablespace option")]
+    InvalidSchema(#[from] OptionSchemaError),
 
     #[error("invalid tablespace storage config")]
     InvalidStorage(#[from] TablespaceStorageError),
@@ -44,13 +45,19 @@ pub enum TablespaceError {
 
 impl From<TablespaceError> for ErrorReport {
     fn from(value: TablespaceError) -> Self {
-        ErrorReport::new(value.sql_error_code(), format!("{value}"), "")
+        domain_error_report(value)
     }
 }
 
 impl SqlStateError for TablespaceError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
-        PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+        match self {
+            Self::InvalidSchema(_) | Self::InvalidStorage(_) => {
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+            }
+            Self::UpdateFailed(error) => error.sql_error_code(),
+            Self::NotFound(_) => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+        }
     }
 }
 
@@ -70,10 +77,7 @@ impl TablespaceOptions {
     ) -> Result<Option<Self>, TablespaceError> {
         // Call into the FFI layer (unsafe)
         // SAFETY: We hold a mutable reference to the statement, so it is safe to modify it via FFI.
-        let opts = unsafe {
-            defs::extract_and_remove_options(stmt)
-                .map_err(TablespaceError::InvalidOption)?
-        };
+        let opts = unsafe { defs::extract_and_remove_options(stmt)? };
 
         let Some(options) = (!opts.is_empty()).then_some(Self { options: opts })
         else {
@@ -93,9 +97,7 @@ impl TablespaceOptions {
     ) -> Result<Option<Self>, TablespaceError> {
         // SAFETY: `stmt` is a live PostgreSQL parse tree for this hook callback
         // and the options list is only read by this call.
-        let opts = unsafe {
-            defs::extract_options(stmt).map_err(TablespaceError::InvalidOption)?
-        };
+        let opts = unsafe { defs::extract_options(stmt)? };
 
         let Some(options) = (!opts.is_empty()).then_some(Self { options: opts })
         else {

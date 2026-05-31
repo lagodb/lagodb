@@ -9,22 +9,80 @@ use thiserror::Error;
 
 /// Small owning handle for a PostgreSQL [`ErrorReport`].
 ///
-/// `ErrorReport` carries the full PostgreSQL diagnostic payload and is too large
-/// to use directly as the `Err` variant of public callback results. Keeping it
-/// boxed preserves the original SQLSTATE/detail/hint/location while keeping
-/// success-path `Result` values compact.
+/// `ErrorReport` is too large to use directly as the `Err` variant of public
+/// callback results. This wrapper boxes the report and keeps a single outer
+/// [`PgSqlErrorCode`] in sync with [`Self::into_report`] / [`Self::report`].
+///
+/// The boxed report retains message, DETAIL, and HINT. File/line location from
+/// the original construction is not preserved across [`Self::into_report`];
+/// reporting uses a fresh caller location from the rebuild.
 #[derive(Debug)]
-pub struct PgReportError(Box<ErrorReport>);
+pub struct PgReportError {
+    sqlerrcode: PgSqlErrorCode,
+    report: Box<ErrorReport>,
+}
 
 impl PgReportError {
+    /// Build from a domain error with a single SQLSTATE and full `source` chain in DETAIL.
     #[inline]
-    pub fn new(report: ErrorReport) -> Self {
-        Self(Box::new(report))
+    pub fn from_domain_error<E>(err: E) -> Self
+    where
+        E: SqlStateError + std::error::Error + std::fmt::Display,
+    {
+        let sqlerrcode = err.sql_error_code();
+        Self {
+            sqlerrcode,
+            report: Box::new(domain_error_report(err)),
+        }
+    }
+
+    /// Build from a primary message only (no DETAIL).
+    #[inline]
+    pub fn from_message(
+        sqlerrcode: PgSqlErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::from_parts(sqlerrcode, message, None, None)
+    }
+
+    /// Build with optional PostgreSQL DETAIL/HINT lines.
+    #[inline]
+    pub fn from_parts(
+        sqlerrcode: PgSqlErrorCode,
+        message: impl Into<String>,
+        detail: Option<String>,
+        hint: Option<String>,
+    ) -> Self {
+        let mut report = ErrorReport::new(sqlerrcode, message.into(), "");
+        if let Some(detail) = detail {
+            report = report.set_detail(detail);
+        }
+        if let Some(hint) = hint {
+            report = report.set_hint(hint);
+        }
+        Self {
+            sqlerrcode,
+            report: Box::new(report),
+        }
     }
 
     #[inline]
+    pub fn sql_error_code(&self) -> PgSqlErrorCode {
+        self.sqlerrcode
+    }
+
+    /// Rebuild the report using the outer SQLSTATE so reporting and hook conversion stay consistent.
+    #[inline]
     pub fn into_report(self) -> ErrorReport {
-        *self.0
+        let Self { sqlerrcode, report } = self;
+        let mut out = ErrorReport::new(sqlerrcode, report.message().to_string(), "");
+        if let Some(detail) = report.detail() {
+            out = out.set_detail(detail.to_string());
+        }
+        if let Some(hint) = report.hint() {
+            out = out.set_hint(hint.to_string());
+        }
+        out
     }
 
     #[inline]
@@ -36,21 +94,56 @@ impl PgReportError {
 
 impl<E> From<E> for PgReportError
 where
-    E: Into<ErrorReport>,
+    E: SqlStateError + std::error::Error + std::fmt::Display,
 {
     #[inline]
     fn from(value: E) -> Self {
-        Self::new(value.into())
+        Self::from_domain_error(value)
     }
 }
 
 impl Display for PgReportError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(self.0.as_ref(), f)
+        Display::fmt(self.report.as_ref(), f)
     }
 }
 
 impl std::error::Error for PgReportError {}
+
+/// Format the full `std::error::Error::source` chain (excluding the top-level error).
+pub fn error_source_chain_detail(err: &dyn std::error::Error) -> Option<String> {
+    let mut current = err.source();
+    let mut lines = Vec::new();
+    while let Some(source) = current {
+        lines.push(format!("{source}"));
+        current = source.source();
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Join optional DETAIL fragments with newlines, skipping `None` and empty strings.
+pub fn join_error_details(
+    parts: impl IntoIterator<Item = Option<String>>,
+) -> Option<String> {
+    let lines: Vec<String> = parts
+        .into_iter()
+        .flatten()
+        .filter(|line| !line.is_empty())
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Build a PostgreSQL [`ErrorReport`] from a domain error and its `source` chain.
+pub fn domain_error_report<E>(err: E) -> ErrorReport
+where
+    E: SqlStateError + std::error::Error + std::fmt::Display,
+{
+    let mut report = ErrorReport::new(err.sql_error_code(), format!("{err}"), "");
+    if let Some(detail) = error_source_chain_detail(&err) {
+        report = report.set_detail(detail);
+    }
+    report
+}
 
 /// Error types that can choose the PostgreSQL SQLSTATE used when reporting.
 pub trait SqlStateError: std::error::Error + Send + Sync + 'static {

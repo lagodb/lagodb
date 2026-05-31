@@ -18,5 +18,5 @@ pub use utility_hook::{
     AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode, AlterTableStmtNode,
     CopyStmtNode, CreateStmtNode, CreateTableAsStmtNode, CreateTableSpaceStmtNode,
     PostUtilityContext, RenameStmtNode, UtilityHook, UtilityNode, UtilityStmtNode,
-    register_utility_hook,
+    freeze_utility_hooks, register_utility_hook,
 };

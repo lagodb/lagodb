@@ -54,9 +54,40 @@ static PREV_EXECUTOR_END: OnceLock<pg_sys::ExecutorEnd_hook_type> = OnceLock::ne
 // Hook chaining matters because PostgreSQL exposes each executor hook as a
 // single global function pointer.  Extensions cooperate by saving the previous
 // pointer and invoking it, or the `standard_*` implementation if there was no
-// previous hook.  The pgrx FFI boundary around previous/standard calls lets
-// Postgres ERRORs unwind safely through Rust frames.
-unsafe fn invoke_prev_executor_start(
+// previous hook.
+//
+// ## Executor hook call boundaries
+//
+// The two dispatcher targets below are not the same kind of FFI edge:
+//
+// 1. `pg_sys::standard_ExecutorStart` / `standard_ExecutorFinish` /
+//    `standard_ExecutorEnd` are bindgen-generated PostgreSQL extern functions.
+//    pgrx applies `#[pgrx_macros::pg_guard]` to the generated extern block, and
+//    that macro rewrites each function as a Rust wrapper that calls
+//    `pg_guard_ffi_boundary`.  Therefore a direct `pg_sys::standard_*` call
+//    already has one pgrx FFI boundary.  Do not add another manual
+//    `pg_guard_ffi_boundary` around those calls.
+//
+// 2. `PREV_EXECUTOR_*` stores a hook function pointer saved from PostgreSQL's
+//    global hook slot.  It is not a bindgen-generated `pg_sys` wrapper.  It is
+//    still an executor dispatcher and can re-enter Rust callbacks with their
+//    own `#[pg_guard]` entry boundary.  Invoke chained executor hooks directly
+//    via their `extern "C-unwind"` symbol, matching PostgreSQL's C hook
+//    chaining discipline.
+//
+// The crash this comment protects against is the duplicate-boundary case:
+// wrapping the whole executor dispatcher in an outer `pg_guard_ffi_boundary`
+// while the dispatcher re-enters Rust callbacks that already have pgrx guards
+// can make an ERROR path cross a second boundary and abort the backend.  This
+// was observed in CustomScan ERROR paths.  The general maintenance rule is to
+// keep executor dispatch to a single pgrx boundary and avoid blanket outer
+// `pg_guard_ffi_boundary` wrappers around dispatcher calls that can re-enter
+// guarded Rust callbacks.
+//
+// This is not a general permission to call every PostgreSQL-provided function
+// pointer without boundary analysis.  It is a rule against adding a blanket
+// outer boundary around executor hook dispatch.
+unsafe fn call_prev_executor_start_direct(
     prev: unsafe extern "C-unwind" fn(
         query_desc: *mut pg_sys::QueryDesc,
         eflags: ::core::ffi::c_int,
@@ -65,31 +96,25 @@ unsafe fn invoke_prev_executor_start(
     eflags: ::core::ffi::c_int,
 ) {
     unsafe {
-        pg_sys::ffi::pg_guard_ffi_boundary(|| {
-            prev(query_desc, eflags);
-        });
+        prev(query_desc, eflags);
     }
 }
 
-unsafe fn invoke_prev_executor_finish(
+unsafe fn tail_call_prev_executor_finish(
     prev: unsafe extern "C-unwind" fn(query_desc: *mut pg_sys::QueryDesc),
     query_desc: *mut pg_sys::QueryDesc,
 ) {
     unsafe {
-        pg_sys::ffi::pg_guard_ffi_boundary(|| {
-            prev(query_desc);
-        });
+        prev(query_desc);
     }
 }
 
-unsafe fn invoke_prev_executor_end(
+unsafe fn tail_call_prev_executor_end(
     prev: unsafe extern "C-unwind" fn(query_desc: *mut pg_sys::QueryDesc),
     query_desc: *mut pg_sys::QueryDesc,
 ) {
     unsafe {
-        pg_sys::ffi::pg_guard_ffi_boundary(|| {
-            prev(query_desc);
-        });
+        prev(query_desc);
     }
 }
 
@@ -191,13 +216,18 @@ unsafe extern "C-unwind" fn executor_start_hook(
     // populated `ExecProcNodeReal`, which is the stable per-node dispatch slot we
     // want to wrap.  `ExecSetExecProcNode` is not used here because that would
     // rebuild more executor dispatch state than necessary.
+    //
+    // Boundary note: do not wrap this dispatch in a blanket
+    // `pg_guard_ffi_boundary`; see the executor hook call-boundary comment
+    // above.  `standard_*` already has pgrx's bindgen wrapper, and chained
+    // executor hooks are direct-call dispatchers.
     unsafe {
         if let Some(prev) = PREV_EXECUTOR_START.get().copied().flatten() {
-            invoke_prev_executor_start(prev, query_desc, eflags);
+            call_prev_executor_start_direct(prev, query_desc, eflags);
         } else {
-            pg_sys::ffi::pg_guard_ffi_boundary(|| {
-                pg_sys::standard_ExecutorStart(query_desc, eflags);
-            });
+            // `pg_sys::standard_ExecutorStart` is already a pgrx-wrapped
+            // bindgen extern; do not add an outer manual FFI boundary here.
+            pg_sys::standard_ExecutorStart(query_desc, eflags);
         }
     }
 
@@ -230,8 +260,8 @@ unsafe extern "C-unwind" fn executor_finish_hook(query_desc: *mut pg_sys::QueryD
     // ExecPostprocessPlan and AFTER triggers), and it can be reached for portal
     // cleanup paths.  A successful DML frame is finalized by the ModifyTable
     // wrapper when the node returns NULL with mt_done set.  Here we only check,
-    // before standard ExecutorFinish mutates executor state, that no frame for
-    // this EState is still on the active stack.
+    // before the chained/standard ExecutorFinish dispatch mutates executor
+    // state, that no frame for this EState is still on the active stack.
     if !query_desc.is_null() {
         let estate = unsafe { (*query_desc).estate };
         if let Some(estate) = NonNull::new(estate)
@@ -242,12 +272,14 @@ unsafe extern "C-unwind" fn executor_finish_hook(query_desc: *mut pg_sys::QueryD
     }
 
     unsafe {
+        // Same executor hook call-boundary discipline as `executor_start_hook`:
+        // do not add a blanket outer boundary around this dispatch.  The
+        // `standard_*` branch already uses pgrx's generated boundary; chained
+        // executor hooks are direct-call dispatchers.
         if let Some(prev) = PREV_EXECUTOR_FINISH.get().copied().flatten() {
-            invoke_prev_executor_finish(prev, query_desc);
+            tail_call_prev_executor_finish(prev, query_desc);
         } else {
-            pg_sys::ffi::pg_guard_ffi_boundary(|| {
-                pg_sys::standard_ExecutorFinish(query_desc);
-            });
+            pg_sys::standard_ExecutorFinish(query_desc);
         }
     }
 }
@@ -268,12 +300,14 @@ unsafe extern "C-unwind" fn executor_end_hook(query_desc: *mut pg_sys::QueryDesc
     }
 
     unsafe {
+        // Same executor hook call-boundary discipline as `executor_start_hook`:
+        // do not add a blanket outer boundary around this dispatch.  The
+        // `standard_*` branch already uses pgrx's generated boundary; chained
+        // executor hooks are direct-call dispatchers.
         if let Some(prev) = PREV_EXECUTOR_END.get().copied().flatten() {
-            invoke_prev_executor_end(prev, query_desc);
+            tail_call_prev_executor_end(prev, query_desc);
         } else {
-            pg_sys::ffi::pg_guard_ffi_boundary(|| {
-                pg_sys::standard_ExecutorEnd(query_desc);
-            });
+            pg_sys::standard_ExecutorEnd(query_desc);
         }
     }
 }
@@ -312,8 +346,7 @@ impl UtilityHook for CopyFromFrameHook {
         };
 
         if copy_stmt.is_from {
-            session::finish_current_copy_frame()
-                .map_err(|err| UtilityHookError::new(err.to_string()))?;
+            session::finish_current_copy_frame().map_err(UtilityHookError::from)?;
         }
 
         Ok(())
@@ -325,7 +358,9 @@ impl UtilityHook for CopyFromFrameHook {
 /// This should be called during extension initialization. Repeated calls are
 /// ignored in the current backend.  The hook state is process-local, matching
 /// PostgreSQL's backend-per-connection model; each backend installs the hooks
-/// once when the extension is loaded.
+/// once when the extension is loaded.  This registers the COPY utility hook
+/// with the shared utility registry; the enclosing extension initializer must
+/// call `freeze_utility_hooks` after all utility hook registrations are done.
 pub fn init_lifecycle_hooks() {
     DML_LIFECYCLE_INIT.call_once(|| {
         PREV_EXECUTOR_START.get_or_init(|| unsafe {

@@ -13,7 +13,7 @@ use crate::handles::{
 };
 use pgrx::prelude::*;
 
-type CustomScanDesc<T> = FfiContainer<pg_sys::TableScanDescData, T>;
+type TableAmScanDesc<T> = FfiContainer<pg_sys::TableScanDescData, T>;
 
 #[pg_guard]
 pub extern "C-unwind" fn slot_callbacks<A>(
@@ -44,7 +44,7 @@ where
         // one lifetime boundary.
         const LIFECYCLE_CTX_NAME: &core::ffi::CStr =
             c"pg-lakebase TableScan lifecycle";
-        let scan_desc = CustomScanDesc::<A::ScanSession>::alloc(
+        let scan_desc = TableAmScanDesc::<A::ScanSession>::alloc(
             pg_sys::CurrentMemoryContext,
             LIFECYCLE_CTX_NAME,
         );
@@ -119,9 +119,9 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         if let Some(end_res) =
-            CustomScanDesc::<A::ScanSession>::finish_with(custom_scan, |state| {
+            TableAmScanDesc::<A::ScanSession>::finish_with(custom_scan, |state| {
                 state.am_instance.scan_end()
             })
         {
@@ -142,7 +142,7 @@ pub extern "C-unwind" fn scan_rescan<A>(
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let nkeys = (*custom_scan).base().rs_nkeys;
         if let Some(state) = (*custom_scan).session_mut_if_initialized() {
             // PostgreSQL heap-AM rescan semantics: a non-null `key` argument
@@ -191,7 +191,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         pg_sys::ExecClearTuple(slot);
 
         let state = (*custom_scan).session_mut();
@@ -221,7 +221,7 @@ pub extern "C-unwind" fn scan_set_tidrange<A>(
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
 
         // Convert raw pointers to safe Handle types
@@ -245,7 +245,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
 
         pg_sys::ExecClearTuple(slot);
 
@@ -276,7 +276,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
 
         // Convert raw pointer to safe Handle type
@@ -299,7 +299,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         pg_sys::ExecClearTuple(slot);
 
         let state = (*custom_scan).session_mut();
@@ -329,7 +329,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
         let scanstate_handle = SampleScanStateHandle::from_raw(scanstate);
         state
@@ -349,7 +349,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         pg_sys::ExecClearTuple(slot);
 
         let state = (*custom_scan).session_mut();
@@ -418,7 +418,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
         let tid_handle = ItemPointer::from_raw(tid);
         state
@@ -436,7 +436,7 @@ pub extern "C-unwind" fn tuple_get_latest_tid<A>(
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
         let mut tid_handle = ItemPointer::from_raw(tid);
 
@@ -458,7 +458,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
         let stream_handle = ReadStreamHandle::from_raw(stream);
 
@@ -481,7 +481,7 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        let custom_scan = CustomScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         pg_sys::ExecClearTuple(slot);
 
         let state = (*custom_scan).session_mut();

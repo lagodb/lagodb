@@ -161,7 +161,7 @@ pub(crate) fn is_tablespace_option(name: &str) -> bool {
 
 pub(crate) unsafe fn extract_and_remove_options(
     stmt: *mut pg_sys::CreateTableSpaceStmt,
-) -> Result<Vec<(String, Option<String>)>, String> {
+) -> Result<Vec<(String, Option<String>)>, schema::OptionSchemaError> {
     unsafe {
         schema::extract_and_remove_options(
             &mut (*stmt).options,
@@ -172,6 +172,6 @@ pub(crate) unsafe fn extract_and_remove_options(
 
 pub(crate) unsafe fn extract_options(
     stmt: *const pg_sys::CreateTableSpaceStmt,
-) -> Result<Vec<(String, Option<String>)>, String> {
+) -> Result<Vec<(String, Option<String>)>, schema::OptionSchemaError> {
     unsafe { schema::extract_options((*stmt).options, TABLESPACE_OPTION_DEFS) }
 }

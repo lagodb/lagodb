@@ -39,6 +39,14 @@ pub mod tuple;
 /// Table access implementation modules (scan, index, dml, ddl, relation)
 pub mod access;
 
+/// Typed PG-`Expr` views, walkers, classification, and the runtime predicate
+/// translator surface used by the CustomScan framework.
+pub mod expr;
+
+/// Generic CustomScan filter-pushdown framework: planner-and-executor seam
+/// that turns SQL `WHERE` predicates into provider-native scan predicates.
+pub mod customscan;
+
 /// Registration logic for Table Access Method routines
 pub mod registry;
 

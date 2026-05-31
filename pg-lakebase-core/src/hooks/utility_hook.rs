@@ -3,7 +3,8 @@ use crate::diag::ReportableError;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 use std::marker::PhantomData;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::os::raw::c_char;
+use std::sync::{OnceLock, RwLock};
 
 /// Type-level binding between a marker type, PostgreSQL utility statement
 /// struct, and its [`pg_sys::NodeTag`].
@@ -131,37 +132,119 @@ pub trait UtilityHook {
     fn on_post(&self, context: &PostUtilityContext) -> Result<(), UtilityHookError>;
 }
 
-type UtilityHookEntry = (pg_sys::NodeTag, Arc<dyn UtilityHook + Send + Sync>);
-type UtilityHookList = Arc<Vec<UtilityHookEntry>>;
+type UtilityHookEntry = (pg_sys::NodeTag, Box<dyn UtilityHook + Send + Sync>);
+type UtilityHookList = &'static [UtilityHookEntry];
 
-static REGISTRY: RwLock<Option<UtilityHookList>> = RwLock::new(None);
+// Utility hooks are backend-lifetime extension metadata.  Registration happens
+// during extension initialization, then the registry is frozen once and the
+// ProcessUtility router sees only an immutable static slice.  The matching-hook
+// path may call a PostgreSQL utility dispatcher directly and then resume Rust
+// for post hooks, so the snapshot crossing that direct call must not own Drop
+// state such as an Arc<Vec<_>> or a lock guard.
+//
+// A PostgreSQL backend is single-threaded, so this lock is not for runtime
+// concurrency: it only provides the interior mutability/`Sync` required to
+// mutate a `static` during initialization. It is written a handful of times
+// at startup (register/freeze) and is never touched on the hot path, which
+// reads the lock-free `FROZEN_REGISTRY` snapshot instead.
+static BUILDING_REGISTRY: RwLock<Vec<UtilityHookEntry>> = RwLock::new(Vec::new());
+static FROZEN_REGISTRY: OnceLock<UtilityHookList> = OnceLock::new();
 
 static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
     OnceLock::new();
 
-fn current_hooks() -> Option<UtilityHookList> {
-    REGISTRY.read().unwrap().clone()
+type ProcessUtilityHookFn = unsafe extern "C-unwind" fn(
+    pstmt: *mut pg_sys::PlannedStmt,
+    query_string: *const c_char,
+    read_only_tree: bool,
+    context: pg_sys::ProcessUtilityContext::Type,
+    params: *mut pg_sys::ParamListInfoData,
+    query_env: *mut pg_sys::QueryEnvironment,
+    dest: *mut pg_sys::DestReceiver,
+    completion_tag: *mut pg_sys::QueryCompletion,
+);
+
+#[derive(Clone, Copy)]
+struct ProcessUtilityArgs {
+    pstmt: *mut pg_sys::PlannedStmt,
+    query_string: *const c_char,
+    read_only_tree: bool,
+    context: pg_sys::ProcessUtilityContext::Type,
+    params: *mut pg_sys::ParamListInfoData,
+    query_env: *mut pg_sys::QueryEnvironment,
+    dest: *mut pg_sys::DestReceiver,
+    completion_tag: *mut pg_sys::QueryCompletion,
 }
 
-pub fn register_utility_hook(
-    tag: pg_sys::NodeTag,
-    hook: Box<dyn UtilityHook + Send + Sync>,
-) {
-    let hook_name = hook.name();
-    let mut registry = REGISTRY.write().unwrap();
-    let mut next: Vec<UtilityHookEntry> = registry
-        .as_ref()
-        .map(|list| Vec::clone(list))
-        .unwrap_or_default();
-    if next.iter().any(|(existing_tag, existing_hook)| {
-        *existing_tag == tag && existing_hook.name() == hook_name
-    }) {
-        return;
+impl ProcessUtilityArgs {
+    unsafe fn target_node(self) -> *mut pg_sys::Node {
+        unsafe { (*self.pstmt).utilityStmt }
     }
-    next.push((tag, Arc::from(hook)));
-    *registry = Some(Arc::new(next));
-    drop(registry);
 
+    unsafe fn call_standard(self) {
+        unsafe {
+            pg_sys::standard_ProcessUtility(
+                self.pstmt,
+                self.query_string,
+                self.read_only_tree,
+                self.context,
+                self.params,
+                self.query_env,
+                self.dest,
+                self.completion_tag,
+            );
+        }
+    }
+
+    unsafe fn call_prev_direct(self, prev: ProcessUtilityHookFn) {
+        // `prev` is a saved hook dispatcher.  It can re-enter pgrx callbacks
+        // with their own `#[pg_guard]` boundary, so do not wrap it in a manual
+        // `pg_guard_ffi_boundary`.  The matching-hook path resumes Rust after
+        // successful return to run post hooks; router state crossing this call
+        // must therefore be trivially deallocated.
+        unsafe {
+            prev(
+                self.pstmt,
+                self.query_string,
+                self.read_only_tree,
+                self.context,
+                self.params,
+                self.query_env,
+                self.dest,
+                self.completion_tag,
+            );
+        }
+    }
+
+    unsafe fn tail_chain(self, prev: pg_sys::ProcessUtility_hook_type) {
+        match prev {
+            Some(prev) => unsafe {
+                prev(
+                    self.pstmt,
+                    self.query_string,
+                    self.read_only_tree,
+                    self.context,
+                    self.params,
+                    self.query_env,
+                    self.dest,
+                    self.completion_tag,
+                );
+            },
+            None => unsafe {
+                self.call_standard();
+            },
+        }
+    }
+}
+
+fn current_hooks() -> Option<UtilityHookList> {
+    FROZEN_REGISTRY
+        .get()
+        .copied()
+        .filter(|hooks| !hooks.is_empty())
+}
+
+fn install_process_utility_hook() {
     PREV_PROCESS_UTILITY.get_or_init(|| unsafe {
         let prev = pg_sys::ProcessUtility_hook;
         pg_sys::ProcessUtility_hook = Some(process_utility_router);
@@ -169,47 +252,62 @@ pub fn register_utility_hook(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn invoke_prev_process_utility(
-    prev: unsafe extern "C-unwind" fn(
-        pstmt: *mut pg_sys::PlannedStmt,
-        query_string: *const std::os::raw::c_char,
-        read_only_tree: bool,
-        context: pg_sys::ProcessUtilityContext::Type,
-        params: *mut pg_sys::ParamListInfoData,
-        query_env: *mut pg_sys::QueryEnvironment,
-        dest: *mut pg_sys::DestReceiver,
-        completion_tag: *mut pg_sys::QueryCompletion,
-    ),
-    pstmt: *mut pg_sys::PlannedStmt,
-    query_string: *const std::os::raw::c_char,
-    read_only_tree: bool,
-    context: pg_sys::ProcessUtilityContext::Type,
-    params: *mut pg_sys::ParamListInfoData,
-    query_env: *mut pg_sys::QueryEnvironment,
-    dest: *mut pg_sys::DestReceiver,
-    completion_tag: *mut pg_sys::QueryCompletion,
+pub fn register_utility_hook(
+    tag: pg_sys::NodeTag,
+    hook: Box<dyn UtilityHook + Send + Sync>,
 ) {
-    unsafe {
-        pg_sys::ffi::pg_guard_ffi_boundary(|| {
-            prev(
-                pstmt,
-                query_string,
-                read_only_tree,
-                context,
-                params,
-                query_env,
-                dest,
-                completion_tag,
-            );
-        });
+    let hook_name = hook.name();
+    let mut entries = BUILDING_REGISTRY.write().unwrap();
+    if FROZEN_REGISTRY.get().is_some() {
+        panic!("register_utility_hook called after freeze_utility_hooks");
+    }
+
+    if entries.iter().any(|(existing_tag, existing_hook)| {
+        *existing_tag == tag && existing_hook.name() == hook_name
+    }) {
+        return;
+    }
+
+    entries.push((tag, hook));
+}
+
+/// Freeze registered utility hooks and install the ProcessUtility router.
+///
+/// Call this once after all [`register_utility_hook`] calls in extension
+/// initialization.  After freezing, the router reads a single immutable
+/// backend-lifetime snapshot, so direct dispatcher calls do not carry Rust
+/// ownership state across PostgreSQL ERROR/longjmp paths.
+pub fn freeze_utility_hooks() {
+    let should_install = {
+        if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
+            !hooks.is_empty()
+        } else {
+            let mut entries = BUILDING_REGISTRY.write().unwrap();
+            if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
+                !hooks.is_empty()
+            } else {
+                let hooks: UtilityHookList = if entries.is_empty() {
+                    &[]
+                } else {
+                    Box::leak(std::mem::take(&mut *entries).into_boxed_slice())
+                };
+                if FROZEN_REGISTRY.set(hooks).is_err() {
+                    unreachable!("utility hook registry frozen concurrently");
+                }
+                !hooks.is_empty()
+            }
+        }
+    };
+
+    if should_install {
+        install_process_utility_hook();
     }
 }
 
 #[pg_guard]
 unsafe extern "C-unwind" fn process_utility_router(
     pstmt: *mut pg_sys::PlannedStmt,
-    query_string: *const std::os::raw::c_char,
+    query_string: *const c_char,
     read_only_tree: bool,
     context: pg_sys::ProcessUtilityContext::Type,
     params: *mut pg_sys::ParamListInfoData,
@@ -218,85 +316,72 @@ unsafe extern "C-unwind" fn process_utility_router(
     completion_tag: *mut pg_sys::QueryCompletion,
 ) {
     unsafe {
-        let target_node = (*pstmt).utilityStmt;
+        let args = ProcessUtilityArgs {
+            pstmt,
+            query_string,
+            read_only_tree,
+            context,
+            params,
+            query_env,
+            dest,
+            completion_tag,
+        };
+        let target_node = args.target_node();
         let tag = (*target_node).type_;
 
-        let hooks = current_hooks();
-        let has_matching_hooks = hooks
-            .as_ref()
-            .map(|list| list.iter().any(|(reg_tag, _)| *reg_tag == tag))
-            .unwrap_or(false);
+        let Some(hooks) = current_hooks() else {
+            args.tail_chain(PREV_PROCESS_UTILITY.get().copied().flatten());
+            return;
+        };
+
+        let has_matching_hooks = hooks.iter().any(|(reg_tag, _)| *reg_tag == tag);
+        if !has_matching_hooks {
+            args.tail_chain(PREV_PROCESS_UTILITY.get().copied().flatten());
+            return;
+        }
 
         // Only deep-copy the statement tree when hooks need the pre-mutation
         // snapshot; this avoids copyObjectImpl overhead for unhooked tags.
-        let copied_node = if has_matching_hooks {
-            let copied =
-                pg_sys::copyObjectImpl(target_node as *const std::ffi::c_void)
-                    as *mut pg_sys::Node;
+        let copied_node =
+            pg_sys::copyObjectImpl(target_node as *const std::ffi::c_void)
+                as *mut pg_sys::Node;
 
-            let mut safe_node = UtilityNode::new(target_node);
-            // SAFETY: `has_matching_hooks` is true => `hooks` is Some.
-            for (reg_tag, hook) in hooks.as_ref().unwrap().iter() {
-                if *reg_tag == tag {
-                    hook.on_pre(&mut safe_node)
-                        .map_err(|err| {
-                            err.with_utility_context(
-                                hook.name(),
-                                UtilityHookPhase::Pre,
-                                tag,
-                            )
-                        })
-                        .report_unwrap();
-                }
-            }
-            Some(copied)
-        } else {
-            None
-        };
-
-        match PREV_PROCESS_UTILITY.get() {
-            Some(Some(prev)) => {
-                invoke_prev_process_utility(
-                    *prev,
-                    pstmt,
-                    query_string,
-                    read_only_tree,
-                    context,
-                    params,
-                    query_env,
-                    dest,
-                    completion_tag,
-                );
-            }
-            _ => {
-                pg_sys::standard_ProcessUtility(
-                    pstmt,
-                    query_string,
-                    read_only_tree,
-                    context,
-                    params,
-                    query_env,
-                    dest,
-                    completion_tag,
-                );
+        let mut safe_node = UtilityNode::new(target_node);
+        for (reg_tag, hook) in hooks.iter() {
+            if *reg_tag == tag {
+                hook.on_pre(&mut safe_node)
+                    .map_err(|err| {
+                        err.with_utility_context(
+                            hook.name(),
+                            UtilityHookPhase::Pre,
+                            tag,
+                        )
+                    })
+                    .report_unwrap();
             }
         }
 
-        if let Some(copied_node) = copied_node {
-            let post_context = PostUtilityContext::new(copied_node);
-            // SAFETY: copied_node is Some only when `hooks` is Some.
-            for (reg_tag, hook) in hooks.as_ref().unwrap().iter() {
-                if *reg_tag == tag {
-                    hook.on_post(&post_context)
-                        .map_err(|err| {
-                            err.with_utility_context(
-                                hook.name(),
-                                UtilityHookPhase::PostSuccess,
-                                tag,
-                            )
-                        })
-                        .report_unwrap();
-                }
+        match PREV_PROCESS_UTILITY.get() {
+            Some(Some(prev)) => {
+                args.call_prev_direct(*prev);
+            }
+            _ => {
+                args.call_standard();
+            }
+        }
+
+        let post_context = PostUtilityContext::new(copied_node);
+        for (reg_tag, hook) in hooks.iter() {
+            if *reg_tag == tag {
+                hook.on_post(&post_context)
+                    .map_err(|err| {
+                        err.with_utility_context(
+                            hook.name(),
+                            UtilityHookPhase::PostSuccess,
+                            tag,
+                        )
+                    })
+                    .report_unwrap();
             }
         }
     }

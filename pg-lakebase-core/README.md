@@ -7,55 +7,83 @@
 **Rust framework primitives for PostgreSQL Table Access Methods.**
 
 `pg-lakebase-core` is the framework crate used by PostgreSQL storage
-extensions in this workspace. It wraps PostgreSQL's C-facing TableAM callbacks
-behind Rust traits, typed handles, tuple value abstractions, lifecycle helpers,
-catalog utilities, and WAL/resource cleanup infrastructure.
+extensions in this workspace. It wraps PostgreSQL's C-facing callback surface
+behind Rust traits, typed handles, and lifecycle helpers so that storage
+extensions can be written in safe Rust instead of against raw C pointers.
 
-The crate currently focuses on **Table Access Method (TAM)** development. FDW
-support is a workspace-level direction, but it is not part of this crate's
+The crate provides two cooperating frameworks:
+
+- A **Table Access Method (TAM)** framework that models PostgreSQL's scan,
+  relation, index, DML, and DDL callbacks as Rust traits.
+- A generic **CustomScan filter-pushdown** framework that lets a storage
+  provider push SQL `WHERE` predicates down into its own scan, so it can prune
+  data files and filter rows before they reach the executor.
+
+FDW support is a workspace-level direction, but it is not part of this crate's
 current public API.
 
 The reference consumer is [pg-iceberg-am](../pg-iceberg-am), which implements
-an Apache Iceberg TAM on top of these traits.
+an Apache Iceberg TAM and CustomScan provider on top of these frameworks.
 
 ## Architecture
 
-`pg-lakebase-core` sits between PostgreSQL/pgrx and a concrete access-method
-implementation:
+`pg-lakebase-core` sits between PostgreSQL/pgrx and a concrete storage
+implementation. It owns the unsafe callback boundary so that providers can stay
+in safe Rust for their business logic.
 
 ```text
-PostgreSQL TableAmRoutine
-        |
-        v
-pg-lakebase-core
-  api traits | access shims | handles | tuple values
-  options    | catalog      | WAL     | resource/transaction cleanup
-        |
-        v
-concrete TAM implementation
+        PostgreSQL planner / executor / TableAM
+                          |
+                          v
+                  pg-lakebase-core
+   TAM traits + handles  |  CustomScan pushdown framework
+   tuple values + batch  |  Expr translation + classification
+   options / catalog     |  WAL / resource / transaction cleanup
+                          |
+                          v
+            concrete storage implementation
 ```
 
-The framework owns the unsafe PostgreSQL callback boundary where possible. TAM
-implementations work with Rust traits and typed handles instead of raw C
-pointers in their main business logic.
+Two seams connect a provider to PostgreSQL:
 
-## Module Map
+- The **TableAM seam** handles the storage engine callbacks: scanning,
+  inserting, updating, deleting, and the relation/index/DDL lifecycle.
+- The **CustomScan seam** plugs into the planner (`set_rel_pathlist_hook`) and
+  executor. It is independent of the TableAM callbacks and is what carries
+  predicate pushdown.
 
-| Module | Purpose |
-|--------|---------|
-| `api` | Public TAM trait surface: scan, relation, index, DML, and DDL facets. |
-| `access` | PostgreSQL callback shims that adapt `TableAmRoutine` calls to the trait API. |
-| `batch` | DML batch abstractions: owned row batches and slot/datum columnar batch interfaces. |
-| `handles` | Typed wrappers around PostgreSQL-owned FFI objects such as relations, snapshots, scan keys, tuple slots, and DML state. |
-| `tuple` | Owned tuple values plus short-lived tuple-slot/datum views for DML hot paths. |
-| `options` | Table and tablespace option parsing, persistence, and cache helpers. |
-| `catalog` | Catalog scan/update helpers and Lakebase catalog object IDs. |
-| `wal` | Custom WAL resource-manager registration and WAL record helpers. |
-| `resource` | ResourceOwner-scoped cleanup for owner-lifetime resources and ERROR paths. |
-| `transaction` | Transaction and subtransaction lifecycle callbacks for transaction-scoped resources. |
-| `hooks` | PostgreSQL hook helpers used by framework features. |
-| `diag` | PostgreSQL error reporting and diagnostic helpers. |
-| `registry` | `TableAmRoutine` construction and registration support. |
+## What the Framework Provides
+
+Rather than expose ad hoc helpers, the crate is organized around the
+PostgreSQL lifecycle boundaries a storage extension has to respect.
+
+**Table access.** A trait-based surface mirrors PostgreSQL's `TableAmRoutine`.
+Stateless behavior (relation sizing, index callbacks, DDL) is implemented on
+the access-method identity type, while stateful operations (scans, index
+fetches, DML) live on associated session types. Callback shims adapt the raw C
+entry points to these traits, and typed handles wrap PostgreSQL-owned objects
+such as relations, snapshots, scan keys, and tuple slots so that providers
+never juggle raw pointers in their main logic.
+
+**Tuple values.** Owned tuple representations (`Cell`, `Row`) coexist with
+short-lived slot and datum views used on DML and scan hot paths, so a provider
+can choose between materializing rows and consuming columns directly.
+
+**Filter pushdown.** A generic CustomScan framework turns SQL predicates into
+provider-native scan predicates. See [Filter Pushdown](#filter-pushdown-customscan)
+below.
+
+**Catalog and options.** Helpers for catalog scans/updates, Lakebase catalog
+object IDs, and parsing/persisting table and tablespace options (with caching).
+
+**Durability and cleanup.** A custom WAL resource-manager registration path,
+plus two distinct cleanup mechanisms: `ResourceOwner`-scoped cleanup for
+owner-lifetime resources and ERROR paths, and transaction/subtransaction
+callbacks for transaction-scoped publication.
+
+**Supporting infrastructure.** PostgreSQL hook helpers, error reporting and
+diagnostics, background-worker scaffolding, and the registration support that
+builds and installs a `TableAmRoutine`.
 
 Internal PostgreSQL wrapper modules are intentionally not public API.
 
@@ -93,17 +121,75 @@ frame fails, aborts, or rolls back
 
 `ResourceOwner` cleanup handles ERROR, abort, and rollback paths that normal
 Rust returns cannot observe reliably. Transaction-scoped publication should use
-the `transaction` module instead of relying on per-tuple callbacks.
+the transaction callbacks instead of relying on per-tuple callbacks.
 
-DML tuple flow is slot-first. The callback shims pass `TupleSlotRow` or
-`TupleSlotBatch` views into the AM session. Row-oriented AMs use the default
-fallback to materialize owned `Row` values and store them in `RowBatchBuffer`;
-columnar AMs can override the slot methods and append `PgDatumRef` values
-directly into format-specific column builders. Core does not depend on Arrow,
-Parquet, Iceberg, or any other concrete batch representation.
+DML tuple flow is slot-first. The callback shims pass slot or batch views into
+the AM session. Row-oriented AMs use the default fallback to materialize owned
+`Row` values into a row batch buffer; columnar AMs can override the slot
+methods and append datum references directly into format-specific column
+builders. Core does not depend on Arrow, Parquet, Iceberg, or any other
+concrete batch representation.
 
 See [access/dml/README.md](src/access/dml/README.md) for the lifecycle
 principles.
+
+## Filter Pushdown (CustomScan)
+
+A normal PostgreSQL TableAM scan never sees ordinary `WHERE` quals — the
+executor evaluates them after the scan returns rows. For lakehouse formats this
+is wasteful: the storage layer could skip whole files, row groups, or pages if
+it knew the predicate. The CustomScan framework closes that gap without binding
+the design to any single format.
+
+The framework is a planner-and-executor seam:
+
+```text
+SQL WHERE
+  -> planner (set_rel_pathlist_hook)
+       core classifies each predicate as pushed / residual / recheck
+       core enumerates plain and parameterized CustomPath variants
+  -> planner picks a path on cost
+  -> CustomScan plan
+       residual quals stay in plan.qual for PostgreSQL to re-check
+       pushed/recheck predicates travel as copyObject-safe PG Expr nodes
+  -> executor Begin / ReScan
+       core translates the pushed predicates into the provider's
+       native predicate, which drives file/row-group pruning
+  -> executor scan
+       provider returns rows; PostgreSQL applies residual quals
+```
+
+The design keeps responsibilities split:
+
+- **Core owns the dangerous parts.** Path enumeration, the planner safety gates
+  (movability and security promotion of join clauses), classification,
+  `RestrictInfo` unwrapping, cost modeling, and the runtime predicate
+  translation seam all live in core, in one place, so providers cannot
+  accidentally break query semantics.
+- **The provider owns format knowledge.** It decides whether a given predicate
+  can be pushed and under which contract, shapes the cost estimate, and
+  translates the pushed predicate into its own scan filter at runtime.
+
+Pushdown is governed by an explicit contract so correctness never depends on a
+provider getting cost estimates right:
+
+- *Exact row filter* — the provider must apply true row-level filtering; the
+  predicate is removed from the residual quals.
+- *Conservative pruning* — the provider may only prune candidates with no false
+  negatives; the original predicate stays in the residual quals so PostgreSQL
+  still guarantees correctness.
+
+The framework supports both plain and parameterized scans, so a pushdown-aware
+scan can sit on the inner side of a nested-loop join and re-translate its
+predicate as outer-tuple values change. The `pg_lakebase.customscan_mode` GUC
+(`off` / `auto` / `force`) controls path emission: `auto` lets the planner
+choose on cost, `off` disables the framework entirely, and `force` biases cost
+for regression testing without relaxing any gate or changing SQL semantics.
+
+Providers register from `_PG_init` (register all providers first, then call
+the framework's `init` to install the planner hook). The full design rationale,
+including the PostgreSQL-internals facts it relies on, lives in
+[src/customscan/README.md](src/customscan/README.md).
 
 ## Quick Start
 
@@ -128,8 +214,10 @@ impl TableAccessMethod for MyTableAm {
 ```
 
 The AM type also implements the stateless facet traits, while the associated
-session types implement their corresponding lifecycle traits. See
-[pg-iceberg-am](../pg-iceberg-am) for a complete implementation.
+session types implement their corresponding lifecycle traits. To add predicate
+pushdown, implement the CustomScan provider trait and register it from
+`_PG_init`. See [pg-iceberg-am](../pg-iceberg-am) for a complete implementation
+of both the TAM and the CustomScan provider.
 
 ## Requirements
 
@@ -208,6 +296,9 @@ cargo build -p pg-lakebase-core
 - DML hot paths should not materialize owned `Row` values until the AM has
   chosen a row-oriented strategy. Columnar AMs should consume slot/datum views
   directly and keep target-format type decisions outside core.
+- Predicate pushdown keeps the planner gates, classification, and cost model in
+  core; providers only decide format-specific pushability and translation, so a
+  provider bug cannot silently change query results.
 - ResourceOwner cleanup and transaction callbacks are separate mechanisms and
   should stay separate.
 - Unsupported PostgreSQL write paths should fail clearly instead of bypassing

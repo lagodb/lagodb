@@ -1,12 +1,8 @@
-This is the revised design. The key correction is: the planner phase must not freeze a native predicate into the plan. The plan tree stores only PG Expr nodes and copyObject-safe metadata. Begin/ReScan translates those PG Expr nodes into provider-native predicates at runtime.
+This is the revised design. The plan tree stores PG Expr nodes (`custom_exprs`, `plan.qual`) and copyObject-safe metadata in `custom_private`; providers do not materialize native predicates at plan time. Core parses leaves into a **temporary** [`PlanPredicate`](../expr/predicate.rs) for `classify_predicate`; path-stage [`PathPushdownSummary`](provider.rs) exposes only counts and selectivity (no raw `Expr` pointers); runtime [`BeginContext::translate_pushed_predicates`](provider.rs) translates persisted `custom_exprs[pushed]` inside core.
 
 **Status**
 
-Design only. The module list below is the intended implementation
-layout; `pg-lakebase-core/src/customscan/` currently contains this
-README but no Rust implementation. Any implementation task must
-verify the generated `pgrx::pg_sys` bindings for the PG17 functions
-named here before using them directly.
+Implemented in `pg-lakebase-core/src/customscan/` (hook, builder, exec, provider runtime contexts, custom_private codec). When extending planner/executor glue, verify `pgrx::pg_sys` bindings for the PG17 functions named here before calling them directly.
 
 **Goal**
 
@@ -29,7 +25,7 @@ SQL WHERE
        custom_private  = copyObject-safe metadata
   -> PG replace_nestloop_params and set_plan_references
   -> executor Begin/ReScan
-       translate PG Expr -> AM native predicate
+       translate_pushed_predicates (custom_exprs[pushed] -> AM native predicate)
        snapshot/params/file pruning
        open scan cursor
   -> ExecScan
@@ -97,26 +93,37 @@ The provider is `pg-iceberg-am`, future `pg-hudi-am`, or future `pg-delta-am`. I
 pg-lakebase-core/src/customscan/
   mod.rs
   hook.rs
+  path_gate.rs
+  path_clause.rs
+  path_router.rs
+  param_path.rs
   provider.rs
   builder.rs
-  private.rs
+  custom_private.rs
+  custom_exprs.rs
+  exec_params.rs
   state.rs
   exec.rs
   explain.rs
 
 pg-lakebase-core/src/expr/
   mod.rs
+  inspect.rs
   nodes.rs
+  predicate.rs
+  relation.rs
+  rewrite.rs
   walker.rs
-  translator.rs
   split.rs
+  translator.rs
   runtime_params.rs
 ```
 
 `customscan` connects to the PostgreSQL planner and executor.
 
-`expr` owns PG Expr typed wrappers, walkers/folders, pushdown
-splitting, and runtime-side parameter resolution.
+`expr` owns PG Expr typed wrappers, relation metadata lookup,
+rewrite/classification, pushdown splitting, and runtime-side parameter
+resolution.
 `expr/runtime_params.rs` is named to make clear that it operates on
 `ParamListInfo` / `ParamExecData` during `Begin/ReScan`, not on the
 plan-time `Param` node which is exposed as `PgParamRef` in
@@ -163,9 +170,9 @@ pub trait LakebaseCustomScanProvider: 'static {
 
     fn supports_relation(ctx: &RelPathContext<'_>) -> bool;
 
-    fn classify_qual(
+    fn classify_predicate(
         ctx: &PlanTranslateContext<'_>,
-        expr: PgExprRef<'_>,
+        predicate: &PlanPredicate<'_>,
     ) -> QualPushdownDecision;
 
     /// Build one CustomPath variant, given the enumeration decisions
@@ -220,21 +227,12 @@ pub struct PathVariant<'a> {
     /// this variant pushes.
     pub required_outer: Relids,
 
-    /// Pre-classified split of `baserestrictinfo` plus any
-    /// planner-supplied `ppi_clauses` that belong to this variant
-    /// into pushed / residual / recheck. Use `kind`, not
-    /// `param_info.is_some()`, to decide whether this is one of the
-    /// join-parameterized variants that core intentionally enumerated
-    /// for AM-side evaluation of outer-driven predicates. A plain
-    /// lateral-only path may still
-    /// have `param_info`, and PG may still attach `ppi_clauses`; those
-    /// clauses are part of the final scan-clause split but do not make
-    /// the variant `JoinParameterized`.
-    /// All safety gates (`pseudoconstant`,
-    /// `restriction_is_securely_promotable`,
-    /// `join_clause_is_movable_to`) have already been applied by
-    /// core; the provider sees only clauses that survived.
-    pub split: &'a PlanPushdownSplit,
+    /// Path-stage pushdown summary for this variant (counts + costed-pruning
+    /// selectivity). Core keeps the full
+    /// [`PlanPushdownSplit`](../expr/split.rs) internal; providers do not
+    /// see raw `Expr` pointers here. Use `kind`, not `param_info.is_some()`,
+    /// to decide whether this is a join-parameterized variant.
+    pub pushdown: PathPushdownSummary,
 }
 
 pub enum PathVariantKind {
@@ -249,8 +247,8 @@ pub enum PathVariantKind {
 }
 ```
 
-`classify_qual` only answers whether a PG Expr can be pushed down
-safely and what semantic guarantee it has. The real native predicate
+`classify_predicate` only answers whether a parsed leaf predicate can be pushed down
+safely and which [`PushdownContract`](../expr/split.rs) applies. The real native predicate
 is built by the runtime translator in `Begin/ReScan`.
 
 **Required outer / param_info convention**
@@ -473,23 +471,28 @@ Enumeration (modeled on `indxpath.c::create_index_paths`):
      start from `bms_copy(baserel->lateral_relids)` (always
      required), then add `rinfo->clause_relids - baserel->relids`
      for every join clause the provider can classify as pushable
-     (`Pushable { Exact | InexactNoFalseNegative }`). Skip clauses
+     (`Pushable { ExactRowFilter | ConservativePruning }`). Skip clauses
      that classify as `Unsupported` — including them in
      `outer_relids` would just produce a parameterized path without
      any extra AM-side predicate benefit.
    - Group clauses by the resulting `outer_relids`; each distinct
-     group becomes one parameterized CustomPath.
-   - Drop a candidate set if it is a strict superset of another
-     candidate's set without enabling any additional pushable
-     clause (matches `indxpath`'s deduplication intent).
+     group becomes one parameterized CustomPath. v1 deduplicates
+     by exact equality only — the strict-superset dedup rule from
+     `indxpath` (drop a strict superset that enables no new
+     pushable clause) never fires under our generation scheme,
+     because each candidate `S` is generated from a clause `c_S`
+     that requires the rels in `S - lateral`; any strict subset
+     `T ⊂ S` cannot push `c_S`, so `S` always enables at least
+     one clause its subsets cannot. PG's planner picks the
+     winning variant on cost.
 3. For each surviving `outer_relids`, call
    `get_baserel_parampathinfo(root, baserel, outer_relids)` to get
    the canonical `ParamPathInfo`. PG itself walks `joininfo` and
    `generate_join_implied_equalities` to decide which clauses end
    up in `ppi_clauses`; the provider does not curate `ppi_clauses`
    directly. v1 then re-classifies the clauses that PG returned
-   (`ppi_clauses`) against the same Exact / Inexact /
-   Unsupported scheme used for `baserestrictinfo`, applying the
+   (`ppi_clauses`) against the same `ExactRowFilter` / `ConservativePruning` /
+   `Unsupported` scheme used for `baserestrictinfo`, applying the
    same `join_clause_is_movable_to` and
    `restriction_is_securely_promotable` gates before pushdown
    classification (an implied-equality clause synthesized by
@@ -520,33 +523,54 @@ Rules and caveats:
   applies uniformly to the whole list.
 - `replace_nestloop_params` runs over `plan.qual` and `custom_exprs`
   after `PlanCustomPath` returns, rewriting outer-relation `Var`s
-  into `PARAM_EXEC` `Param`s. The `column_refs` ordinal walker
-  ignores those because it counts only scan-relation Vars (see Expr
-  Walker section).
+  into `PARAM_EXEC` `Param`s. `column_refs` are keyed by
+  `(expr_index, attno)` for scan-relation Vars only; rewritten outer
+  Vars are resolved through runtime params instead.
 
 **Pushdown Semantics**
 
 ```rust
-pub enum PredicateGuarantee {
-    Exact,
-    InexactNoFalseNegative,
+pub enum PushdownContract {
+    ExactRowFilter,
+    ConservativePruning,
+}
+
+pub enum PushdownCosting {
+    CostedPruning,      // eligible for path-stage scan-volume discount
+    UncostedBestEffort, // pushed for runtime best-effort; not costed
 }
 
 pub enum QualPushdownDecision {
     Pushable {
-        guarantee: PredicateGuarantee,
+        contract: PushdownContract,
+        costing: PushdownCosting,
     },
     Unsupported,
 }
+
+pub struct PushedExpr {
+    expr: *mut pg_sys::Expr,
+    contract: PushdownContract,
+    costing: PushdownCosting,
+}
 ```
+
+`PlanPushdownSplit` stores `pushed: Vec<PushedExpr>` (contract and costing
+live on each entry; no parallel metadata vector). Wire encode derives
+`pushed_contracts[]` from `pushed.iter().map(|p| p.contract)`.
+
+Path-stage costing uses only `split.costed_pruning_exprs()` when computing
+[`PathPushdownSummary::pruning_selectivity`](provider.rs); uncosted
+best-effort pushes do not reduce estimated scan volume.
 
 Semantics:
 
-`Exact`:
+`ExactRowFilter`:
 
-- The backend guarantees row-level SQL-equivalent semantics.
-- The original expression is not placed in residual `plan.qual`.
-- The original PG Expr is placed in the recheck section of
+- The provider must apply row-level SQL-equivalent filtering on the
+  normal scan path (not merely pruning). Core does not keep the
+  original expression in residual `plan.qual`.
+- The original PG Expr is duplicated in the recheck section of
   `custom_exprs`. v1 lake tables do not implement
   `tuple_lock`/`tuple_fetch_row_version`, so they are not real
   participants in `EvalPlanQual` themselves. The recheck path is
@@ -563,20 +587,26 @@ Semantics:
   `recheckMtd`. The recheck `ExprState` is still initialized and
   wired into `recheckMtd` for two reasons: (1) defense in depth, so
   a future relaxation of the rowmark gate cannot silently regress
-  to "exact pushed quals are skipped on recheck", and (2) future
-  row-identity support, where a CustomScan may legitimately
-  participate in EPQ. It is not run on the normal `next_slot` path;
-  it is invoked only when `ExecScanFetch` enters the EPQ/recheck
-  path. When invoked, core's `recheckMtd` always evaluates the
-  recheck `ExprState` over the candidate slot.
+  to "ExactRowFilter pushed quals are skipped on recheck", and (2)
+  future row-identity support, where a CustomScan may legitimately
+  participate in EPQ. Recheck is not run on the normal `next_slot`
+  path; it is invoked only when `ExecScanFetch` enters the
+  EPQ/recheck path. When invoked, core's `recheckMtd` always
+  evaluates the recheck `ExprState` over the candidate slot.
 - The expression is translated into a native predicate at runtime.
+  Translation failure is a hard error (no residual fallback).
 
-`InexactNoFalseNegative`:
+`ConservativePruning`:
 
-- The backend only guarantees that no matching row is lost. This is safe for file, row-group, or page pruning.
-- The original PG Expr must remain in residual `plan.qual`.
+- The provider may only conservatively prune candidates: no false negatives,
+  false positives allowed; residual `plan.qual` preserves correctness. Safe for
+  file, row-group, or page pruning.
+- The conservative PG Expr (or walker-composed minimal residual for partial
+  AND/OR) must remain in residual `plan.qual`. ExactRowFilter siblings in a
+  mixed AND are not duplicated into residual.
 - The expression may also be placed in pushed expressions for pruning.
-- The expression is not placed in exact recheck expressions.
+- The expression is not placed in recheck expressions.
+- Translation failure may drop the pushed copy; residual keeps correctness.
 
 `Unsupported`:
 
@@ -587,15 +617,17 @@ Composition rules:
 
 ```text
 AND:
-  Partial pushdown is allowed.
-  Unsupported or inexact parts still remain in residual quals.
+  Partial pushdown is allowed. Walker emits independent pushed parts per
+  contract; split projects walker-composed minimal residual (conservative
+  leaves, partial unsupported tails). ExactRowFilter siblings are not
+  duplicated into residual when a conservative sibling is present.
 
-OR (Exact):
-  The whole OR expression must be pushable as Exact, otherwise it cannot
-  enter the Exact pushed list. Pushing only one side of an OR with Exact
-  semantics is not allowed.
+OR (ExactRowFilter):
+  The whole OR expression must be pushable as ExactRowFilter, otherwise it
+  cannot enter the ExactRowFilter pushed list. Pushing only one side of an
+  OR with row-filter semantics is not allowed.
 
-OR (InexactNoFalseNegative, pruning-only):
+OR (ConservativePruning):
   Widening an unsupported branch to TRUE preserves no-false-negative,
   but a TRUE branch makes the whole OR a no-op for pruning. So widening
   is only useful when both sides still produce a useful pruning predicate
@@ -613,9 +645,9 @@ NOT:
 
   After rewrite, only literal NOT nodes that could not be eliminated
   (e.g. NOT over a function call without negator) remain. v1 only
-  pushes such NOT when the child is classified Exact and the backend
-  supports exact NOT. Core must not automatically wrap an
-  InexactNoFalseNegative child with NOT, because no-false-negative
+  pushes such NOT when the child is ExactRowFilter and the backend
+  supports exact NOT. Core must not automatically wrap a
+  ConservativePruning child with NOT, because no-false-negative
   is not preserved under NOT.
 ```
 
@@ -623,7 +655,7 @@ This is an important correction to the previous version.
 
 **Expr Walker**
 
-v1 does not require a neutral IR. PG Expr is the source IR. Core provides typed wrappers and a folder.
+v1 does not persist a neutral IR in `custom_private`. **PG Expr in `custom_exprs` is the durable fact source.** Core parses leaves into a temporary [`PlanPredicate`](../expr/predicate.rs) for provider `classify_predicate`; runtime translation uses the same PG Expr list via `PgPredicateTranslator` inside `translate_pushed_predicates`. Core provides PG Expr typed wrappers, the plan predicate parser, and the runtime folder.
 
 Use two phases.
 
@@ -645,7 +677,7 @@ pub trait PgPredicateClassifier {
 /// Operator identity passed to the provider. The provider must match on
 /// (opno, opcollid, inputcollid) — never on operator name alone — so
 /// that text equality under a non-default collation, or a numeric/int
-/// cross-type comparison, is not silently classified as Exact.
+/// cross-type comparison, is not silently classified as ExactRowFilter.
 /// `opfuncid` and `opresulttype` are exposed for diagnostics,
 /// EXPLAIN, and runtime translation context; they are not part of
 /// the classification key and must not override the
@@ -760,28 +792,24 @@ Core owns:
 - Rejection of `SubPlan`.
 - Safe AND/OR/NOT rules.
 - Splitting into residual, pushed, and recheck quals.
-- Pre-resolving column references at path/plan time. For each `Var`
+- Pre-resolving column references at path/plan time. For each user-column `Var`
   reference appearing in a pushed expression, core records resolved
   column metadata into `custom_private` so that `Begin/ReScan` does
   not have to interpret setrefs-rewritten `Var` shapes (e.g.
   `INDEX_VAR`) or post-`replace_nestloop_params` `Param` substitutions.
 
-  Scope of the column ordinal:
+  Scope of the column identity:
 
-  - `var_ordinal` only counts `Var` nodes that belong to the current
-    scan relation (i.e. `varno == rel->relid`). These are the only
-    ones that survive into runtime as `Var`.
+  - Column identity is `(expr_index, attno)`, where `attno` belongs to
+    a `Var` in the current scan relation (i.e. `varno == rel->relid`).
   - Outer-relation `Var` nodes (those coming from `ppi_clauses` of a
-    parameterized path) are NOT given a column ordinal. They are
-    rewritten into `PARAM_EXEC` `Param` nodes by
-    `replace_nestloop_params` after `PlanCustomPath` returns, and at
-    runtime they are resolved through `PgParamValue` instead. If the
-    plan-time ordinal counted outer Vars, the runtime walker would
-    see fewer `Var` nodes (because they have become `Param`s) and
-    every ordinal after the substitution point would be off-by-N.
+    parameterized path) are NOT column identities. They are rewritten
+    into `PARAM_EXEC` `Param` nodes by `replace_nestloop_params` after
+    `PlanCustomPath` returns, and at runtime they are resolved through
+    `PgParamValue` instead.
   - The same rule applies to expressions that came in through join
     clauses: anything that does not reference the scan relation's
-    `varno` is treated as a future `Param`, not a column.
+    `varno` is treated as a future `Param`, not a column reference.
 
   Layout of the resolved-column section in `custom_private`:
 
@@ -790,9 +818,6 @@ Core owns:
     [
       {
         expr_index:   Integer,    // index into custom_exprs[pushed]
-        var_ordinal:  Integer,    // 0-based count of *scan-relation*
-                                  // Var nodes seen by a deterministic
-                                  // walker over that pushed expression
         rel_oid:      Oid,        // pg_class OID of the scan relation,
                                   // resolved from RTE.relid at plan
                                   // time. Pinned by lock acquired in
@@ -826,32 +851,21 @@ Core owns:
   Runtime rule: identify the scan relation only via
   `cscan->scan.scanrelid` (already rtoffset-adjusted). Resolve
   columns purely from `(rel_oid, attno, atttypid, attcollation)`
-  recorded above plus the `(expr_index, var_ordinal)` matched by the
-  walker. A debug-only `pre_setrefs_scan_rti` field MAY live in
+  recorded above plus the `(expr_index, attno)` matched by the
+  runtime `Var`. A debug-only `pre_setrefs_scan_rti` field MAY live in
   `custom_private` for EXPLAIN traceability, but it must not be
   used in any correctness-bearing comparison.
 
-  The same expression-traversal walker is used in two places:
+  Expression traversal is split by responsibility:
   - Inside `PlanCustomPath`, before returning the `CustomScan` node to
-    PG, when emitting `column_refs[]`. This is before PG17
-    `create_customscan_plan` runs `replace_nestloop_params` over
-    `custom_exprs`.
-  - At runtime, when `BeginCustomScan` walks `custom_exprs[pushed]`
-    again and matches each scan-relation `Var` it encounters by
-    `(expr_index, var_ordinal)` to the precomputed metadata.
-    "Scan-relation `Var`" here means `Var.varno ==
-    cscan->scan.scanrelid` (the post-setrefs value), never an RTI
-    cached in `custom_private`.
-
-  Both walkers must use the same traversal over the post-rewrite form
-  of each pushed expression: pre-order, left-to-right children, no
-  recursion into already-resolved `Param` values, and *do not
-  increment* `var_ordinal` for `Var` nodes whose `varno` is not the
-  scan relation. This skip-outer-Var rule is what makes the ordinal
-  stable: the plan-time walker sees outer-relation `Var` nodes before
-  `replace_nestloop_params`, while the runtime walker sees the
-  corresponding `PARAM_EXEC` nodes after the rewrite, and neither
-  side increments `var_ordinal` for them.
+    PG, core emits `column_refs[]` using relation-aware expression
+    inspection. This records user-column attnos for the scan relation
+    and ignores outer-relation Vars.
+  - At runtime, `BeginCustomScan` translates `custom_exprs[pushed]`;
+    each scan-relation `Var` is matched by `(expr_index, attno)` to
+    the precomputed metadata. "Scan-relation `Var`" here means
+    `Var.varno == cscan->scan.scanrelid` (the post-setrefs value),
+    never an RTI cached in `custom_private`.
 
   For v1 base relation scans without `custom_scan_tlist`, PG still
   rewrites scan-relation `Var`s via the standard scan-refs path so
@@ -1122,7 +1136,7 @@ custom_private:
   private_version
   pushed_count
   recheck_count
-  pushed_guarantees[]
+  pushed_contracts[]   // wire: T_IntList of 0=ExactRowFilter, 1=ConservativePruning
   provider private metadata
 ```
 
@@ -1276,7 +1290,7 @@ CreateCustomScanState:
 
 BeginCustomScan:
   read EState / Snapshot / params
-  translate PG Expr nodes from custom_exprs[pushed]
+  translate_pushed_predicates (custom_exprs[pushed], via core translator)
   resolve PARAM_EXTERN / PARAM_EXEC into PgParamValue
   translate into AM native predicate (using metadata pre-resolved at
   plan time, not the possibly setrefs-rewritten Var shape)
@@ -1397,17 +1411,16 @@ come from core's own `ExplainCustomScan` callback. v1 prints a compact
 summary by default and prints expression text only when EXPLAIN VERBOSE
 is enabled, so ordinary EXPLAIN output does not become a predicate dump.
 
+With VERBOSE, core prints labelled predicate lines (no numeric count rows), for example:
+
 ```text
-Lakebase Pushdown:
-  Provider: pg-iceberg-am
-  Pushed Exact: 1
-  Pushed Inexact: 1
-  Recheck: 1
-  Residual: 1
+Provider: pg-iceberg-am
+Pushed Filter Exact: (id = 2)
+Pushed Filter Conservative Pruning: (val < 100.5)
+Recheck: (id = 2)
 ```
 
-With VERBOSE, each non-zero section also prints the expression text
-under that section.
+Default TEXT mode prints a single combined `Pushed Filter:` line when any clause is pushed.
 
 Rules:
 
@@ -1416,15 +1429,20 @@ Rules:
   EXPLAIN walker must respect the
   `pushed_count` / `recheck_count` boundaries from `custom_private`,
   not iterate `custom_exprs` blindly.
-- Counts are always present, even when zero, so EXPLAIN diffs in
-  regression tests are stable.
-- Inexact pushed expressions also appear in Residual by design: they
-  are pushed for pruning and re-evaluated by the executor for
-  correctness. The two counts describe two roles, not two independent
-  qual objects.
-- Residual is also printed here (in addition to PG's own `Filter:`
-  line) so the pushdown summary is complete in one place. Residual
-  expression text follows the same VERBOSE-only rule.
+- v1 does **not** print numeric count rows (`Pushed Exact: N`, etc.).
+  TEXT default mode emits one combined `Pushed Filter:` line when any
+  clause is pushed; TEXT VERBOSE emits `Provider:` plus per-class
+  labelled predicate lines (`Pushed Filter Exact:`, `Pushed Filter
+  Conservative Pruning:`, `Recheck:`) only for non-empty classes.
+- `ConservativePruning` pushed expressions also appear in PG's
+  `Filter:` (residual) by design: the pushed copy is for remote
+  pruning, and the executor re-evaluates the walker/split residual qual
+  containing the conservative predicate to preserve correctness. For
+  mixed AND, that residual is the conservative leaf (or composed minimal
+  tail), not necessarily the original top-level clause. The labelled
+  EXPLAIN lines describe two roles, not two independent qual objects.
+- Core does not duplicate residual expression text in its EXPLAIN
+  callback; PG's own `Filter:` line carries residual qual text.
 
 **Iceberg Integration**
 
@@ -1450,8 +1468,8 @@ PG Expr
 Initial policy:
 
 - Start conservatively for simple `column op literal/param` expressions.
-- Mark an expression as `Exact` only after tests prove that the Iceberg reader semantics match PostgreSQL SQL semantics.
-- If equivalence is not proven, use `InexactNoFalseNegative` and keep residual filtering.
+- Classify as `ExactRowFilter` only after tests prove that the Iceberg reader applies row-level SQL-equivalent filtering on the normal scan path.
+- If that is not proven, use `ConservativePruning` and keep residual filtering.
 - Keep the existing TableAM scan as fallback.
 
 `ScanSpec` and `ScanCursor` should be refactored into a scan backend shared by the provider and the TableAM fallback, so Iceberg scan logic does not split into two implementations.
@@ -1503,8 +1521,9 @@ v1 includes:
     / join source. CustomScan pushdown is entirely disabled for those
     statement types until a row-identity contract exists.
 12. Iceberg provider for simple predicates.
-13. Structured EXPLAIN output for pushed-exact / pushed-inexact /
-    recheck / residual, printed by core's `ExplainCustomScan`.
+13. Structured EXPLAIN output for `ExactRowFilter` / `ConservativePruning`
+    pushed filters, recheck, and residual, printed by core's
+    `ExplainCustomScan`.
 14. Keep TableAM fallback.
 
 The TableAM scan path is retained for v1 for two separate reasons:
@@ -1536,20 +1555,20 @@ v1 excludes:
 Core unit tests:
 
 - AND partial pushdown.
-- OR Exact all-or-nothing.
-- OR Inexact widening rule: `(A AND unsupported) OR B` widens to
+- OR ExactRowFilter all-or-nothing.
+- OR ConservativePruning widening rule: `(A AND unsupported) OR B` widens to
   `A OR B` for pruning; OR with one fully-unsupported side does not
   widen (would degenerate to TRUE).
 - NOT walker rewrite: `NOT (a = 1)` becomes `a <> 1`,
   `NOT (a IS NULL)` becomes `a IS NOT NULL`, DeMorgan applied to
   `NOT (A AND B)` and `NOT (A OR B)`.
-- Inexact under NOT must not be automatically pushed down.
-- Exact does not enter residual and does enter recheck.
-- Inexact remains in residual.
+- ConservativePruning under NOT must not be automatically pushed down.
+- ExactRowFilter does not enter residual and does enter recheck.
+- ConservativePruning remains in residual.
 - Unsupported remains in residual.
 - Operator identity: same operator name with different
   `(opno, opcollid, inputcollid)` is classified independently;
-  non-default collation `text =` is not auto-classified Exact.
+  non-default collation `text =` is not auto-classified ExactRowFilter.
 - `RestrictInfo` unwrap: `scan_clauses` from `PlanCustomPath` are
   passed in as `RestrictInfo`, but `plan.qual` and `custom_exprs`
   contain only bare `Expr`.
@@ -1558,11 +1577,11 @@ Core unit tests:
   PG's gating `Result` instead. Test by including a clause like
   `current_user = 'alice'` and asserting it does not appear in
   EXPLAIN's Filter / Pushed lists.
-- `var_ordinal` stability under parameterized scans: when
+- Column identity stability under parameterized scans: when
   `ppi_clauses` introduces an outer-relation `Var` that
   `replace_nestloop_params` rewrites to `PARAM_EXEC`, the runtime
   walker still resolves remaining scan-relation `Var`s correctly
-  (i.e. plan-time and runtime ordinals match).
+  (i.e. `(expr_index, attno)` matches the plan-time metadata).
 - `PgParamRef` is not fixed to a value in the planner.
 - `chgParam` gating: ReScan without `chgParam` intersection does not
   re-translate the predicate.
@@ -1656,13 +1675,13 @@ PG regression tests:
 Iceberg integration tests:
 
 - File pruning does not lose rows.
-- Inexact pushdown plus residual filtering returns correct results.
-- Exact pushdown matches PostgreSQL filtering.
+- ConservativePruning pushdown plus residual filtering returns correct results.
+- ExactRowFilter pushdown matches PostgreSQL filtering.
 - Parameter changes after rescan take effect.
 
 **Open Items**
 
-1. Which Iceberg expressions can be marked `Exact` cannot be assumed upfront. This must be tested expression by expression across types, NULL semantics, coercion, and collation behavior.
+1. Which Iceberg expressions can be marked `ExactRowFilter` cannot be assumed upfront. This must be tested expression by expression across types, NULL semantics, coercion, and collation behavior.
 
 2. Before implementing `customscan/state.rs`, rename the existing
    TableAM scan descriptor helper
@@ -1674,4 +1693,4 @@ Iceberg integration tests:
 
 **One-Sentence Summary**
 
-`pg-lakebase-core` owns the CustomScan framework, PG Expr walker, pushed/residual/recheck split, and executor glue. Each AM provider only decides whether an expression can be pushed down, translates runtime PG Expr nodes into its native predicate, and opens its own scan backend.
+`pg-lakebase-core` owns the CustomScan framework, PG Expr walker, `PlanPredicate` parsing, pushed/residual/recheck split, and executor glue (including `translate_pushed_predicates`). Each AM provider classifies parsed `PlanPredicate` leaves, calls `translate_pushed_predicates` to obtain native predicates, and opens its own scan backend.

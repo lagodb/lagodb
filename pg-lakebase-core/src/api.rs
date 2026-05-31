@@ -65,7 +65,7 @@
 //! with PostgreSQL.
 
 use crate::TableAmRoutine;
-use crate::diag::PgReportError;
+use crate::diag::{PgReportError, SqlStateError};
 use crate::handles::{
     AttrWidthsHandle, BufferAccessStrategyHandle, BulkInsertStateHandle,
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
@@ -104,6 +104,12 @@ impl Display for AmFrameworkError {
 }
 
 impl std::error::Error for AmFrameworkError {}
+
+impl SqlStateError for AmFrameworkError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+    }
+}
 
 impl From<AmFrameworkError> for ErrorReport {
     fn from(value: AmFrameworkError) -> Self {

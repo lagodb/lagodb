@@ -415,48 +415,6 @@ unsafe fn str_event_from_raw<'a>(
     }
 }
 
-unsafe fn invoke_prev_object_access_hook(
-    prev: unsafe extern "C-unwind" fn(
-        access: pg_sys::ObjectAccessType::Type,
-        class_id: pg_sys::Oid,
-        object_id: pg_sys::Oid,
-        sub_id: i32,
-        arg: *mut c_void,
-    ),
-    access: pg_sys::ObjectAccessType::Type,
-    class_id: pg_sys::Oid,
-    object_id: pg_sys::Oid,
-    sub_id: i32,
-    arg: *mut c_void,
-) {
-    unsafe {
-        pg_sys::ffi::pg_guard_ffi_boundary(|| {
-            prev(access, class_id, object_id, sub_id, arg);
-        });
-    }
-}
-
-unsafe fn invoke_prev_object_access_str_hook(
-    prev: unsafe extern "C-unwind" fn(
-        access: pg_sys::ObjectAccessType::Type,
-        class_id: pg_sys::Oid,
-        object_name: *const std::os::raw::c_char,
-        sub_id: i32,
-        arg: *mut c_void,
-    ),
-    access: pg_sys::ObjectAccessType::Type,
-    class_id: pg_sys::Oid,
-    object_name: *const std::os::raw::c_char,
-    sub_id: i32,
-    arg: *mut c_void,
-) {
-    unsafe {
-        pg_sys::ffi::pg_guard_ffi_boundary(|| {
-            prev(access, class_id, object_name, sub_id, arg);
-        });
-    }
-}
-
 #[pg_guard]
 unsafe extern "C-unwind" fn object_access_router(
     access: pg_sys::ObjectAccessType::Type,
@@ -468,7 +426,8 @@ unsafe extern "C-unwind" fn object_access_router(
     unsafe {
         let mut event = event_from_raw(access, class_id, object_id, sub_id, arg);
 
-        if let Some(hooks) = current_object_access_hooks() {
+        let hooks = current_object_access_hooks();
+        if let Some(hooks) = hooks.as_ref() {
             for hook in hooks.iter() {
                 hook.on_access(&mut event)
                     .map_err(|err| {
@@ -483,12 +442,16 @@ unsafe extern "C-unwind" fn object_access_router(
                     .report_unwrap();
             }
         }
-        let _ = event;
+        drop(event);
+        drop(hooks);
 
         if let Some(Some(prev)) = PREV_OBJECT_ACCESS_HOOK.get() {
-            invoke_prev_object_access_hook(
-                *prev, access, class_id, object_id, sub_id, arg,
-            );
+            // Tail-chain only: all Rust event/hook state has been released and
+            // no Rust logic follows this saved hook call.  If future code must
+            // resume Rust after `prev`, do not add a blanket FFI boundary here;
+            // first ensure any state crossing the direct hook call is
+            // trivially deallocated or prove the callee is a leaf C function.
+            prev(access, class_id, object_id, sub_id, arg);
         }
     }
 }
@@ -505,7 +468,8 @@ unsafe extern "C-unwind" fn object_access_str_router(
         let mut event =
             str_event_from_raw(access, class_id, object_name, sub_id, arg);
 
-        if let Some(hooks) = current_object_access_str_hooks() {
+        let hooks = current_object_access_str_hooks();
+        if let Some(hooks) = hooks.as_ref() {
             for hook in hooks.iter() {
                 hook.on_access_str(&mut event)
                     .map_err(|err: HookError| {
@@ -520,17 +484,16 @@ unsafe extern "C-unwind" fn object_access_str_router(
                     .report_unwrap();
             }
         }
-        let _ = event;
+        drop(event);
+        drop(hooks);
 
         if let Some(Some(prev)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
-            invoke_prev_object_access_str_hook(
-                *prev,
-                access,
-                class_id,
-                object_name,
-                sub_id,
-                arg,
-            );
+            // Tail-chain only: all Rust event/hook state has been released and
+            // no Rust logic follows this saved hook call.  If future code must
+            // resume Rust after `prev`, do not add a blanket FFI boundary here;
+            // first ensure any state crossing the direct hook call is
+            // trivially deallocated or prove the callee is a leaf C function.
+            prev(access, class_id, object_name, sub_id, arg);
         }
     }
 }

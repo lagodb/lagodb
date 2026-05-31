@@ -8,7 +8,9 @@ mod schema;
 pub mod table;
 pub mod tablespace;
 
-pub use schema::{OptionDef, OptionKind, extract_and_remove_options};
+pub use schema::{
+    OptionDef, OptionKind, OptionSchemaError, extract_and_remove_options,
+};
 pub use table::{AmCache, AmCacheable, TableOptionError, TableOptions};
 pub use tablespace::{
     CachedTablespaceOpts, TablespaceCacheError, TablespaceError, TablespaceOptions,

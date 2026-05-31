@@ -34,7 +34,6 @@ use crate::handles::RelationHandle;
 use crate::resource::{self, ResourceHandle};
 use crate::tuple::Row;
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -177,17 +176,14 @@ thread_local! {
 }
 
 fn internal_error(message: impl Into<String>) -> PgReportError {
-    ErrorReport::new(PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, message.into(), "")
-        .into()
+    PgReportError::from_message(PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, message)
 }
 
 fn feature_not_supported(message: impl Into<String>) -> PgReportError {
-    ErrorReport::new(
+    PgReportError::from_message(
         PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-        message.into(),
-        "",
+        message,
     )
-    .into()
 }
 
 fn next_copy_id() -> u64 {
@@ -445,31 +441,23 @@ where
     }
 }
 
-struct CurrentFrameGuard {
-    key: FrameKey,
+fn push_current_frame(key: FrameKey) {
+    CURRENT_FRAME_STACK.with(|stack| stack.borrow_mut().push(key));
 }
 
-impl CurrentFrameGuard {
-    fn push(key: FrameKey) -> Self {
-        CURRENT_FRAME_STACK.with(|stack| stack.borrow_mut().push(key));
-        Self { key }
-    }
-}
-
-impl Drop for CurrentFrameGuard {
-    fn drop(&mut self) {
-        CURRENT_FRAME_STACK.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            if stack.last().copied() == Some(self.key) {
-                stack.pop();
-            } else {
-                debug_assert!(
-                    !stack.contains(&self.key),
-                    "CurrentFrameGuard dropped out of order"
-                );
-            }
-        });
-    }
+fn pop_current_frame(key: FrameKey) {
+    CURRENT_FRAME_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack.last().copied() == Some(key) {
+            stack.pop();
+        } else {
+            debug_assert!(
+                !stack.contains(&key),
+                "current frame stack popped out of order"
+            );
+            stack.retain(|existing| *existing != key);
+        }
+    });
 }
 
 struct FinalizingGuard {
@@ -636,7 +624,10 @@ fn wrap_modifytable_node(
 fn cleanup_executor_adapter(estate: NonNull<pg_sys::EState>) {
     // Abort/error cleanup for wrappers installed in ExecutorStart.  We do not
     // try to restore ExecProcNodeReal because the owning executor memory is
-    // being released; removing our TLS references is the important part.
+    // being released; removing our TLS references is the important part.  If a
+    // direct ExecProcNodeReal call raised a PostgreSQL ERROR, Rust cleanup after
+    // `push_current_frame` did not run, so remove the corresponding frame key
+    // here as the ResourceOwner cleanup boundary.
     let adapter =
         EXECUTOR_ADAPTERS.with(|adapters| adapters.borrow_mut().remove(&estate));
     let Some(adapter) = adapter else {
@@ -646,10 +637,13 @@ fn cleanup_executor_adapter(estate: NonNull<pg_sys::EState>) {
     debug_assert_eq!(adapter.estate, estate);
     NODE_ADAPTERS.with(|node_adapters| {
         let mut node_adapters = node_adapters.borrow_mut();
-        for node in adapter.nodes {
+        for node in adapter.nodes.iter().copied() {
             node_adapters.remove(&node);
         }
     });
+    for node in adapter.nodes {
+        abort_frame_and_remove_stack(FrameKey::ModifyTable(node));
+    }
 }
 
 pub(crate) fn end_executor_adapter(estate: NonNull<pg_sys::EState>) {
@@ -714,14 +708,23 @@ pub(crate) unsafe extern "C-unwind" fn lakebase_modifytable_wrapper(
     // this key and lazily create per-relation AM sessions.  Returning a non-null
     // slot means the node still has RETURNING output to deliver; success
     // finalization waits until PostgreSQL reports end-of-node with mt_done set.
-    let _current = CurrentFrameGuard::push(key);
-    let slot =
-        unsafe { pg_sys::ffi::pg_guard_ffi_boundary(|| (adapter.original)(ps)) };
+    push_current_frame(key);
+    // `original` is the raw ExecProcNodeReal dispatcher saved from this
+    // PlanState.  It can execute executor subtrees that re-enter pgrx
+    // `#[pg_guard]` callbacks, so do not wrap it in `pg_guard_ffi_boundary`.
+    // Keep Rust state crossing this direct call trivially deallocated; the
+    // executor adapter ResourceOwner cleanup removes the frame key if a
+    // PostgreSQL ERROR longjmps past the normal pop path.
+    let slot = unsafe { (adapter.original)(ps) };
 
     let mtstate = ps as *mut pg_sys::ModifyTableState;
-    if slot.is_null() && unsafe { (*mtstate).mt_done } {
-        finish_frame(key).report_unwrap();
-    }
+    let finalize_result = if slot.is_null() && unsafe { (*mtstate).mt_done } {
+        finish_frame(key)
+    } else {
+        Ok(())
+    };
+    pop_current_frame(key);
+    finalize_result.report_unwrap();
 
     slot
 }

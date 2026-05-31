@@ -13,6 +13,21 @@ use pgrx::prelude::*;
 
 pg_module_magic!();
 
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    #[cfg(any(test, feature = "pg_test"))]
+    customscan::init_pg_test_extension();
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+mod customscan;
+
+#[cfg(any(test, feature = "pg_test"))]
+mod expr;
+
+#[cfg(any(test, feature = "pg_test"))]
+mod support;
+
 #[cfg(any(test, feature = "pg_test"))]
 mod tuple;
 

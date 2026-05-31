@@ -5,7 +5,6 @@ use crate::diag::PgReportError;
 use pgrx::FromDatum;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use std::marker::PhantomData;
 
@@ -356,16 +355,14 @@ impl TupleSlotWriter {
             let natts = (*tup_desc).natts as usize;
 
             if row.len() < natts {
-                return Err(ErrorReport::new(
+                return Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INVALID_COLUMN_REFERENCE,
                     format!(
                         "row has {} columns but tuple slot expects {}",
                         row.len(),
                         natts
                     ),
-                    "",
-                )
-                .into());
+                ));
             }
 
             let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
@@ -382,14 +379,13 @@ impl TupleSlotWriter {
                             let datum = cell
                                 .into_datum_typed(attr.atttypid, attr.atttypmod)
                                 .ok_or_else(|| {
-                                    PgReportError::new(ErrorReport::new(
+                                    PgReportError::from_message(
                                         PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
                                         format!(
                                             "failed to convert row column {} to datum",
                                             i + 1
                                         ),
-                                        "",
-                                    ))
+                                    )
                                 })?;
 
                             slot_values[i] = datum;

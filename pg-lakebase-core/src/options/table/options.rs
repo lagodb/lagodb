@@ -4,8 +4,8 @@
 //! schema, and persisted in `lakebase.table_options` for later rd_amcache load.
 
 use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
-use crate::diag::{PgError, SqlStateError};
-use crate::options::schema::{self, OptionDef};
+use crate::diag::{PgError, SqlStateError, domain_error_report};
+use crate::options::schema::{self, OptionDef, OptionSchemaError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -19,6 +19,9 @@ use thiserror::Error;
 /// Errors that can occur when handling table options.
 #[derive(Error, Debug)]
 pub enum TableOptionError {
+    #[error("invalid table option")]
+    InvalidSchema(#[from] OptionSchemaError),
+
     #[error("invalid table option: {0}")]
     InvalidOption(String),
 
@@ -37,13 +40,21 @@ pub enum TableOptionError {
 
 impl From<TableOptionError> for ErrorReport {
     fn from(value: TableOptionError) -> Self {
-        ErrorReport::new(value.sql_error_code(), format!("{value}"), "")
+        domain_error_report(value)
     }
 }
 
 impl SqlStateError for TableOptionError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
-        PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+        match self {
+            Self::InvalidSchema(_) | Self::InvalidOption(_) => {
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+            }
+            Self::PersistFailed(error)
+            | Self::LoadFailed(error)
+            | Self::DeleteFailed(error) => error.sql_error_code(),
+            Self::NullRelation => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        }
     }
 }
 
@@ -83,8 +94,7 @@ impl TableOptions {
     ) -> Result<Option<Self>, TableOptionError> {
         // SAFETY: We hold a mutable reference to the statement, so it is safe to modify via FFI.
         let opts = unsafe {
-            schema::extract_and_remove_options(&mut stmt.options, valid_options)
-                .map_err(TableOptionError::InvalidOption)?
+            schema::extract_and_remove_options(&mut stmt.options, valid_options)?
         };
 
         Ok((!opts.is_empty()).then_some(Self { options: opts }))
@@ -96,10 +106,7 @@ impl TableOptions {
     ) -> Result<Option<Self>, TableOptionError> {
         // SAFETY: `stmt.options` belongs to a live PostgreSQL parse tree for
         // this hook callback and is only read by this call.
-        let opts = unsafe {
-            schema::extract_options(stmt.options, valid_options)
-                .map_err(TableOptionError::InvalidOption)?
-        };
+        let opts = unsafe { schema::extract_options(stmt.options, valid_options)? };
 
         Ok((!opts.is_empty()).then_some(Self { options: opts }))
     }
