@@ -23,11 +23,13 @@
 
 This implementation allows for:
 - Native SQL support (INSERT, SELECT, UPDATE, DELETE)
+- Predicate pushdown into the Iceberg scan via a CustomScan provider
 - Recovery through custom WAL (Write-Ahead Log) resource managers
 
 ## Key Features
 
 - **Native TAM Integration**: Implements the `TableAmRoutine` to hook directly into PostgreSQL's scan and modification paths.
+- **Predicate Pushdown (CustomScan)**: Implements the `pg-lakebase-core` CustomScan provider so that SQL `WHERE` predicates are pushed into the Iceberg scan, enabling file/row-group pruning and row-level filtering instead of scanning everything and filtering in the executor.
 - **Iceberg Support**: Uses `iceberg-lite` (a synchronous, PostgreSQL-friendly fork of `iceberg-rust`) to manage Iceberg metadata and data files.
 - **Storage Flexibility**: Supports local storage and S3-compatible object storage via the `object-store` crate.
 - **Custom WAL RMGR**: Includes a custom WAL resource manager to ensure data consistency and recovery for Iceberg metadata during PostgreSQL crashes.
@@ -39,9 +41,34 @@ This implementation allows for:
 `pg-iceberg-am` is split into several logical components:
 
 - **Scan & DML**: Optimized table scanning and data modification logic.
+- **CustomScan Provider**: Implements the `pg-lakebase-core` CustomScan provider trait. It classifies which `WHERE` predicates can be pushed down, builds parameterized/plain scan paths with pruning-aware cost estimates, and at execution time translates the pushed PostgreSQL `Expr` nodes into native `iceberg-lite` predicates that drive the same scan core used by the seqscan path.
 - **Catalog Management**: Handles Iceberg snapshot creation, metadata updates, and expiration.
 - **Storage Layer**: Abstracted I/O for reading and writing data/metadata files to various backends.
 - **WAL RMGR**: Ensures that Iceberg metadata changes are atomic and recoverable in sync with PostgreSQL transactions.
+
+### Predicate pushdown
+
+Without pushdown, a normal TableAM scan returns every row and PostgreSQL
+evaluates the `WHERE` clause afterwards. The CustomScan provider lets the
+planner choose an Iceberg scan that prunes data files and row groups before
+they are read, then re-checks correctness in the executor as needed. Two
+contracts govern what may be pushed:
+
+- *Exact row filter* — the predicate is applied as a true row-level filter, so
+  it does not need to be re-evaluated by PostgreSQL.
+- *Conservative pruning* — the predicate may only skip candidates with no false
+  negatives; PostgreSQL keeps the original predicate as a residual qual to
+  guarantee correct results.
+
+Pushdown of `float4` / `float8` and `numeric` *comparisons* is currently
+disabled because the available row-level Arrow filter would diverge from
+PostgreSQL semantics (IEEE 754 `NaN` ordering and `decimal` scale downcast,
+respectively); `IS NULL` / `IS NOT NULL` on those columns is unaffected. The
+`pg_lakebase.customscan_mode` GUC (`off` / `auto` / `force`) controls whether
+the framework emits CustomScan paths, and
+`pg_iceberg_am.customscan_min_scan_fraction` floors the estimated scanned
+fraction so an implausibly small selectivity cannot make the scan look almost
+free to the planner.
 
 ## Getting Started
 
@@ -115,6 +142,18 @@ INSERT INTO my_iceberg_table VALUES (1, 'hello', now());
 -- Query data
 SELECT * FROM my_iceberg_table;
 ```
+
+Predicate pushdown happens automatically when the planner picks the Iceberg
+CustomScan. Use `EXPLAIN` to confirm a `Custom Scan` node and to see which
+predicates were pushed versus left as residual filters:
+
+```sql
+EXPLAIN (VERBOSE)
+SELECT * FROM my_iceberg_table WHERE id = 42;
+```
+
+To force or disable the behavior during testing, set
+`pg_lakebase.customscan_mode` (`off` / `auto` / `force`) at the session level.
 
 ### Distributed tablespace limitations
 

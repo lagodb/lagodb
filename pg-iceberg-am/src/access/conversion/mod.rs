@@ -23,4 +23,14 @@ mod tests;
 #[cfg(feature = "pg_test")]
 mod pg_test;
 
-pub use converter::{RecordBatchRowReader, RowRecordBatchBuilder};
+pub use converter::{LiveColumn, RecordBatchRowReader, RowRecordBatchBuilder};
+
+/// Shared PG→Unix epoch offset helpers, re-exported so the runtime predicate
+/// translator (`customscan::predicate_translator::IcebergDatumDecoder`) applies the *same* offset to pushed
+/// `date` / `timestamp` / `timestamptz` bounds that the storage write side
+/// applies to stored values — keeping pushed predicate bounds aligned with
+/// stored manifest bounds (Requirement 3.5). One conversion, one source of
+/// truth.
+pub(crate) use primitive::{
+    pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros,
+};

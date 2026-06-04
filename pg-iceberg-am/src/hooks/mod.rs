@@ -28,4 +28,6 @@ pub fn init_hooks() {
     tablespace_ddl::init_hook();
     table_ddl::init_hook();
     object_access::init_hook();
+    // Publish utility hooks only after every module has registered its entries.
+    pg_lakebase_core::hooks::freeze_utility_hooks();
 }

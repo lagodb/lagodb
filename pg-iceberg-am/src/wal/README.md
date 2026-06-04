@@ -1,13 +1,19 @@
 # Iceberg WAL Contract
 
-This module logs local Iceberg file bytes to PostgreSQL WAL so standby WAL
-replay (including hot standby) or archive recovery can reconstruct files that
-are not available from object storage. This is an availability-first, lossy
-reconstruction mechanism for local Iceberg files, not a heap/smgr-equivalent
-physical storage contract. Local crash recovery is not the target for
-`WRITE_FILE` replay because the primary writer calls `FileSync` on successful
-close. Archived WAL is relevant only when a restore or standby recovery replays
-it.
+This module logs local Iceberg file bytes to PostgreSQL WAL. During WAL replay
+on a standby, including a standby that accepts hot-standby read-only queries, or
+during archive recovery, these records can reconstruct local Iceberg files when
+they are missing from that instance's local disk. Object/distributed storage
+does not use this WAL path; it relies on object-store durability and separate
+orphan cleanup. This is an availability-first, lossy reconstruction mechanism
+for local Iceberg files, not a heap/smgr-equivalent physical storage contract.
+For local crash-only recovery, PostgreSQL may call this custom resource
+manager's redo routine, but the rmgr intentionally skips `WRITE_FILE` replay
+because the primary writer calls `FileSync` on successful close.
+
+Because these are custom WAL resource manager records, `pg_iceberg_am` must be
+loaded via `shared_preload_libraries` while any such records may need to be
+replayed or decoded.
 
 ## Transaction Boundary
 

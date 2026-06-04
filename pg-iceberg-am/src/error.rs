@@ -13,7 +13,7 @@
 //! object methods returning [`IcebergResult<T>`], then let the callback boundary
 //! perform the final conversion to PostgreSQL.
 
-use pg_lakebase_core::diag::{PgError, SqlStateError};
+use pg_lakebase_core::diag::{PgError, SqlStateError, domain_error_report};
 use pg_lakebase_core::options::TablespaceError;
 use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
 use pg_lakebase_storage::{StorageError, StorageErrorKind};
@@ -273,7 +273,7 @@ impl SqlStateError for IcebergError {
 
 impl From<IcebergError> for ErrorReport {
     fn from(value: IcebergError) -> Self {
-        ErrorReport::new(value.sql_error_code(), format!("{value}"), "")
+        domain_error_report(value)
     }
 }
 

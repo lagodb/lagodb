@@ -1,7 +1,7 @@
 use crate::IcebergTableAm;
+use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 
 impl AmDdl for IcebergTableAm {
@@ -14,14 +14,12 @@ impl AmDdl for IcebergTableAm {
     }
 
     fn relation_nontransactional_truncate(rel: &RelationHandle) -> AmResult<()> {
-        Err(ErrorReport::new(
+        Err(PgReportError::from_message(
             PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             format!(
                 "cannot TRUNCATE Iceberg table \"{}\": Iceberg truncate requires metadata rewrite support",
                 rel.relation_name()
             ),
-            "",
-        )
-        .into())
+        ))
     }
 }

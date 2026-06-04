@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 mod access;
 pub mod catalog;
 pub mod constants;
+pub mod customscan;
 pub mod error;
 pub mod gucs;
 pub mod hooks;
@@ -51,6 +52,14 @@ extern "C-unwind" fn _PG_init() {
     storage_worker::init_for_extension("pg_iceberg_am");
     hooks::init_hooks();
     wal::init_wal_rmgr();
+    // Register the Iceberg CustomScan provider, then install the
+    // framework's `set_rel_pathlist_hook` router. Order matters:
+    // `customscan::init` is a no-op if no providers are registered,
+    // but the framework's design (see
+    // `pg_lakebase_core::customscan::init`) is "register all
+    // providers first, then install the hook in `_PG_init`".
+    customscan::register();
+    pg_lakebase_core::customscan::init();
 }
 
 // ============================================================================
