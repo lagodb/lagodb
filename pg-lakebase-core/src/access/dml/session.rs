@@ -637,8 +637,8 @@ fn cleanup_executor_adapter(estate: NonNull<pg_sys::EState>) {
     debug_assert_eq!(adapter.estate, estate);
     NODE_ADAPTERS.with(|node_adapters| {
         let mut node_adapters = node_adapters.borrow_mut();
-        for node in adapter.nodes.iter().copied() {
-            node_adapters.remove(&node);
+        for node in adapter.nodes.iter() {
+            node_adapters.remove(node);
         }
     });
     for node in adapter.nodes {

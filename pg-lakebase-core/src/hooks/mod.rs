@@ -12,7 +12,8 @@ pub use error::{HookError, ObjectAccessHookError, UtilityHookError};
 
 pub use object_access_hook::{
     ObjectAccessEvent, ObjectAccessHook, ObjectAccessStrEvent, ObjectAccessStrHook,
-    register_object_access_hook, register_object_access_str_hook,
+    freeze_object_access_hooks, register_object_access_hook,
+    register_object_access_str_hook,
 };
 pub use utility_hook::{
     AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode, AlterTableStmtNode,

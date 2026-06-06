@@ -3,7 +3,7 @@ use crate::diag::ReportableError;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 use std::ffi::{CStr, c_void};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug)]
 pub enum ObjectAccessEvent<'a> {
@@ -219,11 +219,32 @@ pub trait ObjectAccessStrHook {
     ) -> Result<(), ObjectAccessHookError>;
 }
 
-type ObjectAccessHookList = Arc<Vec<Arc<dyn ObjectAccessHook + Send + Sync>>>;
-type ObjectAccessStrHookList = Arc<Vec<Arc<dyn ObjectAccessStrHook + Send + Sync>>>;
+type ObjectAccessHookList = &'static [Box<dyn ObjectAccessHook + Send + Sync>];
+type ObjectAccessStrHookList =
+    &'static [Box<dyn ObjectAccessStrHook + Send + Sync>];
 
-static REGISTRY: RwLock<Option<ObjectAccessHookList>> = RwLock::new(None);
-static STR_REGISTRY: RwLock<Option<ObjectAccessStrHookList>> = RwLock::new(None);
+// Object-access hooks are backend-lifetime extension metadata.  Registration
+// happens during extension initialization, then the registry is frozen once
+// and the object-access routers see only an immutable static slice.  The
+// matching-hook path tail-chains directly to a saved PostgreSQL hook that may
+// raise an ERROR and longjmp, so the snapshot crossing that direct call must
+// not own Drop state such as an Arc<Vec<_>> or a lock guard.  Freezing to a
+// `&'static` slice keeps the hot path Copy-only and removes that hazard by
+// construction (mirrors `utility_hook.rs`).
+//
+// A PostgreSQL backend is single-threaded, so these locks are not for runtime
+// concurrency: they only provide the interior mutability/`Sync` required to
+// mutate a `static` during initialization.  They are written a handful of
+// times at startup (register/freeze) and are never touched on the hot path,
+// which reads the lock-free `FROZEN_*` snapshots instead.
+static BUILDING_REGISTRY: RwLock<Vec<Box<dyn ObjectAccessHook + Send + Sync>>> =
+    RwLock::new(Vec::new());
+static FROZEN_REGISTRY: OnceLock<ObjectAccessHookList> = OnceLock::new();
+
+static STR_BUILDING_REGISTRY: RwLock<
+    Vec<Box<dyn ObjectAccessStrHook + Send + Sync>>,
+> = RwLock::new(Vec::new());
+static STR_FROZEN_REGISTRY: OnceLock<ObjectAccessStrHookList> = OnceLock::new();
 
 static PREV_OBJECT_ACCESS_HOOK: OnceLock<pg_sys::object_access_hook_type> =
     OnceLock::new();
@@ -231,27 +252,20 @@ static PREV_OBJECT_ACCESS_STR_HOOK: OnceLock<pg_sys::object_access_hook_type_str
     OnceLock::new();
 
 fn current_object_access_hooks() -> Option<ObjectAccessHookList> {
-    REGISTRY.read().unwrap().clone()
+    FROZEN_REGISTRY
+        .get()
+        .copied()
+        .filter(|hooks| !hooks.is_empty())
 }
 
 fn current_object_access_str_hooks() -> Option<ObjectAccessStrHookList> {
-    STR_REGISTRY.read().unwrap().clone()
+    STR_FROZEN_REGISTRY
+        .get()
+        .copied()
+        .filter(|hooks| !hooks.is_empty())
 }
 
-pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>) {
-    let hook_name = hook.name();
-    let mut registry = REGISTRY.write().unwrap();
-    let mut next: Vec<Arc<dyn ObjectAccessHook + Send + Sync>> = registry
-        .as_ref()
-        .map(|list| Vec::clone(list))
-        .unwrap_or_default();
-    if next.iter().any(|existing| existing.name() == hook_name) {
-        return;
-    }
-    next.push(Arc::from(hook));
-    *registry = Some(Arc::new(next));
-    drop(registry);
-
+fn install_object_access_router() {
     PREV_OBJECT_ACCESS_HOOK.get_or_init(|| unsafe {
         let prev = pg_sys::object_access_hook;
         pg_sys::object_access_hook = Some(object_access_router);
@@ -259,27 +273,94 @@ pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>
     });
 }
 
-pub fn register_object_access_str_hook(
-    hook: Box<dyn ObjectAccessStrHook + Send + Sync>,
-) {
-    let hook_name = hook.name();
-    let mut registry = STR_REGISTRY.write().unwrap();
-    let mut next: Vec<Arc<dyn ObjectAccessStrHook + Send + Sync>> = registry
-        .as_ref()
-        .map(|list| Vec::clone(list))
-        .unwrap_or_default();
-    if next.iter().any(|existing| existing.name() == hook_name) {
-        return;
-    }
-    next.push(Arc::from(hook));
-    *registry = Some(Arc::new(next));
-    drop(registry);
-
+fn install_object_access_str_router() {
     PREV_OBJECT_ACCESS_STR_HOOK.get_or_init(|| unsafe {
         let prev = pg_sys::object_access_hook_str;
         pg_sys::object_access_hook_str = Some(object_access_str_router);
         prev
     });
+}
+
+pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>) {
+    let hook_name = hook.name();
+    let mut entries = BUILDING_REGISTRY.write().unwrap();
+    if FROZEN_REGISTRY.get().is_some() {
+        panic!("register_object_access_hook called after freeze_object_access_hooks");
+    }
+    if entries.iter().any(|existing| existing.name() == hook_name) {
+        return;
+    }
+    entries.push(hook);
+}
+
+pub fn register_object_access_str_hook(
+    hook: Box<dyn ObjectAccessStrHook + Send + Sync>,
+) {
+    let hook_name = hook.name();
+    let mut entries = STR_BUILDING_REGISTRY.write().unwrap();
+    if STR_FROZEN_REGISTRY.get().is_some() {
+        panic!(
+            "register_object_access_str_hook called after freeze_object_access_hooks"
+        );
+    }
+    if entries.iter().any(|existing| existing.name() == hook_name) {
+        return;
+    }
+    entries.push(hook);
+}
+
+/// Freeze registered object-access hooks and install the routers.
+///
+/// Call this once after all [`register_object_access_hook`] and
+/// [`register_object_access_str_hook`] calls in extension initialization.
+/// After freezing, the routers read a single immutable backend-lifetime
+/// snapshot, so the direct tail-chain to a saved PostgreSQL hook does not carry
+/// Rust ownership state across ERROR/longjmp paths.
+pub fn freeze_object_access_hooks() {
+    if freeze_object_access_registry() {
+        install_object_access_router();
+    }
+    if freeze_object_access_str_registry() {
+        install_object_access_str_router();
+    }
+}
+
+fn freeze_object_access_registry() -> bool {
+    if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
+        return !hooks.is_empty();
+    }
+    let mut entries = BUILDING_REGISTRY.write().unwrap();
+    if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
+        return !hooks.is_empty();
+    }
+    let hooks: ObjectAccessHookList = if entries.is_empty() {
+        &[]
+    } else {
+        Box::leak(std::mem::take(&mut *entries).into_boxed_slice())
+    };
+    if FROZEN_REGISTRY.set(hooks).is_err() {
+        unreachable!("object access hook registry frozen concurrently");
+    }
+    !hooks.is_empty()
+}
+
+fn freeze_object_access_str_registry() -> bool {
+    if let Some(hooks) = STR_FROZEN_REGISTRY.get().copied() {
+        return !hooks.is_empty();
+    }
+    let mut entries = STR_BUILDING_REGISTRY.write().unwrap();
+    if let Some(hooks) = STR_FROZEN_REGISTRY.get().copied() {
+        return !hooks.is_empty();
+    }
+    let hooks: ObjectAccessStrHookList = if entries.is_empty() {
+        &[]
+    } else {
+        Box::leak(std::mem::take(&mut *entries).into_boxed_slice())
+    };
+    if STR_FROZEN_REGISTRY.set(hooks).is_err() {
+        unreachable!("object access str hook registry frozen concurrently");
+    }
+    !hooks.is_empty()
 }
 
 unsafe fn event_from_raw<'a>(
@@ -424,10 +505,23 @@ unsafe extern "C-unwind" fn object_access_router(
     arg: *mut c_void,
 ) {
     unsafe {
-        let mut event = event_from_raw(access, class_id, object_id, sub_id, arg);
+        // `hooks` is a backend-lifetime `&'static` slice (Copy, no Drop), so it
+        // carries no Rust ownership state across the tail-chain to `prev`.
+        let Some(hooks) = current_object_access_hooks() else {
+            if let Some(Some(prev)) = PREV_OBJECT_ACCESS_HOOK.get() {
+                prev(access, class_id, object_id, sub_id, arg);
+            }
+            return;
+        };
 
-        let hooks = current_object_access_hooks();
-        if let Some(hooks) = hooks.as_ref() {
+        // Bound the event's borrow of `arg` to this scope. `ObjectAccessEvent`
+        // holds no Drop state, but `NamespaceSearch` borrows `&mut` the same
+        // `ObjectAccessNamespaceSearch` that `prev` receives via the raw `arg`
+        // pointer below.  Closing the borrow explicitly (rather than leaning on
+        // NLL) makes the FFI boundary unambiguous: no live Rust view of `arg`
+        // outlives the direct hand-off to the saved PostgreSQL hook.
+        {
+            let mut event = event_from_raw(access, class_id, object_id, sub_id, arg);
             for hook in hooks.iter() {
                 hook.on_access(&mut event)
                     .map_err(|err| {
@@ -442,15 +536,13 @@ unsafe extern "C-unwind" fn object_access_router(
                     .report_unwrap();
             }
         }
-        drop(event);
-        drop(hooks);
 
         if let Some(Some(prev)) = PREV_OBJECT_ACCESS_HOOK.get() {
-            // Tail-chain only: all Rust event/hook state has been released and
-            // no Rust logic follows this saved hook call.  If future code must
-            // resume Rust after `prev`, do not add a blanket FFI boundary here;
-            // first ensure any state crossing the direct hook call is
-            // trivially deallocated or prove the callee is a leaf C function.
+            // Tail-chain only: no Rust logic follows this saved hook call.  If
+            // future code must resume Rust after `prev`, do not add a blanket
+            // FFI boundary here; first ensure any state crossing the direct
+            // hook call is trivially deallocated or prove the callee is a leaf
+            // C function.
             prev(access, class_id, object_id, sub_id, arg);
         }
     }
@@ -465,11 +557,25 @@ unsafe extern "C-unwind" fn object_access_str_router(
     arg: *mut c_void,
 ) {
     unsafe {
-        let mut event =
-            str_event_from_raw(access, class_id, object_name, sub_id, arg);
+        // `hooks` is a backend-lifetime `&'static` slice (Copy, no Drop), so it
+        // carries no Rust ownership state across the tail-chain to `prev`.
+        let Some(hooks) = current_object_access_str_hooks() else {
+            if let Some(Some(prev)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
+                prev(access, class_id, object_name, sub_id, arg);
+            }
+            return;
+        };
 
-        let hooks = current_object_access_str_hooks();
-        if let Some(hooks) = hooks.as_ref() {
+        // Bound the event's borrow of `arg`/`object_name` to this scope.
+        // `ObjectAccessStrEvent` holds no Drop state, but `NamespaceSearch`
+        // borrows `&mut` the same `ObjectAccessNamespaceSearch` that `prev`
+        // receives via the raw `arg` pointer below.  Closing the borrow
+        // explicitly (rather than leaning on NLL) makes the FFI boundary
+        // unambiguous: no live Rust view of `arg` outlives the direct hand-off
+        // to the saved PostgreSQL hook.
+        {
+            let mut event =
+                str_event_from_raw(access, class_id, object_name, sub_id, arg);
             for hook in hooks.iter() {
                 hook.on_access_str(&mut event)
                     .map_err(|err: HookError| {
@@ -484,15 +590,13 @@ unsafe extern "C-unwind" fn object_access_str_router(
                     .report_unwrap();
             }
         }
-        drop(event);
-        drop(hooks);
 
         if let Some(Some(prev)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
-            // Tail-chain only: all Rust event/hook state has been released and
-            // no Rust logic follows this saved hook call.  If future code must
-            // resume Rust after `prev`, do not add a blanket FFI boundary here;
-            // first ensure any state crossing the direct hook call is
-            // trivially deallocated or prove the callee is a leaf C function.
+            // Tail-chain only: no Rust logic follows this saved hook call.  If
+            // future code must resume Rust after `prev`, do not add a blanket
+            // FFI boundary here; first ensure any state crossing the direct
+            // hook call is trivially deallocated or prove the callee is a leaf
+            // C function.
             prev(access, class_id, object_name, sub_id, arg);
         }
     }
