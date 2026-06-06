@@ -293,7 +293,7 @@ mod join_parameterized_noop_preservation_tests {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
         #[test]
-        fn prop2_preserves_useful_join_parameterized_variant(
+        fn prop_preserves_useful_join_parameterized_variant(
             base in arb_split(0, 0, 3),
             ppi in arb_split(1, 1, 4),
             outer_tag in 0u64..32,

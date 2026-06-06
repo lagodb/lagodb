@@ -8,7 +8,7 @@ mod tests {
     use pg_lakebase_core::expr::translator::PgPredicateTranslator;
     use pgrx::pg_sys;
 
-    use crate::customscan::predicate_translator::IcebergDatumDecoder;
+    use crate::customscan::predicate_translator::decode_datum;
     use crate::customscan::{
         IcebergPredicateTranslator, IcebergScalar, IcebergTranslationError,
     };
@@ -24,7 +24,7 @@ mod tests {
             let numeric = AnyNumeric::try_from(100.5_f64).expect("100.5 is valid");
             let datum = numeric.clone().into_datum().expect("numeric into_datum");
 
-            let got = IcebergDatumDecoder::decode(pg_sys::NUMERICOID, datum)
+            let got = decode_datum(pg_sys::NUMERICOID, datum)
                 .expect("an in-range numeric must decode to a decimal Datum");
 
             // Independent oracle: PG canonical text -> rust_decimal -> Datum.
@@ -49,7 +49,7 @@ mod tests {
                 AnyNumeric::try_from("-12345.6789").expect("valid numeric literal");
             let datum = numeric.clone().into_datum().expect("numeric into_datum");
 
-            let got = IcebergDatumDecoder::decode(pg_sys::NUMERICOID, datum)
+            let got = decode_datum(pg_sys::NUMERICOID, datum)
                 .expect("a negative fractional numeric must decode");
 
             let expected_decimal =
@@ -76,7 +76,7 @@ mod tests {
             assert!(nan.is_nan(), "sanity: the literal must be NaN");
             let datum = nan.into_datum().expect("numeric NaN into_datum");
 
-            let got = IcebergDatumDecoder::decode(pg_sys::NUMERICOID, datum);
+            let got = decode_datum(pg_sys::NUMERICOID, datum);
             assert!(
                 matches!(
                     got,
@@ -102,7 +102,7 @@ mod tests {
                 .expect("a 40-digit integer is a valid PG numeric");
             let datum = huge.into_datum().expect("numeric into_datum");
 
-            let got = IcebergDatumDecoder::decode(pg_sys::NUMERICOID, datum);
+            let got = decode_datum(pg_sys::NUMERICOID, datum);
             assert!(
                 matches!(
                     got,
@@ -121,13 +121,13 @@ mod tests {
 
         unsafe {
             let text_datum = "hello".into_datum().expect("text into_datum");
-            let got = IcebergDatumDecoder::decode(pg_sys::TEXTOID, text_datum)
+            let got = decode_datum(pg_sys::TEXTOID, text_datum)
                 .expect("text must decode to a string Datum");
             assert_eq!(got, Datum::string("hello"));
 
             // `varchar` shares the branch (binary-coercible to `text`).
             let varchar_datum = "world".into_datum().expect("varchar into_datum");
-            let got = IcebergDatumDecoder::decode(pg_sys::VARCHAROID, varchar_datum)
+            let got = decode_datum(pg_sys::VARCHAROID, varchar_datum)
                 .expect("varchar must decode to a string Datum");
             assert_eq!(got, Datum::string("world"));
         }
@@ -179,22 +179,21 @@ mod tests {
     // -------------------------------------------------------------------------
     // Pass-by-value temporal / float decode.
     //
-    // These were previously host `#[test]`s, but calling `IcebergDatumDecoder::
-    // decode` pulls in the function's numeric/text arms (`AnyNumeric`,
-    // `pg_detoast_datum`, `palloc`), so the whole decode path requires a live
-    // backend regardless of which type arm a given test exercises (see
-    // `docs/testing.md`). They run here as `#[pg_test]` alongside the numeric /
-    // text decode coverage above.
+    // These were previously host `#[test]`s, but calling `decode_datum` pulls in
+    // the function's numeric/text arms (`AnyNumeric`, `pg_detoast_datum`,
+    // `palloc`), so the whole decode path requires a live backend regardless of
+    // which type arm a given test exercises (see `docs/testing.md`). They run
+    // here as `#[pg_test]` alongside the numeric / text decode coverage above.
     //
     // Scope note: the *happy-path* epoch-offset equivalence for date /
     // timestamp / timestamptz (decoded `Datum` == write-side stored bound) is
     // owned by the write/translator consistency property tests in
     // `access/conversion/primitive.rs` (`pushed_*_bound_matches_write_side_offset`
     // and `*_epoch_consistency_at_unix_epoch`), which exercise the same
-    // `IcebergDatumDecoder::decode` path across the whole representable range.
-    // This module keeps only the decode-specific cases those property tests
-    // deliberately exclude: the ±infinity not-representable rejections (guarded
-    // out of the property ranges) and the `FLOAT_PUSHDOWN_ENABLED` gating.
+    // `decode_datum` path across the whole representable range. This module
+    // keeps only the decode-specific cases those property tests deliberately
+    // exclude: the ±infinity not-representable rejections (guarded out of the
+    // property ranges) and the `FLOAT_PUSHDOWN_ENABLED` gating.
     // -------------------------------------------------------------------------
 
     use iceberg_lite::spec::Datum;
@@ -217,7 +216,7 @@ mod tests {
             let datum = date_datum_from_raw(raw);
             assert!(
                 matches!(
-                    unsafe { IcebergDatumDecoder::decode(pg_sys::DATEOID, datum) },
+                    unsafe { decode_datum(pg_sys::DATEOID, datum) },
                     Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
                         if type_oid == pg_sys::DATEOID
                 ),
@@ -232,7 +231,7 @@ mod tests {
             let datum = ts_datum_from_raw(raw);
             assert!(
                 matches!(
-                    unsafe { IcebergDatumDecoder::decode(pg_sys::TIMESTAMPOID, datum) },
+                    unsafe { decode_datum(pg_sys::TIMESTAMPOID, datum) },
                     Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
                         if type_oid == pg_sys::TIMESTAMPOID
                 ),
@@ -247,7 +246,7 @@ mod tests {
             let datum = ts_datum_from_raw(raw);
             assert!(
                 matches!(
-                    unsafe { IcebergDatumDecoder::decode(pg_sys::TIMESTAMPTZOID, datum) },
+                    unsafe { decode_datum(pg_sys::TIMESTAMPTZOID, datum) },
                     Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
                         if type_oid == pg_sys::TIMESTAMPTZOID
                 ),
@@ -264,12 +263,12 @@ mod tests {
         if !FLOAT_PUSHDOWN_ENABLED {
             // Float decode is gated behind the pushdown toggle; verify rejection.
             assert!(matches!(
-                unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT4OID, datum) },
+                unsafe { decode_datum(pg_sys::FLOAT4OID, datum) },
                 Err(IcebergTranslationError::UnsupportedType { .. })
             ));
             return;
         }
-        let got = unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT4OID, datum) }
+        let got = unsafe { decode_datum(pg_sys::FLOAT4OID, datum) }
             .expect("float4 must decode");
         assert_eq!(got, Datum::float(1.5_f32));
     }
@@ -281,12 +280,12 @@ mod tests {
         let datum = (-273.15_f64).into_datum().expect("f64 into_datum");
         if !FLOAT_PUSHDOWN_ENABLED {
             assert!(matches!(
-                unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) },
+                unsafe { decode_datum(pg_sys::FLOAT8OID, datum) },
                 Err(IcebergTranslationError::UnsupportedType { .. })
             ));
             return;
         }
-        let got = unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) }
+        let got = unsafe { decode_datum(pg_sys::FLOAT8OID, datum) }
             .expect("float8 must decode");
         assert_eq!(got, Datum::double(-273.15_f64));
     }
@@ -300,12 +299,12 @@ mod tests {
         let datum = f64::NAN.into_datum().expect("f64 NaN into_datum");
         if !FLOAT_PUSHDOWN_ENABLED {
             assert!(matches!(
-                unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) },
+                unsafe { decode_datum(pg_sys::FLOAT8OID, datum) },
                 Err(IcebergTranslationError::UnsupportedType { .. })
             ));
             return;
         }
-        let got = unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) }
+        let got = unsafe { decode_datum(pg_sys::FLOAT8OID, datum) }
             .expect("float NaN is representable when pushdown enabled");
         assert_eq!(got, Datum::double(f64::NAN));
     }
@@ -314,7 +313,7 @@ mod tests {
     fn decode_unsupported_type_is_rejected() {
         let datum = pg_sys::Datum::from(1usize);
         assert!(matches!(
-            unsafe { IcebergDatumDecoder::decode(pg_sys::BOOLOID, datum) },
+            unsafe { decode_datum(pg_sys::BOOLOID, datum) },
             Err(IcebergTranslationError::UnsupportedType { type_oid })
                 if type_oid == pg_sys::BOOLOID
         ));

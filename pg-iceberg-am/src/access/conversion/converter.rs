@@ -407,12 +407,9 @@ impl RowRecordBatchBuilder {
 mod column_plan_fixtures {
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, Int32Array, RecordBatch};
-    use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
     use iceberg_lite::spec::{
         NestedField, PrimitiveType, Schema as IcebergSchema, Type,
     };
-    use pg_lakebase_core::tuple::{Cell, Row};
 
     use super::LiveColumn;
 
@@ -435,30 +432,6 @@ mod column_plan_fixtures {
             .with_fields(fields)
             .build()
             .expect("failed to build test iceberg schema")
-    }
-
-    /// Build a one-row Arrow `RecordBatch` whose columns (in order) carry the
-    /// given `i32` values under the given names.
-    pub(super) fn int_batch(cols: &[(&str, i32)]) -> RecordBatch {
-        let fields: Vec<ArrowField> = cols
-            .iter()
-            .map(|(name, _)| ArrowField::new(*name, DataType::Int32, false))
-            .collect();
-        let arrays: Vec<ArrayRef> = cols
-            .iter()
-            .map(|(_, v)| Arc::new(Int32Array::from(vec![*v])) as ArrayRef)
-            .collect();
-        RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), arrays)
-            .expect("failed to build test record batch")
-    }
-
-    /// Extract the `i32` cell at `slot`, or `None` if the slot is SQL NULL.
-    pub(super) fn cell_i32(row: &Row, slot: usize) -> Option<i32> {
-        match row.get(slot).and_then(|c| c.as_ref()) {
-            Some(Cell::I32(v)) => Some(*v),
-            Some(other) => panic!("expected I32 at slot {slot}, got {other:?}"),
-            None => None,
-        }
     }
 
     /// Build a `LiveColumn` list from `(attno, name)` pairs.
@@ -610,8 +583,36 @@ mod column_plan_pg_test {
     use proptest::prelude::*;
     use proptest::test_runner::TestRunner;
 
-    use super::column_plan_fixtures::{cell_i32, int_batch, int_schema, live_cols};
+    use arrow_array::Int32Array;
+    use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
+    use pg_lakebase_core::tuple::Cell;
+
+    use super::column_plan_fixtures::{int_schema, live_cols};
     use super::*;
+
+    /// Build a one-row Arrow `RecordBatch` whose columns (in order) carry the
+    /// given `i32` values under the given names.
+    fn int_batch(cols: &[(&str, i32)]) -> RecordBatch {
+        let fields: Vec<ArrowField> = cols
+            .iter()
+            .map(|(name, _)| ArrowField::new(*name, DataType::Int32, false))
+            .collect();
+        let arrays: Vec<ArrayRef> = cols
+            .iter()
+            .map(|(_, v)| Arc::new(Int32Array::from(vec![*v])) as ArrayRef)
+            .collect();
+        RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), arrays)
+            .expect("failed to build test record batch")
+    }
+
+    /// Extract the `i32` cell at `slot`, or `None` if the slot is SQL NULL.
+    fn cell_i32(row: &Row, slot: usize) -> Option<i32> {
+        match row.get(slot).and_then(|c| c.as_ref()) {
+            Some(Cell::I32(v)) => Some(*v),
+            Some(other) => panic!("expected I32 at slot {slot}, got {other:?}"),
+            None => None,
+        }
+    }
 
     fn proptest_config() -> ProptestConfig {
         ProptestConfig {
@@ -821,7 +822,7 @@ mod column_plan_pg_test {
     /// dropped columns yields `dest == j == attno-1` for every entry — the
     /// degenerate identity case a positional reader produces.
     #[pgrx::pg_test(schema = "tests")]
-    fn prop2_full_table_no_dropped_is_positional_identity() {
+    fn prop_full_table_no_dropped_is_positional_identity() {
         let mut runner = TestRunner::new(proptest_config());
         runner
             .run(&(1usize..=8), |natts| {

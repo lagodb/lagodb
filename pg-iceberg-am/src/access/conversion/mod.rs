@@ -26,7 +26,7 @@ mod pg_test;
 pub use converter::{LiveColumn, RecordBatchRowReader, RowRecordBatchBuilder};
 
 /// Shared PG→Unix epoch offset helpers, re-exported so the runtime predicate
-/// translator (`customscan::predicate_translator::IcebergDatumDecoder`) applies the *same* offset to pushed
+/// translator (`customscan::predicate_translator::decode_datum`) applies the *same* offset to pushed
 /// `date` / `timestamp` / `timestamptz` bounds that the storage write side
 /// applies to stored values — keeping pushed predicate bounds aligned with
 /// stored manifest bounds (Requirement 3.5). One conversion, one source of

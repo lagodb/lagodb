@@ -641,14 +641,14 @@ mod tests {
 
         fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
             unreachable!(
-                "task 3.9 decode-fail test diverges at decode_provider_private; \
+                "decode-fail test diverges at decode_provider_private; \
                  create_state is not reached"
             );
         }
 
         fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!(
-                "task 3.9 decode-fail test diverges at decode_provider_private; \
+                "decode-fail test diverges at decode_provider_private; \
                  begin is not reached"
             );
         }
@@ -657,21 +657,21 @@ mod tests {
             _ctx: NextSlotContext<'_, Self>,
         ) -> Result<bool, CustomScanError> {
             unreachable!(
-                "task 3.9 decode-fail test diverges at decode_provider_private; \
+                "decode-fail test diverges at decode_provider_private; \
                  next_slot is not reached"
             );
         }
 
         fn rescan(_ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!(
-                "task 3.9 decode-fail test diverges at decode_provider_private; \
+                "decode-fail test diverges at decode_provider_private; \
                  rescan is not reached"
             );
         }
 
         fn end(_ctx: EndContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!(
-                "task 3.9 decode-fail test diverges at decode_provider_private; \
+                "decode-fail test diverges at decode_provider_private; \
                  end is not reached"
             );
         }
@@ -691,7 +691,7 @@ mod tests {
                 ptr::null_mut(), // provider_metadata -> decode(NULL) = Err(NullPayload)
                 1,               // pre_setrefs_scan_rti — debug-only
             )
-            .expect("encode_split must succeed for the task 3.9 decode-fail fixture");
+            .expect("encode_split must succeed for the task decode-fail fixture");
 
             let cscan = pg_sys::palloc0(core::mem::size_of::<pg_sys::CustomScan>())
                 as *mut pg_sys::CustomScan;

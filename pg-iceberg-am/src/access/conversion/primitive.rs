@@ -22,7 +22,7 @@ use pgrx::prelude::{AnyNumeric, Date, Time, Timestamp, TimestampWithTimeZone};
 ///
 /// This is the single PG→Unix day-offset conversion shared by the storage
 /// write side ([`TemporalCodec::arrow_days_from_pg_date`]) and the runtime
-/// predicate translator (`customscan::predicate_translator::IcebergDatumDecoder::decode`), so a
+/// predicate translator (`customscan::predicate_translator::decode_datum`), so a
 /// pushed `date` bound is encoded with the *same* offset as the stored
 /// manifest bounds (Requirement 3.5). It reuses the shared
 /// [`PG_EPOCH_DAYS_DIFF`] constant rather than re-deriving the offset.
@@ -642,12 +642,12 @@ impl RowsToArrow for PrimitiveType {
 }
 
 // =============================================================================
-// Task 4.1 — Round-trip / epoch-consistency: translator pushed bounds vs the
+// Round-trip / epoch-consistency: translator pushed bounds vs the
 // storage write side (`TemporalCodec`) for `date` / `timestamp` / `timestamptz`.
 //
-// Feature: pushdown-capability-mismatch, Task 4.1 (integration / round-trip)
+// Feature: pushdown-capability-mismatch (integration / round-trip)
 //
-// The runtime predicate translator (`customscan::predicate_translator::IcebergDatumDecoder::decode`)
+// The runtime predicate translator (`customscan::predicate_translator::decode_datum`)
 // encodes a pushed `date` / `timestamp` / `timestamptz` bound into an iceberg
 // `Datum`, and the storage write side (`TemporalCodec` in this module) encodes
 // the *stored* column values into the Arrow/Iceberg manifest representation.
@@ -660,7 +660,7 @@ impl RowsToArrow for PrimitiveType {
 // translator's pushed `Datum` equals the value produced by the write side's
 // `TemporalCodec` conversion — proving the two share one offset without needing
 // a full end-to-end table write+scan. They are `#[pgrx::pg_test]` (not host
-// `#[test]`): the translator side calls `IcebergDatumDecoder::decode`, whose
+// `#[test]`): the translator side calls `decode_datum`, whose
 // `numeric` / `text` arms reference PG backend symbols (`AnyNumeric`,
 // `pg_detoast_datum`, `palloc`), so the whole decode path requires a live
 // backend even though these tests only drive its temporal arms (per
@@ -677,7 +677,7 @@ mod epoch_consistency_pg_test {
     use super::{
         TemporalCodec, pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros,
     };
-    use crate::customscan::predicate_translator::IcebergDatumDecoder;
+    use crate::customscan::predicate_translator::decode_datum;
     use iceberg_lite::spec::Datum;
     use pg_lakebase_core::tuple::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
     use pgrx::prelude::{Date, Timestamp, TimestampWithTimeZone};
@@ -743,7 +743,7 @@ mod epoch_consistency_pg_test {
         let pg_days = -PG_EPOCH_DAYS_DIFF;
         let datum = date_datum(pg_days);
 
-        let pushed = unsafe { IcebergDatumDecoder::decode(pg_sys::DATEOID, datum) }
+        let pushed = unsafe { decode_datum(pg_sys::DATEOID, datum) }
             .expect("epoch date must decode on the translator side");
 
         let date = unsafe { Date::from_datum(datum, false) }
@@ -766,9 +766,8 @@ mod epoch_consistency_pg_test {
         let pg_micros = -PG_EPOCH_USECS_DIFF;
         let datum = ts_datum(pg_micros);
 
-        let pushed =
-            unsafe { IcebergDatumDecoder::decode(pg_sys::TIMESTAMPOID, datum) }
-                .expect("epoch timestamp must decode on the translator side");
+        let pushed = unsafe { decode_datum(pg_sys::TIMESTAMPOID, datum) }
+            .expect("epoch timestamp must decode on the translator side");
 
         let ts = unsafe { Timestamp::from_datum(datum, false) }
             .expect("epoch timestamp must decode into a pgrx Timestamp");
@@ -792,12 +791,10 @@ mod epoch_consistency_pg_test {
                 |pg_days| {
                     let datum = date_datum(pg_days);
 
-                    let pushed = unsafe {
-                        IcebergDatumDecoder::decode(pg_sys::DATEOID, datum)
-                    }
-                    .expect(
-                        "a representable date must decode on the translator side",
-                    );
+                    let pushed = unsafe { decode_datum(pg_sys::DATEOID, datum) }
+                        .expect(
+                            "a representable date must decode on the translator side",
+                        );
 
                     let date = unsafe { Date::from_datum(datum, false) }
                         .expect("a representable date must decode into a pgrx Date");
@@ -826,7 +823,7 @@ mod epoch_consistency_pg_test {
                 let datum = ts_datum(pg_micros);
 
                 let pushed = unsafe {
-                    IcebergDatumDecoder::decode(pg_sys::TIMESTAMPOID, datum)
+                    decode_datum(pg_sys::TIMESTAMPOID, datum)
                 }
                 .expect(
                     "a representable timestamp must decode on the translator side",
@@ -859,7 +856,7 @@ mod epoch_consistency_pg_test {
                 let datum = ts_datum(pg_micros);
 
                 let pushed = unsafe {
-                    IcebergDatumDecoder::decode(pg_sys::TIMESTAMPTZOID, datum)
+                    decode_datum(pg_sys::TIMESTAMPTZOID, datum)
                 }
                 .expect(
                     "a representable timestamptz must decode on the translator side",

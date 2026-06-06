@@ -3,7 +3,7 @@
 //! [`IcebergPredicateTranslator::comparison`] gates on
 //! `PredicatePushdownPolicy::can_build` (which reaches
 //! `get_collation_isdeterministic`), and `param_value` decodes through
-//! `IcebergDatumDecoder` (numeric/text arms reference PG backend symbols), so
+//! `decode_datum` (numeric/text arms reference PG backend symbols), so
 //! both paths require a live backend even when driven with already-built
 //! scalars (see `docs/testing.md`).
 //!
