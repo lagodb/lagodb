@@ -3,9 +3,9 @@
 //! This module owns the whole "PG expression → iceberg [`Predicate`]" concern,
 //! laid out top to bottom: the scalar leaf model ([`IcebergScalar`] /
 //! [`ScalarKind`]), the error enum ([`IcebergTranslationError`]), the `unsafe`
-//! PG→iceberg value decoder (`decode_datum`), the pure predicate-tree algebra
-//! (`fold_left` / `fold_predicates` / `mirror_operator`), and the translator
-//! itself.
+//! PG→iceberg value decoder (`decode_datum`), the shared predicate-tree fold
+//! kernel (`fold_left`), and the translator itself (whose private methods own
+//! the translator-only assembly helpers `fold_predicates` / `mirror_operator`).
 
 use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
@@ -321,20 +321,26 @@ unsafe fn decode_timestamptz(
 }
 
 // =============================================================================
-// Predicate-tree algebra
+// Predicate-tree fold kernel
 //
-// Pure, stateless operations on `iceberg_lite::expr::Predicate`: the building
-// blocks the translator's `and` / `or` / `comparison` methods assemble their
-// results from. They live here (rather than in the vendored `iceberg-lite`,
-// which is periodically re-merged from upstream) because they are first-party
-// assembly logic. `fold_left` is also shared with the scan provider's
-// `combine_with_and`.
+// `fold_left` is the one genuinely shared building block on
+// `iceberg_lite::expr::Predicate`: it backs both the translator's
+// `fold_predicates` helper (errors on empty) and the scan provider's
+// `combine_with_and` (treats empty as "no filter"). It lives here as a
+// free function precisely because it is *not* translator-only. The
+// translator-only assembly helpers (`fold_predicates` / `mirror_operator`)
+// are private methods on [`IcebergPredicateTranslator`] below.
+//
+// It lives here (rather than in the vendored `iceberg-lite`, which is
+// periodically re-merged from upstream) because it is first-party assembly
+// logic.
 // =============================================================================
 
 /// Left-associative fold of `items` with `combine`; `None` for empty input.
 ///
-/// The kernel shared by `fold_predicates` (errors on empty) and the scan
-/// provider's `combine_with_and` (treats empty as "no filter").
+/// The kernel shared by [`IcebergPredicateTranslator::fold_predicates`]
+/// (errors on empty) and the scan provider's `combine_with_and` (treats empty
+/// as "no filter").
 pub(crate) fn fold_left(
     items: Vec<Predicate>,
     combine: impl Fn(Predicate, Predicate) -> Predicate,
@@ -342,27 +348,6 @@ pub(crate) fn fold_left(
     let mut iter = items.into_iter();
     let first = iter.next()?;
     Some(iter.fold(first, combine))
-}
-
-/// Left-associative fold of predicates with `Predicate::and` or `Predicate::or`.
-fn fold_predicates(
-    items: Vec<Predicate>,
-    and: bool,
-) -> Result<Predicate, IcebergTranslationError> {
-    let combine: fn(Predicate, Predicate) -> Predicate =
-        if and { Predicate::and } else { Predicate::or };
-    fold_left(items, combine).ok_or(IcebergTranslationError::EmptyBoolExpr)
-}
-
-/// Mirror a binary operator for `literal op column` → `column op literal`.
-fn mirror_operator(op: PredicateOperator) -> PredicateOperator {
-    match op {
-        PredicateOperator::LessThan => PredicateOperator::GreaterThan,
-        PredicateOperator::LessThanOrEq => PredicateOperator::GreaterThanOrEq,
-        PredicateOperator::GreaterThan => PredicateOperator::LessThan,
-        PredicateOperator::GreaterThanOrEq => PredicateOperator::LessThanOrEq,
-        _ => op,
-    }
 }
 
 // =============================================================================
@@ -467,7 +452,7 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
 
         let mut predicate_op = self.map_comparison_operator(op)?;
         if swap_sides {
-            predicate_op = mirror_operator(predicate_op);
+            predicate_op = self.mirror_operator(predicate_op);
         }
 
         Ok(Predicate::Binary(BinaryExpression::new(
@@ -503,14 +488,14 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
         &mut self,
         items: Vec<Self::Predicate>,
     ) -> Result<Self::Predicate, Self::Error> {
-        fold_predicates(items, /*and=*/ true)
+        self.fold_predicates(items, /*and=*/ true)
     }
 
     fn or(
         &mut self,
         items: Vec<Self::Predicate>,
     ) -> Result<Self::Predicate, Self::Error> {
-        fold_predicates(items, /*and=*/ false)
+        self.fold_predicates(items, /*and=*/ false)
     }
 
     /// Wraps the child in `Predicate::Not` (schema binding applies `rewrite_not` later).
@@ -599,6 +584,38 @@ impl IcebergPredicateTranslator {
                 inputcollid: op.inputcollid,
             }),
         }
+    }
+
+    /// Mirror a binary operator for the `literal op column` operand order so it
+    /// reads as `column op literal` (e.g. `7 < col` → `col > 7`).
+    ///
+    /// Translator-only assembly step used by [`Self::comparison`] when
+    /// `swap_sides` holds: self-inverse on directional ops, identity on
+    /// symmetric ones.
+    fn mirror_operator(&self, op: PredicateOperator) -> PredicateOperator {
+        match op {
+            PredicateOperator::LessThan => PredicateOperator::GreaterThan,
+            PredicateOperator::LessThanOrEq => PredicateOperator::GreaterThanOrEq,
+            PredicateOperator::GreaterThan => PredicateOperator::LessThan,
+            PredicateOperator::GreaterThanOrEq => PredicateOperator::LessThanOrEq,
+            _ => op,
+        }
+    }
+
+    /// Left-associative fold of predicates with `Predicate::and` or
+    /// `Predicate::or`, erroring on an empty children list.
+    ///
+    /// Translator-only wrapper over the shared [`fold_left`] kernel: it owns
+    /// the `and` / `or` empty-list semantics ([`IcebergTranslationError::EmptyBoolExpr`])
+    /// that distinguish it from the scan provider's `combine_with_and`.
+    fn fold_predicates(
+        &self,
+        items: Vec<Predicate>,
+        and: bool,
+    ) -> Result<Predicate, IcebergTranslationError> {
+        let combine: fn(Predicate, Predicate) -> Predicate =
+            if and { Predicate::and } else { Predicate::or };
+        fold_left(items, combine).ok_or(IcebergTranslationError::EmptyBoolExpr)
     }
 }
 
@@ -737,71 +754,81 @@ mod predicate_algebra_tests {
 
     #[test]
     fn mirror_operator_is_self_inverse_for_directional_ops() {
+        let t = IcebergPredicateTranslator::new();
         for op in [
             PredicateOperator::LessThan,
             PredicateOperator::LessThanOrEq,
             PredicateOperator::GreaterThan,
             PredicateOperator::GreaterThanOrEq,
         ] {
-            assert_eq!(mirror_operator(mirror_operator(op)), op);
+            assert_eq!(t.mirror_operator(t.mirror_operator(op)), op);
         }
     }
 
     #[test]
     fn mirror_operator_is_identity_for_symmetric_ops() {
+        let t = IcebergPredicateTranslator::new();
         for op in [
             PredicateOperator::Eq,
             PredicateOperator::NotEq,
             PredicateOperator::IsNull,
             PredicateOperator::NotNull,
         ] {
-            assert_eq!(mirror_operator(op), op);
+            assert_eq!(t.mirror_operator(op), op);
         }
     }
 
     #[test]
     fn mirror_operator_swaps_lt_and_gt() {
+        let t = IcebergPredicateTranslator::new();
         assert_eq!(
-            mirror_operator(PredicateOperator::LessThan),
+            t.mirror_operator(PredicateOperator::LessThan),
             PredicateOperator::GreaterThan,
         );
         assert_eq!(
-            mirror_operator(PredicateOperator::LessThanOrEq),
+            t.mirror_operator(PredicateOperator::LessThanOrEq),
             PredicateOperator::GreaterThanOrEq,
         );
     }
 
     #[test]
     fn fold_predicates_handles_single_child() {
+        let t = IcebergPredicateTranslator::new();
         let only = Reference::new("a").equal_to(Datum::int(1));
-        let folded = fold_predicates(vec![only.clone()], true).unwrap();
+        let folded = t.fold_predicates(vec![only.clone()], true).unwrap();
         assert_eq!(folded, only);
     }
 
     #[test]
     fn fold_predicates_chains_and_left_assoc() {
+        let t = IcebergPredicateTranslator::new();
         let a = Reference::new("a").equal_to(Datum::int(1));
         let b = Reference::new("b").equal_to(Datum::int(2));
         let c = Reference::new("c").equal_to(Datum::int(3));
-        let folded =
-            fold_predicates(vec![a.clone(), b.clone(), c.clone()], true).unwrap();
+        let folded = t
+            .fold_predicates(vec![a.clone(), b.clone(), c.clone()], true)
+            .unwrap();
         let expected = a.and(b).and(c);
         assert_eq!(folded, expected);
     }
 
     #[test]
     fn fold_predicates_chains_or() {
+        let t = IcebergPredicateTranslator::new();
         let a = Reference::new("a").equal_to(Datum::int(1));
         let b = Reference::new("b").equal_to(Datum::int(2));
-        let folded = fold_predicates(vec![a.clone(), b.clone()], false).unwrap();
+        let folded = t
+            .fold_predicates(vec![a.clone(), b.clone()], false)
+            .unwrap();
         let expected = a.or(b);
         assert_eq!(folded, expected);
     }
 
     #[test]
     fn fold_predicates_rejects_empty_input() {
+        let t = IcebergPredicateTranslator::new();
         assert!(matches!(
-            fold_predicates(vec![], true),
+            t.fold_predicates(vec![], true),
             Err(IcebergTranslationError::EmptyBoolExpr),
         ));
     }

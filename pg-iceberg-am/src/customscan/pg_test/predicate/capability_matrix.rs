@@ -15,6 +15,8 @@ mod tests {
     use pg_lakebase_core::expr::nodes::PgComparisonOp;
     use pgrx::pg_sys;
     use pgrx::pg_sys::Oid;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestRunner;
 
     use crate::customscan::{
         ComparisonOpClass, FLOAT_PUSHDOWN_ENABLED,
@@ -95,49 +97,69 @@ mod tests {
         }
     }
 
-    /// Any non-zero collation on either `opcollid` or `inputcollid` makes an
-    /// integer comparison `Unsupported`.
+    /// One integer-collation-gate case: the `(0,0)` triple must stay
+    /// `ExactRowFilter`, and tagging *either* collation slot with any non-zero
+    /// OID must flip it to `Unsupported`. Returns `Err` on assertion failure so
+    /// the `proptest` runner can shrink the counterexample.
+    fn integer_collation_gate_case(
+        idx: usize,
+        collid: u32,
+        tag_input: bool,
+    ) -> Result<(), TestCaseError> {
+        let (type_oid, opno) = INTEGER_EXACT_PRESERVATION_SET[idx];
+        let exact = triple(opno);
+        prop_assert_eq!(
+            supported_predicate(type_oid, exact),
+            PredicateCapability::ExactRowFilter,
+            "integer (type {}, opno {}) must be ExactRowFilter under (0,0)",
+            u32::from(type_oid),
+            opno,
+        );
+
+        let mut tagged = exact;
+        if tag_input {
+            tagged.inputcollid = Oid::from(collid);
+        } else {
+            tagged.opcollid = Oid::from(collid);
+        }
+        prop_assert_eq!(
+            supported_predicate(type_oid, tagged),
+            PredicateCapability::Unsupported,
+            "integer (type {}, opno {}) with non-zero {} = {} must be Unsupported",
+            u32::from(type_oid),
+            opno,
+            if tag_input { "inputcollid" } else { "opcollid" },
+            collid,
+        );
+
+        Ok(())
+    }
+
+    /// Across the full int4/int8 preservation set, any non-zero collation on
+    /// either slot makes the comparison `Unsupported`, while the collation-free
+    /// triple stays `ExactRowFilter`. Property port of the former host
+    /// `prop_integer_exact_is_unsupported_when_either_collation_slot_nonzero`,
+    /// driven through a backend `TestRunner` because `capability_for` links the
+    /// `text` arm's `get_collation_isdeterministic` syscache symbol.
     #[pgrx::pg_test(schema = "tests")]
-    fn supported_predicate_integer_single_slot_collation_is_unsupported() {
-        let collid = Oid::from(50_000u32);
+    fn supported_predicate_integer_collation_gate_property() {
+        let config = ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        };
+        let mut runner = TestRunner::new(config);
 
-        let int4eq = triple(op::INT4[0]);
-        let input_only = PgComparisonOp {
-            inputcollid: collid,
-            ..int4eq
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT4OID, input_only),
-            PredicateCapability::Unsupported,
-            "non-zero inputcollid alone must make int4eq Unsupported",
+        let strategy = (
+            0usize..INTEGER_EXACT_PRESERVATION_SET.len(),
+            1u32..=u32::MAX,
+            any::<bool>(),
         );
-        let opcoll_only = PgComparisonOp {
-            opcollid: collid,
-            ..int4eq
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT4OID, opcoll_only),
-            PredicateCapability::Unsupported,
-            "non-zero opcollid alone must make int4eq Unsupported",
-        );
-
-        let int8lt = triple(op::INT8[2]);
-        let input_only = PgComparisonOp {
-            inputcollid: collid,
-            ..int8lt
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT8OID, input_only),
-            PredicateCapability::Unsupported,
-        );
-        let opcoll_only = PgComparisonOp {
-            opcollid: collid,
-            ..int8lt
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT8OID, opcoll_only),
-            PredicateCapability::Unsupported,
-        );
+        runner
+            .run(&strategy, |(idx, collid, tag_input)| {
+                integer_collation_gate_case(idx, collid, tag_input)
+            })
+            .expect("integer collation gate property failed");
     }
 
     /// Both collation slots non-zero likewise rejects integer pushdown.

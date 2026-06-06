@@ -8,8 +8,8 @@ mod tests {
         TIMESTAMP_GT_OPNO,
     };
     use crate::customscan::pg_test::support::predicate_harness::{
-        ComparisonOpSpec, ComparisonSpec, ConstSpec, PREDICATE_HARNESS,
-        ScanColumnSpec,
+        ComparisonOpSpec, ComparisonSpec, ConstSpec, OperandSpec, PREDICATE_HARNESS,
+        RelabelSpec, ScanColumnSpec,
     };
     use iceberg_lite::expr::{
         BinaryExpression, Predicate, PredicateOperator, Reference,
@@ -495,6 +495,93 @@ mod tests {
                         case.opno, case.type_oid,
                     ),
                 }
+            }
+        }
+    }
+
+    /// Mirror a binary operator for the `literal op column` operand order, so the
+    /// expected operator matches what `comparison()` must produce after
+    /// `swap_sides → mirror_operator`. Self-inverse on directional ops, identity
+    /// on symmetric ones.
+    fn mirror_operator_oracle(op: PredicateOperator) -> PredicateOperator {
+        match op {
+            PredicateOperator::LessThan => PredicateOperator::GreaterThan,
+            PredicateOperator::LessThanOrEq => PredicateOperator::GreaterThanOrEq,
+            PredicateOperator::GreaterThan => PredicateOperator::LessThan,
+            PredicateOperator::GreaterThanOrEq => PredicateOperator::LessThanOrEq,
+            other => other,
+        }
+    }
+
+    /// `literal op column` clauses must classify identically to `column op
+    /// literal` and translate to the *mirrored* predicate operator (e.g.
+    /// `7 < col` → `col > 7`), still referencing the scan column with the
+    /// original datum. This is the integration guard for the
+    /// `swap_sides → mirror_operator` wiring in `comparison()`: the pure
+    /// `mirror_operator` unit tests and the classifier order-invariance test do
+    /// not exercise the final translated `PredicateOperator`.
+    #[pgrx::pg_test(schema = "tests")]
+    fn translator_integer_literal_op_column_mirrors_operator() {
+        unsafe {
+            for case in int_exact_cases() {
+                let is_int8 = case.type_oid == pg_sys::INT8OID;
+                let const_spec = ConstSpec {
+                    type_oid: case.type_oid,
+                    collation: 0,
+                    len: if is_int8 { 8 } else { 4 },
+                    datum: pg_sys::Datum::from(7usize),
+                    byval: true,
+                };
+                // Literal on the left, scan column on the right.
+                let obs = PREDICATE_HARNESS.observe(&ComparisonSpec::new(
+                    ScanColumnSpec::synthetic(case.type_oid, 0),
+                    OperandSpec::Const(const_spec),
+                    OperandSpec::ScanCol,
+                    ComparisonOpSpec {
+                        opno: case.opno,
+                        opcollid: 0,
+                        inputcollid: 0,
+                        opfuncid: 0,
+                        opresulttype: pg_sys::BOOLOID,
+                    },
+                    RelabelSpec::NONE,
+                ));
+
+                assert!(
+                    matches!(
+                        obs.decision,
+                        QualPushdownDecision::Pushable {
+                            contract: PushdownContract::ExactRowFilter,
+                            costing: PushdownCosting::CostedPruning,
+                        }
+                    ),
+                    "opno {} (type {:?}) with the literal on the left must still classify ExactRowFilter, got {:?}",
+                    case.opno,
+                    case.type_oid,
+                    obs.decision,
+                );
+
+                let expected_op = mirror_operator_oracle(case.expected_op);
+                let expected_datum = if is_int8 {
+                    Datum::long(7)
+                } else {
+                    Datum::int(7)
+                };
+                let expected = Predicate::Binary(BinaryExpression::new(
+                    expected_op,
+                    Reference::new("col"),
+                    expected_datum,
+                ));
+                assert_eq!(
+                    obs.translated
+                        .expect("literal op column must translate on unfixed code"),
+                    expected,
+                    "opno {} (type {:?}) with the literal on the left must mirror {:?} → {:?} while keeping the column reference and datum",
+                    case.opno,
+                    case.type_oid,
+                    case.expected_op,
+                    expected_op,
+                );
             }
         }
     }

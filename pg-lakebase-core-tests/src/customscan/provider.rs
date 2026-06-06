@@ -865,9 +865,7 @@ mod tests {
                 provider_metadata, // malformed cell-6 payload
                 1,   // pre_setrefs_scan_rti — debug-only
             )
-            .expect(
-                "encode_split must succeed for the task codec-malformed fixture",
-            );
+            .expect("encode_split must succeed for the task codec-malformed fixture");
 
             let cscan = pg_sys::palloc0(core::mem::size_of::<pg_sys::CustomScan>())
                 as *mut pg_sys::CustomScan;

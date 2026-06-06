@@ -9,7 +9,7 @@
 //!
 //! The pure `map_comparison_operator` and `is_null` / `is_not_null`
 //! (non-column rejection) tests remain host `#[test]`s in
-//! `customscan/predicate_translator/mod.rs`. This module owns the SQL
+//! `customscan/predicate_translator.rs`. This module owns the SQL
 //! three-valued-logic NULL folding and the NULL-param decode contract.
 
 #[pgrx::pg_schema]
