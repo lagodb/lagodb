@@ -147,8 +147,12 @@ Two ways to wire the cache in:
 - **Thorough path (later)**: install a custom FS extension into the DuckDB
   server that routes `lakebase://` URL I/O to `pg-lakebase-storage` (socket +
   pread / FD passing), making the cache fully transparent to DuckDB and
-  supporting on-demand fetch on a miss. This is what `pg_lake` does in
-  `duckdb_pglake`.
+  supporting on-demand fetch on a miss. `pg_lake` follows the same idea with
+  its `duckdb_pglake` caching file system
+  (`duckdb_pglake/src/fs/caching_file_system.cpp`), though it wraps the
+  object-store FS and controls caching via a `nocache` URL prefix rather than
+  delegating to a separate storage process; our `lakebase://` routing to
+  `pg-lakebase-storage` is an extension of that idea.
 
 ---
 
@@ -246,11 +250,14 @@ rule that "the plan tree never freezes a native predicate / file list" — what
 the offload plan freezes is only a **SQL template string + copyObject-safe
 metadata**, and the file list is injected at Begin/ReScan.
 
-> Deparse reuse: `pg-lakebase-core/src/customscan/` already vendors
-> `pg_ruleutils_17.c` etc. (see `vendor/`; Level 1 EXPLAIN already uses
-> `deparse_expression`). Query offload needs **whole-query** deparse, so either
-> extend the vendored ruleutils or port a `pgduckdb_get_querydef`-style
-> whole-query deparser from `pg_lake`. This is the **highest-effort,
+> Deparse reuse: today there is **no vendored ruleutils** in
+> `pg-lakebase-core`. Level 1 EXPLAIN deparses single expressions by calling
+> PostgreSQL's own `pg_sys::deparse_expression` (in `customscan/explain.rs`),
+> which only handles individual `Expr` nodes. Query offload needs
+> **whole-query** deparse, so this proposal must port a whole-query deparser —
+> either `pg_lake`'s `deparse_ruleutils.c` or a `pgduckdb_get_querydef`-style
+> deparser (the latter from `pg_duckdb`) — most likely by vendoring a
+> `ruleutils` copy into the crate. This is the **highest-effort,
 > highest-risk** piece of this proposal; see §7 Risks.
 
 ### 3.3 Execution: the offload CustomScan
@@ -360,11 +367,13 @@ This is the heart of the proposal — **maximize reuse, minimize what's new**.
 ### 5.1 Sharing Shippability Knowledge (mandatory reuse)
 
 Level 1's `LakebaseCustomScanProvider::classify_predicate` already answers whether a
-parsed leaf can be pushed down via `QualPushdownDecision::Pushable { contract }`,
+parsed leaf can be pushed down via `QualPushdownDecision::Pushable { contract, costing }`,
 with `PushdownContract::ExactRowFilter` (row-level SQL-equivalent filter on the
 normal scan path) or `PushdownContract::ConservativePruning` (conservative
 pruning: no false negatives, false positives allowed; residual `plan.qual`
-keeps correctness). Level 2's whole-query shippability
+keeps correctness) — plus a `PushdownCosting` tier
+(`CostedPruning` / `UncostedBestEffort`) that controls whether the pushed
+expression is allowed to discount scan-volume cost. Level 2's whole-query shippability
 decision **must be built on the same knowledge**, or the two layers will disagree
 about "what can be pushed down."
 
@@ -385,8 +394,9 @@ pub trait Shippability {
   (targetlist, join qual, group/order, having).
 
 The provider (Iceberg AM) implements `Shippability` once, and both layers
-consume it. This corresponds to `pg_lake`'s `shippable_pgduck_functions.c` /
-`shippable_pgduck_operators.c`.
+consume it. This corresponds to `pg_lake`'s `shippable_builtin_functions.c` /
+`shippable_builtin_operators.c` (plus `shippable_spatial_*.c` and the FDW-side
+`fdw/shippable.c` with `is_shippable`).
 
 **For the concrete list of which query shapes / operators / types / subtrees
 can be pushed down, see the full inventory in §5.6.**
@@ -676,7 +686,8 @@ should be able to mark them so they can be tightened later via a GUC
 
 - **Enumeration / lookup** (OID allowlists for operators/functions/types/
   collations): the provider implements `Shippability` in `expr/shippable.rs`
-  (corresponding to `shippable_pgduck_*.c` + `GetDuckDBTypeForPGType`).
+  (corresponding to `shippable_builtin_*.c` / `shippable_spatial_*.c` +
+  `GetDuckDBTypeForPGType`).
 - **Node traversal + Query/RTE-level gates**: core's shared walker
   (corresponding to `ProcessNotShippableExpressionWalker`); both Level 1
   `classify_predicate` (single predicate) and Level 2 `FullQueryIsOffloadable` /
@@ -828,15 +839,15 @@ The provider side (`pg-iceberg-am`) only needs to:
 | Capability | pg_lake counterpart | This proposal's home |
 |---|---|---|
 | Whole-query pushdown decision (2a) | `LakeTablePlanner` / `FullQueryIsPushdownable` | `customscan/duckdb/offloadable.rs` |
-| Subtree pushdown: lake⋈lake join (2b) | `GetForeignJoinPaths` / `foreign_join_ok` | `customscan/duckdb/subtree.rs` (`set_join_pathlist_hook`) |
-| Subtree pushdown: aggregate over lake (2b) | `GetForeignUpperPaths` / `add_foreign_grouping_paths` | `customscan/duckdb/subtree.rs` (`create_upper_paths_hook`) |
-| read_table placeholder + execution-time replacement | `deparse_ruleutils.c` / `ReplaceReadTableFunctionCalls` | `customscan/duckdb/deparse.rs` |
+| Subtree pushdown: lake⋈lake join (2b) | `postgresGetForeignJoinPaths` (FdwRoutine `GetForeignJoinPaths`) / `foreign_join_ok` | `customscan/duckdb/subtree.rs` (`set_join_pathlist_hook`) |
+| Subtree pushdown: aggregate over lake (2b) | `postgresGetForeignUpperPaths` (FdwRoutine `GetForeignUpperPaths`) / `add_foreign_grouping_paths` | `customscan/duckdb/subtree.rs` (`create_upper_paths_hook`) |
+| read_table placeholder + execution-time replacement | `deparse_ruleutils.c` / `ReplaceReadTableFunctionCalls` (pg_lake's placeholder literal is `__lake_read_table` / `PG_LAKE_READ_TABLE`; our `__lakebase_read_table` is the analogous name) | `customscan/duckdb/deparse.rs` |
 | PG↔DuckDB client (libpq + interrupt/cancel) | `pgduck/client.c` | `customscan/duckdb/{pool,client}.rs` |
 | Standalone DuckDB server process | `pgduck_server/` | `worker/duckdb/` + (vendored) pgduck_server |
 | Result return (wire / TRANSMIT) | `pgsession.c` / `duckdb.c` | `customscan/duckdb/result.rs` (v1 wire, later Arrow) |
-| Shippability rules | `shippable_pgduck_*.c` | `expr/shippable.rs` (shared by both layers; inventory in §5.6) |
+| Shippability rules | `shippable_builtin_*.c` / `shippable_spatial_*.c` (+ `fdw/shippable.c`) | `expr/shippable.rs` (shared by both layers; inventory in §5.6) |
 | Pushdown surface (query/RTE/expr/type-level decisions) | `ProcessNotShippableExpressionWalker` + `GetDuckDBTypeForPGType` | core shared walker + `expr/shippable.rs` (§5.6) |
 | SQL shim (renamed functions, e.g. `regexp_matches`) | `rewrite_query.c` `RewriteFuncExpr` + `PG_LAKE_INTERNAL_NSP` | `customscan/duckdb/deparse.rs` + duckdb_pglake module |
 | `now()` -> transaction-time constant | `PG_LAKE_NOW_TEMPLATE` replacement | `customscan/duckdb/deparse.rs` (injection stage) |
-| Cache-transparent FS | `duckdb_pglake/caching_file_system.cpp` | (Phase 4) DuckDB FS extension -> storage socket |
+| Cache-transparent FS | `duckdb_pglake/src/fs/caching_file_system.cpp` | (Phase 4) DuckDB FS extension -> storage socket |
 | Heap-table join pushdown | (pg_lake does not support; heap join falls back to PG) | (not supported, see §6; the lake subtree is still pushed down; pg_duckdb's in-process approach does not apply) |

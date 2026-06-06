@@ -19,11 +19,16 @@ for PostgreSQL integration.
 - `pg-iceberg-am` is the primary SQL-facing extension. Its local Iceberg table
   storage path is the default and most exercised path, using PostgreSQL's local
   file APIs and a custom WAL resource manager for crash recovery.
+- Predicate pushdown is supported through a CustomScan provider: SQL `WHERE`
+  predicates are pushed into the Iceberg scan for file/row-group pruning and
+  row-level filtering, instead of scanning everything and filtering in the
+  executor.
 - Object storage is available through distributed tablespaces backed by
   `pg-lakebase-storage`, a Unix-socket cache service. The storage layer supports
   AWS S3, S3-compatible endpoints, Google Cloud Storage, and Azure Blob Storage.
-- `pg-lakebase-core` currently exposes TAM framework primitives. FDW support is
-  still a project direction, not a completed public API.
+- `pg-lakebase-core` currently exposes a TAM framework plus a generic CustomScan
+  filter-pushdown framework. FDW support is still a project direction, not a
+  completed public API.
 
 ## Architecture Overview
 
@@ -84,7 +89,7 @@ once that integration exists.
 | Crate | Purpose |
 |-------|---------|
 | [pg-iceberg-am](./pg-iceberg-am) | PostgreSQL extension implementing the Iceberg table access method. |
-| [pg-lakebase-core](./pg-lakebase-core) | Framework crate for PostgreSQL TAM implementations. |
+| [pg-lakebase-core](./pg-lakebase-core) | Framework crate for PostgreSQL TAM implementations and CustomScan predicate pushdown. |
 | [pg-lakebase-core-tests](./pg-lakebase-core-tests) | PostgreSQL integration tests (`#[pg_test]`) for `pg-lakebase-core`. |
 | [pg-lakebase-macros](./pg-lakebase-macros) | Procedural macro support, including `#[pg_table_am]`. |
 | [iceberg-lite](./iceberg-lite) | Synchronous, PostgreSQL-friendly Iceberg library used by the TAM. |
