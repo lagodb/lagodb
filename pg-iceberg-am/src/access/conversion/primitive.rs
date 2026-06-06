@@ -659,16 +659,21 @@ impl RowsToArrow for PrimitiveType {
 // These tests drive the SAME raw PG `Datum` through BOTH ends and assert the
 // translator's pushed `Datum` equals the value produced by the write side's
 // `TemporalCodec` conversion — proving the two share one offset without needing
-// a full end-to-end table write+scan. They are host `#[test]` / `proptest`s
-// because every conversion they touch is pure pgrx datum arithmetic
-// (`Date`/`Timestamp`/`TimestampWithTimeZone::from_datum`, the shared
-// `pg_epoch_*` helpers, and the checked-add `TemporalCodec` math) — none of
-// which call into a live PG backend (per `docs/testing.md`, mirroring the
-// existing `decode_date_applies_shared_epoch_offset` host tests in
-// `customscan/predicate_translator/datum_decoder.rs`).
+// a full end-to-end table write+scan. They are `#[pgrx::pg_test]` (not host
+// `#[test]`): the translator side calls `IcebergDatumDecoder::decode`, whose
+// `numeric` / `text` arms reference PG backend symbols (`AnyNumeric`,
+// `pg_detoast_datum`, `palloc`), so the whole decode path requires a live
+// backend even though these tests only drive its temporal arms (per
+// `docs/testing.md`). They are co-located here, gated on `feature = "pg_test"`,
+// to keep access to the module-private `TemporalCodec` write side.
 // =============================================================================
-#[cfg(test)]
-mod epoch_consistency_tests {
+#[cfg(feature = "pg_test")]
+mod epoch_consistency_pg_test {
+    // pgrx-tests calls SELECT tests.<function>(); manual schema placement requires
+    // an explicit schema entity in the generated SQL graph.
+    #[pgrx::pg_schema]
+    mod tests {}
+
     use super::{
         TemporalCodec, pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros,
     };
@@ -678,6 +683,7 @@ mod epoch_consistency_tests {
     use pgrx::prelude::{Date, Timestamp, TimestampWithTimeZone};
     use pgrx::{FromDatum, pg_sys};
     use proptest::prelude::*;
+    use proptest::test_runner::TestRunner;
 
     /// Buffer (in PG-epoch days) kept away from both ends of the `i32` range so
     /// that (a) we never generate the `±infinity` date sentinels
@@ -699,17 +705,11 @@ mod epoch_consistency_tests {
 
     /// The largest PG-epoch micros value for which adding `PG_EPOCH_USECS_DIFF`
     /// stays within `i64` (so BOTH ends produce a `Datum` rather than the
-    /// shared overflow → not-representable result). Near the very top of PG's
-    /// valid range the offset addition would overflow `i64`; both the
-    /// translator and the write side return an error there (consistently), but
-    /// to exercise the *agreement on a produced bound* we cap the generator
-    /// below the overflow point.
+    /// shared overflow → not-representable result).
     const TS_OFFSET_SAFE_MAX: i64 = i64::MAX - PG_EPOCH_USECS_DIFF;
 
     /// Upper bound of the timestamp generator: the tighter of PG's max valid
-    /// value and the offset-overflow-safe max. Any value in
-    /// `MIN_PG_TS_USEC..=TS_GEN_MAX` is finite, representable by
-    /// `from_datum`, and offset-convertible at BOTH ends.
+    /// value and the offset-overflow-safe max.
     const TS_GEN_MAX: i64 = if MAX_PG_TS_USEC < TS_OFFSET_SAFE_MAX {
         MAX_PG_TS_USEC
     } else {
@@ -717,35 +717,35 @@ mod epoch_consistency_tests {
     };
 
     /// Build a PG `date` `Datum` directly from a raw `DateADT` (PG-epoch days).
-    /// This is exactly what `Date::into_datum` produces (`Datum::from(self.0)`),
-    /// so both the translator decode and `Date::from_datum` round-trip it.
     fn date_datum(pg_days: i32) -> pg_sys::Datum {
         pg_sys::Datum::from(pg_days)
     }
 
-    /// Build a PG `timestamp` / `timestamptz` `Datum` directly from raw
-    /// PG-epoch microseconds.
+    /// Build a PG `timestamp` / `timestamptz` `Datum` from raw PG-epoch micros.
     fn ts_datum(pg_micros: i64) -> pg_sys::Datum {
         pg_sys::Datum::from(pg_micros)
     }
 
-    // -------------------------------------------------------------------------
-    // Concrete cross-checks (unit tests): pin the offset agreement at the Unix
-    // epoch and at an arbitrary representable instant.
-    // -------------------------------------------------------------------------
+    /// 256 cases per run (matching the repo's other PBTs, above the >=100
+    /// floor); no on-disk regression persistence inside the backend harness.
+    fn proptest_config() -> ProptestConfig {
+        ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        }
+    }
 
-    /// At the Unix epoch the translator and the write side agree: the PG-epoch
-    /// day `-PG_EPOCH_DAYS_DIFF` (1970-01-01) is iceberg day 0 on BOTH ends.
-    #[test]
+    /// At the Unix epoch the translator and the write side agree: PG-epoch day
+    /// `-PG_EPOCH_DAYS_DIFF` (1970-01-01) is iceberg day 0 on BOTH ends.
+    #[pgrx::pg_test(schema = "tests")]
     fn date_epoch_consistency_at_unix_epoch() {
         let pg_days = -PG_EPOCH_DAYS_DIFF;
         let datum = date_datum(pg_days);
 
-        // Translator (pushed bound).
         let pushed = unsafe { IcebergDatumDecoder::decode(pg_sys::DATEOID, datum) }
             .expect("epoch date must decode on the translator side");
 
-        // Storage write side (stored manifest bound).
         let date = unsafe { Date::from_datum(datum, false) }
             .expect("epoch date must decode into a pgrx Date");
         let write_arrow_days = TemporalCodec::arrow_days_from_pg_date(&date)
@@ -761,7 +761,7 @@ mod epoch_consistency_tests {
 
     /// At the Unix epoch the timestamp translator and write side agree on micros
     /// 0 (PG-epoch micros `-PG_EPOCH_USECS_DIFF`).
-    #[test]
+    #[pgrx::pg_test(schema = "tests")]
     fn timestamp_epoch_consistency_at_unix_epoch() {
         let pg_micros = -PG_EPOCH_USECS_DIFF;
         let datum = ts_datum(pg_micros);
@@ -783,115 +783,105 @@ mod epoch_consistency_tests {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Property: for every representable date / timestamp / timestamptz value,
-    // the translator's pushed `Datum` uses the SAME epoch offset as the storage
-    // write side's `TemporalCodec` conversion (Requirement 3.5).
-    // -------------------------------------------------------------------------
+    #[pgrx::pg_test(schema = "tests")]
+    fn pushed_date_bound_matches_write_side_offset() {
+        let mut runner = TestRunner::new(proptest_config());
+        runner
+            .run(
+                &((i32::MIN + DATE_GUARD)..=(i32::MAX - DATE_GUARD)),
+                |pg_days| {
+                    let datum = date_datum(pg_days);
 
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            // 256 cases per run, matching the host PBTs in `translator.rs` and
-            // `pg-lakebase-core` (well above the >=100 floor). Failing examples
-            // persist to `proptest-regressions/<test>.txt` for replay.
-            cases: 256,
-            ..ProptestConfig::default()
-        })]
+                    let pushed = unsafe {
+                        IcebergDatumDecoder::decode(pg_sys::DATEOID, datum)
+                    }
+                    .expect(
+                        "a representable date must decode on the translator side",
+                    );
 
-        /// Property (Requirement 3.5): for every representable PG `date`, the
-        /// translator's pushed iceberg `Datum::date` equals
-        /// `Datum::date(TemporalCodec::arrow_days_from_pg_date(date))` — i.e.
-        /// both ends apply the shared `PG_EPOCH_DAYS_DIFF` offset, so a pushed
-        /// `date` predicate bound aligns with stored manifest bounds.
-        ///
-        /// Generator domain: finite, in-range PG-epoch days (excludes the
-        /// `±infinity` sentinels and any value whose offset would overflow).
-        ///
-        /// **Validates: Requirements 3.5**
-        #[test]
-        fn pushed_date_bound_matches_write_side_offset(
-            pg_days in (i32::MIN + DATE_GUARD)..=(i32::MAX - DATE_GUARD),
-        ) {
-            let datum = date_datum(pg_days);
+                    let date = unsafe { Date::from_datum(datum, false) }
+                        .expect("a representable date must decode into a pgrx Date");
+                    let write_arrow_days = TemporalCodec::arrow_days_from_pg_date(
+                        &date,
+                    )
+                    .expect("a representable date must encode on the write side");
 
-            // Translator: the pushed predicate bound.
-            let pushed = unsafe { IcebergDatumDecoder::decode(pg_sys::DATEOID, datum) }
-                .expect("a representable date must decode on the translator side");
+                    prop_assert_eq!(
+                        write_arrow_days,
+                        pg_epoch_days_to_unix_days(pg_days)
+                            .expect("offset must not overflow for a guarded value"),
+                    );
+                    prop_assert_eq!(pushed, Datum::date(write_arrow_days));
+                    Ok(())
+                },
+            )
+            .expect("pushed `date` bound must match the write-side offset");
+    }
 
-            // Storage write side: the stored manifest bound.
-            let date = unsafe { Date::from_datum(datum, false) }
-                .expect("a representable date must decode into a pgrx Date");
-            let write_arrow_days = TemporalCodec::arrow_days_from_pg_date(&date)
-                .expect("a representable date must encode on the write side");
+    #[pgrx::pg_test(schema = "tests")]
+    fn pushed_timestamp_bound_matches_write_side_offset() {
+        let mut runner = TestRunner::new(proptest_config());
+        runner
+            .run(&(MIN_PG_TS_USEC..=TS_GEN_MAX), |pg_micros| {
+                let datum = ts_datum(pg_micros);
 
-            // Both ends must apply the SAME shared offset.
-            prop_assert_eq!(
-                write_arrow_days,
-                pg_epoch_days_to_unix_days(pg_days)
-                    .expect("offset must not overflow for a guarded value"),
-            );
-            prop_assert_eq!(pushed, Datum::date(write_arrow_days));
-        }
+                let pushed = unsafe {
+                    IcebergDatumDecoder::decode(pg_sys::TIMESTAMPOID, datum)
+                }
+                .expect(
+                    "a representable timestamp must decode on the translator side",
+                );
 
-        /// Property (Requirement 3.5): for every representable PG `timestamp`,
-        /// the translator's pushed `Datum::timestamp_micros` equals
-        /// `Datum::timestamp_micros(TemporalCodec::unix_micros_from_timestamp(..))`
-        /// — both ends apply the shared `PG_EPOCH_USECS_DIFF` offset.
-        ///
-        /// **Validates: Requirements 3.5**
-        #[test]
-        fn pushed_timestamp_bound_matches_write_side_offset(
-            pg_micros in MIN_PG_TS_USEC..=TS_GEN_MAX,
-        ) {
-            let datum = ts_datum(pg_micros);
+                let ts = unsafe { Timestamp::from_datum(datum, false) }.expect(
+                    "a representable timestamp must decode into a pgrx Timestamp",
+                );
+                let write_unix_micros = TemporalCodec::unix_micros_from_timestamp(
+                    ts.into(),
+                )
+                .expect("a representable timestamp must encode on the write side");
 
-            let pushed = unsafe { IcebergDatumDecoder::decode(pg_sys::TIMESTAMPOID, datum) }
-                .expect("a representable timestamp must decode on the translator side");
+                prop_assert_eq!(
+                    write_unix_micros,
+                    pg_epoch_micros_to_unix_micros(pg_micros)
+                        .expect("offset must not overflow for a guarded value"),
+                );
+                prop_assert_eq!(pushed, Datum::timestamp_micros(write_unix_micros));
+                Ok(())
+            })
+            .expect("pushed `timestamp` bound must match the write-side offset");
+    }
 
-            let ts = unsafe { Timestamp::from_datum(datum, false) }
-                .expect("a representable timestamp must decode into a pgrx Timestamp");
-            let write_unix_micros =
-                TemporalCodec::unix_micros_from_timestamp(ts.into())
-                    .expect("a representable timestamp must encode on the write side");
+    #[pgrx::pg_test(schema = "tests")]
+    fn pushed_timestamptz_bound_matches_write_side_offset() {
+        let mut runner = TestRunner::new(proptest_config());
+        runner
+            .run(&(MIN_PG_TS_USEC..=TS_GEN_MAX), |pg_micros| {
+                let datum = ts_datum(pg_micros);
 
-            prop_assert_eq!(
-                write_unix_micros,
-                pg_epoch_micros_to_unix_micros(pg_micros)
-                    .expect("offset must not overflow for a guarded value"),
-            );
-            prop_assert_eq!(pushed, Datum::timestamp_micros(write_unix_micros));
-        }
+                let pushed = unsafe {
+                    IcebergDatumDecoder::decode(pg_sys::TIMESTAMPTZOID, datum)
+                }
+                .expect(
+                    "a representable timestamptz must decode on the translator side",
+                );
 
-        /// Property (Requirement 3.5): for every representable PG `timestamptz`,
-        /// the translator's pushed `Datum::timestamptz_micros` equals
-        /// `Datum::timestamptz_micros(TemporalCodec::unix_micros_from_timestamp(..))`.
-        /// PG stores `timestamptz` as UTC microseconds, and the write side uses
-        /// the same `unix_micros_from_timestamp` conversion as `timestamp`
-        /// (see the `Timestamptz` build arm), so the shared
-        /// `PG_EPOCH_USECS_DIFF` offset must hold here too.
-        ///
-        /// **Validates: Requirements 3.5**
-        #[test]
-        fn pushed_timestamptz_bound_matches_write_side_offset(
-            pg_micros in MIN_PG_TS_USEC..=TS_GEN_MAX,
-        ) {
-            let datum = ts_datum(pg_micros);
+                let ts = unsafe { TimestampWithTimeZone::from_datum(datum, false) }
+                    .expect(
+                        "a representable timestamptz must decode into a pgrx value",
+                    );
+                let write_unix_micros = TemporalCodec::unix_micros_from_timestamp(
+                    ts.into(),
+                )
+                .expect("a representable timestamptz must encode on the write side");
 
-            let pushed = unsafe { IcebergDatumDecoder::decode(pg_sys::TIMESTAMPTZOID, datum) }
-                .expect("a representable timestamptz must decode on the translator side");
-
-            let ts = unsafe { TimestampWithTimeZone::from_datum(datum, false) }
-                .expect("a representable timestamptz must decode into a pgrx value");
-            let write_unix_micros =
-                TemporalCodec::unix_micros_from_timestamp(ts.into())
-                    .expect("a representable timestamptz must encode on the write side");
-
-            prop_assert_eq!(
-                write_unix_micros,
-                pg_epoch_micros_to_unix_micros(pg_micros)
-                    .expect("offset must not overflow for a guarded value"),
-            );
-            prop_assert_eq!(pushed, Datum::timestamptz_micros(write_unix_micros));
-        }
+                prop_assert_eq!(
+                    write_unix_micros,
+                    pg_epoch_micros_to_unix_micros(pg_micros)
+                        .expect("offset must not overflow for a guarded value"),
+                );
+                prop_assert_eq!(pushed, Datum::timestamptz_micros(write_unix_micros));
+                Ok(())
+            })
+            .expect("pushed `timestamptz` bound must match the write-side offset");
     }
 }

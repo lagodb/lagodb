@@ -16,7 +16,6 @@ mod tests {
     /// In-range `numeric` decodes to an iceberg decimal `Datum`.
     #[pgrx::pg_test(schema = "tests")]
     fn decode_numeric_in_range_builds_decimal_datum() {
-        use iceberg_lite::spec::Datum;
         use pgrx::IntoDatum;
         use pgrx::prelude::AnyNumeric;
         use rust_decimal::Decimal;
@@ -41,7 +40,6 @@ mod tests {
     /// Negative fractional `numeric` decodes through the scaled-`i128` path.
     #[pgrx::pg_test(schema = "tests")]
     fn decode_numeric_negative_fraction_round_trips() {
-        use iceberg_lite::spec::Datum;
         use pgrx::IntoDatum;
         use pgrx::prelude::AnyNumeric;
         use rust_decimal::Decimal;
@@ -119,7 +117,6 @@ mod tests {
     /// `text` / `varchar` literals decode to iceberg `string` `Datum`s.
     #[pgrx::pg_test(schema = "tests")]
     fn decode_text_and_varchar_build_string_datum() {
-        use iceberg_lite::spec::Datum;
         use pgrx::IntoDatum;
 
         unsafe {
@@ -177,5 +174,149 @@ mod tests {
                 ),
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Pass-by-value temporal / float decode.
+    //
+    // These were previously host `#[test]`s, but calling `IcebergDatumDecoder::
+    // decode` pulls in the function's numeric/text arms (`AnyNumeric`,
+    // `pg_detoast_datum`, `palloc`), so the whole decode path requires a live
+    // backend regardless of which type arm a given test exercises (see
+    // `docs/testing.md`). They run here as `#[pg_test]` alongside the numeric /
+    // text decode coverage above.
+    //
+    // Scope note: the *happy-path* epoch-offset equivalence for date /
+    // timestamp / timestamptz (decoded `Datum` == write-side stored bound) is
+    // owned by the write/translator consistency property tests in
+    // `access/conversion/primitive.rs` (`pushed_*_bound_matches_write_side_offset`
+    // and `*_epoch_consistency_at_unix_epoch`), which exercise the same
+    // `IcebergDatumDecoder::decode` path across the whole representable range.
+    // This module keeps only the decode-specific cases those property tests
+    // deliberately exclude: the ±infinity not-representable rejections (guarded
+    // out of the property ranges) and the `FLOAT_PUSHDOWN_ENABLED` gating.
+    // -------------------------------------------------------------------------
+
+    use iceberg_lite::spec::Datum;
+
+    use crate::customscan::FLOAT_PUSHDOWN_ENABLED;
+
+    /// Build a PG `date` `Datum` directly from a raw `DateADT` (PG-epoch days).
+    fn date_datum_from_raw(pg_days: i32) -> pg_sys::Datum {
+        pg_sys::Datum::from(pg_days)
+    }
+
+    /// Build a PG `timestamp` / `timestamptz` `Datum` from raw PG-epoch micros.
+    fn ts_datum_from_raw(pg_micros: i64) -> pg_sys::Datum {
+        pg_sys::Datum::from(pg_micros)
+    }
+
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_date_infinity_is_not_representable() {
+        for raw in [i32::MAX, i32::MIN] {
+            let datum = date_datum_from_raw(raw);
+            assert!(
+                matches!(
+                    unsafe { IcebergDatumDecoder::decode(pg_sys::DATEOID, datum) },
+                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
+                        if type_oid == pg_sys::DATEOID
+                ),
+                "±infinity date (raw {raw}) must be ValueNotRepresentable",
+            );
+        }
+    }
+
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_timestamp_infinity_is_not_representable() {
+        for raw in [i64::MAX, i64::MIN] {
+            let datum = ts_datum_from_raw(raw);
+            assert!(
+                matches!(
+                    unsafe { IcebergDatumDecoder::decode(pg_sys::TIMESTAMPOID, datum) },
+                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
+                        if type_oid == pg_sys::TIMESTAMPOID
+                ),
+                "±infinity timestamp (raw {raw}) must be ValueNotRepresentable",
+            );
+        }
+    }
+
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_timestamptz_infinity_is_not_representable() {
+        for raw in [i64::MAX, i64::MIN] {
+            let datum = ts_datum_from_raw(raw);
+            assert!(
+                matches!(
+                    unsafe { IcebergDatumDecoder::decode(pg_sys::TIMESTAMPTZOID, datum) },
+                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
+                        if type_oid == pg_sys::TIMESTAMPTZOID
+                ),
+                "±infinity timestamptz (raw {raw}) must be ValueNotRepresentable",
+            );
+        }
+    }
+
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_float4_builds_float_datum() {
+        use pgrx::IntoDatum;
+
+        let datum = 1.5_f32.into_datum().expect("f32 into_datum");
+        if !FLOAT_PUSHDOWN_ENABLED {
+            // Float decode is gated behind the pushdown toggle; verify rejection.
+            assert!(matches!(
+                unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT4OID, datum) },
+                Err(IcebergTranslationError::UnsupportedType { .. })
+            ));
+            return;
+        }
+        let got = unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT4OID, datum) }
+            .expect("float4 must decode");
+        assert_eq!(got, Datum::float(1.5_f32));
+    }
+
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_float8_builds_double_datum() {
+        use pgrx::IntoDatum;
+
+        let datum = (-273.15_f64).into_datum().expect("f64 into_datum");
+        if !FLOAT_PUSHDOWN_ENABLED {
+            assert!(matches!(
+                unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) },
+                Err(IcebergTranslationError::UnsupportedType { .. })
+            ));
+            return;
+        }
+        let got = unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) }
+            .expect("float8 must decode");
+        assert_eq!(got, Datum::double(-273.15_f64));
+    }
+
+    /// When float pushdown is enabled, NaN decodes successfully (relied on
+    /// residual for correctness). When disabled, float decode is rejected.
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_float8_nan_behavior() {
+        use pgrx::IntoDatum;
+
+        let datum = f64::NAN.into_datum().expect("f64 NaN into_datum");
+        if !FLOAT_PUSHDOWN_ENABLED {
+            assert!(matches!(
+                unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) },
+                Err(IcebergTranslationError::UnsupportedType { .. })
+            ));
+            return;
+        }
+        let got = unsafe { IcebergDatumDecoder::decode(pg_sys::FLOAT8OID, datum) }
+            .expect("float NaN is representable when pushdown enabled");
+        assert_eq!(got, Datum::double(f64::NAN));
+    }
+
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_unsupported_type_is_rejected() {
+        let datum = pg_sys::Datum::from(1usize);
+        assert!(matches!(
+            unsafe { IcebergDatumDecoder::decode(pg_sys::BOOLOID, datum) },
+            Err(IcebergTranslationError::UnsupportedType { type_oid })
+                if type_oid == pg_sys::BOOLOID
+        ));
     }
 }

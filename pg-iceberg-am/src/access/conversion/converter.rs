@@ -169,7 +169,7 @@ impl ColumnPlan {
     /// (Arrow-batch) order — `select(names)` preserves that order into the
     /// batch, so `src_col == j` (the entry index). Errors — producing no
     /// `ColumnPlan` — when a name does not resolve, an `attno < 1`, or a
-    /// computed `dest >= slot_width` (Requirements 3.6, 3.7).
+    /// computed `dest >= slot_width`.
     fn from_projection(
         schema: &IcebergSchema,
         pairs: &[ProjectedName],
@@ -388,37 +388,38 @@ impl RowRecordBatchBuilder {
 
 // ---------------------------------------------------------------------------
 // Tests — ColumnPlan + read_row (Properties 1, 2, 3)
+//
+// Split by execution environment (see `docs/testing.md`):
+//   * `column_plan_tests` (host `#[cfg(test)]`): pure `ColumnPlan` position
+//     arithmetic — `from_full_schema` / `from_projection` — which never touch
+//     a PG backend.
+//   * `column_plan_pg_test` (`#[pgrx::pg_test]`): anything that calls
+//     `RecordBatchRowReader::read_row`. `read_row` dispatches through
+//     `field_type.extract(..)`, whose `Decimal` arm runs
+//     `Decimal128NumericCodec::decode` -> `AnyNumeric` -> `numeric_recv`. The
+//     linker retains that arm even for an int-only fixture, so the whole read
+//     path links against PG backend symbols and cannot run in a host
+//     `#[test]`.
+//   * `column_plan_fixtures`: builders shared by both modules.
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod column_plan_tests {
-    //! Host (`#[cfg(test)]`) tests for the position arithmetic that lives in
-    //! [`ColumnPlan`] and the projection-aware [`RecordBatchRowReader::read_row`].
-    //!
-    //! These run under plain `cargo test` — they construct Iceberg schemas,
-    //! Arrow `RecordBatch`es, and `Row`s directly with no live PG backend.
-    //!
-    //! Coverage:
-    //! - `from_full_schema` / `from_projection`: `entries` order + `dest`
-    //!   values, with and without dropped columns (Requirements 4.2, 4.3).
-    //! - `read_row`: selected → `attno-1`, non-selected → `None`, including a
-    //!   dropped-column fixture (Property 1, 3).
-    //! - proptest Property 1 (position correctness) + Property 2 (full-table
-    //!   select-all == positional identity).
+#[cfg(any(test, feature = "pg_test"))]
+mod column_plan_fixtures {
+    use std::sync::Arc;
 
-    use super::*;
-    use arrow_array::{Int32Array, RecordBatch};
+    use arrow_array::{ArrayRef, Int32Array, RecordBatch};
     use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
     use iceberg_lite::spec::{
         NestedField, PrimitiveType, Schema as IcebergSchema, Type,
     };
-    use pg_lakebase_core::tuple::Cell;
-    use proptest::prelude::*;
+    use pg_lakebase_core::tuple::{Cell, Row};
+
+    use super::LiveColumn;
 
     /// Build an Iceberg schema with `names.len()` required `int` fields,
     /// assigning sequential field ids `1..=n`. The field *names* model the
     /// relation's live (non-dropped) columns in attno order.
-    fn int_schema(names: &[&str]) -> IcebergSchema {
+    pub(super) fn int_schema(names: &[&str]) -> IcebergSchema {
         let fields: Vec<_> = names
             .iter()
             .enumerate()
@@ -438,7 +439,7 @@ mod column_plan_tests {
 
     /// Build a one-row Arrow `RecordBatch` whose columns (in order) carry the
     /// given `i32` values under the given names.
-    fn int_batch(cols: &[(&str, i32)]) -> RecordBatch {
+    pub(super) fn int_batch(cols: &[(&str, i32)]) -> RecordBatch {
         let fields: Vec<ArrowField> = cols
             .iter()
             .map(|(name, _)| ArrowField::new(*name, DataType::Int32, false))
@@ -452,7 +453,7 @@ mod column_plan_tests {
     }
 
     /// Extract the `i32` cell at `slot`, or `None` if the slot is SQL NULL.
-    fn cell_i32(row: &Row, slot: usize) -> Option<i32> {
+    pub(super) fn cell_i32(row: &Row, slot: usize) -> Option<i32> {
         match row.get(slot).and_then(|c| c.as_ref()) {
             Some(Cell::I32(v)) => Some(*v),
             Some(other) => panic!("expected I32 at slot {slot}, got {other:?}"),
@@ -461,17 +462,26 @@ mod column_plan_tests {
     }
 
     /// Build a `LiveColumn` list from `(attno, name)` pairs.
-    fn live_cols(cols: &[(i16, &str)]) -> Vec<LiveColumn> {
+    pub(super) fn live_cols(cols: &[(i16, &str)]) -> Vec<LiveColumn> {
         cols.iter()
             .map(|(attno, name)| LiveColumn::new(*attno, (*name).to_string()))
             .collect()
     }
+}
+
+#[cfg(test)]
+mod column_plan_tests {
+    //! Host (`#[cfg(test)]`) tests for the pure position arithmetic in
+    //! [`ColumnPlan`]: `entries` order, `dest`, and
+    //! `src_col`, with and without dropped columns. No PG backend.
+
+    use super::column_plan_fixtures::{int_schema, live_cols};
+    use super::*;
 
     // --- from_full_schema -------------------------------------------------
 
     #[test]
     fn from_full_schema_no_dropped_columns_is_identity() {
-        // attno 1,2,3 all live; dest == j == attno-1, src_col == j.
         let schema = int_schema(&["a", "b", "c"]);
         let plan = ColumnPlan::from_full_schema(
             &schema,
@@ -490,8 +500,6 @@ mod column_plan_tests {
 
     #[test]
     fn from_full_schema_with_dropped_column_leaves_gap() {
-        // Relation (a, b, <dropped>, d): live attnos 1,2,4; natts == 4.
-        // Iceberg fields are only the live columns a,b,d (in lockstep order).
         let schema = int_schema(&["a", "b", "d"]);
         let plan = ColumnPlan::from_full_schema(
             &schema,
@@ -502,21 +510,13 @@ mod column_plan_tests {
 
         assert_eq!(plan.slot_width, 4);
         let dests: Vec<usize> = plan.entries.iter().map(|e| e.dest).collect();
-        // dest = attno-1: 0, 1, 3 — slot 2 (the dropped column) has no entry.
         assert_eq!(dests, vec![0, 1, 3]);
-        // src_col follows Iceberg schema order: a,b,d -> 0,1,2.
         let srcs: Vec<usize> = plan.entries.iter().map(|e| e.src_col).collect();
         assert_eq!(srcs, vec![0, 1, 2]);
     }
 
     #[test]
     fn from_full_schema_iceberg_wider_than_live_columns_resolves_by_name() {
-        // Models a runtime `ALTER TABLE ... DROP COLUMN b`: the live PG
-        // columns are a (attno 1) and c (attno 3, with attno 2 a dropped
-        // gap), but the stored Iceberg schema STILL has all three fields
-        // a,b,c (DROP COLUMN does not rewrite Iceberg metadata). The
-        // select-all batch is in Iceberg order [a,b,c], so c's source column
-        // is index 2 even though it is the 2nd live column.
         let schema = int_schema(&["a", "b", "c"]);
         let plan = ColumnPlan::from_full_schema(
             &schema,
@@ -527,7 +527,6 @@ mod column_plan_tests {
 
         assert_eq!(plan.slot_width, 3);
         assert_eq!(plan.entries.len(), 2);
-        // a: src_col 0 -> dest 0; c: src_col 2 (its Iceberg index) -> dest 2.
         assert_eq!(plan.entries[0].src_col, 0);
         assert_eq!(plan.entries[0].dest, 0);
         assert_eq!(plan.entries[1].src_col, 2);
@@ -536,8 +535,6 @@ mod column_plan_tests {
 
     #[test]
     fn from_full_schema_errors_on_unresolved_name() {
-        // A live column whose name is absent from the Iceberg schema (a
-        // RENAME-COLUMN desync, out of scope) fails loud (Requirement 3.6).
         let schema = int_schema(&["a", "b"]);
         let err = ColumnPlan::from_full_schema(
             &schema,
@@ -551,7 +548,6 @@ mod column_plan_tests {
 
     #[test]
     fn from_projection_orders_entries_by_passed_order() {
-        // Schema has a,b,c,d,e; project e then b (scan order). dest = attno-1.
         let schema = int_schema(&["a", "b", "c", "d", "e"]);
         let pairs = vec![
             ProjectedName::new(5, "e".to_string()),
@@ -560,14 +556,11 @@ mod column_plan_tests {
         let plan = ColumnPlan::from_projection(&schema, &pairs, 5).unwrap();
 
         let dests: Vec<usize> = plan.entries.iter().map(|e| e.dest).collect();
-        // Entry order matches the passed (Arrow-batch) order: e (dest 4), b (dest 1).
         assert_eq!(dests, vec![4, 1]);
     }
 
     #[test]
     fn from_projection_with_dropped_column_uses_attno_minus_one() {
-        // Relation (a, b, <dropped>, e): attno 1,2,(3 dropped),4.
-        // Iceberg schema only has live columns a,b,e. Project b, e.
         let schema = int_schema(&["a", "b", "e"]);
         let pairs = vec![
             ProjectedName::new(2, "b".to_string()),
@@ -598,15 +591,39 @@ mod column_plan_tests {
     #[test]
     fn from_projection_errors_on_dest_out_of_range() {
         let schema = int_schema(&["a", "b"]);
-        // attno 5 -> dest 4, but slot_width is 2.
         let pairs = vec![ProjectedName::new(5, "b".to_string())];
         let err = ColumnPlan::from_projection(&schema, &pairs, 2);
         assert!(matches!(err, Err(IcebergError::InvariantViolated(_))));
     }
+}
+
+#[cfg(feature = "pg_test")]
+mod column_plan_pg_test {
+    //! Backend (`#[pgrx::pg_test]`) tests for [`RecordBatchRowReader::read_row`]
+    //! (Properties 1, 2, 3). `read_row` links against the per-`Type`
+    //! `extract` dispatch whose `Decimal` arm reaches `numeric_recv`, so these
+    //! must run inside PostgreSQL even though every fixture is int-only.
+
+    #[pgrx::pg_schema]
+    mod tests {}
+
+    use proptest::prelude::*;
+    use proptest::test_runner::TestRunner;
+
+    use super::column_plan_fixtures::{cell_i32, int_batch, int_schema, live_cols};
+    use super::*;
+
+    fn proptest_config() -> ProptestConfig {
+        ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        }
+    }
 
     // --- read_row ---------------------------------------------------------
 
-    #[test]
+    #[pgrx::pg_test(schema = "tests")]
     fn read_row_full_schema_writes_each_column_to_its_slot() {
         let schema = Arc::new(int_schema(&["a", "b", "c"]));
         let reader = RecordBatchRowReader::new(
@@ -625,9 +642,8 @@ mod column_plan_tests {
         assert_eq!(cell_i32(&row, 2), Some(30));
     }
 
-    #[test]
+    #[pgrx::pg_test(schema = "tests")]
     fn read_row_full_schema_dropped_column_slot_stays_null() {
-        // Live columns a,b,d at attno 1,2,4; slot 2 (dropped) must be NULL.
         let schema = Arc::new(int_schema(&["a", "b", "d"]));
         let reader = RecordBatchRowReader::new(
             schema,
@@ -646,17 +662,12 @@ mod column_plan_tests {
         assert_eq!(cell_i32(&row, 3), Some(40));
     }
 
-    #[test]
+    #[pgrx::pg_test(schema = "tests")]
     fn read_row_full_schema_iceberg_wider_than_live_columns() {
-        // Runtime DROP COLUMN b: live columns a (attno 1) and c (attno 3),
-        // but the Iceberg schema/batch still carries [a, b, c]. read_row must
-        // pull c from its source batch column (index 2) and write it to slot
-        // 2 (attno-1), leaving slot 1 (dropped b) NULL.
         let schema = Arc::new(int_schema(&["a", "b", "c"]));
         let reader =
             RecordBatchRowReader::new(schema, &live_cols(&[(1, "a"), (3, "c")]), 3)
                 .unwrap();
-        // select_all() batch is in Iceberg field order, including dropped b.
         let batch = int_batch(&[("a", 10), ("b", 20), ("c", 30)]);
 
         let mut row = Row::with_capacity(3);
@@ -667,9 +678,8 @@ mod column_plan_tests {
         assert_eq!(cell_i32(&row, 2), Some(30), "c read from src 2 -> slot 2");
     }
 
-    #[test]
+    #[pgrx::pg_test(schema = "tests")]
     fn read_row_projected_writes_selected_and_nulls_rest() {
-        // Project b (attno 2) and e (attno 5) over a 5-wide relation.
         let schema = Arc::new(int_schema(&["a", "b", "c", "d", "e"]));
         let pairs = vec![
             ProjectedName::new(2, "b".to_string()),
@@ -677,7 +687,6 @@ mod column_plan_tests {
         ];
         let reader =
             RecordBatchRowReader::with_projection(schema, &pairs, 5).unwrap();
-        // Projected batch has exactly the selected columns, in scan order.
         let batch = int_batch(&[("b", 20), ("e", 50)]);
 
         let mut row = Row::with_capacity(5);
@@ -690,12 +699,8 @@ mod column_plan_tests {
         assert_eq!(cell_i32(&row, 4), Some(50));
     }
 
-    #[test]
+    #[pgrx::pg_test(schema = "tests")]
     fn read_row_drained_reuse_keeps_non_selected_null() {
-        // Models the scan hot path: between two rows the consumer
-        // (`TupleSlotWriter::write_row`) drains every cell via `take_cell`,
-        // so the reused Row is all-None before the next `read_row`. read_row
-        // writes only to entries' `dest`, leaving non-selected slots NULL.
         let schema = Arc::new(int_schema(&["a", "b", "c"]));
         let pairs = vec![ProjectedName::new(2, "b".to_string())];
         let reader =
@@ -703,17 +708,14 @@ mod column_plan_tests {
 
         let mut row = Row::with_capacity(3);
 
-        // First row.
         reader
             .read_row(&int_batch(&[("b", 99)]), 0, &mut row)
             .unwrap();
         assert_eq!(cell_i32(&row, 1), Some(99));
-        // Consumer drains every cell (what write_row does).
         for i in 0..3 {
             let _ = row.take_cell(i);
         }
 
-        // Second row into the drained, reused buffer.
         reader
             .read_row(&int_batch(&[("b", 7)]), 0, &mut row)
             .unwrap();
@@ -721,8 +723,6 @@ mod column_plan_tests {
         assert_eq!(cell_i32(&row, 1), Some(7));
         assert_eq!(cell_i32(&row, 2), None);
     }
-
-    // --- proptest: Property 1 + Property 2 --------------------------------
 
     /// A live-relation fixture: `live_attnos` are the 1-based attnos of the
     /// non-dropped columns (ascending), `natts` is the full tuple width.
@@ -736,8 +736,6 @@ mod column_plan_tests {
     /// positions, plus the live-attno list it induces.
     fn rel_fixture() -> impl Strategy<Value = RelFixture> {
         (1usize..=8).prop_flat_map(|natts| {
-            // For each of the `natts` positions, decide dropped (false) or
-            // live (true). Ensure at least one live column.
             proptest::collection::vec(any::<bool>(), natts).prop_map(
                 move |mut keep| {
                     if !keep.iter().any(|&k| k) {
@@ -754,124 +752,109 @@ mod column_plan_tests {
         })
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            // 256 cases, matching the repo's other host PBTs.
-            cases: 256,
-            ..ProptestConfig::default()
-        })]
-
-        /// Property 1 (Projection-position correctness): for any relation and
-        /// any referenced-attno subset, every selected column's value lands
-        /// at slot `attno-1` and every other slot is SQL NULL.
-        ///
-        /// **Validates: Requirements 4.2, 4.3, 6.1, 6.3**
-        #[test]
-        fn prop1_projection_position_correctness(
-            fixture in rel_fixture(),
-            subset_seed in any::<u64>(),
-        ) {
-            // Choose a non-empty subset of the live attnos deterministically
-            // from the seed.
-            let mut subset: Vec<i32> = fixture
-                .live_attnos
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|(i, _)| (subset_seed >> (i % 64)) & 1 == 1)
-                .map(|(_, a)| a)
-                .collect();
-            if subset.is_empty() {
-                subset.push(fixture.live_attnos[0]);
-            }
-
-            // Iceberg schema holds only the live columns, named `c<attno>`.
-            let live_names: Vec<String> =
-                fixture.live_attnos.iter().map(|a| format!("c{a}")).collect();
-            let name_refs: Vec<&str> =
-                live_names.iter().map(String::as_str).collect();
-            let schema = Arc::new(int_schema(&name_refs));
-
-            // Projected pairs in scan order (ascending attno here).
-            let pairs: Vec<ProjectedName> = subset
-                .iter()
-                .map(|&a| ProjectedName::new(a as i16, format!("c{a}")))
-                .collect();
-            let reader = RecordBatchRowReader::with_projection(
-                schema,
-                &pairs,
-                fixture.natts,
-            )
-            .unwrap();
-
-            // Projected batch: one column per selected attno (named `c<attno>`),
-            // carrying value == attno so we can check where each value lands.
-            let owned_names: Vec<String> =
-                subset.iter().map(|a| format!("c{a}")).collect();
-            let batch_cols: Vec<(&str, i32)> = owned_names
-                .iter()
-                .zip(subset.iter())
-                .map(|(n, &a)| (n.as_str(), a))
-                .collect();
-            let batch = int_batch(&batch_cols);
-
-            let mut row = Row::with_capacity(fixture.natts);
-            reader.read_row(&batch, 0, &mut row).unwrap();
-
-            for slot in 0..fixture.natts {
-                let attno = (slot + 1) as i32;
-                if subset.contains(&attno) {
-                    prop_assert_eq!(cell_i32(&row, slot), Some(attno));
-                } else {
-                    prop_assert_eq!(cell_i32(&row, slot), None);
+    /// (Projection-position correctness): for any relation and any
+    /// referenced-attno subset, every selected column's value lands at slot
+    /// `attno-1` and every other slot is SQL NULL.
+    #[pgrx::pg_test(schema = "tests")]
+    fn prop1_projection_position_correctness() {
+        let mut runner = TestRunner::new(proptest_config());
+        runner
+            .run(&(rel_fixture(), any::<u64>()), |(fixture, subset_seed)| {
+                let mut subset: Vec<i32> = fixture
+                    .live_attnos
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(i, _)| (subset_seed >> (i % 64)) & 1 == 1)
+                    .map(|(_, a)| a)
+                    .collect();
+                if subset.is_empty() {
+                    subset.push(fixture.live_attnos[0]);
                 }
-            }
-        }
 
-        /// Property 2 (Full-table equivalence): select-all over a relation
-        /// with no dropped columns yields `dest == j == attno-1` for every
-        /// entry — the degenerate identity case a positional reader produces.
-        ///
-        /// **Validates: Requirements 5.1, 5.2**
-        #[test]
-        fn prop2_full_table_no_dropped_is_positional_identity(
-            natts in 1usize..=8,
-        ) {
-            let names: Vec<String> =
-                (1..=natts).map(|a| format!("c{a}")).collect();
-            let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            let schema = Arc::new(int_schema(&name_refs));
-            let live_columns: Vec<LiveColumn> = (1..=natts)
-                .map(|a| LiveColumn::new(a as i16, format!("c{a}")))
-                .collect();
+                let live_names: Vec<String> = fixture
+                    .live_attnos
+                    .iter()
+                    .map(|a| format!("c{a}"))
+                    .collect();
+                let name_refs: Vec<&str> =
+                    live_names.iter().map(String::as_str).collect();
+                let schema = Arc::new(int_schema(&name_refs));
 
-            let reader = RecordBatchRowReader::new(
-                schema,
-                &live_columns,
-                natts,
-            )
-            .unwrap();
+                let pairs: Vec<ProjectedName> = subset
+                    .iter()
+                    .map(|&a| ProjectedName::new(a as i16, format!("c{a}")))
+                    .collect();
+                let reader = RecordBatchRowReader::with_projection(
+                    schema,
+                    &pairs,
+                    fixture.natts,
+                )
+                .unwrap();
 
-            // dest must equal the Arrow column index j for every entry, and
-            // src_col must be the identity index too (no dropped columns).
-            for (j, entry) in reader.plan.entries.iter().enumerate() {
-                prop_assert_eq!(entry.dest, j);
-                prop_assert_eq!(entry.src_col, j);
-            }
-            prop_assert_eq!(reader.plan.slot_width, natts);
+                let owned_names: Vec<String> =
+                    subset.iter().map(|a| format!("c{a}")).collect();
+                let batch_cols: Vec<(&str, i32)> = owned_names
+                    .iter()
+                    .zip(subset.iter())
+                    .map(|(n, &a)| (n.as_str(), a))
+                    .collect();
+                let batch = int_batch(&batch_cols);
 
-            // And a full-width read writes value==attno at slot attno-1.
-            let cols: Vec<(&str, i32)> = names
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.as_str(), (i + 1) as i32))
-                .collect();
-            let batch = int_batch(&cols);
-            let mut row = Row::with_capacity(natts);
-            reader.read_row(&batch, 0, &mut row).unwrap();
-            for slot in 0..natts {
-                prop_assert_eq!(cell_i32(&row, slot), Some((slot + 1) as i32));
-            }
-        }
+                let mut row = Row::with_capacity(fixture.natts);
+                reader.read_row(&batch, 0, &mut row).unwrap();
+
+                for slot in 0..fixture.natts {
+                    let attno = (slot + 1) as i32;
+                    if subset.contains(&attno) {
+                        prop_assert_eq!(cell_i32(&row, slot), Some(attno));
+                    } else {
+                        prop_assert_eq!(cell_i32(&row, slot), None);
+                    }
+                }
+                Ok(())
+            })
+            .expect("projection-position correctness property failed");
+    }
+
+    /// (Full-table equivalence): select-all over a relation with no
+    /// dropped columns yields `dest == j == attno-1` for every entry — the
+    /// degenerate identity case a positional reader produces.
+    #[pgrx::pg_test(schema = "tests")]
+    fn prop2_full_table_no_dropped_is_positional_identity() {
+        let mut runner = TestRunner::new(proptest_config());
+        runner
+            .run(&(1usize..=8), |natts| {
+                let names: Vec<String> =
+                    (1..=natts).map(|a| format!("c{a}")).collect();
+                let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let schema = Arc::new(int_schema(&name_refs));
+                let live_columns: Vec<LiveColumn> = (1..=natts)
+                    .map(|a| LiveColumn::new(a as i16, format!("c{a}")))
+                    .collect();
+
+                let reader =
+                    RecordBatchRowReader::new(schema, &live_columns, natts).unwrap();
+
+                for (j, entry) in reader.plan.entries.iter().enumerate() {
+                    prop_assert_eq!(entry.dest, j);
+                    prop_assert_eq!(entry.src_col, j);
+                }
+                prop_assert_eq!(reader.plan.slot_width, natts);
+
+                let cols: Vec<(&str, i32)> = names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.as_str(), (i + 1) as i32))
+                    .collect();
+                let batch = int_batch(&cols);
+                let mut row = Row::with_capacity(natts);
+                reader.read_row(&batch, 0, &mut row).unwrap();
+                for slot in 0..natts {
+                    prop_assert_eq!(cell_i32(&row, slot), Some((slot + 1) as i32));
+                }
+                Ok(())
+            })
+            .expect("full-table positional-identity property failed");
     }
 }

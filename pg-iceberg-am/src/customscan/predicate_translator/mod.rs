@@ -257,20 +257,27 @@ impl IcebergPredicateTranslator {
     }
 }
 
+// =============================================================================
+// Host tests: pure translator logic that needs no PG backend.
+//
+// `map_comparison_operator` delegates to the pure `op_class` mapping, and the
+// `is_null` / `is_not_null` non-column rejection path only inspects the scalar
+// shape — neither touches `pg_sys`. The NULL-folding `comparison` path (gated
+// on `can_build` -> `get_collation_isdeterministic`) and the `param_value`
+// decode path require a live backend and live in
+// `customscan/pg_test/predicate/translator_semantics.rs` (see `docs/testing.md`).
+// =============================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iceberg_lite::spec::Datum;
     use pgrx::pg_sys::Oid;
+
+    const INT4_TYPE_OID: u32 = 23;
 
     fn map_comparison_operator(
         op: PgComparisonOp,
     ) -> Result<PredicateOperator, IcebergTranslationError> {
         IcebergPredicateTranslator::new().map_comparison_operator(op)
-    }
-
-    fn capability_allows_build(type_oid: pg_sys::Oid, op: PgComparisonOp) -> bool {
-        PredicatePushdownPolicy::new().can_build(type_oid, op)
     }
 
     fn op_triple(opno: u32) -> PgComparisonOp {
@@ -283,23 +290,9 @@ mod tests {
         }
     }
 
-    fn op_triple_with_collation(opno: u32, collid: u32) -> PgComparisonOp {
-        PgComparisonOp {
-            opno: Oid::from(opno),
-            opfuncid: Oid::INVALID,
-            opresulttype: Oid::INVALID,
-            opcollid: Oid::from(collid),
-            inputcollid: Oid::from(collid),
-        }
-    }
-
-    fn text_triple(opno: u32, collid: Oid) -> PgComparisonOp {
-        PgComparisonOp {
-            opno: Oid::from(opno),
-            opfuncid: Oid::INVALID,
-            opresulttype: Oid::INVALID,
-            opcollid: Oid::INVALID,
-            inputcollid: collid,
+    fn null_scalar(type_oid: u32) -> IcebergScalar {
+        IcebergScalar::Null {
+            type_oid: Oid::from(type_oid),
         }
     }
 
@@ -381,275 +374,6 @@ mod tests {
     }
 
     #[test]
-    fn gate_rejects_integer_with_non_default_collation() {
-        assert!(capability_allows_build(pg_sys::INT4OID, op_triple(96)));
-        assert!(!capability_allows_build(
-            pg_sys::INT4OID,
-            op_triple_with_collation(96, 100),
-        ));
-        assert!(capability_allows_build(pg_sys::INT8OID, op_triple(412)));
-        assert!(!capability_allows_build(
-            pg_sys::INT8OID,
-            op_triple_with_collation(412, 100),
-        ));
-    }
-
-    #[test]
-    fn gate_rejects_non_integer_not_equal() {
-        // Numeric comparison buildability follows the pushdown toggle.
-        assert_eq!(
-            capability_allows_build(pg_sys::NUMERICOID, op_triple(1754)),
-            super::super::NUMERIC_COMPARISON_PUSHDOWN_ENABLED,
-        );
-        assert!(!capability_allows_build(
-            pg_sys::NUMERICOID,
-            op_triple(1753)
-        ));
-        // Temporal types stay buildable for ordered ops, never for `<>`.
-        assert!(capability_allows_build(pg_sys::DATEOID, op_triple(1098)));
-        assert!(!capability_allows_build(pg_sys::DATEOID, op_triple(1094)));
-        // Float buildability depends on the FLOAT_PUSHDOWN_ENABLED toggle.
-        assert_eq!(
-            capability_allows_build(pg_sys::FLOAT8OID, op_triple(670)),
-            super::super::FLOAT_PUSHDOWN_ENABLED,
-        );
-        assert!(!capability_allows_build(pg_sys::FLOAT8OID, op_triple(671)));
-    }
-
-    #[test]
-    fn gate_text_collation_host_safe_cases() {
-        for collid in [pg_sys::C_COLLATION_OID, pg_sys::POSIX_COLLATION_OID] {
-            assert!(capability_allows_build(
-                pg_sys::TEXTOID,
-                text_triple(664, collid),
-            ));
-        }
-        assert!(!capability_allows_build(
-            pg_sys::TEXTOID,
-            text_triple(664, Oid::INVALID),
-        ));
-        assert!(!capability_allows_build(
-            pg_sys::TEXTOID,
-            text_triple(98, Oid::INVALID),
-        ));
-        assert!(!capability_allows_build(
-            pg_sys::TEXTOID,
-            text_triple(531, pg_sys::C_COLLATION_OID),
-        ));
-    }
-
-    #[test]
-    fn gate_rejects_unknown_type() {
-        assert!(!capability_allows_build(pg_sys::BOOLOID, op_triple(96)));
-        assert!(!capability_allows_build(pg_sys::BYTEAOID, op_triple(96)));
-    }
-
-    #[test]
-    fn param_value_null_decodes_to_null() {
-        let mut translator = IcebergPredicateTranslator::new();
-        let null_param = PgParamValue {
-            param_id: 1,
-            paramkind: pg_sys::ParamKind::PARAM_EXTERN,
-            type_oid: pg_sys::INT4OID,
-            collid: pg_sys::Oid::INVALID,
-            datum: pg_sys::Datum::from(0usize),
-            is_null: true,
-        };
-
-        let result = translator.param_value(null_param);
-
-        match result {
-            Ok(IcebergScalar::Null { type_oid }) => {
-                assert_eq!(
-                    type_oid,
-                    pg_sys::INT4OID,
-                    "Null scalar must carry the param's PG type OID",
-                );
-            }
-            other => panic!(
-                "post-fix: a NULL-resolved param must decode to \
-                 Ok(IcebergScalar::Null {{ .. }}); got {other:?}",
-            ),
-        }
-    }
-
-    use proptest::prelude::*;
-
-    const INT4_TYPE_OID: u32 = 23;
-    const INT8_TYPE_OID: u32 = 20;
-
-    const ALLOWLISTED_OPNOS: [u32; 12] =
-        [96, 518, 97, 523, 521, 525, 410, 411, 412, 413, 414, 415];
-
-    fn oracle_predicate_op(opno: u32) -> PredicateOperator {
-        match opno {
-            96 | 410 => PredicateOperator::Eq,
-            518 | 411 => PredicateOperator::NotEq,
-            97 | 412 => PredicateOperator::LessThan,
-            523 | 414 => PredicateOperator::LessThanOrEq,
-            521 | 413 => PredicateOperator::GreaterThan,
-            525 | 415 => PredicateOperator::GreaterThanOrEq,
-            other => unreachable!("opno {other} is outside the Property-2 allowlist"),
-        }
-    }
-
-    fn oracle_mirror(op: PredicateOperator) -> PredicateOperator {
-        match op {
-            PredicateOperator::LessThan => PredicateOperator::GreaterThan,
-            PredicateOperator::LessThanOrEq => PredicateOperator::GreaterThanOrEq,
-            PredicateOperator::GreaterThan => PredicateOperator::LessThan,
-            PredicateOperator::GreaterThanOrEq => PredicateOperator::LessThanOrEq,
-            other => other,
-        }
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 256,
-            ..ProptestConfig::default()
-        })]
-
-        #[test]
-        fn prop2_preserves_non_null_binary_predicate(
-            op_idx in 0usize..ALLOWLISTED_OPNOS.len(),
-            column_left in any::<bool>(),
-            is_int8 in any::<bool>(),
-            v32 in any::<i32>(),
-            v64 in any::<i64>(),
-        ) {
-            let opno = ALLOWLISTED_OPNOS[op_idx];
-            let op = op_triple(opno);
-            let col_name = "id";
-
-            let (atttypid, datum) = if is_int8 {
-                (Oid::from(INT8_TYPE_OID), Datum::long(v64))
-            } else {
-                (Oid::from(INT4_TYPE_OID), Datum::int(v32))
-            };
-
-            let column = IcebergScalar::Column {
-                reference: Reference::new(col_name),
-                atttypid,
-            };
-            let scalar = IcebergScalar::Datum(datum.clone());
-
-            let (left, right) = if column_left {
-                (column, scalar)
-            } else {
-                (scalar, column)
-            };
-
-            let mut translator = IcebergPredicateTranslator::new();
-            let got = translator
-                .comparison(op, left, right)
-                .expect("non-NULL column op literal must translate on unfixed code");
-
-            let base = oracle_predicate_op(opno);
-            let expected_op = if column_left {
-                base
-            } else {
-                oracle_mirror(base)
-            };
-            let expected = Predicate::Binary(BinaryExpression::new(
-                expected_op,
-                Reference::new(col_name),
-                datum,
-            ));
-
-            prop_assert_eq!(got, expected);
-        }
-    }
-
-    fn null_scalar(type_oid: u32) -> IcebergScalar {
-        IcebergScalar::Null {
-            type_oid: Oid::from(type_oid),
-        }
-    }
-
-    fn column_scalar(name: &str, type_oid: u32) -> IcebergScalar {
-        IcebergScalar::Column {
-            reference: Reference::new(name),
-            atttypid: Oid::from(type_oid),
-        }
-    }
-
-    #[test]
-    fn comparison_null_left_folds_to_always_false() {
-        let mut t = IcebergPredicateTranslator::new();
-        let got = t
-            .comparison(
-                op_triple(96),
-                null_scalar(INT4_TYPE_OID),
-                column_scalar("id", INT4_TYPE_OID),
-            )
-            .expect("a NULL operand must fold, never error");
-        assert_eq!(got, Predicate::AlwaysFalse);
-    }
-
-    #[test]
-    fn comparison_null_right_folds_to_always_false() {
-        let mut t = IcebergPredicateTranslator::new();
-        let got = t
-            .comparison(
-                op_triple(96),
-                column_scalar("id", INT4_TYPE_OID),
-                null_scalar(INT4_TYPE_OID),
-            )
-            .expect("a NULL operand must fold, never error");
-        assert_eq!(got, Predicate::AlwaysFalse);
-    }
-
-    #[test]
-    fn comparison_null_both_folds_to_always_false() {
-        let mut t = IcebergPredicateTranslator::new();
-        let got = t
-            .comparison(
-                op_triple(96),
-                null_scalar(INT4_TYPE_OID),
-                null_scalar(INT8_TYPE_OID),
-            )
-            .expect("a NULL operand must fold, never error");
-        assert_eq!(got, Predicate::AlwaysFalse);
-    }
-
-    #[test]
-    fn comparison_each_strict_operator_with_null_folds() {
-        for opno in ALLOWLISTED_OPNOS {
-            let mut t = IcebergPredicateTranslator::new();
-            let got = t
-                .comparison(
-                    op_triple(opno),
-                    column_scalar("id", INT4_TYPE_OID),
-                    null_scalar(INT4_TYPE_OID),
-                )
-                .unwrap_or_else(|e| {
-                    panic!("opno {opno} with NULL on RHS must fold, got Err: {e}")
-                });
-            assert_eq!(
-                got,
-                Predicate::AlwaysFalse,
-                "opno {opno} with NULL on RHS must fold to AlwaysFalse",
-            );
-
-            let mut t = IcebergPredicateTranslator::new();
-            let got = t
-                .comparison(
-                    op_triple(opno),
-                    null_scalar(INT4_TYPE_OID),
-                    column_scalar("id", INT4_TYPE_OID),
-                )
-                .unwrap_or_else(|e| {
-                    panic!("opno {opno} with NULL on LHS must fold, got Err: {e}")
-                });
-            assert_eq!(
-                got,
-                Predicate::AlwaysFalse,
-                "opno {opno} with NULL on LHS must fold to AlwaysFalse",
-            );
-        }
-    }
-
-    #[test]
     fn is_null_with_null_scalar_fails_closed() {
         let mut t = IcebergPredicateTranslator::new();
         assert!(matches!(
@@ -665,76 +389,5 @@ mod tests {
             t.is_not_null(null_scalar(INT4_TYPE_OID)),
             Err(IcebergTranslationError::NullTestOnNonColumn)
         ));
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 256,
-            ..ProptestConfig::default()
-        })]
-
-        #[test]
-        fn prop1_null_operand_folds_to_always_false(
-            op_idx in 0usize..ALLOWLISTED_OPNOS.len(),
-            null_on_left in any::<bool>(),
-            is_int8 in any::<bool>(),
-        ) {
-            let opno = ALLOWLISTED_OPNOS[op_idx];
-            let op = op_triple(opno);
-            let type_oid = if is_int8 { INT8_TYPE_OID } else { INT4_TYPE_OID };
-
-            let column = column_scalar("id", type_oid);
-            let null = null_scalar(type_oid);
-
-            let (left, right) = if null_on_left {
-                (null, column)
-            } else {
-                (column, null)
-            };
-
-            let mut translator = IcebergPredicateTranslator::new();
-            let result = translator.comparison(op, left, right);
-
-            prop_assert!(
-                result.is_ok(),
-                "a NULL operand must never error; got {result:?}",
-            );
-            prop_assert_eq!(result.unwrap(), Predicate::AlwaysFalse);
-        }
-    }
-
-    const INTEGER_OPNOS: [u32; 18] = [
-        94, 519, 95, 522, 520, 524, 96, 518, 97, 523, 521, 525, 410, 411, 412, 413,
-        414, 415,
-    ];
-
-    fn integer_oracle_op(opno: u32) -> PredicateOperator {
-        match opno {
-            94 | 96 | 410 => PredicateOperator::Eq,
-            519 | 518 | 411 => PredicateOperator::NotEq,
-            95 | 97 | 412 => PredicateOperator::LessThan,
-            522 | 523 | 414 => PredicateOperator::LessThanOrEq,
-            520 | 521 | 413 => PredicateOperator::GreaterThan,
-            524 | 525 | 415 => PredicateOperator::GreaterThanOrEq,
-            other => unreachable!("opno {other} is outside the integer op set"),
-        }
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 256,
-            ..ProptestConfig::default()
-        })]
-
-        #[test]
-        fn prop2_preserves_integer_operator_mapping(
-            idx in 0usize..INTEGER_OPNOS.len(),
-        ) {
-            let opno = INTEGER_OPNOS[idx];
-            let got = map_comparison_operator(op_triple(opno)).expect(
-                "every integer opno under (0,0) collation must map on unfixed code",
-            );
-            prop_assert_eq!(got, integer_oracle_op(opno));
-        }
     }
 }

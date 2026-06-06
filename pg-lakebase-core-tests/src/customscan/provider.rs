@@ -803,14 +803,14 @@ mod tests {
 
         fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
             unreachable!(
-                "task 11 codec-malformed test diverges at decode_provider_private's \
+                "codec-malformed test diverges at decode_provider_private's \
                  chained reader.finish(); create_state is not reached"
             );
         }
 
         fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!(
-                "task 11 codec-malformed test diverges at decode_provider_private's \
+                "codec-malformed test diverges at decode_provider_private's \
                  chained reader.finish(); begin is not reached"
             );
         }
@@ -819,21 +819,21 @@ mod tests {
             _ctx: NextSlotContext<'_, Self>,
         ) -> Result<bool, CustomScanError> {
             unreachable!(
-                "task 11 codec-malformed test diverges at decode_provider_private's \
+                "codec-malformed test diverges at decode_provider_private's \
                  chained reader.finish(); next_slot is not reached"
             );
         }
 
         fn rescan(_ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!(
-                "task 11 codec-malformed test diverges at decode_provider_private's \
+                "codec-malformed test diverges at decode_provider_private's \
                  chained reader.finish(); rescan is not reached"
             );
         }
 
         fn end(_ctx: EndContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!(
-                "task 11 codec-malformed test diverges at decode_provider_private's \
+                "codec-malformed test diverges at decode_provider_private's \
                  chained reader.finish(); end is not reached"
             );
         }
@@ -866,7 +866,7 @@ mod tests {
                 1,   // pre_setrefs_scan_rti — debug-only
             )
             .expect(
-                "encode_split must succeed for the task 11 codec-malformed fixture",
+                "encode_split must succeed for the task codec-malformed fixture",
             );
 
             let cscan = pg_sys::palloc0(core::mem::size_of::<pg_sys::CustomScan>())

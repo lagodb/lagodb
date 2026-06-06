@@ -443,170 +443,106 @@ impl PredicatePushdownPolicy {
     }
 }
 
-#[cfg(test)]
-mod tests {
+// =============================================================================
+// Shared opno-table test fixture: single source of truth for the
+// `(type, [eq, ne, lt, le, gt, ge])` comparison-operator verdict table, used by
+// both the host `#[test]` policy suite below and the backend `#[pg_test]`
+// capability matrix (`customscan/pg_test/predicate/capability_matrix.rs`).
+//
+// Built directly from the production `pg_operator_oid` constants so the test
+// table can never silently drift from the OIDs the policy actually matches on.
+// Kept crate-internal (`pub(crate)`); only the test/`pg_test` builds compile it.
+// =============================================================================
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) mod test_opno_table {
+    use super::ComparisonOpClass;
     use super::pg_operator_oid as op;
-    use super::*;
-    use pgrx::pg_sys::Oid;
+    use pgrx::pg_sys;
 
-    fn op_class(opno: pg_sys::Oid) -> Option<ComparisonOpClass> {
-        PredicatePushdownPolicy::new().op_class(opno)
-    }
-
-    fn supported_predicate(
-        type_oid: pg_sys::Oid,
-        op_key: PgComparisonOp,
-    ) -> PredicateCapability {
-        PredicatePushdownPolicy::new().capability_for(type_oid, op_key)
-    }
-
-    fn is_c_or_posix_collation(oid: pg_sys::Oid) -> bool {
-        PredicatePushdownPolicy::new().is_c_or_posix_collation(oid)
-    }
-
-    /// Build a collation-free `(opno, 0, 0)` comparison triple.
-    fn triple(opno: u32) -> PgComparisonOp {
-        PgComparisonOp {
-            opno: Oid::from(opno),
-            opfuncid: Oid::INVALID,
-            opresulttype: Oid::INVALID,
-            opcollid: Oid::INVALID,
-            inputcollid: Oid::INVALID,
-        }
-    }
-
-    /// Build a comparison triple carrying a non-zero collation on both
-    /// slots.
-    fn triple_with_collation(opno: u32, collid: u32) -> PgComparisonOp {
-        PgComparisonOp {
-            opno: Oid::from(opno),
-            opfuncid: Oid::INVALID,
-            opresulttype: Oid::INVALID,
-            opcollid: Oid::from(collid),
-            inputcollid: Oid::from(collid),
-        }
-    }
-
-    /// The full `(type, [eq, ne, lt, le, gt, ge])` opno table, mirroring
-    /// `pg_operator.dat`. Used to drive both the `op_class` and
-    /// `supported_predicate` matrix tests.
-    ///
-    /// Order within each row is `[Eq, NotEq, Lt, Le, Gt, Ge]`.
-    const OPNO_TABLE: &[(pg_sys::Oid, [u32; 6])] = &[
-        (
-            pg_sys::INT2OID,
-            [
-                op::INT2_EQ,
-                op::INT2_NE,
-                op::INT2_LT,
-                op::INT2_LE,
-                op::INT2_GT,
-                op::INT2_GE,
-            ],
-        ),
-        (
-            pg_sys::INT4OID,
-            [
-                op::INT4_EQ,
-                op::INT4_NE,
-                op::INT4_LT,
-                op::INT4_LE,
-                op::INT4_GT,
-                op::INT4_GE,
-            ],
-        ),
-        (
-            pg_sys::INT8OID,
-            [
-                op::INT8_EQ,
-                op::INT8_NE,
-                op::INT8_LT,
-                op::INT8_LE,
-                op::INT8_GT,
-                op::INT8_GE,
-            ],
-        ),
-        (
-            pg_sys::NUMERICOID,
-            [
-                op::NUMERIC_EQ,
-                op::NUMERIC_NE,
-                op::NUMERIC_LT,
-                op::NUMERIC_LE,
-                op::NUMERIC_GT,
-                op::NUMERIC_GE,
-            ],
-        ),
-        (
-            pg_sys::DATEOID,
-            [
-                op::DATE_EQ,
-                op::DATE_NE,
-                op::DATE_LT,
-                op::DATE_LE,
-                op::DATE_GT,
-                op::DATE_GE,
-            ],
-        ),
-        (
-            pg_sys::TIMESTAMPOID,
-            [
-                op::TIMESTAMP_EQ,
-                op::TIMESTAMP_NE,
-                op::TIMESTAMP_LT,
-                op::TIMESTAMP_LE,
-                op::TIMESTAMP_GT,
-                op::TIMESTAMP_GE,
-            ],
-        ),
-        (
-            pg_sys::TIMESTAMPTZOID,
-            [
-                op::TIMESTAMPTZ_EQ,
-                op::TIMESTAMPTZ_NE,
-                op::TIMESTAMPTZ_LT,
-                op::TIMESTAMPTZ_LE,
-                op::TIMESTAMPTZ_GT,
-                op::TIMESTAMPTZ_GE,
-            ],
-        ),
-        (
-            pg_sys::FLOAT4OID,
-            [
-                op::FLOAT4_EQ,
-                op::FLOAT4_NE,
-                op::FLOAT4_LT,
-                op::FLOAT4_LE,
-                op::FLOAT4_GT,
-                op::FLOAT4_GE,
-            ],
-        ),
-        (
-            pg_sys::FLOAT8OID,
-            [
-                op::FLOAT8_EQ,
-                op::FLOAT8_NE,
-                op::FLOAT8_LT,
-                op::FLOAT8_LE,
-                op::FLOAT8_GT,
-                op::FLOAT8_GE,
-            ],
-        ),
-        (
-            pg_sys::TEXTOID,
-            [
-                op::TEXT_EQ,
-                op::TEXT_NE,
-                op::TEXT_LT,
-                op::TEXT_LE,
-                op::TEXT_GT,
-                op::TEXT_GE,
-            ],
-        ),
+    // Per-type comparison opno rows in column order `[Eq, NotEq, Lt, Le, Gt, Ge]`.
+    pub(crate) const INT2: [u32; 6] = [
+        op::INT2_EQ,
+        op::INT2_NE,
+        op::INT2_LT,
+        op::INT2_LE,
+        op::INT2_GT,
+        op::INT2_GE,
+    ];
+    pub(crate) const INT4: [u32; 6] = [
+        op::INT4_EQ,
+        op::INT4_NE,
+        op::INT4_LT,
+        op::INT4_LE,
+        op::INT4_GT,
+        op::INT4_GE,
+    ];
+    pub(crate) const INT8: [u32; 6] = [
+        op::INT8_EQ,
+        op::INT8_NE,
+        op::INT8_LT,
+        op::INT8_LE,
+        op::INT8_GT,
+        op::INT8_GE,
+    ];
+    pub(crate) const NUMERIC: [u32; 6] = [
+        op::NUMERIC_EQ,
+        op::NUMERIC_NE,
+        op::NUMERIC_LT,
+        op::NUMERIC_LE,
+        op::NUMERIC_GT,
+        op::NUMERIC_GE,
+    ];
+    pub(crate) const DATE: [u32; 6] = [
+        op::DATE_EQ,
+        op::DATE_NE,
+        op::DATE_LT,
+        op::DATE_LE,
+        op::DATE_GT,
+        op::DATE_GE,
+    ];
+    pub(crate) const TIMESTAMP: [u32; 6] = [
+        op::TIMESTAMP_EQ,
+        op::TIMESTAMP_NE,
+        op::TIMESTAMP_LT,
+        op::TIMESTAMP_LE,
+        op::TIMESTAMP_GT,
+        op::TIMESTAMP_GE,
+    ];
+    pub(crate) const TIMESTAMPTZ: [u32; 6] = [
+        op::TIMESTAMPTZ_EQ,
+        op::TIMESTAMPTZ_NE,
+        op::TIMESTAMPTZ_LT,
+        op::TIMESTAMPTZ_LE,
+        op::TIMESTAMPTZ_GT,
+        op::TIMESTAMPTZ_GE,
+    ];
+    pub(crate) const FLOAT4: [u32; 6] = [
+        op::FLOAT4_EQ,
+        op::FLOAT4_NE,
+        op::FLOAT4_LT,
+        op::FLOAT4_LE,
+        op::FLOAT4_GT,
+        op::FLOAT4_GE,
+    ];
+    pub(crate) const FLOAT8: [u32; 6] = [
+        op::FLOAT8_EQ,
+        op::FLOAT8_NE,
+        op::FLOAT8_LT,
+        op::FLOAT8_LE,
+        op::FLOAT8_GT,
+        op::FLOAT8_GE,
+    ];
+    pub(crate) const TEXT: [u32; 6] = [
+        op::TEXT_EQ,
+        op::TEXT_NE,
+        op::TEXT_LT,
+        op::TEXT_LE,
+        op::TEXT_GT,
+        op::TEXT_GE,
     ];
 
-    /// The six op-classes in the same column order as [`OPNO_TABLE`].
-    const CLASS_BY_COLUMN: [ComparisonOpClass; 6] = [
+    /// The six op-classes in the same column order as the per-type rows.
+    pub(crate) const CLASS_BY_COLUMN: [ComparisonOpClass; 6] = [
         ComparisonOpClass::Eq,
         ComparisonOpClass::NotEq,
         ComparisonOpClass::Lt,
@@ -615,38 +551,78 @@ mod tests {
         ComparisonOpClass::Ge,
     ];
 
+    /// The full `(type, [eq, ne, lt, le, gt, ge])` opno table, mirroring
+    /// `pg_operator.dat`. Order within each row is `[Eq, NotEq, Lt, Le, Gt, Ge]`.
+    pub(crate) fn opno_table() -> [(pg_sys::Oid, [u32; 6]); 10] {
+        [
+            (pg_sys::INT2OID, INT2),
+            (pg_sys::INT4OID, INT4),
+            (pg_sys::INT8OID, INT8),
+            (pg_sys::NUMERICOID, NUMERIC),
+            (pg_sys::DATEOID, DATE),
+            (pg_sys::TIMESTAMPOID, TIMESTAMP),
+            (pg_sys::TIMESTAMPTZOID, TIMESTAMPTZ),
+            (pg_sys::FLOAT4OID, FLOAT4),
+            (pg_sys::FLOAT8OID, FLOAT8),
+            (pg_sys::TEXTOID, TEXT),
+        ]
+    }
+}
+
+// =============================================================================
+// Host tests: pure policy logic that needs no PG backend.
+//
+// Only `op_class` (opno -> class mapping), `is_c_or_posix_collation` (constant
+// comparison), and `null_test_capability` (type-allowlist match) are exercised
+// here — none of them touch `pg_sys`. The value-comparison matrix
+// (`capability_for` / `can_build`) references `get_collation_isdeterministic`
+// in its text arm, so it cannot run in a host `#[test]` and lives in the
+// backend suite (`customscan/pg_test/predicate/capability_matrix.rs`). See
+// `docs/testing.md`.
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::test_opno_table::{CLASS_BY_COLUMN, opno_table};
+    use super::*;
+    use pgrx::pg_sys::Oid;
+
+    fn op_class(opno: pg_sys::Oid) -> Option<ComparisonOpClass> {
+        PredicatePushdownPolicy::new().op_class(opno)
+    }
+
+    fn is_c_or_posix_collation(oid: pg_sys::Oid) -> bool {
+        PredicatePushdownPolicy::new().is_c_or_posix_collation(oid)
+    }
+
     /// `op_class` must map every opno in the consolidated table to the
-    /// expected class — every integer opno from the exact integer policy /
-    /// `map_comparison_operator`, plus the new types' opnos.
+    /// expected class.
     #[test]
     fn op_class_maps_every_known_opno() {
-        for (type_oid, opnos) in OPNO_TABLE {
+        for (type_oid, opnos) in opno_table() {
             for (col, &opno) in opnos.iter().enumerate() {
                 assert_eq!(
                     op_class(Oid::from(opno)),
                     Some(CLASS_BY_COLUMN[col]),
                     "opno {opno} (type {}, column {col}) must map to {:?}",
-                    u32::from(*type_oid),
+                    u32::from(type_oid),
                     CLASS_BY_COLUMN[col],
                 );
             }
         }
     }
 
-    /// Distinct opnos must never collide on the same table entry — a
-    /// duplicate would point at a copy-paste bug in the consolidated map.
+    /// Distinct opnos must never collide on the same table entry.
     #[test]
     fn op_class_table_has_no_duplicate_opnos() {
         let mut seen = std::collections::HashSet::new();
-        for (_type_oid, opnos) in OPNO_TABLE {
-            for &opno in opnos {
+        for (_type_oid, opnos) in opno_table() {
+            for opno in opnos {
                 assert!(seen.insert(opno), "opno {opno} appears twice in the table");
             }
         }
     }
 
-    /// `op_class` returns `None` for operators outside the map (e.g.
-    /// `oidvector` `<>` opno 558, or a clearly-unused OID).
+    /// `op_class` returns `None` for operators outside the map.
     #[test]
     fn op_class_rejects_unknown_opnos() {
         assert_eq!(
@@ -662,420 +638,8 @@ mod tests {
         );
     }
 
-    /// Integers are `Exact` for all six op-classes under the
-    /// collation-free `(0, 0)` triple (preserving the integer
-    /// exact integer policy behavior, including `<>`).
-    #[test]
-    fn supported_predicate_integers_are_exact_under_zero_collation() {
-        for &type_oid in &[pg_sys::INT2OID, pg_sys::INT4OID, pg_sys::INT8OID] {
-            let row = OPNO_TABLE
-                .iter()
-                .find(|(t, _)| *t == type_oid)
-                .expect("integer type present in table");
-            for &opno in &row.1 {
-                assert_eq!(
-                    supported_predicate(type_oid, triple(opno)),
-                    PredicateCapability::ExactRowFilter,
-                    "integer type {} opno {opno} must be ExactRowFilter under (0,0)",
-                    u32::from(type_oid),
-                );
-            }
-        }
-    }
-
-    /// Integer `(0, 0)` comparisons are `Exact`; any non-zero collation on
-    /// **either** `opcollid` or `inputcollid` is `Unsupported` (not translatable).
-    #[test]
-    fn supported_predicate_integer_single_slot_collation_is_unsupported() {
-        let collid = Oid::from(50_000u32);
-
-        let int4eq = triple(op::INT4_EQ);
-        let input_only = PgComparisonOp {
-            inputcollid: collid,
-            ..int4eq
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT4OID, input_only),
-            PredicateCapability::Unsupported,
-            "non-zero inputcollid alone must make int4eq Unsupported",
-        );
-        let opcoll_only = PgComparisonOp {
-            opcollid: collid,
-            ..int4eq
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT4OID, opcoll_only),
-            PredicateCapability::Unsupported,
-            "non-zero opcollid alone must make int4eq Unsupported",
-        );
-
-        let int8lt = triple(op::INT8_LT);
-        let input_only = PgComparisonOp {
-            inputcollid: collid,
-            ..int8lt
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT8OID, input_only),
-            PredicateCapability::Unsupported,
-        );
-        let opcoll_only = PgComparisonOp {
-            opcollid: collid,
-            ..int8lt
-        };
-        assert_eq!(
-            supported_predicate(pg_sys::INT8OID, opcoll_only),
-            PredicateCapability::Unsupported,
-        );
-    }
-
-    /// Both collation slots non-zero (via [`triple_with_collation`]) likewise
-    /// rejects integer pushdown.
-    #[test]
-    fn supported_predicate_integer_with_collation_is_unsupported() {
-        assert_eq!(
-            supported_predicate(
-                pg_sys::INT4OID,
-                triple_with_collation(op::INT4_EQ, 50_000),
-            ),
-            PredicateCapability::Unsupported,
-        );
-        assert_eq!(
-            supported_predicate(
-                pg_sys::INT8OID,
-                triple_with_collation(op::INT8_LT, 50_000),
-            ),
-            PredicateCapability::Unsupported,
-        );
-    }
-
-    /// Preservation set: every int4/int8 comparison from the previous exact
-    /// integer set stays `Exact` under `(opcollid, inputcollid) == (0, 0)`.
-    /// Broader integer matrix coverage lives in
-    /// [`supported_predicate_integers_are_exact_under_zero_collation`].
-    const INTEGER_EXACT_PRESERVATION_SET: &[(pg_sys::Oid, u32)] = &[
-        (pg_sys::INT4OID, op::INT4_EQ),
-        (pg_sys::INT4OID, op::INT4_NE),
-        (pg_sys::INT4OID, op::INT4_LT),
-        (pg_sys::INT4OID, op::INT4_LE),
-        (pg_sys::INT4OID, op::INT4_GT),
-        (pg_sys::INT4OID, op::INT4_GE),
-        (pg_sys::INT8OID, op::INT8_EQ),
-        (pg_sys::INT8OID, op::INT8_NE),
-        (pg_sys::INT8OID, op::INT8_LT),
-        (pg_sys::INT8OID, op::INT8_LE),
-        (pg_sys::INT8OID, op::INT8_GT),
-        (pg_sys::INT8OID, op::INT8_GE),
-    ];
-
-    #[test]
-    fn supported_predicate_integer_exact_preservation_set_is_exact() {
-        assert!(!INTEGER_EXACT_PRESERVATION_SET.is_empty());
-        for &(type_oid, opno) in INTEGER_EXACT_PRESERVATION_SET {
-            assert_eq!(
-                supported_predicate(type_oid, triple(opno)),
-                PredicateCapability::ExactRowFilter,
-                "integer preservation (type {}, opno {opno}) must stay ExactRowFilter under (0,0)",
-                u32::from(type_oid),
-            );
-        }
-    }
-
-    use proptest::prelude::*;
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 256,
-            ..ProptestConfig::default()
-        })]
-
-        /// Any non-zero collation on either slot makes integer comparisons Unsupported.
-        #[test]
-        fn prop_integer_exact_is_unsupported_when_either_collation_slot_nonzero(
-            idx in 0usize..INTEGER_EXACT_PRESERVATION_SET.len(),
-            collid in 1u32..=u32::MAX,
-            tag_input in any::<bool>(),
-        ) {
-            let (type_oid, opno) = INTEGER_EXACT_PRESERVATION_SET[idx];
-            let exact = triple(opno);
-            prop_assert_eq!(
-                supported_predicate(type_oid, exact),
-                PredicateCapability::ExactRowFilter,
-            );
-
-            let mut tagged = exact;
-            if tag_input {
-                tagged.inputcollid = Oid::from(collid);
-            } else {
-                tagged.opcollid = Oid::from(collid);
-            }
-            prop_assert_eq!(
-                supported_predicate(type_oid, tagged),
-                PredicateCapability::Unsupported,
-            );
-        }
-    }
-
-    /// Capability key uses `(type_oid, opno, opcollid, inputcollid)` only;
-    /// `opfuncid` / `opresulttype` are PG diagnostic metadata and must not
-    /// change the oracle verdict (classifier/translator share this oracle).
-    #[test]
-    fn supported_predicate_ignores_diagnostic_fields() {
-        let text_eq_c = PgComparisonOp {
-            opno: Oid::from(op::TEXT_EQ),
-            opfuncid: Oid::INVALID,
-            opresulttype: Oid::INVALID,
-            opcollid: Oid::INVALID,
-            inputcollid: pg_sys::C_COLLATION_OID,
-        };
-
-        let baselines: &[(pg_sys::Oid, PgComparisonOp)] = &[
-            (pg_sys::INT4OID, triple(op::INT4_EQ)), // Exact
-            (pg_sys::INT4OID, triple(op::INT4_LT)), // Exact (different opno)
-            (pg_sys::INT4OID, triple_with_collation(op::INT4_EQ, 50_000)), // Unsupported: integer + tagged collation
-            (pg_sys::NUMERICOID, triple(op::NUMERIC_EQ)), // numeric: ConservativePruning when enabled, else Unsupported
-            (pg_sys::TEXTOID, text_eq_c), // texteq under C, ConservativePruning
-            (
-                pg_sys::TEXTOID,
-                PgComparisonOp {
-                    opno: Oid::from(op::TEXT_NE),
-                    opfuncid: Oid::INVALID,
-                    opresulttype: Oid::INVALID,
-                    opcollid: Oid::INVALID,
-                    inputcollid: pg_sys::C_COLLATION_OID,
-                },
-            ), // text <>, Unsupported
-        ];
-
-        for &(type_oid, baseline) in baselines {
-            let expected = supported_predicate(type_oid, baseline);
-
-            let planner_like = PgComparisonOp {
-                opfuncid: Oid::from(65u32),
-                opresulttype: pg_sys::BOOLOID,
-                ..baseline
-            };
-            assert_eq!(
-                supported_predicate(type_oid, planner_like),
-                expected,
-                "planner-like diagnostic OIDs must not change verdict for type {} opno {}",
-                u32::from(type_oid),
-                u32::from(baseline.opno),
-            );
-
-            let arbitrary = PgComparisonOp {
-                opfuncid: Oid::from(9_999u32),
-                opresulttype: Oid::from(9_999u32),
-                ..baseline
-            };
-            assert_eq!(
-                supported_predicate(type_oid, arbitrary),
-                expected,
-                "arbitrary diagnostic OIDs must not change verdict for type {} opno {}",
-                u32::from(type_oid),
-                u32::from(baseline.opno),
-            );
-        }
-    }
-
-    /// The collation-agnostic temporal types (date / timestamp /
-    /// timestamptz) are `ConservativePruning` for `Eq` and the
-    /// four ordered classes, and `Unsupported` for `<>`.
-    /// Numeric comparison follows `NUMERIC_COMPARISON_PUSHDOWN_ENABLED`
-    /// (all-`Unsupported` when disabled), and float types follow
-    /// `FLOAT_PUSHDOWN_ENABLED` (all-`Unsupported` when disabled).
-    #[test]
-    fn supported_predicate_numeric_temporal_float_matrix() {
-        let temporal = [
-            pg_sys::DATEOID,
-            pg_sys::TIMESTAMPOID,
-            pg_sys::TIMESTAMPTZOID,
-        ];
-        for &type_oid in &temporal {
-            let row = OPNO_TABLE
-                .iter()
-                .find(|(t, _)| *t == type_oid)
-                .expect("type present in table");
-            for (col, &opno) in row.1.iter().enumerate() {
-                let class = CLASS_BY_COLUMN[col];
-                let expected = if class == ComparisonOpClass::NotEq {
-                    PredicateCapability::Unsupported
-                } else {
-                    PredicateCapability::ConservativePruning
-                };
-                assert_eq!(
-                    supported_predicate(type_oid, triple(opno)),
-                    expected,
-                    "type {} class {class:?} (opno {opno}) mismatch",
-                    u32::from(type_oid),
-                );
-            }
-        }
-
-        // Numeric comparison respects the NUMERIC_COMPARISON_PUSHDOWN_ENABLED toggle.
-        let numeric_row = OPNO_TABLE
-            .iter()
-            .find(|(t, _)| *t == pg_sys::NUMERICOID)
-            .expect("numeric present in table");
-        for (col, &opno) in numeric_row.1.iter().enumerate() {
-            let expected = if super::super::NUMERIC_COMPARISON_PUSHDOWN_ENABLED {
-                let class = CLASS_BY_COLUMN[col];
-                if class == ComparisonOpClass::NotEq {
-                    PredicateCapability::Unsupported
-                } else {
-                    PredicateCapability::ConservativePruning
-                }
-            } else {
-                PredicateCapability::Unsupported
-            };
-            assert_eq!(
-                supported_predicate(pg_sys::NUMERICOID, triple(opno)),
-                expected,
-                "numeric opno {opno} mismatch (NUMERIC_COMPARISON_PUSHDOWN_ENABLED={})",
-                super::super::NUMERIC_COMPARISON_PUSHDOWN_ENABLED,
-            );
-        }
-
-        // Float types respect the FLOAT_PUSHDOWN_ENABLED toggle.
-        let float_types = [pg_sys::FLOAT4OID, pg_sys::FLOAT8OID];
-        for &type_oid in &float_types {
-            let row = OPNO_TABLE
-                .iter()
-                .find(|(t, _)| *t == type_oid)
-                .expect("type present in table");
-            for (_col, &opno) in row.1.iter().enumerate() {
-                let expected = if super::super::FLOAT_PUSHDOWN_ENABLED {
-                    let class = CLASS_BY_COLUMN[_col];
-                    if class == ComparisonOpClass::NotEq {
-                        PredicateCapability::Unsupported
-                    } else {
-                        PredicateCapability::ConservativePruning
-                    }
-                } else {
-                    PredicateCapability::Unsupported
-                };
-                assert_eq!(
-                    supported_predicate(type_oid, triple(opno)),
-                    expected,
-                    "float type {} opno {opno} mismatch (FLOAT_PUSHDOWN_ENABLED={})",
-                    u32::from(type_oid),
-                    super::super::FLOAT_PUSHDOWN_ENABLED,
-                );
-            }
-        }
-    }
-
-    /// Only the integer set is ever `Exact`; the newly-supported value
-    /// types are never `Exact` for any op-class.
-    #[test]
-    fn supported_predicate_only_integers_are_exact() {
-        for (type_oid, opnos) in OPNO_TABLE {
-            let is_integer = matches!(
-                *type_oid,
-                pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID
-            );
-            if is_integer {
-                continue;
-            }
-            for &opno in opnos {
-                assert_ne!(
-                    supported_predicate(*type_oid, triple(opno)),
-                    PredicateCapability::ExactRowFilter,
-                    "non-integer type {} opno {opno} must not be ExactRowFilter",
-                    u32::from(*type_oid),
-                );
-            }
-        }
-    }
-
-    /// An unknown type OID is always `Unsupported`, regardless of the
-    /// operator class (here `int4eq`, a recognized opno).
-    #[test]
-    fn supported_predicate_unknown_type_is_unsupported() {
-        // BOOLOID has no comparison entry in our op_class map under these
-        // opnos, but even pairing it with a recognized integer opno must
-        // be Unsupported because the type is outside every category.
-        assert_eq!(
-            supported_predicate(pg_sys::BOOLOID, triple(op::INT4_EQ)),
-            PredicateCapability::Unsupported,
-        );
-        // A clearly-unrelated type (bytea) is likewise Unsupported.
-        assert_eq!(
-            supported_predicate(pg_sys::BYTEAOID, triple(op::INT4_EQ)),
-            PredicateCapability::Unsupported,
-        );
-    }
-
-    /// An unrecognized operator makes any clause `Unsupported`, even for
-    /// an otherwise-supported type.
-    #[test]
-    fn supported_predicate_unknown_operator_is_unsupported() {
-        assert_eq!(
-            supported_predicate(pg_sys::INT4OID, triple(558)),
-            PredicateCapability::Unsupported,
-            "unmapped opno 558 must be Unsupported even for int4",
-        );
-    }
-
-    /// Text under C/POSIX is host-testable because those collations
-    /// short-circuit ahead of the syscache: ordered text under C/POSIX
-    /// is `ConservativePruning`, while text `<>` is always `Unsupported`. Text under
-    /// the unresolved `InvalidOid` collation is `Unsupported` (fail-safe)
-    /// for both `=` and ordered classes.
-    #[test]
-    fn supported_predicate_text_collation_known_cases() {
-        let c = pg_sys::C_COLLATION_OID;
-        let posix = pg_sys::POSIX_COLLATION_OID;
-
-        let with = |opno: u32, collid: pg_sys::Oid| PgComparisonOp {
-            opno: Oid::from(opno),
-            opfuncid: Oid::INVALID,
-            opresulttype: Oid::INVALID,
-            opcollid: Oid::INVALID,
-            inputcollid: collid,
-        };
-
-        // Ordered text under C / POSIX → ConservativePruning (no syscache needed).
-        for &collid in &[c, posix] {
-            for &opno in &[op::TEXT_LT, op::TEXT_LE, op::TEXT_GT, op::TEXT_GE] {
-                assert_eq!(
-                    supported_predicate(pg_sys::TEXTOID, with(opno, collid)),
-                    PredicateCapability::ConservativePruning,
-                    "ordered text opno {opno} under C/POSIX must be ConservativePruning",
-                );
-            }
-            // text `=` under C/POSIX → deterministic short-circuit → ConservativePruning.
-            assert_eq!(
-                supported_predicate(pg_sys::TEXTOID, with(op::TEXT_EQ, collid)),
-                PredicateCapability::ConservativePruning,
-            );
-        }
-
-        // text `<>` is never pushable.
-        assert_eq!(
-            supported_predicate(pg_sys::TEXTOID, with(op::TEXT_NE, c)),
-            PredicateCapability::Unsupported,
-        );
-
-        // Unresolved collation (InvalidOid) → fail-safe Unsupported for
-        // both `=` and ordered classes.
-        assert_eq!(
-            supported_predicate(
-                pg_sys::TEXTOID,
-                with(op::TEXT_EQ, pg_sys::Oid::INVALID)
-            ),
-            PredicateCapability::Unsupported,
-        );
-        assert_eq!(
-            supported_predicate(
-                pg_sys::TEXTOID,
-                with(op::TEXT_LT, pg_sys::Oid::INVALID)
-            ),
-            PredicateCapability::Unsupported,
-        );
-    }
-
-    /// `is_c_or_posix_collation` is true *only* for the built-in C
-    /// (950) and POSIX (951) collation OIDs.
+    /// `is_c_or_posix_collation` is true *only* for the built-in C (950) and
+    /// POSIX (951) collation OIDs.
     #[test]
     fn is_c_or_posix_collation_only_for_c_and_posix() {
         assert!(is_c_or_posix_collation(pg_sys::C_COLLATION_OID));
@@ -1083,8 +647,6 @@ mod tests {
         assert_eq!(u32::from(pg_sys::C_COLLATION_OID), 950);
         assert_eq!(u32::from(pg_sys::POSIX_COLLATION_OID), 951);
 
-        // Everything else is false: InvalidOid, the default collation
-        // (100), and an arbitrary user collation OID.
         assert!(!is_c_or_posix_collation(pg_sys::Oid::INVALID));
         assert!(!is_c_or_posix_collation(pg_sys::DEFAULT_COLLATION_OID));
         assert!(!is_c_or_posix_collation(Oid::from(50_000u32)));
@@ -1121,7 +683,6 @@ mod tests {
     #[test]
     fn null_test_capability_float_is_independent_of_comparison_toggle() {
         let policy = PredicatePushdownPolicy::new();
-        // Even with FLOAT_PUSHDOWN_ENABLED = false, float null tests are safe.
         assert_eq!(
             policy.null_test_capability(pg_sys::FLOAT4OID),
             PredicateCapability::ExactRowFilter,
