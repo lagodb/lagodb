@@ -1,21 +1,32 @@
-//! Batch buffering abstractions for DML write paths.
+//! Batch buffering and transport abstractions for the DML write path and the
+//! columnar scan read path.
 //!
-//! The core crate defines the buffering lifecycle without committing every
-//! access method to a concrete storage layout. Row-oriented implementations can
-//! use [`RowBatchBuffer`], while columnar access methods can append PostgreSQL
-//! datum views through [`SlotColumnarBatchBuffer`] without pulling Arrow or
-//! another columnar format into core.
+//! The core crate defines the buffering/transport *contracts* without
+//! committing to a concrete storage layout or naming a columnar library — the
+//! Arrow implementations live in `pg-arrow-conv`. core stays Arrow-agnostic and
+//! the per-row path stays `dyn`-free (generics + enum dispatch), so the
+//! abstraction is zero-cost.
 //!
-//! The split is deliberate:
+//! Two write worlds, deliberately split by how the source row is owned:
 //!
-//! - [`RowBatchBuffer`] owns `Row` values and is safe across callback
-//!   boundaries.
-//! - [`SlotColumnarBatchBuffer`] consumes `TupleSlotRow` / `PgDatumRef` views
-//!   during the callback and must copy anything it needs into its own builders.
+//! - **Column world (hot path):** [`SlotColumnarBatchBuffer`] consumes
+//!   `TupleSlotRow` / `PgDatumRef` views *during* the callback and copies what
+//!   it needs straight into its column builders. This is what columnar AMs (the
+//!   in-tree Iceberg AM) use; the Arrow implementation is `pg-arrow-conv`'s
+//!   `SlotRecordBatchBuffer`.
+//! - **Row world:** [`RowBatchBuffer`] owns [`Row`] values that are safe across
+//!   callback boundaries — the buffering half of the row-mode / FDW write path,
+//!   paired with `pg-arrow-conv`'s `ColumnRule::build(&[Row], ..)`. Not on the
+//!   columnar hot path (see [`RowBatchBuffer`] for why it is retained).
 //!
-//! Core does not provide a `Cell`-based columnar buffer. For DML hot paths,
-//! materializing `Cell` first would add the same intermediate allocations that
-//! the slot/datum path is designed to avoid.
+//! Core does not provide a `Cell`-based columnar buffer: on a DML hot path,
+//! materializing `Cell` first would add the same intermediate allocations the
+//! slot/datum path is designed to avoid.
+//!
+//! The read path mirrors this: an [`AmScanBatchSource`] yields AM-defined column
+//! batches and a [`BatchRowDecoder`] writes one batch row into a slot, paired by
+//! the core-provided [`BatchRowCursor`]. Their Arrow implementations
+//! (`ArrowBatchSource` / `ArrowColumnDecoder`) also live in `pg-arrow-conv`.
 
 use std::convert::Infallible;
 
@@ -139,24 +150,27 @@ pub trait SlotColumnarBatchBuffer: BatchBuffer {
     }
 }
 
-/// Append a tuple-slot row to a homogenous set of datum column appenders.
-pub fn append_slot_row_to_datum_columns<A>(
-    columns: &mut [A],
-    row: TupleSlotRow<'_>,
-) -> Result<(), A::Error>
-where
-    A: DatumColumnAppender,
-{
-    for (column_index, column) in columns.iter_mut().enumerate() {
-        column.append_datum(row.datum_at(column_index))?;
-    }
-    Ok(())
-}
-
 /// Row-oriented batch buffer backed by owned [`Row`] values.
 ///
-/// This is the core default for AMs that want to keep row-shaped batches. Use
-/// [`Self::push_row`] when ownership is already available. [`Self::copy_row`]
+/// # Role: the buffering half of the row-world write path
+///
+/// This is the **row-world** write buffer, the counterpart to the
+/// `Cell`-based conversion (`pg-arrow-conv`'s `ColumnRule::build(&[Row], ..)`):
+/// a row-mode access method or FDW accumulates owned `Row`s here (one slot at a
+/// time, since `ExecForeignInsert` hands over one slot per call) and, on flush,
+/// converts the buffered `&[Row]` to a columnar batch.
+///
+/// It is deliberately **not** on the columnar hot path. Columnar AMs (the
+/// in-tree Iceberg AM) append tuple slots directly into a
+/// [`SlotColumnarBatchBuffer`] (e.g. `pg-arrow-conv`'s `SlotRecordBatchBuffer`),
+/// which skips the owned-`Row` materialization this type does. As a result the
+/// in-tree code base does not drive `RowBatchBuffer` today — it is exercised by
+/// unit tests and retained as the row-world buffering primitive a future
+/// row-mode FDW will use. It is **not** dead/legacy code: removing it would
+/// leave the row-world write path (which keeps `ColumnRule::build`) without its
+/// buffering half. See the columnar-datapath-refactor design, goal #3 / §3.1.
+///
+/// Use [`Self::push_row`] when ownership is already available. [`Self::copy_row`]
 /// is intentionally named to make deep row copies explicit in hot paths.
 ///
 /// `push_slot_row()` materializes an owned `Row` from a slot view. That is the
@@ -290,5 +304,312 @@ mod tests {
 
         assert_eq!(buffer.rows().len(), 1);
         assert_eq!(buffer.len(), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Read side: column batch → slot.
+// ---------------------------------------------------------------------------
+
+use crate::api::AmResult;
+use crate::tuple::SlotColumns;
+
+/// Yields one AM-defined column batch at a time. The batch is owned by value so
+/// its lifetime is independent of any PostgreSQL memory context.
+pub trait AmScanBatchSource {
+    type Batch;
+
+    fn next_batch(&mut self) -> AmResult<Option<Self::Batch>>;
+}
+
+/// Decodes a column batch into slots. The concrete implementation lives in the
+/// conversion crate; core never names a columnar format here.
+///
+/// Decoding is split into a per-batch [`bind`](Self::bind) step and a per-row
+/// [`write_row`](Self::write_row) step. `bind` resolves each column's concrete
+/// typed array **once per batch** (the validation + downcast that would
+/// otherwise repeat on every value), producing a [`Bound`](Self::Bound) the
+/// per-row path reads without any per-value type dispatch.
+pub trait BatchRowDecoder {
+    type Batch;
+    /// Per-batch bound state: columns resolved to their concrete typed arrays.
+    type Bound;
+
+    /// Bind a freshly fetched batch: validate the stream's schema and resolve
+    /// each mapped column to its concrete typed array, once. This is where a
+    /// producer/plan type drift surfaces as a clean error (the exact decimal
+    /// scale, fixed width, timestamp unit/tz — not just the array kind a
+    /// per-value downcast would check), at the batch boundary rather than
+    /// per row.
+    fn bind(&self, batch: Self::Batch) -> AmResult<Self::Bound>;
+
+    fn num_rows(&self, bound: &Self::Bound) -> usize;
+
+    fn write_row(
+        &self,
+        bound: &Self::Bound,
+        row_idx: usize,
+        out: &mut SlotColumns<'_>,
+    ) -> AmResult<()>;
+}
+
+/// The driver an `AmScanSession`'s associated `BatchDriver` type is bound to.
+/// Kept object-safe-free: the session holds a concrete type, so the per-row
+/// call monomorphizes.
+pub trait ScanBatchDriver {
+    fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool>;
+}
+
+/// Core-provided adapter pairing a batch source with a row decoder and exposing
+/// a "fetch one row into the slot" driver. Generic over both halves so the
+/// per-row decode is a static call.
+#[allow(dead_code)]
+pub struct BatchRowCursor<S, D>
+where
+    S: AmScanBatchSource,
+    D: BatchRowDecoder<Batch = S::Batch>,
+{
+    source: S,
+    decoder: D,
+    /// The current batch, bound once on fetch (validated + downcast per column),
+    /// then read row by row. Dropped before the next batch is fetched so at most
+    /// one batch is ever live.
+    current: Option<D::Bound>,
+    row_idx: usize,
+}
+
+impl<S, D> BatchRowCursor<S, D>
+where
+    S: AmScanBatchSource,
+    D: BatchRowDecoder<Batch = S::Batch>,
+{
+    pub fn new(source: S, decoder: D) -> Self {
+        Self {
+            source,
+            decoder,
+            current: None,
+            row_idx: 0,
+        }
+    }
+
+    pub fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+        loop {
+            if let Some(bound) = self.current.as_ref()
+                && self.row_idx < self.decoder.num_rows(bound)
+            {
+                self.decoder.write_row(bound, self.row_idx, out)?;
+                self.row_idx += 1;
+                return Ok(true);
+            }
+
+            // Drop the exhausted batch before fetching the next so at most one
+            // batch is ever live.
+            self.current = None;
+            match self.source.next_batch()? {
+                Some(batch) => {
+                    // Bind once per batch: this is where the per-column type is
+                    // validated and the array downcast, so per-row decode does
+                    // no per-value downcast.
+                    self.current = Some(self.decoder.bind(batch)?);
+                    self.row_idx = 0;
+                }
+                None => return Ok(false),
+            }
+        }
+    }
+
+    // Reserved for the direct columnar emit path; not implemented here:
+    // pub fn next_batch(&mut self) -> AmResult<Option<S::Batch>> { .. }
+}
+
+impl<S, D> ScanBatchDriver for BatchRowCursor<S, D>
+where
+    S: AmScanBatchSource,
+    D: BatchRowDecoder<Batch = S::Batch>,
+{
+    fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+        BatchRowCursor::next_into_slot(self, out)
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+    use std::cell::Cell as StdCell;
+    use std::rc::Rc;
+
+    use pgrx::pg_sys;
+
+    /// A batch that reports itself live for as long as it exists, so a test can
+    /// assert the cursor never holds more than one batch at a time.
+    struct LiveBatch {
+        rows: Vec<Vec<Option<i64>>>,
+        live: Rc<StdCell<usize>>,
+    }
+
+    impl Drop for LiveBatch {
+        fn drop(&mut self) {
+            self.live.set(self.live.get() - 1);
+        }
+    }
+
+    struct FakeSource {
+        batches: std::vec::IntoIter<Vec<Vec<Option<i64>>>>,
+        live: Rc<StdCell<usize>>,
+        max_live: Rc<StdCell<usize>>,
+    }
+
+    impl AmScanBatchSource for FakeSource {
+        type Batch = LiveBatch;
+
+        fn next_batch(&mut self) -> AmResult<Option<LiveBatch>> {
+            match self.batches.next() {
+                Some(rows) => {
+                    self.live.set(self.live.get() + 1);
+                    if self.live.get() > self.max_live.get() {
+                        self.max_live.set(self.live.get());
+                    }
+                    Ok(Some(LiveBatch {
+                        rows,
+                        live: self.live.clone(),
+                    }))
+                }
+                None => Ok(None),
+            }
+        }
+    }
+
+    struct FakeDecoder;
+
+    impl BatchRowDecoder for FakeDecoder {
+        type Batch = LiveBatch;
+        type Bound = LiveBatch;
+
+        fn bind(&self, batch: LiveBatch) -> AmResult<LiveBatch> {
+            Ok(batch)
+        }
+
+        fn num_rows(&self, bound: &LiveBatch) -> usize {
+            bound.rows.len()
+        }
+
+        fn write_row(
+            &self,
+            bound: &LiveBatch,
+            row_idx: usize,
+            out: &mut SlotColumns<'_>,
+        ) -> AmResult<()> {
+            for (col, value) in bound.rows[row_idx].iter().enumerate() {
+                out.set_datum(col, value.map(|n| pg_sys::Datum::from(n as usize)));
+            }
+            Ok(())
+        }
+    }
+
+    /// Owns the backing arrays a [`SlotColumns`] writes through. The `values`
+    /// buffer never reallocates after construction, so the raw pointers handed
+    /// to the slot stay valid for the slot's lifetime.
+    struct HostSlot {
+        slot: pg_sys::TupleTableSlot,
+        values: Vec<pg_sys::Datum>,
+        nulls: Vec<bool>,
+    }
+
+    impl HostSlot {
+        fn new(natts: usize) -> Box<Self> {
+            // `nulls` starts all-true so the test can assert the writer flips
+            // only the positions it actually writes. This is the test harness's
+            // own initial state, *not* what `ExecClearTuple` produces (a real
+            // cleared slot leaves `tts_isnull` untouched / `palloc0`'d).
+            let mut boxed = Box::new(HostSlot {
+                slot: unsafe { std::mem::zeroed() },
+                values: vec![pg_sys::Datum::from(0usize); natts],
+                nulls: vec![true; natts],
+            });
+            boxed.slot.tts_values = boxed.values.as_mut_ptr();
+            boxed.slot.tts_isnull = boxed.nulls.as_mut_ptr();
+            boxed
+        }
+
+        fn columns(&mut self, natts: usize) -> SlotColumns<'_> {
+            unsafe { SlotColumns::new(&mut self.slot, std::ptr::null_mut(), natts) }
+        }
+    }
+
+    #[test]
+    fn cursor_visits_every_row_once_across_batches() {
+        let batches = vec![
+            vec![vec![Some(1), Some(2)], vec![Some(3), Some(4)]],
+            vec![vec![Some(5), Some(6)]],
+        ];
+        let live = Rc::new(StdCell::new(0));
+        let max_live = Rc::new(StdCell::new(0));
+        let source = FakeSource {
+            batches: batches.into_iter(),
+            live: live.clone(),
+            max_live: max_live.clone(),
+        };
+        let mut cursor = BatchRowCursor::new(source, FakeDecoder);
+
+        let natts = 2;
+        let mut host = HostSlot::new(natts);
+        let mut produced = Vec::new();
+        loop {
+            let mut cols = host.columns(natts);
+            if !cursor.next_into_slot(&mut cols).unwrap() {
+                break;
+            }
+            produced
+                .push((host.values[0].value() as i64, host.values[1].value() as i64));
+        }
+
+        assert_eq!(produced, vec![(1, 2), (3, 4), (5, 6)]);
+        assert_eq!(max_live.get(), 1, "more than one batch was live at once");
+        assert_eq!(live.get(), 0, "final batch was not dropped at end of scan");
+    }
+
+    #[test]
+    fn cursor_signals_end_of_scan_once() {
+        let live = Rc::new(StdCell::new(0));
+        let max_live = Rc::new(StdCell::new(0));
+        let source = FakeSource {
+            batches: vec![vec![vec![Some(7)]]].into_iter(),
+            live,
+            max_live,
+        };
+        let mut cursor = BatchRowCursor::new(source, FakeDecoder);
+
+        let natts = 1;
+        let mut host = HostSlot::new(natts);
+
+        let mut trues = 0;
+        loop {
+            let mut cols = host.columns(natts);
+            if cursor.next_into_slot(&mut cols).unwrap() {
+                trues += 1;
+            } else {
+                break;
+            }
+        }
+        assert_eq!(trues, 1);
+
+        // End-of-scan stays terminal on repeated calls.
+        let mut cols = host.columns(natts);
+        assert!(!cursor.next_into_slot(&mut cols).unwrap());
+    }
+
+    #[test]
+    fn slot_columns_marks_null_and_leaves_unmapped_positions_null() {
+        let natts = 3;
+        let mut host = HostSlot::new(natts);
+        {
+            let mut cols = host.columns(natts);
+            cols.set_datum(0, Some(pg_sys::Datum::from(42usize)));
+            cols.set_datum(1, None);
+            // Index 2 is intentionally never written.
+        }
+
+        assert_eq!(host.nulls, vec![false, true, true]);
+        assert_eq!(host.values[0].value() as i64, 42);
     }
 }

@@ -10,7 +10,7 @@ use std::ffi::CStr;
 
 use crate::diag::PgReportError;
 use crate::handles::OwnedScanKeys;
-use crate::tuple::{Row, TupleSlotWriter};
+use crate::tuple::{Row, SlotColumns};
 use pgrx::pg_sys;
 
 use super::lifecycle;
@@ -41,6 +41,7 @@ pub(crate) struct AmFfiSession<T> {
     /// keep accumulating fields here.
     pub(crate) scan_keys: OwnedScanKeys,
     tmp_ctx: pg_sys::MemoryContext,
+    natts: usize,
 }
 
 impl<B, T> FfiContainer<B, T> {
@@ -143,6 +144,7 @@ impl<T> AmFfiSession<T> {
             row: Row::with_capacity(natts),
             scan_keys,
             tmp_ctx,
+            natts,
         }
     }
 
@@ -152,10 +154,25 @@ impl<T> AmFfiSession<T> {
         }
     }
 
+    /// Per-row context the slot-first path palloc's varlena datums into, reset
+    /// once per fetch so slot datum lifetime is bounded to a single row.
+    pub(crate) fn tmp_ctx(&self) -> pg_sys::MemoryContext {
+        self.tmp_ctx
+    }
+
+    pub(crate) fn natts(&self) -> usize {
+        self.natts
+    }
+
+    /// Materialize the buffered row into the slot through [`SlotColumns`], the
+    /// single substrate that owns the unsafe slot writes (shared with the
+    /// column path). It does **not** call `ExecStoreVirtualTuple`; the caller
+    /// marks the slot non-empty on a produced row, matching `next_into_slot`.
     pub(crate) unsafe fn write_row_to_slot(
         &mut self,
         slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<(), PgReportError> {
-        unsafe { TupleSlotWriter::new(slot, self.tmp_ctx).write_row(&mut self.row) }
+        let mut cols = unsafe { SlotColumns::new(slot, self.tmp_ctx, self.natts) };
+        cols.fill_from_row(&mut self.row)
     }
 }

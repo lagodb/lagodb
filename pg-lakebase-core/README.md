@@ -7,17 +7,38 @@
 **Rust framework primitives for PostgreSQL Table Access Methods.**
 
 `pg-lakebase-core` is the framework crate used by PostgreSQL storage
-extensions in this workspace. It wraps PostgreSQL's C-facing callback surface
-behind Rust traits, typed handles, and lifecycle helpers so that storage
-extensions can be written in safe Rust instead of against raw C pointers.
+extensions in this workspace. Its central job is to **own the FFI boundary**:
+PostgreSQL's access-method and planner integration is a large surface of C
+callbacks over raw pointers, manual memory contexts, and error paths that bypass
+normal Rust control flow. This crate concentrates that unsafe glue in one
+reviewed place — behind Rust traits, typed handles, and lifecycle helpers — so a
+storage provider writes its logic in **safe Rust**, the correctness-critical
+parts are implemented once instead of by every provider, and a provider bug
+stays confined to that provider's business logic.
 
-The crate provides two cooperating frameworks:
+On top of that boundary, the crate exposes two pluggable frameworks a provider
+implements:
 
 - A **Table Access Method (TAM)** framework that models PostgreSQL's scan,
-  relation, index, DML, and DDL callbacks as Rust traits.
+  relation, index, DML, and DDL callbacks as Rust traits, and adapts the raw C
+  entry points to them.
 - A generic **CustomScan filter-pushdown** framework that lets a storage
   provider push SQL `WHERE` predicates down into its own scan, so it can prune
   data files and filter rows before they reach the executor.
+
+These rest on a broader set of supporting facilities the crate also owns: a
+row/column tuple-value substrate (`Cell`/`Row`, zero-copy slot and datum views,
+columnar batch buffers) so providers can materialize rows or consume columns
+directly; typed handles wrapping PostgreSQL-owned objects (relations, snapshots,
+scan keys, slots); a typed `Expr` layer with walkers and classification that
+backs predicate pushdown; catalog scan/update helpers and table/tablespace
+option parsing with caching; a custom WAL resource-manager registration path for
+crash recovery; PostgreSQL hook helpers, error reporting/diagnostics, and
+background-worker scaffolding; and two distinct cleanup mechanisms —
+`ResourceOwner`-scoped and transaction-scoped — for the ERROR, abort, and
+rollback paths normal Rust returns cannot observe. The
+["What the Framework Provides"](#what-the-framework-provides) section breaks
+these down.
 
 FDW support is a workspace-level direction, but it is not part of this crate's
 current public API.
@@ -242,34 +263,21 @@ cargo test -p pg-lakebase-core
 
 Some functionality — like `Cell`'s `IntoDatum`/`FromDatum` round-tripping and
 `Display` formatting via `pg_sys::date_out` etc. — requires a real PostgreSQL
-backend. These tests live in a **dedicated test extension crate**
-[`pg-lakebase-core-tests`](../pg-lakebase-core-tests) and are run with:
+backend. Because `pg-lakebase-core` is a plain library (`rlib`) and not a
+loadable extension, its `#[pg_test]` tests cannot run from inside this crate.
+They live in the workspace's shared backend-test extension
+[`pg-backend-tests`](../pg-backend-tests), which aggregates the `#[pg_test]`
+tests for every framework library crate, and are run with:
 
 ```bash
-cargo pgrx test pg17 --package pg-lakebase-core-tests
+cargo pgrx test pg17 --package pg-backend-tests
 ```
 
-#### Why a separate test crate?
-
-`pg-lakebase-core` is a pure library (`lib`) consumed by downstream extension
-crates like `pg-iceberg-am`. pgrx's `#[pg_test]` requires loading the code as
-a PostgreSQL extension (`cdylib` with `pg_module_magic!()`). Embedding these
-extension artifacts directly in `pg-lakebase-core` would risk symbol conflicts
-(duplicate `Pg_magic_func`) with downstream extensions that also define
-`pg_module_magic!()`.
-
-The separate `pg-lakebase-core-tests` crate isolates all extension plumbing
-(`pg_module_magic!()`, `.control` file) so that `pg-lakebase-core` remains a
-clean library with zero chance of downstream conflicts.
-
-#### Writing new `#[pg_test]` tests
-
-Test modules in `pg-lakebase-core-tests` mirror this crate's source structure.
-For example, tests for `pg_lakebase_core::tuple::Cell` live at
-`pg-lakebase-core-tests/src/tuple/cell.rs`.
-
-See the [pg-lakebase-core-tests README](../pg-lakebase-core-tests/README.md)
-for the full guide on adding new test modules.
+Test modules there mirror this crate's source structure under the
+`lakebase_core` module — for example, tests for `pg_lakebase_core::tuple::Cell`
+live under `pg-backend-tests/src/lakebase_core/tuple/`. See the
+[pg-backend-tests README](../pg-backend-tests/README.md) for why the backend
+tests are aggregated in one crate and how to add new modules.
 
 #### Prerequisites
 

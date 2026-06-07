@@ -123,6 +123,7 @@ where
         }
 
         state.write_row_to_slot(slot).report_unwrap();
+        pg_sys::ExecStoreVirtualTuple(slot);
 
         true
     }

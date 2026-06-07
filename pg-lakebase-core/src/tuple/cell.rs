@@ -356,6 +356,14 @@ impl Cell {
                 Cell::I64(v) => i32::try_from(v).ok().and_then(|v| v.into_datum()),
                 _ => self.into_datum(),
             },
+            // TODO(row-world-list-narrowing): the array `Cell` variants
+            // (`I16Array`/`I32Array`/...) fall through to the `_` arm below and
+            // are emitted at their physical element width, so a list column
+            // widened on write reads back at the wrong PG element type in the
+            // row path (e.g. `int2[]` -> `int4[]`). See the matching TODO on
+            // `ListValues::into_cell` in pg-arrow-conv list.rs; the slot-first
+            // `into_array_datum` already retargets per element OID. Closing this
+            // means adding array-type-OID arms here that retarget each element.
             _ => self.into_datum(),
         }
     }

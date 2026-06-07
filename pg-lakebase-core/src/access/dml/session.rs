@@ -28,7 +28,7 @@
 //! while ResourceOwner handles the non-local exits that Rust code cannot
 //! observe directly.
 
-use crate::api::{AmDmlSession, DmlTarget, TableAccessMethod};
+use crate::api::{AmDmlSession, TableAccessMethod};
 use crate::diag::{PgReportError, ReportableError};
 use crate::handles::RelationHandle;
 use crate::resource::{self, ResourceHandle};
@@ -393,9 +393,8 @@ where
         // here while later callbacks may be insert/update/delete depending on
         // the matched source row.
         let rel_handle = RelationHandle::from_raw(rel);
-        let mut instance = <A::DmlSession as AmDmlSession>::new(
-            DmlTarget::from_relation_with_cmd_type(&rel_handle, cmd_type),
-        )?;
+        let mut instance =
+            <A::DmlSession as AmDmlSession>::new(&rel_handle, cmd_type)?;
         instance.begin_modify()?;
 
         Ok(Box::new(ModifySession::new::<A::DmlSession>(instance)))

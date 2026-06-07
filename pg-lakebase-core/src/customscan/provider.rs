@@ -6,8 +6,10 @@ use core::ffi::CStr;
 use core::marker::PhantomData;
 use core::ptr;
 
+use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 
+use crate::batch::ScanBatchDriver;
 use crate::customscan::custom_private::CustomScanPrivate;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationScope};
 use crate::expr::nodes::PgParamValue;
@@ -15,7 +17,7 @@ use crate::expr::predicate::PlanPredicate;
 use crate::expr::split::{ColumnRef, PushdownContract, QualPushdownDecision};
 use crate::expr::translator::{PgPredicateTranslator, PredicateBuilder};
 use crate::handles::{RelationHandle, SnapshotHandle};
-use crate::tuple::{Row, TupleSlotWriter};
+use crate::tuple::{Row, SlotColumns, TupleSlotWriter};
 
 // Error type
 /// Provider runtime error; re-exported from [`crate::customscan::error`].
@@ -621,11 +623,59 @@ impl<'a, P: LakebaseCustomScanProvider> NextSlotContext<'a, P> {
         unsafe { writer.write_row(row) }.map_err(CustomScanError::from)
     }
 
+    /// Drive a slot-first scan driver straight into the scan slot; marks the
+    /// slot non-empty on a produced row. `Ok(false)` is end-of-scan.
+    pub fn emit_via<D: ScanBatchDriver>(
+        &mut self,
+        driver: &mut D,
+        natts: usize,
+    ) -> Result<bool, CustomScanError> {
+        let slot = self.slot;
+        // CustomScan writes slot datums into the slot's own context, not the
+        // per-tuple `tmp_ctx`: they must outlive the per-tuple reset for the
+        // slot's consumer.
+        // SAFETY: slot and tts_mcxt live for this next_slot callback.
+        let tts_mcxt = unsafe { (*slot).tts_mcxt };
+        emit_into_slot(
+            || unsafe {
+                PgMemoryContexts::For(tts_mcxt).switch_to(|_| {
+                    // SAFETY: slot is valid with at least `natts` attributes
+                    // for this callback; tts_mcxt is the target for varlena
+                    // palloc.
+                    let mut cols = SlotColumns::new(slot, tts_mcxt, natts);
+                    driver.next_into_slot(&mut cols)
+                })
+            },
+            // SAFETY: slot is the live scan slot for this callback.
+            || unsafe {
+                pg_sys::ExecStoreVirtualTuple(slot);
+            },
+        )
+    }
+
     /// Cooperative cancellation check (pgrx `check_for_interrupts!`).
     #[inline]
     pub fn check_for_interrupts(&self) {
         pgrx::pg_sys::check_for_interrupts!();
     }
+}
+
+/// Produced-row/end-of-scan decision shared by the slot-first emit path.
+///
+/// `advance` fills the slot and reports whether a row was produced; `store` is
+/// invoked exactly once per produced row and never at end-of-scan. Splitting the
+/// decision from the slot/context wiring lets it be exercised without a PG
+/// backend.
+fn emit_into_slot<A, S>(advance: A, store: S) -> Result<bool, CustomScanError>
+where
+    A: FnOnce() -> crate::api::AmResult<bool>,
+    S: FnOnce(),
+{
+    let found = advance().map_err(CustomScanError::from)?;
+    if found {
+        store();
+    }
+    Ok(found)
 }
 
 /// Context for [`LakebaseCustomScanProvider::rescan`].
@@ -960,4 +1010,112 @@ pub fn find_matching_provider(
         ));
     }
     Ok(Some(first))
+}
+
+#[cfg(test)]
+mod emit_tests {
+    use super::*;
+    use crate::api::AmResult;
+    use crate::batch::ScanBatchDriver;
+    use crate::tuple::SlotColumns;
+
+    /// Produces a fixed number of rows, then end-of-scan forever.
+    struct FakeDriver {
+        remaining: usize,
+    }
+
+    impl ScanBatchDriver for FakeDriver {
+        fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+            if self.remaining == 0 {
+                return Ok(false);
+            }
+            self.remaining -= 1;
+            out.set_datum(0, Some(pg_sys::Datum::from(1usize)));
+            Ok(true)
+        }
+    }
+
+    /// Owns the arrays a [`SlotColumns`] writes through; the backing vectors
+    /// never reallocate after construction, so the raw pointers stay valid.
+    struct HostSlot {
+        slot: pg_sys::TupleTableSlot,
+        values: Vec<pg_sys::Datum>,
+        nulls: Vec<bool>,
+    }
+
+    impl HostSlot {
+        fn new(natts: usize) -> Box<Self> {
+            let mut boxed = Box::new(HostSlot {
+                slot: unsafe { std::mem::zeroed() },
+                values: vec![pg_sys::Datum::from(0usize); natts],
+                nulls: vec![true; natts],
+            });
+            boxed.slot.tts_values = boxed.values.as_mut_ptr();
+            boxed.slot.tts_isnull = boxed.nulls.as_mut_ptr();
+            boxed
+        }
+
+        fn columns(&mut self, natts: usize) -> SlotColumns<'_> {
+            unsafe { SlotColumns::new(&mut self.slot, std::ptr::null_mut(), natts) }
+        }
+    }
+
+    #[test]
+    fn store_runs_once_per_produced_row_and_eof_is_terminal() {
+        let natts = 1;
+        let mut driver = FakeDriver { remaining: 3 };
+        let mut host = HostSlot::new(natts);
+        let mut stores = 0usize;
+
+        let mut produced = 0usize;
+        loop {
+            let found = emit_into_slot(
+                || {
+                    let mut cols = host.columns(natts);
+                    driver.next_into_slot(&mut cols)
+                },
+                || stores += 1,
+            )
+            .unwrap();
+            if !found {
+                break;
+            }
+            produced += 1;
+        }
+
+        assert_eq!(produced, 3);
+        assert_eq!(stores, 3);
+
+        // End-of-scan stays terminal and never takes the store path again.
+        let again = emit_into_slot(
+            || {
+                let mut cols = host.columns(natts);
+                driver.next_into_slot(&mut cols)
+            },
+            || stores += 1,
+        )
+        .unwrap();
+        assert!(!again);
+        assert_eq!(stores, 3);
+    }
+
+    #[test]
+    fn eof_with_no_rows_never_stores() {
+        let natts = 1;
+        let mut driver = FakeDriver { remaining: 0 };
+        let mut host = HostSlot::new(natts);
+        let mut stores = 0usize;
+
+        let found = emit_into_slot(
+            || {
+                let mut cols = host.columns(natts);
+                driver.next_into_slot(&mut cols)
+            },
+            || stores += 1,
+        )
+        .unwrap();
+
+        assert!(!found);
+        assert_eq!(stores, 0);
+    }
 }

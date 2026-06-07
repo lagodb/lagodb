@@ -3,12 +3,11 @@
 
 use crate::diag::PgReportError;
 use pgrx::FromDatum;
-use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
-use pgrx::prelude::PgSqlErrorCode;
 use std::marker::PhantomData;
 
 use super::cell::Cell;
+use super::slot_columns::SlotColumns;
 
 /// Borrowed view of one PostgreSQL datum in a tuple slot.
 ///
@@ -351,55 +350,19 @@ impl TupleSlotWriter {
     /// valid. The row is consumed in-place: written cells are taken from it.
     pub unsafe fn write_row(&self, row: &mut Row) -> Result<(), PgReportError> {
         unsafe {
-            let tup_desc = (*self.slot).tts_tupleDescriptor;
-            let natts = (*tup_desc).natts as usize;
+            let natts = (*(*self.slot).tts_tupleDescriptor).natts as usize;
 
-            if row.len() < natts {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INVALID_COLUMN_REFERENCE,
-                    format!(
-                        "row has {} columns but tuple slot expects {}",
-                        row.len(),
-                        natts
-                    ),
-                ));
-            }
+            // `SlotColumns` is the single substrate that owns the unsafe
+            // `tts_values`/`tts_isnull` writes; the row world funnels through it
+            // rather than re-deriving the slot pointers here.
+            let mut cols = SlotColumns::new(self.slot, self.memory_context, natts);
+            cols.fill_from_row(row)?;
 
-            let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
-            let slot_values =
-                std::slice::from_raw_parts_mut((*self.slot).tts_values, natts);
-            let slot_nulls =
-                std::slice::from_raw_parts_mut((*self.slot).tts_isnull, natts);
-
-            PgMemoryContexts::For(self.memory_context).switch_to(|_| {
-                for i in 0..natts {
-                    match row.take_cell(i) {
-                        Some(cell) => {
-                            let attr = &attrs[i];
-                            let datum = cell
-                                .into_datum_typed(attr.atttypid, attr.atttypmod)
-                                .ok_or_else(|| {
-                                    PgReportError::from_message(
-                                        PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
-                                        format!(
-                                            "failed to convert row column {} to datum",
-                                            i + 1
-                                        ),
-                                    )
-                                })?;
-
-                            slot_values[i] = datum;
-                            slot_nulls[i] = false;
-                        }
-                        None => {
-                            slot_nulls[i] = true;
-                        }
-                    }
-                }
-
-                pg_sys::ExecStoreVirtualTuple(self.slot);
-                Ok(())
-            })
+            // The row-world provider API marks the slot non-empty itself
+            // (`fill_from_row` deliberately does not), so existing callers that
+            // do not issue their own store keep working.
+            pg_sys::ExecStoreVirtualTuple(self.slot);
+            Ok(())
         }
     }
 }

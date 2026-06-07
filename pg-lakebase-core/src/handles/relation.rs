@@ -44,6 +44,17 @@ impl<'a> RelationHandle<'a> {
         unsafe { (*self.rd_rel()).relnamespace }
     }
 
+    /// The relation's physical file locator (`rd_locator`).
+    ///
+    /// Unlike [`Self::tablespace_oid`] (which returns `reltablespace`, `0` for
+    /// the default tablespace), the locator carries the *resolved* physical
+    /// `spc_oid` PostgreSQL uses for storage. Storage-facing callers should use
+    /// this so default-tablespace relations resolve to the right location.
+    #[inline]
+    pub fn locator(&self) -> RelFileLocator {
+        unsafe { RelFileLocator::from_raw_unchecked(&(*self.as_raw()).rd_locator) }
+    }
+
     #[inline]
     pub fn relation_name(&self) -> String {
         unsafe {
@@ -129,6 +140,28 @@ impl<'a> RelationHandle<'a> {
             live.push((attr.attnum, name));
         }
         live
+    }
+
+    /// Per-attribute `(type oid, typmod)` for every attribute position, indexed
+    /// by `attno - 1` (so a slot-first decoder can look up a destination's
+    /// target type directly). Dropped-column positions keep their stored type;
+    /// callers that only touch live destinations never read those slots.
+    pub fn attr_types(&self) -> Vec<(pg_sys::Oid, i32)> {
+        let tup_desc = self.tuple_desc();
+        debug_assert!(
+            !tup_desc.is_null(),
+            "RelationHandle::attr_types: rd_att is NULL"
+        );
+        // SAFETY: a live RelationHandle yields a valid `TupleDesc`; `attrs` is a
+        // contiguous array of length `natts` for the descriptor's lifetime,
+        // which outlives this borrow.
+        let attrs = unsafe {
+            std::slice::from_raw_parts(
+                (*tup_desc).attrs.as_ptr(),
+                (*tup_desc).natts as usize,
+            )
+        };
+        attrs.iter().map(|a| (a.atttypid, a.atttypmod)).collect()
     }
 
     #[inline]

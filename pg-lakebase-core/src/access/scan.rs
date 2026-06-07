@@ -5,12 +5,15 @@
 
 use super::common::FfiContainer;
 use crate::api::{AmScanSession, TableAccessMethod};
+use crate::batch::ScanBatchDriver;
 use crate::diag::ReportableError;
 use crate::handles::{
     ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle,
     RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
     TBMIterateResultHandle,
 };
+use crate::tuple::SlotColumns;
+use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::*;
 
 type TableAmScanDesc<T> = FfiContainer<pg_sys::TableScanDescData, T>;
@@ -197,18 +200,33 @@ where
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
 
-        let direction_handle = ScanDirection::try_from_raw(direction).report_unwrap();
-        let found = state
-            .am_instance
-            .scan_getnextslot(direction_handle, &mut state.row)
+        // Validate the requested direction even though the slot-filling driver
+        // scans forward-only; an unrecognized raw direction is still a hard
+        // error rather than a silently ignored value.
+        ScanDirection::try_from_raw(direction).report_unwrap();
+
+        // Copied out before borrowing `am_instance`: the slot-fill path needs
+        // both the session's context/width and a `&mut` driver at once.
+        let tmp_ctx = state.tmp_ctx();
+        let natts = state.natts();
+
+        // One uniform slot-filling path: ask the session's driver for the next
+        // tuple. row-vs-column is the driver's own concern. Switch the current
+        // context to the just-reset `tmp_ctx` so the driver's varlena palloc
+        // lands there and is freed on the next fetch's reset.
+        let found = PgMemoryContexts::For(tmp_ctx)
+            .switch_to(|_| {
+                let mut cols = SlotColumns::new(slot, tmp_ctx, natts);
+                state.am_instance.scan_driver().next_into_slot(&mut cols)
+            })
             .report_unwrap();
 
-        if !found {
-            return false;
+        // Exactly once on a produced row, never on end-of-scan, so the
+        // slot-non-empty invariant holds without delegating it to the AM.
+        if found {
+            pg_sys::ExecStoreVirtualTuple(slot);
         }
-
-        state.write_row_to_slot(slot).report_unwrap();
-        true
+        found
     }
 }
 
@@ -263,6 +281,7 @@ where
         }
 
         state.write_row_to_slot(slot).report_unwrap();
+        pg_sys::ExecStoreVirtualTuple(slot);
         true
     }
 }
@@ -316,6 +335,7 @@ where
         }
 
         state.write_row_to_slot(slot).report_unwrap();
+        pg_sys::ExecStoreVirtualTuple(slot);
         true
     }
 }
@@ -366,6 +386,7 @@ where
         }
 
         state.write_row_to_slot(slot).report_unwrap();
+        pg_sys::ExecStoreVirtualTuple(slot);
         true
     }
 }
@@ -500,6 +521,7 @@ where
         }
 
         state.write_row_to_slot(slot).report_unwrap();
+        pg_sys::ExecStoreVirtualTuple(slot);
         true
     }
 }

@@ -15,6 +15,7 @@
 mod cell;
 mod numeric;
 mod row;
+mod slot_columns;
 
 pub use cell::{ByteaView, Cell, StringView};
 pub use numeric::{
@@ -22,3 +23,4 @@ pub use numeric::{
     PG_EPOCH_USECS_DIFF, numeric_precision_scale, numeric_typmod,
 };
 pub use row::{PgDatumRef, Row, TupleSlotBatch, TupleSlotRow, TupleSlotWriter};
+pub use slot_columns::SlotColumns;

@@ -65,6 +65,7 @@
 //! with PostgreSQL.
 
 use crate::TableAmRoutine;
+use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, SqlStateError};
 use crate::handles::{
     AttrWidthsHandle, BufferAccessStrategyHandle, BulkInsertStateHandle,
@@ -177,33 +178,6 @@ impl ScanCapabilities {
     };
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct DmlTarget {
-    pub rel_oid: pg_sys::Oid,
-    pub namespace_oid: pg_sys::Oid,
-    pub locator: RelFileLocator,
-    pub relation_needs_wal: bool,
-    pub cmd_type: pg_sys::CmdType::Type,
-}
-
-impl DmlTarget {
-    pub fn from_relation_with_cmd_type(
-        rel: &RelationHandle,
-        cmd_type: pg_sys::CmdType::Type,
-    ) -> Self {
-        let raw = rel.as_raw();
-        Self {
-            rel_oid: unsafe { (*raw).rd_id },
-            namespace_oid: rel.namespace_oid(),
-            locator: unsafe {
-                RelFileLocator::from_raw_unchecked(&(*raw).rd_locator)
-            },
-            relation_needs_wal: rel.needs_wal(),
-            cmd_type,
-        }
-    }
-}
-
 pub trait AmScan {
     const SCAN_CAPABILITIES: ScanCapabilities = ScanCapabilities::NONE;
 
@@ -243,6 +217,12 @@ pub trait AmScan {
 }
 
 pub trait AmScanSession {
+    /// Concrete slot-filling scan driver (implements [`ScanBatchDriver`]).
+    /// A columnar AM sets this to its cursor type (e.g. an Arrow batch
+    /// cursor). Binding a concrete type (rather than `dyn ScanBatchDriver`)
+    /// keeps the per-row decode a static call.
+    type BatchDriver: ScanBatchDriver;
+
     /// Create a new scan session.
     ///
     /// `new()` runs before any storage IO and therefore before the AM has
@@ -272,21 +252,20 @@ pub trait AmScanSession {
     /// the keys argument they receive on the next callback.
     fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()>;
 
-    /// Fetch the next tuple into the dispatcher-owned row buffer.
+    /// The scan's slot-filling driver for this session.
     ///
-    /// TODO(rowless-scan): this is still the row-mode scan boundary. A columnar
-    /// AM that reads Arrow/columnar batches should eventually be able to
-    /// override a slot-first scan callback, analogous to
-    /// [`AmDmlSession::tuple_insert_slot`], and write values directly into the
-    /// PostgreSQL `TupleTableSlot`. The default implementation can keep this
-    /// `Row` path for row-oriented AMs, but the slot-first path should avoid
-    /// `Arrow -> Cell -> Row -> Datum` materialization for varlena and list
-    /// columns.
-    fn scan_getnextslot(
-        &mut self,
-        direction: ScanDirection,
-        row: &mut Row,
-    ) -> AmResult<bool>;
+    /// The framework drives every TableAM scan through the one uniform
+    /// [`ScanBatchDriver::next_into_slot`] path: the C shim calls this once per
+    /// `scan_getnextslot` and asks the returned driver to fill the slot with
+    /// the next tuple. row-vs-column is an implementation detail *inside* the
+    /// driver (a columnar AM decodes an Arrow batch straight into the slot),
+    /// not a branch in the framework. There is no separate row callback: a
+    /// TableAM is columnar by contract, and a row-at-a-time source (FDW) is a
+    /// different framework, not an `AmScanSession`.
+    ///
+    /// The driver must be ready by the time the executor fetches a row, i.e.
+    /// after [`Self::scan_begin`]; sessions typically build it there.
+    fn scan_driver(&mut self) -> &mut Self::BatchDriver;
 
     /// Restart the scan.
     ///
@@ -584,12 +563,20 @@ pub trait AmIndexCallbacks {
 /// frame and unfinalized sessions receive [`abort_modify`](Self::abort_modify)
 /// instead of `end_modify`.
 ///
-/// `DmlTarget::cmd_type` describes the PostgreSQL frame operation.  For MERGE it
-/// is `CMD_MERGE`, while the actual physical action for each row is still
-/// expressed by the callback being invoked (`tuple_insert`, `tuple_update`, or
-/// `tuple_delete`).
+/// The `cmd_type` passed to [`new`](Self::new) describes the PostgreSQL frame
+/// operation.  For MERGE it is `CMD_MERGE`, while the actual physical action
+/// for each row is still expressed by the callback being invoked
+/// (`tuple_insert`, `tuple_update`, or `tuple_delete`).
 pub trait AmDmlSession {
-    fn new(target: DmlTarget) -> AmResult<Self>
+    /// Construct the write session for a DML frame.
+    ///
+    /// `rel` is borrowed only for the duration of construction (symmetric with
+    /// [`AmScanSession::new`]); the AM derives everything it needs from the
+    /// handle (relation OID, file locator, WAL requirement, and any column
+    /// layout) and must capture it into owned fields rather than retaining the
+    /// handle. `cmd_type` is the frame's PostgreSQL command type (see the trait
+    /// docs for the MERGE note).
+    fn new(rel: &RelationHandle, cmd_type: pg_sys::CmdType::Type) -> AmResult<Self>
     where
         Self: Sized;
 
