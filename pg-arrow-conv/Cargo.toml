@@ -1,0 +1,41 @@
+[package]
+name = "pg-arrow-conv"
+version = { workspace = true }
+publish = false
+homepage = "https://github.com/robertmu/pg-lakebase"
+repository = "https://github.com/robertmu/pg-lakebase"
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+# rlib: linked into each extension cdylib (pg-iceberg-am today, FDW/Hudi/Delta
+# later). The crate is format-neutral and never produces a cdylib of its own.
+crate-type = ["rlib"]
+
+[features]
+# Default to pg17 so `cargo test -p pg-arrow-conv` (and any direct dependent)
+# selects a Postgres version without an explicit `--features`, matching
+# pg-lakebase-core / pg-iceberg-am / pg-backend-tests.
+default = ["pg17"]
+# Thread pg16/pg17 through to pgrx and core, matching pg-iceberg-am.
+pg16 = ["pgrx/pg16", "pg-lakebase-core/pg16"]
+pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17"]
+
+[dependencies]
+pgrx = { workspace = true }
+pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
+arrow-array = "57"
+arrow-schema = "57"
+arrow-buffer = "57"
+uuid = { version = "1.16.0" }
+thiserror = "1.0"
+
+[dev-dependencies]
+# The host integration tests in `tests/` construct arrow/pgrx/core types
+# directly, so those crates must also be available to the test crates.
+proptest = "1.5"
+arrow-array = "57"
+arrow-schema = "57"
+pgrx = { workspace = true }
+uuid = { version = "1.16.0" }
+pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
