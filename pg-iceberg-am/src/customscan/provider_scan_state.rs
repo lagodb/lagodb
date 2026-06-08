@@ -4,9 +4,8 @@ use iceberg_lite::expr::Predicate;
 use pg_lakebase_core::customscan::provider::{
     BeginContext, CustomScanError, EndContext, NextSlotContext, ReScanContext,
 };
-use pg_lakebase_core::tuple::Row;
 
-use crate::access::scan::{RelationShape, ScanCursor, ScanSpec};
+use crate::access::scan::{IcebergBatchCursor, RelationShape, ScanSpec};
 use crate::customscan::IcebergPredicateTranslator;
 use crate::customscan::predicate_translator::fold_left;
 
@@ -17,14 +16,14 @@ use super::provider_projection::ProjectionResolver;
 #[derive(Default)]
 pub struct IcebergScanState {
     pub(crate) spec: Option<ScanSpec>,
-    pub(crate) cursor: Option<ScanCursor>,
-    /// Reusable buffer sized in `begin` to match the scan relation's `TupleDesc`.
-    pub(crate) row: Row,
+    pub(crate) cursor: Option<IcebergBatchCursor>,
+    /// Full tuple width captured in `begin`; sizes the slot-first decode.
+    pub(crate) natts: usize,
 }
 
 impl IcebergScanState {
-    /// Translate pushed quals, build [`ScanSpec`]/[`ScanCursor`] against
-    /// `estate.es_snapshot`, and size the row buffer.
+    /// Translate pushed quals, build [`ScanSpec`]/[`IcebergBatchCursor`] against
+    /// `estate.es_snapshot`, and capture the tuple width.
     pub(super) fn begin(
         ctx: BeginContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
@@ -56,46 +55,34 @@ impl IcebergScanState {
             )?,
         };
 
-        let cursor = spec.open_cursor()?;
+        let cursor = spec.open_batch_cursor(shape.attr_types())?;
         let natts = ctx.relation.natts();
 
         let state = ctx.state;
         state.spec = Some(spec);
         state.cursor = Some(cursor);
-        state.row = Row::with_capacity(natts);
+        state.natts = natts;
 
         Ok(())
     }
 
-    /// Advance the cursor, then materialize the row via
-    /// [`NextSlotContext::emit_row`]. Returns `Ok(false)` at end-of-scan
+    /// Drive the slot-first cursor straight into the scan slot via
+    /// [`NextSlotContext::emit_via`]. Returns `Ok(false)` at end-of-scan
     /// without touching the slot.
     pub(super) fn next_slot(
         mut ctx: NextSlotContext<'_, IcebergCustomScanProvider>,
     ) -> Result<bool, CustomScanError> {
         ctx.check_for_interrupts();
 
-        let produced = {
-            let state = &mut *ctx.state;
-            let (Some(spec), Some(cursor)) =
-                (state.spec.as_ref(), state.cursor.as_mut())
-            else {
-                return Ok(false);
-            };
-
-            cursor.next_row(spec.row_reader(), &mut state.row)?
-        };
-        if !produced {
+        // Take the cursor out so `ctx` is not borrowed through `state` across
+        // the `&mut self` call to `emit_via`.
+        let Some(mut cursor) = ctx.state.cursor.take() else {
             return Ok(false);
-        }
-
-        // Move row out so `ctx` is not borrowed across `emit_row`.
-        let mut row = core::mem::take(&mut ctx.state.row);
-        let result = ctx.emit_row(&mut row);
-        ctx.state.row = row;
-        result?;
-
-        Ok(true)
+        };
+        let natts = ctx.state.natts;
+        let result = ctx.emit_via(&mut cursor, natts);
+        ctx.state.cursor = Some(cursor);
+        result
     }
 
     /// Re-translate and replace the filter when `params_changed`; always reopen
@@ -111,6 +98,7 @@ impl IcebergScanState {
             None
         };
 
+        let attr_types = ctx.relation.attr_types();
         let state = ctx.state;
         let Some(spec) = state.spec.as_mut() else {
             return Ok(());
@@ -120,7 +108,7 @@ impl IcebergScanState {
             spec.set_filter(filter);
         }
 
-        state.cursor = Some(spec.open_cursor()?);
+        state.cursor = Some(spec.open_batch_cursor(&attr_types)?);
         Ok(())
     }
 
@@ -131,7 +119,6 @@ impl IcebergScanState {
         // Drop cursor before spec so IO closes before metadata/predicate teardown.
         let _ = state.cursor.take();
         let _ = state.spec.take();
-        state.row.clear();
         Ok(())
     }
 }

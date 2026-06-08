@@ -1,103 +1,68 @@
 //! Iceberg Table Scan Implementation.
 //!
-//! # Architecture
+//! A scan's state is split in two:
 //!
-//! A scan's state is split into two parts with very different lifetimes, and
-//! the [`AmScanSession`] callbacks orchestrate them:
+//! - [`ScanSpec`] is the immutable scan description (table, [`ScanColumns`],
+//!   optional projection, optional [`Predicate`]). Built once in
+//!   [`AmScanSession::scan_begin`] and preserved across `scan_rescan`, so the
+//!   visible snapshot is frozen for the scan's duration. This matches the Read
+//!   Committed contract: every `scan_rescan` comes from the same statement that
+//!   issued `scan_begin`, so holding the metadata is correct. Newly committed
+//!   work becomes visible at the next statement's `scan_begin`.
+//! - [`IcebergBatchCursor`] is the per-cursor mutable state; `scan_rescan`
+//!   rebuilds only the cursor from the spec.
 //!
-//! - [`ScanSpec`] is the immutable description of the scan: the
-//!   `Arc<Table>`, a [`RecordBatchRowReader`] bound to the snapshot's
-//!   schema, the optional column projection, and the optional Iceberg
-//!   [`Predicate`] translated from PostgreSQL's `OwnedScanKeys`. It is
-//!   built once in [`AmScanSession::scan_begin`] and is preserved across
-//!   `scan_rescan`. The metadata (and therefore the visible snapshot) is
-//!   therefore frozen for the duration of the scan.
+//! `scan_rescan` re-translates the dispatcher-supplied keys (PostgreSQL's
+//! "non-null replaces, null keeps" rule is applied by the dispatcher first).
+//! The borrow is consumed within each callback, never retained.
 //!
-//!   This is a *deliberate* behavior change from the previous implementation,
-//!   which re-resolved `TxMetadata::current_table_metadata(...)`
-//!   inside every `scan_rescan` call. The PostgreSQL Read Committed contract
-//!   wants one statement to see one consistent snapshot; because every
-//!   `scan_rescan` is issued by the same statement that issued the original
-//!   `scan_begin` (e.g. as the inner side of a nested-loop join), holding
-//!   the metadata is the more correct behavior, not the less. New work
-//!   committed by other backends becomes visible at the next
-//!   *statement*'s `scan_begin`. TODO: cover this with a regression test
-//!   once the pgrx test harness for `pg-iceberg-am` is stood up.
-//!
-//! - [`ScanCursor`] is the per-cursor mutable state: the Arrow iterator and
-//!   the position within the current `RecordBatch`. `scan_rescan` rebuilds
-//!   only the cursor from the spec.
-//!
-//! `scan_rescan` honors the keys handed in by the dispatcher:
-//! [`ScanSpec::set_filter`] is replaced from the dispatcher-owned key set
-//! every rescan (the dispatcher has already applied PostgreSQL's
-//! "non-null replaces, null keeps" rule before calling us). The same
-//! `&OwnedScanKeys` is also surfaced to [`AmScanSession::scan_begin`] so
-//! that the *initial* scan and every subsequent rescan go through exactly
-//! the same translation path. The borrow is only valid for the duration of
-//! each callback; the AM consumes it (translates into a `Predicate` stored
-//! on the spec) before returning, rather than retaining the reference.
-//!
-//! Today the [`scan_keys_to_predicate`] translator is a stub that always
-//! returns `None`, which means non-pushed-down predicates remain handled by
-//! the executor (`ExecQual`) above the scan. The path is wired so that
-//! adding real predicate pushdown is a localized change in
-//! [`scan_keys_to_predicate`] only — the AM-level scan lifecycle no longer
-//! needs to be touched.
+//! [`scan_keys_to_predicate`] is currently a stub returning `None`, so
+//! predicates remain handled by the executor (`ExecQual`). Adding real pushdown
+//! is a localized change there.
 
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use iceberg_lite::expr::Predicate;
-use iceberg_lite::scan::ArrowRecordBatchIterator;
+use iceberg_lite::scan::{ArrowRecordBatchIterator, TableScan};
 use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
+use pg_arrow_conv::{ArrowBatchSource, ArrowColumnDecoder};
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::prelude::*;
-use pg_lakebase_core::tuple::Row;
 use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
-use crate::access::conversion::{LiveColumn, RecordBatchRowReader};
+use crate::access::column_mapping::{LiveColumn, ScanColumns};
 use crate::access::projection::Projection;
 use crate::catalog::bridge::IcebergTableId;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::StorageContext;
 
-// ---------------------------------------------------------------------------
-// Relation shape: live attnos + full tuple width
-// ---------------------------------------------------------------------------
-
-/// The relation-shape inputs the converter needs to build a position-correct
-/// [`ColumnPlan`](crate::access::conversion): the live (non-dropped) columns
-/// (`(attno, name)`) in ascending attno order, and the full tuple width
-/// (`natts`).
+/// Relation-shape inputs the converter needs to build a position-correct
+/// [`ColumnMapping`](crate::access::column_mapping): the live (non-dropped)
+/// columns in ascending attno order plus the full tuple width.
 ///
-/// This is derived from the relation's `TupleDesc` once per scan and threaded
-/// into [`RecordBatchRowReader`]. It contains **no** Arrow-column-to-slot
-/// position arithmetic — it only records which columns are live (and their
-/// names, used to resolve Iceberg fields by name) and how wide the tuple is;
-/// the converter turns `attno` into `dest`.
+/// Derived from the relation's `TupleDesc` once per scan. Records only which
+/// columns are live (and their names) and the tuple width; the converter turns
+/// `attno` into `dest`.
 #[derive(Debug, Clone)]
 pub(crate) struct RelationShape {
-    /// Live (non-dropped) columns in ascending attno order. Each carries its
-    /// 1-based attno and its column name (which is also the Iceberg field
-    /// name). The converter resolves the Iceberg field **by name**, so this
-    /// stays correct even when the stored Iceberg schema is wider than the
-    /// live PG columns (e.g. after `ALTER TABLE ... DROP COLUMN`, which does
-    /// not rewrite the Iceberg metadata schema).
+    /// Live (non-dropped) columns in ascending attno order, each with its
+    /// 1-based attno and column name (also the Iceberg field name). Fields are
+    /// resolved by name, so this stays correct even when the Iceberg schema is
+    /// wider than the live PG columns (e.g. after `DROP COLUMN`).
     live_columns: Vec<LiveColumn>,
     /// Full PG tuple width (`natts`), counting dropped-column positions.
     slot_width: usize,
+    /// Per-attribute `(type oid, typmod)` indexed by `attno - 1`, used to
+    /// disambiguate PG types that share one `ColumnRule`.
+    attr_types: Vec<(pg_sys::Oid, i32)>,
 }
 
 impl RelationShape {
     /// Derive the relation shape from a live [`RelationHandle`].
-    ///
-    /// Uses [`RelationHandle::live_columns`] to collect each live
-    /// (non-dropped) column's attno and name in ascending attno order. The
-    /// full `natts` (including dropped positions) is the slot width.
     pub(crate) fn from_relation(rel: &RelationHandle) -> Self {
         let slot_width = rel.natts();
         let live_columns = rel
@@ -109,6 +74,7 @@ impl RelationShape {
         Self {
             live_columns,
             slot_width,
+            attr_types: rel.attr_types(),
         }
     }
 
@@ -119,95 +85,57 @@ impl RelationShape {
     fn slot_width(&self) -> usize {
         self.slot_width
     }
+
+    pub(crate) fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
+        &self.attr_types
+    }
 }
 
-// ---------------------------------------------------------------------------
-// ScanSpec: immutable description of the scan
-// ---------------------------------------------------------------------------
-
-/// Immutable parameters for a scan: which table, which snapshot's schema,
-/// which columns, and which predicate.
+/// Immutable parameters for a scan: which table, snapshot schema, columns, and
+/// predicate.
 ///
-/// Construction (`ScanSpec::build`) is the only place metadata is read from
-/// storage during a scan's life; `scan_rescan` reuses an existing `ScanSpec`
-/// and rebuilds only the [`ScanCursor`].
+/// `ScanSpec::build*` is the only place metadata is read from storage during a
+/// scan; `scan_rescan` reuses the spec and rebuilds only the cursor.
 ///
-/// `pub(crate)` so the CustomScan provider in
-/// [`crate::customscan`] can build a `ScanSpec` from a runtime-built
-/// [`iceberg_lite::expr::Predicate`] (Requirement 18.4 — reuse the same
-/// scan core in both the TableAM seqscan path and the CustomScan path).
+/// `pub(crate)` so the CustomScan provider in [`crate::customscan`] can build a
+/// `ScanSpec` from a runtime-built [`Predicate`], reusing the same scan core in
+/// both the TableAM seqscan and CustomScan paths.
 pub(crate) struct ScanSpec {
-    /// Ready-to-scan Iceberg table. Cheap to clone (`Arc`-backed internally).
+    /// Ready-to-scan Iceberg table. Cheap to clone (`Arc`-backed).
     table: Arc<Table>,
-    /// Schema-bound row reader for the snapshot captured in `table`. Owns
-    /// the per-column dispatch plan used by [`ScanCursor::next_row`] and
-    /// also exposes the underlying `IcebergSchema` for predicate
-    /// translation.
-    row_reader: RecordBatchRowReader,
-    /// Column projection. `None` means "select all".
-    ///
-    /// `Some(Projection)` carries the `(attno, name)` pairs (in scan order)
-    /// used both to `select(names)` against the Iceberg scan builder and to
-    /// build the projected [`ColumnPlan`](crate::access::conversion). A
-    /// `Some(Projection)` always has ≥ 1 column — select-all is `None`, never
-    /// an empty `Projection`. Populated only on the CustomScan
-    /// `build_with_projection` path; the seqscan and select-all paths leave
-    /// it `None`.
+    /// Schema-bound column plan for the captured snapshot. Drives the cursor
+    /// decoder and exposes the `IcebergSchema` for predicate translation.
+    plan: ScanColumns,
+    /// Column projection. `None` means select-all; a `Some` always has ≥ 1
+    /// column. Populated only on the CustomScan `build_with_projection` path.
     projection: Option<Projection>,
-    /// Predicate to push into the Iceberg scan layer for manifest /
-    /// file / row-group pruning. The TableAM seqscan path translates
-    /// from `OwnedScanKeys` (currently a stub returning `None`); the
-    /// CustomScan path supplies a runtime-built
-    /// [`iceberg_lite::expr::Predicate`] built from the pushed PG
-    /// `Expr`s by [`crate::customscan::IcebergPredicateTranslator`].
-    /// Replaced (not merged) by `refresh_filter` /
-    /// [`Self::set_filter`].
+    /// Predicate pushed into the Iceberg scan layer for pruning. Replaced (not
+    /// merged) by [`Self::set_filter`] / `refresh_filter`.
     filter: Option<Predicate>,
 }
 
 impl ScanSpec {
-    /// Build a `ScanSpec` from a `RestrictInfo`-derived
-    /// [`OwnedScanKeys`] (the TableAM seqscan path).
+    /// Build a `ScanSpec` from an [`OwnedScanKeys`] (the TableAM seqscan path).
     ///
-    /// `shape` is the scan relation's live-attno list + full tuple width,
-    /// derived once from its `TupleDesc` (see [`RelationShape::from_relation`]).
-    /// A plain SeqScan never tells the AM which columns are needed, so the
-    /// projection stays `None` (all live columns) — but the full-schema
-    /// [`ColumnPlan`](crate::access::conversion) built from `shape` still
-    /// fixes dropped-column alignment (Requirement 6.2, 6.3, 6.5).
+    /// A plain SeqScan never specifies needed columns, so the projection stays
+    /// `None`; the full-schema [`ColumnMapping`](crate::access::column_mapping)
+    /// built from `shape` still fixes dropped-column alignment.
     pub(crate) fn build(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
         keys: &OwnedScanKeys,
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
-        // Single point of metadata IO for the entire scan. Read here, then
-        // reuse across every `scan_rescan` until `scan_end`.
         let mut spec = Self::build_with_predicate(rel_oid, spc_oid, None, shape)?;
 
-        // Translate scan keys *after* the schema is in hand: the translator
-        // needs Iceberg type and field-id information that only exists once
-        // metadata has been parsed.
-        spec.filter = scan_keys_to_predicate(keys, spec.row_reader.schema())?;
+        // Translate keys after the schema is in hand (the translator needs
+        // Iceberg type / field-id info from parsed metadata).
+        spec.filter = scan_keys_to_predicate(keys, spec.plan.schema())?;
         Ok(spec)
     }
 
-    /// Build a `ScanSpec` with a runtime-built Iceberg [`Predicate`]
-    /// already translated from the pushed PG `Expr`s (the CustomScan
-    /// select-all path).
-    ///
-    /// This is the entry point [`crate::customscan`] uses inside
-    /// `provider.begin` / `provider.rescan` when no projection is requested
-    /// (`NeededColumns::All`): the framework's runtime translator
-    /// (`IcebergPredicateTranslator`) has already produced the Iceberg-side
-    /// predicate from the post-rewrite pushed expressions, so we skip the
-    /// `OwnedScanKeys`-based translation path entirely. Sharing the Iceberg
-    /// scan core (table load + [`Self::open_cursor`]) with
-    /// [`Self::build_with_projection`] is what satisfies Requirement 9.6 (one
-    /// Iceberg scan core, two PG-side entry points).
-    ///
-    /// `shape` drives a full-schema [`ColumnPlan`](crate::access::conversion)
-    /// so dropped-column alignment is correct even when selecting all columns.
+    /// Build a `ScanSpec` with an already-translated [`Predicate`] (the
+    /// CustomScan select-all path), skipping the `OwnedScanKeys` translation.
     pub(crate) fn build_with_predicate(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
@@ -215,27 +143,28 @@ impl ScanSpec {
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
         let (table, schema) = Self::load_table(rel_oid, spc_oid)?;
-        let row_reader = RecordBatchRowReader::new(
+        let plan = ScanColumns::new(
             schema,
             shape.live_columns(),
             shape.slot_width(),
+            shape.attr_types(),
         )?;
         Ok(Self {
             table: Arc::new(table),
-            row_reader,
+            plan,
             projection: None,
             filter: predicate,
         })
     }
 
-    /// Build a `ScanSpec` for the CustomScan path with a column projection
-    /// (the new entry point).
+    /// Build a `ScanSpec` for the CustomScan path with a column projection.
     ///
-    /// `projection` carries the resolved `(attno, name)` pairs in scan order;
-    /// it drives both `select(names)` (read fewer columns) and a projected
-    /// [`ColumnPlan`](crate::access::conversion) (write each selected column
-    /// to its `attno - 1` slot). `shape.slot_width` sizes the output `Row` to
-    /// the full tuple width so projected-away positions stay SQL NULL.
+    /// `projection` drives both `select(names)` (read fewer columns) and a
+    /// projected [`ColumnMapping`](crate::access::column_mapping). The decoder
+    /// writes only the projected `dest` slots; projected-away positions are
+    /// left untouched, which is safe because they are never read (see
+    /// [`ColumnMapping`](crate::access::column_mapping)) — not because the
+    /// cleared slot reads them back as NULL.
     pub(crate) fn build_with_projection(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
@@ -244,23 +173,23 @@ impl ScanSpec {
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
         let (table, schema) = Self::load_table(rel_oid, spc_oid)?;
-        let row_reader = RecordBatchRowReader::with_projection(
+        let plan = ScanColumns::with_projection(
             schema,
             projection.columns(),
             shape.slot_width(),
+            shape.attr_types(),
         )?;
         Ok(Self {
             table: Arc::new(table),
-            row_reader,
+            plan,
             projection: Some(projection),
             filter: predicate,
         })
     }
 
-    /// Shared Iceberg scan core: resolve the relation's metadata location
-    /// through PG's transactional metadata cache and build the `Arc<Table>`
-    /// bound to the current snapshot's schema. Used by both PG-side entry
-    /// points (Requirement 9.6).
+    /// Shared Iceberg scan core: resolve the relation's metadata through PG's
+    /// transactional cache and build the `Arc<Table>` bound to the current
+    /// snapshot's schema. Used by both PG-side entry points.
     fn load_table(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
@@ -281,20 +210,26 @@ impl ScanSpec {
         Ok((table, schema))
     }
 
-    /// Replace the active predicate with a new one. Used by the
-    /// CustomScan provider's `rescan` impl when `chgParam` overlaps
-    /// the cached pushed param ids and a fresh predicate is built
-    /// (Requirement 11.2).
+    /// Replace the active predicate. Used by the CustomScan provider's `rescan`
+    /// when `chgParam` overlaps the cached pushed param ids.
     pub(crate) fn set_filter(&mut self, predicate: Option<Predicate>) {
         self.filter = predicate;
     }
 
-    /// Construct a fresh [`ScanCursor`] from this spec.
-    ///
-    /// Called once in `scan_begin` and again per `scan_rescan`. Does no
-    /// catalog or metadata IO: `self.table` already has metadata in memory,
-    /// and `to_arrow()` only resolves manifests/data files for this snapshot.
-    pub(crate) fn open_cursor(&self) -> IcebergResult<ScanCursor> {
+    /// Construct a fresh slot-first [`IcebergBatchCursor`] for the TableAM scan.
+    pub(crate) fn open_batch_cursor(
+        &self,
+        attr_types: &[(pg_sys::Oid, i32)],
+    ) -> IcebergResult<IcebergBatchCursor> {
+        let source = ArrowBatchSource::new(IcebergArrowBatches(
+            self.build_scan()?.to_arrow()?,
+        ));
+        let decoder = ArrowColumnDecoder::new(self.plan.decoded_columns(attr_types));
+        Ok(BatchRowCursor::new(source, decoder))
+    }
+
+    /// Build the Iceberg [`TableScan`] for this spec's projection and filter.
+    fn build_scan(&self) -> IcebergResult<TableScan> {
         let mut builder = self.table.scan();
         match self.projection.as_ref() {
             Some(proj) => builder = builder.select(proj.names()),
@@ -303,121 +238,66 @@ impl ScanSpec {
         if let Some(predicate) = self.filter.as_ref() {
             builder = builder.with_filter(predicate.clone());
         }
-        let table_scan = builder.build()?;
-        Ok(ScanCursor {
-            iterator: table_scan.to_arrow()?,
-            current_batch: None,
-            current_row_idx: 0,
-        })
+        Ok(builder.build()?)
     }
 
-    /// Re-translate the current effective [`OwnedScanKeys`] into a filter,
-    /// using this spec's already-resolved Iceberg schema.
+    /// Re-translate the current effective [`OwnedScanKeys`] into a filter.
     fn refresh_filter(&mut self, keys: &OwnedScanKeys) -> IcebergResult<()> {
-        self.filter = scan_keys_to_predicate(keys, self.row_reader.schema())?;
+        self.filter = scan_keys_to_predicate(keys, self.plan.schema())?;
         Ok(())
     }
+}
 
-    pub(crate) fn row_reader(&self) -> &RecordBatchRowReader {
-        &self.row_reader
+/// Adapts the Iceberg Arrow batch iterator into the conversion crate's batch
+/// source. The producer error (`iceberg_lite::Error`: IO, Parquet, metadata,
+/// schema) is preserved as an [`IcebergError`] so it reaches the callback
+/// boundary with its own SQLSTATE (IO/internal/feature) rather than being
+/// reclassified as a `ConvError::DatumConversionError` (`DATA_EXCEPTION`).
+/// `pg-arrow-conv` stays format-neutral: it only requires the error to map into
+/// the boundary error, which `IcebergError` already does.
+pub struct IcebergArrowBatches(ArrowRecordBatchIterator);
+
+impl Iterator for IcebergArrowBatches {
+    type Item = Result<RecordBatch, IcebergError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|batch| batch.map_err(IcebergError::from))
     }
 }
 
-// ---------------------------------------------------------------------------
-// ScanCursor: mutable per-cursor state
-// ---------------------------------------------------------------------------
+/// The TableAM scan driver: Arrow batches decoded straight into the slot.
+/// Driven by both the TableAM seqscan and the CustomScan provider.
+pub type IcebergBatchCursor = BatchRowCursor<
+    ArrowBatchSource<IcebergArrowBatches, IcebergError>,
+    ArrowColumnDecoder,
+>;
 
-/// Mutable iteration state for one cursor over a [`ScanSpec`].
-///
-/// `scan_rescan` drops this and asks the spec for a fresh one.
-///
-/// `pub(crate)` so the CustomScan provider can drive the same cursor
-/// implementation (Requirement 18.4).
-pub(crate) struct ScanCursor {
-    iterator: ArrowRecordBatchIterator,
-    current_batch: Option<RecordBatch>,
-    current_row_idx: usize,
-}
-
-impl ScanCursor {
-    /// Pull the next row into `row`, advancing through `RecordBatch`es as
-    /// needed. Returns `Ok(false)` at end-of-scan.
-    pub(crate) fn next_row(
-        &mut self,
-        reader: &RecordBatchRowReader,
-        row: &mut Row,
-    ) -> IcebergResult<bool> {
-        loop {
-            if let Some(ref batch) = self.current_batch
-                && self.current_row_idx < batch.num_rows()
-            {
-                reader.read_row(batch, self.current_row_idx, row)?;
-                self.current_row_idx += 1;
-                return Ok(true);
-            }
-
-            // Cooperate with query cancellation at IO-sub-phase granularity
-            // (Requirement 13.2): a single `next_row` can loop across several
-            // exhausted/empty batches, and each `iterator.next()` may open a
-            // new data file / row group. Checking here — rather than only once
-            // per returned tuple at the `next_slot` boundary — keeps a long
-            // file-walk responsive to cancel/terminate. On a pending interrupt
-            // this does not return (it `longjmp`s via pgrx's guarded
-            // `ProcessInterrupts`, which unwinds to the framework trampoline).
-            pg_sys::check_for_interrupts!();
-
-            match self
-                .iterator
-                .next()
-                .transpose()
-                .map_err(IcebergError::from)?
-            {
-                Some(batch) => {
-                    self.current_batch = Some(batch);
-                    self.current_row_idx = 0;
-                }
-                None => return Ok(false),
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// IcebergScan: AmScanSession orchestrator
-// ---------------------------------------------------------------------------
-
-/// PostgreSQL-facing scan session for the Iceberg table AM.
-///
-/// Holds bookkeeping (`rel_oid` / `spc_oid`) plus the lazily-built [`ScanSpec`]
-/// and current [`ScanCursor`]. The struct itself is intentionally thin: the
-/// real scan logic lives on `ScanSpec` and `ScanCursor`.
+/// PostgreSQL-facing scan session for the Iceberg table AM. Thin bookkeeping
+/// (`rel_oid` / `spc_oid` / `shape`) over the lazily-built [`ScanSpec`] and
+/// current [`IcebergBatchCursor`].
 pub struct IcebergScan {
     rel_oid: pg_sys::Oid,
     spc_oid: pg_sys::Oid,
-    /// Relation shape (live attnos + full tuple width) captured from the
-    /// relation's `TupleDesc` in [`AmScanSession::new`], where the
-    /// `RelationHandle` is in scope. Threaded into `ScanSpec::build` so the
-    /// constructor builds a dropped-column-correct full-schema `ColumnPlan`
-    /// without re-opening the relation.
+    /// Relation shape captured in [`AmScanSession::new`] (the one place the
+    /// `RelationHandle` is in scope), threaded into `ScanSpec::build`.
     shape: RelationShape,
     spec: Option<ScanSpec>,
-    cursor: Option<ScanCursor>,
+    cursor: Option<IcebergBatchCursor>,
 }
 
 impl AmScan for IcebergTableAm {}
 
 impl AmScanSession for IcebergScan {
+    type BatchDriver = IcebergBatchCursor;
+
     fn new(
         rel: &RelationHandle,
         _snapshot: &SnapshotHandle,
         _pscan: Option<&ParallelTableScanDescHandle>,
         _flags: u32,
     ) -> AmResult<Self> {
-        // No metadata IO yet: defer all schema-dependent work to
-        // `scan_begin`, where the dispatcher also surfaces the initial
-        // effective scan keys. The relation shape (live attnos + natts) is
-        // captured here, the one place the `RelationHandle` is in scope, so
-        // `scan_begin` does not need to re-open the relation.
+        // No metadata IO yet: defer schema-dependent work to `scan_begin`. The
+        // relation shape is captured here, where the `RelationHandle` is in scope.
         Ok(IcebergScan {
             rel_oid: rel.oid(),
             spc_oid: rel.tablespace_oid(),
@@ -429,49 +309,30 @@ impl AmScanSession for IcebergScan {
 
     fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
         let spec = ScanSpec::build(self.rel_oid, self.spc_oid, keys, &self.shape)?;
-        let cursor = spec.open_cursor()?;
+        let cursor = spec.open_batch_cursor(self.shape.attr_types())?;
         self.spec = Some(spec);
         self.cursor = Some(cursor);
         Ok(())
     }
 
-    fn scan_getnextslot(
-        &mut self,
-        _direction: ScanDirection,
-        row: &mut Row,
-    ) -> AmResult<bool> {
-        // TODO(rowless-scan): once core exposes a slot-first scan callback,
-        // move this path from `RecordBatchRowReader -> Row -> TupleSlotWriter`
-        // to an Iceberg scan-slot writer that consumes the current Arrow
-        // `RecordBatch` column values directly. The writer should own the
-        // schema-bound per-column encoders and write Datum/null values into the
-        // caller's `TupleTableSlot` in the callback memory context. That keeps
-        // primitive reads cheap and prevents list/string columns from
-        // allocating `Cell::*Array`, `Vec<Option<_>>`, or element `String`
-        // values just to immediately convert them back into PostgreSQL Datums.
-        let (Some(spec), Some(cursor)) = (self.spec.as_ref(), self.cursor.as_mut())
-        else {
-            return Ok(false);
-        };
-        Ok(cursor.next_row(spec.row_reader(), row)?)
+    /// Slot-first scan driver: the Arrow batch cursor that decodes the current
+    /// batch straight into the slot. The framework drives every scan through
+    /// this one path; there is no row variant for a columnar AM.
+    fn scan_driver(&mut self) -> &mut Self::BatchDriver {
+        // `scan_begin` builds the cursor before the executor fetches any row,
+        // so it is always present by the time the framework calls this.
+        self.cursor
+            .as_mut()
+            .expect("scan_driver called after scan_begin")
     }
 
     /// Restart the scan, re-translating the current effective scan keys.
     ///
-    /// PostgreSQL's "non-null replaces, null keeps" rule has already been
-    /// applied by the core dispatcher to the [`OwnedScanKeys`] buffer
-    /// (see `pg-lakebase-core/src/access/scan.rs::scan_rescan`), so `keys`
-    /// here is always the effective key set for the restarted scan; we
-    /// simply re-translate it on top of the already-resolved schema.
-    ///
-    /// `set_params` and the `allow_*` flags only affect heap-AM scan
-    /// strategy choices (sync scan, page mode, BufferAccessStrategy) which
-    /// the Iceberg reader does not use, so they are explicitly ignored.
-    ///
-    /// Note: metadata is *not* re-read here. The whole point of holding a
-    /// `ScanSpec` across rescans is that a single statement (which is what
-    /// drives any `scan_rescan` call, including the inner side of a
-    /// nested-loop) sees a consistent snapshot.
+    /// The dispatcher has already applied the "non-null replaces, null keeps"
+    /// rule, so `keys` is the effective set. `set_params` and the `allow_*`
+    /// flags only affect heap-AM strategy choices and are ignored. Metadata is
+    /// not re-read: a single statement drives every `scan_rescan` and must see
+    /// a consistent snapshot.
     fn scan_rescan(
         &mut self,
         keys: &OwnedScanKeys,
@@ -481,15 +342,13 @@ impl AmScanSession for IcebergScan {
         _allow_pagemode: bool,
     ) -> AmResult<()> {
         let Some(spec) = self.spec.as_mut() else {
-            // Rescan before the first scan_begin shouldn't happen via the
-            // dispatcher, but be defensive: just clear the cursor and let a
-            // subsequent scan_begin populate state.
+            // Defensive: rescan before the first scan_begin shouldn't happen.
             self.cursor = None;
             return Ok(());
         };
 
         spec.refresh_filter(keys)?;
-        self.cursor = Some(spec.open_cursor()?);
+        self.cursor = Some(spec.open_batch_cursor(self.shape.attr_types())?);
         Ok(())
     }
 
@@ -500,46 +359,20 @@ impl AmScanSession for IcebergScan {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ScanKey -> Predicate translation
-// ---------------------------------------------------------------------------
-
-/// Translate PostgreSQL [`OwnedScanKeys`] into an Iceberg [`Predicate`],
-/// using `schema` to resolve column names and types.
+/// Translate PostgreSQL [`OwnedScanKeys`] into an Iceberg [`Predicate`].
 ///
-/// This is the *only* place the AM converts PostgreSQL filter
-/// representations into Iceberg expressions. Keeping the translation in one
-/// schema-aware function means predicate-pushdown work can land here
-/// without touching the scan lifecycle.
+/// The only place the AM converts PG filter representations into Iceberg
+/// expressions, keeping predicate-pushdown work out of the scan lifecycle.
 ///
-/// Current status: stub.
-///
-/// Returning `Ok(None)` is safe today because PostgreSQL only supplies
-/// `ScanKey`s through `IndexScan` / `BitmapIndexScan` / `SampleScan` /
-/// `TidRangeScan` / analyze paths, none of which the Iceberg AM advertises
-/// support for. Plain `SeqScan` calls `table_beginscan(rel, snap, 0, NULL)`
-/// and lets the executor (`ExecQual`) apply `WHERE` above the scan, so no
-/// rows are missed by ignoring the keys here.
-///
-/// This *will* become load-bearing as soon as predicate pushdown is wired
-/// up: at that point the trait contract that we now honor (translate, and
-/// re-translate on rescan against the current effective key set) makes
-/// parameterized nested-loop joins return correct results.
+/// Current status: stub. `Ok(None)` is safe today because PostgreSQL only
+/// supplies `ScanKey`s through paths the Iceberg AM does not advertise support
+/// for; plain `SeqScan` lets the executor apply `WHERE` above the scan.
 fn scan_keys_to_predicate(
     _keys: &OwnedScanKeys,
     _schema: &IcebergSchema,
 ) -> IcebergResult<Option<Predicate>> {
-    // TODO(predicate-pushdown): for each ScanKeyEntry,
-    //   * map sk_attno -> Iceberg field via `_schema.field_by_id` (after
-    //     converting the PostgreSQL attno to the corresponding field id;
-    //     the AM stores the column-order mapping when the table is
-    //     created).
-    //   * map sk_strategy + sk_subtype + sk_argument into a `Predicate`
-    //     (Eq / LessThan / etc.), interpreting the `Datum` according to
-    //     the Iceberg field type.
-    //   * combine across keys with `Predicate::and`.
-    //   * If any single key cannot be translated, return `Ok(None)` for the
-    //     whole set rather than a partial predicate, so the executor
-    //     remains responsible for correctness.
+    // TODO(predicate-pushdown): map each ScanKeyEntry's attno -> Iceberg field,
+    // strategy/subtype/argument -> Predicate, combine with `Predicate::and`,
+    // and return `Ok(None)` for the whole set if any key cannot be translated.
     Ok(None)
 }

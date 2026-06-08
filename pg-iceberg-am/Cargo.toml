@@ -15,20 +15,21 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg17"]
-pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakebase-core/pg16"]
-pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakebase-core/pg17"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakebase-core/pg16", "pg-arrow-conv/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakebase-core/pg17", "pg-arrow-conv/pg17"]
 # `pg_test` compiles the `#[pgrx::pg_test]` modules into the extension cdylib
 # (not under `cfg(test)`), so any crate those backend tests use must be a
 # normal dependency, not a dev-dependency. The classifier shape-matrix
 # property test (`customscan/pg_test.rs`) drives `proptest` through a manual
-# `TestRunner`, so pull `proptest` in here. Mirrors `pg-lakebase-core-tests`,
+# `TestRunner`, so pull `proptest` in here. Mirrors `pg-backend-tests`,
 # which lists `proptest` as a normal dependency for the same reason.
 pg_test = ["dep:proptest"]
 
 [dependencies]
 pgrx = { workspace = true }
-pg-lakebase-core = { path = "../pg-lakebase-core" }
+pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
 pg-lakebase-storage = { path = "../pg-lakebase-storage" }
+pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
 iceberg-lite = { path = "../iceberg-lite" }
 thiserror = "1.0"
 serde_json = "1.0"

@@ -187,8 +187,8 @@ mod tests {
     //
     // Scope note: the *happy-path* epoch-offset equivalence for date /
     // timestamp / timestamptz (decoded `Datum` == write-side stored bound) is
-    // owned by the write/translator consistency property tests in
-    // `access/conversion/primitive.rs` (`pushed_*_bound_matches_write_side_offset`
+    // owned by the cross-crate write/translator consistency property tests in
+    // `decode::epoch_consistency` (`pushed_*_bound_matches_write_side_offset`
     // and `*_epoch_consistency_at_unix_epoch`), which exercise the same
     // `decode_datum` path across the whole representable range. This module
     // keeps only the decode-specific cases those property tests deliberately

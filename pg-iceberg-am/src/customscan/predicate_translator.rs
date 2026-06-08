@@ -21,10 +21,8 @@ use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
 use rust_decimal::Decimal;
 
 use super::predicate_pushdown_policy::{ComparisonOpClass, PredicatePushdownPolicy};
-use crate::access::conversion::{
-    pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros,
-};
 use crate::customscan::FLOAT_PUSHDOWN_ENABLED;
+use pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 
 // =============================================================================
 // Scalar leaf model
@@ -163,7 +161,7 @@ pub enum IcebergTranslationError {
 // This is the `unsafe` PG-FFI surface of the translator: each arm trusts that
 // `type_oid` accurately describes the value behind `datum`. Temporal arms reuse
 // the shared PG→Unix epoch offsets so pushed bounds match the storage write
-// side (see `access::conversion`).
+// side (`pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros}`).
 // =============================================================================
 
 /// Decode a non-null PG `Datum` into an iceberg [`Datum`].

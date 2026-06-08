@@ -146,6 +146,19 @@ impl AlterTableIcebergOperations {
                 pg_sys::AlterTableType::AT_SetTableSpace => {
                     result.sets_tablespace = true;
                 }
+                // TODO(schema-evolution): ALTER TABLE subcommands that mutate
+                // the column set (notably AT_DropColumn, also AT_AddColumn /
+                // AT_AlterColumnType) fall through here and are never
+                // propagated to the stored Iceberg metadata schema. This is a
+                // real, reachable data-path bug, not a theoretical edge:
+                // dropping a NOT NULL column leaves a `required` field with no
+                // live PG source lingering in the Iceberg schema, so every
+                // subsequent INSERT fails permanently in
+                // `WriteColumns::resolve_columns` with
+                // `RequiredColumnMissingSource`. The fix is to translate these
+                // subcommands into proper Iceberg schema-evolution updates
+                // (and at minimum downgrade the dropped field's `required`
+                // bit), not to widen this guard. Deferred for now.
                 _ => {}
             }
         }

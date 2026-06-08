@@ -3871,6 +3871,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg-arrow-conv"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+ "pg-lakebase-core",
+ "pgrx",
+ "proptest",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "pg-iceberg-am"
 version = "0.1.0"
 dependencies = [
@@ -3881,6 +3895,7 @@ dependencies = [
  "iceberg-lite",
  "libc",
  "parquet",
+ "pg-arrow-conv",
  "pg-lakebase-core",
  "pg-lakebase-storage",
  "pgrx",

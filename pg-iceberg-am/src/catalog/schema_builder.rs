@@ -447,4 +447,57 @@ mod tests {
         let builder = SchemaBuilder::new();
         assert_eq!(builder.next_field_id, 1);
     }
+
+    /// Guards the consistency of the two halves of the PG↔Iceberg type
+    /// correspondence, which live in different layers: PG→Iceberg here
+    /// ([`PgType::primitive_type`]) and Iceberg→PG in
+    /// [`crate::access::type_mapping`] ([`IcebergTypeExt::pg_column_type`]).
+    /// They are logical inverses and must agree on the canonical target type,
+    /// but nothing structural forces it — so this round-trips every supported
+    /// scalar built-in and asserts it lands back on the expected canonical
+    /// `PgColumnType`.
+    ///
+    /// The mapping is canonicalizing, not bijective: `int2` widens to Iceberg
+    /// `Int` (→ `Int4`), the `text`/`varchar`/`bpchar`/`json`/`name` family
+    /// collapses to `Text`, and `bytea`/`jsonb` collapse to `Bytea`. The
+    /// round-trip target is therefore the canonical PG type, not necessarily
+    /// the original OID.
+    #[test]
+    fn pg_to_iceberg_to_pg_column_type_round_trips() {
+        use crate::access::type_mapping::IcebergTypeExt;
+        use pg_arrow_conv::PgColumnType;
+
+        let cases = [
+            (PgBuiltInOids::BOOLOID, PgColumnType::Bool),
+            (PgBuiltInOids::INT2OID, PgColumnType::Int4),
+            (PgBuiltInOids::INT4OID, PgColumnType::Int4),
+            (PgBuiltInOids::INT8OID, PgColumnType::Int8),
+            (PgBuiltInOids::FLOAT4OID, PgColumnType::Float4),
+            (PgBuiltInOids::FLOAT8OID, PgColumnType::Float8),
+            (PgBuiltInOids::DATEOID, PgColumnType::Date),
+            (PgBuiltInOids::TIMEOID, PgColumnType::Time),
+            (PgBuiltInOids::TIMESTAMPOID, PgColumnType::Timestamp),
+            (PgBuiltInOids::TIMESTAMPTZOID, PgColumnType::Timestamptz),
+            (PgBuiltInOids::TEXTOID, PgColumnType::Text),
+            (PgBuiltInOids::VARCHAROID, PgColumnType::Text),
+            (PgBuiltInOids::BPCHAROID, PgColumnType::Text),
+            (PgBuiltInOids::JSONOID, PgColumnType::Text),
+            (PgBuiltInOids::NAMEOID, PgColumnType::Text),
+            (PgBuiltInOids::BYTEAOID, PgColumnType::Bytea),
+            (PgBuiltInOids::JSONBOID, PgColumnType::Bytea),
+            (PgBuiltInOids::UUIDOID, PgColumnType::Uuid),
+            (PgBuiltInOids::NUMERICOID, PgColumnType::Numeric),
+        ];
+
+        for (oid, expected) in cases {
+            let iceberg = PgType::from_oid(oid.value())
+                .primitive_type()
+                .unwrap_or_else(|e| panic!("PG->Iceberg for {oid:?} failed: {e}"));
+            assert_eq!(
+                iceberg.pg_column_type(),
+                Some(expected),
+                "PG->Iceberg->PG round-trip mismatch for {oid:?}",
+            );
+        }
+    }
 }
