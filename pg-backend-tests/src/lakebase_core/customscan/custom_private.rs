@@ -7,7 +7,7 @@ mod tests {
     use core::ffi::CStr;
     use std::ptr;
 
-    use crate::support::pg::{INT4_EQ_OPNO, PgNodeBuilder};
+    use crate::lakebase_core::support::pg::{INT4_EQ_OPNO, PgNodeBuilder};
     use pg_lakebase_core::customscan::custom_private::{
         assert_provider_name_matches, decode_private, encode_split,
     };

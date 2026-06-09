@@ -5,7 +5,7 @@
 mod tests {
     use std::ptr;
 
-    use crate::support::pg::PlannerRelFixture;
+    use crate::lakebase_core::support::pg::PlannerRelFixture;
     use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
     use pg_lakebase_core::customscan::custom_private::CustomScanPrivate;
     use pg_lakebase_core::customscan::provider::{

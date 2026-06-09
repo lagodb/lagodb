@@ -5,7 +5,7 @@
 mod tests {
     use std::ptr;
 
-    use crate::support::pg::PgNodeBuilder;
+    use crate::lakebase_core::support::pg::PgNodeBuilder;
     use pg_lakebase_core::expr::nodes::PgExprRef;
     use pg_lakebase_core::expr::predicate::{
         PlanColumnRef, PlanPredicate, PlanPredicateContext, PlanScalar,

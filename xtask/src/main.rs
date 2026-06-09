@@ -86,7 +86,7 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg("test")
             .arg("--workspace")
             .arg("--exclude")
-            .arg("pg-lakebase-core-tests")
+            .arg("pg-backend-tests")
             .arg("--exclude")
             .arg(EXTENSION_PACKAGE)
             .arg("--no-default-features")
@@ -94,14 +94,14 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg(&pg_feature),
     )?;
 
-    println!("\n=== Phase 2: pg-lakebase-core pg_test (PostgreSQL) ===\n");
+    println!("\n=== Phase 2: framework pg_test (PostgreSQL) ===\n");
     run_command(
         Command::new("cargo")
             .arg("pgrx")
             .arg("test")
             .arg(pg_version)
             .arg("--package")
-            .arg("pg-lakebase-core-tests"),
+            .arg("pg-backend-tests"),
     )?;
 
     println!("\n=== Phase 3: pg-iceberg-am Rust tests (host + pg_test) ===\n");

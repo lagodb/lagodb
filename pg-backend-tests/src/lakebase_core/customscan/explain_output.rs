@@ -16,7 +16,7 @@ mod tests {
     use std::ffi::CString;
     use std::ptr;
 
-    use crate::support::pg::{OpExprSpec, PgNodeBuilder};
+    use crate::lakebase_core::support::pg::{OpExprSpec, PgNodeBuilder};
     use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
     use pg_lakebase_core::customscan::custom_private::{
         CustomScanPrivate, encode_split,

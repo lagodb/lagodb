@@ -5,7 +5,9 @@
 mod tests {
     use std::ptr;
 
-    use crate::support::pg::{INT4_EQ_OPNO, OpExprSpec, PgNodeBuilder};
+    use crate::lakebase_core::support::pg::{
+        INT4_EQ_OPNO, OpExprSpec, PgNodeBuilder,
+    };
     use pg_lakebase_core::expr::nodes::{PgExprRef, PgOpExpr};
     use pgrx::pg_sys;
     use pgrx::pg_test;

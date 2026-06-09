@@ -1,0 +1,5 @@
+comment = 'Backend integration tests for the pg-lakebase framework crates (test-only extension)'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/pg_backend_tests'
+relocatable = true
+superuser = false

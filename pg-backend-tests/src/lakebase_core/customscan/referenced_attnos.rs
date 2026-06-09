@@ -5,7 +5,7 @@
 mod tests {
     use std::ptr;
 
-    use crate::support::pg::{INT4_EQ_OPNO, PgNodeBuilder};
+    use crate::lakebase_core::support::pg::{INT4_EQ_OPNO, PgNodeBuilder};
     use pg_lakebase_core::customscan::provider::{
         NeededColumns, pg_test_referenced_attnos,
     };

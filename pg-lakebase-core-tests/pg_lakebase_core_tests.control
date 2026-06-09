@@ -1,5 +1,0 @@
-comment = 'Integration tests for pg-lakebase-core (test-only extension)'
-default_version = '@CARGO_VERSION@'
-module_pathname = '$libdir/pg_lakebase_core_tests'
-relocatable = true
-superuser = false

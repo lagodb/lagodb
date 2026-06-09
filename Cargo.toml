@@ -1,9 +1,10 @@
 [workspace]
 members = [
     "pg-lakebase-core",
-    "pg-lakebase-core-tests",
     "pg-lakebase-macros",
     "pg-iceberg-am",
+    "pg-arrow-conv",
+    "pg-backend-tests",
     "iceberg-lite",
     "pg-lakebase-storage",
     "xtask",

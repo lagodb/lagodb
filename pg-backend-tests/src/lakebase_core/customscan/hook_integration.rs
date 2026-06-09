@@ -3,7 +3,7 @@
 //! Unlike `hook.rs`, these tests exercise the real `set_rel_pathlist_hook`
 //! router through SQL planning, using a dummy provider registered from `_PG_init`.
 //! That provider is installed into the process-global registry for the lifetime
-//! of the `pg-lakebase-core-tests` extension. Keep its relation-name prefixes
+//! of the `pg-backend-tests` extension. Keep its relation-name prefixes
 //! unique to this module so unrelated tests do not accidentally match it.
 
 use std::ffi::CStr;

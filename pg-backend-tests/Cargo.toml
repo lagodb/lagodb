@@ -1,10 +1,10 @@
 [package]
-name = "pg-lakebase-core-tests"
+name = "pg-backend-tests"
 version = { workspace = true }
 publish = false
 authors = ["Robert Mu. https://github.com/robertmu"]
 license = { workspace = true }
-description = "Integration tests for pg-lakebase-core that require a running PostgreSQL instance."
+description = "Backend (#[pg_test]) integration tests for the pg-lakebase framework library crates (pg-lakebase-core, pg-arrow-conv) that require a running PostgreSQL instance."
 homepage = { workspace = true }
 repository = { workspace = true }
 edition = { workspace = true }
@@ -23,18 +23,23 @@ pg16 = [
     "pgrx-tests/pg16",
     "pg-lakebase-core/pg16",
     "pg-lakebase-core/pg_test",
+    "pg-arrow-conv/pg16",
 ]
 pg17 = [
     "pgrx/pg17",
     "pgrx-tests/pg17",
     "pg-lakebase-core/pg17",
     "pg-lakebase-core/pg_test",
+    "pg-arrow-conv/pg17",
 ]
 pg_test = []
 
 [dependencies]
 pgrx = { workspace = true }
 pg-lakebase-core = { path = "../pg-lakebase-core" }
+pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
+arrow-array = "57"
+arrow-schema = "57"
 bytes = "1.10"
 proptest = "1.5"
 serde_json = "1.0"

@@ -27,8 +27,9 @@ for PostgreSQL integration.
   `pg-lakebase-storage`, a Unix-socket cache service. The storage layer supports
   AWS S3, S3-compatible endpoints, Google Cloud Storage, and Azure Blob Storage.
 - `pg-lakebase-core` currently exposes a TAM framework plus a generic CustomScan
-  filter-pushdown framework. FDW support is still a project direction, not a
-  completed public API.
+  filter-pushdown framework, and `pg-arrow-conv` provides the format-neutral
+  Arrow⇆PostgreSQL value conversion both the scan and DML paths rely on. FDW
+  support is still a project direction, not a completed public API.
 
 ## Architecture Overview
 
@@ -90,7 +91,8 @@ once that integration exists.
 |-------|---------|
 | [pg-iceberg-am](./pg-iceberg-am) | PostgreSQL extension implementing the Iceberg table access method. |
 | [pg-lakebase-core](./pg-lakebase-core) | Framework crate for PostgreSQL TAM implementations and CustomScan predicate pushdown. |
-| [pg-lakebase-core-tests](./pg-lakebase-core-tests) | PostgreSQL integration tests (`#[pg_test]`) for `pg-lakebase-core`. |
+| [pg-arrow-conv](./pg-arrow-conv) | Format-neutral Arrow⇆PostgreSQL value conversion layer shared by Arrow-backed access methods. |
+| [pg-backend-tests](./pg-backend-tests) | Single test-only extension hosting the backend (`#[pg_test]`) tests for the framework library crates. |
 | [pg-lakebase-macros](./pg-lakebase-macros) | Procedural macro support, including `#[pg_table_am]`. |
 | [iceberg-lite](./iceberg-lite) | Synchronous, PostgreSQL-friendly Iceberg library used by the TAM. |
 | [pg-lakebase-storage](./pg-lakebase-storage) | Local object-storage caching service library. |
@@ -241,10 +243,25 @@ SELECT * FROM object_events ORDER BY id;
 
 For S3-compatible services, keep `protocol = 's3'` and set `endpoint`.
 
+## Roadmap
+
+The items below are project directions, not committed releases. Each links to
+the design notes that describe the problem and the intended approach in more
+detail.
+
+| Area | Goal | Status | Design notes |
+|------|------|--------|--------------|
+| DuckDB query offload | Push fully-pushable SELECT fragments (join / aggregate / sort / limit) to a standalone DuckDB server process, with PostgreSQL receiving only the final result rows. Layers on top of the existing single-relation filter pushdown and falls back to it when a fragment cannot be offloaded. | Design draft, no implementation | [duckdb-offload-roadmap.md](./pg-lakebase-core/docs/duckdb-offload-roadmap.md) |
+| Iceberg metadata tracker | Remove statement-time intermediate Iceberg metadata writes. The leading candidate is an auxiliary per-table PostgreSQL heap catalog that tracks data/delete file metadata, so scans consume MVCC-visible file rows directly and Iceberg metadata is synchronized only at commit. | Design notes / TODO in code | [catalog/README.md](./pg-iceberg-am/src/catalog/README.md) |
+| Expanded DML | Support `UPDATE` and `DELETE` in addition to `INSERT`, using Iceberg position/equality delete files. | Planned | — |
+| Expanded DDL | Support schema evolution through `ALTER TABLE` (add / drop / rename column, type changes where Iceberg allows). | Planned | — |
+| Partitioned tables | Support creating and querying Iceberg partitioned tables, including partition-aware pruning on the scan path. | Planned | — |
+
 ## Documentation
 
 - [Core framework](./pg-lakebase-core/README.md)
-- [Core integration tests](./pg-lakebase-core-tests/README.md)
+- [Arrow⇆PostgreSQL conversion](./pg-arrow-conv/README.md)
+- [Backend integration tests](./pg-backend-tests/README.md)
 - [Iceberg access method](./pg-iceberg-am/README.md)
 - [Storage service](./pg-lakebase-storage/README.md)
 - [Storage design](./pg-lakebase-storage/doc/design.md)

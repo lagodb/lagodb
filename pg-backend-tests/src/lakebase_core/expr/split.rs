@@ -3,7 +3,7 @@
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
-    use crate::support::pg::{
+    use crate::lakebase_core::support::pg::{
         INT4_EQ_OPNO, OpExprSpec, PgNodeBuilder, PlannerRelFixture,
     };
     use pg_lakebase_core::expr::predicate::{PlanPredicate, PlanScalar};

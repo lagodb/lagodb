@@ -3885,6 +3885,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg-backend-tests"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "bytes",
+ "pg-arrow-conv",
+ "pg-lakebase-core",
+ "pgrx",
+ "pgrx-tests",
+ "proptest",
+ "serde_json",
+]
+
+[[package]]
 name = "pg-iceberg-am"
 version = "0.1.0"
 dependencies = [
@@ -3924,18 +3939,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "pg-lakebase-core-tests"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "pg-lakebase-core",
- "pgrx",
- "pgrx-tests",
- "proptest",
- "serde_json",
 ]
 
 [[package]]

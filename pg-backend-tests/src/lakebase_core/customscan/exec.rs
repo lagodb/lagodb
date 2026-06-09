@@ -7,7 +7,9 @@ mod tests {
     use core::ffi::c_int;
     use std::ptr;
 
-    use crate::support::pg::{INT4_EQ_OPNO, OpExprSpec, PgNodeBuilder};
+    use crate::lakebase_core::support::pg::{
+        INT4_EQ_OPNO, OpExprSpec, PgNodeBuilder,
+    };
     use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
     use pg_lakebase_core::customscan::custom_private::CustomScanPrivate;
     use pg_lakebase_core::customscan::exec::{

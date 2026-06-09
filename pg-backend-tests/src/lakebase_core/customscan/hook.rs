@@ -5,7 +5,9 @@
 mod tests {
     use std::ptr;
 
-    use crate::support::pg::{OpExprSpec, PgNodeBuilder, PlannerRelFixture};
+    use crate::lakebase_core::support::pg::{
+        OpExprSpec, PgNodeBuilder, PlannerRelFixture,
+    };
     use pg_lakebase_core::customscan::hook::{PathStageRejection, path_stage_gates};
     use pgrx::pg_sys;
     use pgrx::pg_test;

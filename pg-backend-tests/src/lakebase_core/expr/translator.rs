@@ -6,7 +6,7 @@ mod tests {
     use core::ffi::c_int;
     use std::fmt;
 
-    use crate::support::pg::{OpExprSpec, PgNodeBuilder};
+    use crate::lakebase_core::support::pg::{OpExprSpec, PgNodeBuilder};
     use pg_lakebase_core::expr::nodes::{
         PgColumnRef, PgComparisonOp, PgLiteral, PgParamValue,
     };
