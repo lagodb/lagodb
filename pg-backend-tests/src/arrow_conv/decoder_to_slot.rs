@@ -509,9 +509,8 @@ mod tests {
                     array_oid,
                     -1,
                 )]);
-                let bound = decoder
-                    .bind(batch_of(vec![array.clone()]))
-                    .expect("bind");
+                let bound =
+                    decoder.bind(batch_of(vec![array.clone()])).expect("bind");
                 let slot = make_slot(&[array_oid]);
                 let mut cols =
                     SlotColumns::new(slot, pg_sys::CurrentMemoryContext, 1);

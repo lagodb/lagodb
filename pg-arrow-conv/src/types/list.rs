@@ -184,7 +184,7 @@ impl ColumnAppend for ListEncoder {
                 // Varlena text family (text/varchar/bpchar/json): each element
                 // reads as a borrowed `&str` straight into the builder.
                 ListInner::String(b) if is_string_array(oid) => {
-                    text!(b, &str, |s| Ok::<&str, ConvError>(s))
+                    text!(b, &str, Ok::<&str, ConvError>)
                 }
                 _ => false,
             }
@@ -528,9 +528,8 @@ unsafe fn accum_array_datum(
             }
             None => (pg_sys::Datum::from(0usize), true),
         };
-        state = unsafe {
-            pg_sys::accumArrayResult(state, datum, isnull, elem_oid, ctx)
-        };
+        state =
+            unsafe { pg_sys::accumArrayResult(state, datum, isnull, elem_oid, ctx) };
     }
     Ok(unsafe { pg_sys::makeArrayResult(state, ctx) })
 }
@@ -563,5 +562,9 @@ pub(crate) unsafe fn array_datum_at(
     elem_oid: pg_sys::Oid,
 ) -> ConvResult<pg_sys::Datum> {
     let values = list.value(row_idx);
-    unsafe { element.read_values(values.as_ref())?.into_array_datum(elem_oid) }
+    unsafe {
+        element
+            .read_values(values.as_ref())?
+            .into_array_datum(elem_oid)
+    }
 }

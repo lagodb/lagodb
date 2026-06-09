@@ -272,11 +272,7 @@ impl ListElementRule {
             ListElementRule::Double => builtin == B::FLOAT8OID,
             ListElementRule::String => matches!(
                 builtin,
-                B::TEXTOID
-                    | B::VARCHAROID
-                    | B::BPCHAROID
-                    | B::NAMEOID
-                    | B::JSONOID
+                B::TEXTOID | B::VARCHAROID | B::BPCHAROID | B::NAMEOID | B::JSONOID
             ),
         }
     }

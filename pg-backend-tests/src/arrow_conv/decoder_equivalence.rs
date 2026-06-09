@@ -25,8 +25,8 @@ mod tests {
     use arrow_array::{Array, ArrayRef, ListArray};
     use pg_arrow_conv::{ColumnRule, PgColumnType, resolve_column_rule};
     use pg_lakebase_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
-    use pgrx::prelude::*;
     use pgrx::pg_sys;
+    use pgrx::prelude::*;
     use proptest::prelude::*;
     use proptest::test_runner::{Config, TestCaseError, TestRunner};
 

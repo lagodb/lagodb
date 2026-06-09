@@ -148,10 +148,23 @@ enum ColumnReader {
     Uuid(FixedSizeBinaryArray),
     Date32(Date32Array),
     Time64Micros(Time64MicrosecondArray),
-    TimestampMicros { arr: TimestampMicrosecondArray, tz: bool },
-    TimestampNanos { arr: TimestampNanosecondArray, tz: bool },
-    Decimal128 { arr: Decimal128Array, codec: Decimal128NumericCodec },
-    List { arr: ListArray, element: ListElementRule, elem_oid: pg_sys::Oid },
+    TimestampMicros {
+        arr: TimestampMicrosecondArray,
+        tz: bool,
+    },
+    TimestampNanos {
+        arr: TimestampNanosecondArray,
+        tz: bool,
+    },
+    Decimal128 {
+        arr: Decimal128Array,
+        codec: Decimal128NumericCodec,
+    },
+    List {
+        arr: ListArray,
+        element: ListElementRule,
+        elem_oid: pg_sys::Oid,
+    },
 }
 
 impl ColumnReader {
@@ -279,8 +292,8 @@ impl ColumnReader {
                 let Some(cell) = scalar.read_cell(row_idx)? else {
                     return Ok(None);
                 };
-                let datum =
-                    unsafe { cell.into_datum_typed(oid, typmod) }.ok_or_else(|| {
+                let datum = unsafe { cell.into_datum_typed(oid, typmod) }
+                    .ok_or_else(|| {
                         ConvError::DatumConversionError(format!(
                             "value is not representable as PostgreSQL type {}",
                             u32::from(oid)
@@ -345,12 +358,11 @@ impl ColumnReader {
             }
             ColumnReader::Uuid(a) => {
                 null_guard!(a);
-                let bytes: [u8; 16] =
-                    a.value(row_idx).try_into().map_err(|_| {
-                        ConvError::ArrowTypeMismatch(std::borrow::Cow::Borrowed(
-                            "UUID must be 16 bytes",
-                        ))
-                    })?;
+                let bytes: [u8; 16] = a.value(row_idx).try_into().map_err(|_| {
+                    ConvError::ArrowTypeMismatch(std::borrow::Cow::Borrowed(
+                        "UUID must be 16 bytes",
+                    ))
+                })?;
                 // Arrow UUID bytes are RFC 4122 network order, as pgrx expects.
                 Cell::Uuid(Uuid::from_bytes(bytes))
             }
@@ -500,9 +512,8 @@ impl BatchRowDecoder for ArrowColumnDecoder {
         for col in bound.columns.iter() {
             // The shim already switched to the slot's target context, so the
             // varlena/array palloc lands where the per-row reset expects it.
-            let datum = unsafe {
-                col.reader.read(row_idx, col.dest_oid, col.dest_typmod)
-            }?;
+            let datum =
+                unsafe { col.reader.read(row_idx, col.dest_oid, col.dest_typmod) }?;
             out.set_datum(col.dest, datum);
         }
         Ok(())

@@ -242,9 +242,17 @@ fn list_elements_resolve_to_matching_element_rule() {
     assert_list_elem!(DataType::Int32, pg_sys::INT4OID, ListElementRule::Int);
     assert_list_elem!(DataType::Int64, pg_sys::INT8OID, ListElementRule::Long);
     assert_list_elem!(DataType::Float32, pg_sys::FLOAT4OID, ListElementRule::Float);
-    assert_list_elem!(DataType::Float64, pg_sys::FLOAT8OID, ListElementRule::Double);
+    assert_list_elem!(
+        DataType::Float64,
+        pg_sys::FLOAT8OID,
+        ListElementRule::Double
+    );
     assert_list_elem!(DataType::Utf8, pg_sys::TEXTOID, ListElementRule::String);
-    assert_list_elem!(DataType::LargeUtf8, pg_sys::TEXTOID, ListElementRule::String);
+    assert_list_elem!(
+        DataType::LargeUtf8,
+        pg_sys::TEXTOID,
+        ListElementRule::String
+    );
 }
 
 // ---------------------------------------------------------------------------

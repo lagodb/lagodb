@@ -31,9 +31,7 @@ use pg_lakebase_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
 use super::projection::ProjectedName;
-use super::type_mapping::{
-    IcebergFieldExt, IcebergSchemaExt, IcebergTypeExt,
-};
+use super::type_mapping::{IcebergFieldExt, IcebergSchemaExt, IcebergTypeExt};
 use crate::error::{IcebergError, IcebergResult};
 
 // ---------------------------------------------------------------------------

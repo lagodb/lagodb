@@ -52,14 +52,8 @@ impl<'a> SlotColumns<'a> {
         // memory.
         unsafe {
             Self {
-                values: std::slice::from_raw_parts_mut(
-                    (*slot).tts_values,
-                    natts,
-                ),
-                nulls: std::slice::from_raw_parts_mut(
-                    (*slot).tts_isnull,
-                    natts,
-                ),
+                values: std::slice::from_raw_parts_mut((*slot).tts_values, natts),
+                nulls: std::slice::from_raw_parts_mut((*slot).tts_isnull, natts),
                 slot,
                 target_ctx,
                 _marker: PhantomData,
