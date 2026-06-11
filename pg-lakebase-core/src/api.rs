@@ -567,6 +567,27 @@ pub trait AmIndexCallbacks {
 /// operation.  For MERGE it is `CMD_MERGE`, while the actual physical action
 /// for each row is still expressed by the callback being invoked
 /// (`tuple_insert`, `tuple_update`, or `tuple_delete`).
+///
+/// # Reentrancy contract
+///
+/// A tuple callback ([`tuple_insert_slot`](Self::tuple_insert_slot),
+/// [`multi_insert_slots`](Self::multi_insert_slots), the update/delete/lock
+/// variants, etc.) MUST NOT synchronously re-enter the table-AM write path for
+/// the *same* relation in the *same* DML frame before it returns. Concretely, a
+/// callback must not call `table_tuple_insert` / `table_multi_insert` /
+/// `table_tuple_update` / `table_tuple_delete` (or SPI / executor entry points
+/// that do) against the relation it is currently writing.
+///
+/// The framework relies on this to hand each callback a unique
+/// `&mut` to the per-relation session without a per-row runtime guard: the hot
+/// path resolves the session once and reuses a cached pointer, which is sound
+/// only while no second `&mut` to the same session can be created concurrently.
+/// PostgreSQL's standard executor already upholds the contract — it runs
+/// `table_tuple_*` to completion before index maintenance and AFTER triggers,
+/// and nested trigger / SPI DML runs in a *new* ModifyTable frame — so normal
+/// AMs need do nothing special. Nested DML against *other* relations is fine
+/// when routed through the executor (it opens a new frame); doing raw table-AM
+/// writes from inside a callback is what the contract forbids.
 pub trait AmDmlSession {
     /// Construct the write session for a DML frame.
     ///

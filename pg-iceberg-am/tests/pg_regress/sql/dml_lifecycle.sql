@@ -122,6 +122,13 @@ INSERT INTO dml_lifecycle.part_t VALUES (30), (170), (40);
 
 SELECT * FROM dml_lifecycle.part_t ORDER BY id;
 
+-- Per-partition placement: the per-row fast path keys the cached session on the
+-- current relation, so alternating partition routing (a -> b -> a) must land
+-- each row in its own leaf relation rather than reusing the previous row's
+-- session. Reading each leaf directly would expose a mis-routed row.
+SELECT * FROM dml_lifecycle.part_t_a ORDER BY id;
+SELECT * FROM dml_lifecycle.part_t_b ORDER BY id;
+
 -- MERGE insert-only still runs as CMD_MERGE and must finalize once at the
 -- ModifyTable frame boundary.
 CREATE TABLE dml_lifecycle.merge_insert_t (

@@ -307,34 +307,89 @@ impl fmt::Display for Cell {
     }
 }
 
+/// The PostgreSQL-target-specific datum construction for a [`Cell`], resolved
+/// once from the destination column's type OID rather than re-derived per value.
+///
+/// Most columns are [`Plain`](Self::Plain) — the `Cell`'s natural [`IntoDatum`].
+/// The other variants capture the cases where one Arrow/`Cell` shape backs
+/// several PostgreSQL types whose datum form differs (`text`/`json`/`name`,
+/// `bytea`/`jsonb`) or needs integer narrowing (`int2`/`int4`). Resolving this
+/// at batch-bind time keeps the per-value decode off the builtin-OID lookup
+/// `PgOid::from` performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatumTarget {
+    /// Use the `Cell`'s natural `IntoDatum` mapping.
+    Plain,
+    /// `json`: parse a `StringView` through `json_in`.
+    Json,
+    /// `jsonb`: parse a `ByteaView` through `jsonb_in`.
+    Jsonb,
+    /// `name`: build a fixed `NameData` from a `StringView`.
+    Name,
+    /// `int2`: narrow an integer cell to `i16`.
+    Int2,
+    /// `int4`: widen/narrow an integer cell to `i32`.
+    Int4,
+}
+
+impl DatumTarget {
+    /// Classify a destination type OID once (e.g. at batch bind) so the
+    /// per-value path dispatches on this small enum instead of re-running the
+    /// 200+-arm builtin-OID lookup behind `PgOid::from` for every row.
+    pub fn from_oid(oid: Oid) -> Self {
+        if oid == pg_sys::JSONBOID {
+            Self::Jsonb
+        } else if oid == pg_sys::JSONOID {
+            Self::Json
+        } else if oid == pg_sys::NAMEOID {
+            Self::Name
+        } else if oid == pg_sys::INT2OID {
+            Self::Int2
+        } else if oid == pg_sys::INT4OID {
+            Self::Int4
+        } else {
+            Self::Plain
+        }
+    }
+}
+
 impl Cell {
-    /// Convert cell to datum with type information.
+    /// Convert cell to datum for a destination type OID.
     ///
-    /// This method is needed for types where the target column type
-    /// must be known to create the correct Datum format.
-    ///
-    /// # Arguments
-    /// * `typoid` - The target PostgreSQL type OID
-    /// * `typmod` - The target type modifier
+    /// Thin compatibility wrapper over [`Self::into_datum_for`] for callers that
+    /// only have the target OID (the row-world write path and per-element list
+    /// construction). The columnar scan path resolves the [`DatumTarget`] once
+    /// at bind and calls `into_datum_for` directly.
     ///
     /// # Safety
     /// This function is unsafe because it calls PostgreSQL internal functions.
     pub unsafe fn into_datum_typed(self, typoid: Oid, _typmod: i32) -> Option<Datum> {
-        let oid = PgOid::from(typoid);
-        match oid {
-            PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => match self {
+        unsafe { self.into_datum_for(DatumTarget::from_oid(typoid)) }
+    }
+
+    /// Convert cell to datum for a pre-resolved [`DatumTarget`].
+    ///
+    /// The target captures the OID-specific datum form (`json`/`jsonb`/`name`,
+    /// integer narrowing) so this dispatch is a small enum match with no
+    /// per-value OID lookup.
+    ///
+    /// # Safety
+    /// This function is unsafe because it calls PostgreSQL internal functions.
+    pub unsafe fn into_datum_for(self, target: DatumTarget) -> Option<Datum> {
+        match target {
+            DatumTarget::Jsonb => match self {
                 Cell::ByteaView(v) => unsafe {
                     PgWrapper::jsonb_in_from_bytes(v.ptr, v.len).ok()
                 },
                 _ => None,
             },
-            PgOid::BuiltIn(PgBuiltInOids::JSONOID) => match self {
+            DatumTarget::Json => match self {
                 Cell::StringView(v) => unsafe {
                     PgWrapper::json_in_from_bytes(v.ptr, v.len).ok()
                 },
                 _ => None,
             },
-            PgOid::BuiltIn(PgBuiltInOids::NAMEOID) => match self {
+            DatumTarget::Name => match self {
                 Cell::StringView(v) => unsafe {
                     let c_str = CString::new(v.as_str()).ok()?;
                     fcinfo::direct_function_call_as_datum(
@@ -344,27 +399,27 @@ impl Cell {
                 },
                 _ => None,
             },
-            PgOid::BuiltIn(PgBuiltInOids::INT2OID) => match self {
+            DatumTarget::Int2 => match self {
                 Cell::I16(v) => v.into_datum(),
                 Cell::I32(v) => i16::try_from(v).ok().and_then(|v| v.into_datum()),
                 Cell::I64(v) => i16::try_from(v).ok().and_then(|v| v.into_datum()),
                 _ => self.into_datum(),
             },
-            PgOid::BuiltIn(PgBuiltInOids::INT4OID) => match self {
+            DatumTarget::Int4 => match self {
                 Cell::I16(v) => (v as i32).into_datum(),
                 Cell::I32(v) => v.into_datum(),
                 Cell::I64(v) => i32::try_from(v).ok().and_then(|v| v.into_datum()),
                 _ => self.into_datum(),
             },
             // TODO(row-world-list-narrowing): the array `Cell` variants
-            // (`I16Array`/`I32Array`/...) fall through to the `_` arm below and
+            // (`I16Array`/`I32Array`/...) fall through to `into_datum` here and
             // are emitted at their physical element width, so a list column
             // widened on write reads back at the wrong PG element type in the
             // row path (e.g. `int2[]` -> `int4[]`). See the matching TODO on
             // `ListValues::into_cell` in pg-arrow-conv list.rs; the slot-first
             // `into_array_datum` already retargets per element OID. Closing this
-            // means adding array-type-OID arms here that retarget each element.
-            _ => self.into_datum(),
+            // means adding array-aware targets that retarget each element.
+            DatumTarget::Plain => self.into_datum(),
         }
     }
 }

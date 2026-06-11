@@ -46,20 +46,18 @@ impl FixedCodec {
 
 pub(crate) struct BinaryEncoder {
     builder: LargeBinaryBuilder,
-    bytes: usize,
 }
 
 impl BinaryEncoder {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             builder: LargeBinaryBuilder::with_capacity(capacity, 1024),
-            bytes: 0,
         }
     }
 }
 
 impl ColumnAppend for BinaryEncoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         let oid = datum.type_oid();
         if oid == pg_sys::BYTEAOID {
             // `bytea` stores the header-stripped payload: the read side rebuilds
@@ -67,7 +65,7 @@ impl ColumnAppend for BinaryEncoder {
             let guard = unsafe { detoasted_payload(datum.datum()) };
             let bytes = guard.bytes();
             self.builder.append_value(bytes);
-            self.bytes += bytes.len();
+            Ok(bytes.len())
         } else if oid == pg_sys::JSONBOID {
             // `jsonb` stores PostgreSQL's internal varlena verbatim, header
             // included: the read side copies the bytes straight back into a
@@ -76,30 +74,26 @@ impl ColumnAppend for BinaryEncoder {
             let guard = unsafe { detoasted_payload(datum.datum()) };
             let bytes = guard.full_varlena_bytes();
             self.builder.append_value(bytes);
-            self.bytes += bytes.len();
+            Ok(bytes.len())
         } else {
-            return Err(ConvError::InvariantViolated(
+            Err(ConvError::InvariantViolated(
                 "Binary encoder: datum source type is not bytea/jsonb",
-            ));
+            ))
         }
-        Ok(())
     }
 
     fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
         match cell {
             Cell::Bytea(b) => {
                 self.builder.append_value(b);
-                self.bytes += b.len();
             }
             // SAFETY: a `ByteaView` cell borrows live bytes; copied synchronously.
             Cell::ByteaView(b) => {
                 let bytes = unsafe { b.as_slice() };
                 self.builder.append_value(bytes);
-                self.bytes += bytes.len();
             }
             Cell::Json(b) => {
                 self.builder.append_value(b);
-                self.bytes += b.len();
             }
             _ => return Err(cell_type_mismatch("bytea")),
         }
@@ -111,16 +105,11 @@ impl ColumnAppend for BinaryEncoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         Ok(Arc::new(self.builder.finish()))
     }
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 
@@ -131,7 +120,6 @@ impl ColumnAppend for BinaryEncoder {
 pub(crate) struct FixedBinaryEncoder {
     builder: FixedSizeBinaryBuilder,
     codec: FixedCodec,
-    bytes: usize,
 }
 
 impl FixedBinaryEncoder {
@@ -140,13 +128,12 @@ impl FixedBinaryEncoder {
         Self {
             builder: FixedSizeBinaryBuilder::with_capacity(capacity, width),
             codec: FixedCodec::new(len),
-            bytes: 0,
         }
     }
 }
 
 impl ColumnAppend for FixedBinaryEncoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         if datum.type_oid() != pg_sys::BYTEAOID {
             return Err(ConvError::InvariantViolated(
                 "FixedBinary encoder: datum source type is not bytea",
@@ -156,8 +143,7 @@ impl ColumnAppend for FixedBinaryEncoder {
         let bytes = guard.bytes();
         self.codec.validate(bytes.len())?;
         self.builder.append_value(bytes)?;
-        self.bytes += bytes.len();
-        Ok(())
+        Ok(bytes.len())
     }
 
     fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
@@ -169,7 +155,6 @@ impl ColumnAppend for FixedBinaryEncoder {
         };
         self.codec.validate(bytes.len())?;
         self.builder.append_value(bytes)?;
-        self.bytes += bytes.len();
         Ok(())
     }
 
@@ -178,16 +163,11 @@ impl ColumnAppend for FixedBinaryEncoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         Ok(Arc::new(self.builder.finish()))
     }
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 
@@ -197,20 +177,18 @@ impl ColumnAppend for FixedBinaryEncoder {
 
 pub(crate) struct UuidEncoder {
     builder: FixedSizeBinaryBuilder,
-    bytes: usize,
 }
 
 impl UuidEncoder {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             builder: FixedSizeBinaryBuilder::with_capacity(capacity, 16),
-            bytes: 0,
         }
     }
 }
 
 impl ColumnAppend for UuidEncoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         // `uuid` is a fixed 16-byte by-reference type, not a varlena, so it is
         // read directly; its bytes are already RFC 4122 network order.
         let u = unsafe {
@@ -222,8 +200,7 @@ impl ColumnAppend for UuidEncoder {
             )
         }?;
         self.builder.append_value(u.as_bytes())?;
-        self.bytes += 16;
-        Ok(())
+        Ok(16)
     }
 
     fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
@@ -231,7 +208,6 @@ impl ColumnAppend for UuidEncoder {
             return Err(cell_type_mismatch("uuid"));
         };
         self.builder.append_value(u.as_bytes())?;
-        self.bytes += 16;
         Ok(())
     }
 
@@ -240,16 +216,11 @@ impl ColumnAppend for UuidEncoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         Ok(Arc::new(self.builder.finish()))
     }
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 

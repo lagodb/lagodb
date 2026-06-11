@@ -42,6 +42,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Once, OnceLock};
 
+use super::modifytable_wrapper;
 use super::session;
 
 static DML_LIFECYCLE_INIT: Once = Once::new();
@@ -250,7 +251,7 @@ unsafe extern "C-unwind" fn executor_start_hook(
         return;
     }
 
-    session::register_executor_adapter(estate_key, nodes).report_unwrap();
+    modifytable_wrapper::register_executor_adapter(estate_key, nodes).report_unwrap();
 }
 
 #[pg_guard]
@@ -265,7 +266,8 @@ unsafe extern "C-unwind" fn executor_finish_hook(query_desc: *mut pg_sys::QueryD
     if !query_desc.is_null() {
         let estate = unsafe { (*query_desc).estate };
         if let Some(estate) = NonNull::new(estate)
-            && let Err(err) = session::check_executor_finish_invariants(estate)
+            && let Err(err) =
+                modifytable_wrapper::check_executor_finish_invariants(estate)
         {
             report_executor_finish_invariant(err);
         }
@@ -295,7 +297,7 @@ unsafe extern "C-unwind" fn executor_end_hook(query_desc: *mut pg_sys::QueryDesc
     if !query_desc.is_null() {
         let estate = unsafe { (*query_desc).estate };
         if let Some(estate) = NonNull::new(estate) {
-            session::end_executor_adapter(estate);
+            modifytable_wrapper::end_executor_adapter(estate);
         }
     }
 

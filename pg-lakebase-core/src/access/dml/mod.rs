@@ -16,6 +16,8 @@
 //! - [`erased_session`]: type-erasure adapter that lets the session manager store
 //!   one `Box<dyn ...>` regardless of the concrete `AmDmlSession` implementation.
 //! - [`session`]: frame-scoped DML session storage and lifecycle.
+//! - [`modifytable_wrapper`]: wraps ModifyTable `ExecProcNodeReal` to discover
+//!   frame boundaries and drive the session lifecycle from them.
 //! - [`callbacks`]: the `extern "C-unwind"` shims wired into PostgreSQL's
 //!   [`pg_sys::TableAmRoutine`] vtable.
 //! - [`lifecycle`]: executor and utility hook wiring that creates DML frame
@@ -24,6 +26,7 @@
 mod callbacks;
 mod erased_session;
 mod lifecycle;
+mod modifytable_wrapper;
 mod session;
 
 pub use lifecycle::init_lifecycle_hooks;

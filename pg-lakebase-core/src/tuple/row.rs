@@ -100,25 +100,26 @@ impl<'slot> TupleSlotRow<'slot> {
     }
 
     pub fn datum_at(&self, index: usize) -> Option<PgDatumRef<'slot>> {
+        self.datums().datum_at(index)
+    }
+
+    /// Deform the slot's columns once into a [`SlotDatums`] view.
+    ///
+    /// The slot's `tts_values` / `tts_isnull` arrays and the descriptor's
+    /// attribute list are resolved a single time here, so per-column access
+    /// through [`SlotDatums::datum_at`] is a plain bounds-checked index. Callers
+    /// reading more than one column (the columnar DML write path, `to_owned_row`)
+    /// must go through this instead of repeated [`Self::datum_at`], which rebuilds
+    /// the three slices on every call.
+    pub fn datums(&self) -> SlotDatums<'slot> {
         unsafe {
             let tup_desc = (*self.slot).tts_tupleDescriptor;
             let natts = (*tup_desc).natts as usize;
-            if index >= natts {
-                return None;
+            SlotDatums {
+                values: std::slice::from_raw_parts((*self.slot).tts_values, natts),
+                nulls: std::slice::from_raw_parts((*self.slot).tts_isnull, natts),
+                attrs: std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts),
             }
-
-            let values = std::slice::from_raw_parts((*self.slot).tts_values, natts);
-            let nulls = std::slice::from_raw_parts((*self.slot).tts_isnull, natts);
-            let attrs = std::slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts);
-            let attr = &attrs[index];
-
-            Some(PgDatumRef {
-                datum: values[index],
-                is_null: nulls[index],
-                type_oid: attr.atttypid,
-                typmod: attr.atttypmod,
-                _marker: PhantomData,
-            })
         }
     }
 
@@ -129,6 +130,46 @@ impl<'slot> TupleSlotRow<'slot> {
     /// columnar DML paths avoid.
     pub fn to_owned_row(&self) -> Row {
         Row::from_slot_view(*self)
+    }
+}
+
+/// A tuple slot's columns deformed once: the backing `tts_values` /
+/// `tts_isnull` arrays and the descriptor's per-attribute metadata, resolved a
+/// single time so each [`Self::datum_at`] is an O(1) index rather than
+/// rebuilding the slices per column.
+///
+/// Built by [`TupleSlotRow::datums`] and consumed within the same callback as
+/// the originating slot view, so the borrowed arrays stay valid.
+#[derive(Clone, Copy)]
+pub struct SlotDatums<'slot> {
+    values: &'slot [pg_sys::Datum],
+    nulls: &'slot [bool],
+    attrs: &'slot [pg_sys::FormData_pg_attribute],
+}
+
+impl<'slot> SlotDatums<'slot> {
+    /// Number of columns (`natts`).
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Borrowed view of column `index`, or `None` when out of range.
+    pub fn datum_at(&self, index: usize) -> Option<PgDatumRef<'slot>> {
+        if index >= self.values.len() {
+            return None;
+        }
+        let attr = &self.attrs[index];
+        Some(PgDatumRef {
+            datum: self.values[index],
+            is_null: self.nulls[index],
+            type_oid: attr.atttypid,
+            typmod: attr.atttypmod,
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -267,12 +308,13 @@ impl Row {
     }
 
     pub fn from_slot_view(slot: TupleSlotRow<'_>) -> Self {
-        let natts = slot.len();
+        let datums = slot.datums();
+        let natts = datums.len();
         let mut row = Self::with_capacity(natts);
         row.size = 0;
 
         for index in 0..natts {
-            row.cells[index] = slot.datum_at(index).and_then(PgDatumRef::to_cell);
+            row.cells[index] = datums.datum_at(index).and_then(PgDatumRef::to_cell);
             if let Some(cell) = &row.cells[index] {
                 row.size += cell.mem_size();
             }

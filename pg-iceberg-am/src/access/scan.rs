@@ -261,6 +261,15 @@ impl Iterator for IcebergArrowBatches {
     type Item = Result<RecordBatch, IcebergError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Cooperative cancellation at the batch boundary. PG's `ExecScanFetch`
+        // already fires `CHECK_FOR_INTERRUPTS` once per *returned* tuple for both
+        // the TableAM seqscan and the CustomScan, but a single `getnextslot` /
+        // `next_slot` call can pull many batches here (skipping batches fully
+        // eliminated by pushed filters, or reading the next Parquet row group),
+        // so a query cancel issued mid-IO would otherwise wait until the next
+        // tuple surfaces. Checking per batch — the unit of Iceberg scan IO —
+        // closes that gap for both scan paths, which share this iterator.
+        pgrx::pg_sys::check_for_interrupts!();
         self.0.next().map(|batch| batch.map_err(IcebergError::from))
     }
 }

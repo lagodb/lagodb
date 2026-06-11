@@ -56,7 +56,6 @@ pub(crate) trait PrimitiveConv {
 /// A primitive Arrow column builder driven by a [`PrimitiveConv`] marker.
 pub(crate) struct PrimitiveEncoder<C: PrimitiveConv> {
     builder: PrimitiveBuilder<C::Arrow>,
-    bytes: usize,
     _conv: PhantomData<fn() -> C>,
 }
 
@@ -64,25 +63,25 @@ impl<C: PrimitiveConv> PrimitiveEncoder<C> {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             builder: PrimitiveBuilder::<C::Arrow>::with_capacity(capacity),
-            bytes: 0,
             _conv: PhantomData,
         }
     }
+
+    const VALUE_BYTES: usize =
+        std::mem::size_of::<<C::Arrow as ArrowPrimitiveType>::Native>();
 }
 
 impl<C: PrimitiveConv> ColumnAppend for PrimitiveEncoder<C> {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         let value = unsafe { C::from_datum(datum) }?;
         self.builder.append_value(value);
-        self.bytes += std::mem::size_of::<<C::Arrow as ArrowPrimitiveType>::Native>();
-        Ok(())
+        Ok(Self::VALUE_BYTES)
     }
 
     fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
         let value =
             C::from_cell(cell)?.ok_or_else(|| cell_type_mismatch(C::LABEL))?;
         self.builder.append_value(value);
-        self.bytes += std::mem::size_of::<<C::Arrow as ArrowPrimitiveType>::Native>();
         Ok(())
     }
 
@@ -91,16 +90,11 @@ impl<C: PrimitiveConv> ColumnAppend for PrimitiveEncoder<C> {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         Ok(Arc::new(self.builder.finish()))
     }
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 
@@ -243,20 +237,18 @@ impl PrimitiveConv for F64Conv {
 
 pub(crate) struct BoolEncoder {
     builder: BooleanBuilder,
-    bytes: usize,
 }
 
 impl BoolEncoder {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             builder: BooleanBuilder::with_capacity(capacity),
-            bytes: 0,
         }
     }
 }
 
 impl ColumnAppend for BoolEncoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         let v = unsafe {
             read_oid(
                 datum,
@@ -266,8 +258,7 @@ impl ColumnAppend for BoolEncoder {
             )
         }?;
         self.builder.append_value(v);
-        self.bytes += std::mem::size_of::<bool>();
-        Ok(())
+        Ok(std::mem::size_of::<bool>())
     }
 
     fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
@@ -275,7 +266,6 @@ impl ColumnAppend for BoolEncoder {
             return Err(cell_type_mismatch("bool"));
         };
         self.builder.append_value(*v);
-        self.bytes += std::mem::size_of::<bool>();
         Ok(())
     }
 
@@ -284,15 +274,10 @@ impl ColumnAppend for BoolEncoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         Ok(Arc::new(self.builder.finish()))
     }
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }

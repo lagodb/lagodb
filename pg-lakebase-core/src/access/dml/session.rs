@@ -1,42 +1,47 @@
 //! DML frame and per-relation session lifecycle.
 //!
-//! The design goal is to give AM implementations a clear `dml_init` /
-//! `dml_fini` semantic boundary even though PostgreSQL's table-AM vtable only
-//! exposes individual tuple operations.  A single SQL write frame can touch one
-//! relation or many relations:
+//! PostgreSQL's table-AM vtable only exposes per-tuple operations, so the
+//! framework scopes DML state to a write "frame" (a ModifyTable node or a COPY
+//! FROM) rather than to a transaction or statement. One frame can touch several
+//! relations (partition routing, MERGE). A [`DmlFrame`] owns the relation-local
+//! [`ModifySession`]s: the first table-AM callback for a relation lazily creates
+//! the session and calls `begin_modify()`; successful completion calls
+//! `end_modify()` once per touched relation. ERROR / abort /
+//! rollback-to-savepoint instead run `abort_modify()` via ResourceOwner cleanup
+//! (the non-local exits Rust cannot observe directly). A process-global "last
+//! used session" cannot model nested SPI / data-modifying CTEs / partitioned
+//! writes / COPY, so the current frame is tracked explicitly on a stack.
 //!
-//! - a plain INSERT usually touches one target relation,
-//! - partition routing can touch several leaf relations in the same
-//!   ModifyTable/COPY frame,
-//! - MERGE uses one ModifyTable frame whose runtime callbacks may be a mix of
-//!   insert, update, and delete actions.
+//! ## Per-row fast path
 //!
-//! The framework therefore scopes DML state to a PostgreSQL "frame" rather than
-//! to a transaction or a statement string.  A [`DmlFrame`] owns relation-local
-//! [`ModifySession`] instances.  The first table-AM callback for a relation
-//! lazily creates the session, calls the AM's `begin_modify()`, and then
-//! dispatches the callback.  Successful frame completion calls
-//! `end_modify()` once for every touched relation.  ERROR, abort, and
-//! rollback-to-savepoint never call `end_modify()`; they are handled by
-//! ResourceOwner cleanup, which drops the frame and lets unfinalized sessions
-//! run `abort_modify()`.
+//! [`with_current_relation_session`] is on the INSERT hot path. It keeps a
+//! frame-scoped memo ([`HotState`]) of the last `(frame, relation, session)` and
+//! reuses it directly when the next callback targets the same frame + relation —
+//! no HashMap lookup, no frame move, one TLS access for both the current frame
+//! and the memo. The memo is keyed on the *current* frame and cleared by every
+//! frame teardown, so it never aliases another frame's session for the same
+//! relid or outlives the frame it points into.
 //!
-//! This intentionally replaced the previous statement-global session cache:
-//! global "last used session" state cannot represent nested SPI, data-modifying
-//! CTEs, cursor/portal execution, partitioned writes, or COPY FROM reliably.
-//! The frame stack below records the current PostgreSQL write frame explicitly,
-//! while ResourceOwner handles the non-local exits that Rust code cannot
-//! observe directly.
+//! ## Reentrancy contract (no per-row guard)
+//!
+//! Session access hands the callback a `&mut ModifySession` from a pointer into
+//! the relation's `Box<ModifySession>` (heap-stable across `Vec`/`FRAMES` growth;
+//! the frame is not torn down mid-callback). Uniqueness of that `&mut` rests on a
+//! *contract*, not a runtime check: an [`AmDmlSession`] tuple callback must not
+//! synchronously re-enter the table-AM write path for the same frame.
+//! PostgreSQL's executor upholds this — it completes `table_tuple_*` before
+//! indexes / AFTER triggers, and nested trigger / SPI DML runs in a new frame —
+//! so the hot path spends nothing defending a case the contract rules out.
 
 use crate::api::{AmDmlSession, TableAccessMethod};
-use crate::diag::{PgReportError, ReportableError};
+use crate::diag::PgReportError;
 use crate::handles::RelationHandle;
 use crate::resource::{self, ResourceHandle};
 use crate::tuple::Row;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ptr::NonNull;
 
 use super::erased_session::{ErasedModifySession, ErasedModifySessionAdapter};
@@ -47,19 +52,16 @@ pub(crate) enum FrameKey {
     CopyFrom(u64),
 }
 
+/// A frame on the current write-frame stack: its key plus the command type
+/// resolved when the frame was pushed (the ModifyTable node's `operation`, or
+/// `CMD_INSERT` for COPY). Carrying `cmd_type` with the push lets the per-row
+/// slow path lazily create the `DmlFrame` without querying the executor
+/// wrapper, keeping the `session` → `modifytable_wrapper` dependency
+/// one-directional.
 #[derive(Clone, Copy)]
-struct NodeAdapter {
-    estate: NonNull<pg_sys::EState>,
-    original: unsafe extern "C-unwind" fn(
-        pstate: *mut pg_sys::PlanState,
-    ) -> *mut pg_sys::TupleTableSlot,
+struct FrameStackEntry {
+    key: FrameKey,
     cmd_type: pg_sys::CmdType::Type,
-}
-
-struct ExecutorAdapter {
-    estate: NonNull<pg_sys::EState>,
-    resource_handle: ResourceHandle,
-    nodes: Vec<NonNull<pg_sys::PlanState>>,
 }
 
 struct DmlFrame {
@@ -70,11 +72,9 @@ struct DmlFrame {
     sessions: Vec<(pg_sys::Oid, Box<ModifySession>)>,
 }
 
-// Thin object-safe wrapper around the AM-provided DML session.  `finalized`
-// records whether the success path has already called `end_modify()`.  Dropping
-// an unfinalized session is always an abort cleanup, which is exactly what we
-// want after ERROR, transaction abort, rollback to savepoint, or an unfinished
-// frame being released by ResourceOwner.
+// Object-safe wrapper over the AM session. `finalized` records whether the
+// success path ran `end_modify()`; dropping an unfinalized session aborts it
+// (the ERROR / abort / rollback path).
 pub(super) struct ModifySession {
     pub(super) state: Box<dyn ErasedModifySession>,
     pub(super) row_buffer: Row,
@@ -142,40 +142,44 @@ impl DmlFrame {
     }
 }
 
+/// Per-row hot-path state, merged into one thread-local so the fast path reads
+/// the current frame and the cached session in a single TLS access.
+#[derive(Clone, Copy)]
+struct HotState {
+    /// Shadow of `CURRENT_FRAME_STACK`'s top, resynced on every push/pop, so the
+    /// per-row path resolves the current frame (and its command type) without
+    /// borrowing the `Vec`.
+    frame_top: Option<FrameStackEntry>,
+    /// Memo of the last resolved `(frame, relation, session)`; see the module
+    /// "Per-row fast path" / "Reentrancy contract" sections for why it is sound.
+    last_session: Option<(FrameKey, pg_sys::Oid, NonNull<ModifySession>)>,
+}
+
+impl HotState {
+    const EMPTY: Self = Self {
+        frame_top: None,
+        last_session: None,
+    };
+}
+
 thread_local! {
-    // PlanState -> wrapper metadata installed by ExecutorStart.  This map is
-    // separate from FRAMES because a ModifyTable node may exist before it has
-    // produced any table-AM write callback.
-    static NODE_ADAPTERS: RefCell<HashMap<NonNull<pg_sys::PlanState>, NodeAdapter>> =
-        RefCell::new(HashMap::new());
-    // EState -> all ModifyTable nodes wrapped for that executor.  The
-    // ExecutorAdapter ResourceOwner cleanup removes stale wrappers if ERROR
-    // prevents ExecutorEnd from running.
-    static EXECUTOR_ADAPTERS: RefCell<HashMap<NonNull<pg_sys::EState>, ExecutorAdapter>> =
-        RefCell::new(HashMap::new());
     // Active or lazily-created DML frames.  Removing a frame drops its sessions;
     // unfinalized sessions abort.
     static FRAMES: RefCell<HashMap<FrameKey, DmlFrame>> =
         RefCell::new(HashMap::new());
     // Current write-frame stack.  Nested SPI DML and trigger DML naturally push
     // another ModifyTable frame while the outer frame is suspended.
-    static CURRENT_FRAME_STACK: RefCell<Vec<FrameKey>> = const { RefCell::new(Vec::new()) };
+    static CURRENT_FRAME_STACK: RefCell<Vec<FrameStackEntry>> =
+        const { RefCell::new(Vec::new()) };
     // COPY FROM frames are created by the utility hook rather than a PlanState,
     // so a separate stack identifies which COPY frame should finish in on_post.
     static COPY_FRAME_STACK: RefCell<Vec<FrameKey>> = const { RefCell::new(Vec::new()) };
-    // Frames currently in `finish_frame`; AM callbacks during finalization would
-    // be a bug because `end_modify()` is supposed to close the relation-local
-    // writer, not perform new table-AM writes into the same frame.
-    static FINALIZING_KEYS: RefCell<HashSet<FrameKey>> = RefCell::new(HashSet::new());
-    // A frame is temporarily removed from FRAMES while a callback gets mutable
-    // access to one session.  This avoids RefCell borrow penetration across AM
-    // code.  The borrowed set rejects same-frame reentrancy before it can
-    // create a shadow frame for the same key.
-    static BORROWED_KEYS: RefCell<HashSet<FrameKey>> = RefCell::new(HashSet::new());
+    // Merged per-row hot-path state (current frame top + last-session memo).
+    static HOT_STATE: Cell<HotState> = const { Cell::new(HotState::EMPTY) };
     static NEXT_COPY_ID: Cell<u64> = const { Cell::new(1) };
 }
 
-fn internal_error(message: impl Into<String>) -> PgReportError {
+pub(super) fn internal_error(message: impl Into<String>) -> PgReportError {
     PgReportError::from_message(PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, message)
 }
 
@@ -194,55 +198,35 @@ fn next_copy_id() -> u64 {
     })
 }
 
-fn current_frame_key() -> Result<FrameKey, PgReportError> {
-    CURRENT_FRAME_STACK.with(|stack| {
-        stack.borrow().last().copied().ok_or_else(|| {
-            feature_not_supported(
-                "DML called outside a managed ModifyTable or COPY FROM frame",
-            )
-        })
-    })
+/// Resync the hot-path frame top from the stack's current top. Called after
+/// every `CURRENT_FRAME_STACK` mutation.
+fn publish_current_top(stack: &[FrameStackEntry]) {
+    HOT_STATE.with(|hot| {
+        let mut state = hot.get();
+        state.frame_top = stack.last().copied();
+        hot.set(state);
+    });
 }
 
 fn remove_key_from_stacks(key: FrameKey) {
-    CURRENT_FRAME_STACK.with(|stack| stack.borrow_mut().retain(|k| *k != key));
+    CURRENT_FRAME_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        stack.retain(|entry| entry.key != key);
+        publish_current_top(&stack);
+    });
     COPY_FRAME_STACK.with(|stack| stack.borrow_mut().retain(|k| *k != key));
 }
 
-fn abort_frame_and_remove_stack(key: FrameKey) {
+pub(super) fn abort_frame_and_remove_stack(key: FrameKey) {
     // ResourceOwner uses this path for ERROR/abort/rollback-to-savepoint.  A
     // dropped frame drops every unfinalized ModifySession, whose Drop calls
     // abort_modify().  Stack removal is by retain rather than pop because COPY
     // errors and subtransaction rollback can unwind non-locally through nested
     // frames.
+    last_session_invalidate(key);
     let frame = FRAMES.with(|frames| frames.borrow_mut().remove(&key));
     drop(frame);
     remove_key_from_stacks(key);
-    FINALIZING_KEYS.with(|keys| {
-        keys.borrow_mut().remove(&key);
-    });
-    BORROWED_KEYS.with(|keys| {
-        keys.borrow_mut().remove(&key);
-    });
-}
-
-fn lookup_node_adapter(
-    ps: NonNull<pg_sys::PlanState>,
-) -> Result<NodeAdapter, PgReportError> {
-    NODE_ADAPTERS.with(|adapters| {
-        adapters.borrow().get(&ps).copied().ok_or_else(|| {
-            internal_error("ModifyTable node adapter missing during DML execution")
-        })
-    })
-}
-
-fn cmd_type_for_key(key: FrameKey) -> Result<pg_sys::CmdType::Type, PgReportError> {
-    match key {
-        FrameKey::ModifyTable(ps) => {
-            lookup_node_adapter(ps).map(|adapter| adapter.cmd_type)
-        }
-        FrameKey::CopyFrom(_) => Ok(pg_sys::CmdType::CMD_INSERT),
-    }
 }
 
 fn ensure_frame_exists(
@@ -259,24 +243,22 @@ fn ensure_frame_exists(
     })
 }
 
-fn is_finalizing(key: FrameKey) -> bool {
-    FINALIZING_KEYS.with(|keys| keys.borrow().contains(&key))
-}
-
-fn is_borrowed(key: FrameKey) -> bool {
-    BORROWED_KEYS.with(|keys| keys.borrow().contains(&key))
-}
-
-fn frame_has_session(
+/// Pointer to the `key` frame's session for `relid`, or `None` if the frame has
+/// no session for it yet. The pointer targets the session's `Box` allocation,
+/// whose address is stable across `sessions` `Vec` growth and `FRAMES`
+/// rehashing, so it stays valid after this `FRAMES` borrow is released.
+fn frame_session_ptr(
     key: FrameKey,
     relid: pg_sys::Oid,
-) -> Result<bool, PgReportError> {
+) -> Result<Option<NonNull<ModifySession>>, PgReportError> {
     FRAMES.with(|frames| {
-        let frames = frames.borrow();
+        let mut frames = frames.borrow_mut();
         let frame = frames
-            .get(&key)
+            .get_mut(&key)
             .ok_or_else(|| internal_error("DML frame missing"))?;
-        Ok(frame.session_index(relid).is_some())
+        Ok(frame
+            .session_index(relid)
+            .map(|index| NonNull::from(frame.sessions[index].1.as_mut())))
     })
 }
 
@@ -302,82 +284,46 @@ fn insert_session(
     })
 }
 
-struct BorrowedFrame {
-    key: FrameKey,
-    frame: Option<DmlFrame>,
-}
-
-impl BorrowedFrame {
-    fn take(key: FrameKey) -> Result<Self, PgReportError> {
-        // Closure-based session access is deliberately implemented by taking
-        // the frame out of the TLS map.  Returning a long-lived raw pointer into
-        // FRAMES would let RefCell borrows leak through arbitrary AM code and
-        // would make reentrant table-AM calls unsound.
-        let inserted = BORROWED_KEYS.with(|keys| keys.borrow_mut().insert(key));
-        if !inserted {
-            return Err(internal_error(
-                "AM reentrancy is not supported in this DML frame",
-            ));
-        }
-
-        let frame = FRAMES.with(|frames| frames.borrow_mut().remove(&key));
-        frame
-            .map(|frame| Self {
-                key,
-                frame: Some(frame),
-            })
-            .ok_or_else(|| {
-                BORROWED_KEYS.with(|keys| {
-                    keys.borrow_mut().remove(&key);
-                });
-                internal_error("DML frame missing during session access")
-            })
-    }
-
-    fn session_mut(
-        &mut self,
-        relid: pg_sys::Oid,
-    ) -> Result<&mut ModifySession, PgReportError> {
-        let frame = self
-            .frame
-            .as_mut()
-            .ok_or_else(|| internal_error("DML frame already returned"))?;
-        let index = frame.session_index(relid).ok_or_else(|| {
-            internal_error("DML session missing during session access")
-        })?;
-        Ok(frame.sessions[index].1.as_mut())
-    }
-}
-
-impl Drop for BorrowedFrame {
-    fn drop(&mut self) {
-        let Some(frame) = self.frame.take() else {
-            return;
-        };
-
-        let collision = FRAMES.with(|frames| {
-            let previous = frames.borrow_mut().insert(self.key, frame);
-            if let Some(previous) = previous {
-                resource::forget_resource(previous.resource_handle);
-                true
-            } else {
-                false
-            }
-        });
-        BORROWED_KEYS.with(|keys| {
-            keys.borrow_mut().remove(&self.key);
-        });
-        debug_assert!(!collision, "DML frame reinsert collision");
-    }
-}
-
-fn with_frame_session<R>(
+/// Record the resolved session in the memo. The matching read is inline in
+/// [`with_current_relation_session`]'s fast path; `last_session_invalidate`
+/// clears it on frame teardown so it never outlives its frame.
+fn last_session_store(
     key: FrameKey,
     relid: pg_sys::Oid,
+    session: NonNull<ModifySession>,
+) {
+    HOT_STATE.with(|hot| {
+        let mut state = hot.get();
+        state.last_session = Some((key, relid, session));
+        hot.set(state);
+    });
+}
+
+fn last_session_invalidate(key: FrameKey) {
+    HOT_STATE.with(|hot| {
+        let mut state = hot.get();
+        if matches!(state.last_session, Some((cached_key, _, _)) if cached_key == key)
+        {
+            state.last_session = None;
+            hot.set(state);
+        }
+    });
+}
+
+/// Dispatch `f` with `&mut` access to the cached `session` pointer.
+///
+/// # Safety
+///
+/// `session` must point to the live `Box<ModifySession>` owned by the current
+/// frame (address-stable across `Vec`/`FRAMES` growth; not torn down during the
+/// callback). Uniqueness of the `&mut` relies on the module-level reentrancy
+/// contract — no synchronous same-frame re-entry — so no second `&mut` to this
+/// session can exist while `f` runs.
+unsafe fn dispatch_to_session<R>(
+    mut session: NonNull<ModifySession>,
     f: impl FnOnce(&mut ModifySession) -> Result<R, PgReportError>,
 ) -> Result<R, PgReportError> {
-    let mut borrowed = BorrowedFrame::take(key)?;
-    f(borrowed.session_mut(relid)?)
+    f(unsafe { session.as_mut() })
 }
 
 fn create_session<A>(
@@ -388,10 +334,8 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        // `cmd_type` is the PostgreSQL frame operation, not necessarily the
-        // individual callback action.  In particular MERGE passes CMD_MERGE
-        // here while later callbacks may be insert/update/delete depending on
-        // the matched source row.
+        // MERGE passes CMD_MERGE here even though later callbacks may be
+        // insert/update/delete depending on the matched source row.
         let rel_handle = RelationHandle::from_raw(rel);
         let mut instance =
             <A::DmlSession as AmDmlSession>::new(&rel_handle, cmd_type)?;
@@ -401,7 +345,28 @@ where
     }
 }
 
-pub(super) fn with_current_session<A, R>(
+/// Resolve the `key` frame's session for `rel`, creating it (and running the
+/// AM's `begin_modify`) on first touch. The AM construction runs outside any
+/// `FRAMES` borrow so it can re-enter the registry safely.
+fn resolve_session_ptr<A>(
+    key: FrameKey,
+    rel: pg_sys::Relation,
+    relid: pg_sys::Oid,
+    cmd_type: pg_sys::CmdType::Type,
+) -> Result<NonNull<ModifySession>, PgReportError>
+where
+    A: TableAccessMethod,
+{
+    if let Some(ptr) = frame_session_ptr(key, relid)? {
+        return Ok(ptr);
+    }
+    let session = create_session::<A>(rel, cmd_type)?;
+    insert_session(key, relid, session)?;
+    frame_session_ptr(key, relid)?
+        .ok_or_else(|| internal_error("DML session missing after insert"))
+}
+
+pub(super) fn with_current_relation_session<A, R>(
     rel: pg_sys::Relation,
     f: impl FnOnce(&mut ModifySession) -> Result<R, PgReportError>,
 ) -> Result<R, PgReportError>
@@ -409,83 +374,93 @@ where
     A: TableAccessMethod,
 {
     unsafe {
-        // Table-AM callbacks are only valid while a lifecycle hook has pushed a
-        // managed frame.  Unsupported v1 paths such as CTAS/DestReceiver writes
-        // fail here rather than silently creating statement-global state with no
-        // well-defined success boundary.
-        let key = current_frame_key()?;
-
-        if is_finalizing(key) {
-            return Err(internal_error("AM callback during DML frame finalization"));
-        }
-        // Check before lazy frame/session creation. BorrowedFrame::take also
-        // rejects reentrancy, but by then this path may have created a shadow
-        // frame for the borrowed key.
-        if is_borrowed(key) {
-            return Err(internal_error(
-                "AM reentrancy is not supported in this DML frame",
-            ));
-        }
-
-        let cmd_type = cmd_type_for_key(key)?;
-        ensure_frame_exists(key, cmd_type)?;
-
+        // Only valid inside a managed frame; unsupported paths (CTAS /
+        // DestReceiver writes) fail here rather than creating unscoped state.
         let relid = (*rel).rd_id;
-        if !frame_has_session(key, relid)? {
-            let session = create_session::<A>(rel, cmd_type)?;
-            insert_session(key, relid, session)?;
+
+        // One TLS access for the whole fast path: read the merged hot state once.
+        let hot = HOT_STATE.with(|hot| hot.get());
+        let entry = hot.frame_top.ok_or_else(|| {
+            feature_not_supported(
+                "DML called outside a managed ModifyTable or COPY FROM frame",
+            )
+        })?;
+        let key = entry.key;
+
+        // Fast path: the previous callback resolved the same frame + relation.
+        if let Some((cached_key, cached_relid, session)) = hot.last_session
+            && cached_key == key
+            && cached_relid == relid
+        {
+            return dispatch_to_session(session, f);
         }
 
-        with_frame_session(key, relid, f)
+        // Slow path: first row for this (frame, relation) — resolve (creating the
+        // session and running `begin_modify` on first touch), then memoize. The
+        // command type travels with the frame push, so the slow path never has
+        // to query the executor wrapper for it.
+        let cmd_type = entry.cmd_type;
+        ensure_frame_exists(key, cmd_type)?;
+        let session = resolve_session_ptr::<A>(key, rel, relid, cmd_type)?;
+        last_session_store(key, relid, session);
+        dispatch_to_session(session, f)
     }
 }
 
-fn push_current_frame(key: FrameKey) {
-    CURRENT_FRAME_STACK.with(|stack| stack.borrow_mut().push(key));
-}
-
-fn pop_current_frame(key: FrameKey) {
+pub(super) fn push_current_frame(key: FrameKey, cmd_type: pg_sys::CmdType::Type) {
     CURRENT_FRAME_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
-        if stack.last().copied() == Some(key) {
-            stack.pop();
-        } else {
-            debug_assert!(
-                !stack.contains(&key),
-                "current frame stack popped out of order"
-            );
-            stack.retain(|existing| *existing != key);
-        }
+        stack.push(FrameStackEntry { key, cmd_type });
+        publish_current_top(&stack);
     });
 }
 
-struct FinalizingGuard {
-    key: FrameKey,
+pub(super) fn pop_current_frame(key: FrameKey) {
+    CURRENT_FRAME_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack.last().map(|entry| entry.key) == Some(key) {
+            stack.pop();
+        } else {
+            debug_assert!(
+                !stack.iter().any(|entry| entry.key == key),
+                "current frame stack popped out of order"
+            );
+            stack.retain(|entry| entry.key != key);
+        }
+        publish_current_top(&stack);
+    });
 }
 
-impl FinalizingGuard {
-    fn insert(key: FrameKey) -> Self {
-        FINALIZING_KEYS.with(|keys| {
-            keys.borrow_mut().insert(key);
-        });
-        Self { key }
-    }
-}
-
-impl Drop for FinalizingGuard {
-    fn drop(&mut self) {
-        FINALIZING_KEYS.with(|keys| {
-            keys.borrow_mut().remove(&self.key);
-        });
-    }
+/// The current frame stack's ModifyTable PlanState keys in stack order,
+/// bottom-to-top (outermost frame first; `Vec::iter` is push order). The only
+/// consumer checks membership, so the order is not significant — but it is not
+/// top-first, despite "current frame" suggesting the top. Lets the executor
+/// hook check its own per-node invariants against the active frames without
+/// owning the stack.
+pub(super) fn current_modifytable_frames() -> Vec<NonNull<pg_sys::PlanState>> {
+    CURRENT_FRAME_STACK.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .filter_map(|entry| match entry.key {
+                FrameKey::ModifyTable(ps) => Some(ps),
+                FrameKey::CopyFrom(_) => None,
+            })
+            .collect()
+    })
 }
 
 pub(crate) fn finish_frame(key: FrameKey) -> Result<(), PgReportError> {
-    // Success path: remove the frame first so any callback during finalize is
-    // either rejected by FINALIZING_KEYS or treated as a separate, explicit
-    // frame.  Forget the ResourceOwner handle before calling AM code; if
-    // `end_modify()` ERRORs, the frame drops immediately and any remaining
-    // unfinalized sessions abort without an additional commit-time leak warning.
+    // Take local ownership of the frame before running AM code, forgetting its
+    // ResourceOwner handle first: if `end_modify()` ERRORs, the local `frame`
+    // drops and its still-unfinalized sessions abort — no commit-time leak
+    // warning. This does not, and is not meant to, stop a stray same-frame
+    // callback during `end_modify()`: the current frame top stays set until the
+    // wrapper pops it, so such a callback would resolve the same key and, the
+    // frame now gone, lazily recreate a shadow frame. That synchronous
+    // same-frame re-entry is an unsupported contract violation (see the module
+    // "Reentrancy contract"), not a case this path guards against.
+    last_session_invalidate(key);
     let frame = FRAMES.with(|frames| frames.borrow_mut().remove(&key));
     let Some(mut frame) = frame else {
         return Ok(());
@@ -493,7 +468,6 @@ pub(crate) fn finish_frame(key: FrameKey) -> Result<(), PgReportError> {
 
     resource::forget_resource(frame.resource_handle);
 
-    let _finalizing = FinalizingGuard::insert(key);
     debug_assert_eq!(frame.key, key);
 
     for (_, session) in frame.sessions.iter_mut() {
@@ -514,7 +488,11 @@ pub(crate) fn begin_copy_from_frame() {
             .borrow_mut()
             .insert(key, DmlFrame::new(key, cmd_type));
     });
-    CURRENT_FRAME_STACK.with(|stack| stack.borrow_mut().push(key));
+    CURRENT_FRAME_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        stack.push(FrameStackEntry { key, cmd_type });
+        publish_current_top(&stack);
+    });
     COPY_FRAME_STACK.with(|stack| stack.borrow_mut().push(key));
 }
 
@@ -530,200 +508,4 @@ pub(crate) fn finish_current_copy_frame() -> Result<(), PgReportError> {
     let result = finish_frame(key);
     remove_key_from_stacks(key);
     result
-}
-
-pub(crate) fn register_executor_adapter(
-    estate: NonNull<pg_sys::EState>,
-    nodes: Vec<NonNull<pg_sys::PlanState>>,
-) -> Result<(), PgReportError> {
-    if nodes.is_empty() {
-        return Ok(());
-    }
-
-    let new_nodes: Vec<_> = nodes
-        .into_iter()
-        .filter(|ps| {
-            !NODE_ADAPTERS.with(|adapters| adapters.borrow().contains_key(ps))
-        })
-        .collect();
-    if new_nodes.is_empty() {
-        return Ok(());
-    }
-
-    let estate_key = estate;
-    let resource_handle =
-        resource::remember_resource(move || cleanup_executor_adapter(estate_key));
-
-    // Register the ExecutorAdapter before wrapping nodes.  If wrapping a later
-    // node fails, ResourceOwner cleanup can still remove the nodes already
-    // wrapped for this executor instead of leaving stale NODE_ADAPTERS entries.
-    EXECUTOR_ADAPTERS.with(|adapters| {
-        adapters.borrow_mut().insert(
-            estate,
-            ExecutorAdapter {
-                estate,
-                resource_handle,
-                nodes: Vec::with_capacity(new_nodes.len()),
-            },
-        );
-    });
-
-    for ps in new_nodes {
-        wrap_modifytable_node(estate, ps)?;
-        EXECUTOR_ADAPTERS.with(|adapters| {
-            let mut adapters = adapters.borrow_mut();
-            let adapter = adapters
-                .get_mut(&estate)
-                .expect("ExecutorAdapter should exist while wrapping DML nodes");
-            adapter.nodes.push(ps);
-        });
-    }
-
-    Ok(())
-}
-
-fn wrap_modifytable_node(
-    estate: NonNull<pg_sys::EState>,
-    ps: NonNull<pg_sys::PlanState>,
-) -> Result<(), PgReportError> {
-    unsafe {
-        if (*ps.as_ptr()).type_ != pg_sys::NodeTag::T_ModifyTableState {
-            return Err(internal_error(
-                "attempted to wrap a non-ModifyTable plan state",
-            ));
-        }
-
-        let original = (*ps.as_ptr()).ExecProcNodeReal.ok_or_else(|| {
-            internal_error(
-                "ModifyTable ExecProcNodeReal is not initialized after ExecutorStart",
-            )
-        })?;
-
-        // Wrap only ExecProcNodeReal.  PostgreSQL's ExecInitNode has already
-        // chosen the real implementation by ExecutorStart time; replacing this
-        // slot lets us bracket calls to exactly this ModifyTable node while
-        // preserving executor instrumentation and outer dispatch machinery.
-        let mtstate = ps.as_ptr() as *mut pg_sys::ModifyTableState;
-        NODE_ADAPTERS.with(|adapters| {
-            adapters.borrow_mut().insert(
-                ps,
-                NodeAdapter {
-                    estate,
-                    original,
-                    cmd_type: (*mtstate).operation,
-                },
-            );
-        });
-        (*ps.as_ptr()).ExecProcNodeReal = Some(lakebase_modifytable_wrapper);
-    }
-
-    Ok(())
-}
-
-fn cleanup_executor_adapter(estate: NonNull<pg_sys::EState>) {
-    // Abort/error cleanup for wrappers installed in ExecutorStart.  We do not
-    // try to restore ExecProcNodeReal because the owning executor memory is
-    // being released; removing our TLS references is the important part.  If a
-    // direct ExecProcNodeReal call raised a PostgreSQL ERROR, Rust cleanup after
-    // `push_current_frame` did not run, so remove the corresponding frame key
-    // here as the ResourceOwner cleanup boundary.
-    let adapter =
-        EXECUTOR_ADAPTERS.with(|adapters| adapters.borrow_mut().remove(&estate));
-    let Some(adapter) = adapter else {
-        return;
-    };
-
-    debug_assert_eq!(adapter.estate, estate);
-    NODE_ADAPTERS.with(|node_adapters| {
-        let mut node_adapters = node_adapters.borrow_mut();
-        for node in adapter.nodes.iter() {
-            node_adapters.remove(node);
-        }
-    });
-    for node in adapter.nodes {
-        abort_frame_and_remove_stack(FrameKey::ModifyTable(node));
-    }
-}
-
-pub(crate) fn end_executor_adapter(estate: NonNull<pg_sys::EState>) {
-    // Normal ExecutorEnd path.  This is not a DML success boundary; PostgreSQL
-    // calls ExecutorFinish before ExecutorEnd on normal portal cleanup, and
-    // ERROR paths may skip ExecutorEnd entirely.  Therefore this function only
-    // removes adapter state and forgets the adapter ResourceOwner handle.
-    let adapter =
-        EXECUTOR_ADAPTERS.with(|adapters| adapters.borrow_mut().remove(&estate));
-    let Some(adapter) = adapter else {
-        return;
-    };
-
-    resource::forget_resource(adapter.resource_handle);
-    debug_assert_eq!(adapter.estate, estate);
-    NODE_ADAPTERS.with(|node_adapters| {
-        let mut node_adapters = node_adapters.borrow_mut();
-        for node in adapter.nodes {
-            node_adapters.remove(&node);
-        }
-    });
-}
-
-pub(crate) fn check_executor_finish_invariants(
-    estate: NonNull<pg_sys::EState>,
-) -> Result<(), PgReportError> {
-    // ExecutorFinish can run executor post-processing and triggers.  If a
-    // ModifyTable frame for this executor is still on the current stack at this
-    // point, our wrapper push/pop accounting is inconsistent.  In release builds
-    // the hook reports this as a warning so unusual but legal portal paths do
-    // not become user-visible query failures.
-    CURRENT_FRAME_STACK.with(|stack| {
-        for key in stack.borrow().iter().copied() {
-            let FrameKey::ModifyTable(ps) = key else {
-                continue;
-            };
-            let adapter =
-                NODE_ADAPTERS.with(|adapters| adapters.borrow().get(&ps).copied());
-            if adapter.is_some_and(|adapter| adapter.estate == estate) {
-                return Err(internal_error(
-                    "ExecutorFinish reached while a ModifyTable frame is active",
-                ));
-            }
-        }
-        Ok(())
-    })
-}
-
-#[pg_guard]
-pub(crate) unsafe extern "C-unwind" fn lakebase_modifytable_wrapper(
-    ps: *mut pg_sys::PlanState,
-) -> *mut pg_sys::TupleTableSlot {
-    let Some(ps_key) = NonNull::new(ps) else {
-        return std::ptr::null_mut();
-    };
-    let key = FrameKey::ModifyTable(ps_key);
-
-    let adapter = lookup_node_adapter(ps_key).report_unwrap();
-
-    // This wrapper is the ModifyTable frame boundary.  While PostgreSQL is
-    // executing the node, table-AM callbacks can resolve CURRENT_FRAME_STACK to
-    // this key and lazily create per-relation AM sessions.  Returning a non-null
-    // slot means the node still has RETURNING output to deliver; success
-    // finalization waits until PostgreSQL reports end-of-node with mt_done set.
-    push_current_frame(key);
-    // `original` is the raw ExecProcNodeReal dispatcher saved from this
-    // PlanState.  It can execute executor subtrees that re-enter pgrx
-    // `#[pg_guard]` callbacks, so do not wrap it in `pg_guard_ffi_boundary`.
-    // Keep Rust state crossing this direct call trivially deallocated; the
-    // executor adapter ResourceOwner cleanup removes the frame key if a
-    // PostgreSQL ERROR longjmps past the normal pop path.
-    let slot = unsafe { (adapter.original)(ps) };
-
-    let mtstate = ps as *mut pg_sys::ModifyTableState;
-    let finalize_result = if slot.is_null() && unsafe { (*mtstate).mt_done } {
-        finish_frame(key)
-    } else {
-        Ok(())
-    };
-    pop_current_frame(key);
-    finalize_result.report_unwrap();
-
-    slot
 }

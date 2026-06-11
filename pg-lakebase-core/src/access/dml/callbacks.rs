@@ -8,7 +8,7 @@
 //! These callbacks intentionally do not own lifecycle decisions.  PostgreSQL may
 //! call the same callback many times inside one ModifyTable/COPY frame, and
 //! MERGE may call different callbacks inside the same frame.  The callbacks only
-//! translate arguments and ask `with_current_session` for the relation-local AM
+//! translate arguments and ask `with_current_relation_session` for the relation-local AM
 //! session that belongs to the current frame.
 
 use crate::api::TableAccessMethod;
@@ -20,7 +20,7 @@ use crate::tuple::{TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
-use super::session::with_current_session;
+use super::session::with_current_relation_session;
 
 #[pg_guard]
 pub(super) extern "C-unwind" fn tuple_insert<A>(
@@ -32,7 +32,7 @@ pub(super) extern "C-unwind" fn tuple_insert<A>(
 ) where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| unsafe {
+    with_current_relation_session::<A, _>(rel, |session| unsafe {
         // Convert bistate to Handle if not null
         let bistate_handle =
             (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
@@ -57,7 +57,7 @@ pub(super) extern "C-unwind" fn tuple_insert_speculative<A>(
 ) where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| unsafe {
+    with_current_relation_session::<A, _>(rel, |session| unsafe {
         let bistate_handle =
             (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
 
@@ -83,7 +83,7 @@ pub(super) extern "C-unwind" fn tuple_complete_speculative<A>(
 ) where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| unsafe {
+    with_current_relation_session::<A, _>(rel, |session| unsafe {
         let row = TupleSlotRow::from_raw(slot);
 
         session
@@ -104,7 +104,7 @@ pub(super) extern "C-unwind" fn multi_insert<A>(
 ) where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| unsafe {
+    with_current_relation_session::<A, _>(rel, |session| unsafe {
         let rows = TupleSlotBatch::from_raw(slots, nslots as usize);
 
         let bistate_handle =
@@ -131,7 +131,7 @@ pub(super) extern "C-unwind" fn tuple_delete<A>(
 where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| unsafe {
+    with_current_relation_session::<A, _>(rel, |session| unsafe {
         let tid = ItemPointer::from_raw(tid);
         let snapshot_handle = SnapshotHandle::from_raw(snapshot);
         let crosscheck_handle =
@@ -171,7 +171,7 @@ pub(super) extern "C-unwind" fn tuple_update<A>(
 where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| unsafe {
+    with_current_relation_session::<A, _>(rel, |session| unsafe {
         let otid = ItemPointer::from_raw(otid);
         // Update buffer from slot
         let snapshot_handle = SnapshotHandle::from_raw(snapshot);
@@ -215,7 +215,7 @@ pub(super) extern "C-unwind" fn tuple_lock<A>(
 where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| unsafe {
+    with_current_relation_session::<A, _>(rel, |session| unsafe {
         let tid = ItemPointer::from_raw(tid);
         let snapshot_handle = SnapshotHandle::from_raw(snapshot);
         let mut tmfd_rust = TM_FailureData::default();
@@ -250,6 +250,8 @@ pub(super) extern "C-unwind" fn finish_bulk_insert<A>(
 ) where
     A: TableAccessMethod,
 {
-    with_current_session::<A, _>(rel, |session| session.finish_bulk_insert(options))
-        .report_unwrap();
+    with_current_relation_session::<A, _>(rel, |session| {
+        session.finish_bulk_insert(options)
+    })
+    .report_unwrap();
 }

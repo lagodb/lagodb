@@ -46,12 +46,13 @@ use temporal::{Date32Conv, Time64Conv, TimestampEncoder};
 /// (row-world / FDW path) — feed the *same* builder, `finish`, NULL append, and
 /// byte accounting, so a type's write logic is written once per type.
 pub(crate) trait ColumnAppend {
-    /// Append a present, non-null datum (columnar path).
+    /// Append a present, non-null datum (columnar path), returning the number
+    /// of bytes it added to the builder's in-memory footprint.
     ///
     /// # Safety
     ///
     /// `datum` must be a valid, non-null datum of this column's source type.
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()>;
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize>;
 
     /// Append a present, non-null buffered [`Cell`] (row-world path). A cell
     /// whose variant does not match the column is rejected.
@@ -65,9 +66,6 @@ pub(crate) trait ColumnAppend {
 
     /// Number of values appended for the current batch.
     fn len(&self) -> usize;
-
-    /// Estimated in-memory footprint of buffered values, in bytes.
-    fn estimated_size(&self) -> usize;
 }
 
 /// A per-column Arrow builder, one variant per physical Arrow column type.
@@ -184,15 +182,16 @@ impl DatumColumnAppender for ArrowColumnEncoder {
     type Column = ArrayRef;
     type Error = ConvError;
 
-    fn append_datum(&mut self, value: Option<PgDatumRef<'_>>) -> ConvResult<()> {
-        // One slot is appended either way; the null path never reads the datum.
+    fn append_datum(&mut self, value: Option<PgDatumRef<'_>>) -> ConvResult<usize> {
+        // One slot is appended either way; the null path never reads the datum
+        // and adds no bytes.
         match value {
             Some(v) if !v.is_null() => {
                 dispatch_encoder!(&mut self.0, e => unsafe { e.append_datum(v) })
             }
             _ => {
                 dispatch_encoder!(&mut self.0, e => e.append_null());
-                Ok(())
+                Ok(0)
             }
         }
     }
@@ -203,9 +202,8 @@ impl DatumColumnAppender for ArrowColumnEncoder {
 
     fn clear(&mut self) {
         // Arrow builders have no separate reset entry point: `finish` is what
-        // resets their internal buffers (and each variant's `finish` also
-        // resets its byte counter), so calling it and discarding the produced
-        // array is the idiomatic way to clear in-progress contents.
+        // resets their internal buffers, so calling it and discarding the
+        // produced array is the idiomatic way to clear in-progress contents.
         //
         // Discarding the `Result` is intentional and sound: of all variants
         // only `Decimal128`'s `finish` is fallible (its precision/scale tag is
@@ -218,10 +216,6 @@ impl DatumColumnAppender for ArrowColumnEncoder {
 
     fn len(&self) -> usize {
         dispatch_encoder!(&self.0, e => e.len())
-    }
-
-    fn estimated_size(&self) -> usize {
-        dispatch_encoder!(&self.0, e => e.estimated_size())
     }
 }
 

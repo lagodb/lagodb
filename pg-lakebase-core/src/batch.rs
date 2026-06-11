@@ -89,14 +89,19 @@ pub trait DatumColumnAppender {
     /// Error raised while encoding or finishing this column.
     type Error;
 
-    /// Append one PostgreSQL datum view to this output column.
+    /// Append one PostgreSQL datum view to this output column, returning the
+    /// number of bytes it added to the column's in-memory footprint.
     ///
     /// `None` represents a missing value for this column index. SQL NULL values
-    /// are represented by `Some(value)` where `value.is_null()` is true.
+    /// are represented by `Some(value)` where `value.is_null()` is true. A
+    /// missing or NULL value adds `0` bytes.
+    ///
+    /// The returned size lets the owning buffer keep a running memory estimate
+    /// in O(1) per append, without re-summing every column.
     fn append_datum(
         &mut self,
         value: Option<PgDatumRef<'_>>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<usize, Self::Error>;
 
     /// Finish the current column values and reset the appender for reuse.
     fn finish(&mut self) -> Result<Self::Column, Self::Error>;
@@ -106,9 +111,6 @@ pub trait DatumColumnAppender {
 
     /// Number of values appended for the current batch.
     fn len(&self) -> usize;
-
-    /// Estimated memory footprint of encoded column data in bytes.
-    fn estimated_size(&self) -> usize;
 
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -143,8 +145,9 @@ pub trait SlotColumnarBatchBuffer: BatchBuffer {
 
     /// Append a PostgreSQL tuple-slot row through the datum interface.
     fn append_slot_row(&mut self, row: TupleSlotRow<'_>) -> Result<(), Self::Error> {
+        let datums = row.datums();
         for column_index in 0..self.column_count() {
-            self.append_datum_to_column(column_index, row.datum_at(column_index))?;
+            self.append_datum_to_column(column_index, datums.datum_at(column_index))?;
         }
         self.finish_row()
     }

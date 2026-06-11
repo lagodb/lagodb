@@ -15,7 +15,8 @@ use super::row::Row;
 /// Per-column slot writer.
 ///
 /// `target_ctx` is taken explicitly so the memory-context discipline lives at
-/// the call site (TableAM passes `tmp_ctx`; CustomScan passes `tts_mcxt`), never
+/// the call site (the TableAM seqscan passes its per-row `tmp_ctx`; the
+/// CustomScan emit path passes the scan node's per-tuple context), never
 /// scattered into an access method.
 pub struct SlotColumns<'a> {
     /// Mutable views over the slot's `tts_values`/`tts_isnull` C arrays, built

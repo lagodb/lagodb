@@ -199,7 +199,6 @@ enum TsBuilder {
 pub(crate) struct TimestampEncoder {
     inner: TsBuilder,
     tz: bool,
-    bytes: usize,
 }
 
 impl TimestampEncoder {
@@ -209,11 +208,7 @@ impl TimestampEncoder {
         } else {
             TsBuilder::Micros(TimestampMicrosecondBuilder::with_capacity(capacity))
         };
-        Self {
-            inner,
-            tz,
-            bytes: 0,
-        }
+        Self { inner, tz }
     }
 
     /// PostgreSQL keeps microsecond resolution, so the nanosecond column stores
@@ -227,13 +222,12 @@ impl TimestampEncoder {
                 b.append_value(unix_micros_from_timestamp(pg_micros)?)
             }
         }
-        self.bytes += std::mem::size_of::<i64>();
         Ok(())
     }
 }
 
 impl ColumnAppend for TimestampEncoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         let oid = datum.type_oid();
         let raw = datum.datum();
         // tz-aware columns read timestamptz, tz-naive read timestamp.
@@ -247,7 +241,10 @@ impl ColumnAppend for TimestampEncoder {
             }
         };
         match pg_micros {
-            Some(m) => self.append_micros(m),
+            Some(m) => {
+                self.append_micros(m)?;
+                Ok(std::mem::size_of::<i64>())
+            }
             None => Err(ConvError::InvariantViolated(
                 "Timestamp encoder: datum source type does not match the \
                  column's tz-awareness (timestamptz vs timestamp)",
@@ -278,7 +275,6 @@ impl ColumnAppend for TimestampEncoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         // tz-aware columns carry the `+00:00` tag; the stored values are
         // tz-independent.
         let array: ArrayRef = match &mut self.inner {
@@ -307,10 +303,6 @@ impl ColumnAppend for TimestampEncoder {
             TsBuilder::Nanos(b) => b.len(),
             TsBuilder::Micros(b) => b.len(),
         }
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 

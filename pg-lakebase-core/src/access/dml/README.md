@@ -90,35 +90,23 @@ cleanup.
 
 The DML callback boundary is intentionally slot-first.
 
-PostgreSQL gives the TableAM a `TupleTableSlot` for insert/update callbacks.
-The framework wraps that slot as a short-lived `TupleSlotRow` or
-`TupleSlotBatch` and dispatches the slot view to the AM session. Core must not
-materialize an owned `Row` before the AM has chosen its write strategy.
+PostgreSQL hands the table AM a tuple slot for insert and update callbacks. The
+framework dispatches a short-lived, callback-scoped view of that slot to the AM
+session rather than eagerly copying it into an owned row. Core must not decide
+the tuple's storage representation before the AM has chosen its write strategy.
 
 This preserves two different hot paths:
 
-```text
-row-oriented AM:
-  TupleTableSlot -> TupleSlotRow -> Row -> RowBatchBuffer
+- A row-oriented AM buffers rows that must outlive the callback, so it
+  materializes owned values. PostgreSQL can reuse tuple slots and reset memory
+  contexts once a callback returns, so buffered rows cannot keep data borrowed
+  from the slot.
+- A columnar AM appends slot values directly into its own column builders and
+  avoids the intermediate owned-row allocation entirely.
 
-columnar AM:
-  TupleTableSlot -> TupleSlotRow -> PgDatumRef -> column builders
-```
-
-The row path materializes owned values because buffered rows must outlive the
-PostgreSQL slot callback. PostgreSQL can reuse tuple slots and reset memory
-contexts after the callback returns, so a row batch cannot safely keep borrowed
-`text`, `bytea`, array, or numeric data from the slot.
-
-The columnar path should not materialize `Row` or `Cell`. It should consume
-`PgDatumRef` values through a slot/datum batch buffer and append directly into
-the concrete column builders. Arrow-backed implementations still usually copy
-variable-width bytes into Arrow-owned buffers, but they avoid the intermediate
-`String`, `Vec`, `Bytes`, and `Cell` allocations.
-
-The default `AmDmlSession` slot methods fall back to the owned-row methods.
-That keeps row-oriented AMs simple while allowing columnar AMs to override the
-slot methods and stay on the direct datum path.
+The default slot methods fall back to the owned-row path. That keeps
+row-oriented AMs simple while letting columnar AMs override the slot methods and
+stay on the direct path.
 
 ## Nested And Reentrant Execution
 
@@ -130,10 +118,13 @@ The framework tracks the current frame as backend-local execution state rather
 than as a process-global singleton. This lets nested writes resolve to the
 frame that is actually active at the TableAM callback boundary.
 
-The implementation also treats same-frame reentrancy during finalization or
-mutable session access as an internal lifecycle error. Re-entering the same
-frame at those points would risk creating duplicate session state or publishing
-work through an ambiguous lifecycle.
+Per-row session access relies on a reentrancy *contract* (see `AmDmlSession`)
+rather than a per-row runtime guard: a tuple callback must not synchronously
+re-enter the table-AM write path for the same frame. PostgreSQL's executor
+upholds this (it completes `table_tuple_*` before index maintenance and AFTER
+triggers, and nested trigger/SPI DML runs in a new ModifyTable frame), so the
+hot path can hand out a `&mut` to the per-relation session without paying to
+defend a case the supported execution model never produces.
 
 ## COPY FROM
 
@@ -168,12 +159,12 @@ The DML lifecycle is built around these invariants:
 - every tuple write handled by this framework belongs to a current frame;
 - each frame owns zero or more relation-local sessions;
 - a relation has at most one session per frame;
-- DML callbacks dispatch slot views first; owned `Row` materialization is a
-  row-mode fallback, not a core callback default;
-- `TupleSlotRow`, `TupleSlotBatch`, and `PgDatumRef` are callback-scoped views
-  and must not be stored across callbacks;
-- row batches own their values; columnar DML fast paths append slot datums
-  directly into AM-owned builders;
+- DML callbacks dispatch callback-scoped slot views first; owned-row
+  materialization is a row-mode fallback, not a core callback default;
+- slot and datum views are callback-scoped and must not be stored across
+  callbacks;
+- row batches own their values; columnar fast paths append slot data directly
+  into AM-owned builders;
 - successful frame completion finalizes touched sessions exactly once;
 - unfinalized sessions abort when their frame is cleaned up;
 - rollback-to-savepoint aborts only work owned by the rolled-back scope;

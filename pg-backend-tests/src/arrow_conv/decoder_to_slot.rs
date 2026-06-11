@@ -200,9 +200,7 @@ mod tests {
         let columns: Vec<DecodedColumn> = plan
             .iter()
             .enumerate()
-            .map(|(i, (_, rule, oid))| {
-                DecodedColumn::new(rule.clone(), i, i, *oid, -1)
-            })
+            .map(|(i, (_, rule, oid))| DecodedColumn::new(rule.clone(), i, i, *oid))
             .collect();
 
         let batch = batch_of(arrays);
@@ -278,8 +276,8 @@ mod tests {
         ]);
         // src 0 -> slot 0 (value); src 1 (null) -> slot 3; slots 1 and 2 unmapped.
         let decoder = ArrowColumnDecoder::new(vec![
-            DecodedColumn::new(ColumnRule::I32, 0, 0, pg_sys::INT4OID, -1),
-            DecodedColumn::new(ColumnRule::I32, 1, 3, pg_sys::INT4OID, -1),
+            DecodedColumn::new(ColumnRule::I32, 0, 0, pg_sys::INT4OID),
+            DecodedColumn::new(ColumnRule::I32, 1, 3, pg_sys::INT4OID),
         ]);
         let natts = 4;
 
@@ -317,7 +315,6 @@ mod tests {
             0,
             0,
             pg_sys::TEXTOID,
-            -1,
         )]);
 
         unsafe {
@@ -381,7 +378,6 @@ mod tests {
             0,
             0,
             pg_sys::INT4OID,
-            -1,
         )]);
         let mut cursor = BatchRowCursor::new(source, decoder);
 
@@ -441,8 +437,8 @@ mod tests {
         let oids = [pg_sys::INT4ARRAYOID, pg_sys::TEXTARRAYOID];
         let batch = batch_of(vec![int_list, str_list]);
         let decoder = ArrowColumnDecoder::new(vec![
-            DecodedColumn::new(int_rule, 0, 0, pg_sys::INT4ARRAYOID, -1),
-            DecodedColumn::new(str_rule, 1, 1, pg_sys::TEXTARRAYOID, -1),
+            DecodedColumn::new(int_rule, 0, 0, pg_sys::INT4ARRAYOID),
+            DecodedColumn::new(str_rule, 1, 1, pg_sys::TEXTARRAYOID),
         ]);
 
         unsafe {
@@ -507,7 +503,6 @@ mod tests {
                     0,
                     0,
                     array_oid,
-                    -1,
                 )]);
                 let bound =
                     decoder.bind(batch_of(vec![array.clone()])).expect("bind");

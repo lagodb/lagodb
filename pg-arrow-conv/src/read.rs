@@ -20,7 +20,7 @@ use arrow_schema::DataType;
 use pg_lakebase_core::api::{AmError, AmResult};
 use pg_lakebase_core::batch::{AmScanBatchSource, BatchRowDecoder};
 use pg_lakebase_core::tuple::{
-    ByteaView, Cell, Decimal128NumericCodec, SlotColumns, StringView,
+    ByteaView, Cell, DatumTarget, Decimal128NumericCodec, SlotColumns, StringView,
 };
 use pgrx::datum::Uuid;
 use pgrx::pg_sys;
@@ -92,16 +92,15 @@ where
 // ---------------------------------------------------------------------------
 
 /// One mapped column: which Arrow batch column to read, the resolved rule, the
-/// destination slot index, and the slot column's target type. The target
-/// `(oid, typmod)` is carried because a single rule (`Utf8`/`Binary`) can back
-/// several PostgreSQL types — `text`/`json`/`name` and `bytea`/`jsonb` — whose
-/// datum construction differs.
+/// destination slot index, and the slot column's datum target. The target type
+/// OID is carried because a single rule (`Utf8`/`Binary`) can back several
+/// PostgreSQL types — `text`/`json`/`name` and `bytea`/`jsonb` — whose datum
+/// construction differs; it is classified into a [`DatumTarget`] once at bind.
 pub struct DecodedColumn {
     rule: ColumnRule,
     src_col: usize,
     dest: usize,
     dest_oid: pg_sys::Oid,
-    dest_typmod: i32,
 }
 
 impl DecodedColumn {
@@ -110,14 +109,12 @@ impl DecodedColumn {
         src_col: usize,
         dest: usize,
         dest_oid: pg_sys::Oid,
-        dest_typmod: i32,
     ) -> Self {
         Self {
             rule,
             src_col,
             dest,
             dest_oid,
-            dest_typmod,
         }
     }
 }
@@ -274,31 +271,25 @@ impl ColumnReader {
         Ok(ColumnReader(reader))
     }
 
-    /// Slot-first read: decode the value at `row_idx` into a PostgreSQL datum,
-    /// or `None` for SQL NULL. No downcast happens here — the concrete array
-    /// was resolved in [`Self::bind`].
+    /// Slot-first read keyed on a pre-resolved [`DatumTarget`]: decode the value
+    /// at `row_idx` into a PostgreSQL datum, or `None` for SQL NULL. No downcast
+    /// happens here — the concrete array was resolved in [`Self::bind`].
     ///
-    /// `(oid, typmod)` is the target type for a **scalar/varlena** column: the
-    /// value becomes a stack `Cell` fed through the target-aware
-    /// `Cell::into_datum_typed`. For a **list** column `oid`/`typmod` are
-    /// ignored — the produced array's element type comes from the
-    /// `elem_oid` bound into the rule at [`ColumnReader::bind`] (from
-    /// `ColumnRule::List`), and each element is built directly via that element
-    /// OID (bypassing the owned `Cell`, since the array `Cell` variants do not
-    /// retarget their element type in `Cell::into_datum_typed`). Callers that
-    /// pass `oid` should keep it consistent with the rule the reader was bound
-    /// from.
+    /// For a **scalar/varlena** column the value becomes a stack `Cell` fed
+    /// through [`Cell::into_datum_for`] using the bind-time `target`, so the hot
+    /// loop never re-runs the builtin-OID lookup. For a **list** column `target`
+    /// is ignored — the produced array's element type comes from the `elem_oid`
+    /// bound into the rule at [`ColumnReader::bind`].
     ///
     /// # Safety
     ///
     /// Builds the datum through PostgreSQL internals: a backend must be active
     /// and the caller must have switched to the memory context the varlena (or
     /// array) payload should be palloc'd into.
-    pub unsafe fn read_datum(
+    pub unsafe fn read_datum_for(
         &self,
         row_idx: usize,
-        oid: pg_sys::Oid,
-        typmod: i32,
+        target: DatumTarget,
     ) -> ConvResult<Option<pg_sys::Datum>> {
         match &self.0 {
             ReaderImpl::List {
@@ -315,22 +306,43 @@ impl ColumnReader {
             }
             _ => {
                 // SAFETY: the borrowed-view `Cell` returned here is consumed
-                // immediately by `into_datum_typed` below (which copies into a
+                // immediately by `into_datum_for` below (which copies into a
                 // palloc'd datum) within this reader's lifetime, so the view
                 // never escapes.
                 let Some(cell) = (unsafe { self.read_cell(row_idx) })? else {
                     return Ok(None);
                 };
-                let datum = unsafe { cell.into_datum_typed(oid, typmod) }
-                    .ok_or_else(|| {
+                let datum =
+                    unsafe { cell.into_datum_for(target) }.ok_or_else(|| {
                         ConvError::DatumConversionError(format!(
-                            "value is not representable as PostgreSQL type {}",
-                            u32::from(oid)
+                            "value is not representable as PostgreSQL target \
+                             {target:?}"
                         ))
                     })?;
                 Ok(Some(datum))
             }
         }
+    }
+
+    /// Slot-first read for callers that only hold the destination type OID.
+    ///
+    /// Resolves the [`DatumTarget`] from `oid` and defers to
+    /// [`Self::read_datum_for`]. `typmod` is unused (kept for call-site
+    /// symmetry). The columnar scan path resolves the target once at bind and
+    /// calls [`Self::read_datum_for`] directly.
+    ///
+    /// # Safety
+    ///
+    /// Builds the datum through PostgreSQL internals: a backend must be active
+    /// and the caller must have switched to the memory context the varlena (or
+    /// array) payload should be palloc'd into.
+    pub unsafe fn read_datum(
+        &self,
+        row_idx: usize,
+        oid: pg_sys::Oid,
+        _typmod: i32,
+    ) -> ConvResult<Option<pg_sys::Datum>> {
+        unsafe { self.read_datum_for(row_idx, DatumTarget::from_oid(oid)) }
     }
 
     /// Row-world read: decode the value at `row_idx` into a [`Cell`], or `None`
@@ -476,8 +488,10 @@ pub struct BoundBatch {
 struct BoundColumn {
     reader: ColumnReader,
     dest: usize,
-    dest_oid: pg_sys::Oid,
-    dest_typmod: i32,
+    /// Datum-construction target resolved once from `dest_oid` at bind, so the
+    /// per-row decode dispatches on a small enum instead of re-classifying the
+    /// destination OID for every value.
+    target: DatumTarget,
 }
 
 /// Decodes Arrow column values into slot datums. The per-column plan is
@@ -531,8 +545,7 @@ impl BatchRowDecoder for ArrowColumnDecoder {
             columns.push(BoundColumn {
                 reader: ColumnReader::bind(&col.rule, array.as_ref())?,
                 dest: col.dest,
-                dest_oid: col.dest_oid,
-                dest_typmod: col.dest_typmod,
+                target: DatumTarget::from_oid(col.dest_oid),
             });
         }
         Ok(BoundBatch {
@@ -554,10 +567,7 @@ impl BatchRowDecoder for ArrowColumnDecoder {
         for col in bound.columns.iter() {
             // The shim already switched to the slot's target context, so the
             // varlena/array palloc lands where the per-row reset expects it.
-            let datum = unsafe {
-                col.reader
-                    .read_datum(row_idx, col.dest_oid, col.dest_typmod)
-            }?;
+            let datum = unsafe { col.reader.read_datum_for(row_idx, col.target) }?;
             out.set_datum(col.dest, datum);
         }
         Ok(())

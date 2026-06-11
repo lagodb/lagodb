@@ -67,7 +67,7 @@ impl IcebergScanState {
     }
 
     /// Drive the slot-first cursor straight into the scan slot via
-    /// [`NextSlotContext::emit_via`]. Returns `Ok(false)` at end-of-scan
+    /// [`NextSlotContext::emit_columns`]. Returns `Ok(false)` at end-of-scan
     /// without touching the slot.
     pub(super) fn next_slot(
         mut ctx: NextSlotContext<'_, IcebergCustomScanProvider>,
@@ -75,12 +75,12 @@ impl IcebergScanState {
         ctx.check_for_interrupts();
 
         // Take the cursor out so `ctx` is not borrowed through `state` across
-        // the `&mut self` call to `emit_via`.
+        // the `&mut self` call to `emit_columns`.
         let Some(mut cursor) = ctx.state.cursor.take() else {
             return Ok(false);
         };
         let natts = ctx.state.natts;
-        let result = ctx.emit_via(&mut cursor, natts);
+        let result = ctx.emit_columns(&mut cursor, natts);
         ctx.state.cursor = Some(cursor);
         result
     }

@@ -60,7 +60,6 @@ enum ListInner {
 
 pub(crate) struct ListEncoder {
     inner: ListInner,
-    bytes: usize,
 }
 
 impl ListEncoder {
@@ -96,12 +95,12 @@ impl ListEncoder {
                     .with_field(field),
             ),
         };
-        Self { inner, bytes: 0 }
+        Self { inner }
     }
 }
 
 impl ColumnAppend for ListEncoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         let oid = datum.type_oid();
         let raw = datum.datum();
         let mut payload = 0usize;
@@ -191,8 +190,7 @@ impl ColumnAppend for ListEncoder {
         };
 
         if matched {
-            self.bytes += payload;
-            Ok(())
+            Ok(payload)
         } else {
             Err(ConvError::InvariantViolated(
                 "List encoder: datum array type does not match the list element rule",
@@ -207,25 +205,21 @@ impl ColumnAppend for ListEncoder {
                 "row cell has an incompatible array type".to_string(),
             )
         };
-        let mut payload = 0usize;
         match &mut self.inner {
             ListInner::Bool(b) => {
                 let Cell::BoolArray(arr) = cell else {
                     return Err(mismatch("boolean"));
                 };
-                payload = arr.len() * std::mem::size_of::<bool>();
                 arr.iter().for_each(|v| b.values().append_option(*v));
                 b.append(true);
             }
             ListInner::Int(b) => match cell {
                 Cell::I32Array(arr) => {
-                    payload = arr.len() * std::mem::size_of::<i32>();
                     arr.iter().for_each(|v| b.values().append_option(*v));
                     b.append(true);
                 }
                 // Widen an Int16 source to Int32, as the datum path does.
                 Cell::I16Array(arr) => {
-                    payload = arr.len() * std::mem::size_of::<i32>();
                     arr.iter()
                         .for_each(|v| b.values().append_option(v.map(|x| x as i32)));
                     b.append(true);
@@ -236,7 +230,6 @@ impl ColumnAppend for ListEncoder {
                 let Cell::I64Array(arr) = cell else {
                     return Err(mismatch("long"));
                 };
-                payload = arr.len() * std::mem::size_of::<i64>();
                 arr.iter().for_each(|v| b.values().append_option(*v));
                 b.append(true);
             }
@@ -244,7 +237,6 @@ impl ColumnAppend for ListEncoder {
                 let Cell::F32Array(arr) = cell else {
                     return Err(mismatch("float"));
                 };
-                payload = arr.len() * std::mem::size_of::<f32>();
                 arr.iter().for_each(|v| b.values().append_option(*v));
                 b.append(true);
             }
@@ -252,7 +244,6 @@ impl ColumnAppend for ListEncoder {
                 let Cell::F64Array(arr) = cell else {
                     return Err(mismatch("double"));
                 };
-                payload = arr.len() * std::mem::size_of::<f64>();
                 arr.iter().for_each(|v| b.values().append_option(*v));
                 b.append(true);
             }
@@ -262,17 +253,13 @@ impl ColumnAppend for ListEncoder {
                 };
                 for v in arr {
                     match v {
-                        Some(s) => {
-                            payload += s.len();
-                            b.values().append_value(s);
-                        }
+                        Some(s) => b.values().append_value(s),
                         None => b.values().append_null(),
                     }
                 }
                 b.append(true);
             }
         }
-        self.bytes += payload;
         Ok(())
     }
 
@@ -281,7 +268,6 @@ impl ColumnAppend for ListEncoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         let array: ArrayRef =
             dispatch_list_inner!(&mut self.inner, b => Arc::new(b.finish()));
         Ok(array)
@@ -289,10 +275,6 @@ impl ColumnAppend for ListEncoder {
 
     fn len(&self) -> usize {
         dispatch_list_inner!(&self.inner, b => b.len())
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 

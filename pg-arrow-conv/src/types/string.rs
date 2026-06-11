@@ -13,20 +13,18 @@ use crate::error::{ConvError, ConvResult};
 
 pub(crate) struct Utf8Encoder {
     builder: StringBuilder,
-    bytes: usize,
 }
 
 impl Utf8Encoder {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             builder: StringBuilder::with_capacity(capacity, 1024),
-            bytes: 0,
         }
     }
 }
 
 impl ColumnAppend for Utf8Encoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         let oid = datum.type_oid();
         if oid == pg_sys::TEXTOID
             || oid == pg_sys::VARCHAROID
@@ -38,7 +36,7 @@ impl ColumnAppend for Utf8Encoder {
             let guard = unsafe { detoasted_payload(datum.datum()) };
             let s = std::str::from_utf8(guard.bytes())?;
             self.builder.append_value(s);
-            self.bytes += s.len();
+            Ok(s.len())
         } else if oid == pg_sys::NAMEOID {
             // `name` is not a varlena: the datum points at a fixed `NameData`
             // (a NUL-terminated C string), so it must be read as a cstring
@@ -49,13 +47,12 @@ impl ColumnAppend for Utf8Encoder {
             }
             .to_str()?;
             self.builder.append_value(s);
-            self.bytes += s.len();
+            Ok(s.len())
         } else {
-            return Err(ConvError::InvariantViolated(
+            Err(ConvError::InvariantViolated(
                 "Utf8 encoder: datum source type is not text/varchar/bpchar/json/name",
-            ));
+            ))
         }
-        Ok(())
     }
 
     fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
@@ -67,7 +64,6 @@ impl ColumnAppend for Utf8Encoder {
             _ => return Err(cell_type_mismatch("text")),
         };
         self.builder.append_value(s);
-        self.bytes += s.len();
         Ok(())
     }
 
@@ -76,16 +72,11 @@ impl ColumnAppend for Utf8Encoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         Ok(Arc::new(self.builder.finish()))
     }
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 

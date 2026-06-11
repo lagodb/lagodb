@@ -70,7 +70,6 @@ pub(crate) struct Decimal128Encoder {
     codec: DecimalCodec,
     precision: u32,
     scale: u32,
-    bytes: usize,
 }
 
 impl Decimal128Encoder {
@@ -80,19 +79,17 @@ impl Decimal128Encoder {
             codec: DecimalCodec::new(precision, scale),
             precision,
             scale,
-            bytes: 0,
         }
     }
 
     fn append_scaled(&mut self, value: &AnyNumeric) -> ConvResult<()> {
         self.builder.append_value(self.codec.encode(value)?);
-        self.bytes += std::mem::size_of::<i128>();
         Ok(())
     }
 }
 
 impl ColumnAppend for Decimal128Encoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<()> {
+    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
         let n = unsafe {
             read_oid(
                 datum,
@@ -101,7 +98,8 @@ impl ColumnAppend for Decimal128Encoder {
                 "Decimal128 encoder: datum source type is not numeric",
             )
         }?;
-        self.append_scaled(&n)
+        self.append_scaled(&n)?;
+        Ok(std::mem::size_of::<i128>())
     }
 
     fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
@@ -116,7 +114,6 @@ impl ColumnAppend for Decimal128Encoder {
     }
 
     fn finish(&mut self) -> ConvResult<ArrayRef> {
-        self.bytes = 0;
         // The builder is untyped; the precision/scale tag must be applied to the
         // finished array.
         Ok(Arc::new(self.builder.finish().with_precision_and_scale(
@@ -127,10 +124,6 @@ impl ColumnAppend for Decimal128Encoder {
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-
-    fn estimated_size(&self) -> usize {
-        self.bytes
     }
 }
 

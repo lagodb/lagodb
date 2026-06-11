@@ -23,6 +23,10 @@ pub struct SlotRecordBatchBuffer {
     schema: Arc<Schema>,
     columns: Vec<ArrowColumnEncoder>,
     rows: usize,
+    /// Running sum of the per-column encoders' `estimated_size`, kept current on
+    /// every append so `estimated_size` / `should_flush` (called once per row by
+    /// the DML path) stay O(1) instead of re-summing every column each row.
+    estimated_bytes: usize,
 }
 
 impl SlotRecordBatchBuffer {
@@ -38,6 +42,7 @@ impl SlotRecordBatchBuffer {
             schema,
             columns,
             rows: 0,
+            estimated_bytes: 0,
         }
     }
 }
@@ -61,6 +66,7 @@ impl BatchBuffer for SlotRecordBatchBuffer {
             column.clear();
         }
         self.rows = 0;
+        self.estimated_bytes = 0;
     }
 
     fn len(&self) -> usize {
@@ -68,7 +74,7 @@ impl BatchBuffer for SlotRecordBatchBuffer {
     }
 
     fn estimated_size(&self) -> usize {
-        self.columns.iter().map(|c| c.estimated_size()).sum()
+        self.estimated_bytes
     }
 }
 
@@ -84,7 +90,10 @@ impl SlotColumnarBatchBuffer for SlotRecordBatchBuffer {
         column_index: usize,
         value: Option<PgDatumRef<'_>>,
     ) -> ConvResult<()> {
-        self.columns[column_index].append_datum(value)
+        // The encoder reports the bytes it appended, so the running total stays
+        // current with a single dispatch — no re-summing every column.
+        self.estimated_bytes += self.columns[column_index].append_datum(value)?;
+        Ok(())
     }
 
     fn finish_row(&mut self) -> ConvResult<()> {
@@ -102,6 +111,7 @@ impl SlotColumnarBatchBuffer for SlotRecordBatchBuffer {
             arrays.push(column.finish()?);
         }
         self.rows = 0;
+        self.estimated_bytes = 0;
         Ok(arrays)
     }
 }

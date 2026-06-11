@@ -159,6 +159,26 @@ SELECT * FROM dml_lifecycle.part_t ORDER BY id;
  170
 (6 rows)
 
+-- Per-partition placement: the per-row fast path keys the cached session on the
+-- current relation, so alternating partition routing (a -> b -> a) must land
+-- each row in its own leaf relation rather than reusing the previous row's
+-- session. Reading each leaf directly would expose a mis-routed row.
+SELECT * FROM dml_lifecycle.part_t_a ORDER BY id;
+ id 
+----
+ 10
+ 20
+ 30
+ 40
+(4 rows)
+
+SELECT * FROM dml_lifecycle.part_t_b ORDER BY id;
+ id  
+-----
+ 150
+ 170
+(2 rows)
+
 -- MERGE insert-only still runs as CMD_MERGE and must finalize once at the
 -- ModifyTable frame boundary.
 CREATE TABLE dml_lifecycle.merge_insert_t (

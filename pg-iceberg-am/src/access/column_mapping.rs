@@ -214,14 +214,14 @@ impl ColumnMapping {
     }
 
     /// Build the slot-first decoder plan from this mapping, pairing each
-    /// already-resolved entry with the destination column's target type.
+    /// already-resolved entry with the destination column's target type OID.
     ///
     /// Reuses the entries' bound `rule`/`src_col`/`dest` verbatim and looks up
-    /// `(dest_oid, dest_typmod)` at `attr_types[dest]`. The target type is
-    /// load-bearing for rules a single `ColumnRule` cannot disambiguate
-    /// (`text`/`json`/`name`, `bytea`/`jsonb`). `attr_types` is the relation's
-    /// full-width `(oid, typmod)` list indexed by `attno - 1`, so `dest` indexes
-    /// it directly.
+    /// `dest_oid` at `attr_types[dest]`. The target OID is load-bearing for rules
+    /// a single `ColumnRule` cannot disambiguate (`text`/`json`/`name`,
+    /// `bytea`/`jsonb`); the decoder classifies it into a `DatumTarget` once at
+    /// bind. `attr_types` is the relation's full-width `(oid, typmod)` list
+    /// indexed by `attno - 1`, so `dest` indexes it directly.
     fn decoded_columns(
         &self,
         attr_types: &[(pg_sys::Oid, i32)],
@@ -229,8 +229,8 @@ impl ColumnMapping {
         self.entries
             .iter()
             .map(|e| {
-                let (oid, typmod) = attr_types[e.dest];
-                DecodedColumn::new(e.rule.clone(), e.src_col, e.dest, oid, typmod)
+                let (oid, _typmod) = attr_types[e.dest];
+                DecodedColumn::new(e.rule.clone(), e.src_col, e.dest, oid)
             })
             .collect()
     }
@@ -542,16 +542,16 @@ impl WriteColumns {
     ///
     /// This is the write-side twin of the read path's per-column decode: the
     /// position arithmetic stays here, and the buffer only ever sees
-    /// already-mapped per-column datums.
+    /// already-mapped per-column datums. The slot is deformed once via
+    /// [`TupleSlotRow::datums`] so each source lookup is an O(1) index rather
+    /// than rebuilding the slot's backing slices per column.
     pub(crate) fn append_slot_row(
         &mut self,
         row: TupleSlotRow<'_>,
     ) -> IcebergResult<()> {
-        for (col_idx, source) in self.source_slots.iter().enumerate() {
-            let value = match source {
-                Some(slot_idx) => row.datum_at(*slot_idx),
-                None => None,
-            };
+        let datums = row.datums();
+        for (col_idx, &source) in self.source_slots.iter().enumerate() {
+            let value = source.and_then(|slot_idx| datums.datum_at(slot_idx));
             self.buffer.append_datum_to_column(col_idx, value)?;
         }
         self.buffer.finish_row()?;

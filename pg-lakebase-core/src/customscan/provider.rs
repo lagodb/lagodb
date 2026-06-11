@@ -588,7 +588,15 @@ pub struct NextSlotContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     #[allow(dead_code)]
     econtext: *mut pg_sys::ExprContext,
 
-    #[allow(dead_code)]
+    /// The scan node's per-tuple memory context (`econtext->ecxt_per_tuple_memory`).
+    ///
+    /// This is the context emitted slot datums (varlena / array payloads) are
+    /// palloc'd into. `ExecScan` calls `ResetExprContext` at the start of every
+    /// tuple cycle (before invoking the access method), so each row's payload is
+    /// reclaimed once the consumer has processed the prior row — bounding scan
+    /// memory to a single live tuple. Writing into the slot's own `tts_mcxt`
+    /// (per-query lifetime) instead would accumulate one row's worth of
+    /// by-reference data per scanned row for the whole query.
     per_tuple_memory_context: pg_sys::MemoryContext,
 
     _marker: PhantomData<&'a ()>,
@@ -615,34 +623,40 @@ impl<'a, P: LakebaseCustomScanProvider> NextSlotContext<'a, P> {
         }
     }
 
-    /// Write `row` into the scan slot (`tts_mcxt`); marks slot non-empty on success.
+    /// Write `row` into the scan slot; marks slot non-empty on success.
+    ///
+    /// Datums are materialized into the scan node's per-tuple memory context
+    /// (reclaimed by `ExecScan`'s per-cycle `ResetExprContext`), not the slot's
+    /// per-query `tts_mcxt`, so a long scan over by-reference columns does not
+    /// accumulate one row's payload per scanned row.
     pub fn emit_row(&mut self, row: &mut Row) -> Result<(), CustomScanError> {
-        // SAFETY: slot and tts_mcxt live for this next_slot callback.
-        let tts_mcxt = unsafe { (*self.slot).tts_mcxt };
-        let writer = unsafe { TupleSlotWriter::new(self.slot, tts_mcxt) };
+        // SAFETY: slot and the per-tuple context live for this next_slot callback.
+        let writer =
+            unsafe { TupleSlotWriter::new(self.slot, self.per_tuple_memory_context) };
         unsafe { writer.write_row(row) }.map_err(CustomScanError::from)
     }
 
     /// Drive a slot-first scan driver straight into the scan slot; marks the
     /// slot non-empty on a produced row. `Ok(false)` is end-of-scan.
-    pub fn emit_via<D: ScanBatchDriver>(
+    pub fn emit_columns<D: ScanBatchDriver>(
         &mut self,
         driver: &mut D,
         natts: usize,
     ) -> Result<bool, CustomScanError> {
         let slot = self.slot;
-        // CustomScan writes slot datums into the slot's own context, not the
-        // per-tuple `tmp_ctx`: they must outlive the per-tuple reset for the
-        // slot's consumer.
-        // SAFETY: slot and tts_mcxt live for this next_slot callback.
-        let tts_mcxt = unsafe { (*slot).tts_mcxt };
+        // Slot datums are palloc'd into the scan node's per-tuple memory context,
+        // which `ExecScan` resets at the start of each tuple cycle (after the
+        // consumer has processed the prior row). Using the slot's own `tts_mcxt`
+        // here would leak one row's by-reference payload per scanned row for the
+        // lifetime of the query, since virtual-slot clear only frees a
+        // materialized buffer, never the per-value pallocs.
+        let target_ctx = self.per_tuple_memory_context;
         emit_into_slot(
             || unsafe {
-                PgMemoryContexts::For(tts_mcxt).switch_to(|_| {
-                    // SAFETY: slot is valid with at least `natts` attributes
-                    // for this callback; tts_mcxt is the target for varlena
-                    // palloc.
-                    let mut cols = SlotColumns::new(slot, tts_mcxt, natts);
+                PgMemoryContexts::For(target_ctx).switch_to(|_| {
+                    // SAFETY: slot is valid with at least `natts` attributes for
+                    // this callback; `target_ctx` is the target for varlena palloc.
+                    let mut cols = SlotColumns::new(slot, target_ctx, natts);
                     driver.next_into_slot(&mut cols)
                 })
             },
