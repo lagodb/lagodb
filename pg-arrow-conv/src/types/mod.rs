@@ -1,17 +1,19 @@
 //! Per-type-family conversion modules and the central column-encoder dispatch.
 //!
-//! Each submodule owns one logical column type's full vertical slice — its
-//! value math (codec), its read (`Arrow → Cell` / datum), and its write
-//! (datum / `Cell` → Arrow builder) — so a type's behavior lives in one place
-//! rather than being smeared across separate read/write/codec files.
+//! Each submodule owns one logical column type's **write** vertical slice — its
+//! value math (codec) and its write path (datum / `Cell` → Arrow builder) — plus
+//! any value helpers the read path reuses (epoch math, decimal codec,
+//! `list::cell_at`). The per-value **read** dispatch is not here: it lives in
+//! the bound [`ColumnReader`](crate::read), which downcasts a column once per
+//! batch and reads values without a per-value downcast.
 //!
 //! This module hosts the cross-cutting write dispatch that ties them together:
 //! the [`ColumnAppend`] contract every per-type encoder implements, the
 //! [`ArrowColumnEncoder`] enum that stores one concrete encoder per column
 //! (heterogeneous, but `dyn`-free so the per-row append monomorphizes), and the
 //! small set of helpers shared across the type modules (`read_oid`,
-//! `detoasted_payload`, `downcast`, `cell_type_mismatch`). The row-world read
-//! dispatch lives in [`convert`](crate::convert).
+//! `detoasted_payload`, `downcast`, `cell_type_mismatch`). The row-world `Cell`
+//! **write** dispatch (`ColumnRule::build`) lives in [`convert`](crate::convert).
 
 use std::borrow::Cow;
 

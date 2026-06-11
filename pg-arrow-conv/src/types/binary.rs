@@ -4,19 +4,15 @@
 
 use std::sync::Arc;
 
+use arrow_array::ArrayRef;
 use arrow_array::builder::{
     ArrayBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
 };
-use arrow_array::cast::AsArray;
-use arrow_array::{Array, ArrayRef, FixedSizeBinaryArray};
-use arrow_schema::DataType;
-use pg_lakebase_core::tuple::{ByteaView, Cell, PgDatumRef};
+use pg_lakebase_core::tuple::{Cell, PgDatumRef};
 use pgrx::datum::Uuid;
 use pgrx::{FromDatum, pg_sys};
 
-use super::{
-    ColumnAppend, cell_type_mismatch, detoasted_payload, downcast, read_oid,
-};
+use super::{ColumnAppend, cell_type_mismatch, detoasted_payload, read_oid};
 use crate::error::{ConvError, ConvResult};
 
 // ---------------------------------------------------------------------------
@@ -258,45 +254,5 @@ impl ColumnAppend for UuidEncoder {
 }
 
 // ---------------------------------------------------------------------------
-// Read (Arrow → Cell)
+// Read (Arrow → Cell): handled by the bound `ColumnReader` in `crate::read`.
 // ---------------------------------------------------------------------------
-
-pub(crate) fn extract_binary(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    let bytes = match column.data_type() {
-        DataType::Binary => column.as_binary::<i32>().value(row_idx),
-        DataType::LargeBinary => column.as_binary::<i64>().value(row_idx),
-        other => {
-            return Err(ConvError::ArrowTypeMismatch(
-                format!("Binary or LargeBinary (actual: {other:?})").into(),
-            ));
-        }
-    };
-    Ok(Cell::ByteaView(ByteaView {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-    }))
-}
-
-pub(crate) fn extract_fixed_binary(
-    column: &dyn Array,
-    row_idx: usize,
-) -> ConvResult<Cell> {
-    let bytes =
-        downcast::<FixedSizeBinaryArray>(column, "FixedSizeBinary")?.value(row_idx);
-    Ok(Cell::ByteaView(ByteaView {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-    }))
-}
-
-pub(crate) fn extract_uuid(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    let bytes = downcast::<FixedSizeBinaryArray>(column, "FixedSizeBinary (UUID)")?
-        .value(row_idx);
-    let bytes: [u8; 16] = bytes.try_into().map_err(|_| {
-        ConvError::ArrowTypeMismatch(std::borrow::Cow::Borrowed(
-            "UUID must be 16 bytes",
-        ))
-    })?;
-    // Arrow UUID bytes are RFC 4122 network order, which pgrx::Uuid expects.
-    Ok(Cell::Uuid(Uuid::from_bytes(bytes)))
-}

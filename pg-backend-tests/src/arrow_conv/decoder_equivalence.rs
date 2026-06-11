@@ -1,8 +1,9 @@
-//! Backend tests for the row-world `ColumnRule::extract` (`Arrow → Cell`) path
-//! and the encoder NULL-append path.
+//! Backend tests for the row-world `Cell` read path
+//! (`ColumnReader::bind` + `read_cell`, `Arrow → Cell`) and the encoder
+//! NULL-append path.
 //!
-//! These cannot run as host `#[test]`s: `ColumnRule::extract` dispatches over
-//! every column rule, so its compiled body references `decimal::extract`
+//! These cannot run as host `#[test]`s: `read_cell` dispatches over every
+//! column rule, so its compiled body references the numeric decode
 //! (`numeric_recv`) and `ArrowColumnEncoder::append_datum` references
 //! `Decimal128Encoder`'s numeric encode path (`numeric_mul`, `numeric_floor`,
 //! `pg_detoast_datum`, ...). Linking those into an ordinary Linux test binary
@@ -23,7 +24,9 @@ mod tests {
     };
     use arrow_array::types::{Int16Type, Int32Type};
     use arrow_array::{Array, ArrayRef, ListArray};
-    use pg_arrow_conv::{ColumnRule, PgColumnType, resolve_column_rule};
+    use pg_arrow_conv::{
+        ColumnReader, ColumnRule, PgColumnType, resolve_column_rule,
+    };
     use pg_lakebase_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
     use pgrx::pg_sys;
     use pgrx::prelude::*;
@@ -260,47 +263,43 @@ mod tests {
     }
 
     fn check_extract(col: GeneratedColumn) -> Result<(), TestCaseError> {
-        let array = col.array.as_ref();
+        let reader = ColumnReader::bind(&col.rule, col.array.as_ref())
+            .map_err(|e| TestCaseError::fail(format!("bind error: {e:?}")))?;
         for (row_idx, expected) in col.expected.iter().enumerate() {
-            if array.is_null(row_idx) {
-                prop_assert!(
-                    expected.is_none(),
-                    "row {row_idx}: array null but expected a value"
-                );
-                continue;
-            }
-            let cell = col
-                .rule
-                .extract(array, row_idx)
-                .map_err(|e| {
-                    TestCaseError::fail(format!(
-                        "extract error at row {row_idx}: {e:?}"
-                    ))
-                })?
-                .ok_or_else(|| {
-                    TestCaseError::fail(format!(
-                        "extract returned None for non-null row {row_idx}"
-                    ))
-                })?;
-            match expected {
-                Some(exp) => prop_assert!(
+            // SAFETY: the generated scalar columns never produce a borrowed-view
+            // `Cell` (no text/binary types), so the returned `Cell` is owned and
+            // outlives `reader` safely; for any view it would, the `reader`
+            // outlives every use within this loop.
+            let cell = unsafe { reader.read_cell(row_idx) }.map_err(|e| {
+                TestCaseError::fail(format!(
+                    "read_cell error at row {row_idx}: {e:?}"
+                ))
+            })?;
+            match (expected, cell) {
+                (None, None) => {}
+                (Some(exp), Some(cell)) => prop_assert!(
                     exp.matches_cell(&cell),
                     "row {}: expected {:?}, got {:?}",
                     row_idx,
                     exp,
                     cell
                 ),
-                None => {
-                    prop_assert!(false, "row {row_idx}: expected null but got a cell")
-                }
+                (None, Some(cell)) => prop_assert!(
+                    false,
+                    "row {row_idx}: expected null but got {cell:?}"
+                ),
+                (Some(exp), None) => prop_assert!(
+                    false,
+                    "row {row_idx}: expected {exp:?} but got null"
+                ),
             }
         }
         Ok(())
     }
 
-    // The slot-first read path (`ArrowColumnDecoder`) and the row-world
-    // `extract` share the same per-type value logic, so this pins that shared
-    // decode logic across all supported scalar types and random nullability.
+    // The slot-first read path (`read_datum`) and the row-world `read_cell`
+    // share one bound `ColumnReader`, so this pins that shared decode logic
+    // across all supported scalar types and random nullability.
     #[pg_test]
     fn extract_produces_expected_cell() {
         let config = Config {
@@ -316,8 +315,8 @@ mod tests {
 
     /// Resolve the rule for a list column from the built array's own Arrow type,
     /// pairing it with the canonical PG element OID for that element kind (the
-    /// `extract` path ignores the OID, but resolution now validates the element
-    /// kind against the target element OID).
+    /// row-world `read_cell` output ignores the OID — it keeps the physical
+    /// width — but resolution validates the element kind against the OID).
     fn list_rule(array: &ArrayRef) -> ColumnRule {
         use arrow_schema::DataType;
         let elem_oid = match array.data_type() {
@@ -338,8 +337,8 @@ mod tests {
 
     // These pin `ListValues::into_cell`: the populated cell carries an interior
     // NULL element, and a present-but-empty cell yields an empty `Vec` (not a
-    // NULL row). `extract`'s contract is that the caller has already checked
-    // `is_null(row_idx)`, so only non-null rows are exercised here.
+    // NULL row). `read_cell` returns `None` for a null row, so only non-null
+    // rows produce a cell here.
     #[pg_test]
     fn extract_int4_list_keeps_values_and_interior_null() {
         let array: ArrayRef =
@@ -348,12 +347,15 @@ mod tests {
                 Some(vec![]),
             ]));
         let rule = list_rule(&array);
+        let reader = ColumnReader::bind(&rule, array.as_ref()).expect("bind");
 
-        match rule.extract(array.as_ref(), 0).unwrap().unwrap() {
+        // SAFETY: list cells are owned (`Cell::*Array`), so they carry no borrow
+        // of the reader.
+        match unsafe { reader.read_cell(0) }.unwrap().unwrap() {
             Cell::I32Array(v) => assert_eq!(v, vec![Some(1), None, Some(3)]),
             other => panic!("expected I32Array, got {other:?}"),
         }
-        match rule.extract(array.as_ref(), 1).unwrap().unwrap() {
+        match unsafe { reader.read_cell(1) }.unwrap().unwrap() {
             Cell::I32Array(v) => assert_eq!(v, Vec::<Option<i32>>::new()),
             other => panic!("expected empty I32Array, got {other:?}"),
         }
@@ -376,8 +378,10 @@ mod tests {
             Arc::new(ListArray::from_iter_primitive::<Int16Type, _, _>(vec![
                 Some(vec![Some(7i16), None, Some(9)]),
             ]));
+        let reader = ColumnReader::bind(&rule, array.as_ref()).expect("bind");
 
-        match rule.extract(array.as_ref(), 0).unwrap().unwrap() {
+        // SAFETY: list cells are owned (`Cell::I16Array`), no borrow of reader.
+        match unsafe { reader.read_cell(0) }.unwrap().unwrap() {
             Cell::I16Array(v) => assert_eq!(v, vec![Some(7), None, Some(9)]),
             other => panic!("expected I16Array, got {other:?}"),
         }
@@ -390,11 +394,12 @@ mod tests {
         bb.values().append_null();
         bb.append(true);
         let bool_array: ArrayRef = Arc::new(bb.finish());
-        match list_rule(&bool_array)
-            .extract(bool_array.as_ref(), 0)
-            .unwrap()
-            .unwrap()
-        {
+        let bool_rule = list_rule(&bool_array);
+        let bool_reader =
+            ColumnReader::bind(&bool_rule, bool_array.as_ref()).expect("bind");
+        // SAFETY: list cells are owned (`Cell::BoolArray`/`StringArray`), no
+        // borrow of the reader.
+        match unsafe { bool_reader.read_cell(0) }.unwrap().unwrap() {
             Cell::BoolArray(v) => assert_eq!(v, vec![Some(true), None]),
             other => panic!("expected BoolArray, got {other:?}"),
         }
@@ -405,11 +410,10 @@ mod tests {
         sb.values().append_value("c");
         sb.append(true);
         let str_array: ArrayRef = Arc::new(sb.finish());
-        match list_rule(&str_array)
-            .extract(str_array.as_ref(), 0)
-            .unwrap()
-            .unwrap()
-        {
+        let str_rule = list_rule(&str_array);
+        let str_reader =
+            ColumnReader::bind(&str_rule, str_array.as_ref()).expect("bind");
+        match unsafe { str_reader.read_cell(0) }.unwrap().unwrap() {
             Cell::StringArray(v) => {
                 assert_eq!(
                     v,

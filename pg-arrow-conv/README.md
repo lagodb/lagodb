@@ -76,10 +76,11 @@ drives them generically while staying Arrow-agnostic.
 
 **Row world (FDW and row-mode).** A row-at-a-time consumer (an FDW, a row-mode
 access method, or buffering and `EXPLAIN` rendering) works through `pg-lakebase-core`'s
-owned `Cell`/`Row` types instead. The same `ColumnRule` extracts an Arrow value
-into a `Cell` and builds an Arrow array from buffered `Cell`s. Because the build
-path drives the very same column encoder the columnar hot path uses, the two
-write sources stay in lockstep.
+owned `Cell`/`Row` types instead. The bound `ColumnReader::read_cell` extracts an
+Arrow value into a `Cell`, and the same `ColumnRule` builds an Arrow array from
+buffered `Cell`s (`ColumnRule::build`). Because the build path drives the very
+same column encoder the columnar hot path uses, the two write sources stay in
+lockstep.
 
 ## Memory and error discipline
 

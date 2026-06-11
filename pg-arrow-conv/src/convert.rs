@@ -1,64 +1,26 @@
-//! Row-world value-conversion dispatch.
+//! Row-world write dispatch.
 //!
-//! [`ColumnRule::extract`] (`Arrow → Cell`) and [`ColumnRule::build`]
-//! (buffered `Cell`s → Arrow array) are the `Cell`-based row-world API a
-//! row-mode access method or FDW consumes. Both are thin dispatchers over the
-//! per-type modules in [`crate::types`]: `extract` keys into each type's
-//! `extract_*`, and `build` drives the same [`ArrowColumnEncoder`] the columnar
-//! hot path uses (via `append_cell`), so the datum and `Cell` write sources
-//! stay in lockstep.
+//! [`ColumnRule::build`] (buffered `Cell`s → Arrow array) is the `Cell`-based
+//! row-world write API a row-mode access method or FDW consumes. It drives the
+//! same [`ArrowColumnEncoder`] the columnar hot path uses (via `append_cell`),
+//! so a buffered `Cell` and a live datum produce a bit-identical Arrow array.
 //!
-//! The slot-first columnar **read** path does not go through `extract`: it
-//! decodes each batch through [`ArrowColumnDecoder`](crate::read), which binds
-//! a column's concrete typed array once per batch and reads values without a
-//! per-value downcast.
+//! The read direction has no per-value dispatcher here: both worlds decode a
+//! batch through [`ColumnReader`](crate::read), which binds a column's concrete
+//! typed array once per batch and then reads values without a per-value
+//! downcast — [`read_datum`](crate::read::ColumnReader::read_datum) for the
+//! slot-first scan, [`read_cell`](crate::read::ColumnReader::read_cell) for the
+//! row-world `Cell`.
 
-use arrow_array::{Array, ArrayRef};
+use arrow_array::ArrayRef;
 use pg_lakebase_core::batch::DatumColumnAppender;
-use pg_lakebase_core::tuple::{Cell, Row};
+use pg_lakebase_core::tuple::Row;
 
 use crate::error::ConvResult;
 use crate::rule::ColumnRule;
-use crate::types::{
-    ArrowColumnEncoder, binary, decimal, list, primitive, string, temporal,
-};
+use crate::types::ArrowColumnEncoder;
 
 impl ColumnRule {
-    /// Extract the [`Cell`] at `row_idx`. The caller guarantees the slot is
-    /// non-null (it checks `column.is_null(row_idx)` first), so this always
-    /// returns `Some`.
-    pub fn extract(
-        &self,
-        column: &dyn Array,
-        row_idx: usize,
-    ) -> ConvResult<Option<Cell>> {
-        let cell = match self {
-            ColumnRule::Bool => primitive::extract_bool(column, row_idx)?,
-            ColumnRule::I32 => primitive::extract_i32(column, row_idx)?,
-            ColumnRule::I64 => primitive::extract_i64(column, row_idx)?,
-            ColumnRule::F32 => primitive::extract_f32(column, row_idx)?,
-            ColumnRule::F64 => primitive::extract_f64(column, row_idx)?,
-            ColumnRule::Utf8 => string::extract_utf8(column, row_idx)?,
-            ColumnRule::Binary => binary::extract_binary(column, row_idx)?,
-            ColumnRule::FixedBinary { .. } => {
-                binary::extract_fixed_binary(column, row_idx)?
-            }
-            ColumnRule::Uuid => binary::extract_uuid(column, row_idx)?,
-            ColumnRule::Date32 => temporal::extract_date(column, row_idx)?,
-            ColumnRule::Time64Micros => temporal::extract_time(column, row_idx)?,
-            ColumnRule::Timestamp { nanos, tz } => {
-                temporal::extract_timestamp(column, row_idx, *nanos, *tz)?
-            }
-            ColumnRule::Decimal128 { precision, scale } => {
-                decimal::extract(column, row_idx, *precision, *scale)?
-            }
-            ColumnRule::List { element, .. } => {
-                list::extract(column, row_idx, *element)?
-            }
-        };
-        Ok(Some(cell))
-    }
-
     /// Build an Arrow array for this rule from column `col_idx` of every row,
     /// appending one slot per row so all columns stay NULL-aligned.
     ///

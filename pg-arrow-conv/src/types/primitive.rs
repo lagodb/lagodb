@@ -12,14 +12,11 @@ use std::sync::Arc;
 
 use arrow_array::builder::{ArrayBuilder, BooleanBuilder, PrimitiveBuilder};
 use arrow_array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
-use arrow_array::{
-    Array, ArrayRef, ArrowPrimitiveType, BooleanArray, Float32Array, Float64Array,
-    Int32Array, Int64Array,
-};
+use arrow_array::{ArrayRef, ArrowPrimitiveType};
 use pg_lakebase_core::tuple::{Cell, PgDatumRef};
 use pgrx::{FromDatum, pg_sys};
 
-use super::{ColumnAppend, cell_type_mismatch, downcast, read_oid};
+use super::{ColumnAppend, cell_type_mismatch, read_oid};
 use crate::error::{ConvError, ConvResult};
 
 // ---------------------------------------------------------------------------
@@ -298,38 +295,4 @@ impl ColumnAppend for BoolEncoder {
     fn estimated_size(&self) -> usize {
         self.bytes
     }
-}
-
-// ---------------------------------------------------------------------------
-// Read (Arrow → Cell)
-// ---------------------------------------------------------------------------
-
-pub(crate) fn extract_bool(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    Ok(Cell::Bool(
-        downcast::<BooleanArray>(column, "Boolean")?.value(row_idx),
-    ))
-}
-
-pub(crate) fn extract_i32(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    Ok(Cell::I32(
-        downcast::<Int32Array>(column, "Int32")?.value(row_idx),
-    ))
-}
-
-pub(crate) fn extract_i64(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    Ok(Cell::I64(
-        downcast::<Int64Array>(column, "Int64")?.value(row_idx),
-    ))
-}
-
-pub(crate) fn extract_f32(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    Ok(Cell::F32(
-        downcast::<Float32Array>(column, "Float32")?.value(row_idx),
-    ))
-}
-
-pub(crate) fn extract_f64(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    Ok(Cell::F64(
-        downcast::<Float64Array>(column, "Float64")?.value(row_idx),
-    ))
 }

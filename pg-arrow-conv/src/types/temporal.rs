@@ -8,13 +8,11 @@
 
 use std::sync::Arc;
 
+use arrow_array::ArrayRef;
 use arrow_array::builder::{
     ArrayBuilder, TimestampMicrosecondBuilder, TimestampNanosecondBuilder,
 };
 use arrow_array::types::{Date32Type, Time64MicrosecondType};
-use arrow_array::{
-    Array, ArrayRef, TimestampMicrosecondArray, TimestampNanosecondArray,
-};
 use pg_lakebase_core::tuple::{
     Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF, PgDatumRef,
 };
@@ -22,7 +20,7 @@ use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
 use pgrx::{FromDatum, pg_sys};
 
 use super::primitive::PrimitiveConv;
-use super::{ColumnAppend, cell_type_mismatch, downcast, read_oid};
+use super::{ColumnAppend, cell_type_mismatch, read_oid};
 use crate::error::{ConvError, ConvResult};
 
 /// Convert PostgreSQL-epoch days (since 2000-01-01) to Unix-epoch days (since
@@ -123,28 +121,8 @@ pub(crate) fn unix_micros_from_nanos(unix_nanos: i64) -> i64 {
     unix_nanos.div_euclid(1_000)
 }
 
-/// Read an Arrow timestamp value as Unix microseconds. `is_nanos` selects the
-/// physical column type; nanosecond columns are truncated via
-/// [`unix_micros_from_nanos`]. The timezone dimension is the caller's concern —
-/// both tz-naive and tz-aware columns are physically `i64`. A physical array
-/// that does not match the planned unit is reported as
-/// [`ConvError::ArrowTypeMismatch`] rather than panicking.
-pub(crate) fn read_unix_micros_from_arrow(
-    column: &dyn Array,
-    row_idx: usize,
-    is_nanos: bool,
-) -> ConvResult<i64> {
-    if is_nanos {
-        let array =
-            downcast::<TimestampNanosecondArray>(column, "Timestamp(Nanosecond)")?;
-        Ok(unix_micros_from_nanos(array.value(row_idx)))
-    } else {
-        let array =
-            downcast::<TimestampMicrosecondArray>(column, "Timestamp(Microsecond)")?;
-        Ok(array.value(row_idx))
-    }
-}
-
+/// Convert a Unix-epoch microsecond value to PostgreSQL-epoch microseconds.
+/// Returns `None`-equivalent error on underflow past the PG epoch.
 pub(crate) fn unix_micros_to_pg_micros(unix_micros: i64) -> ConvResult<i64> {
     unix_micros.checked_sub(PG_EPOCH_USECS_DIFF).ok_or_else(|| {
         invalid_datum(format!(
@@ -337,36 +315,11 @@ impl ColumnAppend for TimestampEncoder {
 }
 
 // ---------------------------------------------------------------------------
-// Read (Arrow → Cell)
+// Read (Arrow → Cell): handled by the bound `ColumnReader` in `crate::read`,
+// which reuses the value helpers above (`pg_date_from_arrow_days`,
+// `time_from_micros`, `timestamp_from_unix_micros`,
+// `timestamptz_from_unix_micros`, `unix_micros_from_nanos`).
 // ---------------------------------------------------------------------------
-
-pub(crate) fn extract_date(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    let days = downcast::<arrow_array::Date32Array>(column, "Date32")?.value(row_idx);
-    Ok(Cell::Date(pg_date_from_arrow_days(days)?))
-}
-
-pub(crate) fn extract_time(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    let micros =
-        downcast::<arrow_array::Time64MicrosecondArray>(column, "Time64Microsecond")?
-            .value(row_idx);
-    Ok(Cell::Time(time_from_micros(micros)?))
-}
-
-pub(crate) fn extract_timestamp(
-    column: &dyn Array,
-    row_idx: usize,
-    nanos: bool,
-    tz: bool,
-) -> ConvResult<Cell> {
-    let unix_micros = read_unix_micros_from_arrow(column, row_idx, nanos)?;
-    if tz {
-        Ok(Cell::Timestamptz(timestamptz_from_unix_micros(
-            unix_micros,
-        )?))
-    } else {
-        Ok(Cell::Timestamp(timestamp_from_unix_micros(unix_micros)?))
-    }
-}
 
 #[cfg(test)]
 mod tests {

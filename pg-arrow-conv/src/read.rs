@@ -134,7 +134,10 @@ impl DecodedColumn {
 /// kept distinct (`FixedBinary` vs `Uuid` both read `FixedSizeBinary`;
 /// `TimestampMicros`/`TimestampNanos` carry their tz-awareness), so the per-row
 /// arm is a direct typed access with no re-inspection of the rule.
-enum ColumnReader {
+///
+/// Private on purpose: the concrete Arrow variants, their split, and the list
+/// special case are implementation detail behind the opaque [`ColumnReader`].
+enum ReaderImpl {
     Bool(BooleanArray),
     I32(Int32Array),
     I64(Int64Array),
@@ -167,12 +170,24 @@ enum ColumnReader {
     },
 }
 
+/// A batch column resolved (validated + downcast) to its concrete Arrow array
+/// once, then read row by row with no per-value downcast — the bound,
+/// schema-neutral building block shared by both read worlds:
+///
+/// - the slot-first columnar scan, via [`read_datum`](Self::read_datum);
+/// - the row-world / FDW `Cell` read, via [`read_cell`](Self::read_cell).
+///
+/// Opaque by design: the inner Arrow representation can change without breaking
+/// callers. Build one per column when a batch arrives ([`bind`](Self::bind)),
+/// then read rows from it.
+pub struct ColumnReader(ReaderImpl);
+
 impl ColumnReader {
     /// Validate `array` against `rule` and downcast it once. The `accepts`
     /// check keeps the exact-type strictness the per-scan validation used to
     /// provide (decimal scale, fixed width, timestamp unit/tz), so the
     /// subsequent downcast cannot fail.
-    fn bind(rule: &ColumnRule, array: &dyn Array) -> ConvResult<Self> {
+    pub fn bind(rule: &ColumnRule, array: &dyn Array) -> ConvResult<Self> {
         if !rule.accepts(array.data_type()) {
             return Err(ConvError::ArrowTypeMismatch(
                 format!(
@@ -185,45 +200,47 @@ impl ColumnReader {
         }
         let reader = match rule {
             ColumnRule::Bool => {
-                Self::Bool(downcast::<BooleanArray>(array, "Boolean")?.clone())
+                ReaderImpl::Bool(downcast::<BooleanArray>(array, "Boolean")?.clone())
             }
             ColumnRule::I32 => {
-                Self::I32(downcast::<Int32Array>(array, "Int32")?.clone())
+                ReaderImpl::I32(downcast::<Int32Array>(array, "Int32")?.clone())
             }
             ColumnRule::I64 => {
-                Self::I64(downcast::<Int64Array>(array, "Int64")?.clone())
+                ReaderImpl::I64(downcast::<Int64Array>(array, "Int64")?.clone())
             }
             ColumnRule::F32 => {
-                Self::F32(downcast::<Float32Array>(array, "Float32")?.clone())
+                ReaderImpl::F32(downcast::<Float32Array>(array, "Float32")?.clone())
             }
             ColumnRule::F64 => {
-                Self::F64(downcast::<Float64Array>(array, "Float64")?.clone())
+                ReaderImpl::F64(downcast::<Float64Array>(array, "Float64")?.clone())
             }
             ColumnRule::Utf8 => match array.data_type() {
-                DataType::Utf8 => Self::Utf8(array.as_string::<i32>().clone()),
-                _ => Self::LargeUtf8(array.as_string::<i64>().clone()),
+                DataType::Utf8 => ReaderImpl::Utf8(array.as_string::<i32>().clone()),
+                _ => ReaderImpl::LargeUtf8(array.as_string::<i64>().clone()),
             },
             ColumnRule::Binary => match array.data_type() {
-                DataType::Binary => Self::Binary(array.as_binary::<i32>().clone()),
-                _ => Self::LargeBinary(array.as_binary::<i64>().clone()),
+                DataType::Binary => {
+                    ReaderImpl::Binary(array.as_binary::<i32>().clone())
+                }
+                _ => ReaderImpl::LargeBinary(array.as_binary::<i64>().clone()),
             },
-            ColumnRule::FixedBinary { .. } => Self::FixedBinary(
+            ColumnRule::FixedBinary { .. } => ReaderImpl::FixedBinary(
                 downcast::<FixedSizeBinaryArray>(array, "FixedSizeBinary")?.clone(),
             ),
-            ColumnRule::Uuid => Self::Uuid(
+            ColumnRule::Uuid => ReaderImpl::Uuid(
                 downcast::<FixedSizeBinaryArray>(array, "FixedSizeBinary (UUID)")?
                     .clone(),
             ),
             ColumnRule::Date32 => {
-                Self::Date32(downcast::<Date32Array>(array, "Date32")?.clone())
+                ReaderImpl::Date32(downcast::<Date32Array>(array, "Date32")?.clone())
             }
-            ColumnRule::Time64Micros => Self::Time64Micros(
+            ColumnRule::Time64Micros => ReaderImpl::Time64Micros(
                 downcast::<Time64MicrosecondArray>(array, "Time64Microsecond")?
                     .clone(),
             ),
             ColumnRule::Timestamp { nanos, tz } => {
                 if *nanos {
-                    Self::TimestampNanos {
+                    ReaderImpl::TimestampNanos {
                         arr: downcast::<TimestampNanosecondArray>(
                             array,
                             "Timestamp(Nanosecond)",
@@ -232,7 +249,7 @@ impl ColumnReader {
                         tz: *tz,
                     }
                 } else {
-                    Self::TimestampMicros {
+                    ReaderImpl::TimestampMicros {
                         arr: downcast::<TimestampMicrosecondArray>(
                             array,
                             "Timestamp(Microsecond)",
@@ -242,41 +259,49 @@ impl ColumnReader {
                     }
                 }
             }
-            ColumnRule::Decimal128 { precision, scale } => Self::Decimal128 {
+            ColumnRule::Decimal128 { precision, scale } => ReaderImpl::Decimal128 {
                 arr: downcast::<Decimal128Array>(array, "Decimal128")?.clone(),
                 codec: Decimal128NumericCodec::new(*precision, *scale)?,
             },
             ColumnRule::List {
                 element, elem_oid, ..
-            } => Self::List {
+            } => ReaderImpl::List {
                 arr: downcast::<ListArray>(array, "List")?.clone(),
                 element: *element,
                 elem_oid: *elem_oid,
             },
         };
-        Ok(reader)
+        Ok(ColumnReader(reader))
     }
 
-    /// Read the value at `row_idx` into a PostgreSQL datum for the target
-    /// `(oid, typmod)`, or `None` for SQL NULL. No downcast happens here — the
-    /// concrete array was resolved in [`Self::bind`].
+    /// Slot-first read: decode the value at `row_idx` into a PostgreSQL datum,
+    /// or `None` for SQL NULL. No downcast happens here — the concrete array
+    /// was resolved in [`Self::bind`].
+    ///
+    /// `(oid, typmod)` is the target type for a **scalar/varlena** column: the
+    /// value becomes a stack `Cell` fed through the target-aware
+    /// `Cell::into_datum_typed`. For a **list** column `oid`/`typmod` are
+    /// ignored — the produced array's element type comes from the
+    /// `elem_oid` bound into the rule at [`ColumnReader::bind`] (from
+    /// `ColumnRule::List`), and each element is built directly via that element
+    /// OID (bypassing the owned `Cell`, since the array `Cell` variants do not
+    /// retarget their element type in `Cell::into_datum_typed`). Callers that
+    /// pass `oid` should keep it consistent with the rule the reader was bound
+    /// from.
     ///
     /// # Safety
     ///
     /// Builds the datum through PostgreSQL internals: a backend must be active
     /// and the caller must have switched to the memory context the varlena (or
     /// array) payload should be palloc'd into.
-    unsafe fn read(
+    pub unsafe fn read_datum(
         &self,
         row_idx: usize,
         oid: pg_sys::Oid,
         typmod: i32,
     ) -> ConvResult<Option<pg_sys::Datum>> {
-        // A list builds its array datum directly (bypassing the owned `Cell`);
-        // every other rule produces a stack `Cell` fed through the target-aware
-        // `Cell::into_datum_typed`, exactly as the row-world reader does.
-        match self {
-            ColumnReader::List {
+        match &self.0 {
+            ReaderImpl::List {
                 arr,
                 element,
                 elem_oid,
@@ -288,8 +313,12 @@ impl ColumnReader {
                     list::array_datum_at(arr, row_idx, *element, *elem_oid)
                 }?))
             }
-            scalar => {
-                let Some(cell) = scalar.read_cell(row_idx)? else {
+            _ => {
+                // SAFETY: the borrowed-view `Cell` returned here is consumed
+                // immediately by `into_datum_typed` below (which copies into a
+                // palloc'd datum) within this reader's lifetime, so the view
+                // never escapes.
+                let Some(cell) = (unsafe { self.read_cell(row_idx) })? else {
                     return Ok(None);
                 };
                 let datum = unsafe { cell.into_datum_typed(oid, typmod) }
@@ -304,10 +333,21 @@ impl ColumnReader {
         }
     }
 
-    /// Build the stack [`Cell`] at `row_idx` for a non-list rule, or `None` for
-    /// SQL NULL. The per-value math mirrors the row-world `extract_*` path; only
-    /// the downcast is hoisted out (it happened in [`Self::bind`]).
-    fn read_cell(&self, row_idx: usize) -> ConvResult<Option<Cell>> {
+    /// Row-world read: decode the value at `row_idx` into a [`Cell`], or `None`
+    /// for SQL NULL. No downcast happens here — the concrete array was resolved
+    /// in [`Self::bind`]; the per-value math reuses each type module's helpers.
+    ///
+    /// # Safety
+    ///
+    /// This is `unsafe` because the `Cell::StringView` / `Cell::ByteaView`
+    /// variants returned for text/binary columns are **zero-copy borrows** of
+    /// the Arrow buffer this reader owns (raw `ptr`/`len`, no lifetime). The
+    /// caller must ensure such a `Cell` does not outlive the `ColumnReader` and
+    /// is not used (including via the safe `Cell: Display`, which dereferences
+    /// the view) after the reader is dropped — copy/materialize it first (e.g.
+    /// into a slot datum) if it must live longer. The owned variants (numeric,
+    /// temporal, list arrays) carry no borrow and are always safe.
+    pub unsafe fn read_cell(&self, row_idx: usize) -> ConvResult<Option<Cell>> {
         macro_rules! null_guard {
             ($arr:expr) => {
                 if $arr.is_null(row_idx) {
@@ -315,48 +355,48 @@ impl ColumnReader {
                 }
             };
         }
-        let cell = match self {
-            ColumnReader::Bool(a) => {
+        let cell = match &self.0 {
+            ReaderImpl::Bool(a) => {
                 null_guard!(a);
                 Cell::Bool(a.value(row_idx))
             }
-            ColumnReader::I32(a) => {
+            ReaderImpl::I32(a) => {
                 null_guard!(a);
                 Cell::I32(a.value(row_idx))
             }
-            ColumnReader::I64(a) => {
+            ReaderImpl::I64(a) => {
                 null_guard!(a);
                 Cell::I64(a.value(row_idx))
             }
-            ColumnReader::F32(a) => {
+            ReaderImpl::F32(a) => {
                 null_guard!(a);
                 Cell::F32(a.value(row_idx))
             }
-            ColumnReader::F64(a) => {
+            ReaderImpl::F64(a) => {
                 null_guard!(a);
                 Cell::F64(a.value(row_idx))
             }
-            ColumnReader::Utf8(a) => {
+            ReaderImpl::Utf8(a) => {
                 null_guard!(a);
                 str_view_cell(a.value(row_idx))
             }
-            ColumnReader::LargeUtf8(a) => {
+            ReaderImpl::LargeUtf8(a) => {
                 null_guard!(a);
                 str_view_cell(a.value(row_idx))
             }
-            ColumnReader::Binary(a) => {
+            ReaderImpl::Binary(a) => {
                 null_guard!(a);
                 bytea_view_cell(a.value(row_idx))
             }
-            ColumnReader::LargeBinary(a) => {
+            ReaderImpl::LargeBinary(a) => {
                 null_guard!(a);
                 bytea_view_cell(a.value(row_idx))
             }
-            ColumnReader::FixedBinary(a) => {
+            ReaderImpl::FixedBinary(a) => {
                 null_guard!(a);
                 bytea_view_cell(a.value(row_idx))
             }
-            ColumnReader::Uuid(a) => {
+            ReaderImpl::Uuid(a) => {
                 null_guard!(a);
                 let bytes: [u8; 16] = a.value(row_idx).try_into().map_err(|_| {
                     ConvError::ArrowTypeMismatch(std::borrow::Cow::Borrowed(
@@ -366,31 +406,33 @@ impl ColumnReader {
                 // Arrow UUID bytes are RFC 4122 network order, as pgrx expects.
                 Cell::Uuid(Uuid::from_bytes(bytes))
             }
-            ColumnReader::Date32(a) => {
+            ReaderImpl::Date32(a) => {
                 null_guard!(a);
                 Cell::Date(temporal::pg_date_from_arrow_days(a.value(row_idx))?)
             }
-            ColumnReader::Time64Micros(a) => {
+            ReaderImpl::Time64Micros(a) => {
                 null_guard!(a);
                 Cell::Time(temporal::time_from_micros(a.value(row_idx))?)
             }
-            ColumnReader::TimestampMicros { arr, tz } => {
+            ReaderImpl::TimestampMicros { arr, tz } => {
                 null_guard!(arr);
                 timestamp_cell(arr.value(row_idx), *tz)?
             }
-            ColumnReader::TimestampNanos { arr, tz } => {
+            ReaderImpl::TimestampNanos { arr, tz } => {
                 null_guard!(arr);
                 let micros = temporal::unix_micros_from_nanos(arr.value(row_idx));
                 timestamp_cell(micros, *tz)?
             }
-            ColumnReader::Decimal128 { arr, codec } => {
+            ReaderImpl::Decimal128 { arr, codec } => {
                 null_guard!(arr);
                 Cell::Numeric(codec.decode(arr.value(row_idx))?)
             }
-            ColumnReader::List { .. } => {
-                return Err(ConvError::InvariantViolated(
-                    "list reader has no Cell form; use read()",
-                ));
+            ReaderImpl::List { arr, element, .. } => {
+                null_guard!(arr);
+                // Row-world list cell keeps the Arrow *physical* element width
+                // (see the narrowing TODO in `types::list`); the slot path uses
+                // `read_datum`'s element-OID-aware route instead.
+                list::cell_at(arr, row_idx, *element)?
             }
         };
         Ok(Some(cell))
@@ -512,8 +554,10 @@ impl BatchRowDecoder for ArrowColumnDecoder {
         for col in bound.columns.iter() {
             // The shim already switched to the slot's target context, so the
             // varlena/array palloc lands where the per-row reset expects it.
-            let datum =
-                unsafe { col.reader.read(row_idx, col.dest_oid, col.dest_typmod) }?;
+            let datum = unsafe {
+                col.reader
+                    .read_datum(row_idx, col.dest_oid, col.dest_typmod)
+            }?;
             out.set_datum(col.dest, datum);
         }
         Ok(())

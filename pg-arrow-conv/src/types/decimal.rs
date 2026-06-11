@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
+use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
-use arrow_array::{Array, ArrayRef, Decimal128Array};
-use pg_lakebase_core::tuple::{Cell, Decimal128NumericCodec, PgDatumRef};
+use pg_lakebase_core::tuple::{Cell, PgDatumRef};
 use pgrx::prelude::AnyNumeric;
 use pgrx::{FromDatum, pg_sys};
 
-use super::{ColumnAppend, cell_type_mismatch, downcast, read_oid};
+use super::{ColumnAppend, cell_type_mismatch, read_oid};
 use crate::error::{ConvError, ConvResult};
 
 // ---------------------------------------------------------------------------
@@ -135,19 +135,9 @@ impl ColumnAppend for Decimal128Encoder {
 }
 
 // ---------------------------------------------------------------------------
-// Read (Arrow → Cell)
+// Read (Arrow → Cell): handled by the bound `ColumnReader` in `crate::read`,
+// which builds the `Decimal128NumericCodec` once per batch (not per value).
 // ---------------------------------------------------------------------------
-
-pub(crate) fn extract(
-    column: &dyn Array,
-    row_idx: usize,
-    precision: u32,
-    scale: u32,
-) -> ConvResult<Cell> {
-    let raw = downcast::<Decimal128Array>(column, "Decimal128")?.value(row_idx);
-    let codec = Decimal128NumericCodec::new(precision, scale)?;
-    Ok(Cell::Numeric(codec.decode(raw)?))
-}
 
 #[cfg(test)]
 mod tests {

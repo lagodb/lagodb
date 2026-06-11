@@ -534,13 +534,19 @@ unsafe fn accum_array_datum(
     Ok(unsafe { pg_sys::makeArrayResult(state, ctx) })
 }
 
-/// Read list cell `row_idx` into an array-valued [`Cell`] (row-world API).
-pub(crate) fn extract(
-    column: &dyn Array,
+/// Read list cell `row_idx` into an array-valued [`Cell`] (row-world API). The
+/// `ListArray` was already downcast when its batch was bound (see
+/// `ColumnReader`), so this takes the typed array directly.
+///
+/// Keeps the Arrow *physical* element width (see the narrowing TODO on
+/// [`ListValues::into_cell`]); the slot-first path retargets per element OID via
+/// [`array_datum_at`] instead.
+pub(crate) fn cell_at(
+    list: &ListArray,
     row_idx: usize,
     element: ListElementRule,
 ) -> ConvResult<Cell> {
-    let values = downcast::<ListArray>(column, "List")?.value(row_idx);
+    let values = list.value(row_idx);
     Ok(element.read_values(values.as_ref())?.into_cell())
 }
 

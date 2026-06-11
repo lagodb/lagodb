@@ -3,11 +3,9 @@
 
 use std::sync::Arc;
 
+use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, StringBuilder};
-use arrow_array::cast::AsArray;
-use arrow_array::{Array, ArrayRef};
-use arrow_schema::DataType;
-use pg_lakebase_core::tuple::{Cell, PgDatumRef, StringView};
+use pg_lakebase_core::tuple::{Cell, PgDatumRef};
 use pgrx::pg_sys;
 
 use super::{ColumnAppend, cell_type_mismatch, detoasted_payload};
@@ -92,21 +90,5 @@ impl ColumnAppend for Utf8Encoder {
 }
 
 // ---------------------------------------------------------------------------
-// Read (Arrow → Cell)
+// Read (Arrow → Cell): handled by the bound `ColumnReader` in `crate::read`.
 // ---------------------------------------------------------------------------
-
-pub(crate) fn extract_utf8(column: &dyn Array, row_idx: usize) -> ConvResult<Cell> {
-    let s = match column.data_type() {
-        DataType::Utf8 => column.as_string::<i32>().value(row_idx),
-        DataType::LargeUtf8 => column.as_string::<i64>().value(row_idx),
-        other => {
-            return Err(ConvError::ArrowTypeMismatch(
-                format!("Utf8 or LargeUtf8 (actual: {other:?})").into(),
-            ));
-        }
-    };
-    Ok(Cell::StringView(StringView {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }))
-}
