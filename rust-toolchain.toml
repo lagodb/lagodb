@@ -20,5 +20,5 @@
 #
 # The channel is exactly same day for our MSRV.
 [toolchain]
-channel = "1.95.0"
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]

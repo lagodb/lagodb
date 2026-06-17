@@ -100,10 +100,10 @@ once that integration exists.
 
 ## Requirements
 
-- Rust 1.95.0 or later
+- Rust 1.96.0 or later
 - PostgreSQL 17, including server development files, or a pgrx-managed
   PostgreSQL 17 downloaded during setup
-- `cargo-pgrx` 0.18.0
+- `cargo-pgrx` 0.18.1
 
 ## Setup
 

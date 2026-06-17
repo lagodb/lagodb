@@ -74,7 +74,7 @@ free to the planner.
 
 ### Prerequisites
 
-- Rust 1.90.0 or later
+- Rust 1.96.0 or later
 - PostgreSQL 16 or 17
 - `cargo-pgrx` installed (`cargo install --locked cargo-pgrx`)
 

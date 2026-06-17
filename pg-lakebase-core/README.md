@@ -242,7 +242,7 @@ of both the TAM and the CustomScan provider.
 
 ## Requirements
 
-- Rust 1.95.0 or later
+- Rust 1.96.0 or later
 - PostgreSQL 16 or 17
 - pgrx 0.18.x
 

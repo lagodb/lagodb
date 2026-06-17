@@ -18,7 +18,7 @@ pub fn report_info(msg: &str) {
     ereport!(
         PgLogLevel::INFO,
         PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
-        msg,
+        msg.to_owned(),
         "pg_lakebase_core"
     );
 }
@@ -29,7 +29,7 @@ pub fn report_notice(msg: &str) {
     ereport!(
         PgLogLevel::NOTICE,
         PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
-        msg,
+        msg.to_owned(),
         "pg_lakebase_core"
     );
 }
@@ -40,7 +40,7 @@ pub fn report_warning(msg: &str) {
     ereport!(
         PgLogLevel::WARNING,
         PgSqlErrorCode::ERRCODE_WARNING,
-        msg,
+        msg.to_owned(),
         "pg_lakebase_core"
     );
 }
@@ -48,11 +48,11 @@ pub fn report_warning(msg: &str) {
 /// Report error to Postgres using `ereport!`
 #[inline]
 pub fn report_error(code: PgSqlErrorCode, msg: &str) {
-    ereport!(PgLogLevel::ERROR, code, msg, "pg_lakebase_core");
+    ereport!(PgLogLevel::ERROR, code, msg.to_owned(), "pg_lakebase_core");
 }
 
 /// Report panic to Postgres using `ereport!`
 #[inline]
 pub fn report_panic(code: PgSqlErrorCode, msg: &str) {
-    ereport!(PgLogLevel::PANIC, code, msg, "pg_lakebase_core");
+    ereport!(PgLogLevel::PANIC, code, msg.to_owned(), "pg_lakebase_core");
 }
