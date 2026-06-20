@@ -222,6 +222,7 @@ unsafe extern "C-unwind" fn plan_custom_path_trampoline<
     );
 
     let provider_metadata: *mut pg_sys::List = unsafe { (*best_path).custom_private };
+    let final_clause_sources = unsafe { FinalScanClauseSources::new(rel) };
 
     let translate_ctx = unsafe { PlanTranslateContext::new(rel) };
     let mut classify_leaf = |predicate: &PlanPredicate<'_>| -> QualPushdownDecision {
@@ -235,7 +236,7 @@ unsafe extern "C-unwind" fn plan_custom_path_trampoline<
             ScanClauseSource::BaseRestriction,
             &mut classify_leaf,
         );
-        splitter.split()
+        splitter.split_with_source(|rinfo| final_clause_sources.source_for(rinfo))
     };
 
     let pushed_count = split.pushed.len();
@@ -320,6 +321,41 @@ unsafe extern "C-unwind" fn plan_custom_path_trampoline<
     }
 
     cscan as *mut pg_sys::Plan
+}
+
+/// Source resolver for the final ordered `scan_clauses` passed to
+/// `PlanCustomPath`.
+///
+/// PostgreSQL builds a base scan's final clauses from `baserestrictinfo` plus
+/// parameterized-path `ppi_clauses`. Like `postgres_fdw`, we recover the base
+/// clauses by pointer membership; anything else is a join/PPI clause and must
+/// pass the movability gate before exact pushdown can remove it from
+/// `plan.qual`.
+#[derive(Debug, Clone, Copy)]
+struct FinalScanClauseSources {
+    baserestrictinfo: *mut pg_sys::List,
+}
+
+impl FinalScanClauseSources {
+    /// # Safety
+    ///
+    /// `rel` must be a live planner-owned node from the current
+    /// `PlanCustomPath` call.
+    unsafe fn new(rel: *mut pg_sys::RelOptInfo) -> Self {
+        Self {
+            baserestrictinfo: unsafe { (*rel).baserestrictinfo },
+        }
+    }
+
+    fn source_for(self, rinfo: *mut pg_sys::RestrictInfo) -> ScanClauseSource {
+        if unsafe {
+            pg_sys::list_member_ptr(self.baserestrictinfo, rinfo.cast::<c_void>())
+        } {
+            ScanClauseSource::BaseRestriction
+        } else {
+            ScanClauseSource::Movable
+        }
+    }
 }
 
 /// Forwards to [`P::reparameterize_private_data`] when a CustomPath is pushed under an appendrel child.

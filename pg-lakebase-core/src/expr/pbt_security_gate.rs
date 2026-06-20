@@ -1,4 +1,5 @@
-//! Property tests: pseudoconstant skip and `restriction_is_securely_promotable` gating.
+//! Property tests: pseudoconstant skip, security gating, and mixed-source
+//! final scan-clause gating.
 //! Rust-only model of path-stage and plan-stage `RestrictInfo` filters (no live PG).
 
 use std::collections::HashSet;
@@ -24,6 +25,12 @@ struct ModelRestrictInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ModelBaserel {
     baserestrict_min_security: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModelClauseSource {
+    BaseRestriction,
+    Movable { movable_to_relation: bool },
 }
 
 /// Mirrors `restriction_is_securely_promotable` (`restrictinfo.c:425`).
@@ -92,6 +99,44 @@ fn classify_plan_stage(
     baserel: ModelBaserel,
 ) -> PhaseSplit {
     SecurityGateModel::plan().classify(clauses, baserel)
+}
+
+fn classify_final_scan_clauses(
+    clauses: &[(ModelRestrictInfo, ModelClauseSource)],
+    baserel: ModelBaserel,
+) -> PhaseSplit {
+    let mut split = PhaseSplit::default();
+    for (rinfo, source) in clauses {
+        if rinfo.pseudoconstant {
+            continue;
+        }
+        if !securely_promotable(*rinfo, baserel) {
+            split.residual.push(rinfo.id);
+            continue;
+        }
+        if matches!(
+            source,
+            ModelClauseSource::Movable {
+                movable_to_relation: false
+            }
+        ) {
+            split.residual.push(rinfo.id);
+            continue;
+        }
+        match rinfo.verdict {
+            LeafVerdict::ExactRowFilter => {
+                split.pushed.push(rinfo.id);
+            }
+            LeafVerdict::ConservativePruning => {
+                split.pushed.push(rinfo.id);
+                split.residual.push(rinfo.id);
+            }
+            LeafVerdict::Unsupported => {
+                split.residual.push(rinfo.id);
+            }
+        }
+    }
+    split
 }
 
 const MAX_SECURITY_LEVEL: u32 = 4;
@@ -349,5 +394,53 @@ mod model_smoke {
         assert_eq!(path.residual, vec![1]);
         assert_eq!(plan.pushed, vec![2]);
         assert_eq!(plan.residual, vec![1]);
+    }
+
+    #[test]
+    fn mixed_final_scan_clauses_keep_unmovable_ppi_residual() {
+        let clauses = vec![
+            (
+                clause(0, false, 0, false, LeafVerdict::ExactRowFilter),
+                ModelClauseSource::BaseRestriction,
+            ),
+            (
+                clause(1, false, 0, false, LeafVerdict::ExactRowFilter),
+                ModelClauseSource::Movable {
+                    movable_to_relation: false,
+                },
+            ),
+        ];
+
+        let split = classify_final_scan_clauses(&clauses, baserel(0));
+        assert_eq!(split.pushed, vec![0]);
+        assert_eq!(split.residual, vec![1]);
+
+        let old_all_base = clauses
+            .iter()
+            .map(|(rinfo, _)| (*rinfo, ModelClauseSource::BaseRestriction))
+            .collect::<Vec<_>>();
+        let old_split = classify_final_scan_clauses(&old_all_base, baserel(0));
+        assert_eq!(old_split.pushed, vec![0, 1]);
+        assert!(old_split.residual.is_empty());
+    }
+
+    #[test]
+    fn mixed_final_scan_clauses_still_push_movable_ppi() {
+        let clauses = vec![
+            (
+                clause(0, false, 0, false, LeafVerdict::ExactRowFilter),
+                ModelClauseSource::BaseRestriction,
+            ),
+            (
+                clause(1, false, 0, false, LeafVerdict::ExactRowFilter),
+                ModelClauseSource::Movable {
+                    movable_to_relation: true,
+                },
+            ),
+        ];
+
+        let split = classify_final_scan_clauses(&clauses, baserel(0));
+        assert_eq!(split.pushed, vec![0, 1]);
+        assert!(split.residual.is_empty());
     }
 }

@@ -204,10 +204,31 @@ where
     ///
     /// Live planner pointers; `scan_clauses` is NULL or `List<RestrictInfo>`.
     pub unsafe fn split(&mut self) -> PlanPushdownSplit {
+        let source = self.source;
+        unsafe { self.split_with_source(|_| source) }
+    }
+
+    /// Split a final scan clause list whose entries may come from different
+    /// planner sources.
+    ///
+    /// PostgreSQL passes `PlanCustomPath` a single ordered `scan_clauses` list.
+    /// For parameterized base scans that list can contain both
+    /// `baserestrictinfo` and `ParamPathInfo.ppi_clauses`, so callers that have
+    /// source information must supply it per `RestrictInfo`.
+    ///
+    /// # Safety
+    ///
+    /// Live planner pointers; `scan_clauses` is NULL or `List<RestrictInfo>`.
+    pub unsafe fn split_with_source<S>(
+        &mut self,
+        mut source_for: S,
+    ) -> PlanPushdownSplit
+    where
+        S: FnMut(*mut pg_sys::RestrictInfo) -> ScanClauseSource,
+    {
         let root = self.root;
         let baserel = self.baserel;
         let scan_clauses = self.scan_clauses;
-        let source = self.source;
 
         let scan_rel = unsafe { PlanScanRelation::new(root, baserel) };
         let predicate_ctx = scan_rel.predicate_context();
@@ -217,6 +238,7 @@ where
         let mut out = SplitAccumulator::new();
 
         for clause in unsafe { RestrictInfoList::new(scan_clauses).unwrapped() } {
+            let source = source_for(clause.rinfo);
             if !unsafe { gates.accepts(clause.rinfo, source) } {
                 out.push_residual(clause.clause);
                 continue;
