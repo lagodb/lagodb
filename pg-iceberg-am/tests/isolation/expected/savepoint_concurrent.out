@@ -87,7 +87,7 @@ step s3_count:
 
 total|sessions
 -----+--------
-    2|       1
+    3|       2
 (1 row)
 
 

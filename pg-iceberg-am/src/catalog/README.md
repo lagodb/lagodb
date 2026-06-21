@@ -1,8 +1,9 @@
 # Catalog metadata tracker notes
 
 This document records the design context for `metadata_tracker.rs`, especially
-the temporary metadata materialization done during statement-level rebases. It is
-intended as background for a future refactor, not as API documentation.
+the transaction-local Iceberg overlay used to avoid statement-time metadata
+materialization. It is intended as background for future refactors, not as API
+documentation.
 
 ## Required semantics
 
@@ -15,85 +16,98 @@ so PostgreSQL-like Read Committed semantics must be preserved:
   concurrent transactions before that later statement starts.
 - A single statement must scan a consistent base.
 
-That means an implementation cannot simply return the transaction's currently
-tracked metadata location after the first write. Doing so would preserve
-read-your-own-writes, but it would miss concurrent committed rows that became
-visible between statements.
+That means an implementation cannot pin the first metadata file seen by the
+transaction. Doing so would preserve read-your-own-writes, but it would miss
+concurrent committed rows that became visible between statements.
 
 ## Current `metadata_tracker.rs` behavior
 
-The read path is:
+`metadata_tracker.rs` keeps a transaction-local `SnapshotDelta` per modified
+Iceberg table. The delta records logical file operations such as added data
+files, position delete files, and removed data files. It is not written to
+Iceberg metadata during statement execution.
+
+The read path for scans and planner statistics is:
 
 ```text
 current_table_metadata
-  -> current_metadata_location (private)
-       -> rebase_for_statement(relid, Vec::new(), file_io)  // read-side rebase
-            -> rebase_inner
-            -> Transaction::commit(&StagedCatalog)
-  -> TableMetadata::read_from(file_io, &location)
+  -> IcebergMetadata::get(relid)                    // latest committed catalog pointer
+  -> TableMetadata::read_from(file_io, &location)   // committed Iceberg metadata
+  -> attach Arc<SnapshotDelta> if this transaction has staged changes
 ```
 
-The write path adds idempotent registration in front:
+The scan path then plans files from the committed metadata plus the attached
+overlay. Because the committed metadata is read fresh for each statement, a
+later Read Committed statement sees concurrent commits that finished before the
+statement starts. Because the overlay is attached to the statement view, the same
+statement also sees this transaction's earlier writes.
+
+The write setup path adds idempotent registration in front:
 
 ```text
 begin_table_modify
-  -> register_table (private, idempotent)
-  -> current_table_metadata (as above)
+  -> register_table(relid)                          // tracker state only
+  -> current_table_metadata(relid, file_io)          // latest committed metadata + overlay
 ```
 
-For writes that are flushing accumulated rows, the staging path is:
+Statement write staging records logical file operations only:
 
 ```text
-end_modify
-  -> stage_data_files
-  -> rebase_for_statement(relid, new_data_files, file_io)  // write-side staging
-  -> rebase_inner
-  -> Transaction::commit(&StagedCatalog)
+stage_data_files
+  -> SnapshotDelta::add_data_file(...)
+
+stage_position_delete_file
+  -> SnapshotDelta::add_position_delete_file(...)
+
+stage_remove_data_file
+  -> SnapshotDelta::remove_data_file(...)
 ```
 
-`rebase_inner` reads the latest globally committed Iceberg metadata location from
-the PostgreSQL catalog, builds a base `Table`, replays the transaction's
-accumulated data files plus the new statement files through iceberg-lite
-`fast_append`, and commits through `StagedCatalog`. `StagedCatalog` is a
-storage-only catalog wrapper; the PostgreSQL catalog row is not updated there.
-The real catalog-visible update happens later in `commit_all` through
-`IcebergMetadata::cas_update`.
+Each mutation is bracketed by a `SnapshotDeltaMarker` when it happens inside a
+savepoint, so `ROLLBACK TO SAVEPOINT` can truncate the delta back to the correct
+logical state. Top-level mutations do not need history frames because top-level
+abort drops the whole tracker.
 
-This preserves Read Committed, but it also means non-final statement processing
-can write Iceberg artifacts:
-
-- `SELECT` after a write can write a new intermediate metadata file when a
-  concurrent commit invalidates the fast path.
-- `end_modify` writes an intermediate metadata file at the end of a write
-  statement so subsequent statements can scan a real metadata location.
-- `commit_all` may write another metadata file during final rebase/CAS retry.
-
-This is the storage write marked by `TODO(metadata-preview)` in
-`metadata_tracker.rs`: iceberg-lite currently exposes the scan-ready
-`base snapshot + pending appends` view only by committing through a catalog,
-which writes manifest, manifest-list, and metadata files.
-
-## Why this is temporarily accepted
-
-The current query path through iceberg-lite needs an actual metadata location
-that exists on storage. Without a real metadata file, the scan code does not have
-a scan-ready table snapshot to hand to iceberg-lite.
-
-The desired long-term shape is an iceberg-lite API that can produce a read-only
-append preview:
+The top-level pre-commit path is the only place that writes Iceberg metadata:
 
 ```text
-base metadata + pending appended DataFiles -> scan-ready in-memory Table/snapshot
+on_pre_commit
+  -> commit_all
+       -> IcebergMetadata::get(relid)                         // latest committed base
+       -> TableMetadata::read_from(file_io, &latest_location)
+       -> Transaction::snapshot_delta(Arc<SnapshotDelta>)
+       -> Transaction::commit(&StagedCatalog)                 // writes manifests/metadata
+       -> IcebergMetadata::cas_update(expected = latest_location)
+       -> on conflict: read latest base and retry
 ```
 
-Such an API should not write manifest, manifest-list, or table metadata files.
-`metadata_tracker.rs` could then keep a logical append log during statement
-execution and defer physical metadata materialization until top-level
-pre-commit, except when attempting the real catalog-visible commit.
+`StagedCatalog` is a storage-only catalog wrapper. It writes standard Iceberg
+manifest, manifest-list, snapshot, and table metadata files, but it does not
+update the PostgreSQL catalog row. The catalog-visible update happens only when
+`IcebergMetadata::cas_update` swaps `lakebase.iceberg_metadata.metadata_location`
+from the base location to the newly written metadata location.
 
-We intentionally keep this as a crate-local TODO for now because iceberg-lite is
-periodically merged from upstream `iceberg-rust`; adding a local API there would
-create recurring merge cost.
+This design deliberately uses one materialization path for append-only and mixed
+append/delete/remove transactions. `AddData` is part of the overlay model, so
+INSERT and future DELETE/UPDATE staging share the same read and commit
+semantics.
+
+## Why this is the current shape
+
+The tracker now satisfies the required PostgreSQL-style Read Committed behavior
+without statement-time Iceberg metadata files:
+
+- Each statement reads the latest committed Iceberg metadata pointer from the
+  PostgreSQL catalog.
+- Each statement overlays this transaction's staged `SnapshotDelta`.
+- Scans hold an `Arc` to the statement-local delta view, so later DML in the
+  same transaction cannot mutate an already planned statement view.
+- Top-level commit materializes exactly the staged delta on top of the latest
+  committed base and retries on CAS conflict.
+
+The overlay and `SnapshotDeltaAction` live in iceberg-lite as additive code, not
+as a destructive rewrite of upstream iceberg-rust APIs. That matters because
+iceberg-lite is periodically synchronized from upstream.
 
 ## pg_lake comparison
 
@@ -122,7 +136,7 @@ FDW scan startup
   -> GetTableDataFilesFromCatalog(..., snapshot)
   -> SPI_execute_snapshot(...)
   -> PgLakeScanSnapshot
-  -> DuckDB read_parquet/read_* call over the selected file paths
+  -> external engine read over the selected file paths
 ```
 
 Important implementation details:
@@ -222,7 +236,7 @@ Typical engine behavior:
   multi-statement transaction problem.
 
 Because these engines generally use a single SQL statement, query, or job as the
-transactional unit, they often avoid exposing this specific problem:
+transactional unit, they often avoid exposing this specific visibility problem:
 
 ```text
 BEGIN;
@@ -277,35 +291,35 @@ Iceberg query engines because PostgreSQL users expect multi-statement
 transactions and Read Committed visibility. Iceberg's metadata commit protocol is
 necessary but not sufficient for that SQL contract.
 
-There are two plausible long-term approaches to remove statement-time metadata
-writes:
+The current solution is an iceberg-lite overlay:
 
-1. Extend iceberg-lite with a read-only/in-memory append preview API that returns
-   a scan-ready table/snapshot without writing metadata artifacts.
-2. Add a pg_lake-style PostgreSQL heap file catalog and make scans consume
-   MVCC-visible file rows directly, then synchronize Iceberg metadata at commit.
+- PostgreSQL transaction state stores a logical `SnapshotDelta`.
+- Read Committed statements scan the latest committed Iceberg metadata plus that
+  transaction-local delta.
+- Top-level commit materializes the delta with `SnapshotDeltaAction` and
+  publishes the resulting metadata location through catalog CAS.
 
-Approach 1 is smaller and keeps the current architecture centered on Iceberg
-metadata and iceberg-lite. Approach 2 avoids the temporary metadata-file problem
-more completely, but it is a larger architectural change: it introduces a second
-authoritative in-transaction file index and requires the scan path to consume
-file lists directly.
+This is the chosen direction for `pg-lakebase` now. It keeps the architecture
+centered on Iceberg metadata and iceberg-lite while avoiding statement-time
+manifest and metadata writes. The pg_lake-style PostgreSQL heap file catalog is
+useful as a comparison point, but it is not part of the current roadmap: the
+overlay already provides the required Read Committed behavior without adding a
+second authoritative in-transaction file index or rewriting scans to consume
+MVCC-visible file rows directly.
 
-Until one of those exists, the current intermediate metadata writes are a
-deliberate tradeoff, not accidental behavior. They are what makes
-PostgreSQL-like Read Committed work with the current iceberg-lite scan contract.
+Guardrails for future refactors:
 
-Guardrails for a future refactor:
-
-- Preserve PostgreSQL-like Read Committed. A scan after a write must not be
-  changed to return only the transaction's previously tracked metadata location.
-- Keep logical writes separate from derived scan previews. In the target design,
-  a read-side preview should not become a logical data-file change or savepoint
-  history frame merely because it had to construct a fresher scan base.
-- Avoid adding long-lived local APIs to iceberg-lite unless there is a plan to
-  carry or upstream them; this repository regularly merges iceberg-lite from
-  upstream iceberg-rust.
-- If the pg_lake-style heap file catalog approach is chosen, treat it as an
-  architectural change, not a helper-function patch. The scan path, transaction
-  visibility, commit-time Iceberg metadata synchronization, savepoint handling,
-  and cleanup of orphaned physical files all need to be designed together.
+- Preserve PostgreSQL-like Read Committed. A scan after a write must read the
+  latest committed metadata pointer and overlay this transaction's staged delta.
+- Keep logical writes separate from statement views. Reading must not create a
+  logical delta operation or savepoint history frame.
+- Keep iceberg-lite changes additive where possible; this repository regularly
+  merges iceberg-lite from upstream iceberg-rust.
+- Keep append-only and mixed append/delete/remove materialization on the same
+  `SnapshotDeltaAction` path for the tracker. Splitting INSERT back to a separate
+  fast append path would reintroduce read/commit semantic drift.
+- Do not introduce a pg_lake-style heap file catalog as an incremental
+  optimization. Revisit it only if a concrete requirement cannot be satisfied by
+  the overlay model, because it would be a separate architecture for scan
+  planning, transaction visibility, commit-time Iceberg metadata synchronization,
+  savepoint handling, and cleanup of orphaned physical files.

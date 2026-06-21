@@ -29,7 +29,8 @@ use super::{
     data_file_schema_v3,
 };
 use crate::error::Result;
-use crate::spec::{DEFAULT_PARTITION_SPEC_ID, Struct, StructType};
+use crate::metadata_columns::RESERVED_FIELD_ID_DELETE_FILE_PATH;
+use crate::spec::{DEFAULT_PARTITION_SPEC_ID, PrimitiveLiteral, Struct, StructType};
 use crate::{Error, ErrorKind};
 
 /// Data file carries data file path, partition tuple, metrics, …
@@ -276,6 +277,38 @@ impl DataFile {
     /// Positional delete files could have the field set, and deletion vectors must the field set.
     pub fn referenced_data_file(&self) -> Option<String> {
         self.referenced_data_file.clone()
+    }
+    /// Borrow the fully qualified referenced location for a position delete file.
+    pub fn referenced_data_file_path(&self) -> Option<&str> {
+        self.referenced_data_file.as_deref()
+    }
+    /// Return the data file path that this position delete file is scoped to.
+    ///
+    /// Writers may store the path explicitly in `referenced_data_file`. When
+    /// that field is absent, a position delete file is still file-scoped if
+    /// the delete file's `file_path` column lower and upper bounds are equal.
+    pub(crate) fn position_delete_target_data_file_path(&self) -> Option<&str> {
+        if self.content != DataContentType::PositionDeletes {
+            return None;
+        }
+
+        self.referenced_data_file_path()
+            .or_else(|| self.position_delete_path_bound())
+    }
+
+    fn position_delete_path_bound(&self) -> Option<&str> {
+        let lower_bound =
+            self.lower_bounds.get(&RESERVED_FIELD_ID_DELETE_FILE_PATH)?;
+        let upper_bound =
+            self.upper_bounds.get(&RESERVED_FIELD_ID_DELETE_FILE_PATH)?;
+
+        match (lower_bound.literal(), upper_bound.literal()) {
+            (
+                PrimitiveLiteral::String(lower_bound),
+                PrimitiveLiteral::String(upper_bound),
+            ) if lower_bound == upper_bound => Some(lower_bound.as_str()),
+            _ => None,
+        }
     }
     /// Get the offset in the file where the blob content starts.
     /// Only meaningful for puffin blobs, and required for deletion vectors.

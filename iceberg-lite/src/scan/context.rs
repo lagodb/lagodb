@@ -37,6 +37,7 @@ pub(crate) struct ManifestFileContext {
 
     pub field_ids: Arc<Vec<i32>>,
     pub bound_predicates: Option<Arc<BoundPredicates>>,
+    pub snapshot_bound_predicate: Option<Arc<BoundPredicate>>,
     pub object_cache: Arc<ObjectCache>,
     pub snapshot_schema: SchemaRef,
     pub expression_evaluator_cache: Arc<ExpressionEvaluatorCache>,
@@ -52,6 +53,7 @@ pub(crate) struct ManifestEntryContext {
     pub expression_evaluator_cache: Arc<ExpressionEvaluatorCache>,
     pub field_ids: Arc<Vec<i32>>,
     pub bound_predicates: Option<Arc<BoundPredicates>>,
+    pub snapshot_bound_predicate: Option<Arc<BoundPredicate>>,
     pub partition_spec_id: i32,
     pub snapshot_schema: SchemaRef,
     pub delete_file_index: Option<DeleteFileIndex>,
@@ -73,6 +75,7 @@ impl ManifestFileContext {
                 field_ids: self.field_ids.clone(),
                 partition_spec_id: self.manifest_file.partition_spec_id,
                 bound_predicates: self.bound_predicates.clone(),
+                snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
                 snapshot_schema: self.snapshot_schema.clone(),
                 delete_file_index: self.delete_file_index.clone(),
                 case_sensitive: self.case_sensitive,
@@ -110,8 +113,9 @@ impl ManifestEntryContext {
             schema: self.snapshot_schema,
             project_field_ids: self.field_ids.to_vec(),
             predicate: self
-                .bound_predicates
-                .map(|x| x.as_ref().snapshot_bound_predicate.clone()),
+                .snapshot_bound_predicate
+                .as_ref()
+                .map(|predicate| predicate.as_ref().clone()),
 
             deletes,
 
@@ -126,11 +130,11 @@ impl ManifestEntryContext {
     }
 }
 
-/// PlanContext wraps a [`SnapshotRef`] alongside all the other
+/// PlanContext wraps an optional [`SnapshotRef`] alongside all the other
 /// objects that are required to perform a scan file plan.
 #[derive(Debug)]
 pub(crate) struct PlanContext {
-    pub snapshot: SnapshotRef,
+    pub snapshot: Option<SnapshotRef>,
 
     pub table_metadata: TableMetadataRef,
     pub snapshot_schema: SchemaRef,
@@ -147,34 +151,90 @@ pub(crate) struct PlanContext {
 
 impl PlanContext {
     /// Get the manifest list for this snapshot. This is a synchronous operation.
-    pub(crate) fn get_manifest_list(&self) -> Result<Arc<ManifestList>> {
+    pub(crate) fn get_manifest_list(&self) -> Result<Option<Arc<ManifestList>>> {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Ok(None);
+        };
+
         self.object_cache
             .as_ref()
-            .get_manifest_list(&self.snapshot, &self.table_metadata)
+            .get_manifest_list(snapshot, &self.table_metadata)
+            .map(Some)
+    }
+
+    pub(crate) fn base_sequence_number(&self) -> i64 {
+        self.snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.sequence_number())
+    }
+
+    pub(crate) fn create_manifest_entry_context(
+        &self,
+        manifest_entry: ManifestEntryRef,
+        partition_spec_id: i32,
+        bound_predicates: Option<Arc<BoundPredicates>>,
+        delete_file_index: Option<DeleteFileIndex>,
+    ) -> ManifestEntryContext {
+        ManifestEntryContext {
+            manifest_entry,
+            expression_evaluator_cache: self.expression_evaluator_cache.clone(),
+            field_ids: self.field_ids.clone(),
+            partition_spec_id,
+            bound_predicates,
+            snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
+            snapshot_schema: self.snapshot_schema.clone(),
+            delete_file_index,
+            case_sensitive: self.case_sensitive,
+        }
+    }
+
+    pub(crate) fn create_delta_manifest_entry_context(
+        &self,
+        manifest_entry: ManifestEntryRef,
+        partition_spec_id: i32,
+        delete_file_index: Option<DeleteFileIndex>,
+    ) -> Result<ManifestEntryContext> {
+        let partition_filter = if self.predicate.is_some() {
+            Some(self.get_partition_filter_for_spec(partition_spec_id)?)
+        } else {
+            None
+        };
+        let bound_predicates = self.bound_predicates(partition_filter);
+        Ok(self.create_manifest_entry_context(
+            manifest_entry,
+            partition_spec_id,
+            bound_predicates,
+            delete_file_index,
+        ))
     }
 
     fn get_partition_filter(
         &self,
         manifest_file: &ManifestFile,
     ) -> Result<Arc<BoundPredicate>> {
-        let partition_spec_id = manifest_file.partition_spec_id;
+        self.get_partition_filter_for_spec(manifest_file.partition_spec_id)
+    }
 
-        let partition_filter = self.partition_filter_cache.get(
+    fn get_partition_filter_for_spec(
+        &self,
+        partition_spec_id: i32,
+    ) -> Result<Arc<BoundPredicate>> {
+        self.partition_filter_cache.get(
             partition_spec_id,
             &self.table_metadata,
             &self.snapshot_schema,
             self.case_sensitive,
             self.predicate
                 .as_ref()
-                .ok_or(Error::new(
-                    ErrorKind::Unexpected,
-                    "Expected a predicate but none present",
-                ))?
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "Expected a predicate but none present",
+                    )
+                })?
                 .as_ref()
                 .bind(self.snapshot_schema.clone(), self.case_sensitive)?,
-        )?;
-
-        Ok(partition_filter)
+        )
     }
 
     /// Build manifest file contexts, separating data and delete manifests.
@@ -228,10 +288,26 @@ impl PlanContext {
         manifest_file: &ManifestFile,
         partition_filter: Option<Arc<BoundPredicate>>,
     ) -> ManifestFileContext {
-        let bound_predicates = if let (
-            Some(ref partition_bound_predicate),
-            Some(snapshot_bound_predicate),
-        ) =
+        let bound_predicates = self.bound_predicates(partition_filter);
+
+        ManifestFileContext {
+            manifest_file: manifest_file.clone(),
+            bound_predicates,
+            snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
+            object_cache: self.object_cache.clone(),
+            snapshot_schema: self.snapshot_schema.clone(),
+            field_ids: self.field_ids.clone(),
+            expression_evaluator_cache: self.expression_evaluator_cache.clone(),
+            delete_file_index: None,
+            case_sensitive: self.case_sensitive,
+        }
+    }
+
+    fn bound_predicates(
+        &self,
+        partition_filter: Option<Arc<BoundPredicate>>,
+    ) -> Option<Arc<BoundPredicates>> {
+        if let (Some(ref partition_bound_predicate), Some(snapshot_bound_predicate)) =
             (partition_filter, &self.snapshot_bound_predicate)
         {
             Some(Arc::new(BoundPredicates {
@@ -240,17 +316,6 @@ impl PlanContext {
             }))
         } else {
             None
-        };
-
-        ManifestFileContext {
-            manifest_file: manifest_file.clone(),
-            bound_predicates,
-            object_cache: self.object_cache.clone(),
-            snapshot_schema: self.snapshot_schema.clone(),
-            field_ids: self.field_ids.clone(),
-            expression_evaluator_cache: self.expression_evaluator_cache.clone(),
-            delete_file_index: None,
-            case_sensitive: self.case_sensitive,
         }
     }
 }

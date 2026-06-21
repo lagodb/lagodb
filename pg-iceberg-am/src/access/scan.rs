@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use iceberg_lite::expr::Predicate;
+use iceberg_lite::overlay::SnapshotDelta;
 use iceberg_lite::scan::{ArrowRecordBatchIterator, TableScan};
 use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
@@ -112,6 +113,8 @@ pub(crate) struct ScanSpec {
     /// Predicate pushed into the Iceberg scan layer for pruning. Replaced (not
     /// merged) by [`Self::set_filter`] / `refresh_filter`.
     filter: Option<Predicate>,
+    /// Transaction-local Iceberg file delta captured for this statement.
+    delta: Option<Arc<SnapshotDelta>>,
 }
 
 impl ScanSpec {
@@ -142,7 +145,7 @@ impl ScanSpec {
         predicate: Option<Predicate>,
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
-        let (table, schema) = Self::load_table(rel_oid, spc_oid)?;
+        let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
         let plan = ScanColumns::new(
             schema,
             shape.live_columns(),
@@ -154,6 +157,7 @@ impl ScanSpec {
             plan,
             projection: None,
             filter: predicate,
+            delta,
         })
     }
 
@@ -172,7 +176,7 @@ impl ScanSpec {
         predicate: Option<Predicate>,
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
-        let (table, schema) = Self::load_table(rel_oid, spc_oid)?;
+        let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
         let plan = ScanColumns::with_projection(
             schema,
             projection.columns(),
@@ -184,6 +188,7 @@ impl ScanSpec {
             plan,
             projection: Some(projection),
             filter: predicate,
+            delta,
         })
     }
 
@@ -193,7 +198,7 @@ impl ScanSpec {
     fn load_table(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
-    ) -> IcebergResult<(Table, Arc<IcebergSchema>)> {
+    ) -> IcebergResult<(Table, Arc<IcebergSchema>, Option<Arc<SnapshotDelta>>)> {
         let ctx = StorageContext::for_tablespace(spc_oid)?;
 
         let loaded =
@@ -207,7 +212,7 @@ impl ScanSpec {
             .identifier(IcebergTableId::for_relation(rel_oid).into_table_ident())
             .build()?;
 
-        Ok((table, schema))
+        Ok((table, schema, loaded.delta))
     }
 
     /// Replace the active predicate. Used by the CustomScan provider's `rescan`
@@ -237,6 +242,9 @@ impl ScanSpec {
         }
         if let Some(predicate) = self.filter.as_ref() {
             builder = builder.with_filter(predicate.clone());
+        }
+        if let Some(delta) = self.delta.as_ref() {
+            builder = builder.with_delta(Arc::clone(delta));
         }
         Ok(builder.build()?)
     }

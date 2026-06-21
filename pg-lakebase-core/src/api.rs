@@ -29,8 +29,8 @@
 //!
 //! ## Design tradeoffs considered
 //!
-//! - *Single root trait with all methods inlined* (DuckDB / DataFusion
-//!   `TableProvider` style): fewest traits, but Rust does not allow splitting
+//! - *Single root trait with all methods inlined* (DataFusion `TableProvider`
+//!   style): fewest traits, but Rust does not allow splitting
 //!   a single `impl` across files. A consumer would either accumulate one
 //!   large `impl TableAccessMethod` block or thunk through helper functions in
 //!   `relation.rs`/`ddl.rs`. Rejected to preserve module boundaries.

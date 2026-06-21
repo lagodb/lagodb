@@ -3,11 +3,10 @@
 //! [`TxMetadata`] owns the bookkeeping for every Iceberg table modified inside
 //! a single PostgreSQL top-level transaction:
 //!
-//! - the metadata location each statement produced,
-//! - the global metadata location each rebase was based on,
-//! - the data files accumulated across statements,
+//! - the transaction-local Iceberg file delta accumulated across statements,
 //! - a per-savepoint history stack used to roll back on
-//!   `ROLLBACK TO SAVEPOINT`.
+//!   `ROLLBACK TO SAVEPOINT`,
+//! - one final metadata materialization during top-level pre-commit.
 //!
 //! It also implements [`TransactionResource`] so the pg-lakebase-core
 //! transaction framework can drive it through pre-commit / commit / abort /
@@ -17,14 +16,17 @@
 //! [`TxMetadata::current`]; callers (DML, scan) never touch the TLS directly.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
-use iceberg_lite::spec::{DataFile, TableMetadata};
+use iceberg_lite::overlay::{SnapshotDelta, SnapshotDeltaMarker};
+use iceberg_lite::spec::{
+    DataContentType, DataFile, ManifestContentType, TableMetadata,
+};
 use iceberg_lite::table::Table;
-use iceberg_lite::transaction::Transaction;
+use iceberg_lite::transaction::{ApplyTransactionAction, Transaction};
 use pg_lakebase_core::diag;
 use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
@@ -33,6 +35,9 @@ use crate::catalog::bridge::{IcebergTableId, StagedCatalog};
 use crate::catalog::metadata_table::{CasUpdate, IcebergMetadata};
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
+
+const TOTAL_RECORDS: &str = "total-records";
+const TOTAL_FILES_SIZE: &str = "total-files-size";
 
 // =============================================================================
 // Per-table state
@@ -45,37 +50,20 @@ use crate::gucs;
 #[derive(Debug, Clone)]
 struct HistoryFrame {
     nest_level: i32,
-    prev_metadata_location: Option<String>,
-    prev_files_count: usize,
-    prev_last_base: Option<String>,
+    marker: SnapshotDeltaMarker,
 }
 
 /// Metadata location bookkeeping for a single Iceberg table inside one
 /// top-level transaction.
 #[derive(Debug)]
 struct TableState {
-    /// PostgreSQL OID - the authoritative identity for the relation.
-    relid: pg_sys::Oid,
-
-    /// Metadata location written by this transaction's most recent statement.
-    current_metadata_location: Option<String>,
-
-    /// The global metadata location our most recent rebase sat on top of.
-    /// Used both as the CAS expected value at commit time and as a
-    /// fast-path key: if the global location hasn't moved, the current
-    /// location is still valid and we can skip the rebase.
-    last_base_metadata_location: Option<String>,
-
-    /// Files accumulated across every statement in this transaction:
-    /// `[stmt_1_files .. stmt_2_files .. ...]`.
+    /// Transaction-local file operations layered over the latest committed
+    /// Iceberg metadata for statement-local reads.
     ///
-    /// Stored as `Arc<DataFile>` so the tracker's own bookkeeping (history
-    /// frames, savepoint truncation, multiple rebases inside one transaction)
-    /// only bumps reference counts. Note that handing the files off to
-    /// iceberg-lite's `add_data_files` still performs a deep clone per call
-    /// because that API is owned-only. See the TODO in `rebase_inner` for
-    /// the upstream change required to remove that last copy.
-    accumulated_data_files: Vec<Arc<DataFile>>,
+    /// Stored behind `Arc` so scan specs can hold a stable statement view.
+    /// Later DML calls mutate through `Arc::make_mut`, preserving any older
+    /// scan's snapshot of the delta.
+    delta: Arc<SnapshotDelta>,
 
     /// FileIO captured from the first statement to drive the final commit.
     file_io: Option<FileIO>,
@@ -88,40 +76,86 @@ struct TableState {
     /// Savepoint history stack. Each frame is the state BEFORE a write at
     /// `nest_level`, so sub-abort can restore it by popping frames whose
     /// `nest_level >= aborted_level`.
+    ///
+    /// Top-level writes do not need frames: top-level abort drops the whole
+    /// tracker, and top-level commit never rolls back through this stack.
     level_history: Vec<HistoryFrame>,
 }
 
 impl TableState {
-    fn new(relid: pg_sys::Oid, nest_level: i32, base: Option<String>) -> Self {
+    fn new(nest_level: i32) -> Self {
         Self {
-            relid,
-            current_metadata_location: base.clone(),
-            last_base_metadata_location: base,
-            accumulated_data_files: Vec::new(),
+            delta: Arc::new(SnapshotDelta::new()),
             file_io: None,
             first_modified_at_level: nest_level,
             level_history: Vec::new(),
         }
     }
 
-    /// Push a history frame and apply the new state.
-    ///
-    /// `new_data_files` are already `Arc`-wrapped by the caller so each file
-    /// is heap-allocated exactly once for the life of the transaction.
-    fn record_change(
+    fn record_delta_mutation<F>(
         &mut self,
         nest_level: i32,
-        new_metadata_location: String,
-        new_data_files: Vec<Arc<DataFile>>,
-    ) {
-        self.level_history.push(HistoryFrame {
-            nest_level,
-            prev_metadata_location: self.current_metadata_location.clone(),
-            prev_files_count: self.accumulated_data_files.len(),
-            prev_last_base: self.last_base_metadata_location.clone(),
-        });
-        self.current_metadata_location = Some(new_metadata_location);
-        self.accumulated_data_files.extend(new_data_files);
+        mutation: F,
+    ) -> IcebergResult<()>
+    where
+        F: FnOnce(&mut SnapshotDelta) -> iceberg_lite::Result<()>,
+    {
+        let marker = self.delta.mark();
+        let should_record_history = nest_level > 1;
+        if should_record_history {
+            self.level_history.push(HistoryFrame { nest_level, marker });
+        }
+
+        let delta = Arc::make_mut(&mut self.delta);
+        if let Err(err) = mutation(delta) {
+            delta.truncate(marker);
+            if should_record_history {
+                self.level_history.pop();
+            }
+            return Err(err.into());
+        }
+
+        Ok(())
+    }
+
+    fn record_data_files(
+        &mut self,
+        nest_level: i32,
+        new_data_files: Vec<DataFile>,
+    ) -> IcebergResult<()> {
+        if new_data_files.is_empty() {
+            return Ok(());
+        }
+
+        self.record_delta_mutation(nest_level, |delta| {
+            for data_file in new_data_files {
+                delta.add_data_file(data_file)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn record_position_delete_file(
+        &mut self,
+        nest_level: i32,
+        delete_file: DataFile,
+        referenced_data_files: Vec<String>,
+    ) -> IcebergResult<()> {
+        self.record_delta_mutation(nest_level, |delta| {
+            delta.add_position_delete_file(delete_file, referenced_data_files)?;
+            Ok(())
+        })
+    }
+
+    fn record_remove_data_file(
+        &mut self,
+        nest_level: i32,
+        file_path: String,
+    ) -> IcebergResult<()> {
+        self.record_delta_mutation(nest_level, |delta| {
+            delta.remove_data_file(file_path)?;
+            Ok(())
+        })
     }
 
     /// Roll back every history frame whose `nest_level >= target_level`.
@@ -152,9 +186,7 @@ impl TableState {
                 break;
             }
             let frame = self.level_history.pop().unwrap();
-            self.current_metadata_location = frame.prev_metadata_location;
-            self.accumulated_data_files.truncate(frame.prev_files_count);
-            self.last_base_metadata_location = frame.prev_last_base;
+            Arc::make_mut(&mut self.delta).truncate(frame.marker);
         }
     }
 
@@ -178,6 +210,10 @@ impl TableState {
                 frame.nest_level = from_level - 1;
             }
         }
+        // Frames promoted to top-level are no longer useful: top-level abort
+        // drops the whole tracker, and sibling savepoints must not roll them
+        // back.
+        self.level_history.retain(|frame| frame.nest_level > 1);
     }
 }
 
@@ -195,6 +231,132 @@ impl TableState {
 pub struct LoadedTableMetadata {
     pub location: String,
     pub metadata: TableMetadata,
+    pub delta: Option<Arc<SnapshotDelta>>,
+}
+
+impl LoadedTableMetadata {
+    /// Return planner-facing relation statistics for the committed metadata
+    /// plus this transaction's staged delta.
+    ///
+    /// Mirrors Iceberg snapshot-summary totals closely enough for PostgreSQL
+    /// planner sizing: data-file appends add rows and bytes, delete-file
+    /// appends add only bytes, and data-file removes subtract the committed
+    /// file's rows and bytes.
+    pub(crate) fn relation_stats(
+        &self,
+        file_io: &FileIO,
+    ) -> IcebergResult<(u64, u64)> {
+        let mut rows = Self::summary_u64(&self.metadata, TOTAL_RECORDS).unwrap_or(0);
+        let mut bytes =
+            Self::summary_u64(&self.metadata, TOTAL_FILES_SIZE).unwrap_or(0);
+
+        let Some(delta) = self.delta.as_ref() else {
+            return Ok((rows, bytes));
+        };
+
+        let delta_stats = delta.stats();
+        rows = rows.saturating_add(delta_stats.added_data_records);
+        bytes = bytes
+            .saturating_add(delta_stats.added_data_file_bytes)
+            .saturating_add(delta_stats.added_delete_file_bytes);
+
+        self.subtract_removed_data_file_stats(
+            file_io,
+            &delta_stats.removed_data_paths,
+            &mut rows,
+            &mut bytes,
+        )?;
+
+        Ok((rows, bytes))
+    }
+
+    fn has_live_data_file_path(
+        &self,
+        file_io: &FileIO,
+        file_path: &str,
+    ) -> IcebergResult<bool> {
+        if file_path.is_empty() {
+            return Ok(false);
+        }
+
+        if let Some(delta) = self.delta.as_ref() {
+            if delta.has_live_added_data_file_path(file_path) {
+                return Ok(true);
+            }
+            if delta.has_removed_data_path(file_path) {
+                return Ok(false);
+            }
+        }
+
+        let Some(snapshot) = self.metadata.current_snapshot() else {
+            return Ok(false);
+        };
+        let manifest_list = snapshot.load_manifest_list(file_io, &self.metadata)?;
+        for manifest_file in manifest_list.entries() {
+            if manifest_file.content != iceberg_lite::spec::ManifestContentType::Data
+            {
+                continue;
+            }
+            let manifest = manifest_file.load_manifest(file_io)?;
+            if manifest.entries().iter().any(|entry| {
+                entry.is_alive()
+                    && entry.content_type() == DataContentType::Data
+                    && entry.file_path() == file_path
+            }) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn summary_u64(metadata: &TableMetadata, key: &str) -> Option<u64> {
+        metadata
+            .current_snapshot()
+            .and_then(|snapshot| snapshot.summary().additional_properties.get(key))
+            .and_then(|value| value.parse::<u64>().ok())
+    }
+
+    fn subtract_removed_data_file_stats(
+        &self,
+        file_io: &FileIO,
+        removed_paths: &[String],
+        rows: &mut u64,
+        bytes: &mut u64,
+    ) -> IcebergResult<()> {
+        if removed_paths.is_empty() {
+            return Ok(());
+        }
+
+        let Some(snapshot) = self.metadata.current_snapshot() else {
+            return Ok(());
+        };
+
+        let mut remaining: HashSet<&str> =
+            removed_paths.iter().map(String::as_str).collect();
+        let manifest_list = snapshot.load_manifest_list(file_io, &self.metadata)?;
+        for manifest_file in manifest_list.entries() {
+            if remaining.is_empty() {
+                break;
+            }
+            if manifest_file.content != ManifestContentType::Data {
+                continue;
+            }
+
+            let manifest = manifest_file.load_manifest(file_io)?;
+            for entry in manifest.entries() {
+                if entry.is_alive()
+                    && entry.content_type() == DataContentType::Data
+                    && remaining.remove(entry.file_path())
+                {
+                    *rows = rows.saturating_sub(entry.record_count());
+                    *bytes = bytes.saturating_sub(entry.file_size_in_bytes());
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Mutable state hidden inside [`TxMetadata`]'s `RefCell`.
@@ -253,140 +415,150 @@ impl TxMetadata {
     /// [`TxMetadata::begin_table_modify`] to acquire write-side metadata; that
     /// method bundles registration with the metadata read so callers cannot
     /// accidentally bypass tracking by reading without registering first.
-    fn register_table(&self, relid: pg_sys::Oid) -> IcebergResult<()> {
+    fn register_table(&self, relid: pg_sys::Oid) {
         let mut inner = self.inner.borrow_mut();
         if inner.tables.contains_key(&relid) {
-            return Ok(());
+            return;
         }
         let nest_level = current_nest_level();
-        let iceberg_meta = IcebergMetadata::get(relid)?;
-        let state =
-            TableState::new(relid, nest_level, iceberg_meta.metadata_location);
+        let state = TableState::new(nest_level);
         inner.tables.insert(relid, state);
-        Ok(())
     }
 
-    /// Statement path: rebase pending changes on top of the latest global
-    /// metadata, append `new_data_files` (may be empty for a read-side rebase),
-    /// generate a new intermediate metadata file, and push a history frame so
-    /// a later `ROLLBACK TO SAVEPOINT` can roll this statement back.
-    ///
-    /// `new_data_files` enters the tracker as `Arc<DataFile>` exactly once,
-    /// so the tracker's own bookkeeping (history frames, savepoint
-    /// truncation, multiple in-transaction rebases) only bumps reference
-    /// counts. The handoff to iceberg-lite's owned `add_data_files` API
-    /// inside `rebase_inner` still performs a deep clone per call. See the
-    /// TODO there.
-    ///
-    /// Under Read Committed isolation we continuously rebase on the latest
-    /// global state to absorb concurrent commits.
-    ///
-    /// TODO(metadata-preview): This currently materializes an intermediate
-    /// Iceberg metadata file for both write-side staging
-    /// (`end_modify` -> `stage_data_files`) and read-side rebases
-    /// (`current_table_metadata` with no new files). That preserves
-    /// PostgreSQL-like Read Committed semantics: a later statement must see
-    /// the latest committed snapshot plus this transaction's accumulated
-    /// appends. Do not replace this with "return the current tracked
-    /// metadata" because that would miss concurrent committed rows.
-    ///
-    /// The long-term shape should live in iceberg-lite: expose a read-only
-    /// fast-append preview that returns a scan-ready in-memory Table/snapshot
-    /// without writing metadata artifacts. We keep this crate-local TODO
-    /// because iceberg-lite is periodically merged from upstream iceberg-rust,
-    /// so changing that API here would create recurring merge cost.
-    pub fn rebase_for_statement(
+    /// Statement write path: record new data files in the transaction-local
+    /// delta without generating Iceberg metadata files.
+    pub fn stage_data_files(
         &self,
         relid: pg_sys::Oid,
         new_data_files: Vec<DataFile>,
         file_io: &FileIO,
-    ) -> IcebergResult<String> {
-        // Wrap in Arc once. Tracker-internal copies (history frames,
-        // accumulated list, retry replay reads) are reference-count bumps
-        // only; the deep clone happens just before iceberg-lite consumes
-        // owned DataFile values in rebase_inner.
-        let new_data_files: Vec<Arc<DataFile>> =
-            new_data_files.into_iter().map(Arc::new).collect();
-        let nest_level = current_nest_level();
-        let mut inner = self.inner.borrow_mut();
-        match Self::rebase_inner(&mut inner, relid, &new_data_files, file_io)? {
-            None => current_or_err(&inner, relid),
-            Some((latest_global, new_meta)) => {
-                let state = inner.tables.get_mut(&relid).expect("registered");
-                state.last_base_metadata_location = Some(latest_global);
-                state.record_change(nest_level, new_meta.clone(), new_data_files);
-                Ok(new_meta)
-            }
-        }
+    ) -> IcebergResult<()> {
+        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+            state.record_data_files(nest_level, new_data_files)
+        })
     }
 
-    /// Commit path: rebase pending changes onto the latest global metadata so
-    /// the subsequent CAS update can succeed. Does NOT push a history frame:
-    /// the tracker is cleared in `on_commit` immediately after `commit_all`,
-    /// so any frame would be dead state.
-    fn rebase_for_commit(
-        inner: &mut TxMetadataInner,
+    /// Statement write path: record a position delete file in the
+    /// transaction-local delta without generating Iceberg metadata files.
+    pub fn stage_position_delete_file<I, S>(
+        &self,
         relid: pg_sys::Oid,
+        delete_file: DataFile,
+        referenced_data_files: I,
         file_io: &FileIO,
-    ) -> IcebergResult<String> {
-        match Self::rebase_inner(inner, relid, &[], file_io)? {
-            None => current_or_err(inner, relid),
-            Some((latest_global, new_meta)) => {
-                let state = inner.tables.get_mut(&relid).expect("registered");
-                state.last_base_metadata_location = Some(latest_global);
-                state.current_metadata_location = Some(new_meta.clone());
-                Ok(new_meta)
-            }
-        }
+    ) -> IcebergResult<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let referenced_data_files: Vec<String> =
+            referenced_data_files.into_iter().map(Into::into).collect();
+        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+            state.record_position_delete_file(
+                nest_level,
+                delete_file,
+                referenced_data_files,
+            )
+        })
     }
 
-    /// Read the current metadata location for `relid`.
+    // Intentionally no equality-delete staging API. With the single-snapshot
+    // materialization used by this tracker, equality deletes cannot delete data
+    // files appended in the same PostgreSQL transaction because both files
+    // inherit the same Iceberg snapshot sequence number, while equality deletes
+    // require delete_seq > data_seq. A hidden multi-snapshot materialization
+    // could model that ordering, but it would write multiple manifest lists,
+    // complicate v3 row-lineage accounting, and expose transaction-internal
+    // intermediate snapshots through Iceberg snapshot history/time travel.
+    // SQL DELETE/UPDATE should stage position deletes instead.
+
+    /// Statement write path: remove a live data file by path in the
+    /// transaction-local delta without generating Iceberg metadata files.
     ///
-    /// - If the table has been written in this transaction, rebase first so
-    ///   the caller observes any concurrent commits since our last
-    ///   statement, then return the intermediate metadata location.
-    /// - Otherwise, return the catalog's latest metadata location directly.
-    ///
-    /// Module-private. Read-side callers should use
-    /// [`TxMetadata::current_table_metadata`]; write-side callers should use
-    /// [`TxMetadata::begin_table_modify`].
-    fn current_metadata_location(
+    /// This is intentionally a single-file staging API. Future SQL
+    /// DELETE/UPDATE plumbing that removes many files should add a batch API
+    /// that collects the statement's live data-file paths once; looping over
+    /// this method would repeatedly walk the manifest entries, even when the
+    /// ObjectCache amortizes manifest IO.
+    pub fn stage_remove_data_file(
+        &self,
+        relid: pg_sys::Oid,
+        file_path: impl Into<String>,
+        file_io: &FileIO,
+    ) -> IcebergResult<()> {
+        let file_path = file_path.into();
+        let loaded = self.begin_table_modify(relid, file_io)?;
+        if !loaded.has_live_data_file_path(file_io, &file_path)? {
+            return Err(IcebergError::MetadataTracker(format!(
+                "Cannot remove non-live Iceberg data file from transaction view: {}",
+                file_path
+            )));
+        }
+        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+            state.record_remove_data_file(nest_level, file_path)
+        })
+    }
+
+    fn stage_delta_mutation<F>(
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
-    ) -> IcebergResult<String> {
-        let already_tracked = self.inner.borrow().tables.contains_key(&relid);
-        if already_tracked {
-            return self.rebase_for_statement(relid, Vec::new(), file_io);
+        mutation: F,
+    ) -> IcebergResult<()>
+    where
+        F: FnOnce(&mut TableState, i32) -> IcebergResult<()>,
+    {
+        self.register_table(relid);
+        let nest_level = current_nest_level();
+        let mut inner = self.inner.borrow_mut();
+        let state = inner.tables.get_mut(&relid).ok_or_else(|| {
+            IcebergError::MetadataTracker(format!(
+                "Table {} not registered in metadata tracker",
+                relid
+            ))
+        })?;
+        if state.file_io.is_none() {
+            state.file_io = Some(file_io.clone());
         }
-        IcebergMetadata::get(relid)?
-            .metadata_location
-            .ok_or(IcebergError::MetadataLocationNull)
+        mutation(state, nest_level)
     }
 
     /// Read-side entry point for scans and planner statistics.
     ///
-    /// Resolves the metadata location appropriate for this transaction
-    /// (already-written tables go through `rebase_for_statement`; untouched
-    /// ones return the catalog's latest committed location) and parses the
-    /// metadata file in one IO step. Does *not* register the table — pure
-    /// reads must not enroll a relation in the per-transaction tracker.
+    /// Reads the latest committed metadata location every time, then attaches
+    /// any transaction-local delta for this relation. That gives Read
+    /// Committed behavior without writing statement-time metadata files.
     pub fn current_table_metadata(
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
     ) -> IcebergResult<LoadedTableMetadata> {
-        let location = self.current_metadata_location(relid, file_io)?;
+        let delta = {
+            let mut inner = self.inner.borrow_mut();
+            inner.tables.get_mut(&relid).and_then(|state| {
+                if state.file_io.is_none() {
+                    state.file_io = Some(file_io.clone());
+                }
+                (!state.delta.is_empty()).then(|| Arc::clone(&state.delta))
+            })
+        };
+
+        let location = IcebergMetadata::get(relid)?
+            .metadata_location
+            .ok_or(IcebergError::MetadataLocationNull)?;
         let metadata = TableMetadata::read_from(file_io, &location)?;
-        Ok(LoadedTableMetadata { location, metadata })
+        Ok(LoadedTableMetadata {
+            location,
+            metadata,
+            delta,
+        })
     }
 
     /// Write-side entry point for DML.
     ///
     /// Registers the relation with this transaction's tracker (idempotent),
-    /// rebases pending changes onto the latest committed metadata so the
-    /// caller observes concurrent commits, and returns the metadata file
-    /// the writer should base its appends on.
+    /// then returns the latest committed metadata plus any prior
+    /// transaction-local delta for statement-local reads.
     ///
     /// This is the single supported way for a writer to obtain its base
     /// snapshot: it bundles `register_table` with the metadata read so a
@@ -397,140 +569,8 @@ impl TxMetadata {
         relid: pg_sys::Oid,
         file_io: &FileIO,
     ) -> IcebergResult<LoadedTableMetadata> {
-        self.register_table(relid)?;
+        self.register_table(relid);
         self.current_table_metadata(relid, file_io)
-    }
-
-    // -------------------------------------------------------------------------
-    // Private rebase core
-    // -------------------------------------------------------------------------
-
-    /// Loads the latest global metadata, takes the fast path if possible,
-    /// otherwise replays accumulated files + (optional) `new_data_files` on
-    /// top of the latest global base and writes a new intermediate metadata
-    /// file.
-    ///
-    /// Returns `Ok(None)` for the fast path, `Ok(Some((latest_global, new)))`
-    /// when a new file was produced. Bookkeeping (`current`, `last_base`,
-    /// history) is intentionally left to the wrappers since their semantics
-    /// differ.
-    fn rebase_inner(
-        inner: &mut TxMetadataInner,
-        relid: pg_sys::Oid,
-        new_data_files: &[Arc<DataFile>],
-        file_io: &FileIO,
-    ) -> IcebergResult<Option<(String, String)>> {
-        let state = inner.tables.get_mut(&relid).ok_or_else(|| {
-            IcebergError::MetadataTracker(format!(
-                "Table {} not registered in metadata tracker",
-                relid
-            ))
-        })?;
-
-        // Cache FileIO for final commit
-        if state.file_io.is_none() {
-            state.file_io = Some(file_io.clone());
-        }
-
-        // 1. Get latest global metadata
-        let current_global = IcebergMetadata::get(relid)?;
-        let latest_global_location =
-            current_global.metadata_location.ok_or_else(|| {
-                IcebergError::MetadataTracker(format!(
-                    "Metadata location is null for table {}",
-                    relid
-                ))
-            })?;
-
-        // Fast path: no new files AND last rebase already sat on the latest
-        // global metadata. Current location is still valid.
-        if new_data_files.is_empty()
-            && state.last_base_metadata_location.as_ref()
-                == Some(&latest_global_location)
-        {
-            return Ok(None);
-        }
-
-        // 2. Load base table.
-        // The Iceberg `TableIdent` is synthesized from the PG OID through
-        // `IcebergTableId` so the only place that maps `Oid -> TableIdent`
-        // is `bridge`.
-        let metadata = TableMetadata::read_from(file_io, &latest_global_location)?;
-        let base_table = Table::builder()
-            .metadata_location(latest_global_location.clone())
-            .metadata(metadata)
-            .identifier(IcebergTableId::for_relation(state.relid).into_table_ident())
-            .file_io(file_io.clone())
-            .build()?;
-
-        // 3. Storage-only catalog wrapper. The catalog derives its FileIO
-        //    from `base_table` itself, so manifest reads and the new
-        //    metadata file write share a single IO context.
-        let catalog = StagedCatalog::new(&base_table);
-
-        // 4. Apply pending changes through a fast-append.
-        //
-        // TODO(metadata-rebase): Avoid deep-cloning accumulated `DataFile`
-        // values when handing them to iceberg-lite. The accumulated state
-        // is already shared as `Arc<DataFile>` so multiple rebases inside
-        // the same transaction share a single allocation, but the
-        // `add_data_files(impl IntoIterator<Item = DataFile>)` API in
-        // iceberg-lite still demands owned values, forcing a deep clone
-        // here on every rebase / CAS retry.
-        //
-        // Long-term fix lives in iceberg-lite (do NOT modify it from this
-        // crate; we sync it from upstream iceberg-rust): introduce
-        // `add_data_file_refs(&[Arc<DataFile>])` (or borrowed equivalent)
-        // through `FastAppendAction` -> `SnapshotProducer` so retries
-        // re-apply the same logical append without reallocating
-        // `DataFile` internals.
-        let tx = Transaction::new(&base_table);
-        let mut append_action = tx.fast_append();
-        if !state.accumulated_data_files.is_empty() {
-            append_action = append_action.add_data_files(
-                state.accumulated_data_files.iter().map(|f| (**f).clone()),
-            );
-        }
-        if !new_data_files.is_empty() {
-            append_action = append_action
-                .add_data_files(new_data_files.iter().map(|f| (**f).clone()));
-        }
-
-        // 5. Commit the transaction to materialise a new metadata file.
-        //
-        // TODO(metadata-preview): This is the storage write we would like to
-        // eliminate from non-final statement processing. iceberg-lite's current
-        // transaction API only exposes the "base snapshot + pending appends"
-        // view by committing through a Catalog, which writes manifest,
-        // manifest-list, and metadata files. That affects both SELECT after a
-        // write (read-side rebase with `new_data_files` empty) and INSERT
-        // statement finalization (`end_modify` staging newly written data
-        // files). Once iceberg-lite exposes a read-only/in-memory append
-        // preview, this tracker should record logical DataFiles during
-        // statement execution and defer physical metadata materialization to
-        // top-level pre-commit, except when a real catalog-visible commit is
-        // being attempted.
-        //
-        // Possible interim storage-layer mitigation: add a "local-only"
-        // staging mode in pg-lakebase-storage for derived intermediate
-        // metadata/manifest artifacts. That would require more than skipping
-        // the object-store PUT in upload/finalize: `open_reader`/`status` must
-        // be able to resolve the same object key to the local staging file for
-        // the current transaction/backend, the artifact registry needs a
-        // LocalOnly state with savepoint/abort cleanup, and `commit_all` must
-        // still write/upload a normal catalog-visible metadata chain before
-        // CAS. Never publish a metadata_location that depends on local-only
-        // files.
-        use iceberg_lite::transaction::ApplyTransactionAction;
-        let tx = append_action.apply(tx)?;
-        let updated_table = tx.commit(&catalog)?;
-
-        let new_metadata_location = updated_table
-            .metadata_location()
-            .ok_or(IcebergError::MetadataLocationNull)?
-            .to_string();
-
-        Ok(Some((latest_global_location, new_metadata_location)))
     }
 
     // -------------------------------------------------------------------------
@@ -540,24 +580,19 @@ impl TxMetadata {
     /// Commit every tracked table to the catalog with optimistic concurrency
     /// control.
     ///
-    /// Per table: rebase pending changes onto the latest global metadata,
-    /// then attempt a CAS update from `last_base` to the new intermediate
+    /// Per table: materialize the transaction-local delta on top of the latest
+    /// global metadata, then attempt a CAS update from that base to the new
     /// metadata location. On `MetadataCatalogConflict`, rebase and retry up
     /// to `gucs::max_commit_retries()`.
-    ///
-    /// TODO(metadata-rebase): Each retry currently re-runs the full rebase:
-    /// re-read catalog, re-read global metadata, rebuild Table, re-`fast_append`
-    /// every accumulated DataFile, and write a fresh metadata file. Cost is
-    /// `O(retries * accumulated_files * manifest IO)`. Acceptable short-term
-    /// because `max_commit_retries` bounds the loop, but the long-term fix is
-    /// an append-log replay model in iceberg-lite (see TODO in
-    /// `rebase_inner`) that lets us re-apply the same logical append without
-    /// reallocating the physical metadata each time.
     fn commit_all(&self) -> IcebergResult<()> {
-        let mut inner = self.inner.borrow_mut();
-        let table_oids: Vec<pg_sys::Oid> = inner.tables.keys().copied().collect();
+        let table_oids: Vec<pg_sys::Oid> =
+            self.inner.borrow().tables.keys().copied().collect();
 
         for relid in table_oids {
+            let Some((delta, file_io)) = self.commit_input(relid)? else {
+                continue;
+            };
+
             let mut retries = 0;
             let max_retries = gucs::max_commit_retries();
 
@@ -570,40 +605,41 @@ impl TxMetadata {
                 }
                 retries += 1;
 
-                let file_io = inner
-                    .tables
-                    .get(&relid)
-                    .and_then(|s| s.file_io.clone())
-                    .unwrap_or_else(FileIO::memory);
+                let latest_global_location = IcebergMetadata::get(relid)?
+                    .metadata_location
+                    .ok_or(IcebergError::MetadataLocationNull)?;
+                let metadata =
+                    TableMetadata::read_from(&file_io, &latest_global_location)?;
+                let base_table = Table::builder()
+                    .metadata_location(latest_global_location.clone())
+                    .metadata(metadata)
+                    .identifier(
+                        IcebergTableId::for_relation(relid).into_table_ident(),
+                    )
+                    .file_io(file_io.clone())
+                    .build()?;
 
-                // 1. Rebase pending changes onto the latest global metadata.
-                //    Does not push history (tracker is about to be cleared).
-                let new_metadata_location =
-                    Self::rebase_for_commit(&mut inner, relid, &file_io)?;
+                let catalog = StagedCatalog::new(&base_table);
+                let tx = Transaction::new(&base_table);
+                // The tracker commits every staged overlay through
+                // SnapshotDeltaAction. AddData is an overlay operation, so
+                // append-only and mixed append/delete/remove transactions must
+                // share the same read and materialization semantics.
+                let tx = tx.snapshot_delta(Arc::clone(&delta)).apply(tx)?;
+                let updated_table = tx.commit(&catalog)?;
+                let new_metadata_location = updated_table
+                    .metadata_location()
+                    .ok_or(IcebergError::MetadataLocationNull)?;
+                if new_metadata_location == latest_global_location {
+                    break;
+                }
 
-                // 2. The CAS expected value is the global metadata we just
-                //    rebased on (= state.last_base after rebase).
-                let last_base = inner
-                    .tables
-                    .get(&relid)
-                    .expect("registered")
-                    .last_base_metadata_location
-                    .clone();
-
-                // 3. CAS update against the catalog.
-                //
-                // Standard Iceberg architecture alignment:
-                // - `IcebergMetadata::cas_update` plays the role of the
-                //   "catalog" (Hive-style), enforcing strict CAS.
-                // - This loop plays the role of "snapshot producer client",
-                //   handling retry/rebase. Under Read Committed we MUST
-                //   rebase appends to avoid aborting the transaction.
                 match IcebergMetadata::cas_update(
                     relid,
-                    last_base.as_deref(),
+                    Some(&latest_global_location),
                     CasUpdate {
-                        metadata_location: Some(&new_metadata_location),
-                        previous_metadata_location: last_base.as_deref(),
+                        metadata_location: Some(new_metadata_location),
+                        previous_metadata_location: Some(&latest_global_location),
                     },
                 ) {
                     Ok(()) => break,
@@ -618,6 +654,26 @@ impl TxMetadata {
             }
         }
         Ok(())
+    }
+
+    fn commit_input(
+        &self,
+        relid: pg_sys::Oid,
+    ) -> IcebergResult<Option<(Arc<SnapshotDelta>, FileIO)>> {
+        let inner = self.inner.borrow();
+        let Some(state) = inner.tables.get(&relid) else {
+            return Ok(None);
+        };
+        if state.delta.is_empty() {
+            return Ok(None);
+        }
+        let file_io = state.file_io.clone().ok_or_else(|| {
+            IcebergError::MetadataTracker(format!(
+                "table {} has staged Iceberg delta without FileIO",
+                relid
+            ))
+        })?;
+        Ok(Some((Arc::clone(&state.delta), file_io)))
     }
 
     // -------------------------------------------------------------------------
@@ -716,22 +772,4 @@ impl TransactionResource for TxMetadata {
 
 fn current_nest_level() -> i32 {
     unsafe { pg_sys::GetCurrentTransactionNestLevel() }
-}
-
-fn current_or_err(
-    inner: &TxMetadataInner,
-    relid: pg_sys::Oid,
-) -> IcebergResult<String> {
-    inner
-        .tables
-        .get(&relid)
-        .expect("registered")
-        .current_metadata_location
-        .clone()
-        .ok_or_else(|| {
-            IcebergError::MetadataTracker(format!(
-                "Current metadata location is null for table {}",
-                relid
-            ))
-        })
 }

@@ -317,12 +317,6 @@ impl IcebergModify {
 
     /// Stage produced data files into transaction-local Iceberg metadata.
     fn stage(&self, new_files: Vec<DataFile>) -> IcebergResult<()> {
-        TxMetadata::current().rebase_for_statement(
-            self.rel_oid,
-            new_files,
-            &self.file_io,
-        )?;
-
-        Ok(())
+        TxMetadata::current().stage_data_files(self.rel_oid, new_files, &self.file_io)
     }
 }

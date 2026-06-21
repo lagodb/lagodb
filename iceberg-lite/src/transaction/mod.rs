@@ -54,6 +54,7 @@ mod action;
 pub use action::*;
 mod append;
 mod snapshot;
+mod snapshot_delta;
 mod sort_order;
 mod update_location;
 mod update_properties;
@@ -66,10 +67,12 @@ use std::time::Duration;
 use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
 
 use crate::error::Result;
+use crate::overlay::SnapshotDelta;
 use crate::spec::TableProperties;
 use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
+use crate::transaction::snapshot_delta::SnapshotDeltaAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
 use crate::transaction::update_properties::UpdatePropertiesAction;
@@ -138,6 +141,11 @@ impl Transaction {
     /// Creates a fast append action.
     pub fn fast_append(&self) -> FastAppendAction {
         FastAppendAction::new()
+    }
+
+    /// Creates an action that materializes a transaction-local snapshot delta.
+    pub fn snapshot_delta(&self, delta: Arc<SnapshotDelta>) -> SnapshotDeltaAction {
+        SnapshotDeltaAction::new(delta)
     }
 
     /// Creates replace sort order action.
@@ -219,6 +227,9 @@ impl Transaction {
 
         for action in &self.actions {
             let action_commit = Arc::clone(action).commit(&current_table)?;
+            if action_commit.is_empty() {
+                continue;
+            }
             // apply action commit to current_table
             current_table = Self::apply(
                 current_table,
@@ -226,6 +237,10 @@ impl Transaction {
                 &mut existing_updates,
                 &mut existing_requirements,
             )?;
+        }
+
+        if existing_updates.is_empty() && existing_requirements.is_empty() {
+            return Ok(current_table);
         }
 
         let table_commit = TableCommit::builder()

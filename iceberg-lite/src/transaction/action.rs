@@ -95,6 +95,12 @@ impl ActionCommit {
         }
     }
 
+    /// Returns true when this action produced no metadata changes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty() && self.requirements.is_empty()
+    }
+
     /// Consumes and returns the list of table updates.
     pub fn take_updates(&mut self) -> Vec<TableUpdate> {
         take(&mut self.updates)

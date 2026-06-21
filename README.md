@@ -30,6 +30,12 @@ for PostgreSQL integration.
   filter-pushdown framework, and `pg-arrow-conv` provides the format-neutral
   Arrow⇆PostgreSQL value conversion both the scan and DML paths rely on. FDW
   support is still a project direction, not a completed public API.
+- Iceberg transaction-local visibility is handled by the metadata tracker using
+  an in-memory `SnapshotDelta` overlay. Each statement reads the latest
+  committed Iceberg metadata pointer and layers the current transaction's staged
+  file operations on top; top-level commit materializes that delta once and
+  publishes it with catalog CAS. This removes the need for statement-time
+  intermediate metadata files or a PostgreSQL heap-table file catalog.
 
 ## Architecture Overview
 
@@ -251,8 +257,8 @@ detail.
 
 | Area | Goal | Status | Design notes |
 |------|------|--------|--------------|
-| DuckDB query offload | Push fully-pushable SELECT fragments (join / aggregate / sort / limit) to a standalone DuckDB server process, with PostgreSQL receiving only the final result rows. Layers on top of the existing single-relation filter pushdown and falls back to it when a fragment cannot be offloaded. | Design draft, no implementation | [duckdb-offload-roadmap.md](./pg-lakebase-core/docs/duckdb-offload-roadmap.md) |
-| Iceberg metadata tracker | Remove statement-time intermediate Iceberg metadata writes. The leading candidate is an auxiliary per-table PostgreSQL heap catalog that tracks data/delete file metadata, so scans consume MVCC-visible file rows directly and Iceberg metadata is synchronized only at commit. | Design notes / TODO in code | [catalog/README.md](./pg-iceberg-am/src/catalog/README.md) |
+| DataFusion query offload | Push lake-table query fragments such as joins, aggregates, sort, and limit into embedded DataFusion execution over Arrow batches, with PostgreSQL receiving only the final result rows. Layers on top of the existing single-relation filter pushdown and falls back when a fragment cannot be offloaded. | Design roadmap, no implementation | [datafusion-offload-roadmap.md](./pg-lakebase-core/docs/datafusion-offload-roadmap.md) |
+| Iceberg metadata tracker | Maintain PostgreSQL-style Read Committed visibility by overlaying each transaction's staged Iceberg file delta on the latest committed metadata, then materializing that delta once at top-level commit with catalog CAS. A PostgreSQL heap-table file catalog is not part of the current roadmap. | Core overlay implemented; hardening and broader DML coverage remain | [catalog/README.md](./pg-iceberg-am/src/catalog/README.md) |
 | Expanded DML | Support `UPDATE` and `DELETE` in addition to `INSERT`, using Iceberg position/equality delete files. | Planned | — |
 | Expanded DDL | Support schema evolution through `ALTER TABLE` (add / drop / rename column, type changes where Iceberg allows). | Planned | — |
 | Partitioned tables | Support creating and querying Iceberg partitioned tables, including partition-aware pruning on the scan path. | Planned | — |

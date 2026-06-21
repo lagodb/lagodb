@@ -23,6 +23,7 @@ mod context;
 use context::*;
 mod task;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -34,6 +35,7 @@ use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluato
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::io::FileIO;
 use crate::metadata_columns::{get_metadata_field_id, is_metadata_column_name};
+use crate::overlay::SnapshotDelta;
 
 use crate::spec::{DataContentType, SnapshotRef};
 use crate::table::Table;
@@ -58,6 +60,7 @@ pub struct TableScanBuilder<'a> {
     concurrency_limit_manifest_files: usize,
     row_group_filtering_enabled: bool,
     row_selection_enabled: bool,
+    delta: Option<Arc<SnapshotDelta>>,
 }
 
 impl<'a> TableScanBuilder<'a> {
@@ -76,6 +79,7 @@ impl<'a> TableScanBuilder<'a> {
             concurrency_limit_manifest_files: num_cpus,
             row_group_filtering_enabled: true,
             row_selection_enabled: false,
+            delta: None,
         }
     }
 
@@ -188,6 +192,12 @@ impl<'a> TableScanBuilder<'a> {
         self
     }
 
+    /// Layer a transaction-local snapshot delta over the committed table state.
+    pub fn with_delta(mut self, delta: Arc<SnapshotDelta>) -> Self {
+        self.delta = Some(delta);
+        self
+    }
+
     /// Build the table scan.
     pub fn build(self) -> Result<TableScan> {
         let snapshot = match self.snapshot_id {
@@ -201,16 +211,20 @@ impl<'a> TableScanBuilder<'a> {
                         format!("Snapshot with id {snapshot_id} not found"),
                     )
                 })?
-                .clone(),
+                .clone()
+                .into(),
             None => {
-                let Some(current_snapshot_id) =
-                    self.table.metadata().current_snapshot()
-                else {
+                let current_snapshot =
+                    self.table.metadata().current_snapshot().cloned();
+                if current_snapshot.is_none()
+                    && self.delta.as_ref().is_none_or(|delta| delta.is_empty())
+                {
                     return Ok(TableScan {
                         batch_size: self.batch_size,
                         column_names: self.column_names,
                         file_io: self.table.file_io().clone(),
                         plan_context: None,
+                        delta: None,
                         concurrency_limit_data_files: self
                             .concurrency_limit_data_files,
                         concurrency_limit_manifest_entries: self
@@ -220,12 +234,15 @@ impl<'a> TableScanBuilder<'a> {
                         row_group_filtering_enabled: self.row_group_filtering_enabled,
                         row_selection_enabled: self.row_selection_enabled,
                     });
-                };
-                current_snapshot_id.clone()
+                }
+                current_snapshot
             }
         };
 
-        let schema = snapshot.schema(self.table.metadata())?;
+        let schema = match snapshot.as_ref() {
+            Some(snapshot) => snapshot.schema(self.table.metadata())?,
+            None => self.table.metadata().current_schema().clone(),
+        };
 
         // Check that all column names exist in the schema (skip reserved columns).
         if let Some(column_names) = self.column_names.as_ref() {
@@ -311,6 +328,7 @@ impl<'a> TableScanBuilder<'a> {
             column_names: self.column_names,
             file_io: self.table.file_io().clone(),
             plan_context: Some(plan_context),
+            delta: self.delta,
             concurrency_limit_data_files: self.concurrency_limit_data_files,
             concurrency_limit_manifest_entries: self
                 .concurrency_limit_manifest_entries,
@@ -324,10 +342,12 @@ impl<'a> TableScanBuilder<'a> {
 /// Table scan.
 #[derive(Debug)]
 pub struct TableScan {
-    /// A [PlanContext], if this table has at least one snapshot, otherwise None.
+    /// A [PlanContext], if this table has a committed snapshot or an overlay
+    /// delta, otherwise None.
     ///
     /// If this is None, then the scan contains no rows.
     plan_context: Option<PlanContext>,
+    delta: Option<Arc<SnapshotDelta>>,
     batch_size: Option<usize>,
     file_io: FileIO,
     column_names: Option<Vec<String>>,
@@ -356,11 +376,17 @@ impl TableScan {
             return Ok(Vec::new());
         };
 
+        let resolved_delta = self.delta.as_ref().map(|delta| delta.resolve());
         let manifest_list = plan_context.get_manifest_list()?;
 
         // 0. Build manifest contexts
         let (mut data_manifest_contexts, delete_manifest_contexts) =
-            plan_context.build_manifest_file_contexts(manifest_list)?;
+            match manifest_list {
+                Some(manifest_list) => {
+                    plan_context.build_manifest_file_contexts(manifest_list)?
+                }
+                None => (Vec::new(), Vec::new()),
+            };
 
         // 1. Collect all delete files using builder
         let builder = DeleteFileIndexBuilder::new();
@@ -373,10 +399,20 @@ impl TableScan {
                 }
             }
         }
+        if let Some(delta) = resolved_delta.as_ref() {
+            let base_sequence_number = plan_context.base_sequence_number();
+            for delete_ctx in delta.delete_file_contexts(base_sequence_number)? {
+                builder.insert(delete_ctx);
+            }
+        }
 
         // 2. Build the immutable index and distribute to data manifest contexts
         let delete_file_index = builder.build();
         let mut file_scan_tasks = Vec::new();
+        let removed_data_paths: HashSet<&str> = resolved_delta
+            .as_ref()
+            .map(|delta| delta.removed_data_paths.iter().copied().collect())
+            .unwrap_or_default();
 
         for ctx in &mut data_manifest_contexts {
             // Clone is cheap: only increments Arc reference count
@@ -384,7 +420,27 @@ impl TableScan {
 
             let entries = ctx.fetch_manifest_entries()?;
             for entry in entries {
+                if removed_data_paths.contains(entry.manifest_entry.file_path()) {
+                    continue;
+                }
                 if let Some(task) = Self::process_data_manifest_entry(entry)? {
+                    file_scan_tasks.push(task);
+                }
+            }
+        }
+
+        if let Some(delta) = resolved_delta.as_ref() {
+            let base_sequence_number = plan_context.base_sequence_number();
+            for manifest_entry in delta.data_manifest_entries(base_sequence_number)? {
+                let partition_spec_id = manifest_entry.data_file().partition_spec_id;
+                let entry_context = plan_context
+                    .create_delta_manifest_entry_context(
+                        manifest_entry,
+                        partition_spec_id,
+                        Some(delete_file_index.clone()),
+                    )?;
+                if let Some(task) = Self::process_data_manifest_entry(entry_context)?
+                {
                     file_scan_tasks.push(task);
                 }
             }
@@ -415,7 +471,7 @@ impl TableScan {
 
     /// Returns a reference to the snapshot of the table scan.
     pub fn snapshot(&self) -> Option<&SnapshotRef> {
-        self.plan_context.as_ref().map(|x| &x.snapshot)
+        self.plan_context.as_ref().and_then(|x| x.snapshot.as_ref())
     }
 
     fn process_data_manifest_entry(
@@ -552,6 +608,7 @@ pub mod tests {
     use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
     use crate::metadata_columns::RESERVED_COL_NAME_FILE;
+    use crate::overlay::SnapshotDelta;
     use crate::scan::FileScanTask;
     use crate::spec::{
         DataContentType, DataFileBuilder, DataFileFormat, Datum, Literal,
@@ -1438,6 +1495,108 @@ pub mod tests {
     }
 
     #[test]
+    fn test_plan_files_on_empty_table_with_delta() {
+        let fixture = TableTestFixture::new_empty();
+        let mut delta = SnapshotDelta::new();
+        delta
+            .add_data_file(
+                DataFileBuilder::default()
+                    .partition_spec_id(0)
+                    .content(DataContentType::Data)
+                    .file_path(format!("{}/pending.parquet", fixture.table_location))
+                    .file_format(DataFileFormat::Parquet)
+                    .file_size_in_bytes(100)
+                    .record_count(1)
+                    .partition(Struct::empty())
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let tasks = fixture
+            .table
+            .scan()
+            .with_delta(Arc::new(delta))
+            .build()
+            .unwrap()
+            .plan_files()
+            .unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].data_file_path,
+            format!("{}/pending.parquet", fixture.table_location)
+        );
+    }
+
+    #[test]
+    fn test_plan_files_delta_prunes_by_file_metrics() {
+        let fixture = TableTestFixture::new_empty();
+        let mut delta = SnapshotDelta::new();
+        delta
+            .add_data_file(delta_data_file_with_y_bounds(
+                &fixture,
+                "pending-pruned.parquet",
+                100,
+                10,
+                20,
+            ))
+            .unwrap();
+        delta
+            .add_data_file(delta_data_file_with_y_bounds(
+                &fixture,
+                "pending-kept.parquet",
+                100,
+                1,
+                2,
+            ))
+            .unwrap();
+
+        let predicate = Reference::new("y").less_than(Datum::long(3));
+        let tasks = fixture
+            .table
+            .scan()
+            .with_delta(Arc::new(delta))
+            .with_filter(predicate)
+            .build()
+            .unwrap()
+            .plan_files()
+            .unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].data_file_path.ends_with("pending-kept.parquet"));
+        assert!(tasks[0].predicate.is_some());
+    }
+
+    #[test]
+    fn test_plan_files_delta_prunes_by_partition() {
+        let fixture = TableTestFixture::new_empty();
+        let mut delta = SnapshotDelta::new();
+        delta
+            .add_data_file(delta_data_file_with_y_bounds(
+                &fixture,
+                "pending-wrong-partition.parquet",
+                100,
+                1,
+                2,
+            ))
+            .unwrap();
+
+        let predicate = Reference::new("x").equal_to(Datum::long(200));
+        let tasks = fixture
+            .table
+            .scan()
+            .with_delta(Arc::new(delta))
+            .with_filter(predicate)
+            .build()
+            .unwrap()
+            .plan_files()
+            .unwrap();
+
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
     fn test_plan_files_no_deletions() {
         let mut fixture = TableTestFixture::new();
         fixture.setup_manifest_files();
@@ -1554,6 +1713,29 @@ pub mod tests {
 
         assert_eq!(batches[0].num_columns(), 0);
         assert_eq!(batches[0].num_rows(), 1024);
+    }
+
+    fn delta_data_file_with_y_bounds(
+        fixture: &TableTestFixture,
+        file_name: &str,
+        partition_x: i64,
+        lower_y: i64,
+        upper_y: i64,
+    ) -> crate::spec::DataFile {
+        DataFileBuilder::default()
+            .partition_spec_id(0)
+            .content(DataContentType::Data)
+            .file_path(format!("{}/{}", fixture.table_location, file_name))
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(100)
+            .record_count(1)
+            .partition(Struct::from_iter([Some(Literal::long(partition_x))]))
+            .value_counts(HashMap::from([(2, 1)]))
+            .null_value_counts(HashMap::from([(2, 0)]))
+            .lower_bounds(HashMap::from([(2, Datum::long(lower_y))]))
+            .upper_bounds(HashMap::from([(2, Datum::long(upper_y))]))
+            .build()
+            .unwrap()
     }
 
     #[test]

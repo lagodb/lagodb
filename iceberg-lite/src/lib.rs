@@ -6,6 +6,7 @@ pub mod error;
 pub mod expr;
 pub mod inspect;
 pub mod io;
+pub mod overlay;
 pub mod scan;
 pub mod spec;
 pub mod table;

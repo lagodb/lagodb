@@ -2,13 +2,9 @@ use crate::IcebergTableAm;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::IcebergResult;
 use crate::storage::StorageContext;
-use iceberg_lite::spec::TableMetadata;
 use pg_lakebase_core::diag::report_warning;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
-
-const TOTAL_RECORDS: &str = "total-records";
-const TOTAL_FILES_SIZE: &str = "total-files-size";
 
 impl AmRelation for IcebergTableAm {
     fn relation_estimate_size(
@@ -62,23 +58,14 @@ impl RelationStats {
         let ctx = StorageContext::for_tablespace(rel.tablespace_oid())?;
         let loaded =
             TxMetadata::current().current_table_metadata(rel.oid(), ctx.file_io())?;
+        let (rows, bytes) = loaded.relation_stats(ctx.file_io())?;
 
-        Ok(Self {
-            rows: Self::summary_u64(&loaded.metadata, TOTAL_RECORDS).unwrap_or(0),
-            bytes: Self::summary_u64(&loaded.metadata, TOTAL_FILES_SIZE).unwrap_or(0),
-        })
+        Ok(Self { rows, bytes })
     }
 
     fn pages(&self) -> pg_sys::BlockNumber {
         let page_size = pg_sys::BLCKSZ as u64;
         let pages = self.bytes.div_ceil(page_size);
         pages.min(u32::MAX as u64) as pg_sys::BlockNumber
-    }
-
-    fn summary_u64(metadata: &TableMetadata, key: &str) -> Option<u64> {
-        metadata
-            .current_snapshot()
-            .and_then(|snapshot| snapshot.summary().additional_properties.get(key))
-            .and_then(|value| value.parse::<u64>().ok())
     }
 }
