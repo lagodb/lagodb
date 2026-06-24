@@ -53,11 +53,13 @@ mod action;
 
 pub use action::*;
 mod append;
+mod expire_snapshots;
 mod snapshot;
 mod snapshot_delta;
 mod sort_order;
 mod update_location;
 mod update_properties;
+mod update_schema;
 mod update_statistics;
 mod upgrade_format_version;
 
@@ -65,6 +67,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
+pub use update_schema::AddColumn;
 
 use crate::error::Result;
 use crate::overlay::SnapshotDelta;
@@ -72,10 +75,12 @@ use crate::spec::TableProperties;
 use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
+use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
 use crate::transaction::snapshot_delta::SnapshotDeltaAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
 use crate::transaction::update_properties::UpdatePropertiesAction;
+use crate::transaction::update_schema::UpdateSchemaAction;
 use crate::transaction::update_statistics::UpdateStatisticsAction;
 use crate::transaction::upgrade_format_version::UpgradeFormatVersionAction;
 use crate::{Catalog, Error, ErrorKind, TableCommit, TableRequirement, TableUpdate};
@@ -138,6 +143,11 @@ impl Transaction {
         UpdatePropertiesAction::new()
     }
 
+    /// Creates an update schema action.
+    pub fn update_schema(&self) -> UpdateSchemaAction {
+        UpdateSchemaAction::new()
+    }
+
     /// Creates a fast append action.
     pub fn fast_append(&self) -> FastAppendAction {
         FastAppendAction::new()
@@ -163,6 +173,11 @@ impl Transaction {
         UpdateStatisticsAction::new()
     }
 
+    /// Creates an action that expires snapshots from table metadata.
+    pub fn expire_snapshots(&self) -> ExpireSnapshotsAction {
+        ExpireSnapshotsAction::new()
+    }
+
     /// Commit transaction.
     pub fn commit(mut self, catalog: &dyn Catalog) -> Result<Table> {
         if self.actions.is_empty() {
@@ -170,13 +185,15 @@ impl Transaction {
             return Ok(self.table);
         }
 
-        let table_props = TableProperties::try_from(
-            self.table.metadata().properties(),
-        )
-        .map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, "Invalid table properties")
-                .with_source(e)
-        })?;
+        let table_props = self.table.metadata().table_properties()?;
+
+        // TODO(https://github.com/apache/iceberg-rust/issues/2034): remove once encrypted writes are supported.
+        if table_props.encryption_key_id.is_some() {
+            return Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Cannot commit to an encrypted table: encrypted writes are not yet supported",
+            ));
+        }
 
         let mut backoff = Self::build_backoff(table_props)?;
         loop {

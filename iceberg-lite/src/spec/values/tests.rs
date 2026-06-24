@@ -20,7 +20,6 @@
 use apache_avro::to_value;
 use apache_avro::types::Value;
 use ordered_float::OrderedFloat;
-use rust_decimal::Decimal;
 use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -33,6 +32,7 @@ use crate::spec::datatypes::{
     ListType, MapType, NestedField, PrimitiveType, StructType, Type,
 };
 use crate::spec::values::datum::{INT_MAX, INT_MIN, LONG_MAX, LONG_MIN};
+use crate::spec::values::decimal_utils::{decimal_from_i128_with_scale, decimal_new};
 use crate::spec::values::serde::_serde;
 use crate::spec::values::{
     Datum, Literal, Map, PrimitiveLiteral, RawLiteral, Struct,
@@ -417,15 +417,15 @@ fn avro_bytes_decimal() {
         (vec![251u8, 46u8], -1234, 2, 38),
         (vec![4u8, 210u8], 1234, 3, 38),
         (vec![251u8, 46u8], -1234, 3, 38),
-        (vec![42u8], 42, 2, 1),
-        (vec![214u8], -42, 2, 1),
+        (vec![42u8], 42, 2, 2),
+        (vec![214u8], -42, 2, 2),
     ];
 
     for (input_bytes, decimal_num, expect_scale, expect_precision) in cases {
         check_avro_bytes_serde(
             input_bytes,
             Datum::decimal_with_precision(
-                Decimal::new(decimal_num, expect_scale),
+                decimal_new(decimal_num, expect_scale),
                 expect_precision,
             )
             .unwrap(),
@@ -440,11 +440,11 @@ fn avro_bytes_decimal() {
 #[test]
 fn avro_bytes_decimal_expect_error() {
     // (decimal_num, expect_scale, expect_precision)
-    let cases = vec![(1234, 2, 1)];
+    let cases = vec![(1234, 2, 1), (42, 2, 1)];
 
     for (decimal_num, expect_scale, expect_precision) in cases {
         let result = Datum::decimal_with_precision(
-            Decimal::new(decimal_num, expect_scale),
+            decimal_new(decimal_num, expect_scale),
             expect_precision,
         );
         assert!(result.is_err(), "expect error but got {result:?}");
@@ -1129,7 +1129,7 @@ fn test_datum_ser_deser() {
     let datum =
         Datum::uuid(Uuid::parse_str("f79c3e09-677c-4bbd-a479-3f349cb785e7").unwrap());
     test_fn(datum);
-    let datum = Datum::decimal(1420).unwrap();
+    let datum = Datum::decimal(decimal_new(1420, 0)).unwrap();
     test_fn(datum);
     let datum = Datum::binary(vec![1, 2, 3, 4, 5]);
     test_fn(datum);
@@ -1216,7 +1216,7 @@ fn test_datum_long_convert_to_timestamptz() {
 
 #[test]
 fn test_datum_decimal_convert_to_long() {
-    let datum = Datum::decimal(12345).unwrap();
+    let datum = Datum::decimal(decimal_new(12345, 0)).unwrap();
 
     let result = datum.to(&Primitive(PrimitiveType::Long)).unwrap();
 
@@ -1227,7 +1227,8 @@ fn test_datum_decimal_convert_to_long() {
 
 #[test]
 fn test_datum_decimal_convert_to_long_above_max() {
-    let datum = Datum::decimal(LONG_MAX as i128 + 1).unwrap();
+    let datum = Datum::decimal(decimal_from_i128_with_scale(LONG_MAX as i128 + 1, 0))
+        .unwrap();
 
     let result = datum.to(&Primitive(PrimitiveType::Long)).unwrap();
 
@@ -1238,7 +1239,8 @@ fn test_datum_decimal_convert_to_long_above_max() {
 
 #[test]
 fn test_datum_decimal_convert_to_long_below_min() {
-    let datum = Datum::decimal(LONG_MIN as i128 - 1).unwrap();
+    let datum = Datum::decimal(decimal_from_i128_with_scale(LONG_MIN as i128 - 1, 0))
+        .unwrap();
 
     let result = datum.to(&Primitive(PrimitiveType::Long)).unwrap();
 
@@ -1367,6 +1369,31 @@ fn test_iceberg_float_order() {
     ];
 
     assert_eq!(double_sorted, double_expected);
+}
+
+#[test]
+fn test_negative_zero_less_than_positive_zero() {
+    {
+        let neg_zero = Datum::float(-0.0);
+        let pos_zero = Datum::float(0.0);
+
+        assert_eq!(
+            neg_zero.partial_cmp(&pos_zero),
+            Some(std::cmp::Ordering::Less),
+            "IEEE 754 totalOrder requires -0.0 < +0.0 on F32"
+        );
+    }
+
+    {
+        let neg_zero = Datum::double(-0.0);
+        let pos_zero = Datum::double(0.0);
+
+        assert_eq!(
+            neg_zero.partial_cmp(&pos_zero),
+            Some(std::cmp::Ordering::Less),
+            "IEEE 754 totalOrder requires -0.0 < +0.0 on F64"
+        );
+    }
 }
 
 /// Test Date deserialization from JSON as number (days since epoch).

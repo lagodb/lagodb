@@ -537,14 +537,16 @@ impl<'a> DeltaSnapshotProducer<'a> {
             FormatVersion::V1 => ManifestListWriter::v1(
                 self.table
                     .file_io()
-                    .new_output(manifest_list_path.clone())?,
+                    .new_output(manifest_list_path.clone())?
+                    .create_file_writer()?,
                 self.snapshot_id,
                 self.table.metadata().current_snapshot_id(),
             ),
             FormatVersion::V2 => ManifestListWriter::v2(
                 self.table
                     .file_io()
-                    .new_output(manifest_list_path.clone())?,
+                    .new_output(manifest_list_path.clone())?
+                    .create_file_writer()?,
                 self.snapshot_id,
                 self.table.metadata().current_snapshot_id(),
                 next_sequence_number,
@@ -552,7 +554,8 @@ impl<'a> DeltaSnapshotProducer<'a> {
             FormatVersion::V3 => ManifestListWriter::v3(
                 self.table
                     .file_io()
-                    .new_output(manifest_list_path.clone())?,
+                    .new_output(manifest_list_path.clone())?
+                    .create_file_writer()?,
                 self.snapshot_id,
                 self.table.metadata().current_snapshot_id(),
                 next_sequence_number,

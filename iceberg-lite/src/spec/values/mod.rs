@@ -18,6 +18,7 @@
 //! This module contains Iceberg value types
 
 pub(crate) mod datum;
+pub(crate) mod decimal_utils;
 mod literal;
 mod map;
 mod primitive;

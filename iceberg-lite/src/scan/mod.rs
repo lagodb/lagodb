@@ -37,9 +37,11 @@ use crate::io::FileIO;
 use crate::metadata_columns::{get_metadata_field_id, is_metadata_column_name};
 use crate::overlay::SnapshotDelta;
 
-use crate::spec::{DataContentType, SnapshotRef};
+use crate::spec::{
+    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, NameMapping, SnapshotRef,
+};
 use crate::table::Table;
-use crate::utils::available_parallelism;
+use crate::util::available_parallelism;
 use crate::{Error, ErrorKind, Result};
 
 /// A synchronous iterator over Arrow [`RecordBatch`]es.
@@ -309,6 +311,25 @@ impl<'a> TableScanBuilder<'a> {
             None
         };
 
+        let name_mapping = self
+            .table
+            .metadata()
+            .properties()
+            .get(DEFAULT_SCHEMA_NAME_MAPPING)
+            .map(|raw| {
+                serde_json::from_str::<NameMapping>(raw).map_err(|e| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "Failed to parse table property {DEFAULT_SCHEMA_NAME_MAPPING} as a NameMapping"
+                        ),
+                    )
+                    .with_source(e)
+                })
+            })
+            .transpose()?
+            .map(Arc::new);
+
         let plan_context = PlanContext {
             snapshot,
             table_metadata: self.table.metadata_ref(),
@@ -318,6 +339,7 @@ impl<'a> TableScanBuilder<'a> {
             snapshot_bound_predicate: snapshot_bound_predicate.map(Arc::new),
             object_cache: self.table.object_cache(),
             field_ids: Arc::new(field_ids),
+            name_mapping,
             partition_filter_cache: Arc::new(PartitionFilterCache::new()),
             manifest_evaluator_cache: Arc::new(ManifestEvaluatorCache::new()),
             expression_evaluator_cache: Arc::new(ExpressionEvaluatorCache::new()),
@@ -814,7 +836,7 @@ pub mod tests {
                                     &self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
-                                .file_size_in_bytes(100)
+                                .file_size_in_bytes(0)
                                 .record_count(1)
                                 .partition(Struct::from_iter([Some(Literal::long(
                                     100,
@@ -842,7 +864,7 @@ pub mod tests {
                                     &self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
-                                .file_size_in_bytes(100)
+                                .file_size_in_bytes(0)
                                 .record_count(1)
                                 .partition(Struct::from_iter([Some(Literal::long(
                                     200,
@@ -869,7 +891,7 @@ pub mod tests {
                                     &self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
-                                .file_size_in_bytes(100)
+                                .file_size_in_bytes(0)
                                 .record_count(1)
                                 .partition(Struct::from_iter([Some(Literal::long(
                                     300,
@@ -887,6 +909,8 @@ pub mod tests {
                 self.table
                     .file_io()
                     .new_output(current_snapshot.manifest_list())
+                    .unwrap()
+                    .create_file_writer()
                     .unwrap(),
                 current_snapshot.snapshot_id(),
                 current_snapshot.parent_snapshot_id(),
@@ -1086,7 +1110,7 @@ pub mod tests {
                                     &self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
-                                .file_size_in_bytes(100)
+                                .file_size_in_bytes(0)
                                 .record_count(1)
                                 .partition(empty_partition.clone())
                                 .key_metadata(None)
@@ -1113,7 +1137,7 @@ pub mod tests {
                                     &self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
-                                .file_size_in_bytes(100)
+                                .file_size_in_bytes(0)
                                 .record_count(1)
                                 .partition(empty_partition.clone())
                                 .build()
@@ -1139,7 +1163,7 @@ pub mod tests {
                                     &self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
-                                .file_size_in_bytes(100)
+                                .file_size_in_bytes(0)
                                 .record_count(1)
                                 .partition(empty_partition.clone())
                                 .build()
@@ -1156,6 +1180,8 @@ pub mod tests {
                 self.table
                     .file_io()
                     .new_output(current_snapshot.manifest_list())
+                    .unwrap()
+                    .create_file_writer()
                     .unwrap(),
                 current_snapshot.snapshot_id(),
                 current_snapshot.parent_snapshot_id(),
@@ -1347,7 +1373,7 @@ pub mod tests {
                                         &self.table_location, i
                                     ))
                                     .file_format(DataFileFormat::Parquet)
-                                    .file_size_in_bytes(100)
+                                    .file_size_in_bytes(0)
                                     .record_count(1)
                                     .partition(Struct::from_iter([Some(
                                         Literal::long(100),
@@ -1385,7 +1411,7 @@ pub mod tests {
                                     &self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
-                                .file_size_in_bytes(100)
+                                .file_size_in_bytes(0)
                                 .record_count(1)
                                 .partition(Struct::from_iter([Some(Literal::long(
                                     100,
@@ -1404,6 +1430,8 @@ pub mod tests {
                 self.table
                     .file_io()
                     .new_output(current_snapshot.manifest_list())
+                    .unwrap()
+                    .create_file_writer()
                     .unwrap(),
                 current_snapshot.snapshot_id(),
                 current_snapshot.parent_snapshot_id(),
@@ -1505,7 +1533,7 @@ pub mod tests {
                     .content(DataContentType::Data)
                     .file_path(format!("{}/pending.parquet", fixture.table_location))
                     .file_format(DataFileFormat::Parquet)
-                    .file_size_in_bytes(100)
+                    .file_size_in_bytes(0)
                     .record_count(1)
                     .partition(Struct::empty())
                     .build()
@@ -1727,7 +1755,7 @@ pub mod tests {
             .content(DataContentType::Data)
             .file_path(format!("{}/{}", fixture.table_location, file_name))
             .file_format(DataFileFormat::Parquet)
-            .file_size_in_bytes(100)
+            .file_size_in_bytes(0)
             .record_count(1)
             .partition(Struct::from_iter([Some(Literal::long(partition_x))]))
             .value_counts(HashMap::from([(2, 1)]))
@@ -2135,6 +2163,7 @@ pub mod tests {
                 .unwrap(),
         );
         let task = FileScanTask {
+            file_size_in_bytes: 0,
             data_file_path: "data_file_path".to_string(),
             start: 0,
             length: 100,
@@ -2153,6 +2182,7 @@ pub mod tests {
 
         // with predicate
         let task = FileScanTask {
+            file_size_in_bytes: 0,
             data_file_path: "data_file_path".to_string(),
             start: 0,
             length: 100,

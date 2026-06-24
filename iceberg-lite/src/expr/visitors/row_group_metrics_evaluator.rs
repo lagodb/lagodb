@@ -547,7 +547,7 @@ mod tests {
     use parquet::schema::types::{
         ColumnDescriptor, ColumnPath, SchemaDescriptor, Type as parquetSchemaType,
     };
-    use rand::{Rng, thread_rng};
+    use rand::Rng;
 
     use super::RowGroupMetricsEvaluator;
     use crate::Result;
@@ -1673,7 +1673,7 @@ mod tests {
 
     #[test]
     fn eval_true_for_too_many_literals_filter_is_in() -> Result<()> {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
 
         let row_group_metadata = create_row_group_metadata(
             1,
@@ -1694,7 +1694,7 @@ mod tests {
 
         let filter = Reference::new("col_float")
             .is_in(
-                std::iter::repeat_with(|| Datum::float(rng.gen_range(0.0..10.0)))
+                std::iter::repeat_with(|| Datum::float(rng.random_range(0.0..10.0)))
                     .take(1000),
             )
             .bind(iceberg_schema_ref.clone(), false)?;

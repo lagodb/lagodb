@@ -425,7 +425,7 @@ mod tests {
             "Ivan", "Judy", "Kelly", "Larry", "Mallory", "Shawn",
         ];
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let batch_num = 10;
         let batch_rows = 100;
         let expected_rows = batch_num * batch_rows;

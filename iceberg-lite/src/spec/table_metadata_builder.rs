@@ -32,7 +32,7 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::spec::{EncryptedKey, INITIAL_ROW_ID, MIN_FORMAT_VERSION_ROW_LINEAGE};
 use crate::{TableCreation, TableUpdate};
 
-const FIRST_FIELD_ID: u32 = 1;
+pub(crate) const FIRST_FIELD_ID: i32 = 1;
 
 /// Manipulating table metadata.
 ///
@@ -237,6 +237,7 @@ impl TableMetadataBuilder {
                 }
                 FormatVersion::V3 => {
                     self.metadata.format_version = format_version;
+                    self.metadata.next_row_id = INITIAL_ROW_ID;
                     self.changes
                         .push(TableUpdate::UpgradeFormatVersion { format_version });
                 }
@@ -590,7 +591,7 @@ impl TableMetadataBuilder {
 
     /// Remove a reference
     ///
-    /// If `ref_name='main'` the current snapshot id is set to -1.
+    /// If `ref_name='main'` the current snapshot id is set to `None`.
     pub fn remove_ref(mut self, ref_name: &str) -> Self {
         if ref_name == MAIN_BRANCH {
             self.metadata.current_snapshot_id = None;
@@ -867,6 +868,9 @@ impl TableMetadataBuilder {
         // Check if partition field names conflict with schema field names across all schemas
         self.validate_partition_field_names(&unbound_spec)?;
 
+        // Reuse field IDs for equivalent fields from existing partition specs.
+        let unbound_spec = self.reuse_partition_field_ids(unbound_spec)?;
+
         let spec =
             PartitionSpecBuilder::new_from_unbound(unbound_spec.clone(), schema)?
                 .with_last_assigned_field_id(self.metadata.last_partition_id)
@@ -910,6 +914,39 @@ impl TableMetadataBuilder {
             std::cmp::max(self.metadata.last_partition_id, highest_field_id);
 
         Ok(self)
+    }
+
+    /// Reuse partition field IDs for equivalent fields from existing partition specs.
+    fn reuse_partition_field_ids(
+        &self,
+        unbound_spec: UnboundPartitionSpec,
+    ) -> Result<UnboundPartitionSpec> {
+        let equivalent_field_ids: HashMap<_, _> = self
+            .metadata
+            .partition_specs
+            .values()
+            .flat_map(|spec| spec.fields())
+            .map(|field| ((field.source_id, &field.transform), field.field_id))
+            .collect();
+
+        let fields = unbound_spec
+            .fields
+            .into_iter()
+            .map(|mut field| {
+                if field.field_id.is_none()
+                    && let Some(&existing_field_id) =
+                        equivalent_field_ids.get(&(field.source_id, &field.transform))
+                {
+                    field.field_id = Some(existing_field_id);
+                }
+                field
+            })
+            .collect();
+
+        Ok(UnboundPartitionSpec {
+            spec_id: unbound_spec.spec_id,
+            fields,
+        })
     }
 
     /// Set the default partition spec.

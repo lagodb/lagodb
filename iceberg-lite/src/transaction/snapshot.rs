@@ -166,29 +166,7 @@ impl<'a> SnapshotProducer<'a> {
     }
 
     pub(crate) fn validate_duplicate_files(&self) -> Result<()> {
-        let new_files: HashSet<&str> = self
-            .added_data_files
-            .iter()
-            .map(|df| df.file_path.as_str())
-            .collect();
-
-        let mut referenced_files = Vec::new();
-        if let Some(current_snapshot) = self.table.metadata().current_snapshot() {
-            let manifest_list = current_snapshot.load_manifest_list(
-                self.table.file_io(),
-                &self.table.metadata_ref(),
-            )?;
-            for manifest_list_entry in manifest_list.entries() {
-                let manifest =
-                    manifest_list_entry.load_manifest(self.table.file_io())?;
-                for entry in manifest.entries() {
-                    let file_path = entry.file_path();
-                    if new_files.contains(file_path) && entry.is_alive() {
-                        referenced_files.push(file_path.to_string());
-                    }
-                }
-            }
-        }
+        let referenced_files = self.duplicate_files_in_current_snapshot()?;
 
         if !referenced_files.is_empty() {
             return Err(Error::new(
@@ -201,6 +179,45 @@ impl<'a> SnapshotProducer<'a> {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn duplicate_files_in_current_snapshot(&self) -> Result<Vec<String>> {
+        let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
+            return Ok(Vec::new());
+        };
+
+        let new_files: HashSet<&str> = self
+            .added_data_files
+            .iter()
+            .map(|df| df.file_path.as_str())
+            .collect();
+
+        if new_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut referenced_files = Vec::new();
+        let manifest_list = self
+            .table
+            .manifest_list_reader(current_snapshot.clone())
+            .load()?;
+        for manifest_list_entry in manifest_list.entries() {
+            if !manifest_list_entry.has_added_files()
+                && !manifest_list_entry.has_existing_files()
+            {
+                continue;
+            }
+
+            let manifest = manifest_list_entry.load_manifest(self.table.file_io())?;
+            for entry in manifest.entries() {
+                let file_path = entry.file_path();
+                if new_files.contains(file_path) && entry.is_alive() {
+                    referenced_files.push(file_path.to_string());
+                }
+            }
+        }
+
+        Ok(referenced_files)
     }
 
     fn generate_unique_snapshot_id(table: &Table) -> i64 {
@@ -391,10 +408,7 @@ impl<'a> SnapshotProducer<'a> {
             );
         }
 
-        let previous_snapshot = table_metadata
-            .snapshot_by_id(self.snapshot_id)
-            .and_then(|snapshot| snapshot.parent_snapshot_id())
-            .and_then(|parent_id| table_metadata.snapshot_by_id(parent_id));
+        let previous_snapshot = table_metadata.current_snapshot();
 
         let mut additional_properties = summary_collector.build();
         additional_properties.extend(self.snapshot_properties.clone());
@@ -436,14 +450,16 @@ impl<'a> SnapshotProducer<'a> {
             FormatVersion::V1 => ManifestListWriter::v1(
                 self.table
                     .file_io()
-                    .new_output(manifest_list_path.clone())?,
+                    .new_output(manifest_list_path.clone())?
+                    .create_file_writer()?,
                 self.snapshot_id,
                 self.table.metadata().current_snapshot_id(),
             ),
             FormatVersion::V2 => ManifestListWriter::v2(
                 self.table
                     .file_io()
-                    .new_output(manifest_list_path.clone())?,
+                    .new_output(manifest_list_path.clone())?
+                    .create_file_writer()?,
                 self.snapshot_id,
                 self.table.metadata().current_snapshot_id(),
                 next_seq_num,
@@ -451,7 +467,8 @@ impl<'a> SnapshotProducer<'a> {
             FormatVersion::V3 => ManifestListWriter::v3(
                 self.table
                     .file_io()
-                    .new_output(manifest_list_path.clone())?,
+                    .new_output(manifest_list_path.clone())?
+                    .create_file_writer()?,
                 self.snapshot_id,
                 self.table.metadata().current_snapshot_id(),
                 next_seq_num,

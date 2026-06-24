@@ -1,0 +1,543 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+//! The main `ArrowReader` pipeline: reading `FileScanTask`s, opening
+//! Parquet files and resolving schemas, then wiring projection, predicates,
+//! row-group / row selection, and delete handling into transformed Arrow
+//! `RecordBatch` iterators.
+
+use std::sync::Arc;
+
+use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
+
+use super::{
+    ArrowFileReader, ArrowReader, ParquetReadOptions,
+    add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema,
+};
+use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
+use crate::arrow::int96::coerce_int96_timestamps;
+use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
+use crate::arrow::scan_metrics::{CountingFileRead, ScanMetrics, ScanResult};
+use crate::error::Result;
+use crate::io::{FileIO, FileMetadata, FileRead};
+use crate::metadata_columns::{RESERVED_FIELD_ID_FILE, is_metadata_field};
+use crate::scan::{ArrowRecordBatchIterator, FileScanTask};
+use crate::spec::Datum;
+use crate::{Error, ErrorKind};
+
+/// Synchronous file-scan pipeline wrapper.
+///
+/// Upstream iceberg-rust executes this stage with async tasks on its runtime.
+/// iceberg-lite keeps a named pipeline entry point, but execution is
+/// deterministic and sequential through the synchronous reader.
+pub struct SyncFileScanPipeline {
+    reader: ArrowReader,
+    tasks: Vec<FileScanTask>,
+}
+
+impl SyncFileScanPipeline {
+    pub fn new(reader: ArrowReader, tasks: Vec<FileScanTask>) -> Self {
+        Self { reader, tasks }
+    }
+
+    pub fn execute(self) -> Result<ScanResult> {
+        self.reader.read_with_metrics(self.tasks)
+    }
+}
+
+impl ArrowReader {
+    /// Creates a synchronous pipeline for future callers that need an explicit
+    /// pipeline object instead of calling `read_with_metrics` directly.
+    pub fn sync_pipeline(self, tasks: Vec<FileScanTask>) -> SyncFileScanPipeline {
+        SyncFileScanPipeline::new(self, tasks)
+    }
+}
+
+impl ArrowReader {
+    /// Take a list of FileScanTasks and reads all the files.
+    /// Returns an iterator of Arrow RecordBatches containing the data from the files
+    pub fn read(self, tasks: Vec<FileScanTask>) -> Result<ArrowRecordBatchIterator> {
+        Ok(self.read_with_metrics(tasks)?.stream())
+    }
+
+    /// Take a list of FileScanTasks and read all the files.
+    ///
+    /// Returns a [`ScanResult`] containing the record batch iterator and scan metrics.
+    pub fn read_with_metrics(self, tasks: Vec<FileScanTask>) -> Result<ScanResult> {
+        let file_io = self.file_io;
+        let batch_size = self.batch_size;
+        let row_group_filtering_enabled = self.row_group_filtering_enabled;
+        let row_selection_enabled = self.row_selection_enabled;
+        let parquet_read_options = self.parquet_read_options;
+        let scan_metrics = ScanMetrics::new();
+        let scan_metrics_for_result = scan_metrics.clone();
+        let delete_file_loader = self
+            .delete_file_loader
+            .with_scan_metrics(scan_metrics.clone());
+
+        let iterator = tasks.into_iter().flat_map(move |task| {
+            let file_io = file_io.clone();
+            let delete_file_loader = delete_file_loader.clone();
+            let scan_metrics = scan_metrics.clone();
+
+            match Self::process_file_scan_task(
+                task,
+                batch_size,
+                file_io,
+                delete_file_loader,
+                row_group_filtering_enabled,
+                row_selection_enabled,
+                parquet_read_options,
+                scan_metrics,
+            ) {
+                Ok(iter) => iter,
+                Err(e) => {
+                    let err = Error::new(
+                        ErrorKind::Unexpected,
+                        "file scan task generate failed",
+                    )
+                    .with_source(e);
+                    Box::new(std::iter::once(Err(err))) as ArrowRecordBatchIterator
+                }
+            }
+        });
+
+        Ok(ScanResult::new(Box::new(iterator), scan_metrics_for_result))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_file_scan_task(
+        task: FileScanTask,
+        batch_size: Option<usize>,
+        file_io: FileIO,
+        delete_file_loader: CachingDeleteFileLoader,
+        row_group_filtering_enabled: bool,
+        row_selection_enabled: bool,
+        parquet_read_options: ParquetReadOptions,
+        scan_metrics: ScanMetrics,
+    ) -> Result<ArrowRecordBatchIterator> {
+        let should_load_page_index = (row_selection_enabled
+            && task.predicate.is_some())
+            || !task.deletes.is_empty();
+        let parquet_read_options =
+            parquet_read_options.with_page_index(should_load_page_index);
+
+        let delete_filter = delete_file_loader
+            .load_deletes(&task.deletes, Arc::clone(&task.schema))?;
+
+        let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
+            &task.data_file_path,
+            file_io.clone(),
+            task.file_size_in_bytes,
+            parquet_read_options,
+            Some(scan_metrics),
+            None,
+        )?;
+
+        // Check if Parquet file has embedded field IDs
+        // Corresponds to Java's ParquetSchemaUtil.hasIds()
+        // Reference: parquet/src/main/java/org/apache/iceberg/parquet/ParquetSchemaUtil.java:118
+        let missing_field_ids = arrow_metadata
+            .schema()
+            .fields()
+            .iter()
+            .next()
+            .is_some_and(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY).is_none());
+
+        let use_position_fallback = missing_field_ids && task.name_mapping.is_none();
+
+        // Three-branch schema resolution strategy matching Java's ReadConf constructor
+        //
+        // Per Iceberg spec Column Projection rules:
+        // "Columns in Iceberg data files are selected by field id. The table schema's column
+        //  names and order may change after a data file is written, and projection must be done
+        //  using field ids."
+        // https://iceberg.apache.org/spec/#column-projection
+        //
+        // When Parquet files lack field IDs (e.g., Hive/Spark migrations via add_files),
+        // we must assign field IDs BEFORE reading data to enable correct projection.
+        //
+        // Java's ReadConf determines field ID strategy:
+        // - Branch 1: hasIds(fileSchema) → trust embedded field IDs, use pruneColumns()
+        // - Branch 2: nameMapping present → applyNameMapping(), then pruneColumns()
+        // - Branch 3: fallback → addFallbackIds(), then pruneColumnsFallback()
+        let arrow_metadata = if missing_field_ids {
+            // Parquet file lacks field IDs - must assign them before reading
+            let arrow_schema = if let Some(name_mapping) = &task.name_mapping {
+                // Branch 2: Apply name mapping to assign correct Iceberg field IDs
+                // Per spec rule #2: "Use schema.name-mapping.default metadata to map field id
+                // to columns without field id"
+                // Corresponds to Java's ParquetSchemaUtil.applyNameMapping()
+                apply_name_mapping_to_arrow_schema(
+                    Arc::clone(arrow_metadata.schema()),
+                    name_mapping,
+                )?
+            } else {
+                // Branch 3: No name mapping - use position-based fallback IDs
+                // Corresponds to Java's ParquetSchemaUtil.addFallbackIds()
+                add_fallback_field_ids_to_arrow_schema(arrow_metadata.schema())
+            };
+
+            let options = ArrowReaderOptions::new().with_schema(arrow_schema);
+            ArrowReaderMetadata::try_new(
+                Arc::clone(arrow_metadata.metadata()),
+                options,
+            )
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "Failed to create ArrowReaderMetadata with field ID schema",
+                )
+                .with_source(err)
+            })?
+        } else {
+            // Branch 1: File has embedded field IDs - trust them
+            arrow_metadata
+        };
+
+        let arrow_metadata = if let Some(coerced_schema) =
+            coerce_int96_timestamps(arrow_metadata.schema(), &task.schema)
+        {
+            let options = ArrowReaderOptions::new().with_schema(coerced_schema);
+            ArrowReaderMetadata::try_new(
+                Arc::clone(arrow_metadata.metadata()),
+                options,
+            )
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "Failed to create ArrowReaderMetadata with INT96-coerced schema",
+                )
+                .with_source(err)
+            })?
+        } else {
+            arrow_metadata
+        };
+
+        let mut record_batch_reader_builder =
+            ParquetRecordBatchReaderBuilder::new_with_metadata(
+                parquet_file_reader,
+                arrow_metadata,
+            );
+
+        // Filter out metadata fields for Parquet projection (they don't exist in files)
+        let project_field_ids_without_metadata: Vec<i32> = task
+            .project_field_ids
+            .iter()
+            .filter(|&&id| !is_metadata_field(id))
+            .copied()
+            .collect();
+
+        // Create projection mask based on field IDs
+        // - If file has embedded IDs: field-ID-based projection.
+        // - If name mapping applied: field-ID-based projection using mapped IDs.
+        // - Otherwise: position-based fallback projection.
+        let projection_mask = Self::get_arrow_projection_mask(
+            &project_field_ids_without_metadata,
+            &task.schema,
+            record_batch_reader_builder.parquet_schema(),
+            record_batch_reader_builder.schema(),
+            use_position_fallback,
+        )?;
+
+        record_batch_reader_builder =
+            record_batch_reader_builder.with_projection(projection_mask.clone());
+
+        // RecordBatchTransformer performs any transformations required on the RecordBatches
+        // that come back from the file, such as type promotion, default column insertion,
+        // column re-ordering, partition constants, and virtual field addition (like _file)
+        let mut record_batch_transformer_builder = RecordBatchTransformerBuilder::new(
+            task.schema_ref(),
+            task.project_field_ids(),
+        );
+
+        // Add the _file metadata column if it's in the projected fields
+        if task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
+            let file_datum = Datum::string(task.data_file_path.clone());
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_constant(RESERVED_FIELD_ID_FILE, file_datum);
+        }
+
+        if let (Some(partition_spec), Some(partition_data)) =
+            (task.partition_spec.clone(), task.partition.clone())
+        {
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_partition(partition_spec, partition_data)?;
+        }
+
+        let mut record_batch_transformer = record_batch_transformer_builder.build();
+
+        if let Some(batch_size) = batch_size {
+            record_batch_reader_builder =
+                record_batch_reader_builder.with_batch_size(batch_size);
+        }
+
+        let delete_predicate =
+            delete_filter.build_equality_delete_predicate(&task)?;
+
+        // In addition to the optional predicate supplied in the `FileScanTask`,
+        // we also have an optional predicate resulting from equality delete files.
+        // If both are present, we logical-AND them together to form a single filter
+        // predicate that we can pass to the `RecordBatchStreamBuilder`.
+        let final_predicate = match (&task.predicate, delete_predicate) {
+            (None, None) => None,
+            (Some(predicate), None) => Some(predicate.clone()),
+            (None, Some(ref predicate)) => Some(predicate.clone()),
+            (Some(filter_predicate), Some(delete_predicate)) => {
+                Some(filter_predicate.clone().and(delete_predicate))
+            }
+        };
+
+        // There are three possible sources for potential lists of selected RowGroup indices,
+        // and two for `RowSelection`s.
+        // Selected RowGroup index lists can come from three sources:
+        //   * When task.start and task.length specify a byte range (file splitting);
+        //   * When there are equality delete files that are applicable;
+        //   * When there is a scan predicate and row_group_filtering_enabled = true.
+        // `RowSelection`s can be created in either or both of the following cases:
+        //   * When there are positional delete files that are applicable;
+        //   * When there is a scan predicate and row_selection_enabled = true
+        // Note that row group filtering from predicates only happens when
+        // there is a scan predicate AND row_group_filtering_enabled = true,
+        // but we perform row selection filtering if there are applicable
+        // equality delete files OR (there is a scan predicate AND row_selection_enabled),
+        // since the only implemented method of applying positional deletes is
+        // by using a `RowSelection`.
+        let mut selected_row_group_indices = None;
+        let mut row_selection = None;
+
+        // Filter row groups based on byte range from task.start and task.length.
+        // If both start and length are 0, read the entire file (backwards compatibility).
+        if task.start != 0 || task.length != 0 {
+            let byte_range_filtered_row_groups =
+                Self::filter_row_groups_by_byte_range(
+                    record_batch_reader_builder.metadata(),
+                    task.start,
+                    task.length,
+                )?;
+            selected_row_group_indices = Some(byte_range_filtered_row_groups);
+        }
+
+        if let Some(predicate) = final_predicate {
+            let (iceberg_field_ids, field_id_map) = Self::build_field_id_set_and_map(
+                record_batch_reader_builder.parquet_schema(),
+                record_batch_reader_builder.schema(),
+                &predicate,
+                use_position_fallback,
+            )?;
+
+            let row_filter = Self::get_row_filter(
+                &predicate,
+                record_batch_reader_builder.parquet_schema(),
+                &iceberg_field_ids,
+                &field_id_map,
+            )?;
+            record_batch_reader_builder =
+                record_batch_reader_builder.with_row_filter(row_filter);
+
+            if row_group_filtering_enabled {
+                let predicate_filtered_row_groups =
+                    Self::get_selected_row_group_indices(
+                        &predicate,
+                        record_batch_reader_builder.metadata(),
+                        &field_id_map,
+                        &task.schema,
+                    )?;
+
+                // Merge predicate-based filtering with byte range filtering (if present)
+                // by taking the intersection of both filters
+                selected_row_group_indices = match selected_row_group_indices {
+                    Some(byte_range_filtered) => {
+                        // Keep only row groups that are in both filters
+                        let intersection: Vec<usize> = byte_range_filtered
+                            .into_iter()
+                            .filter(|idx| predicate_filtered_row_groups.contains(idx))
+                            .collect();
+                        Some(intersection)
+                    }
+                    None => Some(predicate_filtered_row_groups),
+                };
+            }
+
+            if row_selection_enabled {
+                row_selection = Some(Self::get_row_selection_for_filter_predicate(
+                    &predicate,
+                    record_batch_reader_builder.metadata(),
+                    &selected_row_group_indices,
+                    &field_id_map,
+                    &task.schema,
+                )?);
+            }
+        }
+
+        let positional_delete_indexes = delete_filter.get_delete_vector(&task);
+
+        if let Some(positional_delete_indexes) = positional_delete_indexes {
+            let delete_row_selection = {
+                let positional_delete_indexes =
+                    positional_delete_indexes.lock().unwrap();
+
+                Self::build_deletes_row_selection(
+                    record_batch_reader_builder.metadata().row_groups(),
+                    &selected_row_group_indices,
+                    &positional_delete_indexes,
+                )
+            }?;
+
+            // merge the row selection from the delete files with the row selection
+            // from the filter predicate, if there is one from the filter predicate
+            row_selection = match row_selection {
+                None => Some(delete_row_selection),
+                Some(filter_row_selection) => {
+                    Some(filter_row_selection.intersection(&delete_row_selection))
+                }
+            };
+        }
+
+        if let Some(row_selection) = row_selection {
+            record_batch_reader_builder =
+                record_batch_reader_builder.with_row_selection(row_selection);
+        }
+
+        if let Some(selected_row_group_indices) = selected_row_group_indices {
+            record_batch_reader_builder = record_batch_reader_builder
+                .with_row_groups(selected_row_group_indices);
+        }
+
+        // Build the batch stream and send all the RecordBatches that it generates
+        // to the requester.
+        // Build the batch stream and send all the RecordBatches that it generates
+        // to the requester.
+        let record_batch_reader = record_batch_reader_builder.build()?;
+        let iterator = record_batch_reader.map(move |batch| match batch {
+            Ok(batch) => {
+                // Process the record batch (type promotion, column reordering, virtual fields, etc.)
+                record_batch_transformer.process_record_batch(batch)
+            }
+            Err(err) => Err(err.into()),
+        });
+
+        Ok(Box::new(iterator))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn create_parquet_record_batch_reader_builder(
+        data_file_path: &str,
+        file_io: FileIO,
+        should_load_page_index: bool,
+        arrow_reader_options: Option<ArrowReaderOptions>,
+    ) -> Result<ParquetRecordBatchReaderBuilder<ArrowFileReader<Box<dyn FileRead>>>>
+    {
+        let parquet_read_options =
+            ParquetReadOptions::default().with_page_index(should_load_page_index);
+        let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
+            data_file_path,
+            file_io,
+            0,
+            parquet_read_options,
+            None,
+            arrow_reader_options,
+        )?;
+
+        Ok(ParquetRecordBatchReaderBuilder::new_with_metadata(
+            parquet_file_reader,
+            arrow_metadata,
+        ))
+    }
+
+    pub(crate) fn create_parquet_record_batch_reader_builder_with_metrics(
+        data_file_path: &str,
+        file_io: FileIO,
+        file_size_in_bytes: u64,
+        scan_metrics: Option<ScanMetrics>,
+    ) -> Result<ParquetRecordBatchReaderBuilder<ArrowFileReader<Box<dyn FileRead>>>>
+    {
+        let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
+            data_file_path,
+            file_io,
+            file_size_in_bytes,
+            ParquetReadOptions::default(),
+            scan_metrics,
+            None,
+        )?;
+
+        Ok(ParquetRecordBatchReaderBuilder::new_with_metadata(
+            parquet_file_reader,
+            arrow_metadata,
+        ))
+    }
+
+    fn open_parquet_file(
+        data_file_path: &str,
+        file_io: FileIO,
+        file_size_in_bytes: u64,
+        parquet_read_options: ParquetReadOptions,
+        scan_metrics: Option<ScanMetrics>,
+        arrow_reader_options: Option<ArrowReaderOptions>,
+    ) -> Result<(ArrowFileReader<Box<dyn FileRead>>, ArrowReaderMetadata)> {
+        let parquet_file = file_io.new_input(data_file_path)?;
+        let opened_file = parquet_file.open_reader()?;
+        let metadata = if file_size_in_bytes == 0 {
+            opened_file.metadata
+        } else {
+            FileMetadata {
+                size: file_size_in_bytes,
+            }
+        };
+        let reader = match scan_metrics {
+            Some(metrics) => Box::new(CountingFileRead::new(
+                opened_file.reader,
+                Arc::clone(metrics.bytes_read_counter()),
+            )) as Box<dyn FileRead>,
+            None => opened_file.reader,
+        };
+        let parquet_file_reader = ArrowFileReader::new(metadata, reader)
+            .with_page_index(parquet_read_options.preload_page_index);
+
+        let options = parquet_read_options
+            .apply_to_options(arrow_reader_options.unwrap_or_default());
+        let metadata_options = options.metadata_options().clone();
+        let decryption_properties = options.file_decryption_properties().cloned();
+        let parquet_metadata = ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::from(
+                parquet_read_options.preload_page_index,
+            ))
+            .with_prefetch_hint(parquet_read_options.metadata_size_hint)
+            .with_metadata_options(Some(metadata_options))
+            .with_decryption_properties(decryption_properties)
+            .parse_and_finish(&parquet_file_reader)
+            .map_err(|err| {
+                Error::new(ErrorKind::Unexpected, "Failed to load Parquet metadata")
+                    .with_source(err)
+            })?;
+        let arrow_metadata =
+            ArrowReaderMetadata::try_new(Arc::new(parquet_metadata), options)
+                .map_err(|err| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "Failed to create Arrow reader metadata",
+                    )
+                    .with_source(err)
+                })?;
+
+        Ok((parquet_file_reader, arrow_metadata))
+    }
+}

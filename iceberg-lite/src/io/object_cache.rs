@@ -18,6 +18,7 @@
 use std::mem::size_of_val;
 use std::sync::Arc;
 
+use crate::encryption::EncryptionManager;
 use crate::io::FileIO;
 use crate::spec::{
     FormatVersion, Manifest, ManifestFile, ManifestList, SchemaId, SnapshotRef,
@@ -45,6 +46,7 @@ pub struct ObjectCache {
     cache: moka::sync::Cache<CachedObjectKey, CachedItem>,
     file_io: FileIO,
     cache_disabled: bool,
+    encryption_manager: Option<Arc<EncryptionManager>>,
 }
 
 impl ObjectCache {
@@ -54,11 +56,32 @@ impl ObjectCache {
         Self::new_with_capacity(file_io, DEFAULT_CACHE_SIZE_BYTES)
     }
 
+    /// Creates a new [`ObjectCache`] with encryption support.
+    pub(crate) fn new_with_encryption(
+        file_io: FileIO,
+        encryption_manager: Option<Arc<EncryptionManager>>,
+    ) -> Self {
+        Self::new_with_capacity_and_encryption(
+            file_io,
+            DEFAULT_CACHE_SIZE_BYTES,
+            encryption_manager,
+        )
+    }
+
     /// Creates a new [`ObjectCache`]
     /// with a specific cache size
     pub(crate) fn new_with_capacity(file_io: FileIO, cache_size_bytes: u64) -> Self {
+        Self::new_with_capacity_and_encryption(file_io, cache_size_bytes, None)
+    }
+
+    /// Creates a new [`ObjectCache`] with a specific cache size and encryption support.
+    pub(crate) fn new_with_capacity_and_encryption(
+        file_io: FileIO,
+        cache_size_bytes: u64,
+        encryption_manager: Option<Arc<EncryptionManager>>,
+    ) -> Self {
         if cache_size_bytes == 0 {
-            Self::with_disabled_cache(file_io)
+            Self::with_disabled_cache_and_encryption(file_io, encryption_manager)
         } else {
             Self {
                 cache: moka::sync::Cache::builder()
@@ -70,6 +93,7 @@ impl ObjectCache {
                     .build(),
                 file_io,
                 cache_disabled: false,
+                encryption_manager,
             }
         }
     }
@@ -77,10 +101,19 @@ impl ObjectCache {
     /// Creates a new [`ObjectCache`]
     /// with caching disabled
     pub(crate) fn with_disabled_cache(file_io: FileIO) -> Self {
+        Self::with_disabled_cache_and_encryption(file_io, None)
+    }
+
+    /// Creates a new [`ObjectCache`] with caching disabled and encryption support.
+    pub(crate) fn with_disabled_cache_and_encryption(
+        file_io: FileIO,
+        encryption_manager: Option<Arc<EncryptionManager>>,
+    ) -> Self {
         Self {
             cache: moka::sync::Cache::new(0),
             file_io,
             cache_disabled: true,
+            encryption_manager,
         }
     }
 
@@ -130,7 +163,11 @@ impl ObjectCache {
     ) -> Result<Arc<ManifestList>> {
         if self.cache_disabled {
             return snapshot
-                .load_manifest_list(&self.file_io, table_metadata)
+                .load_manifest_list_with_encryption(
+                    &self.file_io,
+                    table_metadata,
+                    self.encryption_manager.as_deref(),
+                )
                 .map(Arc::new);
         }
 
@@ -177,8 +214,11 @@ impl ObjectCache {
         snapshot: &SnapshotRef,
         table_metadata: &TableMetadataRef,
     ) -> Result<CachedItem> {
-        let manifest_list =
-            snapshot.load_manifest_list(&self.file_io, table_metadata)?;
+        let manifest_list = snapshot.load_manifest_list_with_encryption(
+            &self.file_io,
+            table_metadata,
+            self.encryption_manager.as_deref(),
+        )?;
 
         Ok(CachedItem::ManifestList(Arc::new(manifest_list)))
     }
@@ -320,6 +360,8 @@ mod tests {
                 self.table
                     .file_io()
                     .new_output(current_snapshot.manifest_list())
+                    .unwrap()
+                    .create_file_writer()
                     .unwrap(),
                 current_snapshot.snapshot_id(),
                 current_snapshot.parent_snapshot_id(),

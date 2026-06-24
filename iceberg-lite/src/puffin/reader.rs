@@ -21,6 +21,7 @@ use crate::Result;
 use crate::io::{FileRead, InputFile};
 use crate::puffin::blob::Blob;
 use crate::puffin::metadata::{BlobMetadata, FileMetadata};
+use crate::puffin::validate_puffin_compression;
 
 /// Puffin reader
 pub struct PuffinReader {
@@ -45,6 +46,8 @@ impl PuffinReader {
 
     /// Returns blob
     pub fn blob(&self, blob_metadata: &BlobMetadata) -> Result<Blob> {
+        validate_puffin_compression(blob_metadata.compression_codec)?;
+
         let file_read = self.input_file.reader()?;
         let start = blob_metadata.offset;
         let end = start + blob_metadata.length;

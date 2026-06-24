@@ -321,6 +321,11 @@ impl OutputFile {
         })
     }
 
+    /// Create a boxed writer that finalizes the storage object when closed.
+    pub fn create_file_writer(&self) -> crate::Result<Box<dyn FileWrite>> {
+        Ok(Box::new(self.create_writer()?))
+    }
+
     /// Notify the storage backend that the file has been fully written and
     /// closed. Object-storage backends upload the staging file here; local
     /// backends treat this as a no-op.
@@ -412,6 +417,12 @@ impl io::Write for OutputFileWriter {
             Some(writer) => writer.flush(),
             None => Ok(()),
         }
+    }
+}
+
+impl FileWrite for OutputFileWriter {
+    fn close(&mut self) -> Result<()> {
+        self.finish()
     }
 }
 

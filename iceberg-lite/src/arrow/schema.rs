@@ -24,19 +24,20 @@ use arrow_array::types::{Decimal128Type, validate_decimal_precision_and_scale};
 use arrow_array::{
     BinaryArray, BooleanArray, Date32Array, Datum as ArrowDatum, Decimal128Array,
     FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array, Scalar,
-    StringArray, TimestampMicrosecondArray,
+    StringArray, TimestampMicrosecondArray, TimestampNanosecondArray,
 };
-use arrow_schema::{DataType, Field, Fields, Schema as ArrowSchema, TimeUnit};
-use num_bigint::BigInt;
+use arrow_schema::{
+    DataType, Field, FieldRef, Fields, Schema as ArrowSchema, TimeUnit,
+};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use parquet::file::statistics::Statistics;
-use rust_decimal::prelude::ToPrimitive;
 use uuid::Uuid;
 
 use crate::error::Result;
+use crate::spec::decimal_utils::i128_from_be_bytes;
 use crate::spec::{
-    Datum, ListType, MapType, NestedField, NestedFieldRef, PrimitiveLiteral,
-    PrimitiveType, Schema, SchemaVisitor, StructType, Type,
+    Datum, FIRST_FIELD_ID, ListType, MapType, NestedField, NestedFieldRef,
+    PrimitiveLiteral, PrimitiveType, Schema, SchemaVisitor, StructType, Type,
 };
 use crate::{Error, ErrorKind};
 
@@ -56,42 +57,42 @@ pub trait ArrowSchemaVisitor {
     type U;
 
     /// Called before struct/list/map field.
-    fn before_field(&mut self, _field: &Field) -> Result<()> {
+    fn before_field(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
     /// Called after struct/list/map field.
-    fn after_field(&mut self, _field: &Field) -> Result<()> {
+    fn after_field(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
     /// Called before list element.
-    fn before_list_element(&mut self, _field: &Field) -> Result<()> {
+    fn before_list_element(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
     /// Called after list element.
-    fn after_list_element(&mut self, _field: &Field) -> Result<()> {
+    fn after_list_element(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
     /// Called before map key.
-    fn before_map_key(&mut self, _field: &Field) -> Result<()> {
+    fn before_map_key(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
     /// Called after map key.
-    fn after_map_key(&mut self, _field: &Field) -> Result<()> {
+    fn after_map_key(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
     /// Called before map value.
-    fn before_map_value(&mut self, _field: &Field) -> Result<()> {
+    fn before_map_value(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
     /// Called after map value.
-    fn after_map_value(&mut self, _field: &Field) -> Result<()> {
+    fn after_map_value(&mut self, _field: &FieldRef) -> Result<()> {
         Ok(())
     }
 
@@ -196,7 +197,7 @@ fn visit_type<V: ArrowSchemaVisitor>(
 /// Visit list types in post order.
 fn visit_list<V: ArrowSchemaVisitor>(
     data_type: &DataType,
-    element_field: &Field,
+    element_field: &FieldRef,
     visitor: &mut V,
 ) -> Result<V::T> {
     visitor.before_list_element(element_field)?;
@@ -222,7 +223,7 @@ fn visit_struct<V: ArrowSchemaVisitor>(
 }
 
 /// Visit schema in post order.
-fn visit_schema<V: ArrowSchemaVisitor>(
+pub(crate) fn visit_schema<V: ArrowSchemaVisitor>(
     schema: &ArrowSchema,
     visitor: &mut V,
 ) -> Result<V::U> {
@@ -246,6 +247,17 @@ pub fn arrow_schema_to_schema(schema: &ArrowSchema) -> Result<Schema> {
     visit_schema(schema, &mut visitor)
 }
 
+/// Convert Arrow schema to Iceberg schema with automatically assigned field IDs.
+///
+/// Unlike [`arrow_schema_to_schema`], this function does not require field IDs in
+/// Arrow field metadata. It assigns unique field IDs starting from 1.
+pub fn arrow_schema_to_schema_auto_assign_ids(
+    schema: &ArrowSchema,
+) -> Result<Schema> {
+    let mut visitor = ArrowSchemaConverter::new_with_field_ids_from(FIRST_FIELD_ID);
+    visit_schema(schema, &mut visitor)
+}
+
 /// Convert Arrow type to iceberg type.
 pub fn arrow_type_to_type(ty: &DataType) -> Result<Type> {
     let mut visitor = ArrowSchemaConverter::new();
@@ -254,7 +266,7 @@ pub fn arrow_type_to_type(ty: &DataType) -> Result<Type> {
 
 const ARROW_FIELD_DOC_KEY: &str = "doc";
 
-pub(super) fn get_field_id(field: &Field) -> Result<i32> {
+pub(super) fn get_field_id_from_metadata(field: &FieldRef) -> Result<i32> {
     if let Some(value) = field.metadata().get(PARQUET_FIELD_ID_META_KEY) {
         return value.parse::<i32>().map_err(|e| {
             Error::new(
@@ -271,21 +283,45 @@ pub(super) fn get_field_id(field: &Field) -> Result<i32> {
     ))
 }
 
-fn get_field_doc(field: &Field) -> Option<String> {
+fn get_field_doc(field: &FieldRef) -> Option<String> {
     if let Some(value) = field.metadata().get(ARROW_FIELD_DOC_KEY) {
         return Some(value.clone());
     }
     None
 }
 
-struct ArrowSchemaConverter;
+struct ArrowSchemaConverter {
+    reassign_field_ids_from: Option<i32>,
+    next_field_id: i32,
+}
 
 impl ArrowSchemaConverter {
     fn new() -> Self {
-        Self {}
+        Self {
+            reassign_field_ids_from: None,
+            next_field_id: 0,
+        }
+    }
+
+    fn new_with_field_ids_from(start_from: i32) -> Self {
+        Self {
+            reassign_field_ids_from: Some(start_from),
+            next_field_id: 0,
+        }
+    }
+
+    fn get_field_id(&mut self, field: &FieldRef) -> Result<i32> {
+        if self.reassign_field_ids_from.is_some() {
+            let temp_id = self.next_field_id;
+            self.next_field_id += 1;
+            Ok(temp_id)
+        } else {
+            get_field_id_from_metadata(field)
+        }
     }
 
     fn convert_fields(
+        &mut self,
         fields: &Fields,
         field_results: &[Type],
     ) -> Result<Vec<NestedFieldRef>> {
@@ -293,7 +329,7 @@ impl ArrowSchemaConverter {
         for i in 0..fields.len() {
             let field = &fields[i];
             let field_type = &field_results[i];
-            let id = get_field_id(field)?;
+            let id = self.get_field_id(field)?;
             let doc = get_field_doc(field);
             let nested_field = NestedField {
                 id,
@@ -319,8 +355,11 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
         schema: &ArrowSchema,
         values: Vec<Self::T>,
     ) -> Result<Self::U> {
-        let fields = Self::convert_fields(schema.fields(), &values)?;
-        let builder = Schema::builder().with_fields(fields);
+        let fields = self.convert_fields(schema.fields(), &values)?;
+        let mut builder = Schema::builder().with_fields(fields);
+        if let Some(start_from) = self.reassign_field_ids_from {
+            builder = builder.with_reassigned_field_ids(start_from);
+        }
         builder.build()
     }
 
@@ -329,7 +368,7 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
         fields: &Fields,
         results: Vec<Self::T>,
     ) -> Result<Self::T> {
-        let fields = Self::convert_fields(fields, &results)?;
+        let fields = self.convert_fields(fields, &results)?;
         Ok(Type::Struct(StructType::new(fields)))
     }
 
@@ -346,7 +385,7 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
             }
         };
 
-        let id = get_field_id(element_field)?;
+        let id = self.get_field_id(element_field)?;
         let doc = get_field_doc(element_field);
         let mut element_field = NestedField::list_element(
             id,
@@ -379,7 +418,7 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
                     let key_field = &fields[0];
                     let value_field = &fields[1];
 
-                    let key_id = get_field_id(key_field)?;
+                    let key_id = self.get_field_id(key_field)?;
                     let key_doc = get_field_doc(key_field);
                     let mut key_field =
                         NestedField::map_key_element(key_id, key_value.clone());
@@ -388,7 +427,7 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
                     }
                     let key_field = Arc::new(key_field);
 
-                    let value_id = get_field_id(value_field)?;
+                    let value_id = self.get_field_id(value_field)?;
                     let value_doc = get_field_doc(value_field);
                     let mut value_field = NestedField::map_value_element(
                         value_id,
@@ -703,7 +742,8 @@ impl SchemaVisitor for ToArrowSchemaConverter {
             )),
             crate::spec::PrimitiveType::Fixed(len) => {
                 Ok(ArrowSchemaOrFieldOrType::Type(
-                    len.to_i32()
+                    i32::try_from(*len)
+                        .ok()
                         .map(DataType::FixedSizeBinary)
                         .unwrap_or(DataType::LargeBinary),
                 ))
@@ -750,10 +790,10 @@ pub(crate) fn get_arrow_datum(
             Ok(Arc::new(Int64Array::new_scalar(*value)))
         }
         (PrimitiveType::Float, PrimitiveLiteral::Float(value)) => {
-            Ok(Arc::new(Float32Array::new_scalar(value.to_f32().unwrap())))
+            Ok(Arc::new(Float32Array::new_scalar(value.into_inner())))
         }
         (PrimitiveType::Double, PrimitiveLiteral::Double(value)) => {
-            Ok(Arc::new(Float64Array::new_scalar(value.to_f64().unwrap())))
+            Ok(Arc::new(Float64Array::new_scalar(value.into_inner())))
         }
         (PrimitiveType::String, PrimitiveLiteral::String(value)) => {
             Ok(Arc::new(StringArray::new_scalar(value.as_str())))
@@ -773,6 +813,15 @@ pub(crate) fn get_arrow_datum(
                     .with_timezone_utc(),
             )))
         }
+        (PrimitiveType::TimestampNs, PrimitiveLiteral::Long(value)) => {
+            Ok(Arc::new(TimestampNanosecondArray::new_scalar(*value)))
+        }
+        (PrimitiveType::TimestamptzNs, PrimitiveLiteral::Long(value)) => {
+            Ok(Arc::new(Scalar::new(
+                TimestampNanosecondArray::new(vec![*value; 1].into(), None)
+                    .with_timezone_utc(),
+            )))
+        }
         (
             PrimitiveType::Decimal { precision, scale },
             PrimitiveLiteral::Int128(value),
@@ -786,6 +835,13 @@ pub(crate) fn get_arrow_datum(
             let bytes = Uuid::from_u128(*value).into_bytes();
             let array =
                 FixedSizeBinaryArray::try_from_iter(vec![bytes].into_iter()).unwrap();
+            Ok(Arc::new(Scalar::new(array)))
+        }
+        (PrimitiveType::Fixed(_), PrimitiveLiteral::Binary(value)) => {
+            let array = FixedSizeBinaryArray::try_from_iter(std::iter::once(
+                value.as_slice(),
+            ))
+            .map_err(|e| Error::new(ErrorKind::DataInvalid, e.to_string()))?;
             Ok(Arc::new(Scalar::new(array)))
         }
 
@@ -872,10 +928,9 @@ pub(crate) fn get_parquet_stat_min_as_datum(
             let Some(bytes) = stats.min_bytes_opt() else {
                 return Ok(None);
             };
-            let unscaled_value = BigInt::from_signed_bytes_be(bytes);
             Some(Datum::new(
                 primitive_type.clone(),
-                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(
+                PrimitiveLiteral::Int128(i128_from_be_bytes(bytes).ok_or_else(
                     || {
                         Error::new(
                             ErrorKind::DataInvalid,
@@ -1021,10 +1076,9 @@ pub(crate) fn get_parquet_stat_max_as_datum(
             let Some(bytes) = stats.max_bytes_opt() else {
                 return Ok(None);
             };
-            let unscaled_value = BigInt::from_signed_bytes_be(bytes);
             Some(Datum::new(
                 primitive_type.clone(),
-                PrimitiveLiteral::Int128(unscaled_value.to_i128().ok_or_else(
+                PrimitiveLiteral::Int128(i128_from_be_bytes(bytes).ok_or_else(
                     || {
                         Error::new(
                             ErrorKind::DataInvalid,
@@ -1166,15 +1220,191 @@ pub fn datum_to_arrow_type_with_ree(datum: &Datum) -> DataType {
     }
 }
 
+/// A visitor that strips metadata from an Arrow schema.
+///
+/// This visitor recursively removes all metadata from fields at every level of the schema,
+/// including nested struct, list, and map fields. This is useful for schema comparison
+/// where metadata differences should be ignored.
+struct MetadataStripVisitor {
+    /// Stack to track field information during traversal
+    field_stack: Vec<Field>,
+}
+
+impl MetadataStripVisitor {
+    fn new() -> Self {
+        Self {
+            field_stack: Vec::new(),
+        }
+    }
+}
+
+impl ArrowSchemaVisitor for MetadataStripVisitor {
+    type T = Field;
+    type U = ArrowSchema;
+
+    fn before_field(&mut self, field: &FieldRef) -> Result<()> {
+        // Store field name and nullability for later reconstruction
+        self.field_stack.push(Field::new(
+            field.name(),
+            DataType::Null, // Placeholder, will be replaced
+            field.is_nullable(),
+        ));
+        Ok(())
+    }
+
+    fn after_field(&mut self, _field: &FieldRef) -> Result<()> {
+        Ok(())
+    }
+
+    fn schema(
+        &mut self,
+        _schema: &ArrowSchema,
+        values: Vec<Self::T>,
+    ) -> Result<Self::U> {
+        Ok(ArrowSchema::new(values))
+    }
+
+    fn r#struct(
+        &mut self,
+        _fields: &Fields,
+        results: Vec<Self::T>,
+    ) -> Result<Self::T> {
+        // Pop the struct field from the stack
+        let field_info = self.field_stack.pop().ok_or_else(|| {
+            Error::new(ErrorKind::Unexpected, "Field stack underflow in struct")
+        })?;
+
+        // Reconstruct struct field without metadata
+        Ok(Field::new(
+            field_info.name(),
+            DataType::Struct(Fields::from(results)),
+            field_info.is_nullable(),
+        ))
+    }
+
+    fn list(&mut self, list: &DataType, value: Self::T) -> Result<Self::T> {
+        // Pop the list field from the stack
+        let field_info = self.field_stack.pop().ok_or_else(|| {
+            Error::new(ErrorKind::Unexpected, "Field stack underflow in list")
+        })?;
+
+        // Reconstruct list field without metadata
+        let list_type = match list {
+            DataType::List(_) => DataType::List(Arc::new(value)),
+            DataType::LargeList(_) => DataType::LargeList(Arc::new(value)),
+            DataType::FixedSizeList(_, size) => {
+                DataType::FixedSizeList(Arc::new(value), *size)
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Expected list type, got {list}"),
+                ));
+            }
+        };
+
+        Ok(Field::new(
+            field_info.name(),
+            list_type,
+            field_info.is_nullable(),
+        ))
+    }
+
+    fn map(
+        &mut self,
+        map: &DataType,
+        key_value: Self::T,
+        value: Self::T,
+    ) -> Result<Self::T> {
+        // Pop the map field from the stack
+        let field_info = self.field_stack.pop().ok_or_else(|| {
+            Error::new(ErrorKind::Unexpected, "Field stack underflow in map")
+        })?;
+
+        // Reconstruct the map's struct field (contains key and value)
+        let struct_field = Field::new(
+            DEFAULT_MAP_FIELD_NAME,
+            DataType::Struct(Fields::from(vec![key_value, value])),
+            false,
+        );
+
+        // Get the sorted flag from the original map type
+        let sorted = match map {
+            DataType::Map(_, sorted) => *sorted,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Expected map type, got {map}"),
+                ));
+            }
+        };
+
+        // Reconstruct map field without metadata
+        Ok(Field::new(
+            field_info.name(),
+            DataType::Map(Arc::new(struct_field), sorted),
+            field_info.is_nullable(),
+        ))
+    }
+
+    fn primitive(&mut self, p: &DataType) -> Result<Self::T> {
+        // Pop the primitive field from the stack
+        let field_info = self.field_stack.pop().ok_or_else(|| {
+            Error::new(ErrorKind::Unexpected, "Field stack underflow in primitive")
+        })?;
+
+        // Return field without metadata
+        Ok(Field::new(
+            field_info.name(),
+            p.clone(),
+            field_info.is_nullable(),
+        ))
+    }
+}
+
+/// Strips all metadata from an Arrow schema and its nested fields.
+///
+/// This function recursively removes metadata from all fields at every level of the schema,
+/// including nested struct, list, and map fields. This is useful for schema comparison
+/// where metadata differences should be ignored.
+///
+/// # Arguments
+/// * `schema` - The Arrow schema to strip metadata from
+///
+/// # Returns
+/// A new Arrow schema with all metadata removed, or an error if the schema structure
+/// is invalid.
+///
+/// # Example
+/// ```
+/// use std::collections::HashMap;
+///
+/// use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+/// use iceberg_lite::arrow::strip_metadata_from_schema;
+///
+/// let mut metadata = HashMap::new();
+/// metadata.insert("key".to_string(), "value".to_string());
+///
+/// let field = Field::new("col1", DataType::Int32, false).with_metadata(metadata);
+/// let schema = ArrowSchema::new(vec![field]);
+///
+/// let stripped = strip_metadata_from_schema(&schema).unwrap();
+/// assert!(stripped.field(0).metadata().is_empty());
+/// ```
+pub fn strip_metadata_from_schema(schema: &ArrowSchema) -> Result<ArrowSchema> {
+    let mut visitor = MetadataStripVisitor::new();
+    visit_schema(schema, &mut visitor)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
-    use rust_decimal::Decimal;
 
     use super::*;
+    use crate::spec::decimal_utils::decimal_new;
     use crate::spec::{Literal, Schema};
 
     /// Create a simple field with metadata.
@@ -1476,6 +1706,103 @@ mod tests {
         let schema = iceberg_schema_for_arrow_schema_to_schema_test();
         let converted_schema = arrow_schema_to_schema(&arrow_schema).unwrap();
         pretty_assertions::assert_eq!(converted_schema, schema);
+    }
+
+    #[test]
+    fn test_arrow_schema_to_schema_auto_assign_ids() {
+        let arrow_schema = ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new(
+                "tags",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Field::new(
+                "address",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("street", DataType::Utf8, true),
+                    Field::new("city", DataType::Utf8, false),
+                ])),
+                true,
+            ),
+            Field::new(
+                "attributes",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        DEFAULT_MAP_FIELD_NAME,
+                        DataType::Struct(Fields::from(vec![
+                            Field::new("key", DataType::Utf8, false),
+                            Field::new("value", DataType::Utf8, true),
+                        ])),
+                        false,
+                    )),
+                    false,
+                ),
+                true,
+            ),
+        ]);
+
+        let schema = arrow_schema_to_schema_auto_assign_ids(&arrow_schema).unwrap();
+        let expected = Schema::builder()
+            .with_fields(vec![
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long))
+                    .into(),
+                NestedField::optional(
+                    2,
+                    "tags",
+                    Type::List(ListType {
+                        element_field: NestedField::list_element(
+                            5,
+                            Type::Primitive(PrimitiveType::String),
+                            false,
+                        )
+                        .into(),
+                    }),
+                )
+                .into(),
+                NestedField::optional(
+                    3,
+                    "address",
+                    Type::Struct(StructType::new(vec![
+                        NestedField::optional(
+                            6,
+                            "street",
+                            Type::Primitive(PrimitiveType::String),
+                        )
+                        .into(),
+                        NestedField::required(
+                            7,
+                            "city",
+                            Type::Primitive(PrimitiveType::String),
+                        )
+                        .into(),
+                    ])),
+                )
+                .into(),
+                NestedField::optional(
+                    4,
+                    "attributes",
+                    Type::Map(MapType {
+                        key_field: NestedField::map_key_element(
+                            8,
+                            Type::Primitive(PrimitiveType::String),
+                        )
+                        .into(),
+                        value_field: NestedField::map_value_element(
+                            9,
+                            Type::Primitive(PrimitiveType::String),
+                            false,
+                        )
+                        .into(),
+                    }),
+                )
+                .into(),
+            ])
+            .build()
+            .unwrap();
+
+        pretty_assertions::assert_eq!(schema, expected);
+        assert_eq!(schema.highest_field_id(), 9);
     }
 
     fn arrow_schema_for_schema_to_arrow_schema_test() -> ArrowSchema {
@@ -2020,7 +2347,7 @@ mod tests {
         }
         {
             let datum =
-                Datum::decimal_with_precision(Decimal::new(123, 2), 30).unwrap();
+                Datum::decimal_with_precision(decimal_new(123, 2), 30).unwrap();
             let arrow_datum = get_arrow_datum(&datum).unwrap();
             let (array, is_scalar) = arrow_datum.get();
             let array = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
@@ -2040,6 +2367,18 @@ mod tests {
                 .unwrap();
             assert!(is_scalar);
             assert_eq!(array.value(0), [66u8; 16]);
+        }
+        {
+            let datum = Datum::fixed(vec![1u8, 2, 3, 4, 5, 6, 7, 8]);
+            let arrow_datum = get_arrow_datum(&datum).unwrap();
+            let (array, is_scalar) = arrow_datum.get();
+            let array = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            assert!(is_scalar);
+            assert_eq!(array.value_length(), 8);
+            assert_eq!(array.value(0), &[1u8, 2, 3, 4, 5, 6, 7, 8]);
         }
     }
 }

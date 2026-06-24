@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::Result;
 use crate::arrow::ArrowReader;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
+use crate::arrow::scan_metrics::ScanMetrics;
 use crate::io::FileIO;
 use crate::scan::{ArrowRecordBatchIterator, FileScanTaskDeleteFile};
 use crate::spec::{Schema, SchemaRef};
@@ -40,28 +41,39 @@ pub trait DeleteFileLoader {
 #[derive(Clone, Debug)]
 pub(crate) struct BasicDeleteFileLoader {
     file_io: FileIO,
+    scan_metrics: Option<ScanMetrics>,
 }
 
 #[allow(unused_variables)]
 impl BasicDeleteFileLoader {
     pub fn new(file_io: FileIO) -> Self {
-        BasicDeleteFileLoader { file_io }
+        BasicDeleteFileLoader {
+            file_io,
+            scan_metrics: None,
+        }
     }
+
+    pub(crate) fn with_scan_metrics(mut self, scan_metrics: ScanMetrics) -> Self {
+        self.scan_metrics = Some(scan_metrics);
+        self
+    }
+
     /// Loads a RecordBatchIterator for a given datafile.
     pub(crate) fn parquet_to_batch_iterator(
         &self,
         data_file_path: &str,
+        file_size_in_bytes: u64,
     ) -> Result<ArrowRecordBatchIterator> {
         /*
            Essentially a super-cut-down ArrowReader. We can't use ArrowReader directly
            as that introduces a circular dependency.
         */
         let record_batch_reader =
-            ArrowReader::create_parquet_record_batch_reader_builder(
+            ArrowReader::create_parquet_record_batch_reader_builder_with_metrics(
                 data_file_path,
                 self.file_io.clone(),
-                false,
-                None,
+                file_size_in_bytes,
+                self.scan_metrics.clone(),
             )?
             .build()?;
 
@@ -99,7 +111,8 @@ impl DeleteFileLoader for BasicDeleteFileLoader {
         task: &FileScanTaskDeleteFile,
         schema: SchemaRef,
     ) -> Result<ArrowRecordBatchIterator> {
-        let raw_batch_iterator = self.parquet_to_batch_iterator(&task.file_path)?;
+        let raw_batch_iterator =
+            self.parquet_to_batch_iterator(&task.file_path, task.file_size_in_bytes)?;
 
         // For equality deletes, only evolve the equality_ids columns.
         // For positional deletes (equality_ids is None), use all field IDs.

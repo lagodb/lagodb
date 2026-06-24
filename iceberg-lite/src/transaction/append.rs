@@ -124,6 +124,14 @@ impl TransactionAction for FastAppendAction {
 
 struct FastAppendOperation;
 
+impl FastAppendOperation {
+    fn should_keep_existing_manifest(entry: &ManifestFile) -> bool {
+        entry.has_added_files()
+            || entry.has_existing_files()
+            || entry.has_deleted_files()
+    }
+}
+
 impl SnapshotProduceOperation for FastAppendOperation {
     fn operation(&self) -> Operation {
         Operation::Append
@@ -153,7 +161,7 @@ impl SnapshotProduceOperation for FastAppendOperation {
         Ok(manifest_list
             .entries()
             .iter()
-            .filter(|entry| entry.has_added_files() || entry.has_existing_files())
+            .filter(|entry| Self::should_keep_existing_manifest(entry))
             .cloned()
             .collect())
     }
@@ -166,11 +174,45 @@ mod tests {
 
     use crate::spec::{
         DataContentType, DataFileBuilder, DataFileFormat, Literal, MAIN_BRANCH,
-        Struct,
+        ManifestContentType, ManifestFile, Struct,
     };
     use crate::transaction::tests::make_v2_minimal_table;
     use crate::transaction::{Transaction, TransactionAction};
     use crate::{TableRequirement, TableUpdate};
+
+    fn manifest_with_counts(
+        added_files_count: u32,
+        existing_files_count: u32,
+        deleted_files_count: u32,
+    ) -> ManifestFile {
+        ManifestFile {
+            manifest_path: "manifest.avro".to_string(),
+            manifest_length: 1,
+            partition_spec_id: 0,
+            content: ManifestContentType::Data,
+            sequence_number: 1,
+            min_sequence_number: 1,
+            added_snapshot_id: 1,
+            added_files_count: Some(added_files_count),
+            existing_files_count: Some(existing_files_count),
+            deleted_files_count: Some(deleted_files_count),
+            added_rows_count: None,
+            existing_rows_count: None,
+            deleted_rows_count: None,
+            partitions: None,
+            key_metadata: None,
+            first_row_id: None,
+        }
+    }
+
+    #[test]
+    fn test_fast_append_preserves_delete_only_manifest() {
+        let delete_only_manifest = manifest_with_counts(0, 0, 1);
+
+        assert!(super::FastAppendOperation::should_keep_existing_manifest(
+            &delete_only_manifest
+        ));
+    }
 
     #[test]
     fn test_empty_data_append_action() {

@@ -20,11 +20,15 @@
 use std::sync::Arc;
 
 use crate::arrow::ArrowReaderBuilder;
+use crate::encryption::EncryptionManager;
+use crate::encryption::kms::KeyManagementClient;
 use crate::inspect::MetadataTable;
 use crate::io::FileIO;
 use crate::io::object_cache::ObjectCache;
 use crate::scan::TableScanBuilder;
-use crate::spec::{SchemaRef, TableMetadata, TableMetadataRef};
+use crate::spec::{
+    ManifestListReader, SchemaRef, SnapshotRef, TableMetadata, TableMetadataRef,
+};
 use crate::{Error, ErrorKind, Result, TableIdent};
 
 /// Builder to create table scan.
@@ -33,6 +37,7 @@ pub struct TableBuilder {
     metadata_location: Option<String>,
     metadata: Option<TableMetadataRef>,
     identifier: Option<TableIdent>,
+    kms_client: Option<Arc<dyn KeyManagementClient>>,
     readonly: bool,
     disable_cache: bool,
     cache_size_bytes: Option<u64>,
@@ -45,6 +50,7 @@ impl TableBuilder {
             metadata_location: None,
             metadata: None,
             identifier: None,
+            kms_client: None,
             readonly: false,
             disable_cache: false,
             cache_size_bytes: None,
@@ -98,6 +104,12 @@ impl TableBuilder {
         self
     }
 
+    /// optional - sets the KMS client used to unwrap keys for table encryption.
+    pub fn kms_client(mut self, kms_client: Arc<dyn KeyManagementClient>) -> Self {
+        self.kms_client = Some(kms_client);
+        self
+    }
+
     /// build the Table
     pub fn build(self) -> Result<Table> {
         let Self {
@@ -105,6 +117,7 @@ impl TableBuilder {
             metadata_location,
             metadata,
             identifier,
+            kms_client,
             readonly,
             disable_cache,
             cache_size_bytes,
@@ -131,15 +144,40 @@ impl TableBuilder {
             ));
         };
 
+        let encryption_manager =
+            EncryptionManager::from_table_metadata(kms_client.as_ref(), &metadata)?;
+
         let object_cache = if disable_cache {
-            Arc::new(ObjectCache::with_disabled_cache(file_io.clone()))
+            if encryption_manager.is_some() {
+                Arc::new(ObjectCache::with_disabled_cache_and_encryption(
+                    file_io.clone(),
+                    encryption_manager.clone(),
+                ))
+            } else {
+                Arc::new(ObjectCache::with_disabled_cache(file_io.clone()))
+            }
         } else if let Some(cache_size_bytes) = cache_size_bytes {
-            Arc::new(ObjectCache::new_with_capacity(
-                file_io.clone(),
-                cache_size_bytes,
-            ))
+            if encryption_manager.is_some() {
+                Arc::new(ObjectCache::new_with_capacity_and_encryption(
+                    file_io.clone(),
+                    cache_size_bytes,
+                    encryption_manager.clone(),
+                ))
+            } else {
+                Arc::new(ObjectCache::new_with_capacity(
+                    file_io.clone(),
+                    cache_size_bytes,
+                ))
+            }
         } else {
-            Arc::new(ObjectCache::new(file_io.clone()))
+            if encryption_manager.is_some() {
+                Arc::new(ObjectCache::new_with_encryption(
+                    file_io.clone(),
+                    encryption_manager.clone(),
+                ))
+            } else {
+                Arc::new(ObjectCache::new(file_io.clone()))
+            }
         };
 
         Ok(Table {
@@ -149,6 +187,7 @@ impl TableBuilder {
             identifier,
             readonly,
             object_cache,
+            encryption_manager,
         })
     }
 }
@@ -162,6 +201,7 @@ pub struct Table {
     identifier: TableIdent,
     readonly: bool,
     object_cache: Arc<ObjectCache>,
+    encryption_manager: Option<Arc<EncryptionManager>>,
 }
 
 impl Table {
@@ -223,6 +263,21 @@ impl Table {
     /// Returns this table's object cache
     pub(crate) fn object_cache(&self) -> Arc<ObjectCache> {
         self.object_cache.clone()
+    }
+
+    /// Returns the [`EncryptionManager`] for this table, if encryption is configured.
+    pub fn encryption_manager(&self) -> Option<&EncryptionManager> {
+        self.encryption_manager.as_deref()
+    }
+
+    /// Creates a synchronous manifest-list reader for a snapshot.
+    pub fn manifest_list_reader(&self, snapshot: SnapshotRef) -> ManifestListReader {
+        ManifestListReader::new(
+            snapshot,
+            self.file_io.clone(),
+            self.metadata.clone(),
+            self.encryption_manager.clone(),
+        )
     }
 
     /// Creates a table scan.

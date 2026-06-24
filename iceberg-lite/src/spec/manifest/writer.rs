@@ -25,6 +25,7 @@ use super::{
     Datum, FormatVersion, ManifestContentType, PartitionSpec, PrimitiveType,
     UNASSIGNED_SEQUENCE_NUMBER,
 };
+use crate::encryption::EncryptedOutputFile;
 use crate::error::Result;
 use crate::io::OutputFile;
 use crate::spec::manifest::_serde::{ManifestEntryV1, ManifestEntryV2};
@@ -32,13 +33,39 @@ use crate::spec::manifest::{manifest_schema_v1, manifest_schema_v2};
 use crate::spec::{
     DataContentType, DataFile, FieldSummary, ManifestEntry, ManifestFile,
     ManifestMetadata, ManifestStatus, PrimitiveLiteral, SchemaRef, StructType,
-    UNASSIGNED_SNAPSHOT_ID,
 };
 use crate::{Error, ErrorKind};
 
+/// Placeholder for snapshot ID. The field with this value must be replaced
+/// with the actual snapshot ID before it is committed.
+const UNASSIGNED_SNAPSHOT_ID: i64 = -1;
+
+enum ManifestWriterOutput {
+    Plain(OutputFile),
+    Encrypted(EncryptedOutputFile),
+}
+
+impl ManifestWriterOutput {
+    fn location(&self) -> &str {
+        match self {
+            Self::Plain(output) => output.location(),
+            Self::Encrypted(output) => output.location(),
+        }
+    }
+
+    fn write(&self, content: &[u8]) -> Result<()> {
+        match self {
+            Self::Plain(output) => output.write(content),
+            Self::Encrypted(output) => {
+                output.write(bytes::Bytes::copy_from_slice(content))
+            }
+        }
+    }
+}
+
 /// The builder used to create a [`ManifestWriter`].
 pub struct ManifestWriterBuilder {
-    output: OutputFile,
+    output: ManifestWriterOutput,
     snapshot_id: Option<i64>,
     key_metadata: Option<Vec<u8>>,
     schema: SchemaRef,
@@ -55,7 +82,24 @@ impl ManifestWriterBuilder {
         partition_spec: PartitionSpec,
     ) -> Self {
         Self {
-            output,
+            output: ManifestWriterOutput::Plain(output),
+            snapshot_id,
+            key_metadata,
+            schema,
+            partition_spec,
+        }
+    }
+
+    /// Create a new builder from an [`EncryptedOutputFile`].
+    pub fn new_from_encrypted(
+        encrypted_output: EncryptedOutputFile,
+        snapshot_id: Option<i64>,
+        key_metadata: Option<Vec<u8>>,
+        schema: SchemaRef,
+        partition_spec: PartitionSpec,
+    ) -> Self {
+        Self {
+            output: ManifestWriterOutput::Encrypted(encrypted_output),
             snapshot_id,
             key_metadata,
             schema,
@@ -72,7 +116,7 @@ impl ManifestWriterBuilder {
             .format_version(FormatVersion::V1)
             .content(ManifestContentType::Data)
             .build();
-        ManifestWriter::new(
+        ManifestWriter::new_with_output(
             self.output,
             self.snapshot_id,
             self.key_metadata,
@@ -90,7 +134,7 @@ impl ManifestWriterBuilder {
             .format_version(FormatVersion::V2)
             .content(ManifestContentType::Data)
             .build();
-        ManifestWriter::new(
+        ManifestWriter::new_with_output(
             self.output,
             self.snapshot_id,
             self.key_metadata,
@@ -108,7 +152,7 @@ impl ManifestWriterBuilder {
             .format_version(FormatVersion::V2)
             .content(ManifestContentType::Deletes)
             .build();
-        ManifestWriter::new(
+        ManifestWriter::new_with_output(
             self.output,
             self.snapshot_id,
             self.key_metadata,
@@ -126,7 +170,7 @@ impl ManifestWriterBuilder {
             .format_version(FormatVersion::V3)
             .content(ManifestContentType::Data)
             .build();
-        ManifestWriter::new(
+        ManifestWriter::new_with_output(
             self.output,
             self.snapshot_id,
             self.key_metadata,
@@ -146,7 +190,7 @@ impl ManifestWriterBuilder {
             .format_version(FormatVersion::V3)
             .content(ManifestContentType::Deletes)
             .build();
-        ManifestWriter::new(
+        ManifestWriter::new_with_output(
             self.output,
             self.snapshot_id,
             self.key_metadata,
@@ -158,7 +202,7 @@ impl ManifestWriterBuilder {
 
 /// A manifest writer.
 pub struct ManifestWriter {
-    output: OutputFile,
+    output: ManifestWriterOutput,
 
     snapshot_id: Option<i64>,
 
@@ -180,9 +224,8 @@ pub struct ManifestWriter {
 }
 
 impl ManifestWriter {
-    /// Create a new manifest writer.
-    pub(crate) fn new(
-        output: OutputFile,
+    fn new_with_output(
+        output: ManifestWriterOutput,
         snapshot_id: Option<i64>,
         key_metadata: Option<Vec<u8>>,
         metadata: ManifestMetadata,
@@ -458,11 +501,14 @@ impl ManifestWriter {
             "format-version".to_string(),
             (self.metadata.format_version as u8).to_string(),
         )?;
-        if self.metadata.format_version == FormatVersion::V2 {
-            avro_writer.add_user_metadata(
-                "content".to_string(),
-                self.metadata.content.to_string(),
-            )?;
+        match self.metadata.format_version {
+            FormatVersion::V1 => {}
+            FormatVersion::V2 | FormatVersion::V3 => {
+                avro_writer.add_user_metadata(
+                    "content".to_string(),
+                    self.metadata.content.to_string(),
+                )?;
+            }
         }
 
         let partition_summary =

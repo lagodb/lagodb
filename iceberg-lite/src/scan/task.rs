@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize, Serializer};
+use typed_builder::TypedBuilder;
 
 use crate::expr::BoundPredicate;
 use crate::spec::{
@@ -51,8 +52,12 @@ where
 }
 
 /// A task to scan part of file.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TypedBuilder)]
+#[builder(field_defaults(setter(prefix = "with_")))]
 pub struct FileScanTask {
+    /// The total size of the data file in bytes, from the manifest entry.
+    /// Used to avoid an additional metadata lookup when reading Parquet footers.
+    pub file_size_in_bytes: u64,
     /// The start offset of the file to scan.
     pub start: u64,
     /// The length of the file to scan.
@@ -61,6 +66,7 @@ pub struct FileScanTask {
     ///
     /// This is an optional field, and only available if we are
     /// reading the entire data file.
+    #[builder(default)]
     pub record_count: Option<u64>,
 
     /// The data file path corresponding to the task.
@@ -75,9 +81,11 @@ pub struct FileScanTask {
     pub project_field_ids: Vec<i32>,
     /// The predicate to filter.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
     pub predicate: Option<BoundPredicate>,
 
     /// The list of delete files that may need to be applied to this data file
+    #[builder(default)]
     pub deletes: Vec<FileScanTaskDeleteFile>,
 
     /// Partition data from the manifest entry, used to identify which columns can use
@@ -87,6 +95,7 @@ pub struct FileScanTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "serialize_not_implemented")]
     #[serde(deserialize_with = "deserialize_not_implemented")]
+    #[builder(default)]
     pub partition: Option<Struct>,
 
     /// The partition spec for this file, used to distinguish identity transforms
@@ -96,6 +105,7 @@ pub struct FileScanTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "serialize_not_implemented")]
     #[serde(deserialize_with = "deserialize_not_implemented")]
+    #[builder(default)]
     pub partition_spec: Option<Arc<PartitionSpec>>,
 
     /// Name mapping from table metadata (property: schema.name-mapping.default),
@@ -105,6 +115,7 @@ pub struct FileScanTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "serialize_not_implemented")]
     #[serde(deserialize_with = "deserialize_not_implemented")]
+    #[builder(default)]
     pub name_mapping: Option<Arc<NameMapping>>,
 
     /// Whether this scan task should treat column names as case-sensitive when binding predicates.
@@ -148,6 +159,7 @@ impl From<&DeleteFileContext> for FileScanTaskDeleteFile {
     fn from(ctx: &DeleteFileContext) -> Self {
         FileScanTaskDeleteFile {
             file_path: ctx.manifest_entry.file_path().to_string(),
+            file_size_in_bytes: ctx.manifest_entry.file_size_in_bytes(),
             file_type: ctx.manifest_entry.content_type(),
             partition_spec_id: ctx.partition_spec_id,
             equality_ids: ctx.manifest_entry.data_file.equality_ids.clone(),
@@ -156,10 +168,14 @@ impl From<&DeleteFileContext> for FileScanTaskDeleteFile {
 }
 
 /// A task to scan part of file.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TypedBuilder)]
+#[builder(field_defaults(setter(prefix = "with_")))]
 pub struct FileScanTaskDeleteFile {
     /// The delete file path
     pub file_path: String,
+
+    /// The total size of the delete file in bytes, from the manifest entry.
+    pub file_size_in_bytes: u64,
 
     /// delete file type
     pub file_type: DataContentType,
@@ -168,5 +184,6 @@ pub struct FileScanTaskDeleteFile {
     pub partition_spec_id: i32,
 
     /// equality ids for equality deletes (null for anything other than equality-deletes)
+    #[builder(default)]
     pub equality_ids: Option<Vec<i32>>,
 }

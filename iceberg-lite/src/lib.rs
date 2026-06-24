@@ -1,6 +1,8 @@
 pub mod arrow;
 pub mod avro;
 pub mod catalog;
+pub mod compression;
+pub mod encryption;
 pub mod engine;
 pub mod error;
 pub mod expr;
@@ -18,7 +20,7 @@ pub mod metadata_columns;
 pub mod test_utils;
 pub mod transaction;
 pub mod transform;
-mod utils;
+pub mod util;
 
 pub use catalog::*;
 pub use error::{Error, ErrorKind, Result};

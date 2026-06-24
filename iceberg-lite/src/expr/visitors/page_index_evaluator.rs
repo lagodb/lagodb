@@ -840,9 +840,9 @@ mod tests {
     use parquet::arrow::arrow_reader::{
         ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelector,
     };
-    use parquet::file::metadata::ParquetMetaData;
+    use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
     use parquet::file::properties::WriterProperties;
-    use rand::{Rng, thread_rng};
+    use rand::Rng;
     use tempfile::NamedTempFile;
 
     use super::PageIndexEvaluator;
@@ -957,7 +957,8 @@ mod tests {
         writer.close().unwrap();
 
         let file = temp_file.reopen().unwrap();
-        let options = ArrowReaderOptions::new().with_page_index(true);
+        let options = ArrowReaderOptions::new()
+            .with_page_index_policy(PageIndexPolicy::Required);
         let reader =
             ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
                 .unwrap();
@@ -1005,7 +1006,8 @@ mod tests {
         writer.close().unwrap();
 
         let file = temp_file.reopen().unwrap();
-        let options = ArrowReaderOptions::new().with_page_index(true);
+        let options = ArrowReaderOptions::new()
+            .with_page_index_policy(PageIndexPolicy::Required);
         let reader =
             ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
                 .unwrap();
@@ -1378,7 +1380,7 @@ mod tests {
 
     #[test]
     fn eval_in_length_of_set_above_limit_all_rows() -> Result<()> {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
         let (metadata, _temp_file) = create_test_parquet_file()?;
         let (column_index, offset_index, row_group_metadata) =
             get_test_metadata(&metadata);
@@ -1387,7 +1389,7 @@ mod tests {
 
         let filter = Reference::new("col_float")
             .is_in(
-                std::iter::repeat_with(|| Datum::float(rng.gen_range(0.0..10.0)))
+                std::iter::repeat_with(|| Datum::float(rng.random_range(0.0..10.0)))
                     .take(1000),
             )
             .bind(iceberg_schema_ref.clone(), false)?;

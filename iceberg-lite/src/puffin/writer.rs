@@ -18,10 +18,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::Result;
+use crate::compression::CompressionCodec;
 use crate::io::{OutputFile, OutputFileWriter};
 use crate::puffin::blob::Blob;
-use crate::puffin::compression::CompressionCodec;
 use crate::puffin::metadata::{BlobMetadata, FileMetadata, Flag};
+use crate::puffin::validate_puffin_compression;
 
 /// Puffin writer
 pub struct PuffinWriter {
@@ -67,6 +68,8 @@ impl PuffinWriter {
         blob: Blob,
         compression_codec: CompressionCodec,
     ) -> Result<()> {
+        validate_puffin_compression(compression_codec)?;
+
         self.write_header_once()?;
 
         let offset = self.num_bytes_written;
@@ -152,9 +155,9 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::Result;
+    use crate::compression::CompressionCodec;
     use crate::io::{FileIO, InputFile, OutputFile};
     use crate::puffin::blob::Blob;
-    use crate::puffin::compression::CompressionCodec;
     use crate::puffin::metadata::FileMetadata;
     use crate::puffin::reader::PuffinReader;
     use crate::puffin::test_utils::{
@@ -253,7 +256,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let blobs = vec![blob_0(), blob_1()];
         let blobs_with_compression =
-            blobs_with_compression(blobs.clone(), CompressionCodec::Zstd);
+            blobs_with_compression(blobs.clone(), CompressionCodec::zstd_default());
 
         let input_file =
             write_puffin_file(&temp_dir, blobs_with_compression, file_properties())
@@ -322,7 +325,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let blobs = vec![blob_0(), blob_1()];
         let blobs_with_compression =
-            blobs_with_compression(blobs, CompressionCodec::Zstd);
+            blobs_with_compression(blobs, CompressionCodec::zstd_default());
 
         assert_files_are_bit_identical(
             write_puffin_file(&temp_dir, blobs_with_compression, file_properties())

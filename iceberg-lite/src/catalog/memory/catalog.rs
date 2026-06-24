@@ -156,8 +156,15 @@ impl Catalog for MemoryCatalog {
                 let namespaces = root_namespace_state
                     .list_namespaces_under(parent_namespace_ident)?
                     .into_iter()
-                    .map(|name| NamespaceIdent::new(name.to_string()))
-                    .collect_vec();
+                    .map(|name| {
+                        let mut names = parent_namespace_ident
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        names.push(name.to_string());
+                        NamespaceIdent::from_vec(names)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
 
                 Ok(namespaces)
             }
@@ -281,7 +288,7 @@ impl Catalog for MemoryCatalog {
             .build()?
             .metadata;
         let metadata_location =
-            MetadataLocation::new_with_table_location(location).to_string();
+            MetadataLocation::new_with_metadata(location, &metadata).to_string();
 
         metadata.write_to(&self.file_io, &metadata_location)?;
 
@@ -307,9 +314,14 @@ impl Catalog for MemoryCatalog {
     fn drop_table(&self, table_ident: &TableIdent) -> Result<()> {
         let mut root_namespace_state = self.root_namespace_state.lock().unwrap();
 
-        let metadata_location =
-            root_namespace_state.remove_existing_table(table_ident)?;
-        self.file_io.delete(&metadata_location)
+        root_namespace_state.remove_existing_table(table_ident)?;
+        Ok(())
+    }
+
+    fn purge_table(&self, table_ident: &TableIdent) -> Result<()> {
+        let table = self.load_table(table_ident)?;
+        self.drop_table(table_ident)?;
+        crate::catalog::utils::drop_table_data(&table)
     }
 
     /// Check if a table exists in the catalog.
@@ -608,7 +620,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             catalog.list_namespaces(Some(&namespace_ident_1)).unwrap(),
-            vec![NamespaceIdent::new("b".into())]
+            vec![namespace_ident_2]
         );
     }
 
@@ -634,9 +646,9 @@ pub(crate) mod tests {
         assert_eq!(
             to_set(catalog.list_namespaces(Some(&namespace_ident_1)).unwrap()),
             to_set(vec![
-                NamespaceIdent::new("a".into()),
-                NamespaceIdent::new("b".into()),
-                NamespaceIdent::new("c".into()),
+                namespace_ident_2,
+                namespace_ident_3,
+                namespace_ident_4
             ])
         );
     }
@@ -1493,9 +1505,30 @@ pub(crate) mod tests {
         let namespace_ident = NamespaceIdent::new("n1".into());
         create_namespace(&catalog, &namespace_ident);
         let table_ident = TableIdent::new(namespace_ident.clone(), "tbl1".into());
-        create_table(&catalog, &table_ident);
+        let table = create_table(&catalog, &table_ident);
+        let metadata_location = table.metadata_location().unwrap().to_string();
 
         catalog.drop_table(&table_ident).unwrap();
+
+        assert!(!catalog.table_exists(&table_ident).unwrap());
+        assert!(table.file_io().exists(&metadata_location).unwrap());
+    }
+
+    #[test]
+    fn test_purge_table_drops_table_and_deletes_metadata() {
+        let catalog = new_memory_catalog();
+        let namespace_ident = NamespaceIdent::new("n1".into());
+        create_namespace(&catalog, &namespace_ident);
+        let table_ident = TableIdent::new(namespace_ident, "tbl1".into());
+        let table = create_table(&catalog, &table_ident);
+        let metadata_location = table.metadata_location().unwrap().to_string();
+
+        assert!(table.file_io().exists(&metadata_location).unwrap());
+
+        catalog.purge_table(&table_ident).unwrap();
+
+        assert!(!catalog.table_exists(&table_ident).unwrap());
+        assert!(!table.file_io().exists(&metadata_location).unwrap());
     }
 
     #[test]

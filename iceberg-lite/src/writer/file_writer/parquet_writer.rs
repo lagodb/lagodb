@@ -616,13 +616,15 @@ mod tests {
     use arrow_select::concat::concat_batches;
     use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
     use parquet::file::statistics::ValueStatistics;
-    use rust_decimal::Decimal;
     use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
     use crate::arrow::schema_to_arrow_schema;
 
+    use crate::spec::decimal_utils::{
+        decimal_from_str_exact, decimal_mantissa, decimal_new, decimal_scale,
+    };
     use crate::spec::{PrimitiveLiteral, Struct, *};
     use crate::writer::file_writer::location_generator::{
         DefaultFileNameGenerator, DefaultLocationGenerator, FileNameGenerator,
@@ -899,7 +901,7 @@ mod tests {
         // write data
         let mut pw = ParquetWriterBuilder::new(
             WriterProperties::builder()
-                .set_max_row_group_size(128)
+                .set_max_row_group_row_count(Some(128))
                 .build(),
             Arc::new(to_write.schema().as_ref().try_into().unwrap()),
         )
@@ -1510,7 +1512,7 @@ mod tests {
         assert_eq!(
             data_file.upper_bounds().get(&0),
             Some(
-                Datum::decimal_with_precision(Decimal::new(22000000000_i64, 10), 28)
+                Datum::decimal_with_precision(decimal_new(22000000000_i64, 10), 28)
                     .unwrap()
             )
             .as_ref()
@@ -1518,7 +1520,7 @@ mod tests {
         assert_eq!(
             data_file.lower_bounds().get(&0),
             Some(
-                Datum::decimal_with_precision(Decimal::new(11000000000_i64, 10), 28)
+                Datum::decimal_with_precision(decimal_new(11000000000_i64, 10), 28)
                     .unwrap()
             )
             .as_ref()
@@ -1572,7 +1574,7 @@ mod tests {
         assert_eq!(
             data_file.upper_bounds().get(&0),
             Some(
-                Datum::decimal_with_precision(Decimal::new(-11000000000_i64, 10), 28)
+                Datum::decimal_with_precision(decimal_new(-11000000000_i64, 10), 28)
                     .unwrap()
             )
             .as_ref()
@@ -1580,16 +1582,19 @@ mod tests {
         assert_eq!(
             data_file.lower_bounds().get(&0),
             Some(
-                Datum::decimal_with_precision(Decimal::new(-22000000000_i64, 10), 28)
+                Datum::decimal_with_precision(decimal_new(-22000000000_i64, 10), 28)
                     .unwrap()
             )
             .as_ref()
         );
 
-        // test max and min of rust_decimal
-        let decimal_max = Decimal::MAX;
-        let decimal_min = Decimal::MIN;
-        assert_eq!(decimal_max.scale(), decimal_min.scale());
+        // test 38-digit precision decimal values (Iceberg spec max)
+        let decimal_max =
+            decimal_from_str_exact("99999999999999999999999999999999999999").unwrap();
+        let decimal_min =
+            decimal_from_str_exact("-99999999999999999999999999999999999999")
+                .unwrap();
+        assert_eq!(decimal_scale(&decimal_max), decimal_scale(&decimal_min));
         let schema = Arc::new(
             Schema::builder()
                 .with_fields(vec![
@@ -1598,7 +1603,7 @@ mod tests {
                         "decimal",
                         Type::Primitive(PrimitiveType::Decimal {
                             precision: 38,
-                            scale: decimal_max.scale(),
+                            scale: decimal_scale(&decimal_max),
                         }),
                     )
                     .into(),
@@ -1616,8 +1621,8 @@ mod tests {
                 .build(output_file)?;
         let col0 = Arc::new(
             Decimal128Array::from(vec![
-                Some(decimal_max.mantissa()),
-                Some(decimal_min.mantissa()),
+                Some(decimal_mantissa(&decimal_max)),
+                Some(decimal_mantissa(&decimal_min)),
             ])
             .with_data_type(DataType::Decimal128(38, 0)),
         ) as ArrayRef;

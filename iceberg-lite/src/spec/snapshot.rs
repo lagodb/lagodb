@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::table_metadata::SnapshotLog;
+use crate::encryption::{EncryptedInputFile, EncryptionManager};
 use crate::error::{Result, timestamp_ms_to_utc};
 use crate::io::FileIO;
 use crate::spec::{ManifestList, SchemaId, SchemaRef, TableMetadata};
@@ -33,16 +33,15 @@ use crate::{Error, ErrorKind};
 
 /// The ref name of the main branch of the table.
 pub const MAIN_BRANCH: &str = "main";
-/// Placeholder for snapshot ID. The field with this value must be replaced with the actual snapshot ID before it is committed.
-pub const UNASSIGNED_SNAPSHOT_ID: i64 = -1;
 
 /// Reference to [`Snapshot`].
 pub type SnapshotRef = Arc<Snapshot>;
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(rename_all = "lowercase")]
 /// The operation field is used by some operations, like snapshot expiration, to skip processing certain snapshots.
 pub enum Operation {
     /// Only data files were added and no files were removed.
+    #[default]
     Append,
     /// Data and delete files were added and removed without changing table data;
     /// i.e., compaction, changing the data file format, or relocating data files.
@@ -73,12 +72,6 @@ pub struct Summary {
     /// Other summary data.
     #[serde(flatten)]
     pub additional_properties: HashMap<String, String>,
-}
-
-impl Default for Operation {
-    fn default() -> Operation {
-        Self::Append
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -210,21 +203,37 @@ impl Snapshot {
         file_io: &FileIO,
         table_metadata: &TableMetadata,
     ) -> Result<ManifestList> {
-        let manifest_list_content = file_io.new_input(&self.manifest_list)?.read()?;
+        self.load_manifest_list_with_encryption(file_io, table_metadata, None)
+    }
+
+    /// Load manifest list, decrypting it when the snapshot carries an encryption key id.
+    pub(crate) fn load_manifest_list_with_encryption(
+        &self,
+        file_io: &FileIO,
+        table_metadata: &TableMetadata,
+        encryption_manager: Option<&EncryptionManager>,
+    ) -> Result<ManifestList> {
+        let manifest_list_content = match self.encryption_key_id() {
+            Some(key_id) => {
+                let manager = encryption_manager.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::PreconditionFailed,
+                        "Snapshot has encryption_key_id but no EncryptionManager configured on Table",
+                    )
+                })?;
+                let key_metadata =
+                    manager.decrypt_manifest_list_key_metadata(key_id)?;
+                let input = file_io.new_input(&self.manifest_list)?;
+                EncryptedInputFile::new(input, key_metadata).read()?
+            }
+            None => file_io.new_input(&self.manifest_list)?.read()?,
+        };
         ManifestList::parse_with_version(
             &manifest_list_content,
             // TODO: You don't really need the version since you could just project any Avro in
             // the version that you'd like to get (probably always the latest)
             table_metadata.format_version(),
         )
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn log(&self) -> SnapshotLog {
-        SnapshotLog {
-            timestamp_ms: self.timestamp_ms,
-            snapshot_id: self.snapshot_id,
-        }
     }
 
     /// The row-id of the first newly added row in this snapshot. All rows added in this snapshot will
@@ -269,13 +278,13 @@ pub(super) mod _serde {
     use serde::{Deserialize, Serialize};
 
     use super::{Operation, Snapshot, Summary};
-    use crate::Error;
     use crate::spec::SchemaId;
     use crate::spec::snapshot::SnapshotRowRange;
+    use crate::{Error, ErrorKind};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "kebab-case")]
-    /// Defines the structure of a v2 snapshot for serialization/deserialization
+    /// Defines the structure of a v3 snapshot for serialization/deserialization
     pub(crate) struct SnapshotV3 {
         pub snapshot_id: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,8 +295,10 @@ pub(super) mod _serde {
         pub summary: Summary,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub schema_id: Option<SchemaId>,
-        pub first_row_id: u64,
-        pub added_rows: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub first_row_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub added_rows: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub key_id: Option<String>,
     }
@@ -299,6 +310,7 @@ pub(super) mod _serde {
         pub snapshot_id: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub parent_snapshot_id: Option<i64>,
+        #[serde(default)]
         pub sequence_number: i64,
         pub timestamp_ms: i64,
         pub manifest_list: String,
@@ -336,10 +348,15 @@ pub(super) mod _serde {
                 summary: s.summary,
                 schema_id: s.schema_id,
                 encryption_key_id: s.key_id,
-                row_range: Some(SnapshotRowRange {
-                    first_row_id: s.first_row_id,
-                    added_rows: s.added_rows,
-                }),
+                row_range: match (s.first_row_id, s.added_rows) {
+                    (Some(first_row_id), Some(added_rows)) => {
+                        Some(SnapshotRowRange {
+                            first_row_id,
+                            added_rows,
+                        })
+                    }
+                    _ => None,
+                },
             }
         }
     }
@@ -348,13 +365,12 @@ pub(super) mod _serde {
         type Error = Error;
 
         fn try_from(s: Snapshot) -> Result<Self, Self::Error> {
-            let row_range = s.row_range.ok_or_else(|| {
-                Error::new(
-                    crate::ErrorKind::DataInvalid,
-                    "v3 Snapshots must have first-row-id and rows-added fields set."
-                        .to_string(),
-                )
-            })?;
+            let (first_row_id, added_rows) = match s.row_range {
+                Some(row_range) => {
+                    (Some(row_range.first_row_id), Some(row_range.added_rows))
+                }
+                None => (None, None),
+            };
 
             Ok(SnapshotV3 {
                 snapshot_id: s.snapshot_id,
@@ -364,8 +380,8 @@ pub(super) mod _serde {
                 manifest_list: s.manifest_list,
                 summary: s.summary,
                 schema_id: s.schema_id,
-                first_row_id: row_range.first_row_id,
-                added_rows: row_range.added_rows,
+                first_row_id,
+                added_rows,
                 key_id: s.encryption_key_id,
             })
         }
@@ -412,9 +428,19 @@ pub(super) mod _serde {
                 timestamp_ms: v1.timestamp_ms,
                 manifest_list: match (v1.manifest_list, v1.manifests) {
                     (Some(file), None) => file,
-                    (Some(_), Some(_)) => "Invalid v1 snapshot, when manifest list provided, manifest files should be omitted".to_string(),
-                    (None, _) => "Unsupported v1 snapshot, only manifest list is supported".to_string()
-                   },
+                    (Some(_), Some(_)) => {
+                        return Err(Error::new(
+                            ErrorKind::DataInvalid,
+                            "Invalid v1 snapshot, when manifest list provided, manifest files should be omitted",
+                        ));
+                    }
+                    (None, _) => {
+                        return Err(Error::new(
+                            ErrorKind::DataInvalid,
+                            "Unsupported v1 snapshot, only manifest list is supported",
+                        ));
+                    }
+                },
                 summary: v1.summary.unwrap_or(Summary {
                     operation: Operation::default(),
                     additional_properties: HashMap::new(),
@@ -521,6 +547,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
 
+    use crate::spec::TableMetadata;
     use crate::spec::snapshot::_serde::SnapshotV1;
     use crate::spec::snapshot::{Operation, Snapshot, Summary};
 
@@ -606,6 +633,85 @@ mod tests {
                 .get("added-files"),
             Some(&"5".to_string())
         );
+    }
+
+    #[test]
+    fn test_v1_snapshot_with_manifest_list_and_manifests() {
+        {
+            let metadata = r#"
+    {
+        "format-version": 1,
+        "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+        "location": "s3://bucket/test/location",
+        "last-updated-ms": 1700000000000,
+        "last-column-id": 1,
+        "schema": {
+            "type": "struct",
+            "fields": [
+                {"id": 1, "name": "x", "required": true, "type": "long"}
+            ]
+        },
+        "partition-spec": [],
+        "properties": {},
+        "current-snapshot-id": 111111111,
+        "snapshots": [
+            {
+                "snapshot-id": 111111111,
+                "timestamp-ms": 1600000000000,
+                "summary": {"operation": "append"},
+                "manifest-list": "s3://bucket/metadata/snap-123.avro",
+                "manifests": ["s3://bucket/metadata/manifest-1.avro"]
+            }
+        ]
+    }
+    "#;
+
+            let result_both_manifest_list_and_manifest_set =
+                serde_json::from_str::<TableMetadata>(metadata);
+            assert!(result_both_manifest_list_and_manifest_set.is_err());
+            assert_eq!(
+                result_both_manifest_list_and_manifest_set
+                    .unwrap_err()
+                    .to_string(),
+                "DataInvalid => Invalid v1 snapshot, when manifest list provided, manifest files should be omitted"
+            )
+        }
+
+        {
+            let metadata = r#"
+    {
+        "format-version": 1,
+        "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+        "location": "s3://bucket/test/location",
+        "last-updated-ms": 1700000000000,
+        "last-column-id": 1,
+        "schema": {
+            "type": "struct",
+            "fields": [
+                {"id": 1, "name": "x", "required": true, "type": "long"}
+            ]
+        },
+        "partition-spec": [],
+        "properties": {},
+        "current-snapshot-id": 111111111,
+        "snapshots": [
+            {
+                "snapshot-id": 111111111,
+                "timestamp-ms": 1600000000000,
+                "summary": {"operation": "append"},
+                "manifests": ["s3://bucket/metadata/manifest-1.avro"]
+            }
+        ]
+    }
+    "#;
+            let result_missing_manifest_list =
+                serde_json::from_str::<TableMetadata>(metadata);
+            assert!(result_missing_manifest_list.is_err());
+            assert_eq!(
+                result_missing_manifest_list.unwrap_err().to_string(),
+                "DataInvalid => Unsupported v1 snapshot, only manifest list is supported"
+            )
+        }
     }
 
     #[test]

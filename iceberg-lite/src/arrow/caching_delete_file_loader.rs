@@ -23,6 +23,7 @@ use arrow_array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
 
 use super::delete_filter::DeleteFilter;
 use crate::arrow::delete_file_loader::BasicDeleteFileLoader;
+use crate::arrow::scan_metrics::ScanMetrics;
 use crate::arrow::{arrow_primitive_to_literal, arrow_schema_to_schema};
 use crate::delete_vector::DeleteVector;
 use crate::expr::Predicate::AlwaysTrue;
@@ -58,6 +59,13 @@ impl CachingDeleteFileLoader {
             concurrency_limit_data_files,
             delete_filter: DeleteFilter::default(),
         }
+    }
+
+    pub(crate) fn with_scan_metrics(mut self, scan_metrics: ScanMetrics) -> Self {
+        self.basic_delete_file_loader = self
+            .basic_delete_file_loader
+            .with_scan_metrics(scan_metrics);
+        self
     }
 
     /// Synchronously loads all deletes for the specified delete file entries.
@@ -99,10 +107,12 @@ impl CachingDeleteFileLoader {
     /// If another thread is loading this file, we block and wait.
     fn load_positional_delete(&self, task: &FileScanTaskDeleteFile) -> Result<()> {
         let file_path = task.file_path.clone();
+        let file_size_in_bytes = task.file_size_in_bytes;
         let loader = self.basic_delete_file_loader.clone();
 
         self.delete_filter.load_pos_del_file(&file_path, || {
-            let iterator = loader.parquet_to_batch_iterator(&file_path)?;
+            let iterator =
+                loader.parquet_to_batch_iterator(&file_path, file_size_in_bytes)?;
             Self::parse_positional_deletes_record_batch_iterator(iterator)
         })
     }
@@ -119,10 +129,12 @@ impl CachingDeleteFileLoader {
         let file_path = task.file_path.clone();
         let equality_ids_vec = task.equality_ids.clone().unwrap_or_default();
         let equality_ids: HashSet<i32> = HashSet::from_iter(equality_ids_vec.clone());
+        let file_size_in_bytes = task.file_size_in_bytes;
         let loader = self.basic_delete_file_loader.clone();
 
         self.delete_filter.load_eq_del_file(&file_path, || {
-            let raw_iterator = loader.parquet_to_batch_iterator(&file_path)?;
+            let raw_iterator =
+                loader.parquet_to_batch_iterator(&file_path, file_size_in_bytes)?;
             let evolved_iterator = BasicDeleteFileLoader::evolve_schema(
                 raw_iterator,
                 schema,
@@ -491,7 +503,7 @@ mod tests {
 
         let basic_delete_file_loader = BasicDeleteFileLoader::new(file_io.clone());
         let record_batch_iterator = basic_delete_file_loader
-            .parquet_to_batch_iterator(&eq_delete_file_path)
+            .parquet_to_batch_iterator(&eq_delete_file_path, 0)
             .expect("could not get batch iterator");
 
         let eq_ids = HashSet::from_iter(vec![2, 3, 4, 6, 8]);
@@ -699,7 +711,7 @@ mod tests {
         let basic_delete_file_loader = BasicDeleteFileLoader::new(file_io.clone());
 
         let batch_iterator = basic_delete_file_loader
-            .parquet_to_batch_iterator(&delete_file_path)
+            .parquet_to_batch_iterator(&delete_file_path, 0)
             .unwrap();
 
         // Only evolve the equality_ids columns (field 2), not all table columns
@@ -806,6 +818,7 @@ mod tests {
 
         // Create FileScanTask with BOTH positional and equality deletes
         let pos_del = FileScanTaskDeleteFile {
+            file_size_in_bytes: 0,
             file_path: pos_del_path,
             file_type: DataContentType::PositionDeletes,
             partition_spec_id: 0,
@@ -813,6 +826,7 @@ mod tests {
         };
 
         let eq_del = FileScanTaskDeleteFile {
+            file_size_in_bytes: 0,
             file_path: eq_delete_path.clone(),
             file_type: DataContentType::EqualityDeletes,
             partition_spec_id: 0,
@@ -820,6 +834,7 @@ mod tests {
         };
 
         let file_scan_task = FileScanTask {
+            file_size_in_bytes: 0,
             start: 0,
             length: 0,
             record_count: None,
@@ -887,7 +902,7 @@ mod tests {
 
         let basic_delete_file_loader = BasicDeleteFileLoader::new(file_io.clone());
         let record_batch_iterator = basic_delete_file_loader
-            .parquet_to_batch_iterator(&path)
+            .parquet_to_batch_iterator(&path, 0)
             .expect("could not get batch iterator");
 
         let eq_ids = HashSet::from_iter(vec![2]);

@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::compression::CompressionCodec;
 use crate::io::{FileRead, InputFile};
-use crate::puffin::compression::CompressionCodec;
 use crate::{Error, ErrorKind, Result};
 
 /// Human-readable identification of the application writing the file, along with its version.
@@ -343,6 +343,11 @@ impl FileMetadata {
                 return Self::read_from(file_read, input_file_length);
             }
 
+            // Validate file header magic.
+            let first_four_bytes =
+                file_read.read_range(0..FileMetadata::MAGIC_LENGTH.into())?;
+            FileMetadata::check_magic(&first_four_bytes)?;
+
             // Read footer based on prefetch hint
             let start = input_file_length - prefetch_hint as u64;
             let end = input_file_length;
@@ -413,8 +418,10 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::ErrorKind;
+    use crate::compression::CompressionCodec;
     use crate::io::{FileIO, InputFile};
-    use crate::puffin::metadata::{BlobMetadata, CompressionCodec, FileMetadata};
+    use crate::puffin::metadata::{BlobMetadata, FileMetadata};
     use crate::puffin::test_utils::{
         empty_footer_payload, empty_footer_payload_bytes,
         empty_footer_payload_bytes_length_bytes, java_empty_uncompressed_input_file,
@@ -967,6 +974,61 @@ mod tests {
         assert_eq!(
             file_metadata.properties.get("padding").map(String::as_str),
             Some("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        );
+    }
+
+    #[test]
+    fn test_read_with_incorrect_header_magic() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let prefetch_hint: u8 = 64;
+        let mut bytes = vec![];
+        bytes.extend([0x00, 0x00, 0x00, 0x00]);
+        bytes.extend(vec![0u8; prefetch_hint as usize]);
+        bytes.extend(FileMetadata::MAGIC);
+        bytes.extend(empty_footer_payload_bytes());
+        bytes.extend(empty_footer_payload_bytes_length_bytes());
+        bytes.extend(vec![0, 0, 0, 0]);
+        bytes.extend(FileMetadata::MAGIC);
+
+        let input_file = input_file_with_bytes(&temp_dir, &bytes);
+
+        assert_eq!(
+            FileMetadata::read(&input_file).unwrap_err().kind(),
+            ErrorKind::DataInvalid,
+        );
+        assert_eq!(
+            FileMetadata::read_with_prefetch(&input_file, prefetch_hint)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::DataInvalid,
+        );
+    }
+
+    #[test]
+    fn test_read_metadata_with_unsupported_gzip_blob_codec() {
+        let temp_dir = TempDir::new().unwrap();
+        let payload = r#"{
+            "blobs": [
+                {
+                    "type": "test-type",
+                    "fields": [1],
+                    "snapshot-id": 1,
+                    "sequence-number": 1,
+                    "offset": 4,
+                    "length": 10,
+                    "compression-codec": "gzip"
+                }
+            ]
+        }"#;
+
+        let input_file = input_file_with_payload(&temp_dir, payload);
+        let metadata = FileMetadata::read(&input_file).unwrap();
+
+        assert_eq!(metadata.blobs.len(), 1);
+        assert_eq!(
+            metadata.blobs[0].compression_codec,
+            CompressionCodec::gzip_default()
         );
     }
 }

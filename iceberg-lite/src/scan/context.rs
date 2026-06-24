@@ -25,8 +25,8 @@ use crate::scan::{
     PartitionFilterCache,
 };
 use crate::spec::{
-    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, SchemaRef,
-    SnapshotRef, TableMetadataRef,
+    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, NameMapping,
+    SchemaRef, SnapshotRef, TableMetadataRef,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -42,6 +42,7 @@ pub(crate) struct ManifestFileContext {
     pub snapshot_schema: SchemaRef,
     pub expression_evaluator_cache: Arc<ExpressionEvaluatorCache>,
     pub delete_file_index: Option<DeleteFileIndex>,
+    pub name_mapping: Option<Arc<NameMapping>>,
     pub case_sensitive: bool,
 }
 
@@ -57,6 +58,7 @@ pub(crate) struct ManifestEntryContext {
     pub partition_spec_id: i32,
     pub snapshot_schema: SchemaRef,
     pub delete_file_index: Option<DeleteFileIndex>,
+    pub name_mapping: Option<Arc<NameMapping>>,
     pub case_sensitive: bool,
 }
 
@@ -78,6 +80,7 @@ impl ManifestFileContext {
                 snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
                 snapshot_schema: self.snapshot_schema.clone(),
                 delete_file_index: self.delete_file_index.clone(),
+                name_mapping: self.name_mapping.clone(),
                 case_sensitive: self.case_sensitive,
             })
             .collect();
@@ -103,8 +106,12 @@ impl ManifestEntryContext {
         );
 
         Ok(FileScanTask {
+            file_size_in_bytes: self.manifest_entry.file_size_in_bytes(),
             start: 0,
-            length: self.manifest_entry.file_size_in_bytes(),
+            // Manifest-planned tasks read the full data file. Keep the local
+            // full-file sentinel so byte-range filtering is only applied to
+            // explicit split tasks.
+            length: 0,
             record_count: Some(self.manifest_entry.record_count()),
 
             data_file_path: self.manifest_entry.file_path().to_string(),
@@ -123,8 +130,7 @@ impl ManifestEntryContext {
             partition: Some(self.manifest_entry.data_file.partition.clone()),
             // TODO: Pass actual PartitionSpec through context chain for native flow
             partition_spec: None,
-            // TODO: Extract name_mapping from table metadata property "schema.name-mapping.default"
-            name_mapping: None,
+            name_mapping: self.name_mapping,
             case_sensitive: self.case_sensitive,
         })
     }
@@ -143,6 +149,7 @@ pub(crate) struct PlanContext {
     pub snapshot_bound_predicate: Option<Arc<BoundPredicate>>,
     pub object_cache: Arc<ObjectCache>,
     pub field_ids: Arc<Vec<i32>>,
+    pub name_mapping: Option<Arc<NameMapping>>,
 
     pub partition_filter_cache: Arc<PartitionFilterCache>,
     pub manifest_evaluator_cache: Arc<ManifestEvaluatorCache>,
@@ -184,6 +191,7 @@ impl PlanContext {
             snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
             snapshot_schema: self.snapshot_schema.clone(),
             delete_file_index,
+            name_mapping: self.name_mapping.clone(),
             case_sensitive: self.case_sensitive,
         }
     }
@@ -299,6 +307,7 @@ impl PlanContext {
             field_ids: self.field_ids.clone(),
             expression_evaluator_cache: self.expression_evaluator_cache.clone(),
             delete_file_index: None,
+            name_mapping: self.name_mapping.clone(),
             case_sensitive: self.case_sensitive,
         }
     }
