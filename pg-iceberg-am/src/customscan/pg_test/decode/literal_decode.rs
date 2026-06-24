@@ -18,7 +18,6 @@ mod tests {
     fn decode_numeric_in_range_builds_decimal_datum() {
         use pgrx::IntoDatum;
         use pgrx::prelude::AnyNumeric;
-        use rust_decimal::Decimal;
 
         unsafe {
             let numeric = AnyNumeric::try_from(100.5_f64).expect("100.5 is valid");
@@ -27,11 +26,9 @@ mod tests {
             let got = decode_datum(pg_sys::NUMERICOID, datum)
                 .expect("an in-range numeric must decode to a decimal Datum");
 
-            // Independent oracle: PG canonical text -> rust_decimal -> Datum.
-            let expected_decimal =
-                Decimal::from_str_exact(numeric.normalize()).expect("decimal parse");
-            let expected =
-                Datum::decimal(expected_decimal).expect("decimal Datum builds");
+            // Independent oracle: PG canonical text -> iceberg decimal Datum.
+            let expected = Datum::decimal_from_str(numeric.normalize())
+                .expect("decimal Datum builds");
 
             assert_eq!(got, expected, "numeric must decode to the scaled decimal");
         }
@@ -42,7 +39,6 @@ mod tests {
     fn decode_numeric_negative_fraction_round_trips() {
         use pgrx::IntoDatum;
         use pgrx::prelude::AnyNumeric;
-        use rust_decimal::Decimal;
 
         unsafe {
             let numeric =
@@ -52,10 +48,8 @@ mod tests {
             let got = decode_datum(pg_sys::NUMERICOID, datum)
                 .expect("a negative fractional numeric must decode");
 
-            let expected_decimal =
-                Decimal::from_str_exact(numeric.normalize()).expect("decimal parse");
-            let expected =
-                Datum::decimal(expected_decimal).expect("decimal Datum builds");
+            let expected = Datum::decimal_from_str(numeric.normalize())
+                .expect("decimal Datum builds");
             assert_eq!(got, expected);
         }
     }
@@ -95,8 +89,8 @@ mod tests {
         use pgrx::prelude::AnyNumeric;
 
         unsafe {
-            // 40 nines: well beyond rust_decimal's ~28-29 significant digits and
-            // beyond Decimal128, but a perfectly valid PG numeric.
+            // 40 nines: beyond Decimal128's 38-digit precision, but a perfectly
+            // valid PG numeric.
             let huge_text = "9".repeat(40);
             let huge = AnyNumeric::try_from(huge_text.as_str())
                 .expect("a 40-digit integer is a valid PG numeric");

@@ -18,7 +18,6 @@ use pg_lakebase_core::expr::nodes::{
 use pg_lakebase_core::expr::translator::PgPredicateTranslator;
 use pgrx::prelude::{AnyNumeric, Date, Timestamp, TimestampWithTimeZone};
 use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
-use rust_decimal::Decimal;
 
 use super::predicate_pushdown_policy::{ComparisonOpClass, PredicatePushdownPolicy};
 use crate::customscan::FLOAT_PUSHDOWN_ENABLED;
@@ -245,10 +244,9 @@ unsafe fn decode_numeric(
         return Err(IcebergTranslationError::ValueNotRepresentable { type_oid });
     }
 
-    let decimal = Decimal::from_str_exact(numeric.normalize())
-        .map_err(|_| IcebergTranslationError::ValueNotRepresentable { type_oid })?;
+    let decimal_text = numeric.normalize();
 
-    Datum::decimal(decimal)
+    Datum::decimal_from_str(decimal_text)
         .map_err(|_| IcebergTranslationError::ValueNotRepresentable { type_oid })
 }
 

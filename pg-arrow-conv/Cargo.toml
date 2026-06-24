@@ -24,9 +24,9 @@ pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17"]
 [dependencies]
 pgrx = { workspace = true }
 pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
-arrow-array = "57"
-arrow-schema = "57"
-arrow-buffer = "57"
+arrow-array = "58"
+arrow-schema = "58"
+arrow-buffer = "58"
 uuid = { version = "1.16.0" }
 thiserror = "1.0"
 
@@ -34,8 +34,8 @@ thiserror = "1.0"
 # The host integration tests in `tests/` construct arrow/pgrx/core types
 # directly, so those crates must also be available to the test crates.
 proptest = "1.5"
-arrow-array = "57"
-arrow-schema = "57"
+arrow-array = "58"
+arrow-schema = "58"
 pgrx = { workspace = true }
 uuid = { version = "1.16.0" }
 pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }

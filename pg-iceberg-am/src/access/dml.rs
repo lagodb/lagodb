@@ -166,8 +166,7 @@ impl DataFileSink {
         schema: &Arc<IcebergSchema>,
         table_metadata: &TableMetadata,
     ) -> IcebergResult<ParquetDataFileWriter> {
-        let location_generator =
-            DefaultLocationGenerator::new(table_metadata.clone())?;
+        let location_generator = DefaultLocationGenerator::new(table_metadata)?;
         let file_name_generator = DefaultFileNameGenerator::new(
             format!("insert-{}", uuid::Uuid::now_v7()),
             None,

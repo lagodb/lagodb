@@ -300,6 +300,7 @@ impl Catalog for StagedCatalog {
         fn(namespace: &NamespaceIdent, creation: TableCreation) -> Table
     );
     unsupported_catalog_method!(drop_table, fn(table: &TableIdent) -> ());
+    unsupported_catalog_method!(purge_table, fn(table: &TableIdent) -> ());
     unsupported_catalog_method!(
         rename_table,
         fn(src: &TableIdent, dest: &TableIdent) -> ()
