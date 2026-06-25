@@ -17,8 +17,11 @@
 
 use std::sync::Arc;
 
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
 use crate::Result;
 use crate::arrow::ArrowReader;
+use crate::arrow::reader::ParquetReadOptions;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::scan_metrics::ScanMetrics;
 use crate::io::FileIO;
@@ -68,14 +71,19 @@ impl BasicDeleteFileLoader {
            Essentially a super-cut-down ArrowReader. We can't use ArrowReader directly
            as that introduces a circular dependency.
         */
-        let record_batch_reader =
-            ArrowReader::create_parquet_record_batch_reader_builder_with_metrics(
-                data_file_path,
-                self.file_io.clone(),
-                file_size_in_bytes,
-                self.scan_metrics.clone(),
-            )?
-            .build()?;
+        let (parquet_file_reader, arrow_metadata) = ArrowReader::open_parquet_file(
+            data_file_path,
+            &self.file_io,
+            file_size_in_bytes,
+            ParquetReadOptions::default(),
+            self.scan_metrics.clone(),
+        )?;
+
+        let record_batch_reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            parquet_file_reader,
+            arrow_metadata,
+        )
+        .build()?;
 
         let iterator = record_batch_reader.map(|batch| batch.map_err(|e| e.into()));
 

@@ -129,9 +129,6 @@ pub enum IcebergError {
     #[error("cannot import column '{0}' data type '{1}'")]
     ImportColumnError(String, String),
 
-    #[error("decimal conversion error: {0}")]
-    DecimalConversionError(#[from] rust_decimal::Error),
-
     #[error("parse float error: {0}")]
     ParseFloatError(#[from] std::num::ParseFloatError),
 
@@ -242,8 +239,7 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
             }
 
-            IcebergError::DecimalConversionError(_)
-            | IcebergError::ParseFloatError(_)
+            IcebergError::ParseFloatError(_)
             | IcebergError::DatetimeConversionError(_)
             | IcebergError::UuidConversionError(_)
             | IcebergError::NumericError(_) => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,

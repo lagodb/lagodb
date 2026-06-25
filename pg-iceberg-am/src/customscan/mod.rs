@@ -35,6 +35,13 @@ pub use provider::{IcebergCustomScanProvider, IcebergPrivateData, IcebergScanSta
 /// negatives), violating the "no false negatives" contract. Re-enable once the
 /// scan path separates manifest/row-group pruning from row-level filtering, or
 /// wraps float comparisons in PG-compatible NaN semantics.
+///
+/// TODO(float pushdown): if we ever pursue maximum-efficiency row-level
+/// pushdown for floats, the pushed predicate must implement PostgreSQL's NaN
+/// ordering/equality exactly (`NaN = NaN`, NaN sorts above infinity). A
+/// pruning-only path may be less strict, but it still must be conservative:
+/// keep the file/row group/page whenever IEEE/Arrow semantics cannot prove
+/// that PostgreSQL would reject every row.
 pub(crate) const FLOAT_PUSHDOWN_ENABLED: bool = false;
 
 /// Whether `numeric` comparison predicates (`=` / `<` / `<=` / `>` / `>=`)
@@ -49,20 +56,34 @@ pub(crate) const FLOAT_PUSHDOWN_ENABLED: bool = false;
 /// `iceberg-lite`'s `RecordBatchReaderBuilder::with_row_filter`) applies the
 /// predicate as a *row-level* Arrow filter, not pruning-only. PostgreSQL's
 /// `numeric` is arbitrary precision, while an Iceberg `decimal(P, S)` column
-/// has a fixed scale; when the literal's scale exceeds the column scale the
-/// row filter casts/rounds the literal to the column scale, which moves an
-/// ordered-comparison boundary and can drop rows PostgreSQL would keep. Because
+/// has fixed precision and scale. A pushed comparison is exact only when the
+/// literal can be represented at the column's `(P, S)` with operator-aware
+/// boundary handling. The current classifier sees only the PG type OID, and the
+/// translator sees only the runtime `Datum`; neither has the bound Iceberg
+/// decimal scale. Today `iceberg-lite` rejects decimal scale conversion during
+/// predicate binding; a naive downscale/cast would move ordered-comparison
+/// boundaries and could drop rows PostgreSQL would keep. Because
 /// `ConservativePruning` predicates still enter the row filter, the residual
-/// `plan.qual` cannot recover those rows — the missing row never reaches it —
+/// `plan.qual` cannot recover such rows — the missing row never reaches it —
 /// so this is a silent false negative (wrong results), the same failure class
 /// that disables [`FLOAT_PUSHDOWN_ENABLED`].
 ///
-/// Re-enable once `iceberg-lite` exposes a pruning-only filter API distinct
-/// from the row-level filter, so `ConservativePruning` predicates can drive
-/// manifest/row-group/page pruning without row-level filtering. A per-value
-/// scale-aware guard is intentionally avoided: it would couple the translator
-/// to Iceberg decimal scale across const/param/rescan paths and still not
-/// generalize to other `ConservativePruning` types.
+/// Re-enable once either (1) `iceberg-lite` exposes a pruning-only filter API
+/// distinct from the row-level filter, or (2) the pushdown path carries bound
+/// Iceberg decimal `(P, S)` into both const and param/rescan translation and
+/// applies the same representability rules as the write/read decimal codecs.
+///
+/// TODO(decimal pushdown): for maximum-efficiency row-level pushdown, do not
+/// rely on the generic Parquet/Arrow decimal row filter to reinterpret
+/// PostgreSQL `numeric`. Translate the PG predicate into an equivalent Iceberg
+/// `decimal(P, S)` predicate before handing it to the reader. That translation
+/// must be operator-aware: exact in-grid literals may be pushed directly,
+/// off-grid ordered literals need boundary rewrites (for example `x < 12.345`
+/// on `decimal(_, 2)` becomes `x <= 12.34`), `=` may become `AlwaysFalse`, and
+/// `<>` may become `IS NOT NULL` to preserve SQL NULL semantics. A pruning-only
+/// future path can use simpler no-false-negative rules, but any row-level
+/// filter that drops rows must be fully equivalent to PostgreSQL comparison
+/// semantics on the bound Iceberg decimal domain.
 pub(crate) const NUMERIC_COMPARISON_PUSHDOWN_ENABLED: bool = false;
 
 /// Register the Iceberg provider once from `_PG_init`.

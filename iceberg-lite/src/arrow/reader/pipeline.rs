@@ -145,11 +145,10 @@ impl ArrowReader {
 
         let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
             &task.data_file_path,
-            file_io.clone(),
+            &file_io,
             task.file_size_in_bytes,
             parquet_read_options,
             Some(scan_metrics),
-            None,
         )?;
 
         // Check if Parquet file has embedded field IDs
@@ -438,60 +437,12 @@ impl ArrowReader {
         Ok(Box::new(iterator))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn create_parquet_record_batch_reader_builder(
+    pub(crate) fn open_parquet_file(
         data_file_path: &str,
-        file_io: FileIO,
-        should_load_page_index: bool,
-        arrow_reader_options: Option<ArrowReaderOptions>,
-    ) -> Result<ParquetRecordBatchReaderBuilder<ArrowFileReader<Box<dyn FileRead>>>>
-    {
-        let parquet_read_options =
-            ParquetReadOptions::default().with_page_index(should_load_page_index);
-        let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
-            data_file_path,
-            file_io,
-            0,
-            parquet_read_options,
-            None,
-            arrow_reader_options,
-        )?;
-
-        Ok(ParquetRecordBatchReaderBuilder::new_with_metadata(
-            parquet_file_reader,
-            arrow_metadata,
-        ))
-    }
-
-    pub(crate) fn create_parquet_record_batch_reader_builder_with_metrics(
-        data_file_path: &str,
-        file_io: FileIO,
-        file_size_in_bytes: u64,
-        scan_metrics: Option<ScanMetrics>,
-    ) -> Result<ParquetRecordBatchReaderBuilder<ArrowFileReader<Box<dyn FileRead>>>>
-    {
-        let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
-            data_file_path,
-            file_io,
-            file_size_in_bytes,
-            ParquetReadOptions::default(),
-            scan_metrics,
-            None,
-        )?;
-
-        Ok(ParquetRecordBatchReaderBuilder::new_with_metadata(
-            parquet_file_reader,
-            arrow_metadata,
-        ))
-    }
-
-    fn open_parquet_file(
-        data_file_path: &str,
-        file_io: FileIO,
+        file_io: &FileIO,
         file_size_in_bytes: u64,
         parquet_read_options: ParquetReadOptions,
         scan_metrics: Option<ScanMetrics>,
-        arrow_reader_options: Option<ArrowReaderOptions>,
     ) -> Result<(ArrowFileReader<Box<dyn FileRead>>, ArrowReaderMetadata)> {
         let parquet_file = file_io.new_input(data_file_path)?;
         let opened_file = parquet_file.open_reader()?;
@@ -512,8 +463,8 @@ impl ArrowReader {
         let parquet_file_reader = ArrowFileReader::new(metadata, reader)
             .with_page_index(parquet_read_options.preload_page_index);
 
-        let options = parquet_read_options
-            .apply_to_options(arrow_reader_options.unwrap_or_default());
+        let options =
+            parquet_read_options.apply_to_options(ArrowReaderOptions::default());
         let metadata_options = options.metadata_options().clone();
         let decryption_properties = options.file_decryption_properties().cloned();
         let parquet_metadata = ParquetMetaDataReader::new()

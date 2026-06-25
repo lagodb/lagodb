@@ -32,7 +32,7 @@ const DEFAULT_METADATA_SIZE_HINT: usize = 512 * 1024;
 /// Options for tuning Parquet file I/O.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ParquetReadOptions {
+pub(crate) struct ParquetReadOptions {
     /// Number of bytes to prefetch for parsing the Parquet metadata.
     pub(super) metadata_size_hint: Option<usize>,
     /// Gap threshold for merging nearby byte ranges into a single request.

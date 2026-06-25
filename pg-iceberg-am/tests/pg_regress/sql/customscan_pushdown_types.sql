@@ -22,9 +22,10 @@ CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
 -- `Pushed Filter:`.
 --
 -- Note: `numeric` comparison is intentionally NOT used here. With
--- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false` (the row-level Arrow filter can
--- drop rows under a decimal scale downcast, a false negative the residual qual
--- cannot recover), numeric comparisons are `Unsupported` and would not be
+-- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false` (exact row filtering needs the
+-- bound Iceberg decimal precision/scale; a scale-naive row filter can produce
+-- false negatives the residual qual cannot recover), numeric comparisons are
+-- `Unsupported` and would not be
 -- pushed. `date` is a collation-free, fixed-offset `int32` comparison that maps
 -- exactly between PostgreSQL and Iceberg, so its row filter has no false
 -- negatives.
@@ -185,8 +186,8 @@ DROP TABLE customscan_conservative_pruning_t;
 --
 -- The Conservative half uses `date` rather than `numeric`: with
 -- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false` numeric comparisons are
--- `Unsupported` (the row-level Arrow filter can drop rows under a decimal scale
--- downcast). `date` is a collation-free, fixed-offset `int32` comparison that
+-- `Unsupported` (exact row filtering needs bound decimal precision/scale).
+-- `date` is a collation-free, fixed-offset `int32` comparison that
 -- maps exactly between PostgreSQL and Iceberg, so it remains a valid
 -- ConservativePruning clause for exercising the Exact-vs-Conservative split.
 -- ============================================================================
@@ -311,10 +312,11 @@ SET timezone = 'UTC';
 -- NaN / out-of-range literals must still evaluate without error
 -- ============================================================================
 -- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false`: the only filter API the
--- provider has applies the predicate as a row-level Arrow filter, and a numeric
--- comparison can drop rows under a decimal scale downcast (a false negative the
--- residual qual cannot recover). The oracle therefore marks numeric comparison
--- `Unsupported`, so `val < 100.5` is NOT pushed. Because it is the only
+-- provider has applies the predicate as a row-level Arrow filter. Numeric
+-- comparison can only be exact with bound decimal precision/scale and
+-- operator-aware literal conversion; otherwise scale handling can produce false
+-- negatives the residual qual cannot recover. The oracle therefore marks
+-- numeric comparison `Unsupported`, so `val < 100.5` is NOT pushed. Because it is the only
 -- predicate, no clause survives into `variant.split.pushed`, `create_path`
 -- returns `None`, and no CustomPath is emitted — under `force` the plan falls
 -- back to SeqScan, identical to `off`. The residual qual decides every row, so
@@ -365,7 +367,7 @@ SET pg_lakebase.customscan_mode = 'off';
 SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
 
 -- 1.3 numeric out-of-range literal (wider than the Iceberg decimal /
--- rust_decimal range): also never pushed; the residual qual decides without
+-- Decimal128/D128 38-digit range): also never pushed; the residual qual decides without
 -- error. `val < 1e40` is true for every stored value.
 SET pg_lakebase.customscan_mode = 'force';
 SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;

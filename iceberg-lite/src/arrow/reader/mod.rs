@@ -26,7 +26,7 @@ mod projection;
 mod row_filter;
 
 pub use file_reader::ArrowFileReader;
-use options::ParquetReadOptions;
+pub(crate) use options::ParquetReadOptions;
 pub use pipeline::SyncFileScanPipeline;
 use predicate_visitor::{CollectFieldIdVisitor, PredicateConverter};
 use projection::{

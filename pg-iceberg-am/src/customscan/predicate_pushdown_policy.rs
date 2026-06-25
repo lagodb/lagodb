@@ -54,8 +54,8 @@ impl ComparisonOpClass {
 
 /// Float comparison pushdown toggle (disabled in v1 due to NaN semantic
 /// divergence between Arrow IEEE 754 and PostgreSQL ordering) and numeric
-/// comparison pushdown toggle (disabled in v1 due to decimal scale downcast
-/// in the row-level filter).
+/// comparison pushdown toggle (disabled in v1 because exact row-filter
+/// semantics require bound Iceberg decimal precision/scale).
 use super::{FLOAT_PUSHDOWN_ENABLED, NUMERIC_COMPARISON_PUSHDOWN_ENABLED};
 
 /// Built-in `pg_operator` OIDs supported by the predicate policy.
@@ -258,11 +258,12 @@ impl PredicatePushdownPolicy {
                 | PgBuiltInOids::TIMESTAMPTZOID,
             ) => self.conservative_pruning_for_eq_and_ordered(class),
 
-            // `numeric` comparison pushdown is gated: the row-level Arrow filter
-            // can drop rows under a decimal scale downcast (see
-            // `NUMERIC_COMPARISON_PUSHDOWN_ENABLED`). When disabled, `numeric`
-            // comparisons fall through to `Unsupported` and stay in the residual
-            // qual. `numeric` null-tests remain enabled via `null_test_capability`.
+            // `numeric` comparison pushdown is gated: exact row filtering requires
+            // column decimal `(P, S)` plus operator-aware literal representability
+            // (see `NUMERIC_COMPARISON_PUSHDOWN_ENABLED`). When disabled,
+            // `numeric` comparisons fall through to `Unsupported` and stay in the
+            // residual qual. `numeric` null-tests remain enabled via
+            // `null_test_capability`.
             PgOid::BuiltIn(PgBuiltInOids::NUMERICOID)
                 if NUMERIC_COMPARISON_PUSHDOWN_ENABLED =>
             {
