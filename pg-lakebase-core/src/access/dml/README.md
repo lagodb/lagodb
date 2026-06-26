@@ -28,6 +28,12 @@ relation and frame reuse it. This keeps session state scoped to the real
 PostgreSQL write boundary while avoiding work for plans that never produce
 tuple writes.
 
+Auxiliary state established before the first tuple callback can register a
+frame cleanup. Registration materializes the frame eagerly, so zero-row writes
+and failures during scan setup still release that state. Frame cleanup runs
+after relation sessions finish or abort, preserving session access to the
+auxiliary state for their full lifetime.
+
 Conceptually, the lifecycle is:
 
 ```text
@@ -158,6 +164,7 @@ The DML lifecycle is built around these invariants:
 
 - every tuple write handled by this framework belongs to a current frame;
 - each frame owns zero or more relation-local sessions;
+- frame-scoped auxiliary cleanup runs after relation sessions are released;
 - a relation has at most one session per frame;
 - DML callbacks dispatch callback-scoped slot views first; owned-row
   materialization is a row-mode fallback, not a core callback default;

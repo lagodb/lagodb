@@ -463,6 +463,7 @@ mod tests {
             start: 0,
             length: 0,
             record_count: Some(200),
+            first_row_id: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             schema: table_schema.clone(),
@@ -696,6 +697,7 @@ mod tests {
             start: rg1_start,
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
+            first_row_id: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             schema: table_schema.clone(),
@@ -926,6 +928,7 @@ mod tests {
             start: rg1_start,
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
+            first_row_id: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             schema: table_schema.clone(),

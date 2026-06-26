@@ -21,6 +21,7 @@ mod file_reader;
 mod options;
 pub(crate) mod pipeline;
 mod positional_deletes;
+mod predicate_plan;
 pub(super) mod predicate_visitor;
 mod projection;
 mod row_filter;

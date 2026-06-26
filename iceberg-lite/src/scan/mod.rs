@@ -26,15 +26,19 @@ mod task;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, Int64Array, RecordBatch, RecordBatchOptions, UInt32Array};
+use arrow_select::take::take;
+use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 pub use task::*;
 
-use crate::arrow::ArrowReaderBuilder;
+use crate::arrow::{ArrowReader, ArrowReaderBuilder};
 use crate::delete_file_index::DeleteFileIndexBuilder;
 use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluator;
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::io::FileIO;
-use crate::metadata_columns::{get_metadata_field_id, is_metadata_column_name};
+use crate::metadata_columns::{
+    RESERVED_FIELD_ID_POS, get_metadata_field_id, is_metadata_column_name,
+};
 use crate::overlay::SnapshotDelta;
 
 use crate::spec::{
@@ -305,6 +309,33 @@ impl<'a> TableScanBuilder<'a> {
             field_ids.push(field_id);
         }
 
+        // TODO(metadata-column predicate binding): `Predicate::bind` below is
+        // intentionally a table-schema binder, so `_pos`, `_file`, and
+        // `_row_id` cannot be added here by merely teaching `Reference::bind`
+        // about reserved names. Manifest, partition, and data-file metrics do
+        // not contain row metadata and must never receive such a bound
+        // predicate.
+        //
+        // The preferred PostgreSQL integration exposes metadata through an
+        // explicit function or table-function API. The PG layer must resolve
+        // that SQL using ordinary catalog semantics, associate every metadata
+        // reference with its source relation, and normalize it to the reserved
+        // Iceberg field ID before constructing this scan. This crate remains
+        // independent of PostgreSQL syntax and parser hooks.
+        //
+        // Introduce one metadata-aware scan binder/planner that produces both:
+        //   1. a conservative physical pruning predicate (`id = 2`) bound to
+        //      the table schema for manifest/partition/file-metrics pruning;
+        //   2. the full row predicate (`_pos = 3 AND id = 2`) bound to an
+        //      evaluation schema containing the table fields plus reserved
+        //      metadata fields, and attach that predicate to each FileScanTask.
+        // The Arrow reader's FilePredicatePlan will then install `id = 2` as
+        // an exact Parquet RowFilter and evaluate only `_pos = 3` after row
+        // metadata has been generated. Mixed OR/NOT expressions must remain
+        // conservative; never extract one branch unless it is a necessary
+        // condition of the complete predicate. If bare `_pos` syntax is added
+        // later, its PG core parser integration must normalize to this same
+        // binder input rather than creating a second execution path.
         let snapshot_bound_predicate = if let Some(ref predicates) = self.filter {
             Some(predicates.bind(schema.clone(), true)?)
         } else {
@@ -486,6 +517,59 @@ impl TableScan {
         arrow_reader_builder.build().read(tasks)
     }
 
+    /// Fetch one visible row by source data file path and original file position.
+    ///
+    /// This slow path preserves Iceberg delete semantics by planning the scan at
+    /// the scan's snapshot, applying delete files through [`ArrowReader`], and
+    /// matching against generated `_pos`.
+    pub fn fetch_row_by_position(
+        &self,
+        data_file_path: &str,
+        pos: u64,
+        projected_field_ids: &[i32],
+    ) -> Result<Option<RecordBatch>> {
+        let Some(mut task) = self
+            .plan_files()?
+            .into_iter()
+            .find(|task| task.data_file_path() == data_file_path)
+        else {
+            return Ok(None);
+        };
+
+        let mut read_field_ids = projected_field_ids.to_vec();
+        if !read_field_ids.contains(&RESERVED_FIELD_ID_POS) {
+            read_field_ids.push(RESERVED_FIELD_ID_POS);
+        }
+
+        task.project_field_ids = read_field_ids;
+        task.predicate = None;
+
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
+            .with_row_group_filtering_enabled(false)
+            .with_row_selection_enabled(false);
+        if let Some(batch_size) = self.batch_size {
+            arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
+        }
+
+        let pos = i64::try_from(pos).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "row position does not fit Iceberg long metadata column",
+            )
+        })?;
+
+        for batch in arrow_reader_builder.build().read(vec![task])? {
+            let batch = batch?;
+            if let Some(row) =
+                Self::select_row_at_position(batch, pos, projected_field_ids)?
+            {
+                return Ok(Some(row));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Returns a reference to the column names of the table scan.
     pub fn column_names(&self) -> Option<&[String]> {
         self.column_names.as_deref()
@@ -494,6 +578,95 @@ impl TableScan {
     /// Returns a reference to the snapshot of the table scan.
     pub fn snapshot(&self) -> Option<&SnapshotRef> {
         self.plan_context.as_ref().and_then(|x| x.snapshot.as_ref())
+    }
+
+    fn select_row_at_position(
+        batch: RecordBatch,
+        pos: i64,
+        projected_field_ids: &[i32],
+    ) -> Result<Option<RecordBatch>> {
+        let pos_column_index = Self::row_position_column_index(&batch)?;
+        let pos_column = batch
+            .column(pos_column_index)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "_pos column is not an Iceberg long metadata column",
+                )
+            })?;
+
+        for row_index in 0..pos_column.len() {
+            if !pos_column.is_null(row_index) && pos_column.value(row_index) == pos {
+                let row = Self::take_single_row(batch, row_index)?;
+                return ArrowReader::project_record_batch_by_field_ids(
+                    row,
+                    projected_field_ids,
+                )
+                .map(Some);
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn row_position_column_index(batch: &RecordBatch) -> Result<usize> {
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .find_map(|(idx, field)| {
+                field
+                    .metadata()
+                    .get(PARQUET_FIELD_ID_META_KEY)
+                    .and_then(|field_id| {
+                        field_id
+                            .parse::<i32>()
+                            .ok()
+                            .filter(|field_id| *field_id == RESERVED_FIELD_ID_POS)
+                            .map(|_| idx)
+                    })
+            })
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "_pos column not found in row-position fetch batch",
+                )
+            })
+    }
+
+    fn take_single_row(batch: RecordBatch, row_index: usize) -> Result<RecordBatch> {
+        let row_index = u32::try_from(row_index).map_err(|_| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "record batch row index overflowed u32",
+            )
+        })?;
+        let indices = UInt32Array::from(vec![row_index]);
+        let columns = batch
+            .columns()
+            .iter()
+            .map(|column| {
+                take(column.as_ref(), &indices, None).map_err(|err| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "failed to select row from record batch",
+                    )
+                    .with_source(err)
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let options = RecordBatchOptions::default()
+            .with_match_field_names(false)
+            .with_row_count(Some(1));
+        Ok(RecordBatch::try_new_with_options(
+            batch.schema(),
+            columns,
+            &options,
+        )?)
     }
 
     fn process_data_manifest_entry(
@@ -2171,6 +2344,7 @@ pub mod tests {
             predicate: None,
             schema: schema.clone(),
             record_count: Some(100),
+            first_row_id: None,
             data_file_format: DataFileFormat::Parquet,
             deletes: vec![],
             partition: None,
@@ -2190,6 +2364,7 @@ pub mod tests {
             predicate: Some(BoundPredicate::AlwaysTrue),
             schema,
             record_count: None,
+            first_row_id: None,
             data_file_format: DataFileFormat::Avro,
             deletes: vec![],
             partition: None,

@@ -30,6 +30,10 @@ mod modifytable_wrapper;
 mod session;
 
 pub use lifecycle::init_lifecycle_hooks;
+pub use session::{
+    DmlFrameId, DmlTargetPlan, current_dml_frame_id, current_dml_target_frame,
+    register_current_dml_frame_cleanup, with_current_dml_target_plan,
+};
 
 use crate::api::TableAccessMethod;
 use pgrx::pg_sys;

@@ -23,11 +23,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use parquet::arrow::ProjectionMask;
+use arrow_array::{RecordBatch, RecordBatchOptions};
+use arrow_schema::Schema as ArrowSchema;
+use arrow_select::filter::filter_record_batch;
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, RowFilter, RowSelection};
+use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, ProjectionMask};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::schema::types::SchemaDescriptor;
 
+use super::predicate_visitor::PredicateResult;
 use super::{ArrowReader, PredicateConverter};
 use crate::error::Result;
 use crate::expr::BoundPredicate;
@@ -36,6 +40,52 @@ use crate::expr::visitors::page_index_evaluator::PageIndexEvaluator;
 use crate::expr::visitors::row_group_metrics_evaluator::RowGroupMetricsEvaluator;
 use crate::spec::Schema;
 use crate::{Error, ErrorKind};
+
+pub(super) struct TransformedRecordBatchFilter {
+    predicate: BoundPredicate,
+    predicate_fn: Option<Box<PredicateResult>>,
+}
+
+impl TransformedRecordBatchFilter {
+    pub(super) fn new(predicate: BoundPredicate) -> Self {
+        Self {
+            predicate,
+            predicate_fn: None,
+        }
+    }
+
+    pub(super) fn filter(&mut self, batch: RecordBatch) -> Result<RecordBatch> {
+        if self.predicate_fn.is_none() {
+            let field_id_to_batch_index =
+                ArrowReader::build_record_batch_field_id_map(batch.schema_ref())?;
+            let mut converter =
+                PredicateConverter::for_record_batch(&field_id_to_batch_index);
+            self.predicate_fn = Some(visit(&mut converter, &self.predicate)?);
+        }
+
+        let Some(predicate_fn) = self.predicate_fn.as_mut() else {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "transformed record batch predicate was not initialized",
+            ));
+        };
+        let filter = predicate_fn(batch.clone()).map_err(|err| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "failed to evaluate predicate against transformed record batch",
+            )
+            .with_source(err)
+        })?;
+
+        Ok(filter_record_batch(&batch, &filter).map_err(|err| {
+            Error::new(
+                ErrorKind::Unexpected,
+                "failed to filter transformed record batch",
+            )
+            .with_source(err)
+        })?)
+    }
+}
 
 impl ArrowReader {
     pub(super) fn get_row_filter(
@@ -53,11 +103,11 @@ impl ArrowReader {
         column_indices.sort();
 
         // The converter that converts `BoundPredicates` to `ArrowPredicates`
-        let mut converter = PredicateConverter {
+        let mut converter = PredicateConverter::for_parquet(
             parquet_schema,
-            column_map: field_id_map,
-            column_indices: &column_indices,
-        };
+            field_id_map,
+            &column_indices,
+        );
 
         // After collecting required leaf column indices used in the predicate,
         // creates the projection mask for the Arrow predicates.
@@ -66,6 +116,74 @@ impl ArrowReader {
         let predicate_func = visit(&mut converter, predicates)?;
         let arrow_predicate = ArrowPredicateFn::new(projection_mask, predicate_func);
         Ok(RowFilter::new(vec![Box::new(arrow_predicate)]))
+    }
+
+    pub(crate) fn project_record_batch_by_field_ids(
+        batch: RecordBatch,
+        projected_field_ids: &[i32],
+    ) -> Result<RecordBatch> {
+        let schema = batch.schema();
+        let field_id_to_batch_index =
+            Self::build_record_batch_field_id_map(&schema)?;
+
+        if batch.num_columns() == projected_field_ids.len() {
+            let already_projected =
+                projected_field_ids
+                    .iter()
+                    .enumerate()
+                    .all(|(idx, field_id)| {
+                        field_id_to_batch_index
+                            .get(field_id)
+                            .is_some_and(|batch_idx| *batch_idx == idx)
+                    });
+            if already_projected {
+                return Ok(batch);
+            }
+        }
+
+        let mut fields = Vec::with_capacity(projected_field_ids.len());
+        let mut columns = Vec::with_capacity(projected_field_ids.len());
+
+        for field_id in projected_field_ids {
+            let Some(batch_idx) = field_id_to_batch_index.get(field_id).copied()
+            else {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!(
+                        "field id {field_id} not found in transformed record batch"
+                    ),
+                ));
+            };
+            fields.push(schema.fields()[batch_idx].clone());
+            columns.push(batch.column(batch_idx).clone());
+        }
+
+        let options = RecordBatchOptions::default()
+            .with_match_field_names(false)
+            .with_row_count(Some(batch.num_rows()));
+        Ok(RecordBatch::try_new_with_options(
+            Arc::new(ArrowSchema::new(fields)),
+            columns,
+            &options,
+        )?)
+    }
+
+    fn build_record_batch_field_id_map(
+        schema: &Arc<ArrowSchema>,
+    ) -> Result<HashMap<i32, usize>> {
+        let mut field_id_to_batch_index = HashMap::new();
+        for (idx, field) in schema.fields().iter().enumerate() {
+            if let Some(field_id) = field.metadata().get(PARQUET_FIELD_ID_META_KEY) {
+                let field_id = field_id.parse().map_err(|err| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!("field id not parseable as an i32: {err}"),
+                    )
+                })?;
+                field_id_to_batch_index.insert(field_id, idx);
+            }
+        }
+        Ok(field_id_to_batch_index)
     }
 
     pub(super) fn get_selected_row_group_indices(
@@ -199,7 +317,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::cast::AsArray;
-    use arrow_array::{ArrayRef, LargeStringArray, RecordBatch, StringArray};
+    use arrow_array::{
+        ArrayRef, Int32Array, LargeStringArray, RecordBatch, StringArray,
+    };
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
     use parquet::basic::Compression;
@@ -207,12 +327,124 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::arrow::{ArrowReader, ArrowReaderBuilder};
-    use crate::expr::{Bind, Predicate, Reference};
+    use crate::expr::accessor::StructAccessor;
+    use crate::expr::{
+        BinaryExpression, Bind, BoundPredicate, BoundReference, Predicate,
+        PredicateOperator, Reference,
+    };
     use crate::io::FileIO;
+    use crate::metadata_columns::{
+        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS,
+    };
     use crate::scan::FileScanTask;
     use crate::spec::{
         DataFileFormat, Datum, NestedField, PrimitiveType, Schema, SchemaRef, Type,
     };
+
+    #[test]
+    fn mixed_physical_and_position_predicate_preserves_file_row_number() {
+        let schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false).with_metadata(
+                HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "1".to_string(),
+                )]),
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![Arc::new(Int32Array::from_iter_values(0..10))],
+        )
+        .unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("mixed_predicate.parquet");
+        let mut writer = ArrowWriter::try_new(
+            File::create(&file_path).unwrap(),
+            arrow_schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let physical_predicate = Reference::new("id")
+            .greater_than_or_equal_to(Datum::int(5))
+            .bind(schema.clone(), true)
+            .unwrap();
+        let position_field = Arc::new(NestedField::required(
+            RESERVED_FIELD_ID_POS,
+            RESERVED_COL_NAME_POS,
+            Type::Primitive(PrimitiveType::Long),
+        ));
+        let position_reference = BoundReference::new(
+            RESERVED_COL_NAME_POS,
+            position_field,
+            Arc::new(StructAccessor::new(1, PrimitiveType::Long)),
+        );
+        let position_predicate = BoundPredicate::Binary(BinaryExpression::new(
+            PredicateOperator::Eq,
+            position_reference,
+            Datum::long(7),
+        ));
+        let task = FileScanTask {
+            file_size_in_bytes: 0,
+            start: 0,
+            length: 0,
+            record_count: Some(10),
+            first_row_id: None,
+            data_file_path: file_path.to_string_lossy().into_owned(),
+            data_file_format: DataFileFormat::Parquet,
+            schema,
+            project_field_ids: vec![1, RESERVED_FIELD_ID_POS],
+            predicate: Some(physical_predicate.and(position_predicate)),
+            deletes: vec![],
+            partition: None,
+            partition_spec: None,
+            name_mapping: None,
+            case_sensitive: true,
+        };
+        let file_io = FileIO::from_path(temp_dir.path().to_str().unwrap()).unwrap();
+        let batches = ArrowReaderBuilder::new(file_io)
+            .build()
+            .read(vec![task])
+            .unwrap()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        let mut ids = Vec::new();
+        let mut positions = Vec::new();
+        for batch in &batches {
+            ids.extend_from_slice(
+                batch
+                    .column(0)
+                    .as_primitive::<arrow_array::types::Int32Type>()
+                    .values(),
+            );
+            positions.extend_from_slice(
+                batch
+                    .column(1)
+                    .as_primitive::<arrow_array::types::Int64Type>()
+                    .values(),
+            );
+        }
+
+        assert_eq!(ids, vec![7]);
+        assert_eq!(positions, vec![7]);
+    }
 
     #[test]
     fn test_kleene_logic_or_behaviour() {
@@ -350,6 +582,7 @@ mod tests {
             start: 0,
             length: 0,
             record_count: None,
+            first_row_id: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             schema: schema.clone(),
@@ -541,6 +774,7 @@ mod tests {
             start: rg0_start,
             length: row_group_0.compressed_size() as u64,
             record_count: Some(100),
+            first_row_id: None,
             data_file_path: file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             schema: schema.clone(),
@@ -559,6 +793,7 @@ mod tests {
             start: rg1_start,
             length: file_end - rg1_start,
             record_count: Some(200),
+            first_row_id: None,
             data_file_path: file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             schema: schema.clone(),

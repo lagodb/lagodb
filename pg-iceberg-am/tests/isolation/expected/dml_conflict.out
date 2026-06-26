@@ -1,0 +1,30 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_begin s1_update s2_begin s2_update s1_commit s2_commit verify
+step s1_begin: BEGIN;
+step s1_update: UPDATE iceberg_dml_conflict.t SET label = 's1' WHERE id = 1;
+step s2_begin: BEGIN;
+step s2_update: UPDATE iceberg_dml_conflict.t SET label = 's2' WHERE id = 1;
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+ERROR:  iceberg error: PreconditionFailed => row delta conflicts with delete files added after scan snapshot: 1 conflicting delete files
+step verify: SELECT string_agg(id || ':' || label, ',' ORDER BY id) AS rows FROM iceberg_dml_conflict.t;
+rows           
+---------------
+1:s1,100:file_b
+(1 row)
+
+
+starting permutation: s1_begin s1_delete s2_begin s2_update_other s1_commit s2_commit verify
+step s1_begin: BEGIN;
+step s1_delete: DELETE FROM iceberg_dml_conflict.t WHERE id = 1;
+step s2_begin: BEGIN;
+step s2_update_other: UPDATE iceberg_dml_conflict.t SET label = 's2' WHERE id = 100;
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+step verify: SELECT string_agg(id || ':' || label, ',' ORDER BY id) AS rows FROM iceberg_dml_conflict.t;
+rows  
+------
+100:s2
+(1 row)
+

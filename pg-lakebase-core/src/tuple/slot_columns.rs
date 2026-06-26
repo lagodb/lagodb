@@ -9,6 +9,7 @@ use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
 use crate::diag::PgReportError;
+use crate::handles::ItemPointer;
 
 use super::row::Row;
 
@@ -64,6 +65,16 @@ impl<'a> SlotColumns<'a> {
 
     pub fn natts(&self) -> usize {
         self.values.len()
+    }
+
+    /// Set the tuple identity carried by this slot.
+    pub fn set_tid(&mut self, tid: &ItemPointer) {
+        // SAFETY: `self.slot` was validated by `SlotColumns::new`; `tts_tid`
+        // is part of the same live slot and is not aliased through the cached
+        // values/nulls slices.
+        unsafe {
+            (*self.slot).tts_tid = tid.to_pg_sys();
+        }
     }
 
     /// Write column `index`; `None` denotes SQL NULL. The sole writer of

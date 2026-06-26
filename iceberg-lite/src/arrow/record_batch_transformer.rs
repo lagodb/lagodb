@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::{
-    Array as ArrowArray, ArrayRef, Int32Array, RecordBatch, RecordBatchOptions,
-    RunArray,
+    Array as ArrowArray, ArrayRef, Int32Array, Int64Array, RecordBatch,
+    RecordBatchOptions, RunArray,
 };
 use arrow_cast::cast;
 use arrow_schema::{
@@ -34,6 +34,7 @@ use crate::arrow::value::{
 };
 use crate::arrow::{datum_to_arrow_type_with_ree, schema_to_arrow_schema};
 use crate::metadata_columns::get_metadata_field;
+use crate::metadata_columns::{RESERVED_FIELD_ID_POS, RESERVED_FIELD_ID_ROW_ID};
 use crate::spec::{
     Datum, Literal, PartitionSpec, PrimitiveLiteral, Schema as IcebergSchema, Struct,
     Transform,
@@ -118,6 +119,12 @@ fn constants_map(
 /// Indicates how a particular column in a processed RecordBatch should
 /// be sourced.
 #[derive(Debug)]
+pub(crate) enum GeneratedMetadataColumn {
+    Position,
+    RowId { first_row_id: u64 },
+}
+
+#[derive(Debug)]
 pub(crate) enum ColumnSource {
     // signifies that a column should be passed through unmodified
     // from the file's RecordBatch
@@ -146,6 +153,9 @@ pub(crate) enum ColumnSource {
         target_type: DataType,
         value: Option<PrimitiveLiteral>,
     },
+    Generated {
+        field_id: i32,
+    },
     // The iceberg spec refers to other permissible schema evolution actions
     // (see https://iceberg.apache.org/spec/#schema-evolution):
     // renaming fields, deleting fields and reordering fields.
@@ -172,6 +182,11 @@ enum BatchTransform {
 
         // Indicates how each column in the target schema is derived.
         operations: Vec<ColumnSource>,
+
+        // Source index of the row-position column when a generated metadata
+        // column (currently _row_id) depends on it. This is resolved once when
+        // the transform is planned instead of scanning every batch schema.
+        row_position_source_index: Option<usize>,
     },
 
     // Sometimes only the schema will need modifying, for example when
@@ -199,6 +214,7 @@ pub(crate) struct RecordBatchTransformerBuilder {
     snapshot_schema: Arc<IcebergSchema>,
     projected_iceberg_field_ids: Vec<i32>,
     constant_fields: HashMap<i32, Datum>,
+    generated_metadata_fields: HashMap<i32, GeneratedMetadataColumn>,
 }
 
 impl RecordBatchTransformerBuilder {
@@ -210,6 +226,7 @@ impl RecordBatchTransformerBuilder {
             snapshot_schema,
             projected_iceberg_field_ids: projected_iceberg_field_ids.to_vec(),
             constant_fields: HashMap::new(),
+            generated_metadata_fields: HashMap::new(),
         }
     }
 
@@ -221,6 +238,20 @@ impl RecordBatchTransformerBuilder {
     /// * `datum` - The constant value (with type) for this field
     pub(crate) fn with_constant(mut self, field_id: i32, datum: Datum) -> Self {
         self.constant_fields.insert(field_id, datum);
+        self
+    }
+
+    pub(crate) fn with_position_column(mut self) -> Self {
+        self.generated_metadata_fields
+            .insert(RESERVED_FIELD_ID_POS, GeneratedMetadataColumn::Position);
+        self
+    }
+
+    pub(crate) fn with_row_id_column(mut self, first_row_id: u64) -> Self {
+        self.generated_metadata_fields.insert(
+            RESERVED_FIELD_ID_ROW_ID,
+            GeneratedMetadataColumn::RowId { first_row_id },
+        );
         self
     }
 
@@ -251,6 +282,7 @@ impl RecordBatchTransformerBuilder {
             snapshot_schema: self.snapshot_schema,
             projected_iceberg_field_ids: self.projected_iceberg_field_ids,
             constant_fields: self.constant_fields,
+            generated_metadata_fields: self.generated_metadata_fields,
             batch_transform: None,
         }
     }
@@ -294,6 +326,7 @@ pub(crate) struct RecordBatchTransformer {
     // Includes both virtual/metadata fields (like _file) and identity-partitioned fields
     // Datum holds both the Iceberg type and the value
     constant_fields: HashMap<i32, Datum>,
+    generated_metadata_fields: HashMap<i32, GeneratedMetadataColumn>,
 
     // BatchTransform gets lazily constructed based on the schema of
     // the first RecordBatch we receive from the file
@@ -310,13 +343,29 @@ impl RecordBatchTransformer {
             Some(BatchTransform::Modify {
                 target_schema,
                 operations,
+                row_position_source_index,
             }) => {
+                let generated_positions = if let Some(source_index) =
+                    row_position_source_index
+                {
+                    Some(Self::positions_from_batch(
+                        &record_batch,
+                        *source_index,
+                    )?)
+                } else {
+                    None
+                };
                 let options = RecordBatchOptions::default()
                     .with_match_field_names(false)
                     .with_row_count(Some(record_batch.num_rows()));
                 RecordBatch::try_new_with_options(
                     Arc::clone(target_schema),
-                    self.transform_columns(record_batch.columns(), operations)?,
+                    self.transform_columns(
+                        record_batch.columns(),
+                        operations,
+                        generated_positions,
+                        record_batch.num_rows(),
+                    )?,
                     &options,
                 )?
             }
@@ -336,6 +385,7 @@ impl RecordBatchTransformer {
                     self.snapshot_schema.as_ref(),
                     &self.projected_iceberg_field_ids,
                     &self.constant_fields,
+                    &self.generated_metadata_fields,
                 )?);
 
                 self.process_record_batch(record_batch)?
@@ -355,6 +405,7 @@ impl RecordBatchTransformer {
         snapshot_schema: &IcebergSchema,
         projected_iceberg_field_ids: &[i32],
         constant_fields: &HashMap<i32, Datum>,
+        generated_metadata_fields: &HashMap<i32, GeneratedMetadataColumn>,
     ) -> Result<BatchTransform> {
         let mapped_unprojected_arrow_schema =
             Arc::new(schema_to_arrow_schema(snapshot_schema)?);
@@ -367,7 +418,6 @@ impl RecordBatchTransformer {
         let fields: Result<Vec<_>> = projected_iceberg_field_ids
             .iter()
             .map(|field_id| {
-                // Check if this is a constant field
                 if constant_fields.contains_key(field_id) {
                     // For metadata/virtual fields (like _file), get name from metadata_columns
                     // For partition fields, get name from schema (they exist in schema)
@@ -410,6 +460,18 @@ impl RecordBatchTransformer {
                                 .with_metadata(field.metadata().clone());
                         Ok(Arc::new(constant_field))
                     }
+                } else if generated_metadata_fields.contains_key(field_id) {
+                    let iceberg_field = get_metadata_field(*field_id)?;
+                    let arrow_field = Field::new(
+                        &iceberg_field.name,
+                        DataType::Int64,
+                        !iceberg_field.required,
+                    )
+                    .with_metadata(HashMap::from([(
+                        PARQUET_FIELD_ID_META_KEY.to_string(),
+                        iceberg_field.id.to_string(),
+                    )]));
+                    Ok(Arc::new(arrow_field))
                 } else {
                     // Regular field - use schema as-is
                     Ok(field_id_to_mapped_schema_map
@@ -428,17 +490,54 @@ impl RecordBatchTransformer {
             SchemaComparison::NameChangesOnly => {
                 Ok(BatchTransform::ModifySchema { target_schema })
             }
-            SchemaComparison::Different => Ok(BatchTransform::Modify {
-                operations: Self::generate_transform_operations(
+            SchemaComparison::Different => {
+                let operations = Self::generate_transform_operations(
                     source_schema,
                     snapshot_schema,
                     projected_iceberg_field_ids,
                     field_id_to_mapped_schema_map,
                     constant_fields,
-                )?,
-                target_schema,
-            }),
+                    generated_metadata_fields,
+                )?;
+                let row_position_source_index =
+                    Self::row_position_source_index(source_schema, &operations)?;
+                Ok(BatchTransform::Modify {
+                    operations,
+                    row_position_source_index,
+                    target_schema,
+                })
+            }
         }
+    }
+
+    fn row_position_source_index(
+        source_schema: &ArrowSchemaRef,
+        operations: &[ColumnSource],
+    ) -> Result<Option<usize>> {
+        if !operations
+            .iter()
+            .any(|operation| matches!(operation, ColumnSource::Generated { .. }))
+        {
+            return Ok(None);
+        }
+
+        source_schema
+            .fields()
+            .iter()
+            .position(|field| {
+                field
+                    .metadata()
+                    .get(PARQUET_FIELD_ID_META_KEY)
+                    .and_then(|raw| raw.parse::<i32>().ok())
+                    == Some(RESERVED_FIELD_ID_POS)
+            })
+            .map(Some)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "generated row metadata requested without _pos column",
+                )
+            })
     }
 
     /// Compares the source and target schemas
@@ -492,6 +591,7 @@ impl RecordBatchTransformer {
         projected_iceberg_field_ids: &[i32],
         field_id_to_mapped_schema_map: HashMap<i32, (FieldRef, usize)>,
         constant_fields: &HashMap<i32, Datum>,
+        generated_metadata_fields: &HashMap<i32, GeneratedMetadataColumn>,
     ) -> Result<Vec<ColumnSource>> {
         let field_id_to_source_schema_map =
             Self::build_field_id_to_arrow_schema_map(source_schema)?;
@@ -509,6 +609,29 @@ impl RecordBatchTransformer {
                         value: Some(datum.literal().clone()),
                         target_type: arrow_type,
                     });
+                }
+
+                if generated_metadata_fields.contains_key(field_id) {
+                    return Ok(field_id_to_source_schema_map.get(field_id).map_or(
+                        ColumnSource::Generated {
+                            field_id: *field_id,
+                        },
+                        |(source_field, source_index)| {
+                            if source_field
+                                .data_type()
+                                .equals_datatype(&DataType::Int64)
+                            {
+                                ColumnSource::PassThrough {
+                                    source_index: *source_index,
+                                }
+                            } else {
+                                ColumnSource::Promote {
+                                    target_type: DataType::Int64,
+                                    source_index: *source_index,
+                                }
+                            }
+                        },
+                    ));
                 }
 
                 let (target_field, _) = field_id_to_mapped_schema_map
@@ -618,11 +741,19 @@ impl RecordBatchTransformer {
         &self,
         columns: &[Arc<dyn ArrowArray>],
         operations: &[ColumnSource],
+        generated_positions: Option<&[i64]>,
+        num_rows: usize,
     ) -> Result<Vec<Arc<dyn ArrowArray>>> {
-        if columns.is_empty() {
+        if columns.is_empty()
+            && operations.iter().all(|op| {
+                matches!(
+                    op,
+                    ColumnSource::PassThrough { .. } | ColumnSource::Promote { .. }
+                )
+            })
+        {
             return Ok(columns.to_vec());
         }
-        let num_rows = columns[0].len();
 
         operations
             .iter()
@@ -640,9 +771,97 @@ impl RecordBatchTransformer {
                     ColumnSource::Add { target_type, value } => {
                         Self::create_column(target_type, value, num_rows)?
                     }
+
+                    ColumnSource::Generated { field_id } => self
+                        .create_generated_column(
+                            *field_id,
+                            generated_positions.ok_or_else(|| {
+                                Error::new(
+                                    ErrorKind::Unexpected,
+                                    "generated row metadata requested without row positions",
+                                )
+                            })?,
+                        )?,
                 })
             })
             .collect()
+    }
+
+    fn positions_from_batch(
+        record_batch: &RecordBatch,
+        source_index: usize,
+    ) -> Result<&[i64]> {
+        let pos_column = record_batch
+            .columns()
+            .get(source_index)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "cached _pos column index is outside the record batch",
+                )
+            })?
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "_pos column has unexpected Arrow type",
+                )
+            })?;
+
+        if pos_column.null_count() != 0 {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "_pos column cannot contain NULL",
+            ));
+        }
+        Ok(pos_column.values().as_ref())
+    }
+
+    fn create_generated_column(
+        &self,
+        field_id: i32,
+        positions: &[i64],
+    ) -> Result<ArrayRef> {
+        let Some(column) = self.generated_metadata_fields.get(&field_id) else {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "generated metadata column not registered",
+            ));
+        };
+
+        match column {
+            GeneratedMetadataColumn::Position => Ok(Arc::new(Int64Array::from(
+                positions.iter().copied().collect::<Vec<_>>(),
+            ))),
+            GeneratedMetadataColumn::RowId { first_row_id } => {
+                let values: Result<Vec<i64>> = positions
+                    .iter()
+                    .map(|pos| {
+                        let pos = u64::try_from(*pos).map_err(|_| {
+                            Error::new(
+                                ErrorKind::Unexpected,
+                                "negative row position cannot form row id",
+                            )
+                        })?;
+                        let row_id =
+                            first_row_id.checked_add(pos).ok_or_else(|| {
+                                Error::new(
+                                    ErrorKind::Unexpected,
+                                    "row id overflowed u64",
+                                )
+                            })?;
+                        i64::try_from(row_id).map_err(|_| {
+                            Error::new(
+                                ErrorKind::Unexpected,
+                                "row id does not fit Iceberg long metadata column",
+                            )
+                        })
+                    })
+                    .collect();
+                Ok(Arc::new(Int64Array::from(values?)))
+            }
+        }
     }
 
     fn create_column(
@@ -698,9 +917,76 @@ mod test {
     use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
     use crate::arrow::record_batch_transformer::{
-        RecordBatchTransformer, RecordBatchTransformerBuilder,
+        ColumnSource, RecordBatchTransformer, RecordBatchTransformerBuilder,
+    };
+    use crate::metadata_columns::{
+        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS,
+        RESERVED_FIELD_ID_ROW_ID,
     };
     use crate::spec::{Literal, NestedField, PrimitiveType, Schema, Struct, Type};
+
+    #[test]
+    fn row_position_source_index_is_planned_once_for_generated_metadata() {
+        let source_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("value", DataType::Int32, true),
+            Field::new(RESERVED_COL_NAME_POS, DataType::Int64, false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    RESERVED_FIELD_ID_POS.to_string(),
+                )])),
+        ]));
+        let operations = vec![ColumnSource::Generated {
+            field_id: RESERVED_FIELD_ID_ROW_ID,
+        }];
+
+        assert_eq!(
+            RecordBatchTransformer::row_position_source_index(
+                &source_schema,
+                &operations,
+            )
+            .unwrap(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn row_position_source_index_is_not_planned_for_regular_transform() {
+        let source_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            true,
+        )]));
+        let operations = vec![ColumnSource::PassThrough { source_index: 0 }];
+
+        assert_eq!(
+            RecordBatchTransformer::row_position_source_index(
+                &source_schema,
+                &operations,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn generated_metadata_requires_position_source_during_planning() {
+        let source_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            true,
+        )]));
+        let operations = vec![ColumnSource::Generated {
+            field_id: RESERVED_FIELD_ID_ROW_ID,
+        }];
+
+        assert!(
+            RecordBatchTransformer::row_position_source_index(
+                &source_schema,
+                &operations,
+            )
+            .is_err()
+        );
+    }
 
     /// Helper to extract string values from either StringArray or RunEndEncoded<StringArray>
     /// Returns empty string for null values

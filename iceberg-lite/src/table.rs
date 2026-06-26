@@ -19,6 +19,8 @@
 
 use std::sync::Arc;
 
+use arrow_array::RecordBatch;
+
 use crate::arrow::ArrowReaderBuilder;
 use crate::encryption::EncryptionManager;
 use crate::encryption::kms::KeyManagementClient;
@@ -304,6 +306,21 @@ impl Table {
     /// Create a reader for the table.
     pub fn reader_builder(&self) -> ArrowReaderBuilder {
         ArrowReaderBuilder::new(self.file_io.clone())
+    }
+
+    /// Fetch one visible row by data file path and original file position at a snapshot.
+    pub fn fetch_row_by_position(
+        &self,
+        snapshot_id: i64,
+        data_file_path: &str,
+        pos: u64,
+        projected_field_ids: &[i32],
+    ) -> Result<Option<RecordBatch>> {
+        self.scan()
+            .snapshot_id(snapshot_id)
+            .select_empty()
+            .build()?
+            .fetch_row_by_position(data_file_path, pos, projected_field_ids)
     }
 }
 

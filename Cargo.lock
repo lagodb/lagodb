@@ -4107,6 +4107,7 @@ dependencies = [
  "pgrx",
  "pgrx-tests",
  "proptest",
+ "roaring",
  "rustls 0.23.32",
  "serde_json",
  "tempfile",

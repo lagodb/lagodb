@@ -26,7 +26,9 @@ use iceberg_lite::spec::{
     DataContentType, DataFile, ManifestContentType, TableMetadata,
 };
 use iceberg_lite::table::Table;
-use iceberg_lite::transaction::{ApplyTransactionAction, Transaction};
+use iceberg_lite::transaction::{
+    ApplyTransactionAction, RowDeltaValidation, Transaction,
+};
 use pg_lakebase_core::diag;
 use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
@@ -51,6 +53,7 @@ const TOTAL_FILES_SIZE: &str = "total-files-size";
 struct HistoryFrame {
     nest_level: i32,
     marker: SnapshotDeltaMarker,
+    validation_len: usize,
 }
 
 /// Metadata location bookkeeping for a single Iceberg table inside one
@@ -80,6 +83,10 @@ struct TableState {
     /// Top-level writes do not need frames: top-level abort drops the whole
     /// tracker, and top-level commit never rolls back through this stack.
     level_history: Vec<HistoryFrame>,
+
+    /// Row-level conflict validations that must be checked at Iceberg commit
+    /// time before materializing this transaction's delta.
+    validations: Vec<RowDeltaValidation>,
 }
 
 impl TableState {
@@ -89,7 +96,21 @@ impl TableState {
             file_io: None,
             first_modified_at_level: nest_level,
             level_history: Vec::new(),
+            validations: Vec::new(),
         }
+    }
+
+    fn record_history(&mut self, nest_level: i32) -> (SnapshotDeltaMarker, bool) {
+        let marker = self.delta.mark();
+        let should_record_history = nest_level > 1;
+        if should_record_history {
+            self.level_history.push(HistoryFrame {
+                nest_level,
+                marker,
+                validation_len: self.validations.len(),
+            });
+        }
+        (marker, should_record_history)
     }
 
     fn record_delta_mutation<F>(
@@ -100,12 +121,7 @@ impl TableState {
     where
         F: FnOnce(&mut SnapshotDelta) -> iceberg_lite::Result<()>,
     {
-        let marker = self.delta.mark();
-        let should_record_history = nest_level > 1;
-        if should_record_history {
-            self.level_history.push(HistoryFrame { nest_level, marker });
-        }
-
+        let (marker, should_record_history) = self.record_history(nest_level);
         let delta = Arc::make_mut(&mut self.delta);
         if let Err(err) = mutation(delta) {
             delta.truncate(marker);
@@ -116,6 +132,11 @@ impl TableState {
         }
 
         Ok(())
+    }
+
+    fn record_validation(&mut self, nest_level: i32, validation: RowDeltaValidation) {
+        self.record_history(nest_level);
+        self.validations.push(validation);
     }
 
     fn record_data_files(
@@ -187,6 +208,7 @@ impl TableState {
             }
             let frame = self.level_history.pop().unwrap();
             Arc::make_mut(&mut self.delta).truncate(frame.marker);
+            self.validations.truncate(frame.validation_len);
         }
     }
 
@@ -462,6 +484,20 @@ impl TxMetadata {
         })
     }
 
+    /// Statement write path: record Iceberg RowDelta conflict validation to be
+    /// evaluated at the transaction's final metadata commit.
+    pub fn stage_row_delta_validation(
+        &self,
+        relid: pg_sys::Oid,
+        validation: RowDeltaValidation,
+        file_io: &FileIO,
+    ) -> IcebergResult<()> {
+        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+            state.record_validation(nest_level, validation);
+            Ok(())
+        })
+    }
+
     // Intentionally no equality-delete staging API. With the single-snapshot
     // materialization used by this tracker, equality deletes cannot delete data
     // files appended in the same PostgreSQL transaction because both files
@@ -589,7 +625,8 @@ impl TxMetadata {
             self.inner.borrow().tables.keys().copied().collect();
 
         for relid in table_oids {
-            let Some((delta, file_io)) = self.commit_input(relid)? else {
+            let Some((delta, validations, file_io)) = self.commit_input(relid)?
+            else {
                 continue;
             };
 
@@ -622,10 +659,18 @@ impl TxMetadata {
                 let catalog = StagedCatalog::new(&base_table);
                 let tx = Transaction::new(&base_table);
                 // The tracker commits every staged overlay through
-                // SnapshotDeltaAction. AddData is an overlay operation, so
-                // append-only and mixed append/delete/remove transactions must
-                // share the same read and materialization semantics.
-                let tx = tx.snapshot_delta(Arc::clone(&delta)).apply(tx)?;
+                // SnapshotDeltaAction/RowDeltaAction. AddData is an overlay
+                // operation, so append-only and mixed append/delete/remove
+                // transactions must share the same read and materialization
+                // semantics. RowDelta adds Iceberg DML conflict validation
+                // when UPDATE/DELETE participated in the transaction.
+                let tx = if validations.is_empty() {
+                    tx.snapshot_delta(Arc::clone(&delta)).apply(tx)?
+                } else {
+                    tx.row_delta(Arc::clone(&delta))
+                        .add_validations(validations.clone())
+                        .apply(tx)?
+                };
                 let updated_table = tx.commit(&catalog)?;
                 let new_metadata_location = updated_table
                     .metadata_location()
@@ -659,12 +704,13 @@ impl TxMetadata {
     fn commit_input(
         &self,
         relid: pg_sys::Oid,
-    ) -> IcebergResult<Option<(Arc<SnapshotDelta>, FileIO)>> {
+    ) -> IcebergResult<Option<(Arc<SnapshotDelta>, Vec<RowDeltaValidation>, FileIO)>>
+    {
         let inner = self.inner.borrow();
         let Some(state) = inner.tables.get(&relid) else {
             return Ok(None);
         };
-        if state.delta.is_empty() {
+        if state.delta.is_empty() && state.validations.is_empty() {
             return Ok(None);
         }
         let file_io = state.file_io.clone().ok_or_else(|| {
@@ -673,7 +719,11 @@ impl TxMetadata {
                 relid
             ))
         })?;
-        Ok(Some((Arc::clone(&state.delta), file_io)))
+        Ok(Some((
+            Arc::clone(&state.delta),
+            state.validations.clone(),
+            file_io,
+        )))
     }
 
     // -------------------------------------------------------------------------

@@ -1,8 +1,10 @@
 pub mod column_mapping;
+pub mod conflict_filter;
 pub mod ddl;
 pub mod dml;
 pub mod index;
 pub mod projection;
 pub mod relation;
+pub mod row_location;
 pub mod scan;
 pub mod type_mapping;

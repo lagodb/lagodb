@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -113,15 +113,16 @@ impl TransactionAction for SnapshotDeltaAction {
 }
 
 #[derive(Default)]
-struct DeltaPlan {
-    added_data_files: Vec<DataFile>,
-    position_delete_files: Vec<DataFile>,
-    removed_paths: HashSet<String>,
-    added_file_paths: HashSet<String>,
+pub(super) struct DeltaPlan {
+    pub(super) added_data_files: Vec<DataFile>,
+    pub(super) position_delete_files: Vec<DataFile>,
+    pub(super) removed_paths: HashSet<String>,
+    pub(super) added_file_paths: HashSet<String>,
+    pub(super) referenced_data_files: BTreeSet<String>,
 }
 
 impl DeltaPlan {
-    fn from_delta(delta: &SnapshotDelta) -> Self {
+    pub(super) fn from_delta(delta: &SnapshotDelta) -> Self {
         Self::from_resolved(delta.resolve())
     }
 
@@ -134,6 +135,7 @@ impl DeltaPlan {
 
         let mut position_delete_files =
             Vec::with_capacity(resolved.position_delete_files.len());
+        let mut referenced_data_file_set = BTreeSet::new();
         for pending in resolved.position_delete_files {
             let referenced_data_files = pending.referenced_data_files.as_slice();
             debug_assert!(
@@ -144,6 +146,11 @@ impl DeltaPlan {
             else {
                 continue;
             };
+            referenced_data_file_set.extend(
+                referenced_data_files
+                    .iter()
+                    .map(|referenced| (*referenced).to_owned()),
+            );
 
             let mut file = (*pending.file).clone();
             if remaining_paths.is_empty() {
@@ -167,10 +174,11 @@ impl DeltaPlan {
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
+            referenced_data_files: referenced_data_file_set,
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.added_data_files.is_empty()
             && self.position_delete_files.is_empty()
             && self.removed_paths.is_empty()
@@ -190,7 +198,7 @@ impl DeltaPlan {
     }
 }
 
-struct DeltaSnapshotProducer<'a> {
+pub(super) struct DeltaSnapshotProducer<'a> {
     table: &'a Table,
     snapshot_id: i64,
     commit_uuid: Uuid,
@@ -200,7 +208,7 @@ struct DeltaSnapshotProducer<'a> {
 }
 
 impl<'a> DeltaSnapshotProducer<'a> {
-    fn new(
+    pub(super) fn new(
         table: &'a Table,
         commit_uuid: Uuid,
         key_metadata: Option<Vec<u8>>,
@@ -216,7 +224,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
         }
     }
 
-    fn validate_plan(&self, plan: &DeltaPlan) -> Result<()> {
+    pub(super) fn validate_plan(&self, plan: &DeltaPlan) -> Result<()> {
         if self.table.metadata().format_version() == FormatVersion::V1
             && !plan.position_delete_files.is_empty()
         {
@@ -259,7 +267,10 @@ impl<'a> DeltaSnapshotProducer<'a> {
         Self::validate_partition_value(data_file.partition(), &partition_type)
     }
 
-    fn validate_duplicate_files(&self, added_paths: &HashSet<String>) -> Result<()> {
+    pub(super) fn validate_duplicate_files(
+        &self,
+        added_paths: &HashSet<String>,
+    ) -> Result<()> {
         if added_paths.is_empty() {
             return Ok(());
         }
@@ -294,7 +305,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
         ))
     }
 
-    fn commit(mut self, plan: DeltaPlan) -> Result<ActionCommit> {
+    pub(super) fn commit(mut self, plan: DeltaPlan) -> Result<ActionCommit> {
         let operation = plan.operation();
         let mut summary_collector = self.new_summary_collector();
         let mut manifests = self

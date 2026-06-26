@@ -9,7 +9,6 @@ use crate::storage::transactional_artifacts::{
 use iceberg_lite::catalog::TableCreation;
 use iceberg_lite::spec::{SortOrder, UnboundPartitionSpec};
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::options::AmCache;
 use pgrx::pg_sys;
 use std::sync::OnceLock;
 
@@ -70,11 +69,13 @@ impl<'a> IcebergTableLifecycle<'a> {
     /// `s3://bucket/path/metadata/v1.metadata.json`). The owning table
     /// directory is registered for abort cleanup *before* metadata creation,
     /// so a mid-write failure is still recoverable.
-    pub(crate) fn init(self) -> IcebergResult<String> {
+    pub(crate) fn init(
+        self,
+        table_option: &IcebergTableOptionCache,
+    ) -> IcebergResult<String> {
         let Self { rel, ctx, location } = self;
 
         let schema = tuple_desc_to_schema(rel)?;
-        let table_option = AmCache::get::<IcebergTableOptionCache>(rel)?;
         let properties = table_option.to_properties();
         let format_version = table_option.iceberg_format_version()?;
 

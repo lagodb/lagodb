@@ -22,6 +22,43 @@ use std::str::FromStr;
 use crate::compression::CompressionCodec;
 use crate::{Error, ErrorKind, Result};
 
+/// Isolation level used by Iceberg row-level DML validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// Validate concurrent appended data files that may match the DML filter.
+    Serializable,
+    /// Allow concurrent appends, while still validating target-file and delete-file conflicts.
+    Snapshot,
+}
+
+impl FromStr for IsolationLevel {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        if value.eq_ignore_ascii_case("serializable") {
+            Ok(Self::Serializable)
+        } else if value.eq_ignore_ascii_case("snapshot") {
+            Ok(Self::Snapshot)
+        } else {
+            Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "Invalid isolation level: {value}. Valid values are 'serializable' and 'snapshot'",
+                ),
+            ))
+        }
+    }
+}
+
+impl Display for IsolationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serializable => f.write_str("serializable"),
+            Self::Snapshot => f.write_str("snapshot"),
+        }
+    }
+}
+
 // Helper function to parse a property from a HashMap
 // If the property is not found, use the default value
 fn parse_property<T: FromStr>(
@@ -123,6 +160,12 @@ pub struct TableProperties {
     pub encryption_key_id: Option<String>,
     /// The encryption data encryption key length in bytes.
     pub encryption_data_key_length: usize,
+    /// Isolation level for SQL DELETE validation.
+    pub write_delete_isolation_level: IsolationLevel,
+    /// Isolation level for SQL UPDATE validation.
+    pub write_update_isolation_level: IsolationLevel,
+    /// Isolation level for SQL MERGE validation.
+    pub write_merge_isolation_level: IsolationLevel,
 }
 
 impl TableProperties {
@@ -210,6 +253,19 @@ impl TableProperties {
         "write.delete.format.default";
     /// Default value for data file format
     pub const PROPERTY_DEFAULT_FILE_FORMAT_DEFAULT: &str = "parquet";
+
+    /// Property key for delete command isolation level.
+    pub const PROPERTY_WRITE_DELETE_ISOLATION_LEVEL: &str =
+        "write.delete.isolation-level";
+    /// Property key for update command isolation level.
+    pub const PROPERTY_WRITE_UPDATE_ISOLATION_LEVEL: &str =
+        "write.update.isolation-level";
+    /// Property key for merge command isolation level.
+    pub const PROPERTY_WRITE_MERGE_ISOLATION_LEVEL: &str =
+        "write.merge.isolation-level";
+    /// Default DML isolation level.
+    pub const PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT: IsolationLevel =
+        IsolationLevel::Serializable;
 
     /// Target file size for newly written files.
     pub const PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES: &str =
@@ -369,6 +425,21 @@ impl TryFrom<&HashMap<String, String>> for TableProperties {
                 TableProperties::PROPERTY_ENCRYPTION_DATA_KEY_LENGTH,
                 TableProperties::PROPERTY_ENCRYPTION_DATA_KEY_LENGTH_DEFAULT,
             )?,
+            write_delete_isolation_level: parse_property(
+                props,
+                TableProperties::PROPERTY_WRITE_DELETE_ISOLATION_LEVEL,
+                TableProperties::PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT,
+            )?,
+            write_update_isolation_level: parse_property(
+                props,
+                TableProperties::PROPERTY_WRITE_UPDATE_ISOLATION_LEVEL,
+                TableProperties::PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT,
+            )?,
+            write_merge_isolation_level: parse_property(
+                props,
+                TableProperties::PROPERTY_WRITE_MERGE_ISOLATION_LEVEL,
+                TableProperties::PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT,
+            )?,
         })
     }
 }
@@ -405,6 +476,18 @@ mod tests {
             table_properties.metadata_compression_codec,
             CompressionCodec::None
         );
+        assert_eq!(
+            table_properties.write_delete_isolation_level,
+            TableProperties::PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT
+        );
+        assert_eq!(
+            table_properties.write_update_isolation_level,
+            TableProperties::PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT
+        );
+        assert_eq!(
+            table_properties.write_merge_isolation_level,
+            TableProperties::PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT
+        );
     }
 
     #[test]
@@ -426,12 +509,36 @@ mod tests {
                 TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES.to_string(),
                 "512".to_string(),
             ),
+            (
+                TableProperties::PROPERTY_WRITE_DELETE_ISOLATION_LEVEL.to_string(),
+                "snapshot".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_WRITE_UPDATE_ISOLATION_LEVEL.to_string(),
+                "serializable".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_WRITE_MERGE_ISOLATION_LEVEL.to_string(),
+                "SNAPSHOT".to_string(),
+            ),
         ]);
         let table_properties = TableProperties::try_from(&props).unwrap();
         assert_eq!(table_properties.commit_num_retries, 10);
         assert_eq!(table_properties.commit_max_retry_wait_ms, 20);
         assert_eq!(table_properties.write_format_default, "avro".to_string());
         assert_eq!(table_properties.write_target_file_size_bytes, 512);
+        assert_eq!(
+            table_properties.write_delete_isolation_level,
+            IsolationLevel::Snapshot
+        );
+        assert_eq!(
+            table_properties.write_update_isolation_level,
+            IsolationLevel::Serializable
+        );
+        assert_eq!(
+            table_properties.write_merge_isolation_level,
+            IsolationLevel::Snapshot
+        );
     }
 
     #[test]

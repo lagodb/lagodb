@@ -101,6 +101,27 @@ pub enum Cell {
 }
 
 impl Cell {
+    /// Convert any borrowed view variant into an owned cell.
+    ///
+    /// Arrow/slot readers may use `StringView` and `ByteaView` for hot-path
+    /// zero-copy decoding. A `Row` that outlives the source batch/slot must own
+    /// those buffers instead.
+    pub fn into_owned(self) -> Self {
+        match self {
+            Cell::StringView(view) => {
+                // SAFETY: the caller owns the source lifetime decision. This
+                // method copies the bytes immediately, so the returned cell no
+                // longer borrows from `view`.
+                Cell::String(unsafe { view.as_str() }.to_owned())
+            }
+            Cell::ByteaView(view) => {
+                // SAFETY: as above, the slice is copied before returning.
+                Cell::Bytea(Bytes::copy_from_slice(unsafe { view.as_slice() }))
+            }
+            other => other,
+        }
+    }
+
     /// Check if cell is an array type
     pub fn is_array(&self) -> bool {
         matches!(

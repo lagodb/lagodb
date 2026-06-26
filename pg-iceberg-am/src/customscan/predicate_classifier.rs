@@ -14,20 +14,47 @@ use super::predicate_pushdown_policy::{
 
 /// Iceberg per-leaf classifier; delegates type/op verdict to
 /// [`PredicatePushdownPolicy`].
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct IcebergPredicateClassifier {
     pushdown: PredicatePushdownPolicy,
+    purpose: PredicatePurpose,
 }
 
 impl IcebergPredicateClassifier {
     pub const fn new(pushdown: PredicatePushdownPolicy) -> Self {
-        Self { pushdown }
+        Self {
+            pushdown,
+            purpose: PredicatePurpose::ScanPushdown,
+        }
     }
 
-    /// Classify a parsed leaf predicate (volatile/SubPlan already filtered upstream).
+    /// Classifier for row-delta conflict detection.
+    ///
+    /// Conflict filters are built once per DML target, so executor-varying
+    /// operands (`PARAM_EXEC` and outer Vars) cannot be represented safely.
+    /// `PARAM_EXTERN` is also rejected until this path resolves values
+    /// explicitly rather than depending on translation errors.
+    pub(crate) const fn for_conflict_detection() -> Self {
+        Self {
+            pushdown: PredicatePushdownPolicy::new(),
+            purpose: PredicatePurpose::ConflictDetection,
+        }
+    }
+
+    /// CustomScan adapter. Iceberg's capability policy depends on predicate
+    /// metadata rather than planner costing context; other providers may use
+    /// `PlanTranslateContext` through the provider trait.
     pub fn classify_predicate(
         &self,
         _ctx: &PlanTranslateContext,
+        predicate: &PlanPredicate<'_>,
+    ) -> QualPushdownDecision {
+        self.classify(predicate)
+    }
+
+    /// Classify a parsed leaf predicate for this classifier's purpose.
+    pub(crate) fn classify(
+        &self,
         predicate: &PlanPredicate<'_>,
     ) -> QualPushdownDecision {
         match predicate {
@@ -47,7 +74,7 @@ impl IcebergPredicateClassifier {
         right: &PlanScalar<'_>,
     ) -> QualPushdownDecision {
         let shape = ComparisonShape::from_operands(left, right);
-        if !shape.is_pushable() {
+        if !shape.is_pushable(self.purpose) {
             return QualPushdownDecision::Unsupported;
         }
 
@@ -118,6 +145,18 @@ impl IcebergPredicateClassifier {
     }
 }
 
+impl Default for IcebergPredicateClassifier {
+    fn default() -> Self {
+        Self::new(PredicatePushdownPolicy::new())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PredicatePurpose {
+    ScanPushdown,
+    ConflictDetection,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComparisonShape {
     lhs: OperandKind,
@@ -132,16 +171,23 @@ impl ComparisonShape {
         }
     }
 
-    fn is_pushable(self) -> bool {
-        matches!(
-            (self.lhs, self.rhs),
-            (OperandKind::ScanColumn, OperandKind::ConstLiteral)
-                | (OperandKind::ScanColumn, OperandKind::SupportedParam)
-                | (OperandKind::ScanColumn, OperandKind::OuterColumn)
-                | (OperandKind::ConstLiteral, OperandKind::ScanColumn)
-                | (OperandKind::SupportedParam, OperandKind::ScanColumn)
-                | (OperandKind::OuterColumn, OperandKind::ScanColumn)
-        )
+    fn is_pushable(self, purpose: PredicatePurpose) -> bool {
+        match purpose {
+            PredicatePurpose::ScanPushdown => matches!(
+                (self.lhs, self.rhs),
+                (OperandKind::ScanColumn, OperandKind::ConstLiteral)
+                    | (OperandKind::ScanColumn, OperandKind::SupportedParam)
+                    | (OperandKind::ScanColumn, OperandKind::OuterColumn)
+                    | (OperandKind::ConstLiteral, OperandKind::ScanColumn)
+                    | (OperandKind::SupportedParam, OperandKind::ScanColumn)
+                    | (OperandKind::OuterColumn, OperandKind::ScanColumn)
+            ),
+            PredicatePurpose::ConflictDetection => matches!(
+                (self.lhs, self.rhs),
+                (OperandKind::ScanColumn, OperandKind::ConstLiteral)
+                    | (OperandKind::ConstLiteral, OperandKind::ScanColumn)
+            ),
+        }
     }
 
     fn has_param_or_outer(self) -> bool {
@@ -190,5 +236,52 @@ impl OperandKind {
 
     fn is_runtime_bound(self) -> bool {
         matches!(self, Self::SupportedParam | Self::OuterColumn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_pushdown_accepts_runtime_bound_operands() {
+        for dynamic in [OperandKind::SupportedParam, OperandKind::OuterColumn] {
+            for shape in [
+                ComparisonShape {
+                    lhs: OperandKind::ScanColumn,
+                    rhs: dynamic,
+                },
+                ComparisonShape {
+                    lhs: dynamic,
+                    rhs: OperandKind::ScanColumn,
+                },
+            ] {
+                assert!(shape.is_pushable(PredicatePurpose::ScanPushdown));
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_detection_accepts_only_static_literals() {
+        let static_shape = ComparisonShape {
+            lhs: OperandKind::ScanColumn,
+            rhs: OperandKind::ConstLiteral,
+        };
+        assert!(static_shape.is_pushable(PredicatePurpose::ConflictDetection));
+
+        for dynamic in [OperandKind::SupportedParam, OperandKind::OuterColumn] {
+            for shape in [
+                ComparisonShape {
+                    lhs: OperandKind::ScanColumn,
+                    rhs: dynamic,
+                },
+                ComparisonShape {
+                    lhs: dynamic,
+                    rhs: OperandKind::ScanColumn,
+                },
+            ] {
+                assert!(!shape.is_pushable(PredicatePurpose::ConflictDetection));
+            }
+        }
     }
 }

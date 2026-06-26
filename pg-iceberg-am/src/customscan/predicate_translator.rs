@@ -6,6 +6,28 @@
 //! PG→iceberg value decoder (`decode_datum`), the shared predicate-tree fold
 //! kernel (`fold_left`), and the translator itself (whose private methods own
 //! the translator-only assembly helpers `fold_predicates` / `mirror_operator`).
+//!
+//! TODO(metadata-column SQL): expose Iceberg row metadata through an explicit
+//! SQL function or table-function API before extending this translator. That
+//! is the preferred PG17 design because PostgreSQL can resolve cataloged
+//! function names and declared table-function output columns without parser
+//! hooks. A scalar-function form must identify its source relation explicitly
+//! (for example, a marker shaped like `iceberg_pos(table_alias)`) so joins are
+//! unambiguous; the planner must recognize the marker rather than execute it as
+//! an ordinary function. Normalize either SQL form into a typed metadata-column
+//! identity (reserved Iceberg field ID plus SQL type) carried by the core
+//! expression splitter, classifier, private-data codec, and this translator.
+//! Do not manufacture a catalog `attno` or a fake `Var`.
+//!
+//! Bare syntax such as `_pos = 3 AND id = 2` is a separate future feature.
+//! PG17 has per-`ParseState` `p_pre_columnref_hook` and
+//! `p_post_columnref_hook`, but no extension-installable global setup hook that
+//! runs before parse analysis for ordinary client SQL. `post_parse_analyze_hook`
+//! and planner hooks run after an unknown `_pos` has already failed. Supporting
+//! bare metadata names therefore requires a PostgreSQL core parser-setup hook
+//! (plus relation-aware name binding); it is not required by the preferred
+//! explicit function/table-function API. The resulting Iceberg `Predicate`
+//! enters the metadata-aware scan binder documented in `iceberg-lite::scan`.
 
 use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,

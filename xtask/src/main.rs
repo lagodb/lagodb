@@ -6,11 +6,6 @@ use std::process::{Command, ExitCode, Stdio};
 
 const EXTENSION_PACKAGE: &str = "pg-iceberg-am";
 const EXTENSION_NAME: &str = "pg_iceberg_am";
-const DEFAULT_ISOLATION_SPECS: &[&str] = &[
-    "read_visibility",
-    "cas_retry_stress",
-    "savepoint_concurrent",
-];
 
 fn main() -> ExitCode {
     match run() {
@@ -228,7 +223,7 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
     .map_err(|error| format!("failed to write {}: {error}", temp_config.display()))?;
 
     let specs: Vec<OsString> = if specs.is_empty() {
-        DEFAULT_ISOLATION_SPECS.iter().map(OsString::from).collect()
+        discover_isolation_specs(&tests_dir)?
     } else {
         specs.to_vec()
     };
@@ -257,6 +252,36 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
             output_dir.join("regression.diffs").display()
         )
     })
+}
+
+fn discover_isolation_specs(tests_dir: &Path) -> Result<Vec<OsString>, String> {
+    let specs_dir = tests_dir.join("specs");
+    let mut specs: Vec<OsString> = fs::read_dir(&specs_dir)
+        .map_err(|error| {
+            format!(
+                "failed to read specs directory {}: {error}",
+                specs_dir.display()
+            )
+        })?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("spec") {
+                path.file_stem().map(|s| s.to_os_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    specs.sort();
+
+    if specs.is_empty() {
+        return Err(format!("no .spec files found in {}", specs_dir.display()));
+    }
+
+    println!("Discovered {} isolation specs: {:?}", specs.len(), specs);
+    Ok(specs)
 }
 
 // ============================================================================

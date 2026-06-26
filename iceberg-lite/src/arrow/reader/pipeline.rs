@@ -20,25 +20,32 @@
 //! row-group / row selection, and delete handling into transformed Arrow
 //! `RecordBatch` iterators.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+use arrow_schema::{DataType, Field, FieldRef};
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
+use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, RowNumber};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 
 use super::{
     ArrowFileReader, ArrowReader, ParquetReadOptions,
     add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema,
 };
+use super::predicate_plan::FilePredicatePlan;
+use super::row_filter::TransformedRecordBatchFilter;
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::int96::coerce_int96_timestamps;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::scan_metrics::{CountingFileRead, ScanMetrics, ScanResult};
 use crate::error::Result;
 use crate::io::{FileIO, FileMetadata, FileRead};
-use crate::metadata_columns::{RESERVED_FIELD_ID_FILE, is_metadata_field};
+use crate::metadata_columns::{
+    RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS,
+    RESERVED_FIELD_ID_ROW_ID, is_metadata_field,
+};
 use crate::scan::{ArrowRecordBatchIterator, FileScanTask};
 use crate::spec::Datum;
 use crate::{Error, ErrorKind};
@@ -231,19 +238,83 @@ impl ArrowReader {
             arrow_metadata
         };
 
+        let delete_predicate =
+            delete_filter.build_equality_delete_predicate(&task)?;
+
+        // In addition to the optional predicate supplied in the `FileScanTask`,
+        // we also have an optional predicate resulting from equality delete files.
+        // If both are present, we logical-AND them together to form a single filter.
+        let final_predicate = match (&task.predicate, delete_predicate) {
+            (None, None) => None,
+            (Some(predicate), None) => Some(predicate.clone()),
+            (None, Some(ref predicate)) => Some(predicate.clone()),
+            (Some(filter_predicate), Some(delete_predicate)) => {
+                Some(filter_predicate.clone().and(delete_predicate))
+            }
+        };
+
+        let predicate_plan = FilePredicatePlan::try_new(final_predicate)?;
+        let requested_project_field_ids = task.project_field_ids.clone();
+        let post_transform_field_ids =
+            predicate_plan.post_transform_field_ids();
+        let needs_position_column = requested_project_field_ids
+            .contains(&RESERVED_FIELD_ID_POS)
+            || post_transform_field_ids.contains(&RESERVED_FIELD_ID_POS);
+        let needs_row_id_column = requested_project_field_ids
+            .contains(&RESERVED_FIELD_ID_ROW_ID)
+            || post_transform_field_ids.contains(&RESERVED_FIELD_ID_ROW_ID);
+        let needs_row_number_column = needs_position_column || needs_row_id_column;
+        let mut effective_project_field_ids = requested_project_field_ids.clone();
+        let mut ordered_post_transform_field_ids = post_transform_field_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        ordered_post_transform_field_ids.sort_unstable();
+        for field_id in ordered_post_transform_field_ids {
+            if !effective_project_field_ids.contains(&field_id) {
+                effective_project_field_ids.push(field_id);
+            }
+        }
+        if needs_row_id_column
+            && !effective_project_field_ids.contains(&RESERVED_FIELD_ID_POS)
+        {
+            effective_project_field_ids.push(RESERVED_FIELD_ID_POS);
+        }
+        let first_row_id = if needs_row_id_column {
+            Some(task.first_row_id.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    "_row_id requires Iceberg format v3 row lineage",
+                )
+            })?)
+        } else {
+            None
+        };
+
+        let arrow_metadata = if needs_row_number_column {
+            Self::with_row_number_column(arrow_metadata)?
+        } else {
+            arrow_metadata
+        };
+
         let mut record_batch_reader_builder =
             ParquetRecordBatchReaderBuilder::new_with_metadata(
                 parquet_file_reader,
                 arrow_metadata,
             );
 
-        // Filter out metadata fields for Parquet projection (they don't exist in files)
-        let project_field_ids_without_metadata: Vec<i32> = task
-            .project_field_ids
-            .iter()
-            .filter(|&&id| !is_metadata_field(id))
-            .copied()
-            .collect();
+        // Filter out generated metadata fields for Parquet projection. `_pos`
+        // is the exception: arrow-rs exposes it as a native virtual RowNumber
+        // column, so it can be projected and row-filtered like a file column.
+        let project_field_ids_without_metadata: Vec<i32> =
+            effective_project_field_ids
+                .iter()
+                .filter(|&&id| {
+                    !is_metadata_field(id)
+                        || (id == RESERVED_FIELD_ID_POS && needs_row_number_column)
+                })
+                .copied()
+                .collect();
 
         // Create projection mask based on field IDs
         // - If file has embedded IDs: field-ID-based projection.
@@ -265,14 +336,24 @@ impl ArrowReader {
         // column re-ordering, partition constants, and virtual field addition (like _file)
         let mut record_batch_transformer_builder = RecordBatchTransformerBuilder::new(
             task.schema_ref(),
-            task.project_field_ids(),
+            &effective_project_field_ids,
         );
 
         // Add the _file metadata column if it's in the projected fields
-        if task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
+        if effective_project_field_ids.contains(&RESERVED_FIELD_ID_FILE) {
             let file_datum = Datum::string(task.data_file_path.clone());
             record_batch_transformer_builder = record_batch_transformer_builder
                 .with_constant(RESERVED_FIELD_ID_FILE, file_datum);
+        }
+
+        if needs_row_number_column {
+            record_batch_transformer_builder =
+                record_batch_transformer_builder.with_position_column();
+        }
+
+        if let Some(first_row_id) = first_row_id {
+            record_batch_transformer_builder =
+                record_batch_transformer_builder.with_row_id_column(first_row_id);
         }
 
         if let (Some(partition_spec), Some(partition_data)) =
@@ -282,28 +363,10 @@ impl ArrowReader {
                 .with_partition(partition_spec, partition_data)?;
         }
 
-        let mut record_batch_transformer = record_batch_transformer_builder.build();
-
         if let Some(batch_size) = batch_size {
             record_batch_reader_builder =
                 record_batch_reader_builder.with_batch_size(batch_size);
         }
-
-        let delete_predicate =
-            delete_filter.build_equality_delete_predicate(&task)?;
-
-        // In addition to the optional predicate supplied in the `FileScanTask`,
-        // we also have an optional predicate resulting from equality delete files.
-        // If both are present, we logical-AND them together to form a single filter
-        // predicate that we can pass to the `RecordBatchStreamBuilder`.
-        let final_predicate = match (&task.predicate, delete_predicate) {
-            (None, None) => None,
-            (Some(predicate), None) => Some(predicate.clone()),
-            (None, Some(ref predicate)) => Some(predicate.clone()),
-            (Some(filter_predicate), Some(delete_predicate)) => {
-                Some(filter_predicate.clone().and(delete_predicate))
-            }
-        };
 
         // There are three possible sources for potential lists of selected RowGroup indices,
         // and two for `RowSelection`s.
@@ -335,16 +398,20 @@ impl ArrowReader {
             selected_row_group_indices = Some(byte_range_filtered_row_groups);
         }
 
-        if let Some(predicate) = final_predicate {
-            let (iceberg_field_ids, field_id_map) = Self::build_field_id_set_and_map(
-                record_batch_reader_builder.parquet_schema(),
-                record_batch_reader_builder.schema(),
-                &predicate,
-                use_position_fallback,
-            )?;
-
+        // The planner removes these physical conjuncts from the post-transform
+        // residual, so installing the exact Arrow RowFilter is mandatory. The
+        // row-group and page-index evaluators below are conservative reuse of
+        // the same predicate, not substitutes for this row-level filter.
+        if let Some(predicate) = predicate_plan.parquet_filter_predicate() {
+            let (iceberg_field_ids, field_id_map) =
+                Self::build_field_id_set_and_map(
+                    record_batch_reader_builder.parquet_schema(),
+                    record_batch_reader_builder.schema(),
+                    predicate,
+                    use_position_fallback,
+                )?;
             let row_filter = Self::get_row_filter(
-                &predicate,
+                predicate,
                 record_batch_reader_builder.parquet_schema(),
                 &iceberg_field_ids,
                 &field_id_map,
@@ -355,7 +422,7 @@ impl ArrowReader {
             if row_group_filtering_enabled {
                 let predicate_filtered_row_groups =
                     Self::get_selected_row_group_indices(
-                        &predicate,
+                        predicate,
                         record_batch_reader_builder.metadata(),
                         &field_id_map,
                         &task.schema,
@@ -368,7 +435,9 @@ impl ArrowReader {
                         // Keep only row groups that are in both filters
                         let intersection: Vec<usize> = byte_range_filtered
                             .into_iter()
-                            .filter(|idx| predicate_filtered_row_groups.contains(idx))
+                            .filter(|idx| {
+                                predicate_filtered_row_groups.contains(idx)
+                            })
                             .collect();
                         Some(intersection)
                     }
@@ -377,13 +446,14 @@ impl ArrowReader {
             }
 
             if row_selection_enabled {
-                row_selection = Some(Self::get_row_selection_for_filter_predicate(
-                    &predicate,
-                    record_batch_reader_builder.metadata(),
-                    &selected_row_group_indices,
-                    &field_id_map,
-                    &task.schema,
-                )?);
+                row_selection =
+                    Some(Self::get_row_selection_for_filter_predicate(
+                        predicate,
+                        record_batch_reader_builder.metadata(),
+                        &selected_row_group_indices,
+                        &field_id_map,
+                        &task.schema,
+                    )?);
             }
         }
 
@@ -411,6 +481,8 @@ impl ArrowReader {
             };
         }
 
+        let mut record_batch_transformer = record_batch_transformer_builder.build();
+
         if let Some(row_selection) = row_selection {
             record_batch_reader_builder =
                 record_batch_reader_builder.with_row_selection(row_selection);
@@ -421,20 +493,70 @@ impl ArrowReader {
                 .with_row_groups(selected_row_group_indices);
         }
 
-        // Build the batch stream and send all the RecordBatches that it generates
-        // to the requester.
+        let mut post_transform_filter = predicate_plan
+            .into_post_transform_residual()
+            .map(TransformedRecordBatchFilter::new);
+        let should_prune_internal_projection =
+            effective_project_field_ids != requested_project_field_ids;
+
         // Build the batch stream and send all the RecordBatches that it generates
         // to the requester.
         let record_batch_reader = record_batch_reader_builder.build()?;
         let iterator = record_batch_reader.map(move |batch| match batch {
             Ok(batch) => {
                 // Process the record batch (type promotion, column reordering, virtual fields, etc.)
-                record_batch_transformer.process_record_batch(batch)
+                let mut batch =
+                    record_batch_transformer.process_record_batch(batch)?;
+                if let Some(filter) = &mut post_transform_filter {
+                    batch = filter.filter(batch)?;
+                }
+                if should_prune_internal_projection {
+                    batch = Self::project_record_batch_by_field_ids(
+                        batch,
+                        &requested_project_field_ids,
+                    )?;
+                }
+                Ok(batch)
             }
             Err(err) => Err(err.into()),
         });
 
         Ok(Box::new(iterator))
+    }
+
+    fn with_row_number_column(
+        arrow_metadata: ArrowReaderMetadata,
+    ) -> Result<ArrowReaderMetadata> {
+        let options = ArrowReaderOptions::new()
+            .with_schema(Arc::clone(arrow_metadata.schema()))
+            .with_virtual_columns(vec![Self::row_number_field()])
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "Failed to configure Parquet row-number metadata column",
+                )
+                .with_source(err)
+            })?;
+
+        ArrowReaderMetadata::try_new(Arc::clone(arrow_metadata.metadata()), options)
+            .map_err(|err| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "Failed to create ArrowReaderMetadata with row-number column",
+                )
+                .with_source(err)
+            })
+    }
+
+    fn row_number_field() -> FieldRef {
+        Arc::new(
+            Field::new(RESERVED_COL_NAME_POS, DataType::Int64, false)
+                .with_metadata(HashMap::from([(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    RESERVED_FIELD_ID_POS.to_string(),
+                )]))
+                .with_extension_type(RowNumber),
+        )
     }
 
     pub(crate) fn open_parquet_file(

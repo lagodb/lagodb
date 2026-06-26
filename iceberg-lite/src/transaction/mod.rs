@@ -54,6 +54,7 @@ mod action;
 pub use action::*;
 mod append;
 mod expire_snapshots;
+mod row_delta;
 mod snapshot;
 mod snapshot_delta;
 mod sort_order;
@@ -71,11 +72,15 @@ pub use update_schema::AddColumn;
 
 use crate::error::Result;
 use crate::overlay::SnapshotDelta;
+pub use crate::spec::IsolationLevel;
 use crate::spec::TableProperties;
 use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
 use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
+pub use crate::transaction::row_delta::{
+    DmlCommand, RowDeltaAction, RowDeltaValidation,
+};
 use crate::transaction::snapshot_delta::SnapshotDeltaAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
@@ -156,6 +161,11 @@ impl Transaction {
     /// Creates an action that materializes a transaction-local snapshot delta.
     pub fn snapshot_delta(&self, delta: Arc<SnapshotDelta>) -> SnapshotDeltaAction {
         SnapshotDeltaAction::new(delta)
+    }
+
+    /// Creates an action that commits a transaction-local row delta with DML validation.
+    pub fn row_delta(&self, delta: Arc<SnapshotDelta>) -> RowDeltaAction {
+        RowDeltaAction::new(delta)
     }
 
     /// Creates replace sort order action.

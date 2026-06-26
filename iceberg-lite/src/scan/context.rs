@@ -59,6 +59,7 @@ pub(crate) struct ManifestEntryContext {
     pub snapshot_schema: SchemaRef,
     pub delete_file_index: Option<DeleteFileIndex>,
     pub name_mapping: Option<Arc<NameMapping>>,
+    pub first_row_id: Option<u64>,
     pub case_sensitive: bool,
 }
 
@@ -68,10 +69,30 @@ impl ManifestFileContext {
     pub(crate) fn fetch_manifest_entries(&self) -> Result<Vec<ManifestEntryContext>> {
         let manifest = self.object_cache.get_manifest(&self.manifest_file)?;
 
-        let entries: Vec<ManifestEntryContext> = manifest
-            .entries()
-            .iter()
-            .map(|manifest_entry| ManifestEntryContext {
+        let mut entries = Vec::with_capacity(manifest.entries().len());
+        let mut next_row_id = self.manifest_file.first_row_id;
+        for manifest_entry in manifest.entries() {
+            let entry_first_row_id =
+                Self::effective_entry_first_row_id(manifest_entry, next_row_id)?;
+
+            if manifest_entry.is_alive() {
+                if let Some(first_row_id) = entry_first_row_id {
+                    next_row_id = first_row_id
+                        .checked_add(manifest_entry.record_count())
+                        .map(Some)
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::DataInvalid,
+                                format!(
+                                    "row id overflow while planning file {}",
+                                    manifest_entry.file_path()
+                                ),
+                            )
+                        })?;
+                }
+            }
+
+            entries.push(ManifestEntryContext {
                 manifest_entry: manifest_entry.clone(),
                 expression_evaluator_cache: self.expression_evaluator_cache.clone(),
                 field_ids: self.field_ids.clone(),
@@ -81,11 +102,36 @@ impl ManifestFileContext {
                 snapshot_schema: self.snapshot_schema.clone(),
                 delete_file_index: self.delete_file_index.clone(),
                 name_mapping: self.name_mapping.clone(),
+                first_row_id: entry_first_row_id,
                 case_sensitive: self.case_sensitive,
-            })
-            .collect();
+            });
+        }
 
         Ok(entries)
+    }
+
+    fn effective_entry_first_row_id(
+        manifest_entry: &ManifestEntryRef,
+        manifest_next_row_id: Option<u64>,
+    ) -> Result<Option<u64>> {
+        if manifest_entry.content_type() != crate::spec::DataContentType::Data {
+            return Ok(None);
+        }
+
+        match manifest_entry.data_file().first_row_id() {
+            Some(first_row_id) => {
+                u64::try_from(first_row_id).map(Some).map_err(|_| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "data file {} has negative first_row_id {first_row_id}",
+                            manifest_entry.file_path()
+                        ),
+                    )
+                })
+            }
+            None => Ok(manifest_next_row_id),
+        }
     }
 }
 
@@ -113,6 +159,7 @@ impl ManifestEntryContext {
             // explicit split tasks.
             length: 0,
             record_count: Some(self.manifest_entry.record_count()),
+            first_row_id: self.first_row_id,
 
             data_file_path: self.manifest_entry.file_path().to_string(),
             data_file_format: self.manifest_entry.file_format(),
@@ -192,6 +239,7 @@ impl PlanContext {
             snapshot_schema: self.snapshot_schema.clone(),
             delete_file_index,
             name_mapping: self.name_mapping.clone(),
+            first_row_id: None,
             case_sensitive: self.case_sensitive,
         }
     }

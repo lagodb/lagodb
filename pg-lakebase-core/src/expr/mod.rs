@@ -1,6 +1,7 @@
 //! Typed PG `Expr` views, walkers, classification, and the runtime predicate
 //! translator surface for CustomScan.
 
+mod conflict_filter;
 pub(crate) mod inspect;
 pub mod nodes;
 pub mod predicate;
@@ -11,6 +12,7 @@ pub mod split;
 pub mod translator;
 pub mod walker;
 
+pub use conflict_filter::DmlConflictPredicateBuilder;
 pub use predicate::{
     PlanColumnRef, PlanDynamicRef, PlanLiteralRef, PlanOuterVarRef, PlanParamRef,
     PlanPredicate, PlanPredicateContext, PlanScalar, PredicateParseError,

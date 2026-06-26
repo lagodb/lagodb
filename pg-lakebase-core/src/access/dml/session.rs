@@ -42,6 +42,8 @@ use pgrx::pg_sys;
 use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use super::erased_session::{ErasedModifySession, ErasedModifySessionAdapter};
@@ -50,6 +52,92 @@ use super::erased_session::{ErasedModifySession, ErasedModifySessionAdapter};
 pub(crate) enum FrameKey {
     ModifyTable(NonNull<pg_sys::PlanState>),
     CopyFrom(u64),
+}
+
+/// Opaque identifier for the current PostgreSQL DML frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DmlFrameId {
+    tag: u8,
+    value: u64,
+}
+
+impl DmlFrameId {
+    fn from_key(key: FrameKey) -> Self {
+        match key {
+            FrameKey::ModifyTable(planstate) => Self {
+                tag: 0,
+                value: planstate.as_ptr() as usize as u64,
+            },
+            FrameKey::CopyFrom(copy_id) => Self {
+                tag: 1,
+                value: copy_id,
+            },
+        }
+    }
+}
+
+/// Scoped view of the target scan plan for the current DML frame.
+///
+/// Values of this type are only provided to the callback passed to
+/// [`with_current_dml_target_plan`]. The frame lifetime prevents the view from
+/// escaping while keeping PostgreSQL-owned expression pointers private.
+#[derive(Debug)]
+pub struct DmlTargetPlan<'frame> {
+    rel_oid: pg_sys::Oid,
+    scan_relid: core::ffi::c_int,
+    qual: *mut pg_sys::List,
+    _frame: PhantomData<&'frame DmlTargetPlanScope>,
+}
+
+impl<'frame> DmlTargetPlan<'frame> {
+    #[inline]
+    fn new(target: TargetScanMatch, _scope: &'frame DmlTargetPlanScope) -> Self {
+        Self {
+            rel_oid: target.rel_oid,
+            scan_relid: target.scan_relid,
+            qual: target.qual,
+            _frame: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn rel_oid(&self) -> pg_sys::Oid {
+        self.rel_oid
+    }
+
+    #[inline]
+    pub(crate) fn scan_relid(&self) -> core::ffi::c_int {
+        self.scan_relid
+    }
+
+    #[inline]
+    pub(crate) fn qual(&self) -> *mut pg_sys::List {
+        self.qual
+    }
+}
+
+struct DmlTargetPlanScope;
+
+#[derive(Debug, Clone, Copy)]
+struct TargetScanMatch {
+    rel_oid: pg_sys::Oid,
+    scan_relid: core::ffi::c_int,
+    qual: *mut pg_sys::List,
+}
+
+impl TargetScanMatch {
+    #[inline]
+    fn new(
+        rel_oid: pg_sys::Oid,
+        scan_relid: core::ffi::c_int,
+        qual: *mut pg_sys::List,
+    ) -> Self {
+        Self {
+            rel_oid,
+            scan_relid,
+            qual,
+        }
+    }
 }
 
 /// A frame on the current write-frame stack: its key plus the command type
@@ -64,12 +152,329 @@ struct FrameStackEntry {
     cmd_type: pg_sys::CmdType::Type,
 }
 
+impl FrameStackEntry {
+    #[inline]
+    fn modifies_rows_in_place(self) -> bool {
+        matches!(
+            self.cmd_type,
+            pg_sys::CmdType::CMD_UPDATE
+                | pg_sys::CmdType::CMD_DELETE
+                | pg_sys::CmdType::CMD_MERGE
+        )
+    }
+
+    /// The frame id when this frame modifies `rel_oid`'s rows in place
+    /// (`UPDATE`/`DELETE`/`MERGE`) and `rel_oid` is one of its result
+    /// relations; otherwise `None`.
+    ///
+    /// A scan of such a relation must carry stable per-row identity (`ctid`)
+    /// because the matching tuple callbacks address rows by it. `INSERT` and
+    /// `COPY FROM` frames never scan a row-identity target, and source-only
+    /// relations of an `UPDATE ... FROM` are not result relations, so both are
+    /// rejected here.
+    fn row_identity_target(self, rel_oid: pg_sys::Oid) -> Option<DmlFrameId> {
+        if !self.modifies_rows_in_place() {
+            return None;
+        }
+
+        let FrameKey::ModifyTable(node) = self.key else {
+            return None;
+        };
+
+        // SAFETY: this entry is on the current frame stack, so PostgreSQL is
+        // executing its ModifyTable node and the `ModifyTableState` is live.
+        let targets = unsafe { ModifyTableNode(node).targets_relation(rel_oid) };
+        targets.then(|| DmlFrameId::from_key(self.key))
+    }
+
+    fn target_plan(self, rel_oid: pg_sys::Oid) -> Option<TargetScanMatch> {
+        if !self.modifies_rows_in_place() {
+            return None;
+        }
+
+        let FrameKey::ModifyTable(node) = self.key else {
+            return None;
+        };
+
+        // SAFETY: this entry is on the current frame stack, so PostgreSQL is
+        // executing its ModifyTable node and the child PlanState tree is live.
+        unsafe { ModifyTableNode(node).target_plan(rel_oid) }
+    }
+}
+
+/// Read-only view over a live `ModifyTableState` reached through a frame key.
+#[derive(Clone, Copy)]
+struct ModifyTableNode(NonNull<pg_sys::PlanState>);
+
+impl ModifyTableNode {
+    /// Whether `rel_oid` is one of the node's result (target) relations.
+    ///
+    /// # Safety
+    ///
+    /// The node must be live: only valid while its frame is on the stack and
+    /// PostgreSQL is executing the node, so the `resultRelInfo` array it points
+    /// to is initialized.
+    unsafe fn targets_relation(self, rel_oid: pg_sys::Oid) -> bool {
+        let mtstate = self.0.as_ptr() as *const pg_sys::ModifyTableState;
+        let result_rel_info = unsafe { (*mtstate).resultRelInfo };
+        if result_rel_info.is_null() {
+            return false;
+        }
+        let nrels = usize::try_from(unsafe { (*mtstate).mt_nrels }).unwrap_or(0);
+
+        // SAFETY: `resultRelInfo` points to `mt_nrels` contiguous, initialized
+        // `ResultRelInfo`s for a live ModifyTable node.
+        let result_rels =
+            unsafe { std::slice::from_raw_parts(result_rel_info, nrels) };
+        result_rels.iter().any(|info| {
+            let relation = info.ri_RelationDesc;
+            // SAFETY: each result relation is open (non-null `Relation`) during
+            // execution; `rd_id` is a plain field read.
+            !relation.is_null() && unsafe { (*relation).rd_id } == rel_oid
+        })
+    }
+
+    /// Restriction quals from the unique target scan for `rel_oid`.
+    ///
+    /// # Safety
+    ///
+    /// The node and its initialized child PlanState tree must be live.
+    unsafe fn target_plan(self, rel_oid: pg_sys::Oid) -> Option<TargetScanMatch> {
+        let target = unsafe { self.target_identity(rel_oid) }?;
+        let planstate = self.0.as_ptr();
+        let outer = unsafe { (*planstate).lefttree };
+        let mut finder = TargetScanFinder::new(target);
+        unsafe { finder.visit_tree(outer) };
+        finder.finish()
+    }
+
+    /// Resolve one result relation to both its physical OID and range-table
+    /// index. Matching both values distinguishes a DML target from a self-join
+    /// source that scans the same physical relation.
+    ///
+    /// # Safety
+    ///
+    /// The wrapped `ModifyTableState`, its plan, and its `resultRelInfo` array
+    /// must be initialized and live for this call.
+    unsafe fn target_identity(
+        self,
+        rel_oid: pg_sys::Oid,
+    ) -> Option<DmlTargetIdentity> {
+        let mtstate = self.0.as_ptr().cast::<pg_sys::ModifyTableState>();
+        let result_rel_info = unsafe { (*mtstate).resultRelInfo };
+        let plan = unsafe { (*self.0.as_ptr()).plan }.cast::<pg_sys::ModifyTable>();
+        if result_rel_info.is_null() || plan.is_null() {
+            return None;
+        }
+
+        let result_relations = unsafe { (*plan).resultRelations };
+        let nrels = usize::try_from(unsafe { (*mtstate).mt_nrels }).ok()?;
+        if result_relations.is_null()
+            || usize::try_from(unsafe { pg_sys::list_length(result_relations) })
+                .ok()?
+                != nrels
+        {
+            return None;
+        }
+
+        let mut found = None;
+        for index in 0..nrels {
+            let info = unsafe { &*result_rel_info.add(index) };
+            let relation = info.ri_RelationDesc;
+            if relation.is_null() || unsafe { (*relation).rd_id } != rel_oid {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            let list_index = core::ffi::c_int::try_from(index).ok()?;
+            let raw_scan_relid =
+                unsafe { pg_sys::list_nth_int(result_relations, list_index) };
+            let scan_relid = pg_sys::Index::try_from(raw_scan_relid).ok()?;
+            if scan_relid == 0 {
+                return None;
+            }
+            found = Some(DmlTargetIdentity {
+                rel_oid,
+                scan_relid,
+            });
+        }
+        found
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DmlTargetIdentity {
+    rel_oid: pg_sys::Oid,
+    scan_relid: pg_sys::Index,
+}
+
+struct TargetScanFinder {
+    target: DmlTargetIdentity,
+    found: Option<TargetScanMatch>,
+    ambiguous: bool,
+}
+
+impl TargetScanFinder {
+    #[inline]
+    fn new(target: DmlTargetIdentity) -> Self {
+        Self {
+            target,
+            found: None,
+            ambiguous: false,
+        }
+    }
+
+    /// Visit one node and all descendants through PostgreSQL's PlanState walker.
+    ///
+    /// # Safety
+    ///
+    /// `planstate` must be NULL or part of the live target ModifyTable tree.
+    unsafe fn visit_tree(&mut self, planstate: *mut pg_sys::PlanState) {
+        if planstate.is_null() || self.ambiguous {
+            return;
+        }
+
+        if let Some(target) = unsafe { self.scan_target(planstate) } {
+            self.record(target);
+            if self.ambiguous {
+                return;
+            }
+        }
+
+        // SAFETY: `planstate` belongs to the live ModifyTable child tree and
+        // `self` remains valid for the synchronous PostgreSQL walker call.
+        unsafe {
+            pg_sys::planstate_tree_walker_impl(
+                planstate,
+                Some(target_scan_walker),
+                (self as *mut Self).cast::<c_void>(),
+            );
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `planstate` must point to a live PlanState whose tag matches its concrete
+    /// allocation.
+    unsafe fn scan_target(
+        &self,
+        planstate: *mut pg_sys::PlanState,
+    ) -> Option<TargetScanMatch> {
+        let tag = unsafe { (*planstate).type_ };
+        match tag {
+            pg_sys::NodeTag::T_SeqScanState => unsafe {
+                Self::seq_scan_target(planstate, self.target)
+            },
+            pg_sys::NodeTag::T_CustomScanState => unsafe {
+                Self::custom_scan_target(planstate, self.target)
+            },
+            _ => None,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `planstate` must point to a live `SeqScanState`.
+    unsafe fn seq_scan_target(
+        planstate: *mut pg_sys::PlanState,
+        target: DmlTargetIdentity,
+    ) -> Option<TargetScanMatch> {
+        let state = planstate.cast::<pg_sys::SeqScanState>();
+        let scan_state = unsafe { &(*state).ss };
+        let plan = unsafe { (*planstate).plan };
+        if plan.is_null() {
+            return None;
+        }
+        let scan = plan.cast::<pg_sys::SeqScan>();
+        let scan_relid = unsafe { (*scan).scan.scanrelid };
+        unsafe { Self::target_from_scan_state(scan_state, target, scan_relid, plan) }
+    }
+
+    /// # Safety
+    ///
+    /// `planstate` must point to a live `CustomScanState`.
+    unsafe fn custom_scan_target(
+        planstate: *mut pg_sys::PlanState,
+        target: DmlTargetIdentity,
+    ) -> Option<TargetScanMatch> {
+        let state = planstate.cast::<pg_sys::CustomScanState>();
+        let scan_state = unsafe { &(*state).ss };
+        let plan = unsafe { (*planstate).plan };
+        if plan.is_null() {
+            return None;
+        }
+        let scan = plan.cast::<pg_sys::CustomScan>();
+        if unsafe { !(*scan).custom_scan_tlist.is_null() }
+            || unsafe { (*scan).scan.scanrelid } == 0
+        {
+            return None;
+        }
+        let scan_relid = unsafe { (*scan).scan.scanrelid };
+        unsafe { Self::target_from_scan_state(scan_state, target, scan_relid, plan) }
+    }
+
+    /// # Safety
+    ///
+    /// `scan_state`, `plan`, and its current relation must belong to the same
+    /// live executor scan node.
+    unsafe fn target_from_scan_state(
+        scan_state: &pg_sys::ScanState,
+        target: DmlTargetIdentity,
+        scan_relid: pg_sys::Index,
+        plan: *mut pg_sys::Plan,
+    ) -> Option<TargetScanMatch> {
+        let relation = scan_state.ss_currentRelation;
+        if relation.is_null()
+            || unsafe { (*relation).rd_id } != target.rel_oid
+            || scan_relid != target.scan_relid
+        {
+            return None;
+        }
+        let scan_relid = core::ffi::c_int::try_from(scan_relid).ok()?;
+        Some(TargetScanMatch::new(target.rel_oid, scan_relid, unsafe {
+            (*plan).qual
+        }))
+    }
+
+    fn record(&mut self, target: TargetScanMatch) {
+        if self.found.is_some() {
+            self.ambiguous = true;
+        } else {
+            self.found = Some(target);
+        }
+    }
+
+    #[inline]
+    fn finish(self) -> Option<TargetScanMatch> {
+        if self.ambiguous { None } else { self.found }
+    }
+}
+
+/// PostgreSQL PlanState walker callback.
+///
+/// # Safety
+///
+/// `planstate` must be a live executor node and `context` must be the
+/// `TargetScanFinder` supplied by [`TargetScanFinder::visit_tree`].
+unsafe extern "C-unwind" fn target_scan_walker(
+    planstate: *mut pg_sys::PlanState,
+    context: *mut c_void,
+) -> bool {
+    // SAFETY: `context` is the live TargetScanFinder supplied by visit_tree;
+    // PostgreSQL invokes the callback synchronously.
+    let finder = unsafe { &mut *context.cast::<TargetScanFinder>() };
+    unsafe { finder.visit_tree(planstate) };
+    finder.ambiguous
+}
+
 struct DmlFrame {
     key: FrameKey,
     cmd_type: pg_sys::CmdType::Type,
     resource_handle: ResourceHandle,
     rel_index: HashMap<pg_sys::Oid, usize>,
     sessions: Vec<(pg_sys::Oid, Box<ModifySession>)>,
+    cleanup_callbacks: Vec<Box<dyn FnOnce() + 'static>>,
 }
 
 // Object-safe wrapper over the AM session. `finalized` records whether the
@@ -134,11 +539,24 @@ impl DmlFrame {
             resource_handle,
             rel_index: HashMap::new(),
             sessions: Vec::new(),
+            cleanup_callbacks: Vec::new(),
         }
     }
 
     fn session_index(&self, relid: pg_sys::Oid) -> Option<usize> {
         self.rel_index.get(&relid).copied()
+    }
+}
+
+impl Drop for DmlFrame {
+    fn drop(&mut self) {
+        // Relation sessions own the state that consumes frame-scoped auxiliary
+        // data. Finalize or abort them before releasing that data. `clear`
+        // makes the ordering explicit instead of relying on struct field order.
+        self.sessions.clear();
+        for cleanup in self.cleanup_callbacks.drain(..).rev() {
+            cleanup();
+        }
     }
 }
 
@@ -163,8 +581,9 @@ impl HotState {
 }
 
 thread_local! {
-    // Active or lazily-created DML frames.  Removing a frame drops its sessions;
-    // unfinalized sessions abort.
+    // Active DML frames. Tuple callbacks create them lazily; frame-cleanup
+    // registration may create them eagerly. Removing a frame drops its sessions
+    // and then runs its auxiliary cleanup callbacks.
     static FRAMES: RefCell<HashMap<FrameKey, DmlFrame>> =
         RefCell::new(HashMap::new());
     // Current write-frame stack.  Nested SPI DML and trigger DML naturally push
@@ -448,6 +867,76 @@ pub(super) fn current_modifytable_frames() -> Vec<NonNull<pg_sys::PlanState>> {
             })
             .collect()
     })
+}
+
+/// Return the current managed DML frame id, if a table-AM callback is inside one.
+pub fn current_dml_frame_id() -> Option<DmlFrameId> {
+    HOT_STATE.with(|hot| {
+        hot.get()
+            .frame_top
+            .map(|entry| DmlFrameId::from_key(entry.key))
+    })
+}
+
+/// Register cleanup owned by the current managed DML frame.
+///
+/// Registration eagerly materializes the otherwise lazy frame, so the cleanup
+/// also runs when the statement modifies no tuples. Callbacks run in reverse
+/// registration order after all relation-local sessions have either completed
+/// successfully or received abort cleanup.
+///
+/// # Errors
+///
+/// Returns an error when called outside a managed DML frame or when the current
+/// frame cannot be materialized.
+pub fn register_current_dml_frame_cleanup(
+    cleanup: impl FnOnce() + 'static,
+) -> Result<(), PgReportError> {
+    let entry = HOT_STATE
+        .with(|hot| hot.get().frame_top)
+        .ok_or_else(|| {
+            feature_not_supported(
+                "DML frame cleanup registered outside a managed ModifyTable or COPY FROM frame",
+            )
+        })?;
+
+    ensure_frame_exists(entry.key, entry.cmd_type)?;
+    FRAMES.with(|frames| {
+        let mut frames = frames.borrow_mut();
+        let frame = frames.get_mut(&entry.key).ok_or_else(|| {
+            internal_error("DML frame missing while registering cleanup")
+        })?;
+        frame.cleanup_callbacks.push(Box::new(cleanup));
+        Ok(())
+    })
+}
+
+/// Return the current DML frame id only when `rel_oid` is a relation whose rows
+/// the active `ModifyTable` frame rewrites in place (`UPDATE`/`DELETE`/`MERGE`).
+///
+/// A scan driving such a frame must synthesize per-row identity (`ctid`); other
+/// scans in the same statement (an `UPDATE ... FROM` source, an `INSERT`
+/// target, a subquery relation) get `None` and skip that work. Returns `None`
+/// outside any DML frame.
+pub fn current_dml_target_frame(rel_oid: pg_sys::Oid) -> Option<DmlFrameId> {
+    HOT_STATE
+        .with(|hot| hot.get().frame_top)
+        .and_then(|entry| entry.row_identity_target(rel_oid))
+}
+
+/// Use the unique target scan plan for `rel_oid` within the active DML frame.
+///
+/// The callback is higher-ranked over the frame lifetime, so the opaque plan
+/// view and its PostgreSQL-owned expression tree cannot escape this call.
+pub fn with_current_dml_target_plan<R>(
+    rel_oid: pg_sys::Oid,
+    use_plan: impl for<'frame> FnOnce(DmlTargetPlan<'frame>) -> R,
+) -> Option<R> {
+    let target = HOT_STATE
+        .with(|hot| hot.get().frame_top)
+        .and_then(|entry| entry.target_plan(rel_oid))?;
+    let scope = DmlTargetPlanScope;
+    Some(use_plan(DmlTargetPlan::new(target, &scope)))
 }
 
 pub(crate) fn finish_frame(key: FrameKey) -> Result<(), PgReportError> {

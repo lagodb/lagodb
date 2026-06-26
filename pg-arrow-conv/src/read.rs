@@ -20,7 +20,8 @@ use arrow_schema::DataType;
 use pg_lakebase_core::api::{AmError, AmResult};
 use pg_lakebase_core::batch::{AmScanBatchSource, BatchRowDecoder};
 use pg_lakebase_core::tuple::{
-    ByteaView, Cell, DatumTarget, Decimal128NumericCodec, SlotColumns, StringView,
+    ByteaView, Cell, DatumTarget, Decimal128NumericCodec, Row, SlotColumns,
+    StringView,
 };
 use pgrx::datum::Uuid;
 use pgrx::pg_sys;
@@ -516,6 +517,47 @@ impl ArrowColumnDecoder {
         Self {
             columns: columns.into_boxed_slice(),
         }
+    }
+
+    /// Decode one batch row into an owned [`Row`].
+    ///
+    /// This is for row-version fetch paths that must return a `Row` beyond the
+    /// lifetime of the Arrow batch. Borrowed string/binary views are copied into
+    /// owned cells before the row is returned.
+    pub fn read_owned_row(
+        &self,
+        batch: RecordBatch,
+        row_idx: usize,
+    ) -> AmResult<Row> {
+        let bound = self.bind(batch)?;
+        if row_idx >= bound.num_rows {
+            return Err(ConvError::DatumConversionError(
+                format!(
+                    "row index {row_idx} is out of range for batch with {} rows",
+                    bound.num_rows
+                )
+                .into(),
+            )
+            .into());
+        }
+
+        let mut row = Row::with_capacity(
+            self.columns
+                .iter()
+                .map(|col| col.dest)
+                .max()
+                .map(|dest| dest + 1)
+                .unwrap_or(0),
+        );
+        for col in bound.columns.iter() {
+            // SAFETY: `read_cell` may return borrowed views into arrays owned by
+            // `bound`; `Cell::into_owned` copies those view variants before
+            // `bound` is dropped at the end of this method.
+            let cell =
+                unsafe { col.reader.read_cell(row_idx) }?.map(Cell::into_owned);
+            row.set_cell(col.dest, cell);
+        }
+        Ok(row)
     }
 }
 

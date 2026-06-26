@@ -838,6 +838,7 @@ mod tests {
             start: 0,
             length: 0,
             record_count: None,
+            first_row_id: None,
             data_file_path: format!(
                 "{}/data-1.parquet",
                 table_location.to_str().unwrap()

@@ -218,12 +218,44 @@ impl BoundPredicateVisitor for CollectFieldIdVisitor {
 
 /// A visitor to convert Iceberg bound predicates to Arrow predicates.
 pub(super) struct PredicateConverter<'a> {
-    /// The Parquet schema descriptor.
-    pub(super) parquet_schema: &'a SchemaDescriptor,
-    /// The map between field id and leaf column index in Parquet schema.
-    pub(super) column_map: &'a HashMap<i32, usize>,
-    /// The required column indices in Parquet schema for the predicates.
-    pub(super) column_indices: &'a Vec<usize>,
+    resolver: PredicateColumnResolver<'a>,
+}
+
+enum PredicateColumnResolver<'a> {
+    Parquet {
+        parquet_schema: &'a SchemaDescriptor,
+        column_map: &'a HashMap<i32, usize>,
+        column_indices: &'a [usize],
+    },
+    RecordBatch {
+        field_id_to_batch_index: &'a HashMap<i32, usize>,
+    },
+}
+
+impl<'a> PredicateConverter<'a> {
+    pub(super) fn for_parquet(
+        parquet_schema: &'a SchemaDescriptor,
+        column_map: &'a HashMap<i32, usize>,
+        column_indices: &'a [usize],
+    ) -> Self {
+        Self {
+            resolver: PredicateColumnResolver::Parquet {
+                parquet_schema,
+                column_map,
+                column_indices,
+            },
+        }
+    }
+
+    pub(super) fn for_record_batch(
+        field_id_to_batch_index: &'a HashMap<i32, usize>,
+    ) -> Self {
+        Self {
+            resolver: PredicateColumnResolver::RecordBatch {
+                field_id_to_batch_index,
+            },
+        }
+    }
 }
 
 impl PredicateConverter<'_> {
@@ -235,34 +267,44 @@ impl PredicateConverter<'_> {
         &mut self,
         reference: &BoundReference,
     ) -> Result<Option<usize>> {
-        // The leaf column's index in Parquet schema.
-        if let Some(column_idx) = self.column_map.get(&reference.field().id) {
-            if self.parquet_schema.get_column_root(*column_idx).is_group() {
-                return Err(Error::new(
-                    ErrorKind::DataInvalid,
-                    format!(
-                        "Leaf column `{}` in predicates isn't a root column in Parquet schema.",
-                        reference.field().name
-                    ),
-                ));
+        match &self.resolver {
+            PredicateColumnResolver::Parquet {
+                parquet_schema,
+                column_map,
+                column_indices,
+            } => {
+                // The leaf column's index in Parquet schema.
+                if let Some(column_idx) = column_map.get(&reference.field().id) {
+                    if parquet_schema.get_column_root(*column_idx).is_group() {
+                        return Err(Error::new(
+                            ErrorKind::DataInvalid,
+                            format!(
+                                "Leaf column `{}` in predicates isn't a root column in Parquet schema.",
+                                reference.field().name
+                            ),
+                        ));
+                    }
+
+                    // The leaf column's index in the required column indices.
+                    let index = column_indices
+                        .iter()
+                        .position(|&idx| idx == *column_idx)
+                        .ok_or(Error::new(
+                            ErrorKind::DataInvalid,
+                            format!(
+                                "Leaf column `{}` in predicates cannot be found in the required column indices.",
+                                reference.field().name
+                            ),
+                        ))?;
+
+                    Ok(Some(index))
+                } else {
+                    Ok(None)
+                }
             }
-
-            // The leaf column's index in the required column indices.
-            let index = self
-                .column_indices
-                .iter()
-                .position(|&idx| idx == *column_idx)
-                .ok_or(Error::new(
-                    ErrorKind::DataInvalid,
-                    format!(
-                "Leaf column `{}` in predicates cannot be found in the required column indices.",
-                reference.field().name
-            ),
-                ))?;
-
-            Ok(Some(index))
-        } else {
-            Ok(None)
+            PredicateColumnResolver::RecordBatch {
+                field_id_to_batch_index,
+            } => Ok(field_id_to_batch_index.get(&reference.field().id).copied()),
         }
     }
 
@@ -324,9 +366,8 @@ fn compute_is_nan(array: &ArrayRef) -> std::result::Result<BooleanArray, ArrowEr
     Ok(BooleanArray::new(values, None))
 }
 
-type PredicateResult = dyn FnMut(RecordBatch) -> std::result::Result<BooleanArray, ArrowError>
-    + Send
-    + 'static;
+pub(super) type PredicateResult =
+    dyn FnMut(RecordBatch) -> std::result::Result<BooleanArray, ArrowError> + Send + 'static;
 
 impl BoundPredicateVisitor for PredicateConverter<'_> {
     type T = Box<PredicateResult>;
@@ -805,11 +846,11 @@ mod tests {
         let parquet_schema = SchemaDescriptor::new(Arc::new(parquet_type));
         let column_map = HashMap::from([(4i32, 0usize)]);
         let column_indices = vec![0usize];
-        let mut converter = super::PredicateConverter {
-            parquet_schema: &parquet_schema,
-            column_map: &column_map,
-            column_indices: &column_indices,
-        };
+        let mut converter = super::PredicateConverter::for_parquet(
+            &parquet_schema,
+            &column_map,
+            &column_indices,
+        );
         let mut predicate_fn = visit(&mut converter, &bound).unwrap();
         predicate_fn(batch).unwrap()
     }

@@ -400,6 +400,7 @@ pub(crate) mod tests {
                 start: 0,
                 length: 0,
                 record_count: None,
+                first_row_id: None,
                 data_file_path: format!(
                     "{}/1.parquet",
                     table_location.to_str().unwrap()
@@ -419,6 +420,7 @@ pub(crate) mod tests {
                 start: 0,
                 length: 0,
                 record_count: None,
+                first_row_id: None,
                 data_file_path: format!(
                     "{}/2.parquet",
                     table_location.to_str().unwrap()
@@ -481,6 +483,7 @@ pub(crate) mod tests {
             start: 0,
             length: 0,
             record_count: None,
+            first_row_id: None,
             data_file_path: "data.parquet".to_string(),
             data_file_format: crate::spec::DataFileFormat::Parquet,
             schema: schema.clone(),

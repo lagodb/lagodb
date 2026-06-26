@@ -55,7 +55,7 @@ impl IcebergScanState {
             )?,
         };
 
-        let cursor = spec.open_batch_cursor(shape.attr_types())?;
+        let cursor = spec.open_batch_cursor(shape.attr_types(), None)?;
         let natts = ctx.relation.natts();
 
         let state = ctx.state;
@@ -108,7 +108,7 @@ impl IcebergScanState {
             spec.set_filter(filter);
         }
 
-        state.cursor = Some(spec.open_batch_cursor(&attr_types)?);
+        state.cursor = Some(spec.open_batch_cursor(&attr_types, None)?);
         Ok(())
     }
 

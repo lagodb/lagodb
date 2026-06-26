@@ -146,6 +146,19 @@ unsafe impl AmCacheable for IcebergTableOptionCache {
 }
 
 impl IcebergTableOptionCache {
+    pub fn from_table_options(opts: Option<&TableOptions>) -> Self {
+        match opts {
+            Some(opts) => {
+                let (cache, _) = <Self as AmCacheable>::from_options(opts);
+                cache
+            }
+            None => {
+                let (cache, _) = <Self as AmCacheable>::default_options();
+                cache
+            }
+        }
+    }
+
     pub fn iceberg_format_version(&self) -> Result<FormatVersion, TableOptionError> {
         match self.format_version {
             1 => Ok(FormatVersion::V1),
