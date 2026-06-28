@@ -16,13 +16,16 @@ use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use crate::customscan::codec::PrivateDataWriter;
-use crate::customscan::custom_private::{CustomScanPrivate, encode_split};
+use crate::customscan::custom_private::{
+    CustomScanPrivate, encode_split_with_layout,
+};
 use crate::customscan::error::CustomScanError;
 use crate::customscan::provider::{
     LakebaseCustomScanProvider, PathPushdownSummary, PathVariant, PathVariantKind,
     PlanTranslateContext,
 };
 use crate::customscan::state::scan_methods_for;
+use crate::customscan::tuple_layout::BaseScanTuplePlanner;
 use crate::diag::ReportableError;
 use crate::expr::predicate::PlanPredicate;
 use crate::expr::split::{
@@ -264,8 +267,16 @@ unsafe extern "C-unwind" fn plan_custom_path_trampoline<
     let relation_oid =
         unsafe { PlanRelationResolver::new(root).rel_oid((*rel).relid) };
     let pre_setrefs_scan_rti = unsafe { (*rel).relid } as i32;
+    let scan_tuple = unsafe {
+        BaseScanTuplePlanner::new((*rel).relid, relation_oid).plan(
+            tlist,
+            (*(*best_path).path.pathtarget).exprs,
+            plan_qual,
+            custom_exprs,
+        )
+    };
     let custom_private = unsafe {
-        encode_split(
+        encode_split_with_layout(
             P::NAME,
             relation_oid,
             pushed_count,
@@ -274,6 +285,7 @@ unsafe extern "C-unwind" fn plan_custom_path_trampoline<
             &split.column_refs,
             provider_metadata,
             pre_setrefs_scan_rti,
+            &scan_tuple.layout,
         )
     }
     .map_err(CustomScanError::encode_custom_private)
@@ -314,7 +326,7 @@ unsafe extern "C-unwind" fn plan_custom_path_trampoline<
         (*cscan).custom_plans = custom_plans;
         (*cscan).custom_exprs = custom_exprs;
         (*cscan).custom_private = custom_private;
-        (*cscan).custom_scan_tlist = ptr::null_mut();
+        (*cscan).custom_scan_tlist = scan_tuple.custom_scan_tlist;
         (*cscan).custom_relids =
             pg_sys::bms_make_singleton((*rel).relid as core::ffi::c_int);
         (*cscan).methods = scan_methods_for::<P>();

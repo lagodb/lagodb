@@ -89,6 +89,17 @@ struct TableState {
     validations: Vec<RowDeltaValidation>,
 }
 
+/// Owned per-table state detached from the tracker before commit I/O begins.
+///
+/// Keeping this snapshot owned releases the [`RefCell`] borrow on
+/// [`TxMetadataInner`] before metadata reads, transaction materialization, and
+/// catalog CAS retries.
+struct TableCommitInput {
+    delta: Arc<SnapshotDelta>,
+    validations: Vec<RowDeltaValidation>,
+    file_io: FileIO,
+}
+
 impl TableState {
     fn new(nest_level: i32) -> Self {
         Self {
@@ -625,7 +636,11 @@ impl TxMetadata {
             self.inner.borrow().tables.keys().copied().collect();
 
         for relid in table_oids {
-            let Some((delta, validations, file_io)) = self.commit_input(relid)?
+            let Some(TableCommitInput {
+                delta,
+                validations,
+                file_io,
+            }) = self.commit_input(relid)?
             else {
                 continue;
             };
@@ -704,8 +719,7 @@ impl TxMetadata {
     fn commit_input(
         &self,
         relid: pg_sys::Oid,
-    ) -> IcebergResult<Option<(Arc<SnapshotDelta>, Vec<RowDeltaValidation>, FileIO)>>
-    {
+    ) -> IcebergResult<Option<TableCommitInput>> {
         let inner = self.inner.borrow();
         let Some(state) = inner.tables.get(&relid) else {
             return Ok(None);
@@ -719,11 +733,11 @@ impl TxMetadata {
                 relid
             ))
         })?;
-        Ok(Some((
-            Arc::clone(&state.delta),
-            state.validations.clone(),
+        Ok(Some(TableCommitInput {
+            delta: Arc::clone(&state.delta),
+            validations: state.validations.clone(),
             file_io,
-        )))
+        }))
     }
 
     // -------------------------------------------------------------------------

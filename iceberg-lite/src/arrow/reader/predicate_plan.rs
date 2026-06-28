@@ -49,9 +49,7 @@ pub(super) struct FilePredicatePlan {
 }
 
 impl FilePredicatePlan {
-    pub(super) fn try_new(
-        predicate: Option<BoundPredicate>,
-    ) -> Result<Self> {
+    pub(super) fn try_new(predicate: Option<BoundPredicate>) -> Result<Self> {
         let Some(predicate) = predicate else {
             return Ok(Self {
                 parquet_filter_predicate: None,
@@ -81,9 +79,7 @@ impl FilePredicatePlan {
         Ok(plan)
     }
 
-    pub(super) fn parquet_filter_predicate(
-        &self,
-    ) -> Option<&BoundPredicate> {
+    pub(super) fn parquet_filter_predicate(&self) -> Option<&BoundPredicate> {
         self.parquet_filter_predicate.as_ref()
     }
 
@@ -91,9 +87,7 @@ impl FilePredicatePlan {
         &self.post_transform_field_ids
     }
 
-    pub(super) fn into_post_transform_residual(
-        self,
-    ) -> Option<BoundPredicate> {
+    pub(super) fn into_post_transform_residual(self) -> Option<BoundPredicate> {
         self.post_transform_residual
     }
 
@@ -140,9 +134,7 @@ impl FilePredicatePlan {
         let next = match (conjunction.take(), predicate) {
             (None, BoundPredicate::AlwaysTrue) => None,
             (current, BoundPredicate::AlwaysTrue) => current,
-            (_, BoundPredicate::AlwaysFalse) => {
-                Some(BoundPredicate::AlwaysFalse)
-            }
+            (_, BoundPredicate::AlwaysFalse) => Some(BoundPredicate::AlwaysFalse),
             (Some(BoundPredicate::AlwaysFalse), _) => {
                 Some(BoundPredicate::AlwaysFalse)
             }
@@ -163,12 +155,8 @@ mod tests {
     use crate::expr::{
         BinaryExpression, Bind, BoundReference, PredicateOperator, Reference,
     };
-    use crate::metadata_columns::{
-        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS,
-    };
-    use crate::spec::{
-        Datum, NestedField, PrimitiveType, Schema, Type,
-    };
+    use crate::metadata_columns::{RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS};
+    use crate::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
 
     fn equality_predicate(
         field_id: i32,
@@ -225,10 +213,9 @@ mod tests {
     fn mixed_conjunction_is_split_between_exact_filter_and_residual() {
         let physical = physical_predicate(1, 10);
         let metadata = position_predicate(5);
-        let plan = FilePredicatePlan::try_new(Some(
-            physical.clone().and(metadata.clone()),
-        ))
-        .unwrap();
+        let plan =
+            FilePredicatePlan::try_new(Some(physical.clone().and(metadata.clone())))
+                .unwrap();
 
         assert_eq!(plan.parquet_filter_predicate(), Some(&physical));
         assert_eq!(
@@ -240,8 +227,7 @@ mod tests {
 
     #[test]
     fn physical_or_subtree_is_pushed_as_one_conjunct() {
-        let physical_or = physical_predicate(1, 10)
-            .or(physical_predicate(2, 20));
+        let physical_or = physical_predicate(1, 10).or(physical_predicate(2, 20));
         let metadata = position_predicate(5);
         let plan = FilePredicatePlan::try_new(Some(
             physical_or.clone().and(metadata.clone()),
@@ -290,10 +276,7 @@ mod tests {
         );
         let predicate = Reference::new("field_1")
             .equal_to(Datum::int(10))
-            .and(
-                Reference::new(RESERVED_COL_NAME_POS)
-                    .equal_to(Datum::long(5)),
-            )
+            .and(Reference::new(RESERVED_COL_NAME_POS).equal_to(Datum::long(5)))
             .not()
             .bind(schema, true)
             .unwrap();

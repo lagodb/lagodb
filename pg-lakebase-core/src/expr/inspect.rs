@@ -48,6 +48,9 @@ pub(crate) struct ExprVarRef {
     pub(crate) attno: pg_sys::AttrNumber,
     pub(crate) atttypid: pg_sys::Oid,
     pub(crate) attcollation: pg_sys::Oid,
+    /// Planner-owned source node. Consumers that manufacture a scan tlist
+    /// copy this node so PostgreSQL's `varnullingrels` identity is preserved.
+    pub(crate) raw: *mut pg_sys::Var,
 }
 
 /// Owned expression-usage facts for one relation scope.
@@ -62,14 +65,6 @@ impl RelationExprUsage {
     #[inline]
     pub(crate) fn user_vars(&self) -> &[ExprVarRef] {
         &self.user_vars
-    }
-
-    pub(crate) fn sorted_user_attnos(&self) -> Vec<pg_sys::AttrNumber> {
-        let mut attnos: Vec<pg_sys::AttrNumber> =
-            self.user_vars.iter().map(|v| v.attno).collect();
-        attnos.sort_unstable();
-        attnos.dedup();
-        attnos
     }
 
     #[inline]
@@ -95,15 +90,16 @@ impl RelationExprUsage {
                 attno,
                 atttypid: unsafe { (*var).vartype },
                 attcollation: unsafe { (*var).varcollid },
+                raw: var,
             });
         } else if attno == 0 {
             self.has_whole_row = true;
         } else {
-            // `tableoid` is supplied by scan-slot metadata, not by reading a
-            // table column, so only other system attrs are recorded.
-            if attno as i32 != pg_sys::TableOidAttributeNumber {
-                self.system_attnos.push(attno);
-            }
+            // `tableoid` does not require a storage column, but a projected
+            // user-column custom tuple cannot represent it. Keep it in the
+            // usage contract so tuple-layout planning falls back atomically to
+            // the relation-shaped slot.
+            self.system_attnos.push(attno);
         }
     }
 }
@@ -149,32 +145,6 @@ impl RelationExprAnalyzer {
         let len = unsafe { pg_sys::list_length(list) };
         for i in 0..len {
             let expr = unsafe { pg_sys::list_nth(list, i) } as *mut pg_sys::Expr;
-            usage.extend(unsafe { self.collect_expr(expr) });
-        }
-        usage
-    }
-
-    /// Collect usage from a `List<TargetEntry>`.
-    ///
-    /// # Safety
-    ///
-    /// `list` is NULL or a valid PostgreSQL targetlist.
-    pub(crate) unsafe fn collect_targetlist(
-        &self,
-        list: *mut pg_sys::List,
-    ) -> RelationExprUsage {
-        let mut usage = RelationExprUsage::default();
-        if list.is_null() {
-            return usage;
-        }
-        let len = unsafe { pg_sys::list_length(list) };
-        for i in 0..len {
-            let tle =
-                unsafe { pg_sys::list_nth(list, i) } as *mut pg_sys::TargetEntry;
-            if tle.is_null() {
-                continue;
-            }
-            let expr = unsafe { (*tle).expr };
             usage.extend(unsafe { self.collect_expr(expr) });
         }
         usage

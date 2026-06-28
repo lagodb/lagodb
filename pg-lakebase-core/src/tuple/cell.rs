@@ -402,17 +402,30 @@ impl Cell {
                 Cell::ByteaView(v) => unsafe {
                     PgWrapper::jsonb_in_from_bytes(v.ptr, v.len).ok()
                 },
+                Cell::Bytea(v) => unsafe {
+                    PgWrapper::jsonb_in_from_bytes(v.as_ptr(), v.len()).ok()
+                },
                 _ => None,
             },
             DatumTarget::Json => match self {
                 Cell::StringView(v) => unsafe {
                     PgWrapper::json_in_from_bytes(v.ptr, v.len).ok()
                 },
+                Cell::String(v) => unsafe {
+                    PgWrapper::json_in_from_bytes(v.as_ptr(), v.len()).ok()
+                },
                 _ => None,
             },
             DatumTarget::Name => match self {
                 Cell::StringView(v) => unsafe {
                     let c_str = CString::new(v.as_str()).ok()?;
+                    fcinfo::direct_function_call_as_datum(
+                        pg_sys::namein,
+                        &[Some(Datum::from(c_str.as_ptr()))],
+                    )
+                },
+                Cell::String(v) => unsafe {
+                    let c_str = CString::new(v).ok()?;
                     fcinfo::direct_function_call_as_datum(
                         pg_sys::namein,
                         &[Some(Datum::from(c_str.as_ptr()))],

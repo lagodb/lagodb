@@ -41,7 +41,6 @@ pub(crate) struct AmFfiSession<T> {
     /// keep accumulating fields here.
     pub(crate) scan_keys: OwnedScanKeys,
     tmp_ctx: pg_sys::MemoryContext,
-    natts: usize,
 }
 
 impl<B, T> FfiContainer<B, T> {
@@ -144,7 +143,6 @@ impl<T> AmFfiSession<T> {
             row: Row::with_capacity(natts),
             scan_keys,
             tmp_ctx,
-            natts,
         }
     }
 
@@ -160,10 +158,6 @@ impl<T> AmFfiSession<T> {
         self.tmp_ctx
     }
 
-    pub(crate) fn natts(&self) -> usize {
-        self.natts
-    }
-
     /// Materialize the buffered row into the slot through [`SlotColumns`], the
     /// single substrate that owns the unsafe slot writes (shared with the
     /// column path). It does **not** call `ExecStoreVirtualTuple`; the caller
@@ -172,7 +166,7 @@ impl<T> AmFfiSession<T> {
         &mut self,
         slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<(), PgReportError> {
-        let mut cols = unsafe { SlotColumns::new(slot, self.tmp_ctx, self.natts) };
+        let mut cols = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
         cols.fill_from_row(&mut self.row)
     }
 }

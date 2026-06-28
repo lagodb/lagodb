@@ -72,4 +72,55 @@ mod tests {
         })
         .expect("CustomScan slot-first end-to-end query failed");
     }
+
+    #[pg_test]
+    fn customscan_executes_subplan_qual_over_projected_tuple() {
+        Spi::connect_mut(|client| -> pgrx::spi::Result<()> {
+            for stmt in [
+                "CREATE TABLE cs_subplan_projected (id integer, label text, amount integer, tag text) USING iceberg",
+                "INSERT INTO cs_subplan_projected VALUES (1, 'alpha', 10, 'a')",
+                "INSERT INTO cs_subplan_projected VALUES (2, 'beta', 20, 'b')",
+                "INSERT INTO cs_subplan_projected VALUES (3, 'gamma', 30, 'c')",
+                "CREATE TEMP TABLE cs_subplan_keys (id integer)",
+                "INSERT INTO cs_subplan_keys VALUES (1), (3)",
+                "SET pg_lakebase.customscan_mode = 'force'",
+            ] {
+                client.update(stmt, None, &[])?;
+            }
+
+            let query = "SELECT id, label FROM cs_subplan_projected \
+                         WHERE id >= 1 \
+                           AND id NOT IN (SELECT id FROM cs_subplan_keys) \
+                         ORDER BY id";
+            let plan = client
+                .select(&format!("EXPLAIN (COSTS OFF) {query}"), None, &[])?
+                .filter_map(|row| row.get::<String>(1).ok().flatten())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                plan.contains("Custom Scan (pg-iceberg-am)"),
+                "SubPlan query must exercise the Iceberg CustomScan; got\n{plan}",
+            );
+            assert!(
+                plan.contains("SubPlan"),
+                "NOT IN query must retain a planned SubPlan; got\n{plan}",
+            );
+            assert!(
+                plan.contains("Pushed Filter: (id >= 1)"),
+                "independent pushed predicate must select the CustomPath; got\n{plan}",
+            );
+
+            let mut rows = Vec::new();
+            for row in client.select(query, None, &[])? {
+                rows.push((
+                    row.get::<i32>(1)?.expect("id is not NULL"),
+                    row.get::<String>(2)?.expect("label is not NULL"),
+                ));
+            }
+            assert_eq!(rows, vec![(2, "beta".to_string())]);
+
+            Ok(())
+        })
+        .expect("CustomScan projected SubPlan query failed");
+    }
 }

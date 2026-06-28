@@ -5,6 +5,8 @@
 //! lives in [`type_mapping`](super::type_mapping); here those resolved rules
 //! get *bound* to concrete slot/attno/Arrow-column positions:
 //!
+//! - [`RelationShape`] captures the PostgreSQL tuple layout once and supplies
+//!   the same descriptor-derived inputs to both directions.
 //! - [`ScanColumns`] (read): holds the bound `IcebergSchema` and the cached
 //!   [`ColumnMapping`]; produces the slot-first decoder plan (`decoded_columns`)
 //!   both scan paths consume.
@@ -17,9 +19,9 @@
 //! [`ColumnMapping`] is the *single owner* of all "Arrow column ↔ slot
 //! position" arithmetic for the scan path (Requirement 8.1). `scan.rs` and
 //! `provider.rs` contain no `attno - 1` / `dest` index math: they hand this
-//! module the relation's live columns (full-schema path) or a resolved
-//! projection (projected path), and `ColumnMapping` turns those into
-//! destination slot indices.
+//! module a [`RelationShape`] (full-schema path) or a resolved projection
+//! (projected path), and `ColumnMapping` turns those into destination slot
+//! indices.
 
 use std::sync::Arc;
 
@@ -27,6 +29,7 @@ use arrow_array::RecordBatch;
 use iceberg_lite::spec::Schema as IcebergSchema;
 use pg_arrow_conv::{ColumnRule, DecodedColumn, PgColumnType, SlotRecordBatchBuffer};
 use pg_lakebase_core::batch::{BatchBuffer, SlotColumnarBatchBuffer};
+use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
@@ -35,28 +38,69 @@ use super::type_mapping::{IcebergFieldExt, IcebergSchemaExt, IcebergTypeExt};
 use crate::error::{IcebergError, IcebergResult};
 
 // ---------------------------------------------------------------------------
-// Live column (scan input)
+// Relation column layout
 // ---------------------------------------------------------------------------
 
-/// One live (non-dropped) PG column of the scan relation: its 1-based
+/// One live (non-dropped) PG relation column: its 1-based
 /// attribute number and its column name (which is also the Iceberg field
 /// name, since the Iceberg schema is built from PG column names).
 ///
-/// Carried by [`RelationShape`](crate::access::scan) into the full-schema
+/// Carried by [`RelationShape`] into the full-schema
 /// [`ColumnMapping`], where the `name` resolves the Iceberg field (tolerating an
 /// Iceberg schema wider than the live PG columns — see
 /// [`ColumnMapping::from_full_schema`]) and `attno` becomes `dest = attno - 1`.
 #[derive(Debug, Clone)]
-pub(crate) struct LiveColumn {
+struct LiveColumn {
     /// 1-based PG attribute number of the live column.
-    pub attno: pg_sys::AttrNumber,
+    attno: pg_sys::AttrNumber,
     /// Column name (== Iceberg field name).
-    pub name: String,
+    name: String,
 }
 
 impl LiveColumn {
-    pub(crate) fn new(attno: pg_sys::AttrNumber, name: String) -> Self {
+    fn new(attno: pg_sys::AttrNumber, name: String) -> Self {
         Self { attno, name }
+    }
+}
+
+/// Relation layout shared by the read and write column-mapping paths.
+///
+/// Derived once from a relation's `TupleDesc`: live columns retain their
+/// names and one-based attribute numbers, while `slot_width` and `attr_types`
+/// retain the full tuple layout including dropped-column positions.
+#[derive(Debug, Clone)]
+pub(crate) struct RelationShape {
+    live_columns: Vec<LiveColumn>,
+    slot_width: usize,
+    attr_types: Vec<(pg_sys::Oid, i32)>,
+}
+
+impl RelationShape {
+    /// Capture the column layout from a live PostgreSQL relation.
+    pub(crate) fn from_relation(rel: &RelationHandle) -> Self {
+        let live_columns = rel
+            .live_columns()
+            .into_iter()
+            .map(|(attno, name)| LiveColumn::new(attno, name))
+            .collect();
+
+        Self {
+            live_columns,
+            slot_width: rel.natts(),
+            attr_types: rel.attr_types(),
+        }
+    }
+
+    fn live_columns(&self) -> &[LiveColumn] {
+        &self.live_columns
+    }
+
+    fn slot_width(&self) -> usize {
+        self.slot_width
+    }
+
+    fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
+        &self.attr_types
     }
 }
 
@@ -69,6 +113,9 @@ impl LiveColumn {
 /// written to.
 #[derive(Clone)]
 struct ProjectedColumn {
+    /// Original base-relation attribute number used to resolve the Iceberg
+    /// source field. It is intentionally distinct from `dest`.
+    source_base_attno: pg_sys::AttrNumber,
     /// Index of the source column in the Arrow batch the scan produces.
     ///
     /// This is decoupled from the entry's position because the two scan
@@ -79,18 +126,18 @@ struct ProjectedColumn {
     ///   field's index in the Iceberg schema — resolved **by name**, not by
     ///   lockstep position, so it tolerates an Iceberg schema that is wider
     ///   than the live PG columns (see `from_full_schema`).
-    /// - projection (`from_projection`): `select(names)` preserves the passed
-    ///   name order, so `src_col` equals the entry index `j`.
+    /// - projection (`from_projection`): `TableScan::select` preserves request
+    ///   order, so `src_col` is the projection entry index.
     src_col: usize,
-    /// Destination cell index in the PG `Row`, equal to `attno - 1`. Encodes
-    /// the dropped-column gap directly, so both scan paths get correct
-    /// alignment.
+    /// Destination cell index in the actual PG scan tuple.
     dest: usize,
     /// The `pg-arrow-conv` conversion rule for this column, resolved once at
     /// construction from the pair `(Arrow DataType, PgColumnType)` (see
     /// [`IcebergFieldExt::resolve_rule`]). The hot loops dispatch through this
     /// already-resolved rule rather than re-resolving per row.
     rule: ColumnRule,
+    /// Actual destination descriptor OID, cached once for decoder binding.
+    target_oid: pg_sys::Oid,
 }
 
 /// Projection-aware column plan: the single owner of position arithmetic.
@@ -105,10 +152,10 @@ struct ProjectedColumn {
 /// This does not depend on the cleared slot reading those positions as NULL —
 /// `ExecClearTuple` does not reset `tts_isnull`.
 ///
-/// Entry order matches the live-column / projection order, while `src_col`
+/// Entry order matches the storage read order, while `src_col`
 /// locates each entry's column in the produced batch — they coincide
-/// (`src_col == j`) for the projection path and for a clean full-table scan,
-/// but diverge for a full-table scan whose Iceberg schema is wider than the
+/// (`src_col == j`) for projections and a clean full-table scan, but can
+/// diverge for a full-table scan whose Iceberg schema is wider than the
 /// live PG columns (a dropped column that still lingers in the Iceberg
 /// metadata schema — see [`ColumnMapping::from_full_schema`]).
 #[derive(Clone)]
@@ -167,10 +214,13 @@ impl ColumnMapping {
             // Iceberg type that is incompatible with the relation column fails
             // here rather than at datum construction.
             let rule = field.resolve_rule(Self::pg_target_at(attr_types, dest)?)?;
+            let target_oid = attr_types[dest].0;
             entries.push(ProjectedColumn {
+                source_base_attno: col.attno,
                 src_col,
                 dest,
                 rule,
+                target_oid,
             });
         }
         Ok(Self {
@@ -181,9 +231,9 @@ impl ColumnMapping {
     /// Projected plan keyed by resolved `(attno, name)` pairs.
     ///
     /// Resolves each [`ProjectedName::name`] to its Iceberg `NestedField`,
-    /// sets `dest = attno - 1`, and keeps `entries` in the passed
-    /// (Arrow-batch) order — `select(names)` preserves that order into the
-    /// batch, so `src_col == j` (the entry index). Errors — producing no
+    /// uses the plan-time `destination`, and keeps entries in storage read order.
+    /// `TableScan::select` preserves this order into the Arrow batch, so
+    /// `src_col == j`. Errors — producing no
     /// `ColumnMapping` — when a name does not resolve, an `attno < 1`, or a
     /// computed `dest >= slot_width`.
     fn from_projection(
@@ -193,19 +243,26 @@ impl ColumnMapping {
         attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let mut entries = Vec::with_capacity(pairs.len());
-        for (j, pair) in pairs.iter().enumerate() {
+        for (src_col, pair) in pairs.iter().enumerate() {
             // Hard error if the projected name does not resolve to a direct
             // field of the Iceberg schema (Requirement 3.6 / 10.4 — a column
             // rename desync surfaces here rather than returning wrong data).
             let field = schema
                 .field_by_name(&pair.name)
                 .ok_or_else(|| IcebergError::ColumnNotFound(pair.name.clone()))?;
-            let dest = Self::dest_from_attno(pair.attno, slot_width)?;
+            if pair.attno <= 0 {
+                return Err(IcebergError::InvariantViolated(
+                    "ColumnMapping: projected source attno must be >= 1",
+                ));
+            }
+            let dest = Self::validate_dest(pair.destination, slot_width)?;
             let rule = field.resolve_rule(Self::pg_target_at(attr_types, dest)?)?;
             entries.push(ProjectedColumn {
-                src_col: j,
+                source_base_attno: pair.attno,
+                src_col,
                 dest,
                 rule,
+                target_oid: attr_types[dest].0,
             });
         }
         Ok(Self {
@@ -222,17 +279,23 @@ impl ColumnMapping {
     /// `bytea`/`jsonb`); the decoder classifies it into a `DatumTarget` once at
     /// bind. `attr_types` is the relation's full-width `(oid, typmod)` list
     /// indexed by `attno - 1`, so `dest` indexes it directly.
-    fn decoded_columns(
-        &self,
-        attr_types: &[(pg_sys::Oid, i32)],
-    ) -> Vec<DecodedColumn> {
+    fn decoded_columns(&self) -> Vec<DecodedColumn> {
         self.entries
             .iter()
             .map(|e| {
-                let (oid, _typmod) = attr_types[e.dest];
-                DecodedColumn::new(e.rule.clone(), e.src_col, e.dest, oid)
+                debug_assert!(e.source_base_attno > 0);
+                DecodedColumn::new(e.rule.clone(), e.src_col, e.dest, e.target_oid)
             })
             .collect()
+    }
+
+    fn validate_dest(dest: usize, slot_width: usize) -> IcebergResult<usize> {
+        if dest >= slot_width {
+            return Err(IcebergError::InvariantViolated(
+                "ColumnMapping: projected destination is outside the slot width",
+            ));
+        }
+        Ok(dest)
     }
 
     /// Compute and bounds-check `dest = attno - 1` against `slot_width`.
@@ -305,16 +368,12 @@ pub(crate) struct ScanColumns {
 impl ScanColumns {
     /// Select-all plan (full-schema plan).
     ///
-    /// `live_columns` are the relation's live (non-dropped) columns —
-    /// `(attno, name)` in PG tuple order — and `slot_width` is the relation's
-    /// full `natts`. Both come from the relation's `TupleDesc` in `scan.rs`;
-    /// this module owns the name→Iceberg-field resolution and the
-    /// `dest = attno - 1` arithmetic, the caller owns reading the descriptor.
+    /// The relation shape owns the live `(attno, name)` columns and the full
+    /// tuple layout. This module owns the name→Iceberg-field resolution and
+    /// the `dest = attno - 1` arithmetic.
     pub(crate) fn new(
         schema: Arc<IcebergSchema>,
-        live_columns: &[LiveColumn],
-        slot_width: usize,
-        attr_types: &[(pg_sys::Oid, i32)],
+        shape: &RelationShape,
     ) -> IcebergResult<Self> {
         // Per-column `(Arrow DataType, PgColumnType)` validation against the
         // relation's real column types — including the supported-shape gate
@@ -327,9 +386,9 @@ impl ScanColumns {
         // decoded and so is correctly left unchecked.
         let plan = ColumnMapping::from_full_schema(
             &schema,
-            live_columns,
-            slot_width,
-            attr_types,
+            shape.live_columns(),
+            shape.slot_width(),
+            shape.attr_types(),
         )?;
         Ok(Self { schema, plan })
     }
@@ -366,11 +425,8 @@ impl ScanColumns {
     /// plan's already-bound [`ColumnMapping`] and the relation's full-width
     /// `(oid, typmod)` list. Lets the AM build an `ArrowColumnDecoder` without
     /// re-resolving rules or re-deriving `dest` arithmetic.
-    pub(crate) fn decoded_columns(
-        &self,
-        attr_types: &[(pg_sys::Oid, i32)],
-    ) -> Vec<DecodedColumn> {
-        self.plan.decoded_columns(attr_types)
+    pub(crate) fn decoded_columns(&self) -> Vec<DecodedColumn> {
+        self.plan.decoded_columns()
     }
 }
 
@@ -420,14 +476,9 @@ impl WriteColumns {
     /// at session begin rather than mid-INSERT. The bound schema and per-column
     /// rules are consumed into the buffer here and not retained.
     ///
-    /// `live_columns` are the relation's live (non-dropped) columns in attno
-    /// order and `slot_width` is the relation's full `natts`; both come from
-    /// the relation's `TupleDesc`.
     pub(crate) fn resolve(
         schema: &IcebergSchema,
-        live_columns: &[LiveColumn],
-        slot_width: usize,
-        attr_types: &[(pg_sys::Oid, i32)],
+        shape: &RelationShape,
     ) -> IcebergResult<Self> {
         // `resolve_columns` resolves every Iceberg field's rule via
         // `resolve_rule`, which applies the supported-shape gate per field, so
@@ -436,8 +487,12 @@ impl WriteColumns {
         // oversized `Fixed` width. The writer emits every field, so iterating
         // all fields here is the correct scope (no projection on the write
         // path).
-        let (rules, source_slots) =
-            Self::resolve_columns(schema, live_columns, slot_width, attr_types)?;
+        let (rules, source_slots) = Self::resolve_columns(
+            schema,
+            shape.live_columns(),
+            shape.slot_width(),
+            shape.attr_types(),
+        )?;
         let arrow_schema = Arc::new(schema.to_arrow_schema()?);
         let buffer = SlotRecordBatchBuffer::new(arrow_schema, &rules);
         Ok(Self {
@@ -713,39 +768,41 @@ mod tests {
     // --- from_projection --------------------------------------------------
 
     #[pg_test]
-    fn from_projection_orders_entries_by_passed_order() {
+    fn from_projection_decouples_source_order_from_scan_destination() {
         let schema = int_schema(&["a", "b", "c", "d", "e"]);
         let pairs = vec![
-            ProjectedName::new(5, "e".to_string()),
-            ProjectedName::new(2, "b".to_string()),
+            ProjectedName::new(2, 1, "b".to_string()),
+            ProjectedName::new(5, 0, "e".to_string()),
         ];
         let plan =
-            ColumnMapping::from_projection(&schema, &pairs, 5, &int_attr_types(5))
+            ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2))
                 .unwrap();
 
         let dests: Vec<usize> = plan.entries.iter().map(|e| e.dest).collect();
-        assert_eq!(dests, vec![4, 1]);
+        assert_eq!(dests, vec![1, 0]);
+        let sources: Vec<usize> = plan.entries.iter().map(|e| e.src_col).collect();
+        assert_eq!(sources, vec![0, 1]);
     }
 
     #[pg_test]
     fn from_projection_with_dropped_column_uses_attno_minus_one() {
         let schema = int_schema(&["a", "b", "e"]);
         let pairs = vec![
-            ProjectedName::new(2, "b".to_string()),
-            ProjectedName::new(4, "e".to_string()),
+            ProjectedName::new(2, 0, "b".to_string()),
+            ProjectedName::new(4, 1, "e".to_string()),
         ];
         let plan =
-            ColumnMapping::from_projection(&schema, &pairs, 4, &int_attr_types(4))
+            ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2))
                 .unwrap();
 
         let dests: Vec<usize> = plan.entries.iter().map(|e| e.dest).collect();
-        assert_eq!(dests, vec![1, 3]);
+        assert_eq!(dests, vec![0, 1]);
     }
 
     #[pg_test]
     fn from_projection_errors_on_unresolved_name() {
         let schema = int_schema(&["a", "b"]);
-        let pairs = vec![ProjectedName::new(1, "does_not_exist".to_string())];
+        let pairs = vec![ProjectedName::new(1, 0, "does_not_exist".to_string())];
         let err =
             ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2));
         assert!(matches!(err, Err(IcebergError::ColumnNotFound(_))));
@@ -754,7 +811,7 @@ mod tests {
     #[pg_test]
     fn from_projection_errors_on_attno_below_one() {
         let schema = int_schema(&["a", "b"]);
-        let pairs = vec![ProjectedName::new(0, "a".to_string())];
+        let pairs = vec![ProjectedName::new(0, 0, "a".to_string())];
         let err =
             ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2));
         assert!(matches!(err, Err(IcebergError::InvariantViolated(_))));
@@ -763,7 +820,7 @@ mod tests {
     #[pg_test]
     fn from_projection_errors_on_dest_out_of_range() {
         let schema = int_schema(&["a", "b"]);
-        let pairs = vec![ProjectedName::new(5, "b".to_string())];
+        let pairs = vec![ProjectedName::new(2, 5, "b".to_string())];
         let err =
             ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2));
         assert!(matches!(err, Err(IcebergError::InvariantViolated(_))));

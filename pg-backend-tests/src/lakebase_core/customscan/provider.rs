@@ -563,6 +563,7 @@ mod tests {
             (*wrapper_ptr).base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
             (*wrapper_ptr).base.ss.ss_currentRelation =
                 make_relation_stub(relation_oid);
+            (*wrapper_ptr).base.ss.ss_ScanTupleSlot = make_int4_slot();
 
             // Begin does not switch into `ps_ExprContext`; provider uses its own scratch ctx.
             (*wrapper_ptr).base.ss.ps.ps_ExprContext = make_econtext_stub();

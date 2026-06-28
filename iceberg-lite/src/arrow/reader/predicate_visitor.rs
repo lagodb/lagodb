@@ -366,8 +366,9 @@ fn compute_is_nan(array: &ArrayRef) -> std::result::Result<BooleanArray, ArrowEr
     Ok(BooleanArray::new(values, None))
 }
 
-pub(super) type PredicateResult =
-    dyn FnMut(RecordBatch) -> std::result::Result<BooleanArray, ArrowError> + Send + 'static;
+pub(super) type PredicateResult = dyn FnMut(RecordBatch) -> std::result::Result<BooleanArray, ArrowError>
+    + Send
+    + 'static;
 
 impl BoundPredicateVisitor for PredicateConverter<'_> {
     type T = Box<PredicateResult>;

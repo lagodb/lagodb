@@ -392,12 +392,10 @@ impl TupleSlotWriter {
     /// valid. The row is consumed in-place: written cells are taken from it.
     pub unsafe fn write_row(&self, row: &mut Row) -> Result<(), PgReportError> {
         unsafe {
-            let natts = (*(*self.slot).tts_tupleDescriptor).natts as usize;
-
             // `SlotColumns` is the single substrate that owns the unsafe
             // `tts_values`/`tts_isnull` writes; the row world funnels through it
             // rather than re-deriving the slot pointers here.
-            let mut cols = SlotColumns::new(self.slot, self.memory_context, natts);
+            let mut cols = SlotColumns::new(self.slot, self.memory_context);
             cols.fill_from_row(row)?;
 
             // The row-world provider API marks the slot non-empty itself

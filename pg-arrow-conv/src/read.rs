@@ -531,13 +531,10 @@ impl ArrowColumnDecoder {
     ) -> AmResult<Row> {
         let bound = self.bind(batch)?;
         if row_idx >= bound.num_rows {
-            return Err(ConvError::DatumConversionError(
-                format!(
-                    "row index {row_idx} is out of range for batch with {} rows",
-                    bound.num_rows
-                )
-                .into(),
-            )
+            return Err(ConvError::DatumConversionError(format!(
+                "row index {row_idx} is out of range for batch with {} rows",
+                bound.num_rows
+            ))
             .into());
         }
 

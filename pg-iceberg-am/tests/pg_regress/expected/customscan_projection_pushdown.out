@@ -117,9 +117,9 @@ SELECT * FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
 (3 rows)
 
 -- --- A.5 SELECT count(*) ----------------------------------------------------
--- count(*) references no user column (empty subset). The provider's
--- first-live-column policy still selects exactly one column to scan; the
--- count must match the baseline.
+-- count(*) references no user column. Core adds one live resjunk dependency
+-- so the projected scan tuple and storage request remain non-empty; the count
+-- must match the baseline.
 SET pg_lakebase.customscan_mode = 'force';
 SELECT count(*) FROM customscan_proj_dropcol WHERE id >= 1;
  count 
@@ -326,8 +326,234 @@ ORDER BY amount;
 (1 row)
 
 -- ============================================================================
+-- Part C: tableoid + column subset — storage pruning under Relation layout
+--
+-- When `tableoid` is in the targetlist the tuple shape must stay full-width
+-- (Relation layout) because `tableoid` is a system column resolved by
+-- PG's ExecEvalSysVar from slot->tts_tableOid, not from provider-read data.
+-- However the *storage* layer should still prune: only the user columns
+-- actually referenced in the targetlist and quals need to be read from
+-- Iceberg.  The decoupled "tuple shape vs storage columns" design carries
+-- the referenced user attnos as a storage hint inside the Relation layout,
+-- allowing the provider to read a Subset instead of All.
+--
+-- This Part exercises the happy-path parity: a multi-column table where
+-- only a subset of user columns is selected alongside tableoid.  Result-set
+-- parity between `force` (CustomScan) and `off` (SeqScan) asserts
+-- correctness — the pruning must not cause any column to silently become
+-- NULL or shift position.
+-- ============================================================================
+CREATE TABLE customscan_proj_tableoid (
+    id integer,
+    label text,
+    amount integer,
+    tag text,
+    score integer
+) USING iceberg;
+INSERT INTO customscan_proj_tableoid VALUES (1, 'alpha', 10, 'a', 100);
+INSERT INTO customscan_proj_tableoid VALUES (2, 'beta', 20, 'b', 200);
+INSERT INTO customscan_proj_tableoid VALUES (3, 'gamma', 30, 'c', 300);
+-- C.1 plan guard: CustomScan must be chosen (tableoid is supported).
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (pg-iceberg-am) on customscan_proj_tableoid
+         Pushed Filter: (id >= 1)
+(4 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+                 QUERY PLAN                 
+--------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Seq Scan on customscan_proj_tableoid
+         Filter: (id >= 1)
+(4 rows)
+
+-- C.2 result-set parity: tableoid + column subset (id, amount).
+-- `label`, `tag`, `score` are NOT in the select list or the qual,
+-- so the storage layer should prune them.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+           tbl            | id | amount 
+--------------------------+----+--------
+ customscan_proj_tableoid |  1 |     10
+ customscan_proj_tableoid |  2 |     20
+ customscan_proj_tableoid |  3 |     30
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+           tbl            | id | amount 
+--------------------------+----+--------
+ customscan_proj_tableoid |  1 |     10
+ customscan_proj_tableoid |  2 |     20
+ customscan_proj_tableoid |  3 |     30
+(3 rows)
+
+-- C.3 result-set parity: tableoid + single column.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, label
+FROM customscan_proj_tableoid
+WHERE id = 2
+ORDER BY label;
+           tbl            | label 
+--------------------------+-------
+ customscan_proj_tableoid | beta
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, label
+FROM customscan_proj_tableoid
+WHERE id = 2
+ORDER BY label;
+           tbl            | label 
+--------------------------+-------
+ customscan_proj_tableoid | beta
+(1 row)
+
+-- C.4 result-set parity: tableoid + non-projected qual column.
+-- The select list is (tableoid, id), but the qual references `amount`
+-- which is not in the output.  Storage must still read both `id` and
+-- `amount`.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, id
+FROM customscan_proj_tableoid
+WHERE id >= 1 AND amount > 15
+ORDER BY id;
+           tbl            | id 
+--------------------------+----
+ customscan_proj_tableoid |  2
+ customscan_proj_tableoid |  3
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, id
+FROM customscan_proj_tableoid
+WHERE id >= 1 AND amount > 15
+ORDER BY id;
+           tbl            | id 
+--------------------------+----
+ customscan_proj_tableoid |  2
+ customscan_proj_tableoid |  3
+(2 rows)
+
+-- ============================================================================
+-- Part D: SubPlan + narrow scan tuple — NOT IN keeps a planned SubPlan
+--
+-- PostgreSQL's set_customscan_references() rewrites plan.qual against
+-- custom_scan_tlist through fix_upper_expr(), whose expression mutator enters
+-- SubPlan.testexpr and SubPlan.args. Relation-local Vars in those fields can
+-- therefore use the same compact INDEX_VAR mapping as ordinary residual quals.
+--
+-- NOT IN is used deliberately: unlike a simple IN, PostgreSQL retains this
+-- shape as a hashed SubPlan because of its NULL semantics. Every query also
+-- has an independent pushable predicate so `force` selects a real CustomPath.
+-- ============================================================================
+CREATE TABLE customscan_proj_subplan_helper (
+    x integer
+);
+INSERT INTO customscan_proj_subplan_helper VALUES (1);
+INSERT INTO customscan_proj_subplan_helper VALUES (3);
+-- D.1 result-set parity: NOT IN generates a SubPlan in the qual.
+-- Only `id` and `label` are referenced; `amount`, `tag`, `score` should
+-- be pruned from storage.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id | label 
+----+-------
+  2 | beta
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id | label 
+----+-------
+  2 | beta
+(1 row)
+
+-- D.2 result-set parity: SubPlan + pushable predicate + non-projected qual.
+-- The pushable `id >= 1` selects the CustomScan path; the SubPlan qual
+-- `amount NOT IN (...)` references `amount` which is not in the select list.
+-- Storage must read both `id` and `amount`.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND amount NOT IN (SELECT x * 10 FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND amount NOT IN (SELECT x * 10 FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+-- D.3 result-set parity: SubPlan + tableoid combined.
+-- Both SubPlan and tableoid are present; tuple shape is Relation but
+-- storage should still prune to only `id` and `label`.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+           tbl            | id | label 
+--------------------------+----+-------
+ customscan_proj_tableoid |  2 | beta
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+           tbl            | id | label 
+--------------------------+----+-------
+ customscan_proj_tableoid |  2 | beta
+(1 row)
+
+-- ============================================================================
 -- Cleanup
 -- ============================================================================
 RESET pg_lakebase.customscan_mode;
 DROP TABLE customscan_proj_dropcol;
 DROP TABLE customscan_proj_clean;
+DROP TABLE customscan_proj_tableoid;
+DROP TABLE customscan_proj_subplan_helper;

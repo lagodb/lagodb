@@ -22,11 +22,11 @@ use uuid::Uuid;
 
 use crate::overlay::{ResolvedSnapshotDelta, SnapshotDelta};
 use crate::spec::{
-    DataContentType, DataFile, DataFileFormat, FormatVersion, MAIN_BRANCH,
-    ManifestContentType, ManifestFile, ManifestListWriter, ManifestWriter,
-    ManifestWriterBuilder, Operation, PartitionSpecRef, Snapshot, SnapshotReference,
-    SnapshotRetention, SnapshotSummaryCollector, Struct, StructType, Summary,
-    TableProperties, update_snapshot_summaries,
+    DataContentType, DataFile, DataFileFormat, FirstRowIdInheritance, FormatVersion,
+    MAIN_BRANCH, ManifestContentType, ManifestFile, ManifestListWriter,
+    ManifestWriter, ManifestWriterBuilder, Operation, PartitionSpecRef, Snapshot,
+    SnapshotReference, SnapshotRetention, SnapshotSummaryCollector, Struct,
+    StructType, Summary, TableProperties, update_snapshot_summaries,
 };
 use crate::table::Table;
 use crate::transaction::{ActionCommit, TransactionAction};
@@ -449,8 +449,11 @@ impl<'a> DeltaSnapshotProducer<'a> {
             manifest_file.content,
             manifest_file.partition_spec_id,
         )?;
+        let mut row_id_inheritance =
+            FirstRowIdInheritance::new(manifest_file.first_row_id);
 
         for entry in entries {
+            let effective_first_row_id = row_id_inheritance.resolve(entry)?;
             if !entry.is_alive() {
                 continue;
             }
@@ -484,17 +487,36 @@ impl<'a> DeltaSnapshotProducer<'a> {
                     )
                 })?;
 
+            let mut data_file = entry.data_file().clone();
+            if self.table.metadata().format_version() == FormatVersion::V3
+                && data_file.content_type() == DataContentType::Data
+            {
+                data_file.first_row_id = effective_first_row_id
+                    .map(|first_row_id| {
+                        i64::try_from(first_row_id).map_err(|_| {
+                            Error::new(
+                                ErrorKind::DataInvalid,
+                                format!(
+                                    "first_row_id for data file {} does not fit Iceberg long",
+                                    entry.file_path()
+                                ),
+                            )
+                        })
+                    })
+                    .transpose()?;
+            }
+
             if removed_paths.contains(entry.file_path()) {
                 found_removed_paths.insert(entry.file_path().to_owned());
                 writer.add_delete_file(
-                    entry.data_file().clone(),
+                    data_file,
                     sequence_number,
                     Some(file_sequence_number),
                 )?;
                 self.collect_removed_file(summary_collector, entry.data_file())?;
             } else {
                 writer.add_existing_file(
-                    entry.data_file().clone(),
+                    data_file,
                     snapshot_id,
                     sequence_number,
                     Some(file_sequence_number),
@@ -1024,6 +1046,36 @@ mod tests {
         assert_eq!(snapshot.first_row_id(), Some(0));
         assert_eq!(snapshot.added_rows_count(), Some(1));
         assert_eq!(updated.metadata().next_row_id(), 1);
+    }
+
+    #[test]
+    fn snapshot_delta_v3_rewrite_preserves_inherited_file_row_id() {
+        let catalog = new_memory_catalog();
+        let table = make_v3_minimal_table_in_catalog(&catalog);
+        let mut append = SnapshotDelta::new();
+        append.add_data_file(data_file("test/a.parquet")).unwrap();
+        append.add_data_file(data_file("test/b.parquet")).unwrap();
+        let table = commit_delta(&catalog, &table, append);
+
+        let mut remove = SnapshotDelta::new();
+        remove.remove_data_file("test/a.parquet").unwrap();
+        let updated = commit_delta(&catalog, &table, remove);
+
+        let tasks = updated.scan().build().unwrap().plan_files().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].data_file_path(), "test/b.parquet");
+        assert_eq!(tasks[0].first_row_id, Some(1));
+
+        let manifest_list = current_manifest_list(&updated);
+        let manifest = manifest_list.entries()[0]
+            .load_manifest(updated.file_io())
+            .unwrap();
+        let remaining = manifest
+            .entries()
+            .iter()
+            .find(|entry| entry.is_alive())
+            .unwrap();
+        assert_eq!(remaining.data_file().first_row_id(), Some(1));
     }
 
     fn commit_delta(

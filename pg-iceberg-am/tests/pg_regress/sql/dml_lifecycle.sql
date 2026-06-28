@@ -172,6 +172,33 @@ COPY (
     SELECT id, label FROM dml_lifecycle.update_delete_t ORDER BY id
 ) TO STDOUT WITH (FORMAT csv);
 
+-- RowDelta validation must use the final transaction-local view. In
+-- particular, position deletes may reference data files appended by an
+-- earlier statement in the same PostgreSQL transaction.
+CREATE TABLE dml_lifecycle.same_tx_dml_t (
+    id integer,
+    label text
+) USING iceberg;
+
+BEGIN;
+INSERT INTO dml_lifecycle.same_tx_dml_t VALUES
+    (1, 'one'),
+    (2, 'two'),
+    (3, 'three');
+UPDATE dml_lifecycle.same_tx_dml_t
+SET label = 'two_updated'
+WHERE id = 2;
+DELETE FROM dml_lifecycle.same_tx_dml_t
+WHERE id IN (1, 2);
+COPY (
+    SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+COMMIT;
+
+COPY (
+    SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+
 -- Iceberg v1 has no position deletes, so row-level UPDATE/DELETE must fail
 -- before staging files or reaching commit.
 CREATE TABLE dml_lifecycle.v1_dml_t (

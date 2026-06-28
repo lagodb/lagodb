@@ -123,8 +123,7 @@ impl ArrowReader {
         projected_field_ids: &[i32],
     ) -> Result<RecordBatch> {
         let schema = batch.schema();
-        let field_id_to_batch_index =
-            Self::build_record_batch_field_id_map(&schema)?;
+        let field_id_to_batch_index = Self::build_record_batch_field_id_map(&schema)?;
 
         if batch.num_columns() == projected_field_ids.len() {
             let already_projected =
@@ -333,9 +332,7 @@ mod tests {
         PredicateOperator, Reference,
     };
     use crate::io::FileIO;
-    use crate::metadata_columns::{
-        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS,
-    };
+    use crate::metadata_columns::{RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS};
     use crate::scan::FileScanTask;
     use crate::spec::{
         DataFileFormat, Datum, NestedField, PrimitiveType, Schema, SchemaRef, Type,
@@ -358,12 +355,9 @@ mod tests {
                 .unwrap(),
         );
         let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int32, false).with_metadata(
-                HashMap::from([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    "1".to_string(),
-                )]),
-            ),
+            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
+            ])),
         ]));
         let batch = RecordBatch::try_new(
             arrow_schema.clone(),

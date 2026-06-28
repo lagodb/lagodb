@@ -150,6 +150,66 @@ impl ManifestEntry {
     }
 }
 
+/// Resolves file-level `first_row_id` inheritance while walking one manifest.
+///
+/// A file with an explicit ID belongs to an already assigned range and does
+/// not move the manifest cursor. A live data file with a null ID inherits the
+/// cursor and advances it by its record count.
+pub(crate) struct FirstRowIdInheritance {
+    next_row_id: Option<u64>,
+}
+
+impl FirstRowIdInheritance {
+    pub(crate) fn new(manifest_first_row_id: Option<u64>) -> Self {
+        Self {
+            next_row_id: manifest_first_row_id,
+        }
+    }
+
+    pub(crate) fn resolve(&mut self, entry: &ManifestEntry) -> Result<Option<u64>> {
+        if entry.content_type() != DataContentType::Data {
+            return Ok(None);
+        }
+
+        let explicit_first_row_id = entry
+            .data_file()
+            .first_row_id()
+            .map(|first_row_id| {
+                u64::try_from(first_row_id).map_err(|_| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "data file {} has negative first_row_id {first_row_id}",
+                            entry.file_path()
+                        ),
+                    )
+                })
+            })
+            .transpose()?;
+        let effective_first_row_id = explicit_first_row_id.or(self.next_row_id);
+
+        if entry.is_alive()
+            && explicit_first_row_id.is_none()
+            && let Some(first_row_id) = effective_first_row_id
+        {
+            self.next_row_id = first_row_id
+                .checked_add(entry.record_count())
+                .map(Some)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "row id overflow while planning file {}",
+                            entry.file_path()
+                        ),
+                    )
+                })?;
+        }
+
+        Ok(effective_first_row_id)
+    }
+}
+
 /// Used to track additions and deletions in ManifestEntry.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ManifestStatus {
@@ -647,4 +707,47 @@ pub(super) fn manifest_schema_v1(partition_type: &StructType) -> Result<AvroSche
     ];
     let schema = Schema::builder().with_fields(fields).build()?;
     schema_to_avro_schema("manifest_entry", &schema)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::{DataFileBuilder, Struct};
+
+    #[test]
+    fn explicit_file_row_id_does_not_advance_manifest_inheritance() {
+        let existing =
+            entry(ManifestStatus::Existing, "existing.parquet", 25, Some(800));
+        let first_added = entry(ManifestStatus::Added, "added-1.parquet", 50, None);
+        let second_added = entry(ManifestStatus::Added, "added-2.parquet", 50, None);
+        let mut inheritance = FirstRowIdInheritance::new(Some(1000));
+
+        assert_eq!(inheritance.resolve(&existing).unwrap(), Some(800));
+        assert_eq!(inheritance.resolve(&first_added).unwrap(), Some(1000));
+        assert_eq!(inheritance.resolve(&second_added).unwrap(), Some(1050));
+    }
+
+    fn entry(
+        status: ManifestStatus,
+        path: &str,
+        record_count: u64,
+        first_row_id: Option<i64>,
+    ) -> ManifestEntry {
+        let mut data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path(path.to_owned())
+            .file_format(DataFileFormat::Parquet)
+            .partition(Struct::empty())
+            .record_count(record_count)
+            .file_size_in_bytes(100)
+            .build()
+            .unwrap();
+        data_file.first_row_id = first_row_id;
+        ManifestEntry::builder()
+            .status(status)
+            .sequence_number(1)
+            .file_sequence_number(1)
+            .data_file(data_file)
+            .build()
+    }
 }

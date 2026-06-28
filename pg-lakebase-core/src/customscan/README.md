@@ -44,11 +44,14 @@ SQL WHERE
   -> PlanCustomPath
        re-classify the final scan_clauses
        unwrap RestrictInfo to bare Expr
+       collect PathTarget + target + residual + pushed/recheck dependencies
+       build a narrow Var-only custom_scan_tlist and base-attno mapping
   -> CustomScan plan node
        plan.qual      = residual quals (PG evaluates these)
        custom_exprs   = pushed + recheck PG Exprs (PG rewrites, never runs)
-       custom_private = copyObject-safe metadata only
+       custom_private = copyObject-safe metadata + tuple-layout contract
   -> PG runs setrefs + nestloop param rewrite over plan.qual / custom_exprs
+       base Vars become INDEX_VAR references into the narrow scan tuple
   -> executor Begin / ReScan
        translate pushed predicates -> provider native predicate
        resolve params, load current metadata, prune files, open cursor
@@ -180,12 +183,19 @@ The plan node carries three things, each with a strict role:
   per-expression contract tags, pre-resolved column metadata, and provider
   private data. It must never contain raw pointers, native predicates, a
   final file list, or Exprs smuggled in as JSON.
+- `custom_scan_tlist` — a Var-only description of the raw provider tuple.
+  Ordinary output Vars come first in targetlist order; residual, pushed, and
+  recheck-only dependencies are appended as resjunk entries. Vars referenced
+  from `SubPlan.testexpr` and `SubPlan.args` participate in the same mapping.
+  Whole-row, supported system-column, or otherwise unprovable shapes fall back
+  atomically to a NIL tlist and the relation rowtype.
 
 A subtle but important rule: `set_plan_references` rewrites Var range-table
 indexes inside `custom_exprs` but does **not** walk `custom_private`. So the
-range-table index is never cached in `custom_private`; columns are resolved
-from the (post-rewrite) `scan.scanrelid` plus stable column metadata
-(relation OID, attribute number, type, collation).
+range-table index is never cached in `custom_private`. Relation-shaped scans
+resolve `(scanrelid, attno)` directly; projected scans resolve
+`(INDEX_VAR, resno)` through the encoded `resno -> base attno` layout, then
+use stable column metadata (relation OID, attribute number, type, collation).
 
 ## Parameter model
 
@@ -201,13 +211,20 @@ reopens the cursor. This avoids re-pruning manifests on every inner rescan.
 
 ## Executor and slot contract
 
-With `custom_scan_tlist` left empty, the scan slot uses the base relation's
-rowtype. The provider's row producer must therefore return a slot whose
-descriptor matches the base relation exactly, with real values for every
-attribute that the residual qual, the projection, or the recheck expressions
-can read. Internally the provider may prune columns for performance, but it
-may never hand back a shorter descriptor, and unreferenced attributes may be
-left NULL only when nothing observable can read them.
+For an ordinary base scan, the planner emits a narrow `custom_scan_tlist` and
+PostgreSQL builds `ss_ScanTupleSlot` from it. Core stores the matching
+base-attno map in `custom_private`, validates the tlist/layout/slot widths at
+Begin, and exposes the actual scan descriptor to the provider. The provider
+may read storage fields in a different order, but it must map each base
+attribute to its compact scan destination explicitly.
+
+When planning cannot prove a projected layout safe, the tlist remains NIL and
+the scan slot uses the base relation rowtype. Whole-row and tableoid queries
+use this fallback; tableoid can still carry a referenced-user-column storage
+subset, while whole-row requires all live user columns. In both modes
+`SlotColumns` derives its slice length only from the live
+`tts_tupleDescriptor`; a provider can never supply `natts`. Every cell
+observable by residual quals or final projection must be written.
 
 Memory and interrupt handling mirror the FDW model: the per-tuple memory
 context is switched in before the provider's row producer runs, and

@@ -208,7 +208,6 @@ where
         // Copied out before borrowing `am_instance`: the slot-fill path needs
         // both the session's context/width and a `&mut` driver at once.
         let tmp_ctx = state.tmp_ctx();
-        let natts = state.natts();
 
         // One uniform slot-filling path: ask the session's driver for the next
         // tuple. row-vs-column is the driver's own concern. Switch the current
@@ -216,7 +215,7 @@ where
         // lands there and is freed on the next fetch's reset.
         let found = PgMemoryContexts::For(tmp_ctx)
             .switch_to(|_| {
-                let mut cols = SlotColumns::new(slot, tmp_ctx, natts);
+                let mut cols = SlotColumns::new(slot, tmp_ctx);
                 state.am_instance.scan_driver().next_into_slot(&mut cols)
             })
             .report_unwrap();

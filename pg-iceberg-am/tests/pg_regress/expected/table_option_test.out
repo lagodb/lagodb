@@ -48,15 +48,15 @@ CREATE TABLE iceberg_multi_opts_test (
 ) USING iceberg WITH (
     "format-version" = 2,
     "write.parquet.compression-codec" = 'zstd',
-    "write.format.default" = 'orc'
+    "write.format.default" = 'parquet'
 );
 -- Verify all options are stored correctly
 SELECT relid::regclass::text AS table_name, options
 FROM lakebase.table_options
 WHERE relid = 'iceberg_multi_opts_test'::regclass;
-       table_name        |                                     options                                      
--------------------------+----------------------------------------------------------------------------------
- iceberg_multi_opts_test | {format-version=2,write.parquet.compression-codec=zstd,write.format.default=orc}
+       table_name        |                                       options                                        
+-------------------------+--------------------------------------------------------------------------------------
+ iceberg_multi_opts_test | {format-version=2,write.parquet.compression-codec=zstd,write.format.default=parquet}
 (1 row)
 
 DROP TABLE iceberg_multi_opts_test;
@@ -85,15 +85,15 @@ DROP TABLE iceberg_compression_test;
 CREATE TABLE iceberg_enum_opt_test (
     id integer
 ) USING iceberg WITH (
-    "write.format.default" = 'avro'
+    "write.format.default" = 'parquet'
 );
 -- Verify the enum option
 SELECT relid::regclass::text AS table_name, options
 FROM lakebase.table_options
 WHERE relid = 'iceberg_enum_opt_test'::regclass;
-      table_name       |           options           
------------------------+-----------------------------
- iceberg_enum_opt_test | {write.format.default=avro}
+      table_name       |            options             
+-----------------------+--------------------------------
+ iceberg_enum_opt_test | {write.format.default=parquet}
 (1 row)
 
 DROP TABLE iceberg_enum_opt_test;

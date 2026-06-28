@@ -17,8 +17,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, Int64Array, RecordBatch, StringArray, UInt8Array,
-    UInt8DictionaryArray,
+    ArrayRef, Int64Array, RecordBatch, StringArray, UInt8Array, UInt8DictionaryArray,
 };
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::arrow::schema_to_arrow_schema;
@@ -45,16 +44,18 @@ use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
 use pg_lakebase_core::handles::RelationHandle;
+use pg_lakebase_core::options::AmCache;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 use roaring::RoaringTreemap;
 
-use crate::access::column_mapping::{LiveColumn, WriteColumns};
+use crate::access::column_mapping::{RelationShape, WriteColumns};
 use crate::access::conflict_filter::DmlConflictFilterResolver;
 use crate::access::row_location::{RowLocation, lookup_current};
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
+use crate::options::IcebergTableOptionCache;
 use crate::storage::StorageContext;
 
 type ParquetDataFileWriter = DataFileWriter<
@@ -147,29 +148,21 @@ impl DataFileSink {
     /// Resolve the write-side column plan / buffer and build the rolling Parquet
     /// writer. Fails fast on unsupported columns or a column/field desync before
     /// any row is accepted.
-    ///
-    /// `live_columns` are the relation's live (non-dropped) columns in attno
-    /// order, `slot_width` is the relation's full `natts`, and `attr_types` is
-    /// the relation's full-width `(oid, typmod)` list; together they let
-    /// [`WriteColumns`] bind each Arrow output column to its source slot index
-    /// and resolve each rule against the column's real PG type instead of
-    /// assuming positional alignment or a type round-tripped from Iceberg.
     fn new(
         file_io: &FileIO,
         iceberg_schema: &Arc<IcebergSchema>,
-        live_columns: &[LiveColumn],
-        slot_width: usize,
-        attr_types: &[(pg_sys::Oid, i32)],
+        relation_shape: &RelationShape,
         table_metadata: &TableMetadata,
+        writer_properties: &WriterProperties,
         flush_threshold_bytes: usize,
     ) -> IcebergResult<Self> {
-        let columns = WriteColumns::resolve(
+        let columns = WriteColumns::resolve(iceberg_schema, relation_shape)?;
+        let writer = Self::build_writer(
+            file_io,
             iceberg_schema,
-            live_columns,
-            slot_width,
-            attr_types,
+            table_metadata,
+            writer_properties,
         )?;
-        let writer = Self::build_writer(file_io, iceberg_schema, table_metadata)?;
         Ok(Self {
             columns,
             flush_threshold_bytes,
@@ -243,6 +236,7 @@ impl DataFileSink {
         file_io: &FileIO,
         schema: &Arc<IcebergSchema>,
         table_metadata: &TableMetadata,
+        writer_properties: &WriterProperties,
     ) -> IcebergResult<ParquetDataFileWriter> {
         let location_generator = DefaultLocationGenerator::new(table_metadata)?;
         let file_name_generator = DefaultFileNameGenerator::new(
@@ -251,10 +245,8 @@ impl DataFileSink {
             DataFileFormat::Parquet,
         );
 
-        let parquet_writer_builder = ParquetWriterBuilder::new(
-            WriterProperties::builder().build(),
-            schema.clone(),
-        );
+        let parquet_writer_builder =
+            ParquetWriterBuilder::new(writer_properties.clone(), schema.clone());
 
         let rolling_writer_builder =
             RollingFileWriterBuilder::new_with_default_file_size(
@@ -282,10 +274,15 @@ struct PositionDeleteSink {
     schema: Arc<IcebergSchema>,
     batch_schema: arrow_schema::SchemaRef,
     location_generator: DefaultLocationGenerator,
+    writer_properties: WriterProperties,
 }
 
 impl PositionDeleteSink {
-    fn new(file_io: &FileIO, table_metadata: &TableMetadata) -> IcebergResult<Self> {
+    fn new(
+        file_io: &FileIO,
+        table_metadata: &TableMetadata,
+        writer_properties: &WriterProperties,
+    ) -> IcebergResult<Self> {
         let schema = Arc::new(
             IcebergSchema::builder()
                 .with_fields([
@@ -296,25 +293,18 @@ impl PositionDeleteSink {
         );
         let arrow_schema = schema_to_arrow_schema(&schema)?;
         let mut fields = arrow_schema.fields().to_vec();
-        let file_path_field = fields.first_mut().ok_or(
-            IcebergError::InvariantViolated(
+        let file_path_field =
+            fields.first_mut().ok_or(IcebergError::InvariantViolated(
                 "position-delete schema is missing the file path field",
-            ),
-        )?;
+            ))?;
         if file_path_field.data_type() != &DataType::Utf8 {
             return Err(IcebergError::InvariantViolated(
                 "position-delete file path field has an unexpected Arrow type",
             ));
         }
-        *file_path_field = Arc::new(
-            file_path_field
-                .as_ref()
-                .clone()
-                .with_data_type(DataType::Dictionary(
-                    Box::new(DataType::UInt8),
-                    Box::new(DataType::Utf8),
-                )),
-        );
+        *file_path_field = Arc::new(file_path_field.as_ref().clone().with_data_type(
+            DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)),
+        ));
         let batch_schema = Arc::new(ArrowSchema::new_with_metadata(
             fields,
             arrow_schema.metadata().clone(),
@@ -324,6 +314,7 @@ impl PositionDeleteSink {
             schema,
             batch_schema,
             location_generator: DefaultLocationGenerator::new(table_metadata)?,
+            writer_properties: writer_properties.clone(),
         })
     }
 
@@ -348,9 +339,7 @@ impl PositionDeleteSink {
             for delete_file in writer.close()? {
                 outputs.push(PositionDeleteOutput {
                     delete_file,
-                    referenced_data_file: referenced_data_file
-                        .as_ref()
-                        .to_owned(),
+                    referenced_data_file: referenced_data_file.as_ref().to_owned(),
                 });
             }
         }
@@ -367,7 +356,7 @@ impl PositionDeleteSink {
             DataFileFormat::Parquet,
         );
         let parquet_writer_builder = ParquetWriterBuilder::new(
-            WriterProperties::builder().build(),
+            self.writer_properties.clone(),
             Arc::clone(&self.schema),
         );
         let rolling_writer_builder =
@@ -401,9 +390,8 @@ impl PositionDeleteSink {
         let file_values: ArrayRef = Arc::new(StringArray::from_iter_values(
             std::iter::once(referenced_data_file),
         ));
-        let file_array: ArrayRef = Arc::new(
-            UInt8DictionaryArray::try_new(file_keys, file_values)?,
-        );
+        let file_array: ArrayRef =
+            Arc::new(UInt8DictionaryArray::try_new(file_keys, file_values)?);
         let pos_array: ArrayRef = Arc::new(Int64Array::from(pos_values));
         Ok(RecordBatch::try_new(
             Arc::clone(&self.batch_schema),
@@ -501,83 +489,6 @@ impl PositionDeleteAccumulator {
                 )))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod position_delete_accumulator_tests {
-    use super::*;
-
-    #[test]
-    fn accepts_repeated_identical_snapshot_states() {
-        let mut without_snapshot =
-            PositionDeleteAccumulator::default();
-        without_snapshot.record_snapshot(None).unwrap();
-        without_snapshot.record_snapshot(None).unwrap();
-        assert_eq!(without_snapshot.starting_snapshot_id(), None);
-
-        let mut with_snapshot = PositionDeleteAccumulator::default();
-        with_snapshot.record_snapshot(Some(42)).unwrap();
-        with_snapshot.record_snapshot(Some(42)).unwrap();
-        assert_eq!(with_snapshot.starting_snapshot_id(), Some(42));
-    }
-
-    #[test]
-    fn rejects_mixed_snapshot_presence() {
-        let mut snapshot_then_none =
-            PositionDeleteAccumulator::default();
-        snapshot_then_none.record_snapshot(Some(42)).unwrap();
-        assert!(snapshot_then_none.record_snapshot(None).is_err());
-
-        let mut none_then_snapshot =
-            PositionDeleteAccumulator::default();
-        none_then_snapshot.record_snapshot(None).unwrap();
-        assert!(none_then_snapshot.record_snapshot(Some(42)).is_err());
-    }
-
-    #[test]
-    fn rejects_different_snapshot_ids() {
-        let mut accumulator = PositionDeleteAccumulator::default();
-        accumulator.record_snapshot(Some(42)).unwrap();
-        assert!(accumulator.record_snapshot(Some(43)).is_err());
-    }
-
-    #[test]
-    fn clear_resets_recorded_snapshot_state() {
-        let mut accumulator = PositionDeleteAccumulator::default();
-        accumulator.record_snapshot(Some(42)).unwrap();
-
-        accumulator.clear();
-
-        accumulator.record_snapshot(None).unwrap();
-        assert_eq!(accumulator.starting_snapshot_id(), None);
-    }
-
-    #[test]
-    fn positions_are_deduplicated_and_iterated_in_order() {
-        let location = |position| RowLocation {
-            data_file_path: Rc::from("data.parquet"),
-            position,
-            starting_snapshot_id: Some(42),
-        };
-        let mut accumulator = PositionDeleteAccumulator::default();
-
-        assert_eq!(accumulator.add(location(9)).unwrap(), TouchResult::Added);
-        assert_eq!(accumulator.add(location(1)).unwrap(), TouchResult::Added);
-        assert_eq!(accumulator.add(location(5)).unwrap(), TouchResult::Added);
-        assert_eq!(
-            accumulator.add(location(5)).unwrap(),
-            TouchResult::SelfModified
-        );
-        assert!(accumulator.contains(&location(5)));
-
-        let positions: Vec<_> = accumulator
-            .files()
-            .get("data.parquet")
-            .unwrap()
-            .iter()
-            .collect();
-        assert_eq!(positions, vec![1, 5, 9]);
     }
 }
 
@@ -789,33 +700,33 @@ impl IcebergModify {
         let conflict_filter = command
             .validation_command()
             .map(|_| DmlConflictFilterResolver::new(rel_oid).resolve());
-
-        // Live columns (attno order) + full tuple width drive the name-based
-        // source-slot mapping, so dropped-column gaps and schema evolution can
-        // never silently misalign the write path.
-        let live_columns: Vec<LiveColumn> = rel
-            .live_columns()
-            .into_iter()
-            .map(|(attno, name)| LiveColumn::new(attno, name))
-            .collect();
-        let slot_width = rel.natts();
-        let attr_types = rel.attr_types();
+        let write_options = AmCache::get::<IcebergTableOptionCache>(rel)?;
+        let writer_properties = WriterProperties::builder()
+            .set_compression(write_options.parquet_compression()?)
+            .build();
 
         let data_sink = if command.writes_data() {
+            // The shared relation shape drives the read and write column
+            // mappings, keeping dropped-column and type-position handling
+            // consistent. DELETE-only sessions do not allocate it.
+            let relation_shape = RelationShape::from_relation(rel);
             Some(DataFileSink::new(
                 &file_io,
                 &iceberg_schema,
-                &live_columns,
-                slot_width,
-                &attr_types,
+                &relation_shape,
                 &loaded.metadata,
+                &writer_properties,
                 gucs::dml_buffer_flush_bytes(),
             )?)
         } else {
             None
         };
         let position_delete_sink = if command.writes_position_deletes() {
-            Some(PositionDeleteSink::new(&file_io, &loaded.metadata)?)
+            Some(PositionDeleteSink::new(
+                &file_io,
+                &loaded.metadata,
+                &writer_properties,
+            )?)
         } else {
             None
         };
@@ -928,5 +839,79 @@ impl IcebergModify {
     ) {
         tmfd.ctid = *tid;
         tmfd.cmax = cid;
+    }
+}
+
+#[cfg(test)]
+mod position_delete_accumulator_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_repeated_identical_snapshot_states() {
+        let mut without_snapshot = PositionDeleteAccumulator::default();
+        without_snapshot.record_snapshot(None).unwrap();
+        without_snapshot.record_snapshot(None).unwrap();
+        assert_eq!(without_snapshot.starting_snapshot_id(), None);
+
+        let mut with_snapshot = PositionDeleteAccumulator::default();
+        with_snapshot.record_snapshot(Some(42)).unwrap();
+        with_snapshot.record_snapshot(Some(42)).unwrap();
+        assert_eq!(with_snapshot.starting_snapshot_id(), Some(42));
+    }
+
+    #[test]
+    fn rejects_mixed_snapshot_presence() {
+        let mut snapshot_then_none = PositionDeleteAccumulator::default();
+        snapshot_then_none.record_snapshot(Some(42)).unwrap();
+        assert!(snapshot_then_none.record_snapshot(None).is_err());
+
+        let mut none_then_snapshot = PositionDeleteAccumulator::default();
+        none_then_snapshot.record_snapshot(None).unwrap();
+        assert!(none_then_snapshot.record_snapshot(Some(42)).is_err());
+    }
+
+    #[test]
+    fn rejects_different_snapshot_ids() {
+        let mut accumulator = PositionDeleteAccumulator::default();
+        accumulator.record_snapshot(Some(42)).unwrap();
+        assert!(accumulator.record_snapshot(Some(43)).is_err());
+    }
+
+    #[test]
+    fn clear_resets_recorded_snapshot_state() {
+        let mut accumulator = PositionDeleteAccumulator::default();
+        accumulator.record_snapshot(Some(42)).unwrap();
+
+        accumulator.clear();
+
+        accumulator.record_snapshot(None).unwrap();
+        assert_eq!(accumulator.starting_snapshot_id(), None);
+    }
+
+    #[test]
+    fn positions_are_deduplicated_and_iterated_in_order() {
+        let location = |position| RowLocation {
+            data_file_path: Rc::from("data.parquet"),
+            position,
+            starting_snapshot_id: Some(42),
+        };
+        let mut accumulator = PositionDeleteAccumulator::default();
+
+        assert_eq!(accumulator.add(location(9)).unwrap(), TouchResult::Added);
+        assert_eq!(accumulator.add(location(1)).unwrap(), TouchResult::Added);
+        assert_eq!(accumulator.add(location(5)).unwrap(), TouchResult::Added);
+        assert_eq!(
+            accumulator.add(location(5)).unwrap(),
+            TouchResult::SelfModified
+        );
+        assert!(accumulator.contains(&location(5)));
+
+        let positions: Vec<_> = accumulator
+            .files()
+            .get("data.parquet")
+            .unwrap()
+            .iter()
+            .collect();
+        assert_eq!(positions, vec![1, 5, 9]);
     }
 }

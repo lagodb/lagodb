@@ -25,8 +25,8 @@ use crate::scan::{
     PartitionFilterCache,
 };
 use crate::spec::{
-    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, NameMapping,
-    SchemaRef, SnapshotRef, TableMetadataRef,
+    FirstRowIdInheritance, ManifestContentType, ManifestEntryRef, ManifestFile,
+    ManifestList, NameMapping, SchemaRef, SnapshotRef, TableMetadataRef,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -70,27 +70,10 @@ impl ManifestFileContext {
         let manifest = self.object_cache.get_manifest(&self.manifest_file)?;
 
         let mut entries = Vec::with_capacity(manifest.entries().len());
-        let mut next_row_id = self.manifest_file.first_row_id;
+        let mut row_id_inheritance =
+            FirstRowIdInheritance::new(self.manifest_file.first_row_id);
         for manifest_entry in manifest.entries() {
-            let entry_first_row_id =
-                Self::effective_entry_first_row_id(manifest_entry, next_row_id)?;
-
-            if manifest_entry.is_alive() {
-                if let Some(first_row_id) = entry_first_row_id {
-                    next_row_id = first_row_id
-                        .checked_add(manifest_entry.record_count())
-                        .map(Some)
-                        .ok_or_else(|| {
-                            Error::new(
-                                ErrorKind::DataInvalid,
-                                format!(
-                                    "row id overflow while planning file {}",
-                                    manifest_entry.file_path()
-                                ),
-                            )
-                        })?;
-                }
-            }
+            let entry_first_row_id = row_id_inheritance.resolve(manifest_entry)?;
 
             entries.push(ManifestEntryContext {
                 manifest_entry: manifest_entry.clone(),
@@ -108,30 +91,6 @@ impl ManifestFileContext {
         }
 
         Ok(entries)
-    }
-
-    fn effective_entry_first_row_id(
-        manifest_entry: &ManifestEntryRef,
-        manifest_next_row_id: Option<u64>,
-    ) -> Result<Option<u64>> {
-        if manifest_entry.content_type() != crate::spec::DataContentType::Data {
-            return Ok(None);
-        }
-
-        match manifest_entry.data_file().first_row_id() {
-            Some(first_row_id) => {
-                u64::try_from(first_row_id).map(Some).map_err(|_| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!(
-                            "data file {} has negative first_row_id {first_row_id}",
-                            manifest_entry.file_path()
-                        ),
-                    )
-                })
-            }
-            None => Ok(manifest_next_row_id),
-        }
     }
 }
 

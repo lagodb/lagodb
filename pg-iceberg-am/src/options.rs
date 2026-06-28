@@ -6,11 +6,12 @@
 //! options) and `hooks` (which validates and persists options during DDL).
 //!
 //! This is the *schema* layer for reloptions: it defines what is valid and
-//! how cached options are laid out in shared memory. The *DDL path* that
-//! parses, validates, and persists those options on `CREATE TABLE` lives in
-//! `crate::hooks::table_ddl`.
+//! how cached options are laid out in PostgreSQL cache memory. The *DDL path*
+//! that parses, validates, and persists those options on `CREATE TABLE` lives
+//! in `crate::hooks::table_ddl`.
 
 use iceberg_lite::spec::FormatVersion;
+use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use pg_lakebase_core::options::table::{
     AmCacheLayout, AmCacheLayoutBuilder, AmCacheStringOffset, AmCacheable,
     TableOptionError, TableOptions,
@@ -28,14 +29,15 @@ pub const OPT_FORMAT_VERSION_MIN: i32 = 1;
 pub const OPT_FORMAT_VERSION_MAX: i32 = 3;
 pub const OPT_FORMAT_VERSION_DEFAULT: i32 = 2;
 
-/// Parquet compression codec (snappy, zstd, etc.)
+/// Supported Parquet compression codecs.
 pub const OPT_COMPRESSION_CODEC: &str = "write.parquet.compression-codec";
 pub const OPT_COMPRESSION_CODEC_DEFAULT: &str = "zstd";
+pub const OPT_COMPRESSION_CODEC_VALUES: &[&str] = &["snappy", "zstd"];
 
-/// Default file format for writing (parquet, avro, orc)
+/// File format used for writes. The writer currently supports Parquet only.
 pub const OPT_WRITE_FORMAT: &str = "write.format.default";
 pub const OPT_WRITE_FORMAT_DEFAULT: &str = "parquet";
-pub const OPT_WRITE_FORMAT_VALUES: &[&str] = &["parquet", "avro", "orc"];
+pub const OPT_WRITE_FORMAT_VALUES: &[&str] = &["parquet"];
 
 // ============================================================================
 //  Option Definitions
@@ -54,8 +56,9 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_COMPRESSION_CODEC,
-        kind: OptionKind::String {
-            default: Some(OPT_COMPRESSION_CODEC_DEFAULT),
+        kind: OptionKind::Enum {
+            default: OPT_COMPRESSION_CODEC_DEFAULT,
+            values: OPT_COMPRESSION_CODEC_VALUES,
         },
         description: "Parquet compression codec (snappy, zstd)",
     },
@@ -65,9 +68,136 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
             default: OPT_WRITE_FORMAT_DEFAULT,
             values: OPT_WRITE_FORMAT_VALUES,
         },
-        description: "Default file format (parquet, avro, orc)",
+        description: "Default file format (parquet)",
     },
 ];
+
+/// Validated semantic table options shared by DDL and `rd_amcache` creation.
+///
+/// String values borrow either the parsed [`TableOptions`] or static defaults.
+/// Ownership is introduced only when Iceberg's metadata properties require a
+/// `HashMap<String, String>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedIcebergOptions<'a> {
+    format_version: FormatVersion,
+    compression: &'a str,
+    write_format: &'a str,
+}
+
+impl<'a> ResolvedIcebergOptions<'a> {
+    /// Resolve parsed options, applying defaults and validating semantic values.
+    pub(crate) fn from_table_options(
+        options: Option<&'a TableOptions>,
+    ) -> Result<Self, TableOptionError> {
+        let format_version =
+            match options.and_then(|options| options.get_str(OPT_FORMAT_VERSION)) {
+                Some(value) => value.parse::<i32>().map_err(|_| {
+                    TableOptionError::InvalidOption(format!(
+                        "{} must be an integer between {} and {}, got {:?}",
+                        OPT_FORMAT_VERSION,
+                        OPT_FORMAT_VERSION_MIN,
+                        OPT_FORMAT_VERSION_MAX,
+                        value,
+                    ))
+                })?,
+                None => OPT_FORMAT_VERSION_DEFAULT,
+            };
+        let compression = options
+            .and_then(|options| options.get_str(OPT_COMPRESSION_CODEC))
+            .unwrap_or(OPT_COMPRESSION_CODEC_DEFAULT);
+        let write_format = options
+            .and_then(|options| options.get_str(OPT_WRITE_FORMAT))
+            .unwrap_or(OPT_WRITE_FORMAT_DEFAULT);
+
+        Self::from_parts(format_version, compression, write_format)
+    }
+
+    fn from_parts(
+        format_version: i32,
+        compression: &'a str,
+        write_format: &'a str,
+    ) -> Result<Self, TableOptionError> {
+        Self::resolve_parquet_compression(compression)?;
+        if !OPT_WRITE_FORMAT_VALUES.contains(&write_format) {
+            return Err(TableOptionError::InvalidOption(format!(
+                "{} must be one of {}, got {:?}",
+                OPT_WRITE_FORMAT,
+                OPT_WRITE_FORMAT_VALUES.join(", "),
+                write_format,
+            )));
+        }
+
+        Ok(Self {
+            format_version: Self::resolve_format_version(format_version)?,
+            compression,
+            write_format,
+        })
+    }
+
+    fn resolve_parquet_compression(
+        value: &str,
+    ) -> Result<ParquetCompression, TableOptionError> {
+        match value {
+            "snappy" => Ok(ParquetCompression::SNAPPY),
+            "zstd" => Ok(ParquetCompression::ZSTD(ZstdLevel::default())),
+            value => Err(TableOptionError::InvalidOption(format!(
+                "{} must be one of {}, got {:?}",
+                OPT_COMPRESSION_CODEC,
+                OPT_COMPRESSION_CODEC_VALUES.join(", "),
+                value,
+            ))),
+        }
+    }
+
+    fn resolve_format_version(value: i32) -> Result<FormatVersion, TableOptionError> {
+        match value {
+            1 => Ok(FormatVersion::V1),
+            2 => Ok(FormatVersion::V2),
+            3 => Ok(FormatVersion::V3),
+            value => Err(TableOptionError::InvalidOption(format!(
+                "{} must be between {} and {}, got {}",
+                OPT_FORMAT_VERSION,
+                OPT_FORMAT_VERSION_MIN,
+                OPT_FORMAT_VERSION_MAX,
+                value
+            ))),
+        }
+    }
+
+    pub(crate) fn format_version(self) -> FormatVersion {
+        self.format_version
+    }
+
+    fn format_version_number(self) -> i32 {
+        self.format_version as u8 as i32
+    }
+
+    pub(crate) fn properties(self) -> HashMap<String, String> {
+        HashMap::from([
+            (
+                OPT_COMPRESSION_CODEC.to_owned(),
+                self.compression.to_owned(),
+            ),
+            (OPT_WRITE_FORMAT.to_owned(), self.write_format.to_owned()),
+        ])
+    }
+
+    fn into_cache(self) -> (IcebergTableOptionCache, Vec<u8>) {
+        let mut layout =
+            AmCacheLayoutBuilder::for_header::<IcebergTableOptionCache>();
+        let compression_offset = layout.push_str(self.compression);
+        let write_format_offset = layout.push_str(self.write_format);
+
+        (
+            IcebergTableOptionCache {
+                format_version: self.format_version_number(),
+                compression_offset,
+                write_format_offset,
+            },
+            layout.into_bytes(),
+        )
+    }
+}
 
 // ============================================================================
 //  Table Option Cache (rd_amcache)
@@ -102,76 +232,16 @@ pub struct IcebergTableOptionCache {
 
 // SAFETY: IcebergTableOptionCache is #[repr(C)] and contains only POD types.
 unsafe impl AmCacheable for IcebergTableOptionCache {
-    fn from_options(opts: &TableOptions) -> (Self, Vec<u8>) {
-        let mut layout = AmCacheLayoutBuilder::for_header::<Self>();
-
-        let format_version = opts
-            .get_int(OPT_FORMAT_VERSION)
-            .unwrap_or(OPT_FORMAT_VERSION_DEFAULT);
-        let compression = opts
-            .get_str(OPT_COMPRESSION_CODEC)
-            .unwrap_or(OPT_COMPRESSION_CODEC_DEFAULT);
-        let write_format = opts
-            .get_str(OPT_WRITE_FORMAT)
-            .unwrap_or(OPT_WRITE_FORMAT_DEFAULT);
-
-        let compression_offset = layout.push_str(compression);
-        let write_format_offset = layout.push_str(write_format);
-
-        (
-            Self {
-                format_version,
-                compression_offset,
-                write_format_offset,
-            },
-            layout.into_bytes(),
-        )
-    }
-
-    fn default_options() -> (Self, Vec<u8>) {
-        let mut layout = AmCacheLayoutBuilder::for_header::<Self>();
-
-        let compression_offset = layout.push_str(OPT_COMPRESSION_CODEC_DEFAULT);
-        let write_format_offset = layout.push_str(OPT_WRITE_FORMAT_DEFAULT);
-
-        (
-            Self {
-                format_version: OPT_FORMAT_VERSION_DEFAULT,
-                compression_offset,
-                write_format_offset,
-            },
-            layout.into_bytes(),
-        )
+    fn from_options(
+        opts: Option<&TableOptions>,
+    ) -> Result<(Self, Vec<u8>), TableOptionError> {
+        Ok(ResolvedIcebergOptions::from_table_options(opts)?.into_cache())
     }
 }
 
 impl IcebergTableOptionCache {
-    pub fn from_table_options(opts: Option<&TableOptions>) -> Self {
-        match opts {
-            Some(opts) => {
-                let (cache, _) = <Self as AmCacheable>::from_options(opts);
-                cache
-            }
-            None => {
-                let (cache, _) = <Self as AmCacheable>::default_options();
-                cache
-            }
-        }
-    }
-
     pub fn iceberg_format_version(&self) -> Result<FormatVersion, TableOptionError> {
-        match self.format_version {
-            1 => Ok(FormatVersion::V1),
-            2 => Ok(FormatVersion::V2),
-            3 => Ok(FormatVersion::V3),
-            value => Err(TableOptionError::InvalidOption(format!(
-                "{} must be between {} and {}, got {}",
-                OPT_FORMAT_VERSION,
-                OPT_FORMAT_VERSION_MIN,
-                OPT_FORMAT_VERSION_MAX,
-                value
-            ))),
-        }
+        ResolvedIcebergOptions::resolve_format_version(self.format_version)
     }
 
     pub fn compression(&self) -> &str {
@@ -192,21 +262,20 @@ impl IcebergTableOptionCache {
         }
     }
 
+    pub fn parquet_compression(
+        &self,
+    ) -> Result<ParquetCompression, TableOptionError> {
+        ResolvedIcebergOptions::resolve_parquet_compression(self.compression())
+    }
+
     /// Convert cached options to Iceberg table properties HashMap.
-    pub fn to_properties(&self) -> HashMap<String, String> {
-        let mut properties = HashMap::with_capacity(2);
-
-        properties.insert(
-            OPT_COMPRESSION_CODEC.to_string(),
-            self.compression().to_string(),
-        );
-
-        properties.insert(
-            OPT_WRITE_FORMAT.to_string(),
-            self.write_format().to_string(),
-        );
-
-        properties
+    pub fn to_properties(&self) -> Result<HashMap<String, String>, TableOptionError> {
+        ResolvedIcebergOptions::from_parts(
+            self.format_version,
+            self.compression(),
+            self.write_format(),
+        )
+        .map(ResolvedIcebergOptions::properties)
     }
 }
 
@@ -215,8 +284,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn creation_options_apply_defaults_without_cache_storage() {
+        let options = ResolvedIcebergOptions::from_table_options(None).unwrap();
+        let format_version = options.format_version();
+        let properties = options.properties();
+
+        assert_eq!(format_version, FormatVersion::V2);
+        assert_eq!(
+            properties.get(OPT_COMPRESSION_CODEC).map(String::as_str),
+            Some(OPT_COMPRESSION_CODEC_DEFAULT),
+        );
+        assert_eq!(
+            properties.get(OPT_WRITE_FORMAT).map(String::as_str),
+            Some(OPT_WRITE_FORMAT_DEFAULT),
+        );
+    }
+
+    #[test]
+    fn creation_options_preserve_explicit_values_and_partial_defaults() {
+        let options = TableOptions::new(vec![
+            (OPT_FORMAT_VERSION.to_owned(), Some("1".to_owned())),
+            (OPT_COMPRESSION_CODEC.to_owned(), Some("snappy".to_owned())),
+        ]);
+        let resolved =
+            ResolvedIcebergOptions::from_table_options(Some(&options)).unwrap();
+        let format_version = resolved.format_version();
+        let properties = resolved.properties();
+
+        assert_eq!(format_version, FormatVersion::V1);
+        assert_eq!(
+            properties.get(OPT_COMPRESSION_CODEC).map(String::as_str),
+            Some("snappy"),
+        );
+        assert_eq!(
+            properties.get(OPT_WRITE_FORMAT).map(String::as_str),
+            Some(OPT_WRITE_FORMAT_DEFAULT),
+        );
+    }
+
+    #[test]
+    fn creation_options_defensively_reject_invalid_format_version() {
+        let options = TableOptions::new(vec![(
+            OPT_FORMAT_VERSION.to_owned(),
+            Some("4".to_owned()),
+        )]);
+
+        assert!(matches!(
+            ResolvedIcebergOptions::from_table_options(Some(&options)),
+            Err(TableOptionError::InvalidOption(_)),
+        ));
+    }
+
+    #[test]
     fn test_default_options() {
-        let (cache, data) = IcebergTableOptionCache::default_options();
+        let (cache, data) = IcebergTableOptionCache::from_options(None).unwrap();
         assert_eq!(cache.format_version, 2);
         assert_eq!(cache.iceberg_format_version().unwrap(), FormatVersion::V2);
         assert!(cache.compression_offset > 0);
@@ -226,7 +347,7 @@ mod tests {
 
     #[test]
     fn format_version_maps_supported_values() {
-        let (mut cache, _) = IcebergTableOptionCache::default_options();
+        let (mut cache, _) = IcebergTableOptionCache::from_options(None).unwrap();
 
         cache.format_version = 1;
         assert_eq!(cache.iceberg_format_version().unwrap(), FormatVersion::V1);
@@ -240,10 +361,51 @@ mod tests {
 
     #[test]
     fn format_version_rejects_unvalidated_values() {
-        let (mut cache, _) = IcebergTableOptionCache::default_options();
+        let (mut cache, _) = IcebergTableOptionCache::from_options(None).unwrap();
         cache.format_version = 4;
 
         let err = cache.iceberg_format_version().unwrap_err();
         assert!(err.to_string().contains(OPT_FORMAT_VERSION));
     }
+
+    #[test]
+    fn resolved_options_reject_non_integer_format_version() {
+        let options = TableOptions::new(vec![(
+            OPT_FORMAT_VERSION.to_owned(),
+            Some("not-an-integer".to_owned()),
+        )]);
+
+        assert!(matches!(
+            ResolvedIcebergOptions::from_table_options(Some(&options)),
+            Err(TableOptionError::InvalidOption(_)),
+        ));
+    }
+
+    #[test]
+    fn resolved_options_reject_unknown_write_format() {
+        let options = TableOptions::new(vec![(
+            OPT_WRITE_FORMAT.to_owned(),
+            Some("avro".to_owned()),
+        )]);
+
+        assert!(matches!(
+            ResolvedIcebergOptions::from_table_options(Some(&options)),
+            Err(TableOptionError::InvalidOption(_)),
+        ));
+    }
+
+    #[test]
+    fn parquet_compression_values_are_validated_and_mapped() {
+        assert_eq!(
+            ResolvedIcebergOptions::resolve_parquet_compression("snappy").unwrap(),
+            ParquetCompression::SNAPPY,
+        );
+        assert!(matches!(
+            ResolvedIcebergOptions::resolve_parquet_compression("invalid"),
+            Err(TableOptionError::InvalidOption(_)),
+        ));
+    }
 }
+
+#[cfg(feature = "pg_test")]
+mod pg_test;

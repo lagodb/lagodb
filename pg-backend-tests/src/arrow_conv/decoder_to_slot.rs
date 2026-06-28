@@ -211,8 +211,7 @@ mod tests {
         unsafe {
             let slot = make_slot(&oids);
 
-            let mut cols =
-                SlotColumns::new(slot, pg_sys::CurrentMemoryContext, natts);
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 0, &mut cols)
                 .expect("decode value row");
@@ -254,8 +253,7 @@ mod tests {
             );
 
             // The NULL row marks every mapped position SQL NULL.
-            let mut cols =
-                SlotColumns::new(slot, pg_sys::CurrentMemoryContext, natts);
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 1, &mut cols)
                 .expect("decode null row");
@@ -290,8 +288,7 @@ mod tests {
             }
 
             let bound = decoder.bind(batch).expect("bind");
-            let mut cols =
-                SlotColumns::new(slot, pg_sys::CurrentMemoryContext, natts);
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             decoder.write_row(&bound, 0, &mut cols).expect("decode");
 
             assert_eq!(read::<i32>(slot, 0), Some(10));
@@ -334,7 +331,7 @@ mod tests {
             // Mirror the shim: switch the current context to tmp_ctx so the
             // varlena palloc lands there, then decode.
             let prior = pg_sys::MemoryContextSwitchTo(tmp_ctx);
-            let mut cols = SlotColumns::new(slot, tmp_ctx, 1);
+            let mut cols = SlotColumns::new(slot, tmp_ctx);
             decoder
                 .write_row(&bound, 0, &mut cols)
                 .expect("decode first");
@@ -354,7 +351,7 @@ mod tests {
             pg_sys::MemoryContextReset(tmp_ctx);
 
             let prior = pg_sys::MemoryContextSwitchTo(tmp_ctx);
-            let mut cols = SlotColumns::new(slot, tmp_ctx, 1);
+            let mut cols = SlotColumns::new(slot, tmp_ctx);
             decoder
                 .write_row(&bound, 1, &mut cols)
                 .expect("decode after reset");
@@ -387,7 +384,7 @@ mod tests {
             // Produced row: clear, decode, store.
             pg_sys::ExecClearTuple(slot);
             assert!(is_empty(slot), "slot is empty before a row is produced");
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext, 1);
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             assert!(cursor.next_into_slot(&mut cols).expect("first row"));
             pg_sys::ExecStoreVirtualTuple(slot);
             assert!(!is_empty(slot), "slot is non-empty after a produced row");
@@ -395,7 +392,7 @@ mod tests {
 
             // End of scan: clear, decode returns false, no store.
             pg_sys::ExecClearTuple(slot);
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext, 1);
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             assert!(!cursor.next_into_slot(&mut cols).expect("end of scan"));
             assert!(is_empty(slot), "slot stays empty at end of scan");
         }
@@ -446,8 +443,7 @@ mod tests {
             let bound = decoder.bind(batch).expect("bind");
 
             // Row 0: populated lists.
-            let mut cols =
-                SlotColumns::new(slot, pg_sys::CurrentMemoryContext, oids.len());
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 0, &mut cols)
                 .expect("decode row 0");
@@ -461,8 +457,7 @@ mod tests {
             );
 
             // Row 1: NULL list cells.
-            let mut cols =
-                SlotColumns::new(slot, pg_sys::CurrentMemoryContext, oids.len());
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 1, &mut cols)
                 .expect("decode row 1");
@@ -470,8 +465,7 @@ mod tests {
             assert!(is_null(slot, 1), "NULL text[] cell");
 
             // Row 2: present-but-empty lists decode to empty arrays, not NULL.
-            let mut cols =
-                SlotColumns::new(slot, pg_sys::CurrentMemoryContext, oids.len());
+            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 2, &mut cols)
                 .expect("decode row 2");
@@ -507,8 +501,7 @@ mod tests {
                 let bound =
                     decoder.bind(batch_of(vec![array.clone()])).expect("bind");
                 let slot = make_slot(&[array_oid]);
-                let mut cols =
-                    SlotColumns::new(slot, pg_sys::CurrentMemoryContext, 1);
+                let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
                 decoder.write_row(&bound, 0, &mut cols).expect("write_row");
                 let direct = read::<T>(slot, 0);
 

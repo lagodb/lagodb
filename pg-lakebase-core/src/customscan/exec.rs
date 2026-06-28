@@ -80,6 +80,19 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
         unsafe { decode_provider_private::<P>(priv_payload.provider_metadata_raw) }
             .report_unwrap();
 
+    let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
+    debug_assert!(
+        !scan_slot.is_null(),
+        "BeginCustomScan: ss_ScanTupleSlot must be initialized",
+    );
+    unsafe {
+        priv_payload
+            .tuple_layout
+            .validate_executor(cscan, scan_slot)
+    }
+    .report_unwrap();
+    let scan_tuple_desc = unsafe { (*scan_slot).tts_tupleDescriptor };
+
     // Cache framework envelope fields that rescan needs, avoiding repeated
     // decode_private on every ReScanCustomScan invocation. Move (not clone)
     // the Vecs from the decoded payload into the cache.
@@ -88,6 +101,7 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
         recheck_count: priv_payload.recheck_count,
         pushed_contracts: priv_payload.pushed_contracts,
         column_refs: priv_payload.column_refs,
+        tuple_layout: priv_payload.tuple_layout,
     });
 
     // SAFETY: uninit → write decoded private; End drops when initialized.
@@ -167,13 +181,13 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
         &envelope.pushed_contracts,
         &resolved_params,
         scan_relid,
+        &envelope.tuple_layout,
+        scan_tuple_desc,
         unsafe { RelationHandle::from_raw(scan_rel) },
         unsafe { SnapshotHandle::from_raw(snapshot) },
         estate,
         per_tuple_memory_context,
         eflags,
-        cscan,
-        expr_sections.recheck(),
     );
     if let Err(err) = P::begin(begin_ctx) {
         err.with_provider_phase::<P>(CustomScanPhase::Begin)
@@ -274,6 +288,7 @@ pub unsafe extern "C-unwind" fn rescan_custom_scan_trampoline<
         &envelope.pushed_contracts,
         &resolved_params,
         scan_relid,
+        &envelope.tuple_layout,
         unsafe { RelationHandle::from_raw(scan_rel) },
         unsafe { SnapshotHandle::from_raw(snapshot) },
         estate,

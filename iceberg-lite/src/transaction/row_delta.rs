@@ -469,7 +469,16 @@ impl<'a> RowDeltaValidator<'a> {
     }
 
     fn live_data_file_paths(&self) -> Result<BTreeSet<String>> {
-        let mut paths = BTreeSet::new();
+        // Validation runs against the table state produced by this commit, not
+        // only the currently committed snapshot. Position deletes may legally
+        // reference data files appended earlier in the same transaction.
+        // `DeltaPlan` is already resolved, so add-then-remove files are absent.
+        let mut paths: BTreeSet<String> = self
+            .plan
+            .added_data_files
+            .iter()
+            .map(|file| file.file_path().to_owned())
+            .collect();
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
             return Ok(paths);
         };
@@ -503,19 +512,18 @@ impl<'a> RowDeltaValidator<'a> {
         starting_snapshot_id: Option<i64>,
     ) -> Result<BTreeSet<i64>> {
         let mut after_start = BTreeSet::new();
-        let Some(starting_snapshot_id) = starting_snapshot_id else {
-            return Ok(after_start);
-        };
-
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
-            return Err(self.validation_error(
-                "row delta has a scan snapshot but table has no current snapshot",
-            ));
+            return match starting_snapshot_id {
+                None => Ok(after_start),
+                Some(_) => Err(self.validation_error(
+                    "row delta has a scan snapshot but table has no current snapshot",
+                )),
+            };
         };
 
         let mut cursor = Some(current_snapshot.snapshot_id());
         while let Some(snapshot_id) = cursor {
-            if snapshot_id == starting_snapshot_id {
+            if starting_snapshot_id == Some(snapshot_id) {
                 return Ok(after_start);
             }
 
@@ -523,6 +531,13 @@ impl<'a> RowDeltaValidator<'a> {
             after_start.insert(snapshot_id);
             cursor = snapshot.parent_snapshot_id();
         }
+
+        // `None` means the statement scanned a table before it had any
+        // snapshot. Every snapshot now present was therefore committed after
+        // the scan and belongs to the validation interval.
+        let Some(starting_snapshot_id) = starting_snapshot_id else {
+            return Ok(after_start);
+        };
 
         Err(self.validation_error(format!(
             "row delta scan snapshot {starting_snapshot_id} is not an ancestor of current snapshot {}",
@@ -570,5 +585,96 @@ impl<'a> RowDeltaValidator<'a> {
 
     fn validation_error(&self, message: impl Into<String>) -> Error {
         Error::new(ErrorKind::PreconditionFailed, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::memory::tests::new_memory_catalog;
+    use crate::spec::{
+        DataFile, DataFileBuilder, DataFileFormat, FormatVersion, Literal, Struct,
+        TableMetadata,
+    };
+    use crate::transaction::tests::make_v2_minimal_table;
+    use crate::transaction::{ApplyTransactionAction, Transaction};
+    use crate::{Catalog, TableCreation, TableIdent};
+
+    use super::*;
+
+    #[test]
+    fn live_files_include_transaction_local_adds() {
+        let table = make_v2_minimal_table();
+        let mut plan = DeltaPlan::default();
+        plan.added_data_files.push(data_file("test/staged.parquet"));
+        let validator = RowDeltaValidator::new(&table, &plan);
+
+        let paths = validator.live_data_file_paths().unwrap();
+
+        assert!(paths.contains("test/staged.parquet"));
+    }
+
+    #[test]
+    fn no_starting_snapshot_includes_entire_current_history() {
+        let catalog = new_memory_catalog();
+        let table = make_v2_table_in_catalog(&catalog);
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .fast_append()
+            .add_data_files([data_file("test/concurrent.parquet")])
+            .apply(tx)
+            .unwrap();
+        let table = tx.commit(&catalog).unwrap();
+        let plan = DeltaPlan::default();
+        let validator = RowDeltaValidator::new(&table, &plan);
+
+        let snapshot_ids = validator.snapshot_ids_after(None).unwrap();
+        let expected: BTreeSet<i64> = table
+            .metadata()
+            .snapshots()
+            .map(|snapshot| snapshot.snapshot_id())
+            .collect();
+
+        assert_eq!(snapshot_ids, expected);
+        assert!(!snapshot_ids.is_empty());
+    }
+
+    fn make_v2_table_in_catalog(catalog: &impl Catalog) -> Table {
+        let table_ident = TableIdent::from_strs([
+            format!("ns-{}", Uuid::new_v4()),
+            "test".to_owned(),
+        ])
+        .unwrap();
+        catalog
+            .create_namespace(table_ident.namespace(), HashMap::new())
+            .unwrap();
+
+        let base_table = make_v2_minimal_table();
+        let base_metadata: &TableMetadata = base_table.metadata();
+        let table_creation = TableCreation::builder()
+            .schema((**base_metadata.current_schema()).clone())
+            .partition_spec((**base_metadata.default_partition_spec()).clone())
+            .sort_order((**base_metadata.default_sort_order()).clone())
+            .name(table_ident.name().to_owned())
+            .format_version(FormatVersion::V2)
+            .build();
+
+        catalog
+            .create_table(table_ident.namespace(), table_creation)
+            .unwrap()
+    }
+
+    fn data_file(path: &str) -> DataFile {
+        let mut builder = DataFileBuilder::default();
+        builder
+            .content(DataContentType::Data)
+            .file_path(path.to_owned())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(100)
+            .record_count(1)
+            .partition_spec_id(0)
+            .partition(Struct::from_iter([Some(Literal::long(300))]));
+        builder.build().unwrap()
     }
 }

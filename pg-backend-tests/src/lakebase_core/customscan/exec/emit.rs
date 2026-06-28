@@ -427,8 +427,7 @@ mod tests {
         fn next_slot(
             mut ctx: NextSlotContext<'_, Self>,
         ) -> Result<bool, CustomScanError> {
-            let natts = ctx.relation.natts();
-            let produced = ctx.emit_columns(&mut EmitColumnsDriver, natts)?;
+            let produced = ctx.emit_columns(&mut EmitColumnsDriver)?;
             ctx.state.emitted = produced;
             Ok(produced)
         }

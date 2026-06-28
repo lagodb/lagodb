@@ -5,7 +5,8 @@ use pg_lakebase_core::customscan::provider::{
     BeginContext, CustomScanError, EndContext, NextSlotContext, ReScanContext,
 };
 
-use crate::access::scan::{IcebergBatchCursor, RelationShape, ScanSpec};
+use crate::access::column_mapping::RelationShape;
+use crate::access::scan::{IcebergBatchCursor, ScanSpec};
 use crate::customscan::IcebergPredicateTranslator;
 use crate::customscan::predicate_translator::fold_left;
 
@@ -17,8 +18,6 @@ use super::provider_projection::ProjectionResolver;
 pub struct IcebergScanState {
     pub(crate) spec: Option<ScanSpec>,
     pub(crate) cursor: Option<IcebergBatchCursor>,
-    /// Full tuple width captured in `begin`; sizes the slot-first decode.
-    pub(crate) natts: usize,
 }
 
 impl IcebergScanState {
@@ -42,8 +41,10 @@ impl IcebergScanState {
             translate_predicates(&ctx)?
         };
 
-        let projection = ProjectionResolver::new(rel_oid, &ctx.relation)
-            .resolve(ctx.referenced_attnos())?;
+        let scan_tuple = ctx.scan_tuple();
+        let projection = ProjectionResolver::new(rel_oid)
+            .resolve(ctx.required_columns(), scan_tuple)?;
+        let scan_attr_types = scan_tuple.attr_types();
         let shape = RelationShape::from_relation(&ctx.relation);
 
         let spec = match projection {
@@ -51,17 +52,19 @@ impl IcebergScanState {
                 ScanSpec::build_with_predicate(rel_oid, spc_oid, predicate, &shape)?
             }
             Some(proj) => ScanSpec::build_with_projection(
-                rel_oid, spc_oid, proj, predicate, &shape,
+                rel_oid,
+                spc_oid,
+                proj,
+                predicate,
+                &scan_attr_types,
             )?,
         };
 
-        let cursor = spec.open_batch_cursor(shape.attr_types(), None)?;
-        let natts = ctx.relation.natts();
+        let cursor = spec.open_batch_cursor(None)?;
 
         let state = ctx.state;
         state.spec = Some(spec);
         state.cursor = Some(cursor);
-        state.natts = natts;
 
         Ok(())
     }
@@ -79,8 +82,7 @@ impl IcebergScanState {
         let Some(mut cursor) = ctx.state.cursor.take() else {
             return Ok(false);
         };
-        let natts = ctx.state.natts;
-        let result = ctx.emit_columns(&mut cursor, natts);
+        let result = ctx.emit_columns(&mut cursor);
         ctx.state.cursor = Some(cursor);
         result
     }
@@ -98,7 +100,6 @@ impl IcebergScanState {
             None
         };
 
-        let attr_types = ctx.relation.attr_types();
         let state = ctx.state;
         let Some(spec) = state.spec.as_mut() else {
             return Ok(());
@@ -108,7 +109,7 @@ impl IcebergScanState {
             spec.set_filter(filter);
         }
 
-        state.cursor = Some(spec.open_batch_cursor(&attr_types, None)?);
+        state.cursor = Some(spec.open_batch_cursor(None)?);
         Ok(())
     }
 

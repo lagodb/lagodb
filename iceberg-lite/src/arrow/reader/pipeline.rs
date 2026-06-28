@@ -30,12 +30,12 @@ use parquet::arrow::arrow_reader::{
 use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, RowNumber};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 
+use super::predicate_plan::FilePredicatePlan;
+use super::row_filter::TransformedRecordBatchFilter;
 use super::{
     ArrowFileReader, ArrowReader, ParquetReadOptions,
     add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema,
 };
-use super::predicate_plan::FilePredicatePlan;
-use super::row_filter::TransformedRecordBatchFilter;
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::int96::coerce_int96_timestamps;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
@@ -255,8 +255,7 @@ impl ArrowReader {
 
         let predicate_plan = FilePredicatePlan::try_new(final_predicate)?;
         let requested_project_field_ids = task.project_field_ids.clone();
-        let post_transform_field_ids =
-            predicate_plan.post_transform_field_ids();
+        let post_transform_field_ids = predicate_plan.post_transform_field_ids();
         let needs_position_column = requested_project_field_ids
             .contains(&RESERVED_FIELD_ID_POS)
             || post_transform_field_ids.contains(&RESERVED_FIELD_ID_POS);
@@ -265,10 +264,8 @@ impl ArrowReader {
             || post_transform_field_ids.contains(&RESERVED_FIELD_ID_ROW_ID);
         let needs_row_number_column = needs_position_column || needs_row_id_column;
         let mut effective_project_field_ids = requested_project_field_ids.clone();
-        let mut ordered_post_transform_field_ids = post_transform_field_ids
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let mut ordered_post_transform_field_ids =
+            post_transform_field_ids.iter().copied().collect::<Vec<_>>();
         ordered_post_transform_field_ids.sort_unstable();
         for field_id in ordered_post_transform_field_ids {
             if !effective_project_field_ids.contains(&field_id) {
@@ -403,13 +400,12 @@ impl ArrowReader {
         // row-group and page-index evaluators below are conservative reuse of
         // the same predicate, not substitutes for this row-level filter.
         if let Some(predicate) = predicate_plan.parquet_filter_predicate() {
-            let (iceberg_field_ids, field_id_map) =
-                Self::build_field_id_set_and_map(
-                    record_batch_reader_builder.parquet_schema(),
-                    record_batch_reader_builder.schema(),
-                    predicate,
-                    use_position_fallback,
-                )?;
+            let (iceberg_field_ids, field_id_map) = Self::build_field_id_set_and_map(
+                record_batch_reader_builder.parquet_schema(),
+                record_batch_reader_builder.schema(),
+                predicate,
+                use_position_fallback,
+            )?;
             let row_filter = Self::get_row_filter(
                 predicate,
                 record_batch_reader_builder.parquet_schema(),
@@ -435,9 +431,7 @@ impl ArrowReader {
                         // Keep only row groups that are in both filters
                         let intersection: Vec<usize> = byte_range_filtered
                             .into_iter()
-                            .filter(|idx| {
-                                predicate_filtered_row_groups.contains(idx)
-                            })
+                            .filter(|idx| predicate_filtered_row_groups.contains(idx))
                             .collect();
                         Some(intersection)
                     }
@@ -446,14 +440,13 @@ impl ArrowReader {
             }
 
             if row_selection_enabled {
-                row_selection =
-                    Some(Self::get_row_selection_for_filter_predicate(
-                        predicate,
-                        record_batch_reader_builder.metadata(),
-                        &selected_row_group_indices,
-                        &field_id_map,
-                        &task.schema,
-                    )?);
+                row_selection = Some(Self::get_row_selection_for_filter_predicate(
+                    predicate,
+                    record_batch_reader_builder.metadata(),
+                    &selected_row_group_indices,
+                    &field_id_map,
+                    &task.schema,
+                )?);
             }
         }
 

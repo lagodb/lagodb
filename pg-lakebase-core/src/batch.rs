@@ -514,6 +514,7 @@ mod read_tests {
     /// to the slot stay valid for the slot's lifetime.
     struct HostSlot {
         slot: pg_sys::TupleTableSlot,
+        tuple_desc: Box<pg_sys::TupleDescData>,
         values: Vec<pg_sys::Datum>,
         nulls: Vec<bool>,
     }
@@ -524,18 +525,23 @@ mod read_tests {
             // only the positions it actually writes. This is the test harness's
             // own initial state, *not* what `ExecClearTuple` produces (a real
             // cleared slot leaves `tts_isnull` untouched / `palloc0`'d).
+            let mut tuple_desc: Box<pg_sys::TupleDescData> =
+                Box::new(unsafe { std::mem::zeroed() });
+            tuple_desc.natts = natts as i32;
             let mut boxed = Box::new(HostSlot {
                 slot: unsafe { std::mem::zeroed() },
+                tuple_desc,
                 values: vec![pg_sys::Datum::from(0usize); natts],
                 nulls: vec![true; natts],
             });
             boxed.slot.tts_values = boxed.values.as_mut_ptr();
             boxed.slot.tts_isnull = boxed.nulls.as_mut_ptr();
+            boxed.slot.tts_tupleDescriptor = &mut *boxed.tuple_desc;
             boxed
         }
 
-        fn columns(&mut self, natts: usize) -> SlotColumns<'_> {
-            unsafe { SlotColumns::new(&mut self.slot, std::ptr::null_mut(), natts) }
+        fn columns(&mut self) -> SlotColumns<'_> {
+            unsafe { SlotColumns::new(&mut self.slot, std::ptr::null_mut()) }
         }
     }
 
@@ -558,7 +564,7 @@ mod read_tests {
         let mut host = HostSlot::new(natts);
         let mut produced = Vec::new();
         loop {
-            let mut cols = host.columns(natts);
+            let mut cols = host.columns();
             if !cursor.next_into_slot(&mut cols).unwrap() {
                 break;
             }
@@ -587,7 +593,7 @@ mod read_tests {
 
         let mut trues = 0;
         loop {
-            let mut cols = host.columns(natts);
+            let mut cols = host.columns();
             if cursor.next_into_slot(&mut cols).unwrap() {
                 trues += 1;
             } else {
@@ -597,7 +603,7 @@ mod read_tests {
         assert_eq!(trues, 1);
 
         // End-of-scan stays terminal on repeated calls.
-        let mut cols = host.columns(natts);
+        let mut cols = host.columns();
         assert!(!cursor.next_into_slot(&mut cols).unwrap());
     }
 
@@ -606,7 +612,7 @@ mod read_tests {
         let natts = 3;
         let mut host = HostSlot::new(natts);
         {
-            let mut cols = host.columns(natts);
+            let mut cols = host.columns();
             cols.set_datum(0, Some(pg_sys::Datum::from(42usize)));
             cols.set_datum(1, None);
             // Index 2 is intentionally never written.

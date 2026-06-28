@@ -56,7 +56,71 @@ pub struct PredicateBuilder<'a, T: PgPredicateTranslator> {
     exprs: &'a [*mut pg_sys::Expr],
     column_refs: ColumnRefs<'a>,
     resolved_params: ResolvedParams<'a>,
-    scan_relid: c_int,
+    var_resolver: ScanVarResolver<'a>,
+}
+
+/// Maps executor `Var` coordinates back to base-relation attribute numbers.
+/// Relation-shaped scans use their RTI directly; projected CustomScans use
+/// `INDEX_VAR` plus the plan-time `resno -> base attno` contract.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ScanVarResolver<'a> {
+    Relation {
+        scan_relid: c_int,
+    },
+    Mapped {
+        varno: c_int,
+        source_attnos: &'a [pg_sys::AttrNumber],
+    },
+}
+
+impl<'a> ScanVarResolver<'a> {
+    pub(crate) fn relation(scan_relid: c_int) -> Self {
+        Self::Relation { scan_relid }
+    }
+
+    pub(crate) fn mapped(
+        varno: c_int,
+        source_attnos: &'a [pg_sys::AttrNumber],
+    ) -> Self {
+        Self::Mapped {
+            varno,
+            source_attnos,
+        }
+    }
+
+    fn expected_varno(self) -> c_int {
+        match self {
+            Self::Relation { scan_relid } => scan_relid,
+            Self::Mapped { varno, .. } => varno,
+        }
+    }
+
+    fn resolve(
+        self,
+        varno: c_int,
+        varattno: pg_sys::AttrNumber,
+    ) -> Result<pg_sys::AttrNumber, ResolveScanVarError> {
+        if varno != self.expected_varno() {
+            return Err(ResolveScanVarError::UnexpectedVarno);
+        }
+        if varattno <= 0 {
+            return Err(ResolveScanVarError::UnsupportedAttno);
+        }
+        match self {
+            Self::Relation { .. } => Ok(varattno),
+            Self::Mapped { source_attnos, .. } => source_attnos
+                .get(varattno as usize - 1)
+                .copied()
+                .ok_or(ResolveScanVarError::MappedResnoOutOfRange),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResolveScanVarError {
+    UnexpectedVarno,
+    UnsupportedAttno,
+    MappedResnoOutOfRange,
 }
 
 impl<'a, T: PgPredicateTranslator> PredicateBuilder<'a, T> {
@@ -73,7 +137,23 @@ impl<'a, T: PgPredicateTranslator> PredicateBuilder<'a, T> {
             exprs,
             column_refs: ColumnRefs::new(column_refs),
             resolved_params: ResolvedParams::new(resolved_params),
-            scan_relid,
+            var_resolver: ScanVarResolver::relation(scan_relid),
+        }
+    }
+
+    pub(crate) fn with_var_resolver(
+        translator: &'a mut T,
+        exprs: &'a [*mut pg_sys::Expr],
+        column_refs: &'a [ColumnRef],
+        resolved_params: &'a [PgParamValue],
+        var_resolver: ScanVarResolver<'a>,
+    ) -> Self {
+        Self {
+            translator,
+            exprs,
+            column_refs: ColumnRefs::new(column_refs),
+            resolved_params: ResolvedParams::new(resolved_params),
+            var_resolver,
         }
     }
 
@@ -143,20 +223,35 @@ impl<'a, T: PgPredicateTranslator> PredicateBuilder<'a, T> {
                 let var = unsafe { PgVar::try_from_expr(expr) }
                     .expect("node_tag matched T_Var but try_from_expr failed");
                 let varno = unsafe { var.varno() };
-                if varno != self.scan_relid {
-                    return Err(BuildPredicateError::OuterRelationVar {
-                        expr_index,
-                        varno,
-                        scan_relid: self.scan_relid,
-                    });
-                }
-                let attno = unsafe { var.varattno() };
-                if attno <= 0 {
-                    return Err(BuildPredicateError::UnsupportedScanVarAttno {
-                        expr_index,
-                        attno,
-                    });
-                }
+                let raw_attno = unsafe { var.varattno() };
+                let attno = match self.var_resolver.resolve(varno, raw_attno) {
+                    Ok(attno) => attno,
+                    Err(ResolveScanVarError::UnexpectedVarno) => {
+                        return Err(BuildPredicateError::OuterRelationVar {
+                            expr_index,
+                            varno,
+                            scan_relid: self.var_resolver.expected_varno(),
+                        });
+                    }
+                    Err(ResolveScanVarError::UnsupportedAttno) => {
+                        return Err(BuildPredicateError::UnsupportedScanVarAttno {
+                            expr_index,
+                            attno: raw_attno,
+                        });
+                    }
+                    Err(ResolveScanVarError::MappedResnoOutOfRange) => {
+                        return Err(BuildPredicateError::MappedScanVarOutOfRange {
+                            expr_index,
+                            resno: raw_attno,
+                            width: match self.var_resolver {
+                                ScanVarResolver::Mapped { source_attnos, .. } => {
+                                    source_attnos.len()
+                                }
+                                ScanVarResolver::Relation { .. } => 0,
+                            },
+                        });
+                    }
+                };
                 let col = self.column_refs.lookup(expr_index, attno).ok_or(
                     BuildPredicateError::MissingColumnRef { expr_index, attno },
                 )?;
@@ -483,6 +578,16 @@ where
     UnsupportedScanVarAttno {
         expr_index: usize,
         attno: pg_sys::AttrNumber,
+    },
+
+    #[error(
+        "PredicateBuilder: expression {expr_index} references projected scan \
+         resno {resno}, outside layout width {width}"
+    )]
+    MappedScanVarOutOfRange {
+        expr_index: usize,
+        resno: pg_sys::AttrNumber,
+        width: usize,
     },
 
     #[error(

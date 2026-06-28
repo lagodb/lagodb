@@ -11,6 +11,7 @@ mod tests {
     use pg_lakebase_core::customscan::custom_private::{
         assert_provider_name_matches, decode_private, encode_split,
     };
+    use pg_lakebase_core::customscan::provider::NeededColumns;
     use pg_lakebase_core::diag::ReportableError;
     use pg_lakebase_core::expr::nodes::PgParamValue;
     use pg_lakebase_core::expr::split::{ColumnRef, PushdownContract};
@@ -33,6 +34,23 @@ mod tests {
             list = pg_sys::lappend(list, str_node.cast());
 
             list
+        }
+    }
+
+    unsafe fn replace_tuple_layout_wire(
+        envelope: *mut pg_sys::List,
+        kind: i32,
+        attnos: &[pg_sys::AttrNumber],
+    ) {
+        let mut wire: *mut pg_sys::List = ptr::null_mut();
+        wire = unsafe { pg_sys::lappend_int(wire, kind) };
+        for &attno in attnos {
+            wire = unsafe { pg_sys::lappend_int(wire, attno as i32) };
+        }
+        let cell = unsafe { pg_sys::list_nth_cell(envelope, 8) };
+        assert!(!cell.is_null(), "tuple-layout envelope cell must exist");
+        unsafe {
+            (*cell).ptr_value = wire.cast();
         }
     }
 
@@ -176,7 +194,7 @@ mod tests {
         }
     }
 
-    /// The top-level `custom_private` envelope keeps its stable 8-cell layout.
+    /// The top-level envelope includes the framework tuple-layout contract.
     #[pg_test]
     fn custom_private_envelope_structural_identity() {
         let provider_name = c"envelope-shape-test-provider";
@@ -210,8 +228,8 @@ mod tests {
             );
             assert_eq!(
                 (*top).length,
-                8,
-                "top-level custom_private must keep the 8-cell envelope layout",
+                9,
+                "top-level custom_private must keep the 9-cell envelope layout",
             );
 
             let cell_tag = |i: i32| -> pg_sys::NodeTag {
@@ -228,6 +246,7 @@ mod tests {
             assert_eq!(cell_tag(5), pg_sys::NodeTag::T_List);
             assert_eq!(cell_tag(6), pg_sys::NodeTag::T_List);
             assert_eq!(cell_tag(7), pg_sys::NodeTag::T_Integer);
+            assert_eq!(cell_tag(8), pg_sys::NodeTag::T_IntList);
 
             let metadata = pg_sys::list_nth(top, 6) as *mut pg_sys::List;
             assert!(
@@ -248,6 +267,94 @@ mod tests {
                 provider_name,
                 "provider name cell must survive copyObject unchanged",
             );
+
+            let decoded = decode_private(copied).report_unwrap();
+            assert_eq!(
+                decoded.tuple_layout.required_columns(),
+                NeededColumns::All,
+                "legacy encode_split must carry a semantic relation layout",
+            );
+        }
+    }
+
+    #[pg_test]
+    fn tuple_layout_projected_and_relation_pruned_wire_decode() {
+        let provider_name = c"tuple-layout-wire-provider";
+        let (
+            relation_oid,
+            pushed_count,
+            recheck_count,
+            pushed_contracts,
+            column_refs,
+            pre_setrefs_scan_rti,
+        ) = synthetic_inputs();
+
+        for (kind, expected) in [(1, &[3, 1][..]), (2, &[1, 4][..])] {
+            unsafe {
+                let envelope = encode_split(
+                    provider_name,
+                    relation_oid,
+                    pushed_count,
+                    recheck_count,
+                    &pushed_contracts,
+                    &column_refs,
+                    ptr::null_mut(),
+                    pre_setrefs_scan_rti,
+                )
+                .expect("encode_split failed");
+                replace_tuple_layout_wire(envelope, kind, expected);
+
+                let copied =
+                    pg_sys::copyObjectImpl(envelope.cast()) as *mut pg_sys::List;
+                let decoded = decode_private(copied).report_unwrap();
+                assert_eq!(
+                    decoded.tuple_layout.required_columns(),
+                    NeededColumns::Subset(expected),
+                );
+            }
+        }
+    }
+
+    #[pg_test]
+    fn tuple_layout_wire_rejects_malformed_shapes() {
+        let provider_name = c"tuple-layout-malformed-provider";
+        let (
+            relation_oid,
+            pushed_count,
+            recheck_count,
+            pushed_contracts,
+            column_refs,
+            pre_setrefs_scan_rti,
+        ) = synthetic_inputs();
+
+        for (kind, attnos, expected_error) in [
+            (99, &[][..], "unknown kind tag 99"),
+            (1, &[][..], "projected base layout is empty"),
+            (2, &[][..], "relation-pruned layout has no storage attnos"),
+            (1, &[0][..], "invalid value 0"),
+            (1, &[2, 2][..], "duplicate base attno 2"),
+        ] {
+            unsafe {
+                let envelope = encode_split(
+                    provider_name,
+                    relation_oid,
+                    pushed_count,
+                    recheck_count,
+                    &pushed_contracts,
+                    &column_refs,
+                    ptr::null_mut(),
+                    pre_setrefs_scan_rti,
+                )
+                .expect("encode_split failed");
+                replace_tuple_layout_wire(envelope, kind, attnos);
+
+                let error =
+                    decode_private(envelope).expect_err("malformed layout must fail");
+                assert!(
+                    error.to_string().contains(expected_error),
+                    "unexpected decode error for kind={kind}, attnos={attnos:?}: {error}",
+                );
+            }
         }
     }
 

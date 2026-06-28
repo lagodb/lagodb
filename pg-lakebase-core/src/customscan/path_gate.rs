@@ -103,9 +103,9 @@ impl PathStageGate {
         // Gate 6: whole-row Var.
         //
         // Whole-row references require the runtime to populate every live user
-        // column in the scan slot. The current provider contract satisfies that
-        // by returning `NeededColumns::All` when whole-row usage is found during
-        // BeginCustomScan, which disables projection pushdown for that scan.
+        // column in the scan slot. The plan-time tuple contract represents that
+        // requirement as `NeededColumns::All`, which disables storage projection
+        // for that scan.
         if usage.has_whole_row()
             && !unsafe { self.runtime_can_materialize_all_user_attrs() }
         {

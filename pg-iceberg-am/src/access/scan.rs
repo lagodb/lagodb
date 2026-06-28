@@ -40,64 +40,13 @@ use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
-use crate::access::column_mapping::{LiveColumn, ScanColumns};
+use crate::access::column_mapping::{RelationShape, ScanColumns};
 use crate::access::projection::Projection;
 use crate::access::row_location::{RowLocationMapHandle, begin_dml_scan};
 use crate::catalog::bridge::IcebergTableId;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::StorageContext;
-
-/// Relation-shape inputs the converter needs to build a position-correct
-/// [`ColumnMapping`](crate::access::column_mapping): the live (non-dropped)
-/// columns in ascending attno order plus the full tuple width.
-///
-/// Derived from the relation's `TupleDesc` once per scan. Records only which
-/// columns are live (and their names) and the tuple width; the converter turns
-/// `attno` into `dest`.
-#[derive(Debug, Clone)]
-pub(crate) struct RelationShape {
-    /// Live (non-dropped) columns in ascending attno order, each with its
-    /// 1-based attno and column name (also the Iceberg field name). Fields are
-    /// resolved by name, so this stays correct even when the Iceberg schema is
-    /// wider than the live PG columns (e.g. after `DROP COLUMN`).
-    live_columns: Vec<LiveColumn>,
-    /// Full PG tuple width (`natts`), counting dropped-column positions.
-    slot_width: usize,
-    /// Per-attribute `(type oid, typmod)` indexed by `attno - 1`, used to
-    /// disambiguate PG types that share one `ColumnRule`.
-    attr_types: Vec<(pg_sys::Oid, i32)>,
-}
-
-impl RelationShape {
-    /// Derive the relation shape from a live [`RelationHandle`].
-    pub(crate) fn from_relation(rel: &RelationHandle) -> Self {
-        let slot_width = rel.natts();
-        let live_columns = rel
-            .live_columns()
-            .into_iter()
-            .map(|(attno, name)| LiveColumn::new(attno, name))
-            .collect();
-
-        Self {
-            live_columns,
-            slot_width,
-            attr_types: rel.attr_types(),
-        }
-    }
-
-    pub(crate) fn live_columns(&self) -> &[LiveColumn] {
-        &self.live_columns
-    }
-
-    pub(crate) fn slot_width(&self) -> usize {
-        self.slot_width
-    }
-
-    pub(crate) fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
-        &self.attr_types
-    }
-}
 
 /// Immutable parameters for a scan: which table, snapshot schema, columns, and
 /// predicate.
@@ -153,12 +102,7 @@ impl ScanSpec {
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
         let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
-        let plan = ScanColumns::new(
-            schema,
-            shape.live_columns(),
-            shape.slot_width(),
-            shape.attr_types(),
-        )?;
+        let plan = ScanColumns::new(schema, shape)?;
         Ok(Self {
             table: Arc::new(table),
             plan,
@@ -181,14 +125,14 @@ impl ScanSpec {
         spc_oid: pg_sys::Oid,
         projection: Projection,
         predicate: Option<Predicate>,
-        shape: &RelationShape,
+        scan_attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
         let plan = ScanColumns::with_projection(
             schema,
             projection.columns(),
-            shape.slot_width(),
-            shape.attr_types(),
+            scan_attr_types.len(),
+            scan_attr_types,
         )?;
         Ok(Self {
             table: Arc::new(table),
@@ -231,14 +175,13 @@ impl ScanSpec {
     /// Construct a fresh slot-first [`IcebergBatchCursor`] for the TableAM scan.
     pub(crate) fn open_batch_cursor(
         &self,
-        attr_types: &[(pg_sys::Oid, i32)],
         row_locations: Option<RowLocationMapHandle>,
     ) -> IcebergResult<IcebergBatchCursor> {
         let include_row_locations = row_locations.is_some();
         let source = ArrowBatchSource::new(IcebergArrowBatches(
             self.build_scan(include_row_locations)?.to_arrow()?,
         ));
-        let decoder = ArrowColumnDecoder::new(self.plan.decoded_columns(attr_types));
+        let decoder = ArrowColumnDecoder::new(self.plan.decoded_columns());
         Ok(IcebergBatchCursor::new(source, decoder, row_locations))
     }
 
@@ -474,7 +417,7 @@ impl IcebergBatchCursor {
         row_locations: RowLocationMapHandle,
     ) -> AmResult<Vec<u32>> {
         let mut file_indices = Vec::with_capacity(num_rows);
-        let mut cached_path: Option<String> = None;
+        let mut cached_path: Option<&str> = None;
         let mut cached_index: Option<u32> = None;
 
         for row_idx in 0..num_rows {
@@ -486,13 +429,13 @@ impl IcebergBatchCursor {
             }
 
             let file_path = file_column.value(row_idx);
-            let file_index = if cached_path.as_deref() == Some(file_path) {
+            let file_index = if cached_path == Some(file_path) {
                 cached_index.ok_or(IcebergError::InvariantViolated(
                     "cached DML file index is missing",
                 ))?
             } else {
                 let file_index = row_locations.file_index_for(file_path)?;
-                cached_path = Some(file_path.to_owned());
+                cached_path = Some(file_path);
                 cached_index = Some(file_index);
                 file_index
             };
@@ -669,8 +612,7 @@ impl AmScanSession for IcebergScan {
         let spec = ScanSpec::build(self.rel_oid, self.spc_oid, keys, &self.shape)?;
         let row_locations =
             begin_dml_scan(self.rel_oid, spec.starting_snapshot_id())?;
-        let cursor =
-            spec.open_batch_cursor(self.shape.attr_types(), row_locations)?;
+        let cursor = spec.open_batch_cursor(row_locations)?;
         self.spec = Some(spec);
         self.cursor = Some(cursor);
         Ok(())
@@ -711,8 +653,7 @@ impl AmScanSession for IcebergScan {
         spec.refresh_filter(keys)?;
         let row_locations =
             begin_dml_scan(self.rel_oid, spec.starting_snapshot_id())?;
-        self.cursor =
-            Some(spec.open_batch_cursor(self.shape.attr_types(), row_locations)?);
+        self.cursor = Some(spec.open_batch_cursor(row_locations)?);
         Ok(())
     }
 

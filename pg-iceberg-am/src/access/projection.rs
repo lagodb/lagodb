@@ -2,47 +2,55 @@
 //!
 //! [`Projection`] is the resolved column projection handed from the
 //! CustomScan provider's `resolve_projection` (Layer 2) to the scan layer
-//! (Layer 3). It carries the selected columns in *scan order*, each as a
-//! `(attno, name)` pair so neither the scan layer nor the converter has to
+//! (Layer 3). It carries selected columns in base-schema read order, each as a
+//! `(base attno, scan destination, name)` triple so neither the scan layer nor
+//! the converter has to
 //! re-derive one from the other:
 //!
 //! - `name` drives `builder.select(...)` (the Iceberg field to read).
-//! - `attno` drives the [`ColumnMapping`](super::column_mapping) `dest = attno - 1`
-//!   mapping (where the decoded value lands in the PG `Row`).
+//! - `destination` is the zero-based custom scan-slot cell where the decoded
+//!   value lands.
 //!
 //! Select-all is represented by [`ScanSpec`](super::scan::ScanSpec) holding
-//! `Option<Projection>` = `None`, **not** by an empty `Projection`: an empty
-//! `Projection` would be a zero-column scan, which v1 never constructs (the
-//! `count(*)` policy maps an empty subset to a single-column `Projection`).
+//! `Option<Projection>` = `None`, **not** by an empty `Projection`. Core's
+//! tuple planner adds a live resjunk dependency for a zero-input `count(*)`.
 //!
 //! This module owns no Arrow-column-to-slot-position arithmetic — that lives
 //! exclusively in `ColumnMapping` (Requirement 8.1). `Projection` only records
-//! the resolved `(attno, name)` pairs; the converter turns them into `dest`
-//! indices.
+//! the resolved source/destination contract.
 
 use pgrx::pg_sys;
 
 /// One selected column: its 1-based PG attribute number and the Iceberg
 /// field name resolved from it.
 ///
-/// `attno` becomes `dest = attno - 1` inside `ColumnMapping`; `name` is what the
-/// Iceberg scan builder selects. Both are owned so the descriptor outlives
-/// the catalog lookups that produced it.
+/// `attno` identifies the Iceberg source field; `destination` identifies the
+/// actual raw scan-slot cell. `name` is owned once at scan construction.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectedName {
     /// 1-based PG attribute number of a live (non-dropped) user column.
     pub(crate) attno: pg_sys::AttrNumber,
+    /// Zero-based destination in the actual executor scan slot.
+    pub(crate) destination: usize,
     /// Iceberg field name resolved from `attno`.
     pub(crate) name: String,
 }
 
 impl ProjectedName {
-    pub(crate) fn new(attno: pg_sys::AttrNumber, name: String) -> Self {
-        Self { attno, name }
+    pub(crate) fn new(
+        attno: pg_sys::AttrNumber,
+        destination: usize,
+        name: String,
+    ) -> Self {
+        Self {
+            attno,
+            destination,
+            name,
+        }
     }
 }
 
-/// A resolved column projection: the selected columns in scan order.
+/// A resolved column projection in stable base-schema read order.
 ///
 /// Invariant (enforced by the provider's `resolve_projection`): a `Projection`
 /// v1 builds always has **≥ 1** column. Select-all is represented by a `None`
@@ -54,24 +62,22 @@ pub(crate) struct Projection {
 }
 
 impl Projection {
-    /// Build a projection from the resolved `(attno, name)` pairs in scan
-    /// order. Callers (the provider) guarantee `columns` is non-empty.
+    /// Build a projection from resolved source/destination/name entries in
+    /// storage read order. Callers guarantee `columns` is non-empty.
     pub(crate) fn new(columns: Vec<ProjectedName>) -> Self {
         Self { columns }
     }
 
-    /// The selected columns in scan order. Consumed by the converter to build
-    /// the projected `ColumnMapping` (each pair's `attno` → `dest`).
+    /// Selected columns in storage read order. Each entry independently carries
+    /// its compact scan-slot destination.
     pub(crate) fn columns(&self) -> &[ProjectedName] {
         &self.columns
     }
 
-    /// The selected column names in scan order, for `builder.select(...)`.
+    /// Selected column names in storage read order, for `builder.select(...)`.
     ///
-    /// The Iceberg `select(names)` call preserves the passed name order all
-    /// the way to the produced Arrow batch's column order, which is exactly
-    /// the order the projected `ColumnMapping` entries are built in — so Arrow
-    /// column `j` always lines up with `ColumnMapping.entries[j]`.
+    /// Iceberg preserves this request order in the produced Arrow batch;
+    /// `ColumnMapping` binds source indices against the same sequence.
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.columns.iter().map(|c| c.name.as_str())
     }

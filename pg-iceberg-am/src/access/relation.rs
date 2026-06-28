@@ -1,7 +1,6 @@
 use crate::IcebergTableAm;
-use crate::access::column_mapping::ScanColumns;
+use crate::access::column_mapping::{RelationShape, ScanColumns};
 use crate::access::row_location::lookup_current;
-use crate::access::scan::RelationShape;
 use crate::catalog::bridge::IcebergTableId;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
@@ -42,9 +41,6 @@ impl AmRelation for IcebergTableAm {
         let Some(location) = lookup_current(rel.oid(), tid)? else {
             return Ok(false);
         };
-        let Some(snapshot_id) = location.starting_snapshot_id else {
-            return Ok(false);
-        };
 
         let ctx = StorageContext::for_tablespace(rel.tablespace_oid())?;
         let loaded =
@@ -65,7 +61,10 @@ impl AmRelation for IcebergTableAm {
             .iter()
             .map(|field| field.id)
             .collect();
-        let mut scan_builder = table.scan().snapshot_id(snapshot_id).select_empty();
+        let mut scan_builder = table.scan().select_empty();
+        if let Some(snapshot_id) = location.starting_snapshot_id {
+            scan_builder = scan_builder.snapshot_id(snapshot_id);
+        }
         if let Some(delta) = delta {
             scan_builder = scan_builder.with_delta(delta);
         }
@@ -83,14 +82,8 @@ impl AmRelation for IcebergTableAm {
         };
 
         let shape = RelationShape::from_relation(rel);
-        let plan = ScanColumns::new(
-            schema,
-            shape.live_columns(),
-            shape.slot_width(),
-            shape.attr_types(),
-        )?;
-        let decoder =
-            ArrowColumnDecoder::new(plan.decoded_columns(shape.attr_types()));
+        let plan = ScanColumns::new(schema, &shape)?;
+        let decoder = ArrowColumnDecoder::new(plan.decoded_columns());
         let mut fetched = decoder.read_owned_row(batch, 0)?;
         fetched.ensure_len(rel.natts());
         row.replace_with(fetched);

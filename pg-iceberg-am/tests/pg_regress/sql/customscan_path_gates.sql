@@ -236,12 +236,10 @@ ORDER BY k;
 -- Block F: Whole-row Var IS supported — CustomScan SHALL plan
 -- ============================================================================
 -- `SELECT lake FROM lake` produces a whole-row `Var` with
--- `varattno == 0` against the lake rel. The path-stage gate
--- (`has_whole_row_var` in `hook.rs`) detects this and consults
--- the runtime hook `runtime_can_materialize_all_user_attrs`,
--- which v1 defaults to `true` because providers are
--- contractually required to fill every user attribute reachable
--- by the slot's user attributes. PG's
+-- `varattno == 0` against the lake rel. `PathStageGate::collect_usage`
+-- detects it and confirms that the provider contract can materialize all
+-- user attributes. `BaseScanTuplePlanner` then emits a relation-shaped tuple
+-- with `NeededColumns::All`. PG's
 -- `ExecEvalWholeRowVar` (`execExprInterp.c:4946`) then builds the
 -- composite straight out of `tts_values` / `tts_isnull`, so
 -- whole-row Var works natively against the framework's slot
@@ -254,7 +252,7 @@ ORDER BY k;
 -- Result-set parity asserts that the composite row value is
 -- identical on both sides — every user attribute is materialized
 -- as its real value (no pruning-induced NULL leaks into the
--- composite, per.
+-- composite).
 
 SET pg_lakebase.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)

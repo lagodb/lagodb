@@ -74,6 +74,9 @@ pub struct CachedEnvelope {
     pub pushed_contracts: Vec<crate::expr::split::PushdownContract>,
     /// Pre-resolved column metadata for the pushed expressions.
     pub column_refs: Vec<crate::expr::split::ColumnRef>,
+    /// Decoded once from `custom_private`; shared by begin/rescan translation
+    /// and provider scan-tuple binding.
+    pub tuple_layout: crate::customscan::tuple_layout::ScanTupleLayout,
 }
 
 impl<P: LakebaseCustomScanProvider> Drop for CustomScanStateWrapper<P> {

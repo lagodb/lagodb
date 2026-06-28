@@ -20,6 +20,7 @@ mod tests {
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
         PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
+        ScanTupleLayout,
     };
     use pg_lakebase_core::customscan::state::{
         CachedEnvelope, CustomScanStateWrapper,
@@ -309,6 +310,7 @@ mod tests {
                 recheck_count: 0,
                 pushed_contracts: vec![PushdownContract::ExactRowFilter],
                 column_refs,
+                tuple_layout: ScanTupleLayout::default(),
             });
 
             let cached_ids = make_bms(cached_ids_members);

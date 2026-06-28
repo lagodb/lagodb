@@ -9,6 +9,7 @@ use pgrx::pg_sys;
 
 use crate::customscan::codec::{PrivateDataReader, PrivateDataWriter};
 use crate::customscan::error::CustomScanError;
+use crate::customscan::tuple_layout::ScanTupleLayout;
 use crate::expr::split::{ColumnRef, PushdownContract};
 
 // Positional indices into the top-level `T_List` payload. Both encode and
@@ -21,7 +22,8 @@ const FIELD_PUSHED_CONTRACTS: i32 = 4;
 const FIELD_COLUMN_REFS: i32 = 5;
 const FIELD_PROVIDER_METADATA: i32 = 6;
 const FIELD_PRE_SETREFS_SCAN_RTI: i32 = 7;
-const TOP_LEVEL_LEN: usize = 8;
+const FIELD_TUPLE_LAYOUT: i32 = 8;
+const TOP_LEVEL_LEN: usize = 9;
 
 // Wire encoding for `PushdownContract` inside the `T_IntList` at
 // `FIELD_PUSHED_CONTRACTS`. Decode is exhaustive over these values.
@@ -146,6 +148,18 @@ pub(crate) enum DecodeError {
         "custom_private cell at position {position} holds a malformed string value"
     )]
     MalformedStringCell { position: usize },
+    /// Tuple-layout wire list is structurally invalid.
+    #[error("custom_private tuple layout is malformed: {reason}")]
+    MalformedTupleLayout { reason: &'static str },
+    /// Tuple-layout kind tag is not recognized.
+    #[error("custom_private tuple layout has unknown kind tag {value}")]
+    UnknownTupleLayoutKind { value: i32 },
+    /// Tuple-layout column lists only contain positive `AttrNumber` values.
+    #[error("custom_private tuple layout attnos[{index}] has invalid value {value}")]
+    InvalidTupleLayoutAttno { index: usize, value: i32 },
+    /// A base attribute may appear only once in a tuple-layout column list.
+    #[error("custom_private tuple layout contains duplicate base attno {attno}")]
+    DuplicateTupleLayoutAttno { attno: pg_sys::AttrNumber },
 }
 
 /// Provider-extensible encode/decode for the opaque tail of `custom_private`.
@@ -190,6 +204,9 @@ pub struct EncodedPrivate {
 
     /// Debug-only RTI; invalid after `rtoffset` — do not use for correctness.
     pub pre_setrefs_scan_rti: i32,
+
+    /// Raw scan-tuple shape and base-attribute mapping.
+    pub tuple_layout: ScanTupleLayout,
 }
 
 /// Encode plan-stage pushdown split into `CustomScan.custom_private`.
@@ -209,6 +226,33 @@ pub unsafe fn encode_split(
     provider_metadata: *mut pg_sys::List,
     pre_setrefs_scan_rti: i32,
 ) -> Result<*mut pg_sys::List, CustomScanError> {
+    let tuple_layout = ScanTupleLayout::relation();
+    unsafe {
+        encode_split_with_layout(
+            provider_id_or_name,
+            relation_oid,
+            pushed_count,
+            recheck_count,
+            pushed_contracts,
+            column_refs,
+            provider_metadata,
+            pre_setrefs_scan_rti,
+            &tuple_layout,
+        )
+    }
+}
+
+pub(crate) unsafe fn encode_split_with_layout(
+    provider_id_or_name: &CStr,
+    relation_oid: pg_sys::Oid,
+    pushed_count: usize,
+    recheck_count: usize,
+    pushed_contracts: &[PushdownContract],
+    column_refs: &[ColumnRef],
+    provider_metadata: *mut pg_sys::List,
+    pre_setrefs_scan_rti: i32,
+    tuple_layout: &ScanTupleLayout,
+) -> Result<*mut pg_sys::List, CustomScanError> {
     unsafe {
         encode_split_impl(
             provider_id_or_name,
@@ -219,6 +263,7 @@ pub unsafe fn encode_split(
             column_refs,
             provider_metadata,
             pre_setrefs_scan_rti,
+            tuple_layout,
         )
     }
     .map_err(CustomScanError::private_codec)
@@ -233,6 +278,7 @@ unsafe fn encode_split_impl(
     column_refs: &[ColumnRef],
     provider_metadata: *mut pg_sys::List,
     pre_setrefs_scan_rti: i32,
+    tuple_layout: &ScanTupleLayout,
 ) -> Result<*mut pg_sys::List, DecodeError> {
     debug_assert_eq!(
         pushed_contracts.len(),
@@ -321,6 +367,10 @@ unsafe fn encode_split_impl(
         // FIELD_PRE_SETREFS_SCAN_RTI: T_Integer (debug-only)
         let rti_node = pg_sys::makeInteger(pre_setrefs_scan_rti);
         top = pg_sys::lappend(top, rti_node.cast());
+
+        // FIELD_TUPLE_LAYOUT: non-empty T_IntList owned by the layout domain.
+        let tuple_layout_wire = tuple_layout.encode_wire();
+        top = pg_sys::lappend(top, tuple_layout_wire.cast());
 
         Ok(top)
     }
@@ -566,6 +616,13 @@ unsafe fn decode_private_impl(
     let pre_setrefs_scan_rti =
         unsafe { read_integer_cell(list, FIELD_PRE_SETREFS_SCAN_RTI)? };
 
+    // FIELD_TUPLE_LAYOUT: T_IntList with kind tag and optional base attnos.
+    let tuple_layout_wire =
+        unsafe { pg_sys::list_nth(list, FIELD_TUPLE_LAYOUT) as *mut pg_sys::List };
+    let tuple_layout = unsafe {
+        ScanTupleLayout::decode_wire(tuple_layout_wire, FIELD_TUPLE_LAYOUT)?
+    };
+
     // Cross-field invariants: contracts align with pushed_count; expr_index in range.
     if pushed_contracts.len() != pushed_count {
         return Err(DecodeError::PushedContractsLengthMismatch {
@@ -592,6 +649,7 @@ unsafe fn decode_private_impl(
         column_refs,
         provider_metadata_raw,
         pre_setrefs_scan_rti,
+        tuple_layout,
     })
 }
 

@@ -55,16 +55,15 @@ use pgrx::pg_sys;
 /// Implementors MUST be `#[repr(C)]` and contain only POD (Plain Old Data) types.
 /// No `String`, `Vec`, `Box`, or other types that require `Drop`.
 pub unsafe trait AmCacheable: Copy + Sized {
-    /// Parse options and return the Header struct and the variable data bytes.
+    /// Resolve options and return the Header struct and variable data bytes.
     ///
     /// The Header struct will be placed at the start of the allocated memory.
     /// The variable data bytes will be copied immediately after the Header.
     ///
     /// Offsets in the Header should be calculated relative to the start of the Header (0).
-    fn from_options(opts: &TableOptions) -> (Self, Vec<u8>);
-
-    /// Create a default Header and data when no options are present.
-    fn default_options() -> (Self, Vec<u8>);
+    fn from_options(
+        opts: Option<&TableOptions>,
+    ) -> Result<(Self, Vec<u8>), TableOptionError>;
 }
 
 /// Helper to manage `rd_amcache`.
@@ -108,10 +107,7 @@ impl AmCache {
         // SAFETY: rel is a valid, locked Relation obtained from RelationHandle.
         let opts = unsafe { TableOptions::load_from_catalog((*rel).rd_id)? };
 
-        let (header, data) = match opts {
-            Some(opts) => T::from_options(&opts),
-            None => T::default_options(),
-        };
+        let (header, data) = T::from_options(opts.as_ref())?;
 
         let header_size = std::mem::size_of::<T>();
         let total_size = header_size + data.len();

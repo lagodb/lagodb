@@ -348,10 +348,7 @@ impl RecordBatchTransformer {
                 let generated_positions = if let Some(source_index) =
                     row_position_source_index
                 {
-                    Some(Self::positions_from_batch(
-                        &record_batch,
-                        *source_index,
-                    )?)
+                    Some(Self::positions_from_batch(&record_batch, *source_index)?)
                 } else {
                     None
                 };
@@ -920,8 +917,7 @@ mod test {
         ColumnSource, RecordBatchTransformer, RecordBatchTransformerBuilder,
     };
     use crate::metadata_columns::{
-        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS,
-        RESERVED_FIELD_ID_ROW_ID,
+        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS, RESERVED_FIELD_ID_ROW_ID,
     };
     use crate::spec::{Literal, NestedField, PrimitiveType, Schema, Struct, Type};
 
@@ -929,11 +925,12 @@ mod test {
     fn row_position_source_index_is_planned_once_for_generated_metadata() {
         let source_schema = Arc::new(ArrowSchema::new(vec![
             Field::new("value", DataType::Int32, true),
-            Field::new(RESERVED_COL_NAME_POS, DataType::Int64, false)
-                .with_metadata(HashMap::from([(
+            Field::new(RESERVED_COL_NAME_POS, DataType::Int64, false).with_metadata(
+                HashMap::from([(
                     PARQUET_FIELD_ID_META_KEY.to_string(),
                     RESERVED_FIELD_ID_POS.to_string(),
-                )])),
+                )]),
+            ),
         ]));
         let operations = vec![ColumnSource::Generated {
             field_id: RESERVED_FIELD_ID_ROW_ID,

@@ -1,7 +1,7 @@
 use crate::catalog::metadata_table::IcebergMetadata;
 use crate::catalog::table_lifecycle::IcebergTableLifecycle;
 use crate::catalog::{IcebergAccessMethod, IcebergRelationExt};
-use crate::options::{ICEBERG_TABLE_OPTIONS, IcebergTableOptionCache};
+use crate::options::{ICEBERG_TABLE_OPTIONS, ResolvedIcebergOptions};
 use pg_lakebase_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, get_tablespace_oid,
     range_var_get_relid,
@@ -232,14 +232,14 @@ impl UtilityHook for IcebergTableHook {
 
         let table_options =
             TableOptions::read_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?;
+        let creation_options =
+            ResolvedIcebergOptions::from_table_options(table_options.as_ref())?;
         if let Some(opts) = table_options.as_ref() {
             opts.persist_to_catalog(oid)?;
         }
-        let table_option_cache =
-            IcebergTableOptionCache::from_table_options(table_options.as_ref());
 
         let metadata_location =
-            IcebergTableLifecycle::new(&rel)?.init(&table_option_cache)?;
+            IcebergTableLifecycle::new(&rel)?.init(creation_options)?;
 
         IcebergMetadata::new(oid)
             .with_metadata_location(metadata_location)

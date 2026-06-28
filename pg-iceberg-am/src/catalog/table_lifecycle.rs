@@ -1,7 +1,7 @@
 use super::bridge::{BootstrapWriter, IcebergTableId};
 use super::schema_builder::tuple_desc_to_schema;
 use crate::error::{IcebergError, IcebergResult};
-use crate::options::IcebergTableOptionCache;
+use crate::options::ResolvedIcebergOptions;
 use crate::storage::StorageContext;
 use crate::storage::transactional_artifacts::{
     register_table_dir_created, register_table_dir_dropped,
@@ -71,13 +71,13 @@ impl<'a> IcebergTableLifecycle<'a> {
     /// so a mid-write failure is still recoverable.
     pub(crate) fn init(
         self,
-        table_option: &IcebergTableOptionCache,
+        table_options: ResolvedIcebergOptions<'_>,
     ) -> IcebergResult<String> {
         let Self { rel, ctx, location } = self;
 
         let schema = tuple_desc_to_schema(rel)?;
-        let properties = table_option.to_properties();
-        let format_version = table_option.iceberg_format_version()?;
+        let format_version = table_options.format_version();
+        let properties = table_options.properties();
 
         // The PostgreSQL relation OID is the authoritative identity; the
         // Iceberg `TableIdent` is synthesized from it via `IcebergTableId`.

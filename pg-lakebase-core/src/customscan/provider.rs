@@ -11,7 +11,6 @@ use pgrx::pg_sys;
 
 use crate::batch::ScanBatchDriver;
 use crate::customscan::custom_private::CustomScanPrivate;
-use crate::expr::inspect::{RelationExprAnalyzer, RelationScope};
 use crate::expr::nodes::PgParamValue;
 use crate::expr::predicate::PlanPredicate;
 use crate::expr::split::{ColumnRef, PushdownContract, QualPushdownDecision};
@@ -22,6 +21,12 @@ use crate::tuple::{Row, SlotColumns, TupleSlotWriter};
 // Error type
 /// Provider runtime error; re-exported from [`crate::customscan::error`].
 pub use crate::customscan::error::CustomScanError;
+pub use crate::customscan::tuple_layout::{
+    NeededColumns, ScanTupleDescriptor, ScanTupleLayout,
+};
+#[cfg(feature = "pg_test")]
+#[doc(hidden)]
+pub use crate::customscan::tuple_layout::{ScanTuplePlanProbe, ScanTupleShape};
 
 // Relids alias
 /// Nullable PG `Bitmapset *` (Relids). Use `bms_is_empty`, not pointer null test.
@@ -310,22 +315,13 @@ impl<P: LakebaseCustomScanProvider + ?Sized> CreateStateContext<P> {
     }
 }
 
-/// Columns the executor will read from the scan relation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NeededColumns {
-    /// Whole-row / system column / unsafe analysis fallback.
-    All,
-
-    /// Referenced user columns (positive attnos), sorted.
-    Subset(Vec<pg_sys::AttrNumber>),
-}
-
 struct PushedPredicateInputs<'a> {
     pushed_exprs: &'a [*mut pg_sys::Expr],
     column_refs: &'a [ColumnRef],
     pushed_contracts: &'a [PushdownContract],
     resolved_params: &'a [PgParamValue],
     scan_relid: core::ffi::c_int,
+    tuple_layout: &'a ScanTupleLayout,
 }
 
 impl<'a> PushedPredicateInputs<'a> {
@@ -335,6 +331,7 @@ impl<'a> PushedPredicateInputs<'a> {
         pushed_contracts: &'a [PushdownContract],
         resolved_params: &'a [PgParamValue],
         scan_relid: core::ffi::c_int,
+        tuple_layout: &'a ScanTupleLayout,
     ) -> Self {
         Self {
             pushed_exprs,
@@ -342,6 +339,7 @@ impl<'a> PushedPredicateInputs<'a> {
             pushed_contracts,
             resolved_params,
             scan_relid,
+            tuple_layout,
         }
     }
 
@@ -368,12 +366,12 @@ impl<'a> PushedPredicateInputs<'a> {
         for i in 0..self.pushed_exprs.len() {
             let mut translator = make_translator(i);
             let result = unsafe {
-                let mut builder = PredicateBuilder::new(
+                let mut builder = PredicateBuilder::with_var_resolver(
                     &mut translator,
                     self.pushed_exprs,
                     self.column_refs,
                     self.resolved_params,
-                    self.scan_relid,
+                    self.tuple_layout.var_resolver(self.scan_relid),
                 );
                 builder.build_one(i)
             };
@@ -416,6 +414,8 @@ pub struct BeginContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     pushed_contracts: &'a [crate::expr::split::PushdownContract],
     resolved_params: &'a [crate::expr::nodes::PgParamValue],
     scan_relid: core::ffi::c_int,
+    tuple_layout: &'a ScanTupleLayout,
+    scan_tuple_desc: pg_sys::TupleDesc,
 
     /// Scan relation handle.
     pub relation: RelationHandle<'a>,
@@ -431,10 +431,6 @@ pub struct BeginContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
 
     #[allow(dead_code)]
     eflags: core::ffi::c_int,
-
-    cscan: *mut pg_sys::CustomScan,
-
-    recheck_exprs: &'a [*mut pg_sys::Expr],
 
     _marker: PhantomData<&'a ()>,
 }
@@ -452,13 +448,13 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
         pushed_contracts: &'a [crate::expr::split::PushdownContract],
         resolved_params: &'a [crate::expr::nodes::PgParamValue],
         scan_relid: core::ffi::c_int,
+        tuple_layout: &'a ScanTupleLayout,
+        scan_tuple_desc: pg_sys::TupleDesc,
         relation: RelationHandle<'a>,
         snapshot: SnapshotHandle<'a>,
         estate: *mut pg_sys::EState,
         per_tuple_memory_context: pg_sys::MemoryContext,
         eflags: core::ffi::c_int,
-        cscan: *mut pg_sys::CustomScan,
-        recheck_exprs: &'a [*mut pg_sys::Expr],
     ) -> Self {
         Self {
             state,
@@ -468,13 +464,13 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
             pushed_contracts,
             resolved_params,
             scan_relid,
+            tuple_layout,
+            scan_tuple_desc,
             relation,
             snapshot,
             estate,
             per_tuple_memory_context,
             eflags,
-            cscan,
-            recheck_exprs,
             _marker: PhantomData,
         }
     }
@@ -513,63 +509,20 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
             self.pushed_contracts,
             self.resolved_params,
             self.scan_relid,
+            self.tuple_layout,
         )
     }
 
-    /// User columns read from this scan rel (targetlist ∪ qual ∪ recheck).
-    pub fn referenced_attnos(&self) -> NeededColumns {
-        // SAFETY: `cscan` is the live `CustomScan` plan node (valid for the
-        // duration of `begin` per the constructor contract) and
-        // `recheck_exprs` is the recheck slice the trampoline materialized;
-        // both stay live for the borrow of `self`.
-        unsafe {
-            compute_referenced_attnos(self.cscan, self.scan_relid, self.recheck_exprs)
-        }
-    }
-}
-
-/// Referenced attnos from targetlist, qual, and recheck; null `cscan` → `All`.
-unsafe fn compute_referenced_attnos(
-    cscan: *mut pg_sys::CustomScan,
-    scan_relid: core::ffi::c_int,
-    recheck_exprs: &[*mut pg_sys::Expr],
-) -> NeededColumns {
-    // Null cscan → conservative All.
-    if cscan.is_null() {
-        return NeededColumns::All;
+    /// Plan-time storage-column contract. No executor expression walk or
+    /// allocation occurs here.
+    pub fn required_columns(&self) -> NeededColumns<'_> {
+        self.tuple_layout.required_columns()
     }
 
-    let analyzer =
-        RelationExprAnalyzer::new(RelationScope::exact(scan_relid as pg_sys::Index));
-    let mut usage = crate::expr::inspect::RelationExprUsage::default();
-
-    // SAFETY: live CustomScan plan node.
-    unsafe {
-        let plan = &(*cscan).scan.plan;
-
-        usage.extend(analyzer.collect_targetlist(plan.targetlist));
-        usage.extend(analyzer.collect_expr_list(plan.qual));
-
-        for &expr in recheck_exprs {
-            usage.extend(analyzer.collect_expr(expr));
-        }
+    /// Actual executor descriptor for the provider-filled raw scan slot.
+    pub fn scan_tuple(&self) -> ScanTupleDescriptor<'_> {
+        unsafe { ScanTupleDescriptor::new(self.scan_tuple_desc, self.tuple_layout) }
     }
-
-    if usage.has_whole_row() || !usage.system_attnos().is_empty() {
-        NeededColumns::All
-    } else {
-        NeededColumns::Subset(usage.sorted_user_attnos())
-    }
-}
-
-#[cfg(feature = "pg_test")]
-#[doc(hidden)]
-pub unsafe fn pg_test_referenced_attnos(
-    cscan: *mut pg_sys::CustomScan,
-    scan_relid: core::ffi::c_int,
-    recheck_exprs: &[*mut pg_sys::Expr],
-) -> NeededColumns {
-    unsafe { compute_referenced_attnos(cscan, scan_relid, recheck_exprs) }
 }
 
 /// Context for [`LakebaseCustomScanProvider::next_slot`].
@@ -641,7 +594,6 @@ impl<'a, P: LakebaseCustomScanProvider> NextSlotContext<'a, P> {
     pub fn emit_columns<D: ScanBatchDriver>(
         &mut self,
         driver: &mut D,
-        natts: usize,
     ) -> Result<bool, CustomScanError> {
         let slot = self.slot;
         // Slot datums are palloc'd into the scan node's per-tuple memory context,
@@ -654,9 +606,9 @@ impl<'a, P: LakebaseCustomScanProvider> NextSlotContext<'a, P> {
         emit_into_slot(
             || unsafe {
                 PgMemoryContexts::For(target_ctx).switch_to(|_| {
-                    // SAFETY: slot is valid with at least `natts` attributes for
-                    // this callback; `target_ctx` is the target for varlena palloc.
-                    let mut cols = SlotColumns::new(slot, target_ctx, natts);
+                    // SAFETY: the live slot descriptor is the sole source of
+                    // width; `target_ctx` is the target for varlena palloc.
+                    let mut cols = SlotColumns::new(slot, target_ctx);
                     driver.next_into_slot(&mut cols)
                 })
             },
@@ -706,6 +658,7 @@ pub struct ReScanContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     pushed_contracts: &'a [crate::expr::split::PushdownContract],
     resolved_params: &'a [crate::expr::nodes::PgParamValue],
     scan_relid: core::ffi::c_int,
+    tuple_layout: &'a ScanTupleLayout,
 
     /// Scan relation handle.
     pub relation: RelationHandle<'a>,
@@ -738,6 +691,7 @@ impl<'a, P: LakebaseCustomScanProvider> ReScanContext<'a, P> {
         pushed_contracts: &'a [crate::expr::split::PushdownContract],
         resolved_params: &'a [crate::expr::nodes::PgParamValue],
         scan_relid: core::ffi::c_int,
+        tuple_layout: &'a ScanTupleLayout,
         relation: RelationHandle<'a>,
         snapshot: SnapshotHandle<'a>,
         estate: *mut pg_sys::EState,
@@ -751,6 +705,7 @@ impl<'a, P: LakebaseCustomScanProvider> ReScanContext<'a, P> {
             pushed_contracts,
             resolved_params,
             scan_relid,
+            tuple_layout,
             relation,
             snapshot,
             estate,
@@ -793,6 +748,7 @@ impl<'a, P: LakebaseCustomScanProvider> ReScanContext<'a, P> {
             self.pushed_contracts,
             self.resolved_params,
             self.scan_relid,
+            self.tuple_layout,
         )
     }
 
@@ -1053,24 +1009,30 @@ mod emit_tests {
     /// never reallocate after construction, so the raw pointers stay valid.
     struct HostSlot {
         slot: pg_sys::TupleTableSlot,
+        tuple_desc: Box<pg_sys::TupleDescData>,
         values: Vec<pg_sys::Datum>,
         nulls: Vec<bool>,
     }
 
     impl HostSlot {
         fn new(natts: usize) -> Box<Self> {
+            let mut tuple_desc: Box<pg_sys::TupleDescData> =
+                Box::new(unsafe { std::mem::zeroed() });
+            tuple_desc.natts = natts as i32;
             let mut boxed = Box::new(HostSlot {
                 slot: unsafe { std::mem::zeroed() },
+                tuple_desc,
                 values: vec![pg_sys::Datum::from(0usize); natts],
                 nulls: vec![true; natts],
             });
             boxed.slot.tts_values = boxed.values.as_mut_ptr();
             boxed.slot.tts_isnull = boxed.nulls.as_mut_ptr();
+            boxed.slot.tts_tupleDescriptor = &mut *boxed.tuple_desc;
             boxed
         }
 
-        fn columns(&mut self, natts: usize) -> SlotColumns<'_> {
-            unsafe { SlotColumns::new(&mut self.slot, std::ptr::null_mut(), natts) }
+        fn columns(&mut self) -> SlotColumns<'_> {
+            unsafe { SlotColumns::new(&mut self.slot, std::ptr::null_mut()) }
         }
     }
 
@@ -1085,7 +1047,7 @@ mod emit_tests {
         loop {
             let found = emit_into_slot(
                 || {
-                    let mut cols = host.columns(natts);
+                    let mut cols = host.columns();
                     driver.next_into_slot(&mut cols)
                 },
                 || stores += 1,
@@ -1103,7 +1065,7 @@ mod emit_tests {
         // End-of-scan stays terminal and never takes the store path again.
         let again = emit_into_slot(
             || {
-                let mut cols = host.columns(natts);
+                let mut cols = host.columns();
                 driver.next_into_slot(&mut cols)
             },
             || stores += 1,
@@ -1122,7 +1084,7 @@ mod emit_tests {
 
         let found = emit_into_slot(
             || {
-                let mut cols = host.columns(natts);
+                let mut cols = host.columns();
                 driver.next_into_slot(&mut cols)
             },
             || stores += 1,

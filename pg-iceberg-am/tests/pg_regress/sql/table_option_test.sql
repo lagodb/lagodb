@@ -47,7 +47,7 @@ CREATE TABLE iceberg_multi_opts_test (
 ) USING iceberg WITH (
     "format-version" = 2,
     "write.parquet.compression-codec" = 'zstd',
-    "write.format.default" = 'orc'
+    "write.format.default" = 'parquet'
 );
 
 -- Verify all options are stored correctly
@@ -80,7 +80,7 @@ DROP TABLE iceberg_compression_test;
 CREATE TABLE iceberg_enum_opt_test (
     id integer
 ) USING iceberg WITH (
-    "write.format.default" = 'avro'
+    "write.format.default" = 'parquet'
 );
 
 -- Verify the enum option

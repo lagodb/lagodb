@@ -35,17 +35,23 @@ pub struct SlotColumns<'a> {
 impl<'a> SlotColumns<'a> {
     /// # Safety
     ///
-    /// `slot` must be a valid, initialized slot with at least `natts`
-    /// attributes; `target_ctx` must be the context the caller wants varlena
-    /// datums palloc'd into.
+    /// `slot` must be a valid, initialized slot with a non-NULL tuple
+    /// descriptor; `target_ctx` must be the context the caller wants varlena
+    /// datums palloc'd into. The slice width is derived only from that live
+    /// descriptor, never from provider-supplied metadata.
     pub unsafe fn new(
         slot: *mut pg_sys::TupleTableSlot,
         target_ctx: pg_sys::MemoryContext,
-        natts: usize,
     ) -> Self {
-        // SAFETY: the caller guarantees `slot` is valid with at least `natts`
-        // attributes, so `tts_values`/`tts_isnull` are each a live array of
-        // `natts` elements. These arrays are stable for the slot's lifetime
+        let tuple_desc = unsafe { (*slot).tts_tupleDescriptor };
+        assert!(
+            !tuple_desc.is_null(),
+            "slot tuple descriptor must not be NULL"
+        );
+        let natts = unsafe { (*tuple_desc).natts as usize };
+        // SAFETY: the caller guarantees `slot` and its descriptor are valid,
+        // so `tts_values`/`tts_isnull` are each a live array of `natts`
+        // elements. These arrays are stable for the slot's lifetime
         // (allocated at slot init, never reallocated by `ExecClearTuple` /
         // `ExecStoreVirtualTuple`), and `SlotColumns` is the sole writer of
         // them, so holding `&mut` views for `'a` does not alias any other live
