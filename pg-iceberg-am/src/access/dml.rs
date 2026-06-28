@@ -44,7 +44,6 @@ use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::options::AmCache;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 use roaring::RoaringTreemap;
@@ -58,7 +57,7 @@ use crate::access::row_location::{
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
-use crate::options::IcebergTableOptionCache;
+use crate::options::IcebergTableOptions;
 use crate::storage::StorageContext;
 
 type ParquetDataFileWriter = DataFileWriter<
@@ -697,9 +696,9 @@ impl IcebergModify {
         let conflict_filter = command
             .validation_command()
             .map(|_| DmlConflictFilterResolver::new(rel_oid).resolve());
-        let write_options = AmCache::get::<IcebergTableOptionCache>(rel)?;
+        let write_options = IcebergTableOptions::for_relation(rel)?;
         let writer_properties = WriterProperties::builder()
-            .set_compression(write_options.parquet_compression()?)
+            .set_compression(write_options.parquet_compression())
             .build();
 
         let data_sink = if command.writes_data() {

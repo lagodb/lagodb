@@ -71,7 +71,7 @@ impl<'a> IcebergTableLifecycle<'a> {
     /// so a mid-write failure is still recoverable.
     pub(crate) fn init(
         self,
-        table_options: ResolvedIcebergOptions<'_>,
+        table_options: ResolvedIcebergOptions,
     ) -> IcebergResult<String> {
         let Self { rel, ctx, location } = self;
 
