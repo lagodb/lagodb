@@ -12,6 +12,18 @@ fn table_option_cache_reads_strings_from_contiguous_pg_allocation() {
     let options = TableOptions::new(vec![
         (OPT_COMPRESSION_CODEC.to_owned(), Some("snappy".to_owned())),
         (OPT_WRITE_FORMAT.to_owned(), Some("parquet".to_owned())),
+        (
+            OPT_WRITE_DELETE_ISOLATION_LEVEL.to_owned(),
+            Some("snapshot".to_owned()),
+        ),
+        (
+            OPT_WRITE_UPDATE_ISOLATION_LEVEL.to_owned(),
+            Some("serializable".to_owned()),
+        ),
+        (
+            OPT_WRITE_MERGE_ISOLATION_LEVEL.to_owned(),
+            Some("snapshot".to_owned()),
+        ),
     ]);
     let (header, data) = IcebergTableOptionCache::from_options(Some(&options))
         .expect("valid options must build an AM cache");
@@ -44,14 +56,6 @@ fn table_option_cache_reads_strings_from_contiguous_pg_allocation() {
                 .parquet_compression()
                 .expect("cached codec must remain semantically valid"),
             parquet::basic::Compression::SNAPPY,
-        );
-        assert_eq!(
-            cached
-                .to_properties()
-                .expect("cached options must adapt to Iceberg properties")
-                .get(OPT_COMPRESSION_CODEC)
-                .map(String::as_str),
-            Some("snappy"),
         );
 
         pg_sys::pfree(allocation.cast());

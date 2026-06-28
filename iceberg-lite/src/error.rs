@@ -31,6 +31,13 @@ pub enum ErrorKind {
     /// The operation was rejected because the system is not in a state required for the operation’s execution.
     PreconditionFailed,
 
+    /// Concurrent table changes invalidated optimistic data validation.
+    ///
+    /// The caller must rebuild the containing operation against a new table
+    /// snapshot. Retrying the same commit transparently cannot resolve this
+    /// conflict, so this kind is intentionally independent of [`Error::retryable`].
+    DataConflict,
+
     /// Iceberg don't know what happened here, and no actions other than
     /// just returning it back. For example, iceberg returns an internal
     /// service error.
@@ -86,6 +93,7 @@ impl From<ErrorKind> for &'static str {
             ErrorKind::NamespaceAlreadyExists => "NamespaceAlreadyExists",
             ErrorKind::NamespaceNotFound => "NamespaceNotFound",
             ErrorKind::PreconditionFailed => "PreconditionFailed",
+            ErrorKind::DataConflict => "DataConflict",
             ErrorKind::CatalogCommitConflicts => "CatalogCommitConflicts",
             ErrorKind::IoError => "IoError",
         }

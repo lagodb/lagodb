@@ -309,7 +309,7 @@ impl<'a> RowDeltaValidator<'a> {
             return Ok(());
         }
 
-        Err(self.validation_error(format!(
+        Err(self.conflict_error(format!(
             "row delta referenced data files are no longer live: {} missing data files",
             missing.len()
         )))
@@ -343,7 +343,7 @@ impl<'a> RowDeltaValidator<'a> {
             return Ok(());
         }
 
-        Err(self.validation_error(format!(
+        Err(self.conflict_error(format!(
             "row delta conflicts with data files added after scan snapshot: {} conflicting data files",
             conflicts.len()
         )))
@@ -375,7 +375,7 @@ impl<'a> RowDeltaValidator<'a> {
             return Ok(());
         }
 
-        Err(self.validation_error(format!(
+        Err(self.conflict_error(format!(
             "row delta conflicts with delete files added after scan snapshot: {} conflicting delete files",
             conflicts.len()
         )))
@@ -515,7 +515,7 @@ impl<'a> RowDeltaValidator<'a> {
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
             return match starting_snapshot_id {
                 None => Ok(after_start),
-                Some(_) => Err(self.validation_error(
+                Some(_) => Err(self.conflict_error(
                     "row delta has a scan snapshot but table has no current snapshot",
                 )),
             };
@@ -539,7 +539,7 @@ impl<'a> RowDeltaValidator<'a> {
             return Ok(after_start);
         };
 
-        Err(self.validation_error(format!(
+        Err(self.conflict_error(format!(
             "row delta scan snapshot {starting_snapshot_id} is not an ancestor of current snapshot {}",
             current_snapshot.snapshot_id()
         )))
@@ -550,7 +550,7 @@ impl<'a> RowDeltaValidator<'a> {
             .metadata()
             .snapshot_by_id(snapshot_id)
             .ok_or_else(|| {
-                self.validation_error(format!(
+                self.conflict_error(format!(
                     "snapshot {snapshot_id} referenced by row delta validation does not exist"
                 ))
             })
@@ -586,6 +586,10 @@ impl<'a> RowDeltaValidator<'a> {
     fn validation_error(&self, message: impl Into<String>) -> Error {
         Error::new(ErrorKind::PreconditionFailed, message)
     }
+
+    fn conflict_error(&self, message: impl Into<String>) -> Error {
+        Error::new(ErrorKind::DataConflict, message)
+    }
 }
 
 #[cfg(test)]
@@ -602,6 +606,18 @@ mod tests {
     use crate::{Catalog, TableCreation, TableIdent};
 
     use super::*;
+
+    #[test]
+    fn data_conflict_requires_rebuilding_the_outer_transaction() {
+        let table = make_v2_minimal_table();
+        let plan = DeltaPlan::default();
+        let validator = RowDeltaValidator::new(&table, &plan);
+
+        let error = validator.conflict_error("concurrent data change");
+
+        assert_eq!(error.kind(), ErrorKind::DataConflict);
+        assert!(!error.retryable());
+    }
 
     #[test]
     fn live_files_include_transaction_local_adds() {

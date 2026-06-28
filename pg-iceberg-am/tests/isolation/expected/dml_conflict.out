@@ -7,7 +7,7 @@ step s2_begin: BEGIN;
 step s2_update: UPDATE iceberg_dml_conflict.t SET label = 's2' WHERE id = 1;
 step s1_commit: COMMIT;
 step s2_commit: COMMIT;
-ERROR:  iceberg error: PreconditionFailed => row delta conflicts with delete files added after scan snapshot: 1 conflicting delete files
+ERROR:  iceberg error: DataConflict => row delta conflicts with delete files added after scan snapshot: 1 conflicting delete files
 step verify: SELECT string_agg(id || ':' || label, ',' ORDER BY id) AS rows FROM iceberg_dml_conflict.t;
 rows           
 ---------------
@@ -28,3 +28,46 @@ rows
 100:s2
 (1 row)
 
+
+starting permutation: s1_begin s1_merge s2_begin s2_merge s1_commit s2_commit verify_merge
+step s1_begin: BEGIN;
+step s1_merge: MERGE INTO iceberg_dml_conflict.merge_t AS target USING (VALUES (200, 's1')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s2_begin: BEGIN;
+step s2_merge: MERGE INTO iceberg_dml_conflict.merge_t AS target USING (VALUES (200, 's2')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
+step verify_merge: SELECT string_agg(id || ':' || label, ',' ORDER BY id) AS rows FROM iceberg_dml_conflict.merge_t;
+rows  
+------
+200:s1
+(1 row)
+
+
+starting permutation: s1_begin s1_merge_snapshot s2_begin s2_merge_snapshot s1_commit s2_commit verify_merge_snapshot
+step s1_begin: BEGIN;
+step s1_merge_snapshot: MERGE INTO iceberg_dml_conflict.merge_snapshot_t AS target USING (VALUES (300, 's1')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s2_begin: BEGIN;
+step s2_merge_snapshot: MERGE INTO iceberg_dml_conflict.merge_snapshot_t AS target USING (VALUES (300, 's2')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+step verify_merge_snapshot: SELECT count(*) AS rows FROM iceberg_dml_conflict.merge_snapshot_t;
+rows
+----
+   2
+(1 row)
+
+
+starting permutation: s1_begin_serializable s1_merge_pg_serializable s2_begin_serializable s2_merge_pg_serializable s1_commit s2_commit verify_merge_pg_serializable
+step s1_begin_serializable: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s1_merge_pg_serializable: MERGE INTO iceberg_dml_conflict.merge_pg_serializable_t AS target USING (VALUES (400, 's1')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s2_begin_serializable: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step s2_merge_pg_serializable: MERGE INTO iceberg_dml_conflict.merge_pg_serializable_t AS target USING (VALUES (400, 's2')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
+step verify_merge_pg_serializable: SELECT count(*) AS rows FROM iceberg_dml_conflict.merge_pg_serializable_t;
+rows
+----
+   1
+(1 row)

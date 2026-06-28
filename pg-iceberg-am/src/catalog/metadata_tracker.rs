@@ -678,7 +678,7 @@ impl TxMetadata {
                 // operation, so append-only and mixed append/delete/remove
                 // transactions must share the same read and materialization
                 // semantics. RowDelta adds Iceberg DML conflict validation
-                // when UPDATE/DELETE participated in the transaction.
+                // when DELETE/UPDATE/MERGE produced a statement delta.
                 let tx = if validations.is_empty() {
                     tx.snapshot_delta(Arc::clone(&delta)).apply(tx)?
                 } else {

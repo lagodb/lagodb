@@ -1,10 +1,13 @@
-//! Statement-local row identity for Iceberg DML.
+//! Statement-local target-scan state and row identity for Iceberg DML.
 //!
 //! PostgreSQL's table-AM UPDATE/DELETE path communicates the target row through
 //! `ItemPointer` (`ctid`). Iceberg's native row identity for v2 DML is
 //! `(data_file_path, position)`, so this module owns the lossy boundary:
 //! scans intern file paths in a DML-frame-local registry and pack
 //! `(file_index, pos)` into `ctid`; tuple callbacks decode it back.
+//! The same scan registration records the observed Iceberg snapshot even when
+//! no rows are returned, allowing statement finalization to validate an
+//! insert-only MERGE without coupling that dependency to position deletes.
 //!
 //! ## Why no `map_id` in the ctid
 //!
@@ -106,6 +109,18 @@ impl RowLocationMapHandle {
     ) -> IcebergResult<ItemPointer> {
         RowLocationCodec::encode(file_index, position)
     }
+}
+
+/// Whether the current DML statement scanned this target relation and, when it
+/// did, which Iceberg snapshot supplied that scan.
+///
+/// `Observed(None)` is distinct from `Unobserved`: it means the statement read
+/// a table before its first snapshot existed, so validation must include every
+/// snapshot that appeared after that read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DmlScanSnapshot {
+    Unobserved,
+    Observed(Option<i64>),
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +252,18 @@ impl RowLocationRegistry {
         }))
     }
 
+    fn scan_snapshot(
+        &self,
+        frame_id: DmlFrameId,
+        rel_oid: pg_sys::Oid,
+    ) -> DmlScanSnapshot {
+        self.maps
+            .get(&RegistryKey { frame_id, rel_oid })
+            .map_or(DmlScanSnapshot::Unobserved, |map| {
+                DmlScanSnapshot::Observed(map.starting_snapshot_id)
+            })
+    }
+
     fn remove_map(&mut self, key: RegistryKey) {
         self.maps.remove(&key);
     }
@@ -343,4 +370,19 @@ pub(crate) fn lookup_current(
         return Ok(None);
     };
     REGISTRY.with(|registry| registry.borrow().lookup(frame_id, rel_oid, tid))
+}
+
+/// Return the target scan observation for `rel_oid` in the current DML frame.
+///
+/// Unlike row lookup, this remains meaningful for a scan that returned no
+/// tuples, which is required by insert-only MERGE validation.
+pub(crate) fn current_dml_scan_snapshot(
+    rel_oid: pg_sys::Oid,
+) -> DmlScanSnapshot {
+    let Some(frame_id) = current_dml_frame_id() else {
+        return DmlScanSnapshot::Unobserved;
+    };
+    REGISTRY.with(|registry| {
+        registry.borrow().scan_snapshot(frame_id, rel_oid)
+    })
 }

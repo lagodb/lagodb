@@ -3,6 +3,7 @@ pub mod conflict_filter;
 pub mod ddl;
 pub mod dml;
 pub mod index;
+pub(crate) mod isolation;
 pub mod projection;
 pub mod relation;
 pub mod row_location;

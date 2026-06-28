@@ -41,6 +41,7 @@ use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
 use crate::access::column_mapping::{RelationShape, ScanColumns};
+use crate::access::isolation::PgTransactionIsolation;
 use crate::access::projection::Projection;
 use crate::access::row_location::{RowLocationMapHandle, begin_dml_scan};
 use crate::catalog::bridge::IcebergTableId;
@@ -150,6 +151,11 @@ impl ScanSpec {
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
     ) -> IcebergResult<(Table, Arc<IcebergSchema>, Option<Arc<SnapshotDelta>>)> {
+        // Validate the transaction mode on every execution-side scan entry.
+        // Serializable currently retains statement-level metadata visibility
+        // and strengthens Iceberg row-level write validation; see
+        // `access::isolation` for the intentionally incomplete PG SSI scope.
+        PgTransactionIsolation::current()?;
         let ctx = StorageContext::for_tablespace(spc_oid)?;
 
         let loaded =

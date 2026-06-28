@@ -91,7 +91,30 @@ WHERE relid = 'iceberg_enum_opt_test'::regclass;
 DROP TABLE iceberg_enum_opt_test;
 
 -- ============================================================================
--- Test 6: Create table in a specific schema
+-- Test 6: Persist command-specific DML isolation options
+-- ============================================================================
+CREATE TABLE iceberg_isolation_opts_test (
+    id integer
+) USING iceberg WITH (
+    "write.delete.isolation-level" = 'snapshot',
+    "write.update.isolation-level" = 'serializable',
+    "write.merge.isolation-level" = 'snapshot'
+);
+
+COPY (
+    SELECT options @> ARRAY[
+        'write.delete.isolation-level=snapshot',
+        'write.update.isolation-level=serializable',
+        'write.merge.isolation-level=snapshot'
+    ]::text[]
+    FROM lakebase.table_options
+    WHERE relid = 'iceberg_isolation_opts_test'::regclass
+) TO STDOUT;
+
+DROP TABLE iceberg_isolation_opts_test;
+
+-- ============================================================================
+-- Test 7: Create table in a specific schema
 -- ============================================================================
 CREATE SCHEMA IF NOT EXISTS test_schema;
 

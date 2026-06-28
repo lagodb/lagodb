@@ -31,13 +31,23 @@ pub enum IsolationLevel {
     Snapshot,
 }
 
+impl IsolationLevel {
+    /// Canonical Iceberg table-property value for this isolation level.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Serializable => "serializable",
+            Self::Snapshot => "snapshot",
+        }
+    }
+}
+
 impl FromStr for IsolationLevel {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        if value.eq_ignore_ascii_case("serializable") {
+        if value.eq_ignore_ascii_case(Self::Serializable.as_str()) {
             Ok(Self::Serializable)
-        } else if value.eq_ignore_ascii_case("snapshot") {
+        } else if value.eq_ignore_ascii_case(Self::Snapshot.as_str()) {
             Ok(Self::Snapshot)
         } else {
             Err(Error::new(
@@ -52,10 +62,7 @@ impl FromStr for IsolationLevel {
 
 impl Display for IsolationLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Serializable => f.write_str("serializable"),
-            Self::Snapshot => f.write_str("snapshot"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

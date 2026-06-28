@@ -10,7 +10,7 @@
 //! that parses, validates, and persists those options on `CREATE TABLE` lives
 //! in `crate::hooks::table_ddl`.
 
-use iceberg_lite::spec::FormatVersion;
+use iceberg_lite::spec::{FormatVersion, IsolationLevel, TableProperties};
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use pg_lakebase_core::options::table::{
     AmCacheLayout, AmCacheLayoutBuilder, AmCacheStringOffset, AmCacheable,
@@ -38,6 +38,20 @@ pub const OPT_COMPRESSION_CODEC_VALUES: &[&str] = &["snappy", "zstd"];
 pub const OPT_WRITE_FORMAT: &str = "write.format.default";
 pub const OPT_WRITE_FORMAT_DEFAULT: &str = "parquet";
 pub const OPT_WRITE_FORMAT_VALUES: &[&str] = &["parquet"];
+
+/// Command-specific Iceberg row-level DML isolation.
+pub const OPT_WRITE_DELETE_ISOLATION_LEVEL: &str =
+    TableProperties::PROPERTY_WRITE_DELETE_ISOLATION_LEVEL;
+pub const OPT_WRITE_UPDATE_ISOLATION_LEVEL: &str =
+    TableProperties::PROPERTY_WRITE_UPDATE_ISOLATION_LEVEL;
+pub const OPT_WRITE_MERGE_ISOLATION_LEVEL: &str =
+    TableProperties::PROPERTY_WRITE_MERGE_ISOLATION_LEVEL;
+pub const OPT_WRITE_ISOLATION_LEVEL_DEFAULT: &str =
+    TableProperties::PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT.as_str();
+pub const OPT_WRITE_ISOLATION_LEVEL_VALUES: &[&str] = &[
+    IsolationLevel::Snapshot.as_str(),
+    IsolationLevel::Serializable.as_str(),
+];
 
 // ============================================================================
 //  Option Definitions
@@ -70,18 +84,46 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
         },
         description: "Default file format (parquet)",
     },
+    OptionDef {
+        name: OPT_WRITE_DELETE_ISOLATION_LEVEL,
+        kind: OptionKind::Enum {
+            default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
+            values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
+        },
+        description: "Iceberg DELETE isolation level (snapshot or serializable)",
+    },
+    OptionDef {
+        name: OPT_WRITE_UPDATE_ISOLATION_LEVEL,
+        kind: OptionKind::Enum {
+            default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
+            values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
+        },
+        description: "Iceberg UPDATE isolation level (snapshot or serializable)",
+    },
+    OptionDef {
+        name: OPT_WRITE_MERGE_ISOLATION_LEVEL,
+        kind: OptionKind::Enum {
+            default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
+            values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
+        },
+        description: "Iceberg MERGE isolation level (snapshot or serializable)",
+    },
 ];
 
 /// Validated semantic table options shared by DDL and `rd_amcache` creation.
 ///
-/// String values borrow either the parsed [`TableOptions`] or static defaults.
-/// Ownership is introduced only when Iceberg's metadata properties require a
+/// String-valued writer options borrow either the parsed [`TableOptions`] or
+/// static defaults. Isolation values are parsed into Iceberg's domain enum.
+/// Ownership is introduced only when metadata properties require a
 /// `HashMap<String, String>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResolvedIcebergOptions<'a> {
     format_version: FormatVersion,
     compression: &'a str,
     write_format: &'a str,
+    delete_isolation: IsolationLevel,
+    update_isolation: IsolationLevel,
+    merge_isolation: IsolationLevel,
 }
 
 impl<'a> ResolvedIcebergOptions<'a> {
@@ -108,14 +150,39 @@ impl<'a> ResolvedIcebergOptions<'a> {
         let write_format = options
             .and_then(|options| options.get_str(OPT_WRITE_FORMAT))
             .unwrap_or(OPT_WRITE_FORMAT_DEFAULT);
+        let delete_isolation = options
+            .and_then(|options| {
+                options.get_str(OPT_WRITE_DELETE_ISOLATION_LEVEL)
+            })
+            .unwrap_or(OPT_WRITE_ISOLATION_LEVEL_DEFAULT);
+        let update_isolation = options
+            .and_then(|options| {
+                options.get_str(OPT_WRITE_UPDATE_ISOLATION_LEVEL)
+            })
+            .unwrap_or(OPT_WRITE_ISOLATION_LEVEL_DEFAULT);
+        let merge_isolation = options
+            .and_then(|options| {
+                options.get_str(OPT_WRITE_MERGE_ISOLATION_LEVEL)
+            })
+            .unwrap_or(OPT_WRITE_ISOLATION_LEVEL_DEFAULT);
 
-        Self::from_parts(format_version, compression, write_format)
+        Self::from_parts(
+            format_version,
+            compression,
+            write_format,
+            delete_isolation,
+            update_isolation,
+            merge_isolation,
+        )
     }
 
     fn from_parts(
         format_version: i32,
         compression: &'a str,
         write_format: &'a str,
+        delete_isolation: &'a str,
+        update_isolation: &'a str,
+        merge_isolation: &'a str,
     ) -> Result<Self, TableOptionError> {
         Self::resolve_parquet_compression(compression)?;
         if !OPT_WRITE_FORMAT_VALUES.contains(&write_format) {
@@ -126,11 +193,26 @@ impl<'a> ResolvedIcebergOptions<'a> {
                 write_format,
             )));
         }
+        let delete_isolation = Self::resolve_isolation_level(
+            OPT_WRITE_DELETE_ISOLATION_LEVEL,
+            delete_isolation,
+        )?;
+        let update_isolation = Self::resolve_isolation_level(
+            OPT_WRITE_UPDATE_ISOLATION_LEVEL,
+            update_isolation,
+        )?;
+        let merge_isolation = Self::resolve_isolation_level(
+            OPT_WRITE_MERGE_ISOLATION_LEVEL,
+            merge_isolation,
+        )?;
 
         Ok(Self {
             format_version: Self::resolve_format_version(format_version)?,
             compression,
             write_format,
+            delete_isolation,
+            update_isolation,
+            merge_isolation,
         })
     }
 
@@ -164,6 +246,20 @@ impl<'a> ResolvedIcebergOptions<'a> {
         }
     }
 
+    fn resolve_isolation_level(
+        option: &str,
+        value: &str,
+    ) -> Result<IsolationLevel, TableOptionError> {
+        value.parse::<IsolationLevel>().map_err(|_| {
+            TableOptionError::InvalidOption(format!(
+                "{} must be one of {}, got {:?}",
+                option,
+                OPT_WRITE_ISOLATION_LEVEL_VALUES.join(", "),
+                value,
+            ))
+        })
+    }
+
     pub(crate) fn format_version(self) -> FormatVersion {
         self.format_version
     }
@@ -179,9 +275,25 @@ impl<'a> ResolvedIcebergOptions<'a> {
                 self.compression.to_owned(),
             ),
             (OPT_WRITE_FORMAT.to_owned(), self.write_format.to_owned()),
+            (
+                OPT_WRITE_DELETE_ISOLATION_LEVEL.to_owned(),
+                self.delete_isolation.as_str().to_owned(),
+            ),
+            (
+                OPT_WRITE_UPDATE_ISOLATION_LEVEL.to_owned(),
+                self.update_isolation.as_str().to_owned(),
+            ),
+            (
+                OPT_WRITE_MERGE_ISOLATION_LEVEL.to_owned(),
+                self.merge_isolation.as_str().to_owned(),
+            ),
         ])
     }
 
+    /// Cache only values used by the relation-local write hot path.
+    ///
+    /// DML isolation remains authoritative in Iceberg metadata and is resolved
+    /// from `TableProperties` when a modify session opens.
     fn into_cache(self) -> (IcebergTableOptionCache, Vec<u8>) {
         let mut layout =
             AmCacheLayoutBuilder::for_header::<IcebergTableOptionCache>();
@@ -203,7 +315,7 @@ impl<'a> ResolvedIcebergOptions<'a> {
 //  Table Option Cache (rd_amcache)
 // ============================================================================
 
-/// Iceberg table options cached in rd_amcache.
+/// Hot-path Iceberg writer options cached in `rd_amcache`.
 ///
 /// This struct is stored directly in Postgres memory via palloc.
 /// All fields must be POD types (no String, Vec, Box).
@@ -267,16 +379,6 @@ impl IcebergTableOptionCache {
     ) -> Result<ParquetCompression, TableOptionError> {
         ResolvedIcebergOptions::resolve_parquet_compression(self.compression())
     }
-
-    /// Convert cached options to Iceberg table properties HashMap.
-    pub fn to_properties(&self) -> Result<HashMap<String, String>, TableOptionError> {
-        ResolvedIcebergOptions::from_parts(
-            self.format_version,
-            self.compression(),
-            self.write_format(),
-        )
-        .map(ResolvedIcebergOptions::properties)
-    }
 }
 
 #[cfg(test)]
@@ -298,6 +400,16 @@ mod tests {
             properties.get(OPT_WRITE_FORMAT).map(String::as_str),
             Some(OPT_WRITE_FORMAT_DEFAULT),
         );
+        for option in [
+            OPT_WRITE_DELETE_ISOLATION_LEVEL,
+            OPT_WRITE_UPDATE_ISOLATION_LEVEL,
+            OPT_WRITE_MERGE_ISOLATION_LEVEL,
+        ] {
+            assert_eq!(
+                properties.get(option).map(String::as_str),
+                Some(OPT_WRITE_ISOLATION_LEVEL_DEFAULT),
+            );
+        }
     }
 
     #[test]
@@ -305,6 +417,18 @@ mod tests {
         let options = TableOptions::new(vec![
             (OPT_FORMAT_VERSION.to_owned(), Some("1".to_owned())),
             (OPT_COMPRESSION_CODEC.to_owned(), Some("snappy".to_owned())),
+            (
+                OPT_WRITE_DELETE_ISOLATION_LEVEL.to_owned(),
+                Some("snapshot".to_owned()),
+            ),
+            (
+                OPT_WRITE_UPDATE_ISOLATION_LEVEL.to_owned(),
+                Some("snapshot".to_owned()),
+            ),
+            (
+                OPT_WRITE_MERGE_ISOLATION_LEVEL.to_owned(),
+                Some("snapshot".to_owned()),
+            ),
         ]);
         let resolved =
             ResolvedIcebergOptions::from_table_options(Some(&options)).unwrap();
@@ -320,6 +444,16 @@ mod tests {
             properties.get(OPT_WRITE_FORMAT).map(String::as_str),
             Some(OPT_WRITE_FORMAT_DEFAULT),
         );
+        for option in [
+            OPT_WRITE_DELETE_ISOLATION_LEVEL,
+            OPT_WRITE_UPDATE_ISOLATION_LEVEL,
+            OPT_WRITE_MERGE_ISOLATION_LEVEL,
+        ] {
+            assert_eq!(
+                properties.get(option).map(String::as_str),
+                Some("snapshot"),
+            );
+        }
     }
 
     #[test]
@@ -386,6 +520,19 @@ mod tests {
         let options = TableOptions::new(vec![(
             OPT_WRITE_FORMAT.to_owned(),
             Some("avro".to_owned()),
+        )]);
+
+        assert!(matches!(
+            ResolvedIcebergOptions::from_table_options(Some(&options)),
+            Err(TableOptionError::InvalidOption(_)),
+        ));
+    }
+
+    #[test]
+    fn resolved_options_reject_unknown_isolation_level() {
+        let options = TableOptions::new(vec![(
+            OPT_WRITE_UPDATE_ISOLATION_LEVEL.to_owned(),
+            Some("read-committed".to_owned()),
         )]);
 
         assert!(matches!(

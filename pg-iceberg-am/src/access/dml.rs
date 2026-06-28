@@ -1,10 +1,10 @@
 //! Iceberg DML operations.
 //!
-//! Implements INSERT/UPDATE/DELETE for Iceberg tables. INSERT writes Parquet
-//! data files; DELETE writes position delete files; UPDATE writes both a
-//! position delete for the old row and a data-file row for the new version.
-//! All files are staged in `TxMetadata` and committed through iceberg-lite's
-//! transaction API.
+//! Implements INSERT/UPDATE/DELETE/MERGE for Iceberg tables. INSERT writes
+//! Parquet data files; DELETE writes position delete files; UPDATE writes both
+//! a position delete for the old row and a data-file row for the new version;
+//! MERGE may combine those outcomes. All files are staged in `TxMetadata` and
+//! committed through iceberg-lite's transaction API.
 //!
 //! [`DataFileSink`] owns the slot -> Parquet data-file pipeline; [`IcebergModify`]
 //! is the AM session that wires tuple callbacks to the sink, crosses the
@@ -51,7 +51,10 @@ use roaring::RoaringTreemap;
 
 use crate::access::column_mapping::{RelationShape, WriteColumns};
 use crate::access::conflict_filter::DmlConflictFilterResolver;
-use crate::access::row_location::{RowLocation, lookup_current};
+use crate::access::isolation::PgTransactionIsolation;
+use crate::access::row_location::{
+    DmlScanSnapshot, RowLocation, current_dml_scan_snapshot, lookup_current,
+};
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
@@ -110,7 +113,7 @@ impl ModifyCommand {
         }
     }
 
-    fn isolation_level(
+    fn table_isolation_level(
         self,
         table_properties: &iceberg_lite::spec::TableProperties,
     ) -> Option<IsolationLevel> {
@@ -120,6 +123,17 @@ impl ModifyCommand {
             Self::Update => Some(table_properties.write_update_isolation_level),
             Self::Merge => Some(table_properties.write_merge_isolation_level),
         }
+    }
+
+    fn effective_isolation_level(
+        self,
+        table_properties: &iceberg_lite::spec::TableProperties,
+        transaction_isolation: PgTransactionIsolation,
+    ) -> Option<IsolationLevel> {
+        self.table_isolation_level(table_properties)
+            .map(|table_isolation| {
+                transaction_isolation.effective_iceberg(table_isolation)
+            })
     }
 }
 
@@ -406,32 +420,23 @@ enum TouchResult {
     SelfModified,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum RecordedSnapshot {
-    #[default]
-    Unrecorded,
-    Recorded(Option<i64>),
-}
-
 #[derive(Debug, Default)]
 struct PositionDeleteAccumulator {
     by_file: BTreeMap<Rc<str>, RoaringTreemap>,
-    starting_snapshot: RecordedSnapshot,
 }
 
 impl PositionDeleteAccumulator {
-    fn add(&mut self, location: RowLocation) -> IcebergResult<TouchResult> {
-        self.record_snapshot(location.starting_snapshot_id)?;
+    fn add(&mut self, location: RowLocation) -> TouchResult {
         let inserted = self
             .by_file
             .entry(location.data_file_path)
             .or_default()
             .insert(location.position);
-        Ok(if inserted {
+        if inserted {
             TouchResult::Added
         } else {
             TouchResult::SelfModified
-        })
+        }
     }
 
     fn contains(&self, location: &RowLocation) -> bool {
@@ -455,44 +460,44 @@ impl PositionDeleteAccumulator {
             .collect()
     }
 
-    fn starting_snapshot_id(&self) -> Option<i64> {
-        match self.starting_snapshot {
-            RecordedSnapshot::Unrecorded => None,
-            RecordedSnapshot::Recorded(snapshot_id) => snapshot_id,
-        }
-    }
-
     fn clear(&mut self) {
         self.by_file.clear();
-        self.starting_snapshot = RecordedSnapshot::Unrecorded;
+    }
+}
+
+/// Final output of one relation-local PostgreSQL ModifyTable session.
+///
+/// Keeping the scan observation beside the produced delta prevents validation
+/// policy from being inferred indirectly from position deletes. In particular,
+/// an insert-only MERGE has added data and an observed target scan but no
+/// referenced data files.
+struct StatementOutcome {
+    command: ModifyCommand,
+    scan_snapshot: DmlScanSnapshot,
+    new_data_files: Vec<DataFile>,
+    position_delete_files: Vec<PositionDeleteOutput>,
+    referenced_data_files: BTreeSet<String>,
+}
+
+impl StatementOutcome {
+    fn has_delta(&self) -> bool {
+        !self.new_data_files.is_empty()
+            || !self.position_delete_files.is_empty()
     }
 
-    fn record_snapshot(
-        &mut self,
-        starting_snapshot_id: Option<i64>,
-    ) -> IcebergResult<()> {
-        match self.starting_snapshot {
-            RecordedSnapshot::Unrecorded => {
-                self.starting_snapshot =
-                    RecordedSnapshot::Recorded(starting_snapshot_id);
-                Ok(())
-            }
-            RecordedSnapshot::Recorded(existing)
-                if existing == starting_snapshot_id =>
-            {
-                Ok(())
-            }
-            RecordedSnapshot::Recorded(existing) => {
-                Err(IcebergError::MetadataTracker(format!(
-                    "one Iceberg DML statement touched rows from inconsistent scan snapshots: \
-                     {existing:?} and {starting_snapshot_id:?}"
-                )))
-            }
+    fn validation_snapshot(&self) -> IcebergResult<Option<i64>> {
+        match self.scan_snapshot {
+            DmlScanSnapshot::Observed(snapshot_id) => Ok(snapshot_id),
+            DmlScanSnapshot::Unobserved => Err(
+                IcebergError::InvariantViolated(
+                    "row-level DML produced an Iceberg delta without scanning its target",
+                ),
+            ),
         }
     }
 }
 
-/// Iceberg DML state for INSERT/UPDATE/DELETE operations.
+/// Iceberg DML state for INSERT/UPDATE/DELETE/MERGE operations.
 ///
 /// Constructed eagerly: storage context, schemas, and writer are all wired up
 /// by the time this struct exists.
@@ -563,7 +568,7 @@ impl AmDmlSession for IcebergModify {
                 "tuple_delete reached a ctid with no active Iceberg row location",
             ),
         )?;
-        match self.position_deletes.add(location)? {
+        match self.position_deletes.add(location) {
             TouchResult::Added => Ok(pg_sys::TM_Result::TM_Ok),
             TouchResult::SelfModified => {
                 self.mark_self_modified(tmfd, tid, cid);
@@ -593,7 +598,7 @@ impl AmDmlSession for IcebergModify {
                 "tuple_update_slot reached a ctid with no active Iceberg row location",
             ),
         )?;
-        match self.position_deletes.add(location)? {
+        match self.position_deletes.add(location) {
             TouchResult::Added => {
                 self.data_sink_mut()?.append(row)?;
                 *lockmode = pg_sys::LockTupleMode::LockTupleExclusive;
@@ -644,20 +649,8 @@ impl AmDmlSession for IcebergModify {
         // `register_object_file_staged()` / `mark_object_file_uploaded()`, and
         // `StorageArtifactResource::on_abort` unlinks staging files or issues
         // remote deletes on abort. Do not re-introduce a separate cleanup list here.
-        let new_files = self.finish_data_files()?;
-        let referenced_data_files = self.position_deletes.referenced_data_files();
-        let delete_files = self.finish_position_deletes()?;
-
-        if !new_files.is_empty() {
-            self.stage_data_files(new_files)?;
-        }
-        for output in delete_files {
-            self.stage_position_delete_file(output)?;
-        }
-        if !referenced_data_files.is_empty() {
-            self.stage_validation(referenced_data_files)?;
-        }
-
+        let outcome = self.finish_statement()?;
+        self.stage_statement(outcome)?;
         Ok(())
     }
 }
@@ -675,6 +668,7 @@ impl IcebergModify {
         cmd_type: pg_sys::CmdType::Type,
     ) -> IcebergResult<Self> {
         let command = ModifyCommand::from_pg(cmd_type)?;
+        let transaction_isolation = PgTransactionIsolation::current()?;
         let rel_oid = rel.oid();
         // `locator().spc_oid` is the *resolved* physical tablespace (default
         // tablespaces resolve here), unlike `reltablespace`.
@@ -696,7 +690,10 @@ impl IcebergModify {
         }
         let iceberg_schema = loaded.metadata.current_schema().clone();
         let table_properties = loaded.metadata.table_properties()?;
-        let isolation_level = command.isolation_level(&table_properties);
+        let isolation_level = command.effective_isolation_level(
+            &table_properties,
+            transaction_isolation,
+        );
         let conflict_filter = command
             .validation_command()
             .map(|_| DmlConflictFilterResolver::new(rel_oid).resolve());
@@ -762,13 +759,14 @@ impl IcebergModify {
 
     fn stage_validation(
         &mut self,
+        command: DmlCommand,
+        starting_snapshot_id: Option<i64>,
         referenced_data_files: BTreeSet<String>,
     ) -> IcebergResult<()> {
-        let Some(command) = self.command.validation_command() else {
-            return Ok(());
-        };
         let Some(isolation_level) = self.isolation_level else {
-            return Ok(());
+            return Err(IcebergError::InvariantViolated(
+                "row-level DML validation has no effective isolation level",
+            ));
         };
         let conflict_filter =
             self.conflict_filter
@@ -778,15 +776,59 @@ impl IcebergModify {
                 ))?;
         let validation =
             RowDeltaValidation::new(command, conflict_filter, isolation_level)
-                .with_starting_snapshot_id(
-                    self.position_deletes.starting_snapshot_id(),
-                )
+                .with_starting_snapshot_id(starting_snapshot_id)
                 .with_referenced_data_files(referenced_data_files);
         TxMetadata::current().stage_row_delta_validation(
             self.rel_oid,
             validation,
             &self.file_io,
         )
+    }
+
+    fn finish_statement(&mut self) -> IcebergResult<StatementOutcome> {
+        let new_data_files = self.finish_data_files()?;
+        let referenced_data_files =
+            self.position_deletes.referenced_data_files();
+        let position_delete_files = self.finish_position_deletes()?;
+        Ok(StatementOutcome {
+            command: self.command,
+            scan_snapshot: current_dml_scan_snapshot(self.rel_oid),
+            new_data_files,
+            position_delete_files,
+            referenced_data_files,
+        })
+    }
+
+    fn stage_statement(
+        &mut self,
+        outcome: StatementOutcome,
+    ) -> IcebergResult<()> {
+        let has_delta = outcome.has_delta();
+        let validation = if has_delta {
+            match outcome.command.validation_command() {
+                Some(command) => {
+                    Some((command, outcome.validation_snapshot()?))
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        if !outcome.new_data_files.is_empty() {
+            self.stage_data_files(outcome.new_data_files)?;
+        }
+        for output in outcome.position_delete_files {
+            self.stage_position_delete_file(output)?;
+        }
+        if let Some((command, starting_snapshot_id)) = validation {
+            self.stage_validation(
+                command,
+                starting_snapshot_id,
+                outcome.referenced_data_files,
+            )?;
+        }
+        Ok(())
     }
 
     fn finish_data_files(&mut self) -> IcebergResult<Vec<DataFile>> {
@@ -843,49 +885,66 @@ impl IcebergModify {
 }
 
 #[cfg(test)]
-mod position_delete_accumulator_tests {
+mod dml_state_tests {
     use super::*;
 
     #[test]
-    fn accepts_repeated_identical_snapshot_states() {
-        let mut without_snapshot = PositionDeleteAccumulator::default();
-        without_snapshot.record_snapshot(None).unwrap();
-        without_snapshot.record_snapshot(None).unwrap();
-        assert_eq!(without_snapshot.starting_snapshot_id(), None);
+    fn commands_read_their_own_isolation_property() {
+        let cases = [
+            (
+                iceberg_lite::spec::TableProperties::PROPERTY_WRITE_DELETE_ISOLATION_LEVEL,
+                ModifyCommand::Delete,
+            ),
+            (
+                iceberg_lite::spec::TableProperties::PROPERTY_WRITE_UPDATE_ISOLATION_LEVEL,
+                ModifyCommand::Update,
+            ),
+            (
+                iceberg_lite::spec::TableProperties::PROPERTY_WRITE_MERGE_ISOLATION_LEVEL,
+                ModifyCommand::Merge,
+            ),
+        ];
 
-        let mut with_snapshot = PositionDeleteAccumulator::default();
-        with_snapshot.record_snapshot(Some(42)).unwrap();
-        with_snapshot.record_snapshot(Some(42)).unwrap();
-        assert_eq!(with_snapshot.starting_snapshot_id(), Some(42));
+        for (snapshot_property, snapshot_command) in cases {
+            let properties = iceberg_lite::spec::TableProperties::try_from(
+                &std::collections::HashMap::from([(
+                    snapshot_property.to_owned(),
+                    "snapshot".to_owned(),
+                )]),
+            )
+            .unwrap();
+
+            for command in [
+                ModifyCommand::Delete,
+                ModifyCommand::Update,
+                ModifyCommand::Merge,
+            ] {
+                let expected = if command == snapshot_command {
+                    IsolationLevel::Snapshot
+                } else {
+                    IsolationLevel::Serializable
+                };
+                assert_eq!(command.table_isolation_level(&properties), Some(expected));
+            }
+        }
     }
 
     #[test]
-    fn rejects_mixed_snapshot_presence() {
-        let mut snapshot_then_none = PositionDeleteAccumulator::default();
-        snapshot_then_none.record_snapshot(Some(42)).unwrap();
-        assert!(snapshot_then_none.record_snapshot(None).is_err());
+    fn scan_of_empty_table_is_distinct_from_unobserved_scan() {
+        let observed = StatementOutcome {
+            command: ModifyCommand::Merge,
+            scan_snapshot: DmlScanSnapshot::Observed(None),
+            new_data_files: Vec::new(),
+            position_delete_files: Vec::new(),
+            referenced_data_files: BTreeSet::new(),
+        };
+        assert_eq!(observed.validation_snapshot().unwrap(), None);
 
-        let mut none_then_snapshot = PositionDeleteAccumulator::default();
-        none_then_snapshot.record_snapshot(None).unwrap();
-        assert!(none_then_snapshot.record_snapshot(Some(42)).is_err());
-    }
-
-    #[test]
-    fn rejects_different_snapshot_ids() {
-        let mut accumulator = PositionDeleteAccumulator::default();
-        accumulator.record_snapshot(Some(42)).unwrap();
-        assert!(accumulator.record_snapshot(Some(43)).is_err());
-    }
-
-    #[test]
-    fn clear_resets_recorded_snapshot_state() {
-        let mut accumulator = PositionDeleteAccumulator::default();
-        accumulator.record_snapshot(Some(42)).unwrap();
-
-        accumulator.clear();
-
-        accumulator.record_snapshot(None).unwrap();
-        assert_eq!(accumulator.starting_snapshot_id(), None);
+        let unobserved = StatementOutcome {
+            scan_snapshot: DmlScanSnapshot::Unobserved,
+            ..observed
+        };
+        assert!(unobserved.validation_snapshot().is_err());
     }
 
     #[test]
@@ -897,11 +956,11 @@ mod position_delete_accumulator_tests {
         };
         let mut accumulator = PositionDeleteAccumulator::default();
 
-        assert_eq!(accumulator.add(location(9)).unwrap(), TouchResult::Added);
-        assert_eq!(accumulator.add(location(1)).unwrap(), TouchResult::Added);
-        assert_eq!(accumulator.add(location(5)).unwrap(), TouchResult::Added);
+        assert_eq!(accumulator.add(location(9)), TouchResult::Added);
+        assert_eq!(accumulator.add(location(1)), TouchResult::Added);
+        assert_eq!(accumulator.add(location(5)), TouchResult::Added);
         assert_eq!(
-            accumulator.add(location(5)).unwrap(),
+            accumulator.add(location(5)),
             TouchResult::SelfModified
         );
         assert!(accumulator.contains(&location(5)));

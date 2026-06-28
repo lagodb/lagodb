@@ -20,6 +20,28 @@ That means an implementation cannot pin the first metadata file seen by the
 transaction. Doing so would preserve read-your-own-writes, but it would miss
 concurrent committed rows that became visible between statements.
 
+### PostgreSQL isolation scope
+
+The Iceberg AM supports PostgreSQL `READ COMMITTED` metadata visibility.
+`READ UNCOMMITTED` is normalized to `READ COMMITTED`, matching PostgreSQL.
+`REPEATABLE READ` is rejected because the tracker intentionally does not pin a
+transaction-wide Iceberg snapshot.
+
+PostgreSQL `SERIALIZABLE` currently strengthens the command-specific Iceberg
+row-level isolation policy to Iceberg `Serializable`, but metadata visibility
+remains statement-scoped and the AM does not yet participate in PostgreSQL's
+SSI predicate-lock/read-write dependency tracking. This is an explicitly
+incomplete PostgreSQL `SERIALIZABLE` implementation; see
+`access::isolation::PgTransactionIsolation`.
+
+`write.delete.isolation-level`, `write.update.isolation-level`, and
+`write.merge.isolation-level` are accepted as Iceberg table options with
+`snapshot` and `serializable` values. They are persisted in Iceberg metadata,
+which remains the runtime source of truth; `rd_amcache` does not duplicate
+them. The default is `serializable`. At `READ COMMITTED`, the table property is
+preserved; PostgreSQL `SERIALIZABLE` always raises the effective Iceberg policy
+to `Serializable`.
+
 ## Current `metadata_tracker.rs` behavior
 
 `metadata_tracker.rs` keeps a transaction-local `SnapshotDelta` per modified

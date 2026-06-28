@@ -63,7 +63,7 @@ step s1_begin: BEGIN;
 step s1_insert_overlap: INSERT INTO iceberg_cf.t VALUES (1, 'inserted');
 step s1_commit: COMMIT;
 step s2_commit: COMMIT;
-ERROR:  iceberg error: PreconditionFailed => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
+ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
 step verify: SELECT string_agg(id || ':' || label, ',' ORDER BY id, label) AS rows FROM iceberg_cf.t;
 rows                        
 ----------------------------
@@ -78,7 +78,7 @@ step s1_begin: BEGIN;
 step s1_insert: INSERT INTO iceberg_cf.t VALUES (200, 'new');
 step s1_commit: COMMIT;
 step s2_commit: COMMIT;
-ERROR:  iceberg error: PreconditionFailed => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
+ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
 step verify: SELECT string_agg(id || ':' || label, ',' ORDER BY id, label) AS rows FROM iceberg_cf.t;
 rows                     
 -------------------------
@@ -107,7 +107,7 @@ step s1_begin: BEGIN;
 step s1_insert: INSERT INTO iceberg_cf.t VALUES (200, 'new');
 step s1_commit: COMMIT;
 step s2_commit: COMMIT;
-ERROR:  iceberg error: PreconditionFailed => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
+ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
 step verify: SELECT string_agg(id || ':' || label, ',' ORDER BY id, label) AS rows FROM iceberg_cf.t;
 rows                     
 -------------------------
@@ -124,7 +124,7 @@ step s1_begin: BEGIN;
 step s1_insert: INSERT INTO iceberg_cf.t VALUES (200, 'new');
 step s1_commit: COMMIT;
 step s2p_commit: COMMIT;
-ERROR:  iceberg error: PreconditionFailed => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
+ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
 step verify: SELECT string_agg(id || ':' || label, ',' ORDER BY id, label) AS rows FROM iceberg_cf.t;
 rows                     
 -------------------------
@@ -144,4 +144,3 @@ rows
 -----------------------
 1:s2,100:source,200:new
 (1 row)
-
