@@ -47,7 +47,7 @@ impl<S: NoopProviderSpec> LakebaseCustomScanProvider for NoopProvider<S> {
 
     fn classify_predicate(
         _ctx: &PlanTranslateContext,
-        _predicate: &PlanPredicate<'_>,
+        _predicate: &PlanPredicate,
     ) -> QualPushdownDecision {
         QualPushdownDecision::Unsupported
     }
@@ -88,10 +88,6 @@ pub(crate) struct PushdownSplitFixture {
 impl PushdownSplitFixture {
     pub(crate) const fn new(namespace: u64) -> Self {
         Self { namespace }
-    }
-
-    pub(crate) fn relids(tag: u64) -> *mut pg_sys::Bitmapset {
-        ((tag + 1) * 8) as usize as *mut pg_sys::Bitmapset
     }
 
     fn expr(&self, section: u64, index: usize) -> *mut pg_sys::Expr {
@@ -155,29 +151,5 @@ impl PushdownSplitFixture {
     ) -> PlanPushdownSplit {
         let contracts = vec![PushdownContract::ExactRowFilter; pushed_len];
         self.split_from_contracts(residual_len, recheck_len, &contracts, &[])
-    }
-
-    pub(crate) fn split_alternating_contracts(
-        &self,
-        pushed_len: usize,
-        residual_len: usize,
-        recheck_len: usize,
-        column_expr_indexes: &[usize],
-    ) -> PlanPushdownSplit {
-        let contracts: Vec<PushdownContract> = (0..pushed_len)
-            .map(|index| {
-                if index % 2 == 0 {
-                    PushdownContract::ExactRowFilter
-                } else {
-                    PushdownContract::ConservativePruning
-                }
-            })
-            .collect();
-        self.split_from_contracts(
-            residual_len,
-            recheck_len,
-            &contracts,
-            column_expr_indexes,
-        )
     }
 }

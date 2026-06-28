@@ -5,7 +5,6 @@
 mod tests {
     use core::ffi::CStr;
 
-    use pg_lakebase_core::customscan::builder::path_methods_for;
     use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
     use pg_lakebase_core::customscan::custom_private::CustomScanPrivate;
     use pg_lakebase_core::customscan::hook::pg_test_assert_set_rel_pathlist_callback_signature;
@@ -13,8 +12,8 @@ mod tests {
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
         PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
+        method_tables_for,
     };
-    use pg_lakebase_core::customscan::state::{exec_methods_for, scan_methods_for};
     use pg_lakebase_core::expr::runtime_params::ffi_accessors::{
         ExecSetParamPlanFn, ExecSetParamPlanMultiFn, exec_set_param_plan,
         exec_set_param_plan_multi,
@@ -56,7 +55,7 @@ mod tests {
 
                 fn classify_predicate(
                     _ctx: &PlanTranslateContext,
-                    _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+                    _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
                 ) -> QualPushdownDecision {
                     QualPushdownDecision::Unsupported
                 }
@@ -117,27 +116,27 @@ mod tests {
     }
 
     #[pg_test]
-    fn exec_methods_for_is_stable_per_provider() {
-        let a1 =
-            exec_methods_for::<GlueProviderA>() as *const pg_sys::CustomExecMethods;
-        let a2 =
-            exec_methods_for::<GlueProviderA>() as *const pg_sys::CustomExecMethods;
-        let b1 =
-            exec_methods_for::<GlueProviderB>() as *const pg_sys::CustomExecMethods;
+    fn provider_exec_methods_are_stable_per_provider() {
+        let a1 = method_tables_for::<GlueProviderA>().exec()
+            as *const pg_sys::CustomExecMethods;
+        let a2 = method_tables_for::<GlueProviderA>().exec()
+            as *const pg_sys::CustomExecMethods;
+        let b1 = method_tables_for::<GlueProviderB>().exec()
+            as *const pg_sys::CustomExecMethods;
         assert_eq!(a1, a2);
         assert_ne!(a1, b1);
     }
 
     #[pg_test]
-    fn exec_methods_for_carries_provider_name() {
-        let table = exec_methods_for::<GlueProviderA>();
+    fn provider_exec_methods_carry_provider_name() {
+        let table = method_tables_for::<GlueProviderA>().exec();
         let name = unsafe { CStr::from_ptr(table.CustomName) };
         assert_eq!(name, GlueProviderA::NAME);
     }
 
     #[pg_test]
-    fn exec_methods_for_trampoline_wiring() {
-        let table = exec_methods_for::<GlueProviderA>();
+    fn provider_exec_methods_wire_trampolines() {
+        let table = method_tables_for::<GlueProviderA>().exec();
         assert!(table.BeginCustomScan.is_some());
         assert!(table.ReScanCustomScan.is_some());
         assert!(table.ExecCustomScan.is_some());
@@ -146,40 +145,40 @@ mod tests {
     }
 
     #[pg_test]
-    fn scan_methods_for_is_stable_per_provider_and_distinct_across() {
-        let a1 =
-            scan_methods_for::<GlueProviderA>() as *const pg_sys::CustomScanMethods;
-        let a2 =
-            scan_methods_for::<GlueProviderA>() as *const pg_sys::CustomScanMethods;
-        let b1 =
-            scan_methods_for::<GlueProviderB>() as *const pg_sys::CustomScanMethods;
+    fn provider_scan_methods_are_stable_and_type_specific() {
+        let a1 = method_tables_for::<GlueProviderA>().scan()
+            as *const pg_sys::CustomScanMethods;
+        let a2 = method_tables_for::<GlueProviderA>().scan()
+            as *const pg_sys::CustomScanMethods;
+        let b1 = method_tables_for::<GlueProviderB>().scan()
+            as *const pg_sys::CustomScanMethods;
         assert_eq!(a1, a2);
         assert_ne!(a1, b1);
     }
 
     #[pg_test]
-    fn scan_methods_for_carries_name_and_create_state_callback() {
-        let table = scan_methods_for::<GlueProviderA>();
+    fn provider_scan_methods_carry_name_and_create_state() {
+        let table = method_tables_for::<GlueProviderA>().scan();
         let name = unsafe { CStr::from_ptr(table.CustomName) };
         assert_eq!(name, GlueProviderA::NAME);
         assert!(table.CreateCustomScanState.is_some());
     }
 
     #[pg_test]
-    fn path_methods_for_is_stable_per_provider_and_distinct_across() {
-        let a1 =
-            path_methods_for::<GlueProviderA>() as *const pg_sys::CustomPathMethods;
-        let a2 =
-            path_methods_for::<GlueProviderA>() as *const pg_sys::CustomPathMethods;
-        let b1 =
-            path_methods_for::<GlueProviderB>() as *const pg_sys::CustomPathMethods;
+    fn provider_path_methods_are_stable_and_type_specific() {
+        let a1 = method_tables_for::<GlueProviderA>().path()
+            as *const pg_sys::CustomPathMethods;
+        let a2 = method_tables_for::<GlueProviderA>().path()
+            as *const pg_sys::CustomPathMethods;
+        let b1 = method_tables_for::<GlueProviderB>().path()
+            as *const pg_sys::CustomPathMethods;
         assert_eq!(a1, a2);
         assert_ne!(a1, b1);
     }
 
     #[pg_test]
-    fn path_methods_for_carries_name_and_plan_callback() {
-        let table = path_methods_for::<GlueProviderA>();
+    fn provider_path_methods_carry_name_and_plan_callbacks() {
+        let table = method_tables_for::<GlueProviderA>().path();
         let name = unsafe { CStr::from_ptr(table.CustomName) };
         assert_eq!(name, GlueProviderA::NAME);
         assert!(table.PlanCustomPath.is_some());

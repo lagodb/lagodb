@@ -8,105 +8,10 @@ mod tests {
     use pg_lakebase_core::expr::translator::PgPredicateTranslator;
     use pgrx::pg_sys;
 
-    use crate::customscan::predicate_translator::decode_datum;
-    use crate::customscan::{
+    use crate::predicate::translator::{
         IcebergPredicateTranslator, IcebergScalar, IcebergTranslationError,
+        decode_datum,
     };
-
-    /// In-range `numeric` decodes to an iceberg decimal `Datum`.
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_numeric_in_range_builds_decimal_datum() {
-        use pgrx::IntoDatum;
-        use pgrx::prelude::AnyNumeric;
-
-        unsafe {
-            let numeric = AnyNumeric::try_from(100.5_f64).expect("100.5 is valid");
-            let datum = numeric.clone().into_datum().expect("numeric into_datum");
-
-            let got = decode_datum(pg_sys::NUMERICOID, datum)
-                .expect("an in-range numeric must decode to a decimal Datum");
-
-            // Independent oracle: PG canonical text -> iceberg decimal Datum.
-            let expected = Datum::decimal_from_str(numeric.normalize())
-                .expect("decimal Datum builds");
-
-            assert_eq!(got, expected, "numeric must decode to the scaled decimal");
-        }
-    }
-
-    /// Negative fractional `numeric` decodes through the scaled-`i128` path.
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_numeric_negative_fraction_round_trips() {
-        use pgrx::IntoDatum;
-        use pgrx::prelude::AnyNumeric;
-
-        unsafe {
-            let numeric =
-                AnyNumeric::try_from("-12345.6789").expect("valid numeric literal");
-            let datum = numeric.clone().into_datum().expect("numeric into_datum");
-
-            let got = decode_datum(pg_sys::NUMERICOID, datum)
-                .expect("a negative fractional numeric must decode");
-
-            let expected = Datum::decimal_from_str(numeric.normalize())
-                .expect("decimal Datum builds");
-            assert_eq!(got, expected);
-        }
-    }
-
-    /// `numeric 'NaN'` decodes to `ValueNotRepresentable`: NaN has no Iceberg
-    /// decimal ordering, so the decoder refuses it instead of producing a bound.
-    /// This is decoder-level defense-in-depth — numeric comparison pushdown is
-    /// currently disabled (`NUMERIC_COMPARISON_PUSHDOWN_ENABLED`), so the
-    /// production path never reaches this decode; the guard keeps the decoder
-    /// correct for when numeric pushdown is re-enabled.
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_numeric_nan_is_not_representable() {
-        use pgrx::IntoDatum;
-        use pgrx::prelude::AnyNumeric;
-
-        unsafe {
-            let nan = AnyNumeric::try_from("NaN").expect("NaN is a valid numeric");
-            assert!(nan.is_nan(), "sanity: the literal must be NaN");
-            let datum = nan.into_datum().expect("numeric NaN into_datum");
-
-            let got = decode_datum(pg_sys::NUMERICOID, datum);
-            assert!(
-                matches!(
-                    got,
-                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
-                        if type_oid == pg_sys::NUMERICOID
-                ),
-                "numeric NaN must be ValueNotRepresentable, got {got:?}",
-            );
-        }
-    }
-
-    /// Out-of-range `numeric` → `ValueNotRepresentable`.
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_numeric_out_of_range_is_not_representable() {
-        use pgrx::IntoDatum;
-        use pgrx::prelude::AnyNumeric;
-
-        unsafe {
-            // 40 nines: beyond Decimal128's 38-digit precision, but a perfectly
-            // valid PG numeric.
-            let huge_text = "9".repeat(40);
-            let huge = AnyNumeric::try_from(huge_text.as_str())
-                .expect("a 40-digit integer is a valid PG numeric");
-            let datum = huge.into_datum().expect("numeric into_datum");
-
-            let got = decode_datum(pg_sys::NUMERICOID, datum);
-            assert!(
-                matches!(
-                    got,
-                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
-                        if type_oid == pg_sys::NUMERICOID
-                ),
-                "an out-of-range numeric must be ValueNotRepresentable, got {got:?}",
-            );
-        }
-    }
 
     /// `text` / `varchar` literals decode to iceberg `string` `Datum`s.
     #[pgrx::pg_test(schema = "tests")]
@@ -171,13 +76,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Pass-by-value temporal / float decode.
-    //
-    // These were previously host `#[test]`s, but calling `decode_datum` pulls in
-    // the function's numeric/text arms (`AnyNumeric`, `pg_detoast_datum`,
-    // `palloc`), so the whole decode path requires a live backend regardless of
-    // which type arm a given test exercises (see `docs/testing.md`). They run
-    // here as `#[pg_test]` alongside the numeric / text decode coverage above.
+    // Pass-by-value temporal decode.
     //
     // Scope note: the *happy-path* epoch-offset equivalence for date /
     // timestamp / timestamptz (decoded `Datum` == write-side stored bound) is
@@ -185,14 +84,11 @@ mod tests {
     // `decode::epoch_consistency` (`pushed_*_bound_matches_write_side_offset`
     // and `*_epoch_consistency_at_unix_epoch`), which exercise the same
     // `decode_datum` path across the whole representable range. This module
-    // keeps only the decode-specific cases those property tests deliberately
-    // exclude: the ±infinity not-representable rejections (guarded out of the
-    // property ranges) and the `FLOAT_PUSHDOWN_ENABLED` gating.
+    // keeps the ±infinity not-representable rejections excluded from those
+    // property ranges.
     // -------------------------------------------------------------------------
 
     use iceberg_lite::spec::Datum;
-
-    use crate::customscan::FLOAT_PUSHDOWN_ENABLED;
 
     /// Build a PG `date` `Datum` directly from a raw `DateADT` (PG-epoch days).
     fn date_datum_from_raw(pg_days: i32) -> pg_sys::Datum {
@@ -247,60 +143,6 @@ mod tests {
                 "±infinity timestamptz (raw {raw}) must be ValueNotRepresentable",
             );
         }
-    }
-
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_float4_builds_float_datum() {
-        use pgrx::IntoDatum;
-
-        let datum = 1.5_f32.into_datum().expect("f32 into_datum");
-        if !FLOAT_PUSHDOWN_ENABLED {
-            // Float decode is gated behind the pushdown toggle; verify rejection.
-            assert!(matches!(
-                unsafe { decode_datum(pg_sys::FLOAT4OID, datum) },
-                Err(IcebergTranslationError::UnsupportedType { .. })
-            ));
-            return;
-        }
-        let got = unsafe { decode_datum(pg_sys::FLOAT4OID, datum) }
-            .expect("float4 must decode");
-        assert_eq!(got, Datum::float(1.5_f32));
-    }
-
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_float8_builds_double_datum() {
-        use pgrx::IntoDatum;
-
-        let datum = (-273.15_f64).into_datum().expect("f64 into_datum");
-        if !FLOAT_PUSHDOWN_ENABLED {
-            assert!(matches!(
-                unsafe { decode_datum(pg_sys::FLOAT8OID, datum) },
-                Err(IcebergTranslationError::UnsupportedType { .. })
-            ));
-            return;
-        }
-        let got = unsafe { decode_datum(pg_sys::FLOAT8OID, datum) }
-            .expect("float8 must decode");
-        assert_eq!(got, Datum::double(-273.15_f64));
-    }
-
-    /// When float pushdown is enabled, NaN decodes successfully (relied on
-    /// residual for correctness). When disabled, float decode is rejected.
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_float8_nan_behavior() {
-        use pgrx::IntoDatum;
-
-        let datum = f64::NAN.into_datum().expect("f64 NaN into_datum");
-        if !FLOAT_PUSHDOWN_ENABLED {
-            assert!(matches!(
-                unsafe { decode_datum(pg_sys::FLOAT8OID, datum) },
-                Err(IcebergTranslationError::UnsupportedType { .. })
-            ));
-            return;
-        }
-        let got = unsafe { decode_datum(pg_sys::FLOAT8OID, datum) }
-            .expect("float NaN is representable when pushdown enabled");
-        assert_eq!(got, Datum::double(f64::NAN));
     }
 
     #[pgrx::pg_test(schema = "tests")]

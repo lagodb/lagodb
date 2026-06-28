@@ -5,7 +5,7 @@
 //! numeric / temporal / float rows (which never reach that syscache lookup)
 //! pull the symbol into the link and cannot run as host `#[test]`s (see
 //! `docs/testing.md`). The pure `op_class` mapping and `null_test_capability`
-//! stay as host tests in `predicate_pushdown_policy.rs`; the `text` collation
+//! stay as host tests in `predicate/policy.rs`; the `text` collation
 //! semantics live in `capability_backend.rs`. This module owns the
 //! type×operator×collation verdict matrix for the non-text categories plus the
 //! integer collation gate.
@@ -18,18 +18,14 @@ mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::TestRunner;
 
-    use crate::customscan::{
-        ComparisonOpClass, FLOAT_PUSHDOWN_ENABLED,
-        NUMERIC_COMPARISON_PUSHDOWN_ENABLED, PredicateCapability,
-        PredicatePushdownPolicy,
+    use crate::predicate::policy::{
+        ComparisonOpClass, PredicateCapability, PredicatePushdownPolicy,
     };
     // Single source of truth for the comparison opno verdict table, shared with
-    // the host `#[test]` policy suite in `predicate_pushdown_policy.rs`. `op`
+    // the host `#[test]` policy suite in `predicate/policy.rs`. `op`
     // exposes the per-type rows (`op::INT4`, `op::TEXT`, ...).
-    use crate::customscan::predicate_pushdown_policy::test_opno_table as op;
-    use crate::customscan::predicate_pushdown_policy::test_opno_table::{
-        CLASS_BY_COLUMN, opno_table,
-    };
+    use crate::predicate::policy::test_opno_table as op;
+    use crate::predicate::policy::test_opno_table::{CLASS_BY_COLUMN, opno_table};
 
     fn supported_predicate(
         type_oid: pg_sys::Oid,
@@ -212,7 +208,7 @@ mod tests {
             (pg_sys::INT4OID, triple(op::INT4[0])),
             (pg_sys::INT4OID, triple(op::INT4[2])),
             (pg_sys::INT4OID, triple_with_collation(op::INT4[0], 50_000)),
-            (pg_sys::NUMERICOID, triple(op::NUMERIC[0])),
+            (pg_sys::NUMERICOID, triple(1752)),
             (pg_sys::TEXTOID, text_eq_c),
             (
                 pg_sys::TEXTOID,
@@ -258,9 +254,8 @@ mod tests {
     }
 
     /// Temporal types are `ConservativePruning` for `Eq` and the four ordered
-    /// classes, `Unsupported` for `<>`. Numeric follows
-    /// `NUMERIC_COMPARISON_PUSHDOWN_ENABLED`, float follows
-    /// `FLOAT_PUSHDOWN_ENABLED`.
+    /// classes, `Unsupported` for `<>`; numeric and float comparisons are
+    /// unsupported.
     #[pgrx::pg_test(schema = "tests")]
     fn supported_predicate_numeric_temporal_float_matrix() {
         let table = opno_table();
@@ -290,49 +285,23 @@ mod tests {
             }
         }
 
-        let numeric_row = table
-            .iter()
-            .find(|(t, _)| *t == pg_sys::NUMERICOID)
-            .expect("numeric present in table");
-        for (col, &opno) in numeric_row.1.iter().enumerate() {
-            let expected = if NUMERIC_COMPARISON_PUSHDOWN_ENABLED {
-                let class = CLASS_BY_COLUMN[col];
-                if class == ComparisonOpClass::NotEq {
-                    PredicateCapability::Unsupported
-                } else {
-                    PredicateCapability::ConservativePruning
-                }
-            } else {
-                PredicateCapability::Unsupported
-            };
+        for opno in [1752, 1753, 1754, 1755, 1756, 1757] {
             assert_eq!(
                 supported_predicate(pg_sys::NUMERICOID, triple(opno)),
-                expected,
-                "numeric opno {opno} mismatch (NUMERIC_COMPARISON_PUSHDOWN_ENABLED={NUMERIC_COMPARISON_PUSHDOWN_ENABLED})",
+                PredicateCapability::Unsupported,
+                "numeric opno {opno} must remain unsupported",
             );
         }
 
-        let float_types = [pg_sys::FLOAT4OID, pg_sys::FLOAT8OID];
-        for &type_oid in &float_types {
-            let row = table
-                .iter()
-                .find(|(t, _)| *t == type_oid)
-                .expect("type present in table");
-            for (col, &opno) in row.1.iter().enumerate() {
-                let expected = if FLOAT_PUSHDOWN_ENABLED {
-                    let class = CLASS_BY_COLUMN[col];
-                    if class == ComparisonOpClass::NotEq {
-                        PredicateCapability::Unsupported
-                    } else {
-                        PredicateCapability::ConservativePruning
-                    }
-                } else {
-                    PredicateCapability::Unsupported
-                };
+        for (type_oid, opnos) in [
+            (pg_sys::FLOAT4OID, [620, 621, 622, 624, 623, 625]),
+            (pg_sys::FLOAT8OID, [670, 671, 672, 673, 674, 675]),
+        ] {
+            for opno in opnos {
                 assert_eq!(
                     supported_predicate(type_oid, triple(opno)),
-                    expected,
-                    "float type {} opno {opno} mismatch (FLOAT_PUSHDOWN_ENABLED={FLOAT_PUSHDOWN_ENABLED})",
+                    PredicateCapability::Unsupported,
+                    "float type {} opno {opno} must remain unsupported",
                     u32::from(type_oid),
                 );
             }

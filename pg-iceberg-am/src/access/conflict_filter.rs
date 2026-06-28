@@ -15,7 +15,7 @@ use pg_lakebase_core::expr::predicate::PlanPredicate;
 use pg_lakebase_core::expr::split::QualPushdownDecision;
 use pgrx::pg_sys;
 
-use crate::customscan::{IcebergPredicateClassifier, IcebergPredicateTranslator};
+use crate::predicate::{IcebergPredicateClassifier, IcebergPredicateTranslator};
 
 /// Resolves the safest available Iceberg conflict filter for one DML target.
 #[derive(Debug)]
@@ -38,10 +38,9 @@ impl DmlConflictFilterResolver {
 
     fn resolve_target(&self, target_plan: DmlTargetPlan<'_>) -> Predicate {
         let classifier = IcebergPredicateClassifier::for_conflict_detection();
-        let mut classify_leaf =
-            |predicate: &PlanPredicate<'_>| -> QualPushdownDecision {
-                classifier.classify(predicate)
-            };
+        let mut classify_leaf = |predicate: &PlanPredicate| -> QualPushdownDecision {
+            classifier.classify(predicate)
+        };
         let Some(mut builder) =
             DmlConflictPredicateBuilder::new(target_plan, &mut classify_leaf)
         else {

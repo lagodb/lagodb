@@ -10,6 +10,7 @@ pub mod error;
 pub mod gucs;
 pub mod hooks;
 pub mod options;
+mod predicate;
 pub mod storage;
 pub mod wal;
 

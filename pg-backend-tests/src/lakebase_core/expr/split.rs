@@ -91,6 +91,22 @@ mod tests {
             unsafe { self.nodes.restrictinfo(clause, pseudoconstant, true, 0) }
         }
 
+        unsafe fn restrictinfo_with_security(
+            &self,
+            clause: *mut pg_sys::Expr,
+            leakproof: bool,
+            security_level: u32,
+        ) -> *mut pg_sys::RestrictInfo {
+            unsafe {
+                self.nodes.restrictinfo(
+                    clause,
+                    /* pseudoconstant */ false,
+                    leakproof,
+                    security_level,
+                )
+            }
+        }
+
         unsafe fn restrictinfo_list(
             &self,
             rinfos: &[*mut pg_sys::RestrictInfo],
@@ -126,7 +142,7 @@ mod tests {
             let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
 
             let mut classify_leaf =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Pushable {
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
                     contract: PushdownContract::ExactRowFilter,
                     costing: PushdownCosting::CostedPruning,
                 };
@@ -189,7 +205,7 @@ mod tests {
             let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
 
             let mut classify_leaf =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Pushable {
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
                     contract: PushdownContract::ConservativePruning,
                     costing: PushdownCosting::CostedPruning,
                 };
@@ -255,7 +271,7 @@ mod tests {
             let and_ri = fixture.restrictinfo(and_clause, false);
             let scan_clauses = fixture.restrictinfo_list(&[and_ri]);
 
-            let mut classify_leaf = |pred: &PlanPredicate<'_>| {
+            let mut classify_leaf = |pred: &PlanPredicate| {
                 let attno = match pred {
                     PlanPredicate::Comparison {
                         left: PlanScalar::Column(c),
@@ -331,7 +347,7 @@ mod tests {
             let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
 
             let mut classify_leaf =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Unsupported;
+                |_p: &PlanPredicate| QualPushdownDecision::Unsupported;
 
             let mut splitter = PlanPushdownSplitter::new(
                 fixture.root(),
@@ -375,7 +391,7 @@ mod tests {
             let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
 
             let mut classify_leaf =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Pushable {
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
                     contract: PushdownContract::ExactRowFilter,
                     costing: PushdownCosting::CostedPruning,
                 };
@@ -402,6 +418,138 @@ mod tests {
                 "pseudoconstant must NOT appear in recheck",
             );
             assert!(split.pushed_contracts().next().is_none());
+            assert!(split.column_refs.is_empty());
+        }
+    }
+
+    /// A non-leakproof clause above the relation's minimum security level must
+    /// remain in PostgreSQL's residual qual without reaching the provider.
+    #[pg_test]
+    fn split_security_gate_keeps_non_leakproof_clause_residual() {
+        unsafe {
+            let fixture = SplitFixture::new();
+            let clause = fixture.op_expr(
+                INT4_EQ_OPNO,
+                pg_sys::Oid::INVALID,
+                pg_sys::Oid::INVALID,
+                &[fixture.int4_var(1), fixture.int4_const(1)],
+            );
+            let rinfo = fixture.restrictinfo_with_security(
+                clause,
+                /* leakproof */ false,
+                /* security_level */ 1,
+            );
+            let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
+
+            let mut classify_leaf =
+                |_p: &PlanPredicate| -> QualPushdownDecision {
+                    panic!(
+                        "security-gated clause must not reach provider classification"
+                    )
+                };
+            let mut splitter = PlanPushdownSplitter::new(
+                fixture.root(),
+                fixture.baserel(),
+                scan_clauses,
+                ScanClauseSource::BaseRestriction,
+                &mut classify_leaf,
+            );
+            let split = splitter.split();
+
+            assert_eq!(split.residual, vec![clause]);
+            assert!(split.pushed.is_empty());
+            assert!(split.recheck.is_empty());
+            assert!(split.column_refs.is_empty());
+        }
+    }
+
+    /// Leakproof clauses may be promoted even when their security level is
+    /// above the relation minimum.
+    #[pg_test]
+    fn split_security_gate_allows_leakproof_clause() {
+        unsafe {
+            let fixture = SplitFixture::new();
+            let clause = fixture.op_expr(
+                INT4_EQ_OPNO,
+                pg_sys::Oid::INVALID,
+                pg_sys::Oid::INVALID,
+                &[fixture.int4_var(1), fixture.int4_const(1)],
+            );
+            let rinfo = fixture.restrictinfo_with_security(
+                clause,
+                /* leakproof */ true,
+                /* security_level */ 1,
+            );
+            let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
+
+            let mut classify_leaf =
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
+                    contract: PushdownContract::ExactRowFilter,
+                    costing: PushdownCosting::CostedPruning,
+                };
+            let mut splitter = PlanPushdownSplitter::new(
+                fixture.root(),
+                fixture.baserel(),
+                scan_clauses,
+                ScanClauseSource::BaseRestriction,
+                &mut classify_leaf,
+            );
+            let split = splitter.split();
+
+            assert!(split.residual.is_empty());
+            assert_eq!(
+                split.pushed,
+                vec![pushed_entry(clause, PushdownContract::ExactRowFilter)],
+            );
+            assert_eq!(split.recheck, vec![clause]);
+        }
+    }
+
+    /// A join/PPI clause that PostgreSQL says is not movable to the scan
+    /// relation must remain residual without reaching provider classification.
+    #[pg_test]
+    fn split_movable_source_keeps_unmovable_clause_residual() {
+        unsafe {
+            let fixture = SplitFixture::new();
+            let clause = fixture.op_expr(
+                INT4_EQ_OPNO,
+                pg_sys::Oid::INVALID,
+                pg_sys::Oid::INVALID,
+                &[fixture.int4_var(1), fixture.int4_const(1)],
+            );
+            let rinfo = fixture.restrictinfo_with_security(
+                clause,
+                /* leakproof */ true,
+                /* security_level */ 0,
+            );
+            (*rinfo).clause_relids =
+                pg_sys::bms_make_singleton(SYNTH_RELID as core::ffi::c_int);
+            (*rinfo).outer_relids =
+                pg_sys::bms_make_singleton(SYNTH_RELID as core::ffi::c_int);
+            assert!(
+                !pg_sys::join_clause_is_movable_to(rinfo, fixture.baserel()),
+                "fixture must represent an unmovable join clause",
+            );
+            let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
+
+            let mut classify_leaf =
+                |_p: &PlanPredicate| -> QualPushdownDecision {
+                    panic!(
+                        "unmovable clause must not reach provider classification"
+                    )
+                };
+            let mut splitter = PlanPushdownSplitter::new(
+                fixture.root(),
+                fixture.baserel(),
+                scan_clauses,
+                ScanClauseSource::Movable,
+                &mut classify_leaf,
+            );
+            let split = splitter.split();
+
+            assert_eq!(split.residual, vec![clause]);
+            assert!(split.pushed.is_empty());
+            assert!(split.recheck.is_empty());
             assert!(split.column_refs.is_empty());
         }
     }
@@ -434,7 +582,7 @@ mod tests {
                 unsupported_ri,
             ]);
 
-            let mut classify_leaf = |pred: &PlanPredicate<'_>| {
+            let mut classify_leaf = |pred: &PlanPredicate| {
                 let attno = match pred {
                     PlanPredicate::Comparison {
                         left: PlanScalar::Column(c),
@@ -527,7 +675,7 @@ mod tests {
             let ri_b = fixture.restrictinfo(clause_b, false);
             let scan_clauses = fixture.restrictinfo_list(&[ri_a, ri_b]);
 
-            let mut classify_leaf = |pred: &PlanPredicate<'_>| {
+            let mut classify_leaf = |pred: &PlanPredicate| {
                 let PlanPredicate::Comparison { op, .. } = pred else {
                     return QualPushdownDecision::Unsupported;
                 };

@@ -3,7 +3,7 @@
 //!
 //! Split by subsystem so each file targets one exec helper / trampoline:
 //! - [`slice`]: `slice_pushed_recheck` + `check_scan_relation_oid`.
-//! - [`param_refs`]: the `collect_param_refs` pushed-Param walker.
+//! - [`param_refs`]: the cached pushed-expression parameter domain.
 //! - [`rescan`]: the ReScan trampoline's chgParam gating + `bms_overlap`.
 //! - [`runtime_params`]: `RuntimeParamResolver` EXTERN/EXEC resolution.
 //! - [`emit`]: `RelationHandle` accessors + `emit_row` / `emit_columns`.

@@ -2,24 +2,23 @@
 //!
 //! Downstream extensions call [`provider::register_provider`] then [`init`] from `_PG_init`.
 
-pub mod builder;
-pub mod codec;
-mod custom_exprs;
-pub mod custom_private;
 mod error;
+mod execution;
 pub use error::CustomScanError;
-pub mod exec;
-mod exec_params;
-pub mod explain;
 mod gucs;
-pub mod hook;
-mod param_path;
-mod path_clause;
-mod path_gate;
-mod path_router;
+mod plan_data;
+mod planning;
 pub mod provider;
-pub mod state;
-mod tuple_layout;
+
+// Stable facade paths for provider crates. Internally, ownership follows the
+// planning / plan-data / execution lifecycle boundaries above.
+pub use execution::{exec, explain, state};
+pub use plan_data::{codec, custom_private};
+pub use planning::{builder, hook};
+
+pub(crate) use execution::exec_params;
+pub(crate) use plan_data::{custom_exprs, tuple_layout};
+pub(crate) use planning::{candidate, parameterized, paths};
 
 #[cfg(test)]
 mod test_support;
@@ -33,6 +32,3 @@ pub fn init() {
         hook::install_set_rel_pathlist_hook();
     }
 }
-
-#[cfg(test)]
-mod pbt_param_info;

@@ -4,11 +4,9 @@
 //!
 //! - [`support`]: reusable PG-node fixtures and observation harnesses
 //! - [`predicate`]: backend-only classifier / translator pipeline coverage
-//! - [`custom_private`]: Iceberg `custom_private` payload and envelope behavior
 //! - [`decode`]: backend datum-decoding paths that cannot run in host `#[test]`
 //! - [`scan`]: end-to-end CustomScan execution over a live Iceberg table
 
-mod custom_private;
 mod decode;
 mod predicate;
 mod scan;

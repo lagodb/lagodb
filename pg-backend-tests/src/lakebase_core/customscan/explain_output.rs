@@ -74,7 +74,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }
@@ -190,7 +190,6 @@ mod tests {
                 pushed_contracts,
                 column_refs,
                 ptr::null_mut(),
-                varno as i32,
             )
             .expect("encode_split: synthetic counts are well within i32::MAX");
 

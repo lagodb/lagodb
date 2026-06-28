@@ -70,7 +70,7 @@ mod tests {
 
                 fn classify_predicate(
                     _ctx: &PlanTranslateContext,
-                    _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+                    _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
                 ) -> QualPushdownDecision {
                     QualPushdownDecision::Unsupported
                 }
@@ -171,7 +171,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }
@@ -394,7 +394,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }
@@ -531,7 +531,6 @@ mod tests {
                 &[],             // pushed_contracts (len must equal pushed_count = 0)
                 &[],             // column_refs
                 ptr::null_mut(), // provider_metadata -> decode(NULL) = Ok(unit)
-                1,               // pre_setrefs_scan_rti — debug-only
             )
             .expect("encode_split must succeed for the begin fixture");
 
@@ -627,7 +626,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }
@@ -690,7 +689,6 @@ mod tests {
                 &[],             // pushed_contracts (len must equal pushed_count = 0)
                 &[],             // column_refs
                 ptr::null_mut(), // provider_metadata -> decode(NULL) = Err(NullPayload)
-                1,               // pre_setrefs_scan_rti — debug-only
             )
             .expect("encode_split must succeed for the task decode-fail fixture");
 
@@ -789,7 +787,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }
@@ -864,7 +862,6 @@ mod tests {
                 &[], // pushed_contracts (len must equal pushed_count = 0)
                 &[], // column_refs
                 provider_metadata, // malformed cell-6 payload
-                1,   // pre_setrefs_scan_rti — debug-only
             )
             .expect("encode_split must succeed for the task codec-malformed fixture");
 

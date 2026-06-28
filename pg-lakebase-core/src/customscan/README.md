@@ -10,6 +10,25 @@ This README is for maintainers. It explains *why* the module is shaped the
 way it is and *how* a query flows through it. It deliberately avoids
 function signatures and field-level layouts — read the source for those.
 
+## Module boundaries
+
+The implementation is organized by lifecycle rather than by Rust item type:
+
+```text
+customscan/
+  planning/   planner hook, gates, path variants, costing, plan construction
+  plan_data/  PostgreSQL-copyable plan carriers and scan-tuple contract
+  execution/  executor callbacks, parameter resolution, state, EXPLAIN
+  provider/   typed provider SPI plus the type-erased process registry
+```
+
+Dependencies should follow the query lifecycle. Planning may produce
+`plan_data`; execution may consume it; neither layer owns provider runtime
+state. The provider registry is planner infrastructure and is deliberately
+separate from the typed SPI implemented by storage backends. The facade in
+`mod.rs` keeps provider-facing paths concise without making the implementation
+flat again.
+
 ## Why this exists
 
 A normal PostgreSQL TableAM scan never sees ordinary `WHERE` quals; the

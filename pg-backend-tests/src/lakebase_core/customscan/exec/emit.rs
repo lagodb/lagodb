@@ -123,7 +123,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }
@@ -403,7 +403,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }

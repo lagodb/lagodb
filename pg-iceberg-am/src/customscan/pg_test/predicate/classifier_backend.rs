@@ -15,7 +15,9 @@ mod tests {
         ComparisonOpSpec, ComparisonSpec, ConstSpec, OperandSpec, PREDICATE_HARNESS,
         RelabelSpec, ScanColumnSpec,
     };
-    use crate::customscan::{PredicateCapability, PredicatePushdownPolicy};
+    use crate::predicate::policy::{
+        PredicateCapability, PredicatePushdownPolicy,
+    };
     use pg_lakebase_core::expr::nodes::PgComparisonOp;
     use pg_lakebase_core::expr::split::{
         PushdownContract, PushdownCosting, QualPushdownDecision,
@@ -523,7 +525,7 @@ mod tests {
         }
     }
 
-    /// Float IS NULL is pushable regardless of `FLOAT_PUSHDOWN_ENABLED` because
+    /// Float IS NULL is pushable although float comparisons are unsupported because
     /// null tests only inspect the null bitmap — no value comparison involved.
     #[pgrx::pg_test(schema = "tests")]
     fn classifier_pushes_null_test_on_float_regardless_of_toggle() {
@@ -551,7 +553,7 @@ mod tests {
                         contract,
                         PushdownContract::ExactRowFilter,
                         "IS NOT NULL on float8 scan column must be ExactRowFilter \
-                         (null tests are decoupled from FLOAT_PUSHDOWN_ENABLED)",
+                         (null tests are independent of comparison support)",
                     );
                     assert_eq!(
                         costing,

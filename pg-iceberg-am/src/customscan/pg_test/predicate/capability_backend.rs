@@ -8,7 +8,9 @@ mod tests {
     use pg_lakebase_core::expr::nodes::PgComparisonOp;
     use pgrx::pg_sys;
 
-    use crate::customscan::{PredicateCapability, PredicatePushdownPolicy};
+    use crate::predicate::policy::{
+        PredicateCapability, PredicatePushdownPolicy,
+    };
 
     fn supported_predicate(
         type_oid: pg_sys::Oid,

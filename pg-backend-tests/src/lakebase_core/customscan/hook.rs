@@ -1,4 +1,4 @@
-//! Backend tests for `path_stage_gates` and join-parameterized emit decisions.
+//! Backend tests for CustomScan candidates and join-parameterized emit decisions.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
@@ -8,7 +8,9 @@ mod tests {
     use crate::lakebase_core::support::pg::{
         OpExprSpec, PgNodeBuilder, PlannerRelFixture,
     };
-    use pg_lakebase_core::customscan::hook::{PathStageRejection, path_stage_gates};
+    use pg_lakebase_core::customscan::hook::{
+        CustomScanCandidate, CustomScanRejection,
+    };
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
@@ -92,9 +94,9 @@ mod tests {
             let (root, baserel, rte) = make_psg_state();
             (*rte).relkind = pg_sys::RELKIND_PARTITIONED_TABLE as core::ffi::c_char;
 
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte);
             match result {
-                Err(PathStageRejection::UnsupportedRelKind { relkind }) => {
+                Err(CustomScanRejection::UnsupportedRelKind { relkind }) => {
                     assert_eq!(
                         relkind,
                         pg_sys::RELKIND_PARTITIONED_TABLE,
@@ -115,9 +117,9 @@ mod tests {
             let (root, baserel, rte) = make_psg_state();
             (*rte).relkind = pg_sys::RELKIND_FOREIGN_TABLE as core::ffi::c_char;
 
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte);
             match result {
-                Err(PathStageRejection::UnsupportedRelKind { relkind }) => {
+                Err(CustomScanRejection::UnsupportedRelKind { relkind }) => {
                     assert_eq!(
                         relkind,
                         pg_sys::RELKIND_FOREIGN_TABLE,
@@ -141,10 +143,10 @@ mod tests {
             (*(*root).parse).commandType = pg_sys::CmdType::CMD_UPDATE;
             (*root).all_result_relids = psg_singleton_bitmap(PSG_RELID as i32);
 
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte);
             assert_eq!(
                 result,
-                Err(PathStageRejection::DmlTarget),
+                Err(CustomScanRejection::DmlTarget),
                 "DML target gate must reject when commandType != SELECT and \
                  rel->relid is in root->all_result_relids",
             );
@@ -165,10 +167,10 @@ mod tests {
             row_marks = pg_sys::lappend(row_marks, mark.cast());
             (*root).rowMarks = row_marks;
 
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte);
             assert_eq!(
                 result,
-                Err(PathStageRejection::HasRowMark),
+                Err(CustomScanRejection::HasRowMark),
                 "rowmark gate must reject when root->rowMarks has an entry whose \
                  rti matches rel->relid",
             );
@@ -186,10 +188,10 @@ mod tests {
             (*baserel).baserestrictinfo =
                 HookExprFixture::singleton_restrictinfo_list(rinfo);
 
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte);
             assert_eq!(
                 result,
-                Err(PathStageRejection::SystemColumnReference),
+                Err(CustomScanRejection::SystemColumnReference),
                 "system-column gate must reject a Var(ctid) reachable from \
                  baserestrictinfo",
             );
@@ -208,10 +210,10 @@ mod tests {
             (*baserel).baserestrictinfo =
                 HookExprFixture::singleton_restrictinfo_list(rinfo);
 
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte);
             assert_eq!(
                 result,
-                Err(PathStageRejection::SystemColumnReference),
+                Err(CustomScanRejection::SystemColumnReference),
                 "system-column gate must inspect Vars nested under common \
                  expression nodes",
             );
@@ -230,7 +232,7 @@ mod tests {
             let rinfo = HookExprFixture::restrictinfo(other_ctid);
             (*baserel).joininfo = HookExprFixture::singleton_restrictinfo_list(rinfo);
 
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte).map(|_| ());
             assert_eq!(
                 result,
                 Ok(()),
@@ -244,7 +246,7 @@ mod tests {
     fn path_stage_accepts_normal_relation() {
         unsafe {
             let (root, baserel, rte) = make_psg_state();
-            let result = path_stage_gates(root, baserel, rte);
+            let result = CustomScanCandidate::inspect(root, baserel, rte).map(|_| ());
             assert_eq!(
                 result,
                 Ok(()),
@@ -284,7 +286,7 @@ mod tests {
             let base_list = HookExprFixture::singleton_restrictinfo_list(base_rinfo);
 
             let mut base_classify =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Pushable {
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
                     contract: PushdownContract::ExactRowFilter,
                     costing: PushdownCosting::CostedPruning,
                 };
@@ -305,7 +307,7 @@ mod tests {
             let ppi_list = HookExprFixture::singleton_restrictinfo_list(ppi_rinfo);
 
             let mut ppi_classify =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Unsupported;
+                |_p: &PlanPredicate| QualPushdownDecision::Unsupported;
             let mut ppi_splitter = PlanPushdownSplitter::new(
                 root,
                 baserel,
@@ -359,7 +361,7 @@ mod tests {
             let base_list = HookExprFixture::singleton_restrictinfo_list(base_rinfo);
 
             let mut base_classify =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Pushable {
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
                     contract: PushdownContract::ExactRowFilter,
                     costing: PushdownCosting::CostedPruning,
                 };
@@ -380,7 +382,7 @@ mod tests {
             let ppi_list = HookExprFixture::singleton_restrictinfo_list(ppi_rinfo);
 
             let mut ppi_classify =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Unsupported;
+                |_p: &PlanPredicate| QualPushdownDecision::Unsupported;
             let mut ppi_splitter = PlanPushdownSplitter::new(
                 root,
                 baserel,
@@ -430,7 +432,7 @@ mod tests {
             let ppi_list = HookExprFixture::singleton_restrictinfo_list(join_rinfo);
 
             let mut ppi_classify =
-                |_p: &PlanPredicate<'_>| QualPushdownDecision::Pushable {
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
                     contract: PushdownContract::ExactRowFilter,
                     costing: PushdownCosting::CostedPruning,
                 };

@@ -66,7 +66,7 @@ impl LakebaseCustomScanProvider for HookIntegrationProvider {
 
     fn classify_predicate(
         _ctx: &PlanTranslateContext,
-        predicate: &PlanPredicate<'_>,
+        predicate: &PlanPredicate,
     ) -> QualPushdownDecision {
         if is_int4_eq_comparison(predicate) {
             QualPushdownDecision::Pushable {
@@ -100,7 +100,7 @@ impl LakebaseCustomScanProvider for HookIntegrationProvider {
             return None;
         }
 
-        Some(builder.private_data(HookIntegrationPrivate).build())
+        Some(builder.build(HookIntegrationPrivate))
     }
 
     fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
@@ -136,7 +136,7 @@ fn relation_name(rel_oid: pg_sys::Oid) -> Option<String> {
     }
 }
 
-fn is_int4_eq_comparison(predicate: &PlanPredicate<'_>) -> bool {
+fn is_int4_eq_comparison(predicate: &PlanPredicate) -> bool {
     match predicate {
         PlanPredicate::Comparison { op, left, right } => {
             let accepted_shape = matches!(

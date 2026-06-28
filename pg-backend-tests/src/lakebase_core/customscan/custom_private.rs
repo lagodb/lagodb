@@ -47,7 +47,7 @@ mod tests {
         for &attno in attnos {
             wire = unsafe { pg_sys::lappend_int(wire, attno as i32) };
         }
-        let cell = unsafe { pg_sys::list_nth_cell(envelope, 8) };
+        let cell = unsafe { pg_sys::list_nth_cell(envelope, 7) };
         assert!(!cell.is_null(), "tuple-layout envelope cell must exist");
         unsafe {
             (*cell).ptr_value = wire.cast();
@@ -60,7 +60,6 @@ mod tests {
         usize,
         Vec<PushdownContract>,
         Vec<ColumnRef>,
-        i32,
     ) {
         let relation_oid = pg_sys::Oid::from(16_384u32);
         let pushed_count = 2usize;
@@ -95,14 +94,12 @@ mod tests {
                 name: Some("col_c".to_string()),
             },
         ];
-        let pre_setrefs_scan_rti = 5;
         (
             relation_oid,
             pushed_count,
             recheck_count,
             pushed_contracts,
             column_refs,
-            pre_setrefs_scan_rti,
         )
     }
 
@@ -115,7 +112,6 @@ mod tests {
             recheck_count,
             pushed_contracts,
             column_refs,
-            pre_setrefs_scan_rti,
         ) = synthetic_inputs();
 
         unsafe {
@@ -128,7 +124,6 @@ mod tests {
                 &pushed_contracts,
                 &column_refs,
                 provider_metadata,
-                pre_setrefs_scan_rti,
             )
             .expect("encode_split: synthetic counts are within i32::MAX");
             assert!(!original.is_null(), "encode_split returned NULL");
@@ -168,11 +163,6 @@ mod tests {
                 "column_refs did not round-trip",
             );
 
-            assert_eq!(
-                decoded.pre_setrefs_scan_rti, pre_setrefs_scan_rti,
-                "pre_setrefs_scan_rti did not round-trip",
-            );
-
             let raw = decoded.provider_metadata_raw;
             assert!(!raw.is_null(), "provider_metadata_raw was NULL after copy");
             assert_eq!((*raw).type_, pg_sys::NodeTag::T_List);
@@ -204,7 +194,6 @@ mod tests {
             recheck_count,
             pushed_contracts,
             column_refs,
-            pre_setrefs_scan_rti,
         ) = synthetic_inputs();
 
         unsafe {
@@ -217,7 +206,6 @@ mod tests {
                 &pushed_contracts,
                 &column_refs,
                 provider_metadata,
-                pre_setrefs_scan_rti,
             )
             .expect("encode_split: synthetic counts are within i32::MAX");
             assert!(!top.is_null(), "encode_split returned NULL");
@@ -228,8 +216,8 @@ mod tests {
             );
             assert_eq!(
                 (*top).length,
-                9,
-                "top-level custom_private must keep the 9-cell envelope layout",
+                8,
+                "top-level custom_private must keep the 8-cell envelope layout",
             );
 
             let cell_tag = |i: i32| -> pg_sys::NodeTag {
@@ -245,8 +233,7 @@ mod tests {
             assert_eq!(cell_tag(4), pg_sys::NodeTag::T_IntList);
             assert_eq!(cell_tag(5), pg_sys::NodeTag::T_List);
             assert_eq!(cell_tag(6), pg_sys::NodeTag::T_List);
-            assert_eq!(cell_tag(7), pg_sys::NodeTag::T_Integer);
-            assert_eq!(cell_tag(8), pg_sys::NodeTag::T_IntList);
+            assert_eq!(cell_tag(7), pg_sys::NodeTag::T_IntList);
 
             let metadata = pg_sys::list_nth(top, 6) as *mut pg_sys::List;
             assert!(
@@ -286,7 +273,6 @@ mod tests {
             recheck_count,
             pushed_contracts,
             column_refs,
-            pre_setrefs_scan_rti,
         ) = synthetic_inputs();
 
         for (kind, expected) in [(1, &[3, 1][..]), (2, &[1, 4][..])] {
@@ -299,7 +285,6 @@ mod tests {
                     &pushed_contracts,
                     &column_refs,
                     ptr::null_mut(),
-                    pre_setrefs_scan_rti,
                 )
                 .expect("encode_split failed");
                 replace_tuple_layout_wire(envelope, kind, expected);
@@ -324,7 +309,6 @@ mod tests {
             recheck_count,
             pushed_contracts,
             column_refs,
-            pre_setrefs_scan_rti,
         ) = synthetic_inputs();
 
         for (kind, attnos, expected_error) in [
@@ -343,7 +327,6 @@ mod tests {
                     &pushed_contracts,
                     &column_refs,
                     ptr::null_mut(),
-                    pre_setrefs_scan_rti,
                 )
                 .expect("encode_split failed");
                 replace_tuple_layout_wire(envelope, kind, attnos);
@@ -369,7 +352,6 @@ mod tests {
             PushdownContract::ExactRowFilter,
             PushdownContract::ExactRowFilter,
         ];
-        let pre_setrefs_scan_rti = 7;
 
         let named = ColumnRef {
             expr_index: 0,
@@ -398,7 +380,6 @@ mod tests {
                 &pushed_contracts,
                 &column_refs,
                 ptr::null_mut(),
-                pre_setrefs_scan_rti,
             )
             .expect("encode_split: synthetic counts are within i32::MAX");
             assert!(!original.is_null(), "encode_split returned NULL");

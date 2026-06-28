@@ -1,7 +1,7 @@
 //! Cross-crate epoch-consistency backend tests.
 //!
 //! These tests assert a property *between* two crates: the runtime predicate
-//! translator (`customscan::predicate_translator::decode_datum`, in
+//! translator (`predicate::translator::decode_datum`, in
 //! `pg-iceberg-am`) encodes a pushed `date` / `timestamp` / `timestamptz` bound
 //! into an iceberg `Datum`, and the storage write side encodes the *stored*
 //! column values into the Arrow/Iceberg representation. For Iceberg-side pruning
@@ -17,7 +17,7 @@
 //!
 //! They stay in `pg-iceberg-am` (they reference `decode_datum`, which is
 //! AM-private) as `#[pgrx::pg_test]` — the translator side calls `decode_datum`,
-//! whose `numeric` / `text` arms reference PG backend symbols (`AnyNumeric`,
+//! whose text arm references PG backend symbols,
 //! `pg_detoast_datum`, `palloc`), so the whole decode path requires a live
 //! backend even though these tests only drive its temporal arms.
 //!
@@ -39,7 +39,7 @@ use pgrx::{FromDatum, pg_sys};
 use proptest::prelude::*;
 use proptest::test_runner::TestRunner;
 
-use crate::customscan::predicate_translator::decode_datum;
+use crate::predicate::translator::decode_datum;
 
 /// Buffer (in PG-epoch days) kept away from both ends of the `i32` range so
 /// that (a) we never generate the `±infinity` date sentinels

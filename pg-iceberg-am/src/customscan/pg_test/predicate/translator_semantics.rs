@@ -9,7 +9,7 @@
 //!
 //! The pure `map_comparison_operator` and `is_null` / `is_not_null`
 //! (non-column rejection) tests remain host `#[test]`s in
-//! `customscan/predicate_translator.rs`. This module owns the SQL
+//! `customscan/predicate/translator.rs`. This module owns the SQL
 //! three-valued-logic NULL folding and the NULL-param decode contract.
 
 #[pgrx::pg_schema]
@@ -20,7 +20,9 @@ mod tests {
     use pgrx::pg_sys;
     use pgrx::pg_sys::Oid;
 
-    use crate::customscan::{IcebergPredicateTranslator, IcebergScalar};
+    use crate::predicate::translator::{
+        IcebergPredicateTranslator, IcebergScalar,
+    };
 
     const INT4_TYPE_OID: u32 = 23;
     const INT8_TYPE_OID: u32 = 20;

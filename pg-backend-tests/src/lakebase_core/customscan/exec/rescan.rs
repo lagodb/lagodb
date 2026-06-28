@@ -15,7 +15,9 @@ mod tests {
     use pg_lakebase_core::customscan::custom_private::{
         CustomScanPrivate, encode_split,
     };
-    use pg_lakebase_core::customscan::exec::rescan_custom_scan_trampoline;
+    use pg_lakebase_core::customscan::exec::{
+        CustomExprSections, RuntimeParamRefs, rescan_custom_scan_trampoline,
+    };
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
@@ -147,7 +149,7 @@ mod tests {
 
         fn classify_predicate(
             _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate<'_>,
+            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
         ) -> QualPushdownDecision {
             QualPushdownDecision::Unsupported
         }
@@ -212,27 +214,28 @@ mod tests {
         }
     }
 
-    /// `ParamListInfo` with one INT4 slot (paramid 1) holding value 42.
-    unsafe fn make_param_list_int4_one() -> pg_sys::ParamListInfo {
+    /// Two-slot `PARAM_EXEC` array with slot 1 holding value 42.
+    unsafe fn make_exec_params_int4_one() -> *mut pg_sys::ParamExecData {
         unsafe {
-            let pli = pg_sys::makeParamList(1);
-            let slot: *mut pg_sys::ParamExternData = (*pli).params.as_mut_ptr();
-            (*slot).ptype = pg_sys::INT4OID;
+            let slots =
+                pg_sys::palloc0(2 * core::mem::size_of::<pg_sys::ParamExecData>())
+                    as *mut pg_sys::ParamExecData;
+            let slot = slots.add(1);
             (*slot).value = pg_sys::Datum::from(42i32);
             (*slot).isnull = false;
-            (*slot).pflags = 0;
-            pli
+            (*slot).execPlan = ptr::null_mut();
+            slots
         }
     }
 
-    /// Synthetic `CustomScan` with one pushed EXTERN param and matching envelope.
+    /// Synthetic `CustomScan` with one pushed EXEC param and matching envelope.
     unsafe fn make_custom_scan_plan(
         relation_oid: pg_sys::Oid,
     ) -> *mut pg_sys::CustomScan {
         unsafe {
             let nodes = PgNodeBuilder::new(1);
             let v = nodes.int4_var(1);
-            let p = nodes.int4_param(pg_sys::ParamKind::PARAM_EXTERN, 1);
+            let p = nodes.int4_param(pg_sys::ParamKind::PARAM_EXEC, 1);
 
             let op = nodes.op_expr(OpExprSpec::int4_eq_deparse(), &[v, p]);
 
@@ -257,7 +260,6 @@ mod tests {
                 &pushed_contracts,
                 &column_refs,
                 ptr::null_mut(),
-                1, // pre_setrefs_scan_rti — debug-only
             )
             .expect("encode_split must succeed for the CP-8 fixture's tiny counts");
 
@@ -274,7 +276,6 @@ mod tests {
 
     /// Build wrapper/node/cached_ids triple for chgParam rescan tests.
     unsafe fn synth_setup_chgparam_rescan(
-        cached_ids_members: &[c_int],
         chgparam_members: &[c_int],
     ) -> ChgParamFixture {
         unsafe {
@@ -306,24 +307,27 @@ mod tests {
                 name: None,
             }];
             (*wrapper_ptr).cached_envelope = Some(CachedEnvelope {
-                pushed_count: 1,
-                recheck_count: 0,
                 pushed_contracts: vec![PushdownContract::ExactRowFilter],
                 column_refs,
                 tuple_layout: ScanTupleLayout::default(),
             });
 
-            let cached_ids = make_bms(cached_ids_members);
-            (*wrapper_ptr).cached_pushed_param_ids = cached_ids;
-
             let cscan = make_custom_scan_plan(relation_oid);
             (*wrapper_ptr).base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
+            let expr_sections =
+                CustomExprSections::from_custom_exprs((*cscan).custom_exprs, 1, 0)
+                    .expect("fixture custom_exprs must have one pushed expression");
+            let runtime_params =
+                RuntimeParamRefs::collect_from_exprs(expr_sections.pushed());
+            let cached_ids = runtime_params.exec_param_ids();
+            (*wrapper_ptr).expr_sections = Some(expr_sections);
+            (*wrapper_ptr).runtime_params = Some(runtime_params);
 
             let scan_rel = make_relation_stub(relation_oid);
             (*wrapper_ptr).base.ss.ss_currentRelation = scan_rel;
 
-            let pli = make_param_list_int4_one();
-            let estate = make_estate_stub(pli);
+            let estate = make_estate_stub(ptr::null_mut());
+            (*estate).es_param_exec_vals = make_exec_params_int4_one();
             let econtext = make_econtext_stub();
             (*wrapper_ptr).base.ss.ps.state = estate;
             (*wrapper_ptr).base.ss.ps.ps_ExprContext = econtext;
@@ -350,7 +354,7 @@ mod tests {
     #[pg_test]
     fn rescan_chgparam_intersect_triggers_rebuild() {
         unsafe {
-            let fx = synth_setup_chgparam_rescan(&[1, 2, 3], &[1, 7]);
+            let fx = synth_setup_chgparam_rescan(&[1, 7]);
 
             rescan_custom_scan_trampoline::<CountingProvider>(fx.node);
 
@@ -379,9 +383,13 @@ mod tests {
                  cscan->scan.scanrelid ",
             );
             assert_eq!(
-                (*fx.wrapper_ptr).cached_pushed_param_ids,
+                (*fx.wrapper_ptr)
+                    .runtime_params
+                    .as_ref()
+                    .expect("runtime params cached")
+                    .exec_param_ids(),
                 fx.cached_ids,
-                "cached_pushed_param_ids is computed once at Begin and must \
+                "runtime param ids are computed once at Begin and must \
                  NOT be stomped by ReScan ",
             );
         }
@@ -391,7 +399,7 @@ mod tests {
     #[pg_test]
     fn rescan_chgparam_disjoint_skips_rebuild() {
         unsafe {
-            let fx = synth_setup_chgparam_rescan(&[1, 2, 3], &[7, 8]);
+            let fx = synth_setup_chgparam_rescan(&[7, 8]);
 
             rescan_custom_scan_trampoline::<CountingProvider>(fx.node);
 
@@ -413,9 +421,13 @@ mod tests {
                  Requirement 11.4 — no Datum comparison)",
             );
             assert_eq!(
-                (*fx.wrapper_ptr).cached_pushed_param_ids,
+                (*fx.wrapper_ptr)
+                    .runtime_params
+                    .as_ref()
+                    .expect("runtime params cached")
+                    .exec_param_ids(),
                 fx.cached_ids,
-                "cached_pushed_param_ids must remain unchanged across the \
+                "runtime param ids must remain unchanged across the \
                  reopen-only branch ",
             );
         }
@@ -425,7 +437,7 @@ mod tests {
     #[pg_test]
     fn rescan_chgparam_null_skips_rebuild() {
         unsafe {
-            let fx = synth_setup_chgparam_rescan(&[1, 2, 3], &[]);
+            let fx = synth_setup_chgparam_rescan(&[]);
             assert!(
                 (*fx.wrapper_ptr).base.ss.ps.chgParam.is_null(),
                 "make_bms with no members must produce NULL — PG's \

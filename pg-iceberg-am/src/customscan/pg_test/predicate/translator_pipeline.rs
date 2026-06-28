@@ -250,10 +250,8 @@ mod tests {
     }
 
     /// Classifier pushability and translator buildability must stay in lockstep
-    /// for representative scoped operators. Numeric is included as the
-    /// disabled case (`NUMERIC_COMPARISON_PUSHDOWN_ENABLED == false`): both the
-    /// classifier and the translator must reject it, so lockstep holds as
-    /// `false == false`.
+    /// for representative scoped operators. Numeric is included as an
+    /// unsupported case: classifier and translator must both reject it.
     #[pgrx::pg_test(schema = "tests")]
     fn translator_scoped_classifier_lockstep_matrix() {
         use pgrx::IntoDatum;

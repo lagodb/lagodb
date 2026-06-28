@@ -102,7 +102,7 @@ mod tests {
     }
 
     /// Test leaf classifier dispatching on scan-column `attno` from a parsed predicate.
-    fn classify_by_varattno(predicate: &PlanPredicate<'_>) -> QualPushdownDecision {
+    fn classify_by_varattno(predicate: &PlanPredicate) -> QualPushdownDecision {
         let attno = scan_column_attno(predicate);
         match attno {
             Some(VARATTNO_EXACT) => QualPushdownDecision::Pushable {
@@ -117,9 +117,7 @@ mod tests {
         }
     }
 
-    fn scan_column_attno(
-        predicate: &PlanPredicate<'_>,
-    ) -> Option<pg_sys::AttrNumber> {
+    fn scan_column_attno(predicate: &PlanPredicate) -> Option<pg_sys::AttrNumber> {
         let col = match predicate {
             PlanPredicate::Comparison { left, .. } => column_ref(left)?,
             PlanPredicate::IsNull { value } | PlanPredicate::IsNotNull { value } => {
@@ -129,7 +127,7 @@ mod tests {
         Some(col.attno)
     }
 
-    fn column_ref(scalar: &PlanScalar<'_>) -> Option<PlanColumnRef> {
+    fn column_ref(scalar: &PlanScalar) -> Option<PlanColumnRef> {
         match scalar {
             PlanScalar::Column(c) => Some(*c),
             _ => None,

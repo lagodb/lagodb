@@ -6,8 +6,8 @@ use pg_lakebase_core::expr::predicate::PlanPredicateContext;
 use pg_lakebase_core::expr::split::QualPushdownDecision;
 use pgrx::pg_sys;
 
-use crate::customscan::IcebergPredicateClassifier;
 use crate::customscan::pg_test::support::fixtures::SCAN_RELID;
+use crate::predicate::IcebergPredicateClassifier;
 
 /// Stateless backend harness for running the AM classifier over synthetic PG nodes.
 pub(crate) struct ClassifierHarness;

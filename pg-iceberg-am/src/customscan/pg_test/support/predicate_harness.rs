@@ -13,7 +13,9 @@ use crate::customscan::pg_test::support::fixtures::{
     OUTER_RELID, SCAN_RELID, make_opexpr, make_typed_const, make_typed_param,
     make_typed_var, wrap_relabel,
 };
-use crate::customscan::{IcebergPredicateTranslator, IcebergTranslationError};
+use crate::predicate::translator::{
+    IcebergPredicateTranslator, IcebergTranslationError,
+};
 
 const SCAN_REL_OID: u32 = 16_384;
 const COLUMN_NAME: &str = "col";
