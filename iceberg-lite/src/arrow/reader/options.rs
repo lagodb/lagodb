@@ -16,7 +16,7 @@
 // under the License.
 
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
-use parquet::file::metadata::PageIndexPolicy;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 
 /// Default gap between byte ranges below which they are coalesced into a
 /// single request in the upstream async reader.
@@ -39,8 +39,10 @@ pub(crate) struct ParquetReadOptions {
     pub(super) range_coalesce_bytes: u64,
     /// Maximum number of merged byte ranges to fetch concurrently.
     pub(super) range_fetch_concurrency: usize,
-    /// Whether to preload the page index when reading Parquet metadata.
-    pub(super) preload_page_index: bool,
+    /// Policy for loading the Parquet column index.
+    pub(super) column_index_policy: PageIndexPolicy,
+    /// Policy for loading the Parquet offset index.
+    pub(super) offset_index_policy: PageIndexPolicy,
 }
 
 impl Default for ParquetReadOptions {
@@ -49,14 +51,20 @@ impl Default for ParquetReadOptions {
             metadata_size_hint: Some(DEFAULT_METADATA_SIZE_HINT),
             range_coalesce_bytes: DEFAULT_RANGE_COALESCE_BYTES,
             range_fetch_concurrency: DEFAULT_RANGE_FETCH_CONCURRENCY,
-            preload_page_index: false,
+            column_index_policy: PageIndexPolicy::Skip,
+            offset_index_policy: PageIndexPolicy::Skip,
         }
     }
 }
 
 impl ParquetReadOptions {
-    pub(super) fn with_page_index(mut self, load: bool) -> Self {
-        self.preload_page_index = load;
+    pub(super) fn with_index_policies(
+        mut self,
+        column_index_policy: PageIndexPolicy,
+        offset_index_policy: PageIndexPolicy,
+    ) -> Self {
+        self.column_index_policy = column_index_policy;
+        self.offset_index_policy = offset_index_policy;
         self
     }
 
@@ -64,6 +72,17 @@ impl ParquetReadOptions {
         &self,
         options: ArrowReaderOptions,
     ) -> ArrowReaderOptions {
-        options.with_page_index_policy(PageIndexPolicy::from(self.preload_page_index))
+        options
+            .with_column_index_policy(self.column_index_policy)
+            .with_offset_index_policy(self.offset_index_policy)
+    }
+
+    pub(super) fn apply_to_metadata_reader(
+        &self,
+        reader: ParquetMetaDataReader,
+    ) -> ParquetMetaDataReader {
+        reader
+            .with_column_index_policy(self.column_index_policy)
+            .with_offset_index_policy(self.offset_index_policy)
     }
 }

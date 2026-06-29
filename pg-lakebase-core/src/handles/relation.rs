@@ -276,6 +276,18 @@ impl<'a> SnapshotHandle<'a> {
         self.inner.as_ptr()
     }
 
+    /// Returns PostgreSQL's snapshot kind.
+    #[inline]
+    pub fn snapshot_type(&self) -> pg_sys::SnapshotType::Type {
+        unsafe { self.inner.as_ref().snapshot_type }
+    }
+
+    /// Returns whether this snapshot bypasses normal tuple visibility checks.
+    #[inline]
+    pub fn is_any(&self) -> bool {
+        self.snapshot_type() == pg_sys::SnapshotType::SNAPSHOT_ANY
+    }
+
     #[inline]
     pub fn xmin(&self) -> pg_sys::TransactionId {
         unsafe { self.inner.as_ref().xmin }

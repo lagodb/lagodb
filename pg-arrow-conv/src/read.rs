@@ -519,16 +519,21 @@ impl ArrowColumnDecoder {
         }
     }
 
-    /// Decode one batch row into an owned [`Row`].
+    /// Decode one batch row into a caller-owned [`Row`].
     ///
     /// This is for row-version fetch paths that must return a `Row` beyond the
     /// lifetime of the Arrow batch. Borrowed string/binary views are copied into
-    /// owned cells before the row is returned.
-    pub fn read_owned_row(
+    /// owned cells before the batch is dropped. Existing cells at mapped
+    /// destinations are replaced; unmapped destinations are left untouched.
+    ///
+    /// If decoding fails, `out` may contain cells decoded before the error and
+    /// must not be consumed as a complete row.
+    pub fn read_owned_row_into(
         &self,
         batch: RecordBatch,
         row_idx: usize,
-    ) -> AmResult<Row> {
+        out: &mut Row,
+    ) -> AmResult<()> {
         let bound = self.bind(batch)?;
         if row_idx >= bound.num_rows {
             return Err(ConvError::DatumConversionError(format!(
@@ -538,23 +543,15 @@ impl ArrowColumnDecoder {
             .into());
         }
 
-        let mut row = Row::with_capacity(
-            self.columns
-                .iter()
-                .map(|col| col.dest)
-                .max()
-                .map(|dest| dest + 1)
-                .unwrap_or(0),
-        );
         for col in bound.columns.iter() {
             // SAFETY: `read_cell` may return borrowed views into arrays owned by
             // `bound`; `Cell::into_owned` copies those view variants before
             // `bound` is dropped at the end of this method.
             let cell =
                 unsafe { col.reader.read_cell(row_idx) }?.map(Cell::into_owned);
-            row.set_cell(col.dest, cell);
+            out.set_cell(col.dest, cell);
         }
-        Ok(row)
+        Ok(())
     }
 }
 

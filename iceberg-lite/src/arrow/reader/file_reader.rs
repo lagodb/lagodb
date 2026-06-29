@@ -16,54 +16,20 @@
 // under the License.
 
 use bytes::Bytes;
-use parquet::arrow::arrow_reader::ArrowReaderOptions;
-use parquet::file::metadata::PageIndexPolicy;
 use parquet::file::reader::{ChunkReader, Length};
 
 use crate::io::{FileMetadata, FileRead};
 
 /// ArrowFileReader is a wrapper around a FileRead that implements parquet's ChunkReader.
-///
-/// Note: In sync API, page index loading is controlled via `ArrowReaderOptions::with_page_index()`,
-/// which can be obtained from this struct via `to_arrow_reader_options()`.
 pub struct ArrowFileReader<R: FileRead> {
     meta: FileMetadata,
-    load_page_index: bool,
     r: R,
 }
 
 impl<R: FileRead> ArrowFileReader<R> {
     /// Create a new ArrowFileReader
     pub fn new(meta: FileMetadata, r: R) -> Self {
-        Self {
-            meta,
-            load_page_index: false,
-            r,
-        }
-    }
-
-    /// Enable or disable loading of the page index (column index + offset index).
-    ///
-    /// When enabled, the parquet reader will load page-level statistics which allows
-    /// for more granular row selection and filtering.
-    pub fn with_page_index(mut self, load: bool) -> Self {
-        self.load_page_index = load;
-        self
-    }
-
-    /// Get whether page index loading is enabled
-    pub fn page_index_enabled(&self) -> bool {
-        self.load_page_index
-    }
-
-    /// Convert the page index settings to ArrowReaderOptions.
-    ///
-    /// This merges the page index setting with any existing options.
-    pub fn apply_to_options(
-        &self,
-        options: ArrowReaderOptions,
-    ) -> ArrowReaderOptions {
-        options.with_page_index_policy(PageIndexPolicy::from(self.load_page_index))
+        Self { meta, r }
     }
 }
 

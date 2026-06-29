@@ -1,15 +1,60 @@
+use std::sync::Arc;
+
 use crate::IcebergTableAm;
 use crate::access::column_mapping::{RelationShape, ScanColumns};
-use crate::access::row_location::lookup_current;
-use crate::catalog::bridge::IcebergTableId;
+use crate::access::row_location::PhysicalRowTarget;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::StorageContext;
-use iceberg_lite::table::Table;
+use arrow_array::RecordBatch;
+use iceberg_lite::arrow::ArrowReaderBuilder;
+use iceberg_lite::spec::SchemaRef;
 use pg_arrow_conv::ArrowColumnDecoder;
 use pg_lakebase_core::diag::report_warning;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
+
+/// One physical Iceberg row in Arrow's native one-row batch representation.
+struct ArrowPhysicalRow {
+    schema: SchemaRef,
+    batch: RecordBatch,
+}
+
+impl ArrowPhysicalRow {
+    fn decode_into(self, rel: &RelationHandle, row: &mut Row) -> AmResult<()> {
+        let shape = RelationShape::from_relation(rel);
+        let plan = ScanColumns::new(self.schema, &shape)?;
+        let decoder = ArrowColumnDecoder::new(plan.decoded_columns());
+        row.ensure_len(rel.natts());
+        decoder.read_owned_row_into(self.batch, 0, row)
+    }
+}
+
+impl IcebergTableAm {
+    fn fetch_physical_row(
+        rel: &RelationHandle,
+        target: PhysicalRowTarget,
+    ) -> IcebergResult<Option<ArrowPhysicalRow>> {
+        let ctx = StorageContext::for_tablespace(rel.tablespace_oid())?;
+        let schema = Arc::clone(target.schema());
+
+        let projected_field_ids: Vec<i32> = schema
+            .as_struct()
+            .fields()
+            .iter()
+            .map(|field| field.id)
+            .collect();
+        let request = target.into_read_request(projected_field_ids)?;
+        let Some(batch) = ArrowReaderBuilder::new(ctx.file_io().clone())
+            .build()
+            .read_physical_row(request)?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(ArrowPhysicalRow { schema, batch }))
+    }
+}
 
 impl AmRelation for IcebergTableAm {
     fn relation_estimate_size(
@@ -35,58 +80,23 @@ impl AmRelation for IcebergTableAm {
     fn tuple_fetch_row_version(
         rel: &RelationHandle,
         tid: &ItemPointer,
-        _snapshot: &SnapshotHandle,
+        snapshot: &SnapshotHandle,
         row: &mut Row,
     ) -> AmResult<bool> {
-        let Some(location) = lookup_current(rel.oid(), tid)? else {
+        let Some(target) = PhysicalRowTarget::lookup_current(rel.oid(), tid)? else {
             return Ok(false);
         };
-
-        let ctx = StorageContext::for_tablespace(rel.tablespace_oid())?;
-        let loaded =
-            TxMetadata::current().current_table_metadata(rel.oid(), ctx.file_io())?;
-        let schema = loaded.metadata.current_schema().clone();
-        let delta = loaded.delta.clone();
-        let table = Table::builder()
-            .file_io(ctx.file_io().clone())
-            .metadata_location(loaded.location)
-            .metadata(loaded.metadata)
-            .identifier(IcebergTableId::for_relation(rel.oid()).into_table_ident())
-            .build()
-            .map_err(IcebergError::from)?;
-
-        let projected_field_ids: Vec<i32> = schema
-            .as_struct()
-            .fields()
-            .iter()
-            .map(|field| field.id)
-            .collect();
-        let mut scan_builder = table.scan().select_empty();
-        if let Some(snapshot_id) = location.starting_snapshot_id {
-            scan_builder = scan_builder.snapshot_id(snapshot_id);
-        }
-        if let Some(delta) = delta {
-            scan_builder = scan_builder.with_delta(delta);
-        }
-        let Some(batch) = scan_builder
-            .build()
-            .map_err(IcebergError::from)?
-            .fetch_row_by_position(
-                &location.data_file_path,
-                location.position,
-                &projected_field_ids,
+        if !snapshot.is_any() {
+            return Err(IcebergError::NotImplemented(
+                "Iceberg synthetic ctid fetch currently requires SnapshotAny",
             )
-            .map_err(IcebergError::from)?
-        else {
+            .into());
+        }
+
+        let Some(fetched) = Self::fetch_physical_row(rel, target)? else {
             return Ok(false);
         };
-
-        let shape = RelationShape::from_relation(rel);
-        let plan = ScanColumns::new(schema, &shape)?;
-        let decoder = ArrowColumnDecoder::new(plan.decoded_columns());
-        let mut fetched = decoder.read_owned_row(batch, 0)?;
-        fetched.ensure_len(rel.natts());
-        row.replace_with(fetched);
+        fetched.decode_into(rel, row)?;
         Ok(true)
     }
 }

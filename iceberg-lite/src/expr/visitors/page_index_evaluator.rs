@@ -176,12 +176,11 @@ impl<'a> PageIndexEvaluator<'a> {
                     let Some(offset_index) =
                         self.offset_index.get(parquet_column_index)
                     else {
-                        // if we have a column index, we should always have an offset index.
-                        return Err(Error::new(
-                            ErrorKind::Unexpected,
-                            format!("Missing offset index for field id {field_id}"),
-                        ));
+                        return self.select_all_rows();
                     };
+                    if offset_index.page_locations().is_empty() {
+                        return self.select_all_rows();
+                    }
 
                     let count = self.calc_row_counts(offset_index);
                     self.row_count_cache

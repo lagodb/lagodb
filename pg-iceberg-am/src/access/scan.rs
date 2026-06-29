@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use arrow_array::types::Int32Type;
 use arrow_array::{Array, ArrayRef, Int64Array, RecordBatch, RunArray, StringArray};
+use iceberg_lite::arrow::PhysicalRowReadContext;
 use iceberg_lite::expr::Predicate;
 use iceberg_lite::metadata_columns::{
     RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE,
@@ -72,6 +73,8 @@ pub(crate) struct ScanSpec {
     filter: Option<Predicate>,
     /// Transaction-local Iceberg file delta captured for this statement.
     delta: Option<Arc<SnapshotDelta>>,
+    /// Schema and name mapping retained for `SnapshotAny` physical tuple fetches.
+    physical_read_context: PhysicalRowReadContext,
 }
 
 impl ScanSpec {
@@ -103,6 +106,8 @@ impl ScanSpec {
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
         let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
+        let physical_read_context =
+            PhysicalRowReadContext::try_new(table.metadata())?;
         let plan = ScanColumns::new(schema, shape)?;
         Ok(Self {
             table: Arc::new(table),
@@ -110,6 +115,7 @@ impl ScanSpec {
             projection: None,
             filter: predicate,
             delta,
+            physical_read_context,
         })
     }
 
@@ -129,6 +135,8 @@ impl ScanSpec {
         scan_attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
+        let physical_read_context =
+            PhysicalRowReadContext::try_new(table.metadata())?;
         let plan = ScanColumns::with_projection(
             schema,
             projection.columns(),
@@ -141,6 +149,7 @@ impl ScanSpec {
             projection: Some(projection),
             filter: predicate,
             delta,
+            physical_read_context,
         })
     }
 
@@ -616,8 +625,11 @@ impl AmScanSession for IcebergScan {
 
     fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
         let spec = ScanSpec::build(self.rel_oid, self.spc_oid, keys, &self.shape)?;
-        let row_locations =
-            begin_dml_scan(self.rel_oid, spec.starting_snapshot_id())?;
+        let row_locations = begin_dml_scan(
+            self.rel_oid,
+            spec.starting_snapshot_id(),
+            spec.physical_read_context.clone(),
+        )?;
         let cursor = spec.open_batch_cursor(row_locations)?;
         self.spec = Some(spec);
         self.cursor = Some(cursor);
@@ -657,8 +669,11 @@ impl AmScanSession for IcebergScan {
         };
 
         spec.refresh_filter(keys)?;
-        let row_locations =
-            begin_dml_scan(self.rel_oid, spec.starting_snapshot_id())?;
+        let row_locations = begin_dml_scan(
+            self.rel_oid,
+            spec.starting_snapshot_id(),
+            spec.physical_read_context.clone(),
+        )?;
         self.cursor = Some(spec.open_batch_cursor(row_locations)?);
         Ok(())
     }

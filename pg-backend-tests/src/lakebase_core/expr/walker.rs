@@ -620,9 +620,9 @@ mod tests {
                         "SubPlan-tainted clause should be returned as Unsupported with the original residual",
                     );
                 }
-                other => panic!(
-                    "expected Unsupported (SubPlan gate), got {other:?}",
-                ),
+                other => {
+                    panic!("expected Unsupported (SubPlan gate), got {other:?}",)
+                }
             }
         }
     }

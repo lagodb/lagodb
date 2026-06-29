@@ -53,7 +53,7 @@ use crate::access::conflict_filter::{
 };
 use crate::access::isolation::PgTransactionIsolation;
 use crate::access::row_location::{
-    DmlScanObservation, RowLocation, current_dml_scan_observation, lookup_current,
+    DmlScanObservation, RowLocation, current_dml_scan_observation,
 };
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
@@ -600,7 +600,7 @@ impl AmDmlSession for IcebergModify {
         // `tuple_delete` only runs inside `ExecModifyTable` (frame active) with a
         // ctid this relation's scan synthesized, so a missing row location is an
         // invariant violation, not a concurrently deleted row.
-        let location = lookup_current(self.rel_oid, tid)?.ok_or(
+        let location = RowLocation::lookup_current(self.rel_oid, tid)?.ok_or(
             IcebergError::InvariantViolated(
                 "tuple_delete reached a ctid with no active Iceberg row location",
             ),
@@ -630,7 +630,7 @@ impl AmDmlSession for IcebergModify {
         // As in `tuple_delete`: `tuple_update_slot` only runs inside
         // `ExecModifyTable` with a ctid this relation's scan synthesized, so a
         // missing row location is an invariant violation.
-        let location = lookup_current(self.rel_oid, otid)?.ok_or(
+        let location = RowLocation::lookup_current(self.rel_oid, otid)?.ok_or(
             IcebergError::InvariantViolated(
                 "tuple_update_slot reached a ctid with no active Iceberg row location",
             ),
@@ -661,7 +661,7 @@ impl AmDmlSession for IcebergModify {
         _flags: u8,
         tmfd: &mut TM_FailureData,
     ) -> AmResult<pg_sys::TM_Result::Type> {
-        let Some(location) = lookup_current(self.rel_oid, tid)? else {
+        let Some(location) = RowLocation::lookup_current(self.rel_oid, tid)? else {
             return Ok(pg_sys::TM_Result::TM_Deleted);
         };
         if self.position_deletes.contains(&location) {
@@ -989,7 +989,6 @@ mod dml_state_tests {
         let location = |position| RowLocation {
             data_file_path: Rc::from("data.parquet"),
             position,
-            starting_snapshot_id: Some(42),
         };
         let mut accumulator = PositionDeleteAccumulator::default();
 

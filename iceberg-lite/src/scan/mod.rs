@@ -26,19 +26,15 @@ mod task;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use arrow_array::{Array, Int64Array, RecordBatch, RecordBatchOptions, UInt32Array};
-use arrow_select::take::take;
-use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+use arrow_array::RecordBatch;
 pub use task::*;
 
-use crate::arrow::{ArrowReader, ArrowReaderBuilder};
+use crate::arrow::ArrowReaderBuilder;
 use crate::delete_file_index::DeleteFileIndexBuilder;
 use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluator;
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::io::FileIO;
-use crate::metadata_columns::{
-    RESERVED_FIELD_ID_POS, get_metadata_field_id, is_metadata_column_name,
-};
+use crate::metadata_columns::{get_metadata_field_id, is_metadata_column_name};
 use crate::overlay::SnapshotDelta;
 
 use crate::spec::{
@@ -517,59 +513,6 @@ impl TableScan {
         arrow_reader_builder.build().read(tasks)
     }
 
-    /// Fetch one visible row by source data file path and original file position.
-    ///
-    /// This slow path preserves Iceberg delete semantics by planning the scan at
-    /// the scan's snapshot, applying delete files through [`ArrowReader`], and
-    /// matching against generated `_pos`.
-    pub fn fetch_row_by_position(
-        &self,
-        data_file_path: &str,
-        pos: u64,
-        projected_field_ids: &[i32],
-    ) -> Result<Option<RecordBatch>> {
-        let Some(mut task) = self
-            .plan_files()?
-            .into_iter()
-            .find(|task| task.data_file_path() == data_file_path)
-        else {
-            return Ok(None);
-        };
-
-        let mut read_field_ids = projected_field_ids.to_vec();
-        if !read_field_ids.contains(&RESERVED_FIELD_ID_POS) {
-            read_field_ids.push(RESERVED_FIELD_ID_POS);
-        }
-
-        task.project_field_ids = read_field_ids;
-        task.predicate = None;
-
-        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
-            .with_row_group_filtering_enabled(false)
-            .with_row_selection_enabled(false);
-        if let Some(batch_size) = self.batch_size {
-            arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
-        }
-
-        let pos = i64::try_from(pos).map_err(|_| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                "row position does not fit Iceberg long metadata column",
-            )
-        })?;
-
-        for batch in arrow_reader_builder.build().read(vec![task])? {
-            let batch = batch?;
-            if let Some(row) =
-                Self::select_row_at_position(batch, pos, projected_field_ids)?
-            {
-                return Ok(Some(row));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Returns a reference to the column names of the table scan.
     pub fn column_names(&self) -> Option<&[String]> {
         self.column_names.as_deref()
@@ -578,95 +521,6 @@ impl TableScan {
     /// Returns a reference to the snapshot of the table scan.
     pub fn snapshot(&self) -> Option<&SnapshotRef> {
         self.plan_context.as_ref().and_then(|x| x.snapshot.as_ref())
-    }
-
-    fn select_row_at_position(
-        batch: RecordBatch,
-        pos: i64,
-        projected_field_ids: &[i32],
-    ) -> Result<Option<RecordBatch>> {
-        let pos_column_index = Self::row_position_column_index(&batch)?;
-        let pos_column = batch
-            .column(pos_column_index)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    "_pos column is not an Iceberg long metadata column",
-                )
-            })?;
-
-        for row_index in 0..pos_column.len() {
-            if !pos_column.is_null(row_index) && pos_column.value(row_index) == pos {
-                let row = Self::take_single_row(batch, row_index)?;
-                return ArrowReader::project_record_batch_by_field_ids(
-                    row,
-                    projected_field_ids,
-                )
-                .map(Some);
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn row_position_column_index(batch: &RecordBatch) -> Result<usize> {
-        batch
-            .schema()
-            .fields()
-            .iter()
-            .enumerate()
-            .find_map(|(idx, field)| {
-                field
-                    .metadata()
-                    .get(PARQUET_FIELD_ID_META_KEY)
-                    .and_then(|field_id| {
-                        field_id
-                            .parse::<i32>()
-                            .ok()
-                            .filter(|field_id| *field_id == RESERVED_FIELD_ID_POS)
-                            .map(|_| idx)
-                    })
-            })
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "_pos column not found in row-position fetch batch",
-                )
-            })
-    }
-
-    fn take_single_row(batch: RecordBatch, row_index: usize) -> Result<RecordBatch> {
-        let row_index = u32::try_from(row_index).map_err(|_| {
-            Error::new(
-                ErrorKind::Unexpected,
-                "record batch row index overflowed u32",
-            )
-        })?;
-        let indices = UInt32Array::from(vec![row_index]);
-        let columns = batch
-            .columns()
-            .iter()
-            .map(|column| {
-                take(column.as_ref(), &indices, None).map_err(|err| {
-                    Error::new(
-                        ErrorKind::Unexpected,
-                        "failed to select row from record batch",
-                    )
-                    .with_source(err)
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let options = RecordBatchOptions::default()
-            .with_match_field_names(false)
-            .with_row_count(Some(1));
-        Ok(RecordBatch::try_new_with_options(
-            batch.schema(),
-            columns,
-            &options,
-        )?)
     }
 
     fn process_data_manifest_entry(
@@ -799,7 +653,7 @@ pub mod tests {
 
     use crate::Result;
     use crate::TableIdent;
-    use crate::arrow::ArrowReaderBuilder;
+    use crate::arrow::{ArrowReaderBuilder, PhysicalRowReadContext};
     use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
     use crate::metadata_columns::RESERVED_COL_NAME_FILE;
@@ -1850,6 +1704,48 @@ pub mod tests {
 
         let int64_arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(int64_arr.value(0), 1);
+    }
+
+    #[test]
+    fn test_physical_row_read_returns_requested_row() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files();
+        let data_file_path = format!("{}/1.parquet", fixture.table_location);
+        let read_context =
+            PhysicalRowReadContext::try_new(fixture.table.metadata()).unwrap();
+        let request = read_context
+            .read_row(&data_file_path, 700, vec![2])
+            .unwrap();
+
+        let batch = fixture
+            .table
+            .reader_builder()
+            .build()
+            .read_physical_row(request)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 1);
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 3);
+
+        let out_of_bounds = read_context
+            .read_row(&data_file_path, 1024, vec![2])
+            .unwrap();
+        assert!(
+            fixture
+                .table
+                .reader_builder()
+                .build()
+                .read_physical_row(out_of_bounds)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -175,12 +175,9 @@ impl MetadataArtifactRegistry {
         }
 
         let id = MetadataAttemptId(self.next_attempt_id);
-        self.next_attempt_id = self
-            .next_attempt_id
-            .checked_add(1)
-            .ok_or(IcebergError::InvariantViolated(
-                "metadata artifact attempt id overflow",
-            ))?;
+        self.next_attempt_id = self.next_attempt_id.checked_add(1).ok_or(
+            IcebergError::InvariantViolated("metadata artifact attempt id overflow"),
+        )?;
         self.active_attempt = Some(MetadataAttemptState {
             id,
             artifacts: Vec::new(),
@@ -352,8 +349,7 @@ impl ArtifactRegistry {
     // -- transaction callbacks ------------------------------------------------
 
     fn drain_top_level(&mut self) -> TopLevelArtifacts {
-        let (promoted_metadata, cleanup_metadata) =
-            self.metadata.drain_top_level();
+        let (promoted_metadata, cleanup_metadata) = self.metadata.drain_top_level();
         TopLevelArtifacts {
             transaction: std::mem::take(&mut self.entries),
             promoted_metadata,
@@ -447,19 +443,18 @@ impl ArtifactRegistry {
     fn abort_one(kind: ArtifactKind) -> Option<ArtifactKind> {
         let cleaned = match &kind {
             ArtifactKind::CreatedLocalFile { path } => best_effort_unlink(path),
-            ArtifactKind::CreatedTableDir {
-                location,
-                file_io,
-            } => match file_io.remove_dir_all(location) {
-                Ok(()) => true,
-                Err(e) => {
-                    pg_lakebase_core::diag::report_warning(&format!(
-                        "failed to delete table directory '{}': {}",
-                        location, e
-                    ));
-                    false
+            ArtifactKind::CreatedTableDir { location, file_io } => {
+                match file_io.remove_dir_all(location) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        pg_lakebase_core::diag::report_warning(&format!(
+                            "failed to delete table directory '{}': {}",
+                            location, e
+                        ));
+                        false
+                    }
                 }
-            },
+            }
             ArtifactKind::ObjectFile {
                 location,
                 staging_path,
@@ -534,27 +529,25 @@ struct StorageArtifactResource {
 }
 
 impl StorageArtifactResource {
-    fn promote_metadata_attempt(
-        &self,
-        id: MetadataAttemptId,
-    ) -> IcebergResult<()> {
+    fn promote_metadata_attempt(&self, id: MetadataAttemptId) -> IcebergResult<()> {
         self.inner
             .try_borrow_mut()
             .map_err(|_| {
-                IcebergError::InvariantViolated("artifact registry is already borrowed")
+                IcebergError::InvariantViolated(
+                    "artifact registry is already borrowed",
+                )
             })?
             .promote_metadata_attempt(id)
     }
 
-    fn discard_metadata_attempt(
-        &self,
-        id: MetadataAttemptId,
-    ) -> IcebergResult<()> {
+    fn discard_metadata_attempt(&self, id: MetadataAttemptId) -> IcebergResult<()> {
         let artifacts = self
             .inner
             .try_borrow_mut()
             .map_err(|_| {
-                IcebergError::InvariantViolated("artifact registry is already borrowed")
+                IcebergError::InvariantViolated(
+                    "artifact registry is already borrowed",
+                )
             })?
             .take_metadata_attempt_artifacts(id)?;
         self.cleanup_metadata_attempt(artifacts);
@@ -673,7 +666,9 @@ impl MetadataAttempt {
             .inner
             .try_borrow_mut()
             .map_err(|_| {
-                IcebergError::InvariantViolated("artifact registry is already borrowed")
+                IcebergError::InvariantViolated(
+                    "artifact registry is already borrowed",
+                )
             })?
             .begin_metadata_attempt()?;
         Ok(Self {

@@ -5,9 +5,10 @@
 //! `(data_file_path, position)`, so this module owns the lossy boundary:
 //! scans intern file paths in a DML-frame-local registry and pack
 //! `(file_index, pos)` into `ctid`; tuple callbacks decode it back. A map also
-//! retains the snapshot from which those row locations were produced. This is
-//! a physical scan observation, not the policy decision of whether the DML
-//! statement logically required a target read.
+//! retains the snapshot and physical-read schema context from which those row
+//! locations were produced. This is a physical scan observation, not the
+//! policy decision of whether the DML statement logically required a target
+//! read.
 //!
 //! ## Why no `map_id` in the ctid
 //!
@@ -62,6 +63,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use iceberg_lite::arrow::{PhysicalRowReadContext, PhysicalRowReadRequest};
+use iceberg_lite::spec::SchemaRef;
 use pg_lakebase_core::access::dml::{
     DmlFrameId, current_dml_frame_id, current_dml_target_frame,
     register_current_dml_frame_cleanup,
@@ -123,11 +126,62 @@ pub(crate) enum DmlScanObservation {
     Observed(Option<i64>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct RowLocation {
     pub(crate) data_file_path: Rc<str>,
     pub(crate) position: u64,
-    pub(crate) starting_snapshot_id: Option<i64>,
+}
+
+impl RowLocation {
+    pub(crate) fn lookup_current(
+        rel_oid: pg_sys::Oid,
+        tid: &ItemPointer,
+    ) -> IcebergResult<Option<Self>> {
+        let Some(frame_id) = current_dml_frame_id() else {
+            return Ok(None);
+        };
+        REGISTRY.with(|registry| registry.borrow().lookup(frame_id, rel_oid, tid))
+    }
+}
+
+/// A row identity resolved together with the scan-time schema context required
+/// by PostgreSQL's `SnapshotAny` tuple-fetch callback.
+#[derive(Debug)]
+pub(crate) struct PhysicalRowTarget {
+    location: RowLocation,
+    read_context: PhysicalRowReadContext,
+}
+
+impl PhysicalRowTarget {
+    pub(crate) fn lookup_current(
+        rel_oid: pg_sys::Oid,
+        tid: &ItemPointer,
+    ) -> IcebergResult<Option<Self>> {
+        let Some(frame_id) = current_dml_frame_id() else {
+            return Ok(None);
+        };
+        REGISTRY.with(|registry| {
+            registry
+                .borrow()
+                .lookup_physical_row(frame_id, rel_oid, tid)
+        })
+    }
+
+    pub(crate) fn schema(&self) -> &SchemaRef {
+        self.read_context.schema()
+    }
+
+    pub(crate) fn into_read_request(
+        self,
+        projected_field_ids: Vec<i32>,
+    ) -> IcebergResult<PhysicalRowReadRequest> {
+        let request = self.read_context.read_row(
+            self.location.data_file_path.as_ref(),
+            self.location.position,
+            projected_field_ids,
+        )?;
+        Ok(request)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,14 +193,19 @@ struct RegistryKey {
 #[derive(Debug)]
 struct RowLocationMap {
     starting_snapshot_id: Option<i64>,
+    read_context: PhysicalRowReadContext,
     files: Vec<Rc<str>>,
     file_indexes: HashMap<Rc<str>, u32>,
 }
 
 impl RowLocationMap {
-    fn new(starting_snapshot_id: Option<i64>) -> Self {
+    fn new(
+        starting_snapshot_id: Option<i64>,
+        read_context: PhysicalRowReadContext,
+    ) -> Self {
         Self {
             starting_snapshot_id,
+            read_context,
             files: Vec::new(),
             file_indexes: HashMap::new(),
         }
@@ -180,6 +239,17 @@ impl RowLocationMap {
                 ))
             })
     }
+
+    fn row_location(
+        &self,
+        file_index: u32,
+        position: u64,
+    ) -> IcebergResult<RowLocation> {
+        Ok(RowLocation {
+            data_file_path: self.file_path(file_index)?,
+            position,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -188,11 +258,30 @@ struct RowLocationRegistry {
 }
 
 impl RowLocationRegistry {
+    fn resolve(
+        &self,
+        frame_id: DmlFrameId,
+        rel_oid: pg_sys::Oid,
+        tid: &ItemPointer,
+    ) -> IcebergResult<Option<(&RowLocationMap, u32, u64)>> {
+        let Some((file_index, position)) = RowLocationCodec::decode(tid)? else {
+            return Ok(None);
+        };
+        let key = RegistryKey { frame_id, rel_oid };
+        let map = self.maps.get(&key).ok_or_else(|| {
+            IcebergError::MetadataTracker(format!(
+                "Iceberg DML ctid has no active row-location map for relation {rel_oid}"
+            ))
+        })?;
+        Ok(Some((map, file_index, position)))
+    }
+
     fn begin_scan(
         &mut self,
         frame_id: DmlFrameId,
         rel_oid: pg_sys::Oid,
         starting_snapshot_id: Option<i64>,
+        read_context: PhysicalRowReadContext,
     ) -> IcebergResult<(RowLocationMapHandle, bool)> {
         let key = RegistryKey { frame_id, rel_oid };
         let mut inserted = false;
@@ -205,8 +294,10 @@ impl RowLocationRegistry {
                 }
             }
             None => {
-                self.maps
-                    .insert(key, RowLocationMap::new(starting_snapshot_id));
+                self.maps.insert(
+                    key,
+                    RowLocationMap::new(starting_snapshot_id, read_context),
+                );
                 inserted = true;
             }
         }
@@ -236,19 +327,28 @@ impl RowLocationRegistry {
         rel_oid: pg_sys::Oid,
         tid: &ItemPointer,
     ) -> IcebergResult<Option<RowLocation>> {
-        let Some((file_index, position)) = RowLocationCodec::decode(tid)? else {
+        let Some((map, file_index, position)) =
+            self.resolve(frame_id, rel_oid, tid)?
+        else {
             return Ok(None);
         };
-        let key = RegistryKey { frame_id, rel_oid };
-        let map = self.maps.get(&key).ok_or_else(|| {
-            IcebergError::MetadataTracker(format!(
-                "Iceberg DML ctid has no active row-location map for relation {rel_oid}"
-            ))
-        })?;
-        Ok(Some(RowLocation {
-            data_file_path: map.file_path(file_index)?,
-            position,
-            starting_snapshot_id: map.starting_snapshot_id,
+        Ok(Some(map.row_location(file_index, position)?))
+    }
+
+    fn lookup_physical_row(
+        &self,
+        frame_id: DmlFrameId,
+        rel_oid: pg_sys::Oid,
+        tid: &ItemPointer,
+    ) -> IcebergResult<Option<PhysicalRowTarget>> {
+        let Some((map, file_index, position)) =
+            self.resolve(frame_id, rel_oid, tid)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PhysicalRowTarget {
+            location: map.row_location(file_index, position)?,
+            read_context: map.read_context.clone(),
         }))
     }
 
@@ -337,14 +437,18 @@ thread_local! {
 pub(crate) fn begin_dml_scan(
     rel_oid: pg_sys::Oid,
     starting_snapshot_id: Option<i64>,
+    read_context: PhysicalRowReadContext,
 ) -> IcebergResult<Option<RowLocationMapHandle>> {
     let Some(frame_id) = current_dml_target_frame(rel_oid) else {
         return Ok(None);
     };
     let (handle, inserted) = REGISTRY.with(|registry| {
-        registry
-            .borrow_mut()
-            .begin_scan(frame_id, rel_oid, starting_snapshot_id)
+        registry.borrow_mut().begin_scan(
+            frame_id,
+            rel_oid,
+            starting_snapshot_id,
+            read_context,
+        )
     })?;
 
     if inserted {
@@ -360,16 +464,6 @@ pub(crate) fn begin_dml_scan(
     }
 
     Ok(Some(handle))
-}
-
-pub(crate) fn lookup_current(
-    rel_oid: pg_sys::Oid,
-    tid: &ItemPointer,
-) -> IcebergResult<Option<RowLocation>> {
-    let Some(frame_id) = current_dml_frame_id() else {
-        return Ok(None);
-    };
-    REGISTRY.with(|registry| registry.borrow().lookup(frame_id, rel_oid, tid))
 }
 
 /// Return the target scan observation for `rel_oid` in the current DML frame.

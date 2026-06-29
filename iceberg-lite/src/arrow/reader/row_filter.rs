@@ -214,25 +214,23 @@ impl ArrowReader {
         selected_row_groups: &Option<Vec<usize>>,
         field_id_map: &HashMap<i32, usize>,
         snapshot_schema: &Schema,
-    ) -> Result<RowSelection> {
-        let Some(column_index) = parquet_metadata.column_index() else {
-            return Err(Error::new(
-                ErrorKind::Unexpected,
-                "Parquet file metadata does not contain a column index",
-            ));
+    ) -> Result<Option<RowSelection>> {
+        let (Some(column_index), Some(offset_index)) = (
+            parquet_metadata.column_index(),
+            parquet_metadata.offset_index(),
+        ) else {
+            return Ok(None);
         };
-
-        let Some(offset_index) = parquet_metadata.offset_index() else {
-            return Err(Error::new(
-                ErrorKind::Unexpected,
-                "Parquet file metadata does not contain an offset index",
-            ));
-        };
+        if column_index.len() != parquet_metadata.num_row_groups()
+            || offset_index.len() != parquet_metadata.num_row_groups()
+        {
+            return Ok(None);
+        }
 
         // If all row groups were filtered out, return an empty RowSelection (select no rows)
         if let Some(selected_row_groups) = selected_row_groups {
             if selected_row_groups.is_empty() {
-                return Ok(RowSelection::from(Vec::new()));
+                return Ok(Some(RowSelection::from(Vec::new())));
             }
         }
 
@@ -273,7 +271,9 @@ impl ArrowReader {
             }
         }
 
-        Ok(results.into_iter().flatten().collect::<Vec<_>>().into())
+        Ok(Some(
+            results.into_iter().flatten().collect::<Vec<_>>().into(),
+        ))
     }
 
     /// Filters row groups by byte range to support Iceberg's file splitting.
