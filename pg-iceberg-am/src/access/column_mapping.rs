@@ -17,7 +17,7 @@
 //! ## Position arithmetic lives here
 //!
 //! [`ColumnMapping`] is the *single owner* of all "Arrow column ↔ slot
-//! position" arithmetic for the scan path (Requirement 8.1). `scan.rs` and
+//! position" arithmetic for the scan path. `scan.rs` and
 //! `provider.rs` contain no `attno - 1` / `dest` index math: they hand this
 //! module a [`RelationShape`] (full-schema path) or a resolved projection
 //! (projected path), and `ColumnMapping` turns those into destination slot
@@ -183,10 +183,6 @@ impl ColumnMapping {
     /// carries that lingering column, so `src_col` (its schema index) is what
     /// lines the live columns up with their batch columns.
     ///
-    /// Errors — producing no `ColumnMapping` — when a live column name does not
-    /// resolve to an Iceberg field (Requirement 3.6 / 10.4, e.g. an
-    /// `ALTER TABLE RENAME COLUMN` attname/field desync), an `attno < 1`, or a
-    /// computed `dest >= slot_width` (Requirement 3.7).
     fn from_full_schema(
         schema: &IcebergSchema,
         live_columns: &[LiveColumn],
@@ -198,7 +194,7 @@ impl ColumnMapping {
         for col in live_columns {
             // Resolve the live PG column to its Iceberg field by name. A miss
             // means the name desynced from the Iceberg schema (out of scope;
-            // fail loud rather than silently mis-align — Requirement 3.6).
+            // fail loud rather than silently mis-align).
             let field = schema
                 .field_by_name(&col.name)
                 .ok_or_else(|| IcebergError::ColumnNotFound(col.name.clone()))?;
@@ -244,9 +240,6 @@ impl ColumnMapping {
     ) -> IcebergResult<Self> {
         let mut entries = Vec::with_capacity(pairs.len());
         for (src_col, pair) in pairs.iter().enumerate() {
-            // Hard error if the projected name does not resolve to a direct
-            // field of the Iceberg schema (Requirement 3.6 / 10.4 — a column
-            // rename desync surfaces here rather than returning wrong data).
             let field = schema
                 .field_by_name(&pair.name)
                 .ok_or_else(|| IcebergError::ColumnNotFound(pair.name.clone()))?;
@@ -299,13 +292,6 @@ impl ColumnMapping {
     }
 
     /// Compute and bounds-check `dest = attno - 1` against `slot_width`.
-    ///
-    /// The single place `attno - 1` is computed for either data-path direction
-    /// (Requirement 8.1): the scan plans (`from_full_schema` / `from_projection`)
-    /// and the write plan ([`WriteColumns::resolve_columns`]) all route the
-    /// attno→slot-index arithmetic through here. A non-positive `attno` or an
-    /// out-of-range `dest` is an AM-internal contract violation (callers only
-    /// ever pass live user columns whose `attno - 1 < natts == slot_width`).
     fn dest_from_attno(
         attno: pg_sys::AttrNumber,
         slot_width: usize,
@@ -441,19 +427,6 @@ impl ScanColumns {
 /// It owns both the per-column Arrow write buffer and the source-slot mapping,
 /// so the DML sink drives a single cohesive object rather than coordinating a
 /// loose buffer and a separate plan.
-///
-/// ## Position arithmetic lives here too (Requirement 8.1)
-///
-/// The write path is *not* a plain positional copy. The Parquet writer emits
-/// every Iceberg field in schema order, but the tuple slot is the relation's
-/// full `natts` width including dropped-column gaps, so Arrow-column index and
-/// slot index do **not** coincide in general. [`Self::source_slots`] binds each
-/// output column to the slot index of the live PG column that feeds it
-/// (resolved by name, `attno - 1`), exactly mirroring how the read-side
-/// [`ColumnMapping`] resolves `dest`. This removes the previous implicit
-/// "Iceberg field index == slot index" assumption, which only held by accident
-/// for simple `DROP COLUMN` and would silently write the wrong column under
-/// other schema shapes.
 pub(crate) struct WriteColumns {
     /// Per-column Arrow write buffer (one encoder per output column), bound to
     /// the relation's Arrow schema. Produces a `RecordBatch` on flush.
@@ -514,11 +487,6 @@ impl WriteColumns {
     /// `None` (written as SQL NULL) and resolves its rule from the
     /// Iceberg-derived type, since there is no relation column to validate
     /// against.
-    ///
-    /// It also proves the converse — every live PG column must be writable into
-    /// some Iceberg field — so a rename/schema desync that would otherwise
-    /// silently drop a live column's values fails loud here
-    /// (Requirement 3.6 / 10.4), matching the read path.
     fn resolve_columns(
         schema: &IcebergSchema,
         live_columns: &[LiveColumn],

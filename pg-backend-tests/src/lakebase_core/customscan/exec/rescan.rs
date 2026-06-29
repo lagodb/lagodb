@@ -417,8 +417,7 @@ mod tests {
             assert_eq!(
                 state.resolved_param_count, 0,
                 "reopen-only branch must hand the provider the empty \
-                 resolved-params slice (Requirement 11.3 — no re-resolution; \
-                 Requirement 11.4 — no Datum comparison)",
+                 resolved-params slice",
             );
             assert_eq!(
                 (*fx.wrapper_ptr)

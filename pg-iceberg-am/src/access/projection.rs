@@ -10,14 +10,6 @@
 //! - `name` drives `builder.select(...)` (the Iceberg field to read).
 //! - `destination` is the zero-based custom scan-slot cell where the decoded
 //!   value lands.
-//!
-//! Select-all is represented by [`ScanSpec`](super::scan::ScanSpec) holding
-//! `Option<Projection>` = `None`, **not** by an empty `Projection`. Core's
-//! tuple planner adds a live resjunk dependency for a zero-input `count(*)`.
-//!
-//! This module owns no Arrow-column-to-slot-position arithmetic — that lives
-//! exclusively in `ColumnMapping` (Requirement 8.1). `Projection` only records
-//! the resolved source/destination contract.
 
 use pgrx::pg_sys;
 

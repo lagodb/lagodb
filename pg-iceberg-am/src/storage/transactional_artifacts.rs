@@ -1,9 +1,10 @@
 //! Transaction-scoped lifecycle for storage artifacts.
 //!
 //! Manages the lifecycle of files created during a transaction: local data files,
-//! table directories, and object-storage staging/uploaded files. Each artifact is
-//! tracked with its transaction nesting level so subtransaction commit (promote)
-//! and abort (cleanup) work correctly.
+//! table directories, and object-storage staging/uploaded files. Transaction-owned
+//! artifacts carry their savepoint nesting level. Metadata materialization
+//! artifacts live in a separate top-level-only registry until their catalog CAS
+//! succeeds or fails.
 //!
 //! The module exposes a small set of domain-level registration functions. Internally
 //! a single [`StorageArtifactResource`] is lazily registered as a
@@ -15,6 +16,8 @@
 //!   or object-storage prefix.
 //! - `ObjectFile(Uploaded)` → unlink the staging file (best-effort).
 //! - `ObjectFile(Staged)` → warn, then unlink the staging file (best-effort).
+//! - unresolved metadata-attempt artifacts → abort-style cleanup instead of
+//!   preserving files that no successful catalog CAS references.
 //! - Everything else → no-op.
 //!
 //! **Abort behaviour:**
@@ -51,11 +54,14 @@ use std::rc::Rc;
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::transaction::{self, TransactionResource};
 use pg_lakebase_core::wal::flush_wal;
-use pg_lakebase_storage::{ObjectLocation, StorageClient};
+use pg_lakebase_storage::{ObjectLocation, StorageClient, StorageErrorKind};
 use pgrx::pg_sys;
 
+use crate::error::{IcebergError, IcebergResult};
 use crate::storage::LocalStorage;
 use crate::wal::record::log_delete_directory;
+
+const TOP_LEVEL_NEST_LEVEL: i32 = 1;
 
 // ---------------------------------------------------------------------------
 // Artifact model
@@ -86,6 +92,9 @@ enum ArtifactKind {
         state: ObjectFileState,
     },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetadataAttemptId(u32);
 
 impl std::fmt::Debug for ArtifactKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -123,6 +132,102 @@ struct ArtifactEntry {
     kind: ArtifactKind,
 }
 
+#[derive(Debug)]
+struct MetadataAttemptState {
+    id: MetadataAttemptId,
+    artifacts: Vec<ArtifactKind>,
+}
+
+/// Metadata materialization artifacts have a top-level-only lifecycle. They do
+/// not carry savepoint nesting state and are never visited by subtransaction
+/// callbacks.
+#[derive(Debug)]
+struct MetadataArtifactRegistry {
+    active_attempt: Option<MetadataAttemptState>,
+    /// Artifacts selected by a successful CAS and retained until transaction end.
+    promoted: Vec<ArtifactKind>,
+    /// Rejected artifacts whose immediate cleanup failed.
+    cleanup_required: Vec<ArtifactKind>,
+    next_attempt_id: u32,
+}
+
+impl MetadataArtifactRegistry {
+    fn new() -> Self {
+        Self {
+            active_attempt: None,
+            promoted: Vec::new(),
+            cleanup_required: Vec::new(),
+            next_attempt_id: 1,
+        }
+    }
+
+    fn begin_attempt(&mut self) -> IcebergResult<MetadataAttemptId> {
+        let nest_level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
+        if nest_level != TOP_LEVEL_NEST_LEVEL {
+            return Err(IcebergError::InvariantViolated(
+                "metadata artifact attempts require top-level transaction context",
+            ));
+        }
+        if self.active_attempt.is_some() {
+            return Err(IcebergError::InvariantViolated(
+                "metadata artifact attempts cannot be nested",
+            ));
+        }
+
+        let id = MetadataAttemptId(self.next_attempt_id);
+        self.next_attempt_id = self
+            .next_attempt_id
+            .checked_add(1)
+            .ok_or(IcebergError::InvariantViolated(
+                "metadata artifact attempt id overflow",
+            ))?;
+        self.active_attempt = Some(MetadataAttemptState {
+            id,
+            artifacts: Vec::new(),
+        });
+        Ok(id)
+    }
+
+    fn promote_attempt(&mut self, id: MetadataAttemptId) -> IcebergResult<()> {
+        let artifacts = self.take_attempt(id)?;
+        self.promoted.extend(artifacts);
+        Ok(())
+    }
+
+    fn take_attempt(
+        &mut self,
+        id: MetadataAttemptId,
+    ) -> IcebergResult<Vec<ArtifactKind>> {
+        let Some(attempt) = self.active_attempt.take() else {
+            return Err(IcebergError::InvariantViolated(
+                "metadata artifact attempt is not active",
+            ));
+        };
+        if attempt.id != id {
+            self.active_attempt = Some(attempt);
+            return Err(IcebergError::InvariantViolated(
+                "metadata artifact attempt is not active",
+            ));
+        }
+        Ok(attempt.artifacts)
+    }
+
+    fn drain_top_level(&mut self) -> (Vec<ArtifactKind>, Vec<ArtifactKind>) {
+        let promoted = std::mem::take(&mut self.promoted);
+        let mut cleanup_required = std::mem::take(&mut self.cleanup_required);
+        if let Some(active) = self.active_attempt.take() {
+            cleanup_required.extend(active.artifacts.into_iter().rev());
+        }
+        (promoted, cleanup_required)
+    }
+}
+
+struct TopLevelArtifacts {
+    transaction: Vec<ArtifactEntry>,
+    promoted_metadata: Vec<ArtifactKind>,
+    cleanup_metadata: Vec<ArtifactKind>,
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -130,30 +235,72 @@ struct ArtifactEntry {
 #[derive(Debug)]
 struct ArtifactRegistry {
     entries: Vec<ArtifactEntry>,
+    metadata: MetadataArtifactRegistry,
 }
 
 impl ArtifactRegistry {
     fn new() -> Self {
         Self {
             entries: Vec::new(),
+            metadata: MetadataArtifactRegistry::new(),
         }
     }
 
     fn add(&mut self, kind: ArtifactKind) {
+        if let Some(attempt) = self.metadata.active_attempt.as_mut() {
+            attempt.artifacts.push(kind);
+            return;
+        }
         let nest_level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
         self.entries.push(ArtifactEntry { nest_level, kind });
+    }
+
+    fn begin_metadata_attempt(&mut self) -> IcebergResult<MetadataAttemptId> {
+        self.metadata.begin_attempt()
+    }
+
+    fn promote_metadata_attempt(
+        &mut self,
+        id: MetadataAttemptId,
+    ) -> IcebergResult<()> {
+        self.metadata.promote_attempt(id)
+    }
+
+    fn take_metadata_attempt_artifacts(
+        &mut self,
+        id: MetadataAttemptId,
+    ) -> IcebergResult<Vec<ArtifactKind>> {
+        self.metadata.take_attempt(id)
+    }
+
+    fn current_write_artifacts(&self) -> impl Iterator<Item = &ArtifactKind> {
+        self.metadata
+            .active_attempt
+            .iter()
+            .flat_map(|attempt| attempt.artifacts.iter())
+            .chain(self.entries.iter().map(|entry| &entry.kind))
+    }
+
+    fn current_write_artifacts_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut ArtifactKind> {
+        self.metadata
+            .active_attempt
+            .iter_mut()
+            .flat_map(|attempt| attempt.artifacts.iter_mut())
+            .chain(self.entries.iter_mut().map(|entry| &mut entry.kind))
     }
 
     fn assert_staged(
         &self,
         location: &ObjectLocation,
     ) -> std::result::Result<(), String> {
-        for entry in &self.entries {
+        for kind in self.current_write_artifacts() {
             if let ArtifactKind::ObjectFile {
-                location: ref loc,
-                ref state,
+                location: loc,
+                state,
                 ..
-            } = entry.kind
+            } = kind
                 && loc == location
             {
                 return match state {
@@ -177,12 +324,12 @@ impl ArtifactRegistry {
         &mut self,
         location: &ObjectLocation,
     ) -> std::result::Result<(), String> {
-        for entry in &mut self.entries {
+        for kind in self.current_write_artifacts_mut() {
             if let ArtifactKind::ObjectFile {
-                location: ref loc,
-                ref mut state,
+                location: loc,
+                state,
                 ..
-            } = entry.kind
+            } = kind
                 && loc == location
             {
                 if *state == ObjectFileState::Staged {
@@ -204,14 +351,18 @@ impl ArtifactRegistry {
 
     // -- transaction callbacks ------------------------------------------------
 
-    fn take_commit_entries(&mut self) -> Vec<ArtifactEntry> {
-        self.entries.drain(..).collect()
+    fn drain_top_level(&mut self) -> TopLevelArtifacts {
+        let (promoted_metadata, cleanup_metadata) =
+            self.metadata.drain_top_level();
+        TopLevelArtifacts {
+            transaction: std::mem::take(&mut self.entries),
+            promoted_metadata,
+            cleanup_metadata,
+        }
     }
 
-    fn take_abort_entries(&mut self) -> Vec<ArtifactEntry> {
-        self.entries.drain(..).collect()
-    }
-
+    // Savepoint callbacks only affect transaction entries. Metadata artifacts
+    // are top-level-only and intentionally absent from both operations.
     fn handle_commit_sub(&mut self, nest_level: i32) {
         for entry in &mut self.entries {
             if entry.nest_level >= nest_level {
@@ -236,8 +387,8 @@ impl ArtifactRegistry {
 
     // -- per-entry actions ----------------------------------------------------
 
-    fn commit_one(entry: ArtifactEntry) {
-        match entry.kind {
+    fn commit_one(kind: ArtifactKind) {
+        match kind {
             ArtifactKind::DroppedTableDir {
                 ref location,
                 ref file_io,
@@ -274,7 +425,7 @@ impl ArtifactRegistry {
                 state: ObjectFileState::Uploaded,
                 ..
             } => {
-                best_effort_unlink(staging_path);
+                let _ = best_effort_unlink(staging_path);
             }
             ArtifactKind::ObjectFile {
                 ref location,
@@ -287,50 +438,59 @@ impl ArtifactRegistry {
                     location,
                     staging_path.display()
                 ));
-                best_effort_unlink(staging_path);
+                let _ = best_effort_unlink(staging_path);
             }
             _ => {}
         }
     }
 
-    fn abort_one(entry: ArtifactEntry) {
-        match entry.kind {
-            ArtifactKind::CreatedLocalFile { ref path } => {
-                best_effort_unlink(path);
-            }
+    fn abort_one(kind: ArtifactKind) -> Option<ArtifactKind> {
+        let cleaned = match &kind {
+            ArtifactKind::CreatedLocalFile { path } => best_effort_unlink(path),
             ArtifactKind::CreatedTableDir {
-                ref location,
-                ref file_io,
-            } => {
-                if let Err(e) = file_io.remove_dir_all(location) {
+                location,
+                file_io,
+            } => match file_io.remove_dir_all(location) {
+                Ok(()) => true,
+                Err(e) => {
                     pg_lakebase_core::diag::report_warning(&format!(
                         "failed to delete table directory '{}': {}",
                         location, e
                     ));
+                    false
                 }
-            }
+            },
             ArtifactKind::ObjectFile {
-                ref location,
-                ref staging_path,
-                ref client,
+                location,
+                staging_path,
+                client,
                 state,
             } => {
-                if state == ObjectFileState::Uploaded
-                    && let Err(e) = client.delete(
+                let remote_deleted = if *state == ObjectFileState::Uploaded {
+                    match client.delete(
                         location.store_id().as_str(),
                         location.bucket(),
                         location.key(),
-                    )
-                {
-                    pg_lakebase_core::diag::report_warning(&format!(
-                        "failed to delete uploaded object '{}': {}",
-                        location, e
-                    ));
-                }
-                best_effort_unlink(staging_path);
+                    ) {
+                        Ok(()) => true,
+                        Err(e) if e.kind() == StorageErrorKind::NotFound => true,
+                        Err(e) => {
+                            pg_lakebase_core::diag::report_warning(&format!(
+                                "failed to delete uploaded object '{}': {}",
+                                location, e
+                            ));
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
+                let staging_unlinked = best_effort_unlink(staging_path);
+                remote_deleted && staging_unlinked
             }
-            _ => {}
-        }
+            ArtifactKind::DroppedTableDir { .. } => true,
+        };
+        (!cleaned).then_some(kind)
     }
 
     fn local_needs_wal(file_io: &FileIO) -> bool {
@@ -343,16 +503,17 @@ impl ArtifactRegistry {
     }
 }
 
-fn best_effort_unlink(path: &Path) {
+fn best_effort_unlink(path: &Path) -> bool {
     match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
         Err(e) => {
             pg_lakebase_core::diag::report_warning(&format!(
                 "failed to unlink '{}': {}",
                 path.display(),
                 e
             ));
+            false
         }
     }
 }
@@ -372,6 +533,50 @@ struct StorageArtifactResource {
     nest_level: Cell<i32>,
 }
 
+impl StorageArtifactResource {
+    fn promote_metadata_attempt(
+        &self,
+        id: MetadataAttemptId,
+    ) -> IcebergResult<()> {
+        self.inner
+            .try_borrow_mut()
+            .map_err(|_| {
+                IcebergError::InvariantViolated("artifact registry is already borrowed")
+            })?
+            .promote_metadata_attempt(id)
+    }
+
+    fn discard_metadata_attempt(
+        &self,
+        id: MetadataAttemptId,
+    ) -> IcebergResult<()> {
+        let artifacts = self
+            .inner
+            .try_borrow_mut()
+            .map_err(|_| {
+                IcebergError::InvariantViolated("artifact registry is already borrowed")
+            })?
+            .take_metadata_attempt_artifacts(id)?;
+        self.cleanup_metadata_attempt(artifacts);
+        Ok(())
+    }
+
+    fn cleanup_metadata_attempt(&self, artifacts: Vec<ArtifactKind>) {
+        let cleanup_required: Vec<_> = artifacts
+            .into_iter()
+            .rev()
+            .filter_map(ArtifactRegistry::abort_one)
+            .collect();
+        if !cleanup_required.is_empty() {
+            self.inner
+                .borrow_mut()
+                .metadata
+                .cleanup_required
+                .extend(cleanup_required);
+        }
+    }
+}
+
 impl TransactionResource for StorageArtifactResource {
     fn nest_level(&self) -> i32 {
         self.nest_level.get()
@@ -382,17 +587,31 @@ impl TransactionResource for StorageArtifactResource {
     }
 
     fn on_commit(&self) {
-        let entries = self.inner.borrow_mut().take_commit_entries();
-        for entry in entries {
-            ArtifactRegistry::commit_one(entry);
+        let artifacts = self.inner.borrow_mut().drain_top_level();
+        for kind in artifacts
+            .transaction
+            .into_iter()
+            .map(|entry| entry.kind)
+            .chain(artifacts.promoted_metadata)
+        {
+            ArtifactRegistry::commit_one(kind);
+        }
+        for kind in artifacts.cleanup_metadata {
+            let _ = ArtifactRegistry::abort_one(kind);
         }
         REGISTRY.with(|r| *r.borrow_mut() = None);
     }
 
     fn on_abort(&self) {
-        let entries = self.inner.borrow_mut().take_abort_entries();
-        for entry in entries {
-            ArtifactRegistry::abort_one(entry);
+        let artifacts = self.inner.borrow_mut().drain_top_level();
+        for kind in artifacts
+            .transaction
+            .into_iter()
+            .map(|entry| entry.kind)
+            .chain(artifacts.promoted_metadata)
+            .chain(artifacts.cleanup_metadata)
+        {
+            let _ = ArtifactRegistry::abort_one(kind);
         }
         REGISTRY.with(|r| *r.borrow_mut() = None);
     }
@@ -409,7 +628,7 @@ impl TransactionResource for StorageArtifactResource {
             .borrow_mut()
             .take_abort_sub_entries(current_nest_level);
         for entry in entries {
-            ArtifactRegistry::abort_one(entry);
+            let _ = ArtifactRegistry::abort_one(entry.kind);
         }
     }
 }
@@ -420,7 +639,7 @@ fn ensure_registry() -> Rc<StorageArtifactResource> {
         if borrow.is_none() {
             let resource = Rc::new(StorageArtifactResource {
                 inner: RefCell::new(ArtifactRegistry::new()),
-                nest_level: Cell::new(1),
+                nest_level: Cell::new(TOP_LEVEL_NEST_LEVEL),
             });
             transaction::register_resource(resource.clone());
             *borrow = Some(resource.clone());
@@ -432,6 +651,64 @@ fn ensure_registry() -> Rc<StorageArtifactResource> {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Owns every storage artifact produced by one metadata materialization and
+/// catalog CAS attempt.
+///
+/// Files created while this scope is active are isolated from transaction-owned
+/// data files and savepoint state. A successful CAS moves them to the promoted
+/// metadata set: top-level commit preserves them, while top-level abort removes
+/// them. A rejected or dropped attempt performs abort-style cleanup immediately.
+#[must_use = "a metadata attempt must be promoted or discarded"]
+pub(crate) struct MetadataAttempt {
+    resource: Rc<StorageArtifactResource>,
+    id: MetadataAttemptId,
+    resolved: bool,
+}
+
+impl MetadataAttempt {
+    pub(crate) fn begin() -> IcebergResult<Self> {
+        let resource = ensure_registry();
+        let id = resource
+            .inner
+            .try_borrow_mut()
+            .map_err(|_| {
+                IcebergError::InvariantViolated("artifact registry is already borrowed")
+            })?
+            .begin_metadata_attempt()?;
+        Ok(Self {
+            resource,
+            id,
+            resolved: false,
+        })
+    }
+
+    pub(crate) fn promote(mut self) -> IcebergResult<()> {
+        self.resource.promote_metadata_attempt(self.id)?;
+        self.resolved = true;
+        Ok(())
+    }
+
+    pub(crate) fn discard(mut self) -> IcebergResult<()> {
+        self.resource.discard_metadata_attempt(self.id)?;
+        self.resolved = true;
+        Ok(())
+    }
+}
+
+impl Drop for MetadataAttempt {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        if let Err(error) = self.resource.discard_metadata_attempt(self.id) {
+            pg_lakebase_core::diag::report_warning(&format!(
+                "failed to discard unresolved metadata artifact attempt: {}",
+                error
+            ));
+        }
+    }
+}
 
 /// Register a local data file for abort cleanup.
 pub fn register_local_file_created(path: PathBuf) {

@@ -1,15 +1,5 @@
 //! Cross-crate epoch-consistency backend tests.
 //!
-//! These tests assert a property *between* two crates: the runtime predicate
-//! translator (`predicate::translator::decode_datum`, in
-//! `pg-iceberg-am`) encodes a pushed `date` / `timestamp` / `timestamptz` bound
-//! into an iceberg `Datum`, and the storage write side encodes the *stored*
-//! column values into the Arrow/Iceberg representation. For Iceberg-side pruning
-//! to be sound, BOTH ends must apply the SAME PG→Unix epoch offset
-//! (`PG_EPOCH_DAYS_DIFF` / `PG_EPOCH_USECS_DIFF`) — otherwise a pushed predicate
-//! bound would be compared against stored manifest bounds on a different epoch
-//! and prune the wrong files (Requirement 3.5 / 8.x).
-//!
 //! Each test drives the SAME raw PG `Datum` through BOTH ends and asserts the
 //! translator's pushed `Datum` equals the value produced by the write-side
 //! epoch conversion — proving the two share one offset without needing a full

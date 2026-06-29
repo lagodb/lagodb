@@ -411,20 +411,6 @@ mod tests {
         );
     }
 
-    // ========================================================================
-    //  Property 7: SQLSTATE preservation across the boundary (cross-crate half)
-    //
-    //  The crate-local half (pg-arrow-conv/tests/error_sqlstate.rs) proves
-    //  `ConvError::sql_error_code()` matches the pre-extraction classification.
-    //  This half proves the `IcebergError::ConvError(#[from] ConvError)`
-    //  delegation preserves that classification verbatim across the crate
-    //  boundary: for every representative `ConvError`, wrapping it into an
-    //  `IcebergError` must NOT change the SQLSTATE.
-    //
-    //  Validates Requirements 9.5 (delegation preserves SQLSTATE) and
-    //  9.6 (DecimalCodecError routing yields the same SQLSTATE classes).
-    // ========================================================================
-
     /// Every representative `ConvError` variant must report the same SQLSTATE
     /// before and after being wrapped in `IcebergError::ConvError`.
     #[test]

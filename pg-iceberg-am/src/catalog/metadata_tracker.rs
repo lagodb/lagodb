@@ -37,6 +37,7 @@ use crate::catalog::bridge::{IcebergTableId, StagedCatalog};
 use crate::catalog::metadata_table::{CasUpdate, IcebergMetadata};
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
+use crate::storage::transactional_artifacts::MetadataAttempt;
 
 const TOTAL_RECORDS: &str = "total-records";
 const TOTAL_FILES_SIZE: &str = "total-files-size";
@@ -686,11 +687,15 @@ impl TxMetadata {
                         .add_validations(validations.clone())
                         .apply(tx)?
                 };
+                // FileIO registrations during materialization belong to this
+                // attempt until the catalog CAS decides whether they survive.
+                let metadata_attempt = MetadataAttempt::begin()?;
                 let updated_table = tx.commit(&catalog)?;
                 let new_metadata_location = updated_table
                     .metadata_location()
                     .ok_or(IcebergError::MetadataLocationNull)?;
                 if new_metadata_location == latest_global_location {
+                    metadata_attempt.discard()?;
                     break;
                 }
 
@@ -702,8 +707,12 @@ impl TxMetadata {
                         previous_metadata_location: Some(&latest_global_location),
                     },
                 ) {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        metadata_attempt.promote()?;
+                        break;
+                    }
                     Err(IcebergError::MetadataCatalogConflict) => {
+                        metadata_attempt.discard()?;
                         diag::report_notice(
                             "Concurrent Iceberg update detected, rebasing...",
                         );

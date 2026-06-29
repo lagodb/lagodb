@@ -582,7 +582,7 @@ mod tests {
                     );
                 }
                 other => panic!(
-                    "expected Unsupported (volatile function gate, Requirement 4.8), got {other:?}",
+                    "expected Unsupported (volatile function gate), got {other:?}",
                 ),
             }
         }
@@ -621,7 +621,7 @@ mod tests {
                     );
                 }
                 other => panic!(
-                    "expected Unsupported (SubPlan gate, Requirement 4.8), got {other:?}",
+                    "expected Unsupported (SubPlan gate), got {other:?}",
                 ),
             }
         }
