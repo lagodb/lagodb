@@ -146,3 +146,4 @@ SELECT COUNT(*) AS orphan_count FROM lakebase.table_options;
 --------------
             0
 (1 row)
+

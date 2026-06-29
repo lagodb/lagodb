@@ -85,7 +85,7 @@ impl AmCacheString {
         Some(start..start.checked_add(len)?)
     }
 
-    fn resolve<'a>(self, payload: &'a [u8]) -> &'a str {
+    fn resolve(self, payload: &[u8]) -> &str {
         let bytes = self
             .range()
             .and_then(|range| payload.get(range))

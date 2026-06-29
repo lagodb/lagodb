@@ -33,7 +33,9 @@
 //! indexes / AFTER triggers, and nested trigger / SPI DML runs in a new frame —
 //! so the hot path spends nothing defending a case the contract rules out.
 
-use crate::api::{AmDmlSession, TableAccessMethod};
+use crate::api::{
+    AmDmlSession, DmlSessionContext, DmlTargetReadRequirement, TableAccessMethod,
+};
 use crate::diag::PgReportError;
 use crate::handles::RelationHandle;
 use crate::resource::{self, ResourceHandle};
@@ -200,6 +202,56 @@ impl FrameStackEntry {
         // executing its ModifyTable node and the child PlanState tree is live.
         unsafe { ModifyTableNode(node).target_plan(rel_oid) }
     }
+
+    /// Resolve the logical target-read requirement before constructing a
+    /// relation-local AM session.
+    ///
+    /// INSERT/COPY are independent appends. UPDATE and DELETE always require a
+    /// target read. MERGE is plan-sensitive: PostgreSQL may remove an
+    /// unreachable target scan (for example `ON FALSE`), leaving only an
+    /// independent insert action.
+    fn session_context(
+        self,
+        rel_oid: pg_sys::Oid,
+    ) -> Result<DmlSessionContext, PgReportError> {
+        let target_read = match self.cmd_type {
+            pg_sys::CmdType::CMD_INSERT => DmlTargetReadRequirement::Independent,
+            pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE => {
+                DmlTargetReadRequirement::ReadRequired
+            }
+            pg_sys::CmdType::CMD_MERGE => {
+                let FrameKey::ModifyTable(node) = self.key else {
+                    return Err(internal_error(
+                        "MERGE DML session is not owned by a ModifyTable frame",
+                    ));
+                };
+                // SAFETY: this entry is the current frame, so its initialized
+                // ModifyTableState and child PlanState tree remain live.
+                let target_scan =
+                    unsafe { ModifyTableNode(node).target_scan(rel_oid) }
+                        .ok_or_else(|| {
+                            internal_error(
+                                "MERGE DML relation is not a unique result relation",
+                            )
+                        })?;
+                match target_scan {
+                    TargetScanSearch::Missing => {
+                        DmlTargetReadRequirement::Independent
+                    }
+                    TargetScanSearch::Unique(_)
+                    | TargetScanSearch::Present
+                    | TargetScanSearch::Ambiguous => {
+                        DmlTargetReadRequirement::ReadRequired
+                    }
+                }
+            }
+            _ if self.modifies_rows_in_place() => {
+                DmlTargetReadRequirement::ReadRequired
+            }
+            _ => DmlTargetReadRequirement::Independent,
+        };
+        Ok(DmlSessionContext::new(self.cmd_type, target_read))
+    }
 }
 
 /// Read-only view over a live `ModifyTableState` reached through a frame key.
@@ -240,12 +292,28 @@ impl ModifyTableNode {
     ///
     /// The node and its initialized child PlanState tree must be live.
     unsafe fn target_plan(self, rel_oid: pg_sys::Oid) -> Option<TargetScanMatch> {
+        match unsafe { self.target_scan(rel_oid) }? {
+            TargetScanSearch::Unique(target) => Some(target),
+            TargetScanSearch::Missing
+            | TargetScanSearch::Present
+            | TargetScanSearch::Ambiguous => None,
+        }
+    }
+
+    /// Search the initialized child plan for scans of one unique result
+    /// relation. `Missing` is meaningful for MERGE because PostgreSQL can prove
+    /// the target unreachable and replace it with a dummy relation.
+    ///
+    /// # Safety
+    ///
+    /// The node and its initialized child PlanState tree must be live.
+    unsafe fn target_scan(self, rel_oid: pg_sys::Oid) -> Option<TargetScanSearch> {
         let target = unsafe { self.target_identity(rel_oid) }?;
         let planstate = self.0.as_ptr();
         let outer = unsafe { (*planstate).lefttree };
         let mut finder = TargetScanFinder::new(target);
         unsafe { finder.visit_tree(outer) };
-        finder.finish()
+        Some(finder.finish())
     }
 
     /// Resolve one result relation to both its physical OID and range-table
@@ -311,8 +379,23 @@ struct DmlTargetIdentity {
 
 struct TargetScanFinder {
     target: DmlTargetIdentity,
+    present: bool,
     found: Option<TargetScanMatch>,
     ambiguous: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TargetScanSearch {
+    Missing,
+    Present,
+    Unique(TargetScanMatch),
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TargetScanCandidate {
+    Usable(TargetScanMatch),
+    Unsupported,
 }
 
 impl TargetScanFinder {
@@ -320,6 +403,7 @@ impl TargetScanFinder {
     fn new(target: DmlTargetIdentity) -> Self {
         Self {
             target,
+            present: false,
             found: None,
             ambiguous: false,
         }
@@ -360,14 +444,23 @@ impl TargetScanFinder {
     unsafe fn scan_target(
         &self,
         planstate: *mut pg_sys::PlanState,
-    ) -> Option<TargetScanMatch> {
+    ) -> Option<TargetScanCandidate> {
         let tag = unsafe { (*planstate).type_ };
         match tag {
             pg_sys::NodeTag::T_SeqScanState => unsafe {
                 Self::seq_scan_target(planstate, self.target)
+                    .map(TargetScanCandidate::Usable)
             },
             pg_sys::NodeTag::T_CustomScanState => unsafe {
                 Self::custom_scan_target(planstate, self.target)
+            },
+            pg_sys::NodeTag::T_IndexScanState
+            | pg_sys::NodeTag::T_IndexOnlyScanState
+            | pg_sys::NodeTag::T_BitmapHeapScanState
+            | pg_sys::NodeTag::T_TidScanState
+            | pg_sys::NodeTag::T_TidRangeScanState
+            | pg_sys::NodeTag::T_SampleScanState => unsafe {
+                Self::non_projectable_scan_target(planstate, self.target)
             },
             _ => None,
         }
@@ -397,7 +490,7 @@ impl TargetScanFinder {
     unsafe fn custom_scan_target(
         planstate: *mut pg_sys::PlanState,
         target: DmlTargetIdentity,
-    ) -> Option<TargetScanMatch> {
+    ) -> Option<TargetScanCandidate> {
         let state = planstate.cast::<pg_sys::CustomScanState>();
         let scan_state = unsafe { &(*state).ss };
         let plan = unsafe { (*planstate).plan };
@@ -405,13 +498,59 @@ impl TargetScanFinder {
             return None;
         }
         let scan = plan.cast::<pg_sys::CustomScan>();
-        if unsafe { !(*scan).custom_scan_tlist.is_null() }
-            || unsafe { (*scan).scan.scanrelid } == 0
-        {
+        let scan_relid = unsafe { (*scan).scan.scanrelid };
+        let matches_target = unsafe {
+            Self::scan_state_matches_target(scan_state, target, scan_relid)
+        };
+        if scan_relid == 0 || !matches_target {
             return None;
         }
-        let scan_relid = unsafe { (*scan).scan.scanrelid };
-        unsafe { Self::target_from_scan_state(scan_state, target, scan_relid, plan) }
+        if unsafe { !(*scan).custom_scan_tlist.is_null() } {
+            return Some(TargetScanCandidate::Unsupported);
+        }
+        unsafe {
+            Self::target_from_scan_state(scan_state, target, scan_relid, plan)
+                .map(TargetScanCandidate::Usable)
+        }
+    }
+
+    /// Detect target scans whose quals cannot currently be exposed through
+    /// [`DmlTargetPlan`]. They still prove that the DML depends on a physical
+    /// target read and must never be mistaken for a planner-elided target.
+    ///
+    /// # Safety
+    ///
+    /// `planstate` must be one of the standard scan-state tags matched by
+    /// [`Self::scan_target`].
+    unsafe fn non_projectable_scan_target(
+        planstate: *mut pg_sys::PlanState,
+        target: DmlTargetIdentity,
+    ) -> Option<TargetScanCandidate> {
+        let scan_state = unsafe { &*planstate.cast::<pg_sys::ScanState>() };
+        let plan = unsafe { (*planstate).plan };
+        if plan.is_null() {
+            return None;
+        }
+        let scan_relid = unsafe { (*plan.cast::<pg_sys::Scan>()).scanrelid };
+        let matches_target = unsafe {
+            Self::scan_state_matches_target(scan_state, target, scan_relid)
+        };
+        matches_target.then_some(TargetScanCandidate::Unsupported)
+    }
+
+    /// # Safety
+    ///
+    /// `scan_state` and its current relation must belong to the scan identified
+    /// by `scan_relid`.
+    unsafe fn scan_state_matches_target(
+        scan_state: &pg_sys::ScanState,
+        target: DmlTargetIdentity,
+        scan_relid: pg_sys::Index,
+    ) -> bool {
+        let relation = scan_state.ss_currentRelation;
+        !relation.is_null()
+            && unsafe { (*relation).rd_id } == target.rel_oid
+            && scan_relid == target.scan_relid
     }
 
     /// # Safety
@@ -424,11 +563,10 @@ impl TargetScanFinder {
         scan_relid: pg_sys::Index,
         plan: *mut pg_sys::Plan,
     ) -> Option<TargetScanMatch> {
-        let relation = scan_state.ss_currentRelation;
-        if relation.is_null()
-            || unsafe { (*relation).rd_id } != target.rel_oid
-            || scan_relid != target.scan_relid
-        {
+        let matches_target = unsafe {
+            Self::scan_state_matches_target(scan_state, target, scan_relid)
+        };
+        if !matches_target {
             return None;
         }
         let scan_relid = core::ffi::c_int::try_from(scan_relid).ok()?;
@@ -437,17 +575,28 @@ impl TargetScanFinder {
         }))
     }
 
-    fn record(&mut self, target: TargetScanMatch) {
-        if self.found.is_some() {
+    fn record(&mut self, candidate: TargetScanCandidate) {
+        if self.present {
             self.ambiguous = true;
         } else {
-            self.found = Some(target);
+            self.present = true;
+            if let TargetScanCandidate::Usable(target) = candidate {
+                self.found = Some(target);
+            }
         }
     }
 
     #[inline]
-    fn finish(self) -> Option<TargetScanMatch> {
-        if self.ambiguous { None } else { self.found }
+    fn finish(self) -> TargetScanSearch {
+        if self.ambiguous {
+            TargetScanSearch::Ambiguous
+        } else if let Some(target) = self.found {
+            TargetScanSearch::Unique(target)
+        } else if self.present {
+            TargetScanSearch::Present
+        } else {
+            TargetScanSearch::Missing
+        }
     }
 }
 
@@ -747,7 +896,7 @@ unsafe fn dispatch_to_session<R>(
 
 fn create_session<A>(
     rel: pg_sys::Relation,
-    cmd_type: pg_sys::CmdType::Type,
+    context: DmlSessionContext,
 ) -> Result<Box<ModifySession>, PgReportError>
 where
     A: TableAccessMethod,
@@ -757,7 +906,7 @@ where
         // insert/update/delete depending on the matched source row.
         let rel_handle = RelationHandle::from_raw(rel);
         let mut instance =
-            <A::DmlSession as AmDmlSession>::new(&rel_handle, cmd_type)?;
+            <A::DmlSession as AmDmlSession>::new(&rel_handle, context)?;
         instance.begin_modify()?;
 
         Ok(Box::new(ModifySession::new::<A::DmlSession>(instance)))
@@ -771,7 +920,7 @@ fn resolve_session_ptr<A>(
     key: FrameKey,
     rel: pg_sys::Relation,
     relid: pg_sys::Oid,
-    cmd_type: pg_sys::CmdType::Type,
+    context: DmlSessionContext,
 ) -> Result<NonNull<ModifySession>, PgReportError>
 where
     A: TableAccessMethod,
@@ -779,7 +928,7 @@ where
     if let Some(ptr) = frame_session_ptr(key, relid)? {
         return Ok(ptr);
     }
-    let session = create_session::<A>(rel, cmd_type)?;
+    let session = create_session::<A>(rel, context)?;
     insert_session(key, relid, session)?;
     frame_session_ptr(key, relid)?
         .ok_or_else(|| internal_error("DML session missing after insert"))
@@ -820,7 +969,8 @@ where
         // to query the executor wrapper for it.
         let cmd_type = entry.cmd_type;
         ensure_frame_exists(key, cmd_type)?;
-        let session = resolve_session_ptr::<A>(key, rel, relid, cmd_type)?;
+        let context = entry.session_context(relid)?;
+        let session = resolve_session_ptr::<A>(key, rel, relid, context)?;
         last_session_store(key, relid, session);
         dispatch_to_session(session, f)
     }

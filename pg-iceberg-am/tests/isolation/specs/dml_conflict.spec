@@ -14,6 +14,9 @@
 #                             policy, so both concurrent appends may commit
 #   5. pg_serializable       – PostgreSQL SERIALIZABLE strengthens a table's
 #                             Snapshot policy to Iceberg Serializable
+#   6. dynamic_merge_scope   – a dynamic source join has no bounded static
+#                             target predicate, so Serializable deliberately
+#                             falls back to whole-table conflict detection
 
 setup
 {
@@ -44,12 +47,26 @@ setup
     "write.merge.isolation-level" = 'snapshot'
   );
 
+  CREATE TABLE iceberg_dml_conflict.merge_source_1 (
+    id int,
+    label text
+  );
+
+  CREATE TABLE iceberg_dml_conflict.merge_source_2 (
+    id int,
+    label text
+  );
+
+  INSERT INTO iceberg_dml_conflict.merge_source_1 VALUES (200, 's1');
+  INSERT INTO iceberg_dml_conflict.merge_source_2 VALUES (201, 's2');
   INSERT INTO iceberg_dml_conflict.t VALUES (1, 'file_a');
   INSERT INTO iceberg_dml_conflict.t VALUES (100, 'file_b');
 }
 
 teardown
 {
+  DROP TABLE IF EXISTS iceberg_dml_conflict.merge_source_2 CASCADE;
+  DROP TABLE IF EXISTS iceberg_dml_conflict.merge_source_1 CASCADE;
   DROP TABLE IF EXISTS iceberg_dml_conflict.merge_pg_serializable_t CASCADE;
   DROP TABLE IF EXISTS iceberg_dml_conflict.merge_snapshot_t CASCADE;
   DROP TABLE IF EXISTS iceberg_dml_conflict.merge_t CASCADE;
@@ -63,6 +80,7 @@ step s1_begin_serializable { BEGIN ISOLATION LEVEL SERIALIZABLE; }
 step s1_update { UPDATE iceberg_dml_conflict.t SET label = 's1' WHERE id = 1; }
 step s1_delete { DELETE FROM iceberg_dml_conflict.t WHERE id = 1; }
 step s1_merge  { MERGE INTO iceberg_dml_conflict.merge_t AS target USING (VALUES (200, 's1')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
+step s1_merge_dynamic { MERGE INTO iceberg_dml_conflict.merge_t AS target USING iceberg_dml_conflict.merge_source_1 AS source ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
 step s1_merge_snapshot { MERGE INTO iceberg_dml_conflict.merge_snapshot_t AS target USING (VALUES (300, 's1')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
 step s1_merge_pg_serializable { MERGE INTO iceberg_dml_conflict.merge_pg_serializable_t AS target USING (VALUES (400, 's1')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
 step s1_commit { COMMIT; }
@@ -73,6 +91,7 @@ step s2_begin_serializable { BEGIN ISOLATION LEVEL SERIALIZABLE; }
 step s2_update { UPDATE iceberg_dml_conflict.t SET label = 's2' WHERE id = 1; }
 step s2_update_other { UPDATE iceberg_dml_conflict.t SET label = 's2' WHERE id = 100; }
 step s2_merge { MERGE INTO iceberg_dml_conflict.merge_t AS target USING (VALUES (200, 's2')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
+step s2_merge_dynamic_other_key { MERGE INTO iceberg_dml_conflict.merge_t AS target USING iceberg_dml_conflict.merge_source_2 AS source ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
 step s2_merge_snapshot { MERGE INTO iceberg_dml_conflict.merge_snapshot_t AS target USING (VALUES (300, 's2')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
 step s2_merge_pg_serializable { MERGE INTO iceberg_dml_conflict.merge_pg_serializable_t AS target USING (VALUES (400, 's2')) AS source(id, label) ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label); }
 step s2_commit { COMMIT; }
@@ -97,3 +116,9 @@ permutation s1_begin s1_merge_snapshot s2_begin s2_merge_snapshot s1_commit s2_c
 
 # 5. PostgreSQL SERIALIZABLE strengthens Snapshot to Iceberg Serializable
 permutation s1_begin_serializable s1_merge_pg_serializable s2_begin_serializable s2_merge_pg_serializable s1_commit s2_commit verify_merge_pg_serializable
+
+# 6. Dynamic source keys are not accumulated into an unbounded predicate.
+# Without a static target filter, Serializable uses a whole-table scope, so
+# even unrelated keys conflict. This is conservative isolation, not key-level
+# uniqueness enforcement.
+permutation s1_begin s1_merge_dynamic s2_begin s2_merge_dynamic_other_key s1_commit s2_commit verify_merge

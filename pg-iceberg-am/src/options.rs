@@ -14,8 +14,7 @@ use iceberg_lite::spec::{FormatVersion, IsolationLevel, TableProperties};
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::table::{
-    AmCache, AmCacheRef, AmCacheValue, AmCacheable, TableOptionError,
-    TableOptions,
+    AmCache, AmCacheRef, AmCacheValue, AmCacheable, TableOptionError, TableOptions,
 };
 use pg_lakebase_core::options::{OptionDef, OptionKind};
 use std::collections::HashMap;
@@ -32,8 +31,7 @@ pub const OPT_FORMAT_VERSION_DEFAULT: i32 = 2;
 
 /// Supported Parquet compression codecs.
 pub const OPT_COMPRESSION_CODEC: &str = "write.parquet.compression-codec";
-pub const OPT_COMPRESSION_CODEC_DEFAULT: &str =
-    CompressionOption::Zstd.as_str();
+pub const OPT_COMPRESSION_CODEC_DEFAULT: &str = CompressionOption::Zstd.as_str();
 pub const OPT_COMPRESSION_CODEC_VALUES: &[&str] = &[
     CompressionOption::Snappy.as_str(),
     CompressionOption::Zstd.as_str(),
@@ -42,8 +40,7 @@ pub const OPT_COMPRESSION_CODEC_VALUES: &[&str] = &[
 /// File format used for writes. The writer currently supports Parquet only.
 pub const OPT_WRITE_FORMAT: &str = "write.format.default";
 pub const OPT_WRITE_FORMAT_DEFAULT: &str = WriteFormatOption::Parquet.as_str();
-pub const OPT_WRITE_FORMAT_VALUES: &[&str] =
-    &[WriteFormatOption::Parquet.as_str()];
+pub const OPT_WRITE_FORMAT_VALUES: &[&str] = &[WriteFormatOption::Parquet.as_str()];
 
 /// Command-specific Iceberg row-level DML isolation.
 pub const OPT_WRITE_DELETE_ISOLATION_LEVEL: &str =
@@ -220,19 +217,13 @@ impl ResolvedIcebergOptions {
             .and_then(|options| options.get_str(OPT_WRITE_FORMAT))
             .unwrap_or(OPT_WRITE_FORMAT_DEFAULT);
         let delete_isolation = options
-            .and_then(|options| {
-                options.get_str(OPT_WRITE_DELETE_ISOLATION_LEVEL)
-            })
+            .and_then(|options| options.get_str(OPT_WRITE_DELETE_ISOLATION_LEVEL))
             .unwrap_or(OPT_WRITE_ISOLATION_LEVEL_DEFAULT);
         let update_isolation = options
-            .and_then(|options| {
-                options.get_str(OPT_WRITE_UPDATE_ISOLATION_LEVEL)
-            })
+            .and_then(|options| options.get_str(OPT_WRITE_UPDATE_ISOLATION_LEVEL))
             .unwrap_or(OPT_WRITE_ISOLATION_LEVEL_DEFAULT);
         let merge_isolation = options
-            .and_then(|options| {
-                options.get_str(OPT_WRITE_MERGE_ISOLATION_LEVEL)
-            })
+            .and_then(|options| options.get_str(OPT_WRITE_MERGE_ISOLATION_LEVEL))
             .unwrap_or(OPT_WRITE_ISOLATION_LEVEL_DEFAULT);
 
         Self::from_parts(
@@ -388,9 +379,7 @@ unsafe impl AmCacheable for IcebergTableOptionCache {
 
 /// Iceberg-specific safe access to this AM's single `rd_amcache` type.
 #[derive(Clone, Copy)]
-pub(crate) struct IcebergTableOptions<'a>(
-    AmCacheRef<'a, IcebergTableOptionCache>,
-);
+pub(crate) struct IcebergTableOptions<'a>(AmCacheRef<'a, IcebergTableOptionCache>);
 
 impl<'a> IcebergTableOptions<'a> {
     pub(crate) fn for_relation(
@@ -399,21 +388,8 @@ impl<'a> IcebergTableOptions<'a> {
         // SAFETY: `IcebergTableOptionCache` is private to this module and this is
         // the only production accessor for an Iceberg relation's `rd_amcache`.
         // Every access therefore uses the same concrete cache type.
-        let cached =
-            unsafe { AmCache::get::<IcebergTableOptionCache>(rel)? };
+        let cached = unsafe { AmCache::get::<IcebergTableOptionCache>(rel)? };
         Ok(Self(cached))
-    }
-
-    pub(crate) fn format_version(self) -> FormatVersion {
-        self.0.header().format_version
-    }
-
-    pub(crate) fn compression(self) -> &'static str {
-        self.0.header().compression.as_str()
-    }
-
-    pub(crate) fn write_format(self) -> &'static str {
-        self.0.header().write_format.as_str()
     }
 
     pub(crate) fn parquet_compression(self) -> ParquetCompression {
@@ -489,10 +465,7 @@ mod tests {
             OPT_WRITE_UPDATE_ISOLATION_LEVEL,
             OPT_WRITE_MERGE_ISOLATION_LEVEL,
         ] {
-            assert_eq!(
-                properties.get(option).map(String::as_str),
-                Some("snapshot"),
-            );
+            assert_eq!(properties.get(option).map(String::as_str), Some("snapshot"),);
         }
     }
 
@@ -516,10 +489,9 @@ mod tests {
             (OPT_COMPRESSION_CODEC.to_owned(), Some("snappy".to_owned())),
             (OPT_WRITE_FORMAT.to_owned(), Some("parquet".to_owned())),
         ]);
-        let cache =
-            ResolvedIcebergOptions::from_table_options(Some(&options))
-                .unwrap()
-                .into_cache();
+        let cache = ResolvedIcebergOptions::from_table_options(Some(&options))
+            .unwrap()
+            .into_cache();
 
         let copied = cache;
 

@@ -104,10 +104,8 @@ mod tests {
     #[test]
     fn postgres_read_uncommitted_normalizes_to_read_committed() {
         assert_eq!(
-            PgTransactionIsolation::from_raw(
-                pg_sys::XACT_READ_UNCOMMITTED as i32
-            )
-            .unwrap(),
+            PgTransactionIsolation::from_raw(pg_sys::XACT_READ_UNCOMMITTED as i32)
+                .unwrap(),
             PgTransactionIsolation::ReadCommitted
         );
     }
@@ -115,10 +113,8 @@ mod tests {
     #[test]
     fn postgres_repeatable_read_is_rejected() {
         assert!(
-            PgTransactionIsolation::from_raw(
-                pg_sys::XACT_REPEATABLE_READ as i32
-            )
-            .is_err()
+            PgTransactionIsolation::from_raw(pg_sys::XACT_REPEATABLE_READ as i32)
+                .is_err()
         );
     }
 

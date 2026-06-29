@@ -15,9 +15,7 @@ mod tests {
         ComparisonOpSpec, ComparisonSpec, ConstSpec, OperandSpec, PREDICATE_HARNESS,
         RelabelSpec, ScanColumnSpec,
     };
-    use crate::predicate::policy::{
-        PredicateCapability, PredicatePushdownPolicy,
-    };
+    use crate::predicate::policy::{PredicateCapability, PredicatePushdownPolicy};
     use pg_lakebase_core::expr::nodes::PgComparisonOp;
     use pg_lakebase_core::expr::split::{
         PushdownContract, PushdownCosting, QualPushdownDecision,

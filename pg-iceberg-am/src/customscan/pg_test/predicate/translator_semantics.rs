@@ -20,9 +20,7 @@ mod tests {
     use pgrx::pg_sys;
     use pgrx::pg_sys::Oid;
 
-    use crate::predicate::translator::{
-        IcebergPredicateTranslator, IcebergScalar,
-    };
+    use crate::predicate::translator::{IcebergPredicateTranslator, IcebergScalar};
 
     const INT4_TYPE_OID: u32 = 23;
     const INT8_TYPE_OID: u32 = 20;

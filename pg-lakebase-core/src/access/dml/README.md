@@ -85,6 +85,23 @@ logical DML operation into multiple relations. A single global session for the
 whole statement would either conflate relation state or force AMs to implement
 their own relation dispatch layer.
 
+Session construction also receives the frame's logical target-read
+requirement. This is resolved from the initialized ModifyTable plan, not
+inferred from whether a scan callback happened. Most UPDATE, DELETE, and MERGE
+plans require a target read. A MERGE whose target side PostgreSQL proved
+unreachable, such as `MERGE ... ON FALSE`, has no target read and its remaining
+insert action is an independent append. An AM combines this requirement with
+its own storage-version observation; a required but unobserved read is an
+invariant failure, while an independent append needs no read validation.
+
+The framework does not attempt to turn dynamic source rows into key-level
+conflict predicates. That would make memory and commit cost proportional to the
+source cardinality and would incorrectly imply primary-key enforcement. A
+table AM may narrow validation with a static target predicate; otherwise it
+must explicitly choose a conservative whole-table scope, weaker snapshot
+isolation, or reject the operation. Cross-table serializability remains the
+responsibility of PostgreSQL SSI integration rather than this frame lifecycle.
+
 Sessions are finalized in first-touch order. If finalization of a later session
 fails, earlier sessions may already have been finalized while later sessions
 are aborted. AM designs should account for that. For storage formats with
@@ -166,6 +183,8 @@ The DML lifecycle is built around these invariants:
 - each frame owns zero or more relation-local sessions;
 - frame-scoped auxiliary cleanup runs after relation sessions are released;
 - a relation has at most one session per frame;
+- each relation session receives its logical target-read requirement from the
+  owning frame rather than inferring it from physical scan callbacks;
 - DML callbacks dispatch callback-scoped slot views first; owned-row
   materialization is a row-mode fallback, not a core callback default;
 - slot and datum views are callback-scoped and must not be stored across

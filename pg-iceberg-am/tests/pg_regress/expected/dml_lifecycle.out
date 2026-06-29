@@ -197,6 +197,23 @@ SELECT * FROM dml_lifecycle.merge_insert_t ORDER BY id;
  22 | merge_22
 (2 rows)
 
+-- A constant-false MERGE condition lets PostgreSQL replace the target side
+-- with a dummy relation. The remaining NOT MATCHED action is an independent
+-- append and must not require a target-scan snapshot that cannot exist.
+MERGE INTO dml_lifecycle.merge_insert_t AS target
+USING (VALUES (23, 'merge_23'), (24, 'merge_24')) AS source(id, label)
+ON FALSE
+WHEN NOT MATCHED THEN
+    INSERT (id, label) VALUES (source.id, source.label);
+SELECT * FROM dml_lifecycle.merge_insert_t ORDER BY id;
+ id |  label   
+----+----------
+ 21 | merge_21
+ 22 | merge_22
+ 23 | merge_23
+ 24 | merge_24
+(4 rows)
+
 -- UPDATE and DELETE use scan-synthesized row locations and must remain visible
 -- to later statements through Iceberg position deletes plus appended data files.
 CREATE TABLE dml_lifecycle.update_delete_t (
@@ -262,10 +279,22 @@ CREATE TABLE dml_lifecycle.v1_dml_t (
 INSERT INTO dml_lifecycle.v1_dml_t VALUES (1, 'one');
 \set VERBOSITY terse
 DELETE FROM dml_lifecycle.v1_dml_t WHERE id = 1;
-ERROR:  feature not yet implemented: UPDATE/DELETE/MERGE require Iceberg format v2 or later
+ERROR:  feature not yet implemented: UPDATE/DELETE and target-reading MERGE require Iceberg format v2 or later
 UPDATE dml_lifecycle.v1_dml_t SET label = 'updated' WHERE id = 1;
-ERROR:  feature not yet implemented: UPDATE/DELETE/MERGE require Iceberg format v2 or later
+ERROR:  feature not yet implemented: UPDATE/DELETE and target-reading MERGE require Iceberg format v2 or later
 \set VERBOSITY default
+-- A target-independent MERGE writes no position deletes, so it remains a
+-- valid append on an Iceberg v1 table.
+MERGE INTO dml_lifecycle.v1_dml_t AS target
+USING (VALUES (2, 'two')) AS source(id, label)
+ON FALSE
+WHEN NOT MATCHED THEN
+    INSERT (id, label) VALUES (source.id, source.label);
+COPY (
+    SELECT id, label FROM dml_lifecycle.v1_dml_t ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+1,one
+2,two
 -- Matched MERGE branches exercise the same AM update/delete/lock paths through
 -- PostgreSQL's MERGE executor.
 CREATE TABLE dml_lifecycle.merge_update_t (

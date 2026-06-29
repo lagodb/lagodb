@@ -548,6 +548,53 @@ pub trait AmIndexCallbacks {
     }
 }
 
+/// Whether a relation-local row-level DML session logically depends on its
+/// ModifyTable target scan.
+///
+/// This is deliberately independent of whether a scan callback happened. The
+/// optimizer can prove a MERGE target unreachable (for example `ON FALSE`) and
+/// remove that scan, making its insert action an independent append. Conversely,
+/// a required read that was not observed is an AM/executor invariant failure,
+/// not an independent write. Arbitrary source-subquery reads and PostgreSQL SSI
+/// dependencies are outside this context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmlTargetReadRequirement {
+    /// The write does not depend on a row-level scan of its target relation.
+    Independent,
+    /// The row-level operation depends on a target scan and its read snapshot.
+    ReadRequired,
+}
+
+/// Immutable frame context supplied when a relation-local DML session is
+/// created.
+#[derive(Debug, Clone, Copy)]
+pub struct DmlSessionContext {
+    cmd_type: pg_sys::CmdType::Type,
+    target_read: DmlTargetReadRequirement,
+}
+
+impl DmlSessionContext {
+    pub(crate) fn new(
+        cmd_type: pg_sys::CmdType::Type,
+        target_read: DmlTargetReadRequirement,
+    ) -> Self {
+        Self {
+            cmd_type,
+            target_read,
+        }
+    }
+
+    /// PostgreSQL command type for the owning DML frame.
+    pub fn cmd_type(self) -> pg_sys::CmdType::Type {
+        self.cmd_type
+    }
+
+    /// Logical target-read requirement resolved from the owning frame's plan.
+    pub fn target_read(self) -> DmlTargetReadRequirement {
+        self.target_read
+    }
+}
+
 /// Relation-local AM state for one managed PostgreSQL DML frame.
 ///
 /// This trait is the AM-facing `dml_init`/`dml_fini` abstraction.  PostgreSQL
@@ -563,10 +610,11 @@ pub trait AmIndexCallbacks {
 /// frame and unfinalized sessions receive [`abort_modify`](Self::abort_modify)
 /// instead of `end_modify`.
 ///
-/// The `cmd_type` passed to [`new`](Self::new) describes the PostgreSQL frame
-/// operation.  For MERGE it is `CMD_MERGE`, while the actual physical action
-/// for each row is still expressed by the callback being invoked
-/// (`tuple_insert`, `tuple_update`, or `tuple_delete`).
+/// The [`DmlSessionContext`] passed to [`new`](Self::new) describes the
+/// PostgreSQL frame operation and whether that relation-local write logically
+/// depends on reading the target. For MERGE the command is `CMD_MERGE`, while
+/// the actual physical action for each row is still expressed by the callback
+/// being invoked (`tuple_insert`, `tuple_update`, or `tuple_delete`).
 ///
 /// # Reentrancy contract
 ///
@@ -595,9 +643,9 @@ pub trait AmDmlSession {
     /// [`AmScanSession::new`]); the AM derives everything it needs from the
     /// handle (relation OID, file locator, WAL requirement, and any column
     /// layout) and must capture it into owned fields rather than retaining the
-    /// handle. `cmd_type` is the frame's PostgreSQL command type (see the trait
-    /// docs for the MERGE note).
-    fn new(rel: &RelationHandle, cmd_type: pg_sys::CmdType::Type) -> AmResult<Self>
+    /// handle. `context` carries the frame's PostgreSQL command type and target
+    /// read requirement (see the trait docs for the MERGE note).
+    fn new(rel: &RelationHandle, context: DmlSessionContext) -> AmResult<Self>
     where
         Self: Sized;
 

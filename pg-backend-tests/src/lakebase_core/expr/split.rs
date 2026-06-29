@@ -435,18 +435,13 @@ mod tests {
                 &[fixture.int4_var(1), fixture.int4_const(1)],
             );
             let rinfo = fixture.restrictinfo_with_security(
-                clause,
-                /* leakproof */ false,
-                /* security_level */ 1,
+                clause, /* leakproof */ false, /* security_level */ 1,
             );
             let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
 
-            let mut classify_leaf =
-                |_p: &PlanPredicate| -> QualPushdownDecision {
-                    panic!(
-                        "security-gated clause must not reach provider classification"
-                    )
-                };
+            let mut classify_leaf = |_p: &PlanPredicate| -> QualPushdownDecision {
+                panic!("security-gated clause must not reach provider classification")
+            };
             let mut splitter = PlanPushdownSplitter::new(
                 fixture.root(),
                 fixture.baserel(),
@@ -476,9 +471,7 @@ mod tests {
                 &[fixture.int4_var(1), fixture.int4_const(1)],
             );
             let rinfo = fixture.restrictinfo_with_security(
-                clause,
-                /* leakproof */ true,
-                /* security_level */ 1,
+                clause, /* leakproof */ true, /* security_level */ 1,
             );
             let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
 
@@ -518,9 +511,7 @@ mod tests {
                 &[fixture.int4_var(1), fixture.int4_const(1)],
             );
             let rinfo = fixture.restrictinfo_with_security(
-                clause,
-                /* leakproof */ true,
-                /* security_level */ 0,
+                clause, /* leakproof */ true, /* security_level */ 0,
             );
             (*rinfo).clause_relids =
                 pg_sys::bms_make_singleton(SYNTH_RELID as core::ffi::c_int);
@@ -532,12 +523,9 @@ mod tests {
             );
             let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
 
-            let mut classify_leaf =
-                |_p: &PlanPredicate| -> QualPushdownDecision {
-                    panic!(
-                        "unmovable clause must not reach provider classification"
-                    )
-                };
+            let mut classify_leaf = |_p: &PlanPredicate| -> QualPushdownDecision {
+                panic!("unmovable clause must not reach provider classification")
+            };
             let mut splitter = PlanPushdownSplitter::new(
                 fixture.root(),
                 fixture.baserel(),

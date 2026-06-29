@@ -21,7 +21,6 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::arrow::schema_to_arrow_schema;
-use iceberg_lite::expr::Predicate;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::metadata_columns::{delete_file_path_field, delete_file_pos_field};
 use iceberg_lite::spec::{
@@ -49,10 +48,12 @@ use pgrx::pg_sys;
 use roaring::RoaringTreemap;
 
 use crate::access::column_mapping::{RelationShape, WriteColumns};
-use crate::access::conflict_filter::DmlConflictFilterResolver;
+use crate::access::conflict_filter::{
+    ConflictValidationScope, DmlConflictFilterResolver,
+};
 use crate::access::isolation::PgTransactionIsolation;
 use crate::access::row_location::{
-    DmlScanSnapshot, RowLocation, current_dml_scan_snapshot, lookup_current,
+    DmlScanObservation, RowLocation, current_dml_scan_observation, lookup_current,
 };
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
@@ -464,15 +465,48 @@ impl PositionDeleteAccumulator {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetDependency {
+    Independent,
+    ReadRequired(DmlScanObservation),
+}
+
+impl TargetDependency {
+    fn from_frame(
+        requirement: DmlTargetReadRequirement,
+        observation: DmlScanObservation,
+    ) -> Self {
+        match requirement {
+            DmlTargetReadRequirement::Independent => Self::Independent,
+            DmlTargetReadRequirement::ReadRequired => Self::ReadRequired(observation),
+        }
+    }
+
+    fn required_snapshot(self) -> IcebergResult<Option<i64>> {
+        match self {
+            Self::ReadRequired(DmlScanObservation::Observed(snapshot_id)) => {
+                Ok(snapshot_id)
+            }
+            Self::ReadRequired(DmlScanObservation::Unobserved) => {
+                Err(IcebergError::InvariantViolated(
+                    "row-level DML produced an Iceberg delta without observing its required target read",
+                ))
+            }
+            Self::Independent => Err(IcebergError::InvariantViolated(
+                "independent DML has no target snapshot",
+            )),
+        }
+    }
+}
+
 /// Final output of one relation-local PostgreSQL ModifyTable session.
 ///
-/// Keeping the scan observation beside the produced delta prevents validation
-/// policy from being inferred indirectly from position deletes. In particular,
-/// an insert-only MERGE has added data and an observed target scan but no
-/// referenced data files.
+/// Target dependency is explicit: the DML frame decides whether the finalized
+/// plan logically needs a target read, while row-location tracking contributes
+/// the snapshot observation only for a required read.
 struct StatementOutcome {
     command: ModifyCommand,
-    scan_snapshot: DmlScanSnapshot,
+    target_dependency: TargetDependency,
     new_data_files: Vec<DataFile>,
     position_delete_files: Vec<PositionDeleteOutput>,
     referenced_data_files: BTreeSet<String>,
@@ -480,18 +514,21 @@ struct StatementOutcome {
 
 impl StatementOutcome {
     fn has_delta(&self) -> bool {
-        !self.new_data_files.is_empty()
-            || !self.position_delete_files.is_empty()
+        !self.new_data_files.is_empty() || !self.position_delete_files.is_empty()
     }
 
-    fn validation_snapshot(&self) -> IcebergResult<Option<i64>> {
-        match self.scan_snapshot {
-            DmlScanSnapshot::Observed(snapshot_id) => Ok(snapshot_id),
-            DmlScanSnapshot::Unobserved => Err(
-                IcebergError::InvariantViolated(
-                    "row-level DML produced an Iceberg delta without scanning its target",
-                ),
-            ),
+    fn row_delta_validation(
+        &self,
+    ) -> IcebergResult<Option<(DmlCommand, Option<i64>)>> {
+        if !self.has_delta() {
+            return Ok(None);
+        }
+        let Some(command) = self.command.validation_command() else {
+            return Ok(None);
+        };
+        match self.target_dependency {
+            TargetDependency::Independent => Ok(None),
+            dependency => Ok(Some((command, dependency.required_snapshot()?))),
         }
     }
 }
@@ -506,8 +543,9 @@ pub struct IcebergModify {
     /// File IO for staging produced data files into transaction metadata.
     file_io: FileIO,
     command: ModifyCommand,
+    target_read: DmlTargetReadRequirement,
     isolation_level: Option<IsolationLevel>,
-    conflict_filter: Option<Predicate>,
+    conflict_scope: Option<ConflictValidationScope>,
     /// The slot -> data-file production pipeline.
     data_sink: Option<DataFileSink>,
     position_delete_sink: Option<PositionDeleteSink>,
@@ -515,8 +553,8 @@ pub struct IcebergModify {
 }
 
 impl AmDmlSession for IcebergModify {
-    fn new(rel: &RelationHandle, cmd_type: pg_sys::CmdType::Type) -> AmResult<Self> {
-        Ok(Self::open(rel, cmd_type)?)
+    fn new(rel: &RelationHandle, context: DmlSessionContext) -> AmResult<Self> {
+        Ok(Self::open(rel, context)?)
     }
 
     fn begin_modify(&mut self) -> AmResult<()> {
@@ -662,11 +700,9 @@ impl IcebergModify {
     /// for storage, the relation OID for the metadata tracker, and the live
     /// columns / tuple width / attribute types that bind the write-side
     /// source-slot mapping ([`WriteColumns`]). The handle is not retained.
-    fn open(
-        rel: &RelationHandle,
-        cmd_type: pg_sys::CmdType::Type,
-    ) -> IcebergResult<Self> {
-        let command = ModifyCommand::from_pg(cmd_type)?;
+    fn open(rel: &RelationHandle, context: DmlSessionContext) -> IcebergResult<Self> {
+        let command = ModifyCommand::from_pg(context.cmd_type())?;
+        let target_read = context.target_read();
         let transaction_isolation = PgTransactionIsolation::current()?;
         let rel_oid = rel.oid();
         // `locator().spc_oid` is the *resolved* physical tablespace (default
@@ -680,22 +716,27 @@ impl IcebergModify {
         // Registers the relation with the per-transaction tracker, rebases
         // pending changes, and returns the base metadata in one step.
         let loaded = TxMetadata::current().begin_table_modify(rel_oid, &file_io)?;
-        if command.writes_position_deletes()
+        let writes_position_deletes = command.writes_position_deletes()
+            && target_read == DmlTargetReadRequirement::ReadRequired;
+        if writes_position_deletes
             && loaded.metadata.format_version() < FormatVersion::V2
         {
             return Err(IcebergError::NotImplemented(
-                "UPDATE/DELETE/MERGE require Iceberg format v2 or later",
+                "UPDATE/DELETE and target-reading MERGE require Iceberg format v2 or later",
             ));
         }
         let iceberg_schema = loaded.metadata.current_schema().clone();
         let table_properties = loaded.metadata.table_properties()?;
-        let isolation_level = command.effective_isolation_level(
-            &table_properties,
-            transaction_isolation,
-        );
-        let conflict_filter = command
-            .validation_command()
-            .map(|_| DmlConflictFilterResolver::new(rel_oid).resolve());
+        let isolation_level = command
+            .effective_isolation_level(&table_properties, transaction_isolation);
+        let conflict_scope = if target_read == DmlTargetReadRequirement::ReadRequired
+        {
+            command
+                .validation_command()
+                .map(|_| DmlConflictFilterResolver::new(rel_oid).resolve())
+        } else {
+            None
+        };
         let write_options = IcebergTableOptions::for_relation(rel)?;
         let writer_properties = WriterProperties::builder()
             .set_compression(write_options.parquet_compression())
@@ -717,7 +758,7 @@ impl IcebergModify {
         } else {
             None
         };
-        let position_delete_sink = if command.writes_position_deletes() {
+        let position_delete_sink = if writes_position_deletes {
             Some(PositionDeleteSink::new(
                 &file_io,
                 &loaded.metadata,
@@ -731,8 +772,9 @@ impl IcebergModify {
             rel_oid,
             file_io,
             command,
+            target_read,
             isolation_level,
-            conflict_filter,
+            conflict_scope,
             data_sink,
             position_delete_sink,
             position_deletes: PositionDeleteAccumulator::default(),
@@ -767,12 +809,13 @@ impl IcebergModify {
                 "row-level DML validation has no effective isolation level",
             ));
         };
-        let conflict_filter =
-            self.conflict_filter
-                .take()
-                .ok_or(IcebergError::InvariantViolated(
-                    "row-delta conflict filter was already consumed",
-                ))?;
+        let conflict_filter = self
+            .conflict_scope
+            .take()
+            .ok_or(IcebergError::InvariantViolated(
+                "row-delta conflict scope was already consumed",
+            ))?
+            .into_predicate();
         let validation =
             RowDeltaValidation::new(command, conflict_filter, isolation_level)
                 .with_starting_snapshot_id(starting_snapshot_id)
@@ -786,33 +829,22 @@ impl IcebergModify {
 
     fn finish_statement(&mut self) -> IcebergResult<StatementOutcome> {
         let new_data_files = self.finish_data_files()?;
-        let referenced_data_files =
-            self.position_deletes.referenced_data_files();
+        let referenced_data_files = self.position_deletes.referenced_data_files();
         let position_delete_files = self.finish_position_deletes()?;
         Ok(StatementOutcome {
             command: self.command,
-            scan_snapshot: current_dml_scan_snapshot(self.rel_oid),
+            target_dependency: TargetDependency::from_frame(
+                self.target_read,
+                current_dml_scan_observation(self.rel_oid),
+            ),
             new_data_files,
             position_delete_files,
             referenced_data_files,
         })
     }
 
-    fn stage_statement(
-        &mut self,
-        outcome: StatementOutcome,
-    ) -> IcebergResult<()> {
-        let has_delta = outcome.has_delta();
-        let validation = if has_delta {
-            match outcome.command.validation_command() {
-                Some(command) => {
-                    Some((command, outcome.validation_snapshot()?))
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
+    fn stage_statement(&mut self, outcome: StatementOutcome) -> IcebergResult<()> {
+        let validation = outcome.row_delta_validation()?;
 
         if !outcome.new_data_files.is_empty() {
             self.stage_data_files(outcome.new_data_files)?;
@@ -923,27 +955,33 @@ mod dml_state_tests {
                 } else {
                     IsolationLevel::Serializable
                 };
-                assert_eq!(command.table_isolation_level(&properties), Some(expected));
+                assert_eq!(
+                    command.table_isolation_level(&properties),
+                    Some(expected)
+                );
             }
         }
     }
 
     #[test]
-    fn scan_of_empty_table_is_distinct_from_unobserved_scan() {
-        let observed = StatementOutcome {
-            command: ModifyCommand::Merge,
-            scan_snapshot: DmlScanSnapshot::Observed(None),
-            new_data_files: Vec::new(),
-            position_delete_files: Vec::new(),
-            referenced_data_files: BTreeSet::new(),
-        };
-        assert_eq!(observed.validation_snapshot().unwrap(), None);
+    fn target_dependency_separates_independent_and_required_reads() {
+        let empty_table_read = TargetDependency::from_frame(
+            DmlTargetReadRequirement::ReadRequired,
+            DmlScanObservation::Observed(None),
+        );
+        assert_eq!(empty_table_read.required_snapshot().unwrap(), None);
 
-        let unobserved = StatementOutcome {
-            scan_snapshot: DmlScanSnapshot::Unobserved,
-            ..observed
-        };
-        assert!(unobserved.validation_snapshot().is_err());
+        let missing_required_read = TargetDependency::from_frame(
+            DmlTargetReadRequirement::ReadRequired,
+            DmlScanObservation::Unobserved,
+        );
+        assert!(missing_required_read.required_snapshot().is_err());
+
+        let independent = TargetDependency::from_frame(
+            DmlTargetReadRequirement::Independent,
+            DmlScanObservation::Unobserved,
+        );
+        assert_eq!(independent, TargetDependency::Independent);
     }
 
     #[test]
@@ -958,10 +996,7 @@ mod dml_state_tests {
         assert_eq!(accumulator.add(location(9)), TouchResult::Added);
         assert_eq!(accumulator.add(location(1)), TouchResult::Added);
         assert_eq!(accumulator.add(location(5)), TouchResult::Added);
-        assert_eq!(
-            accumulator.add(location(5)),
-            TouchResult::SelfModified
-        );
+        assert_eq!(accumulator.add(location(5)), TouchResult::SelfModified);
         assert!(accumulator.contains(&location(5)));
 
         let positions: Vec<_> = accumulator

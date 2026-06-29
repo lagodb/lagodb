@@ -324,9 +324,7 @@ fn iceberg_lite_sql_error_code(error: &iceberg_lite::Error) -> PgSqlErrorCode {
         // Optimistic row-level validation found concurrent data changes. The
         // same Iceberg commit must not be retried transparently; PostgreSQL
         // aborts the transaction and lets the client rebuild it.
-        ErrorKind::DataConflict => {
-            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-        }
+        ErrorKind::DataConflict => PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
         ErrorKind::TableNotFound => PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
         ErrorKind::TableAlreadyExists => PgSqlErrorCode::ERRCODE_DUPLICATE_TABLE,
         ErrorKind::NamespaceNotFound => PgSqlErrorCode::ERRCODE_INVALID_SCHEMA_NAME,
@@ -402,12 +400,10 @@ mod tests {
 
     #[test]
     fn non_retryable_iceberg_precondition_preserves_prerequisite_state() {
-        let error = IcebergError::IcebergLiteError(
-            iceberg_lite::Error::new(
-                iceberg_lite::ErrorKind::PreconditionFailed,
-                "invalid operation state",
-            ),
-        );
+        let error = IcebergError::IcebergLiteError(iceberg_lite::Error::new(
+            iceberg_lite::ErrorKind::PreconditionFailed,
+            "invalid operation state",
+        ));
 
         assert_eq!(
             error.sql_error_code(),

@@ -71,3 +71,19 @@ rows
 ----
    1
 (1 row)
+
+
+starting permutation: s1_begin s1_merge_dynamic s2_begin s2_merge_dynamic_other_key s1_commit s2_commit verify_merge
+step s1_begin: BEGIN;
+step s1_merge_dynamic: MERGE INTO iceberg_dml_conflict.merge_t AS target USING iceberg_dml_conflict.merge_source_1 AS source ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s2_begin: BEGIN;
+step s2_merge_dynamic_other_key: MERGE INTO iceberg_dml_conflict.merge_t AS target USING iceberg_dml_conflict.merge_source_2 AS source ON target.id = source.id WHEN NOT MATCHED THEN INSERT (id, label) VALUES (source.id, source.label);
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
+step verify_merge: SELECT string_agg(id || ':' || label, ',' ORDER BY id) AS rows FROM iceberg_dml_conflict.merge_t;
+rows  
+------
+200:s1
+(1 row)
+
