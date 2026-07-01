@@ -30,7 +30,9 @@ use syn::{
 /// impl TableAccessMethod for MyTableAm {
 ///     type ScanSession = MyScan;
 ///     type IndexFetchSession = MyIndexFetch;
-///     type DmlSession = MyModify;
+///     type ModifyQueryState = MyModifyQueryState;
+///     type ModifyState = MyModify;
+///     type CopySession = MyCopy;
 /// }
 ///
 /// struct MyScan;
@@ -45,8 +47,14 @@ use syn::{
 ///
 /// impl AmDdl for MyTableAm { /* ... */ }
 ///
+/// struct MyModifyQueryState;
+/// impl AmModifyQueryState for MyModifyQueryState { /* ... */ }
+///
 /// struct MyModify;
-/// impl AmDmlSession for MyModify { /* ... */ }
+/// impl AmModifyState for MyModify { /* ... */ }
+///
+/// struct MyCopy;
+/// impl AmCopySession for MyCopy { /* ... */ }
 /// ```
 ///
 /// then you can use those functions in Postgres,

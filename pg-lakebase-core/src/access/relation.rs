@@ -118,19 +118,34 @@ where
         let tup_desc = (*slot).tts_tupleDescriptor;
         let natts = (*tup_desc).natts as usize;
 
+        match crate::access::mutation::trigger_rows::fetch::<A>(
+            rel_handle.oid(),
+            tid,
+            slot,
+        ) {
+            crate::access::mutation::trigger_rows::FetchResult::Found => {
+                (*slot).tts_tid = tid.to_pg_sys();
+                return true;
+            }
+            crate::access::mutation::trigger_rows::FetchResult::Missing => {
+                error!(
+                    "Lakebase AFTER-trigger row identity has no live query-level row store"
+                );
+            }
+            crate::access::mutation::trigger_rows::FetchResult::PhysicalRow => {}
+        }
+
         let mut row = Row::with_capacity(natts);
-
-        let found =
-            A::tuple_fetch_row_version(&rel_handle, &tid, &snapshot_handle, &mut row)
-                .report_unwrap();
-
-        if !found {
+        if !A::tuple_fetch_row_version(&rel_handle, &tid, &snapshot_handle, &mut row)
+            .report_unwrap()
+        {
             return false;
         }
 
         TupleSlotWriter::new(slot, (*slot).tts_mcxt)
             .write_row(&mut row)
             .report_unwrap();
+        (*slot).tts_tid = tid.to_pg_sys();
 
         true
     }

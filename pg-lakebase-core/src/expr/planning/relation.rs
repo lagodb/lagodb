@@ -86,22 +86,6 @@ impl PlanScanRelation {
     }
 
     #[inline]
-    pub(crate) fn from_runtime(
-        rel_oid: pg_sys::Oid,
-        scan_relid: core::ffi::c_int,
-    ) -> Option<Self> {
-        let relid = pg_sys::Index::try_from(scan_relid).ok()?;
-        if relid == 0 {
-            return None;
-        }
-        Some(Self {
-            relid,
-            scan_relid,
-            rel_oid,
-        })
-    }
-
-    #[inline]
     pub(crate) fn predicate_context(self) -> PlanPredicateContext {
         PlanPredicateContext {
             rel_oid: self.rel_oid,

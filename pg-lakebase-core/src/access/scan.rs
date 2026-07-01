@@ -6,17 +6,51 @@
 use super::common::FfiContainer;
 use crate::api::{AmScanSession, TableAccessMethod};
 use crate::batch::ScanBatchDriver;
-use crate::diag::ReportableError;
+use crate::diag::{PgReportError, ReportableError};
 use crate::handles::{
     ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle,
     RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
     TBMIterateResultHandle,
 };
-use crate::tuple::SlotColumns;
+use crate::tuple::{Row, SlotColumns};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::*;
 
-type TableAmScanDesc<T> = FfiContainer<pg_sys::TableScanDescData, T>;
+struct TableScanState<T> {
+    am_instance: T,
+    scan_keys: OwnedScanKeys,
+    row: Row,
+    tmp_ctx: pg_sys::MemoryContext,
+}
+
+type TableAmScanDesc<T> = FfiContainer<pg_sys::TableScanDescData, TableScanState<T>>;
+
+impl<T> TableScanState<T> {
+    fn new(
+        am_instance: T,
+        scan_keys: OwnedScanKeys,
+        tmp_ctx: pg_sys::MemoryContext,
+    ) -> Self {
+        Self {
+            am_instance,
+            scan_keys,
+            row: Row::new(),
+            tmp_ctx,
+        }
+    }
+
+    unsafe fn reset_tmp_context(&mut self) {
+        unsafe { pg_sys::MemoryContextReset(self.tmp_ctx) };
+    }
+
+    unsafe fn write_row_to_slot(
+        &mut self,
+        slot: *mut pg_sys::TupleTableSlot,
+    ) -> Result<(), PgReportError> {
+        let mut columns = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
+        columns.fill_from_row(&mut self.row)
+    }
+}
 
 #[pg_guard]
 pub extern "C-unwind" fn slot_callbacks<A>(
@@ -74,14 +108,12 @@ where
         )
         .report_unwrap();
 
-        let tup_desc = (*rel).rd_att;
-        let natts = (*tup_desc).natts as usize;
-
         const TMP_CTX_NAME: &core::ffi::CStr = c"pg-lakebase TableScan tmp";
+        let tmp_ctx = (*scan_desc).create_child_context(TMP_CTX_NAME);
         // Move ownership of the keys into the FFI session container so that
         // the AM's scan_begin sees the same buffer that scan_rescan will
         // later mutate in place.
-        (*scan_desc).init_session(instance, scan_keys, TMP_CTX_NAME, natts);
+        (*scan_desc).init_session(TableScanState::new(instance, scan_keys, tmp_ctx));
 
         // Wire the PostgreSQL TableScanDescData up to point at the AM-owned
         // key buffer (mirroring heap AM, where rs_key is allocated by the
@@ -207,7 +239,7 @@ where
 
         // Copied out before borrowing `am_instance`: the slot-fill path needs
         // both the session's context/width and a `&mut` driver at once.
-        let tmp_ctx = state.tmp_ctx();
+        let tmp_ctx = state.tmp_ctx;
 
         // One uniform slot-filling path: ask the session's driver for the next
         // tuple. row-vs-column is the driver's own concern. Switch the current

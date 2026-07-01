@@ -43,7 +43,7 @@ impl<'slot> PgDatumRef<'slot> {
 
     /// Materialize this datum into the framework's owned cell representation.
     ///
-    /// This is the row-mode fallback. Columnar DML hot paths should prefer
+    /// This is the row-mode fallback. Columnar mutation hot paths should prefer
     /// appending the datum view directly to their builders.
     pub fn to_cell(self) -> Option<Cell> {
         unsafe {
@@ -58,7 +58,7 @@ impl<'slot> PgDatumRef<'slot> {
 /// not be stored across callbacks because PostgreSQL can reuse the slot and
 /// reset the surrounding memory context.
 ///
-/// The intended DML flow is:
+/// The intended mutation flow is:
 ///
 /// - row-mode AMs call [`Self::to_owned_row`] and buffer owned values;
 /// - columnar AMs read [`PgDatumRef`] values with [`Self::datum_at`] and append
@@ -108,7 +108,7 @@ impl<'slot> TupleSlotRow<'slot> {
     /// The slot's `tts_values` / `tts_isnull` arrays and the descriptor's
     /// attribute list are resolved a single time here, so per-column access
     /// through [`SlotDatums::datum_at`] is a plain bounds-checked index. Callers
-    /// reading more than one column (the columnar DML write path, `to_owned_row`)
+    /// reading more than one column (the columnar mutation write path, `to_owned_row`)
     /// must go through this instead of repeated [`Self::datum_at`], which rebuilds
     /// the three slices on every call.
     pub fn datums(&self) -> SlotDatums<'slot> {
@@ -127,7 +127,7 @@ impl<'slot> TupleSlotRow<'slot> {
     ///
     /// Use this only when the AM needs row-shaped values after the callback
     /// returns. It intentionally performs the ownership conversion that
-    /// columnar DML paths avoid.
+    /// columnar mutation paths avoid.
     pub fn to_owned_row(&self) -> Row {
         Row::from_slot_view(*self)
     }

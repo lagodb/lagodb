@@ -13,7 +13,7 @@
 //! abort, or savepoint event handling.  ResourceOwner callbacks are appropriate
 //! for frame-, portal-, executor-, or other owner-scoped resources that must be
 //! cleaned up if PostgreSQL unwinds past normal Rust control flow, such as
-//! ERROR during DML or COPY.
+//! ERROR during mutation or COPY.
 //!
 //! # Example
 //!

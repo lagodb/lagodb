@@ -5,15 +5,46 @@
 
 use super::common::FfiContainer;
 use crate::api::{AmIndexFetchSession, TableAccessMethod};
+use crate::diag::PgReportError;
 use crate::diag::ReportableError;
 use crate::handles::{
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
     RelationHandle, SnapshotHandle, TMIndexDeleteOpHandle, TableScanDescHandle,
     ValidateIndexStateHandle,
 };
+use crate::tuple::{Row, SlotColumns};
 use pgrx::prelude::*;
 
-type CustomIndexFetchData<T> = FfiContainer<pg_sys::IndexFetchTableData, T>;
+struct IndexFetchState<T> {
+    am_instance: T,
+    row: Row,
+    tmp_ctx: pg_sys::MemoryContext,
+}
+
+type CustomIndexFetchData<T> =
+    FfiContainer<pg_sys::IndexFetchTableData, IndexFetchState<T>>;
+
+impl<T> IndexFetchState<T> {
+    fn new(am_instance: T, tmp_ctx: pg_sys::MemoryContext, natts: usize) -> Self {
+        Self {
+            am_instance,
+            row: Row::with_capacity(natts),
+            tmp_ctx,
+        }
+    }
+
+    unsafe fn reset_tmp_context(&mut self) {
+        unsafe { pg_sys::MemoryContextReset(self.tmp_ctx) };
+    }
+
+    unsafe fn write_row_to_slot(
+        &mut self,
+        slot: *mut pg_sys::TupleTableSlot,
+    ) -> Result<(), PgReportError> {
+        let mut columns = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
+        columns.fill_from_row(&mut self.row)
+    }
+}
 
 #[pg_guard]
 pub extern "C-unwind" fn index_fetch_begin<A>(
@@ -41,12 +72,8 @@ where
         let natts = (*tup_desc).natts as usize;
 
         const TMP_CTX_NAME: &core::ffi::CStr = c"pg-lakebase IndexFetch tmp";
-        (*fetch_data).init_session(
-            instance,
-            crate::handles::OwnedScanKeys::empty(),
-            TMP_CTX_NAME,
-            natts,
-        );
+        let tmp_ctx = (*fetch_data).create_child_context(TMP_CTX_NAME);
+        (*fetch_data).init_session(IndexFetchState::new(instance, tmp_ctx, natts));
 
         fetch_data as *mut pg_sys::IndexFetchTableData
     }

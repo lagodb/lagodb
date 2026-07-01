@@ -25,17 +25,17 @@
 //!   `RelationGuard` and `HeapTupleGuard`.
 
 mod borrowed;
-mod dml;
 mod index;
+mod mutation;
 mod relation;
 mod scan;
 mod tuple;
 
-pub use dml::{BulkInsertStateHandle, TM_FailureData, TMIndexDeleteOpHandle};
 pub use index::{
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle,
     ValidateIndexStateHandle,
 };
+pub use mutation::{BulkInsertStateHandle, TM_FailureData, TMIndexDeleteOpHandle};
 pub use relation::{
     AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationGuard,
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,

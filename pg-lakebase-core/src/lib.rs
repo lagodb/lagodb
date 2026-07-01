@@ -20,14 +20,16 @@
 //! impl TableAccessMethod for MyTableAm {
 //!     type ScanSession = MyScan;
 //!     type IndexFetchSession = MyIndexFetch;
-//!     type DmlSession = MyModify;
+//!     type ModifyQueryState = MyModifyQueryState;
+//!     type ModifyState = MyModify;
+//!     type CopySession = MyCopy;
 //! }
 //! ```
 
 /// Core trait definitions for table access methods
 pub mod api;
 
-/// DML batch buffering abstractions and default row buffer.
+/// Mutation batch buffering abstractions and default row buffer.
 pub mod batch;
 
 /// Safe wrapper types for PostgreSQL FFI types
@@ -36,7 +38,7 @@ pub mod handles;
 /// PostgreSQL tuple value abstractions (Cell, Row)
 pub mod tuple;
 
-/// Table access implementation modules (scan, index, dml, ddl, relation)
+/// Table access implementation modules (scan, index, mutation, ddl, relation)
 pub mod access;
 
 /// Typed PG-`Expr` views, walkers, classification, and the runtime predicate

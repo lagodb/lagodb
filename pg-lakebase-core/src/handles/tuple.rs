@@ -25,7 +25,7 @@ impl<'a> TupleTableSlotHandle<'a> {
 }
 
 /// Safe wrapper for PostgreSQL ItemPointer (TID).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ItemPointer {
     pub block_number: u32,
     pub offset: u16,

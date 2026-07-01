@@ -1,4 +1,4 @@
-//! Batch buffering and transport abstractions for the DML write path and the
+//! Batch buffering and transport abstractions for the mutation write path and the
 //! columnar scan read path.
 //!
 //! The core crate defines the buffering/transport *contracts* without
@@ -19,7 +19,7 @@
 //!   paired with `pg-arrow-conv`'s `ColumnRule::build(&[Row], ..)`. Not on the
 //!   columnar hot path (see [`RowBatchBuffer`] for why it is retained).
 //!
-//! Core does not provide a `Cell`-based columnar buffer: on a DML hot path,
+//! Core does not provide a `Cell`-based columnar buffer: on a mutation hot path,
 //! materializing `Cell` first would add the same intermediate allocations the
 //! slot/datum path is designed to avoid.
 //!
@@ -77,7 +77,7 @@ pub trait BatchBuffer {
 
 /// Per-column encoder for direct PostgreSQL datum sources.
 ///
-/// This is the fast path for Arrow-backed DML buffers: the concrete appender
+/// This is the fast path for Arrow-backed mutation buffers: the concrete appender
 /// can inspect PostgreSQL type metadata and append directly into its physical
 /// builder without first allocating a materialized cell. Target-format
 /// decisions such as Iceberg decimal scale, fixed-width binary length,
@@ -121,7 +121,7 @@ pub trait DatumColumnAppender {
 /// tuple slots.
 ///
 /// This is the abstraction a future Arrow companion crate should implement for
-/// the DML hot path. It keeps core independent of Arrow while avoiding the
+/// the mutation hot path. It keeps core independent of Arrow while avoiding the
 /// intermediate row/cell allocation layer.
 pub trait SlotColumnarBatchBuffer: BatchBuffer {
     /// Finished physical column type.

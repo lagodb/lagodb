@@ -13,7 +13,7 @@
 //! Use this module for transaction-scoped state, such as metadata updates,
 //! staged publication, or cleanup actions that must react to commit, abort,
 //! pre-commit, or subtransaction promotion/rollback.  Use [`crate::resource`] for
-//! executor, portal, DML-frame, COPY, or other ResourceOwner-bound cleanup that
+//! executor, portal, mutation-frame, COPY, or other ResourceOwner-bound cleanup that
 //! must run when PostgreSQL releases the owner even after ERROR/longjmp.
 //!
 //! The [`cleanup`] submodule provides higher-level helpers for common

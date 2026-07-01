@@ -17,7 +17,7 @@ where
         crate::access::scan::register::<A>(&mut am_routine);
         crate::access::relation::register::<A>(&mut am_routine);
         crate::access::index::register::<A>(&mut am_routine);
-        crate::access::dml::register::<A>(&mut am_routine);
+        crate::access::mutation::register::<A>(&mut am_routine);
         crate::access::ddl::register::<A>(&mut am_routine);
 
         TableAmRoutine::from_pg(am_routine.into_pg())

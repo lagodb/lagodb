@@ -73,6 +73,11 @@ impl<'a> SlotColumns<'a> {
         self.values.len()
     }
 
+    /// Memory context in which varlena values for this output slot must live.
+    pub fn target_context(&self) -> pg_sys::MemoryContext {
+        self.target_ctx
+    }
+
     /// Set the tuple identity carried by this slot.
     pub fn set_tid(&mut self, tid: &ItemPointer) {
         // SAFETY: `self.slot` was validated by `SlotColumns::new`; `tts_tid`
@@ -81,6 +86,12 @@ impl<'a> SlotColumns<'a> {
         unsafe {
             (*self.slot).tts_tid = tid.to_pg_sys();
         }
+    }
+
+    /// Set the physical relation OID carried by this slot.
+    pub fn set_table_oid(&mut self, table_oid: pg_sys::Oid) {
+        // SAFETY: `self.slot` is live for the lifetime of this writer.
+        unsafe { (*self.slot).tts_tableOid = table_oid };
     }
 
     /// Write column `index`; `None` denotes SQL NULL. The sole writer of

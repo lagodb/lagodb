@@ -13,8 +13,9 @@
 //!   [`TableAccessMethod`] so the registry only needs a single `A: TableAccessMethod`
 //!   bound.
 //! - **Session traits** ([`AmScanSession`], [`AmIndexFetchSession`],
-//!   [`AmDmlSession`]) describe `&mut self` lifecycles tied to a scan, an
-//!   index fetch, or a statement-scoped DML batch. They surface as associated
+//!   [`AmModifyQueryState`], [`AmModifyState`]) describe `&mut self` lifecycles
+//!   tied to a scan, an index fetch, a Modify query, or one result relation.
+//!   They surface as associated
 //!   types on [`TableAccessMethod`] so the framework can construct, store,
 //!   and drop one instance per active operation.
 //!
@@ -65,6 +66,7 @@
 //! with PostgreSQL.
 
 use crate::TableAmRoutine;
+use crate::access::mutation::trigger_rows::TriggerQueryState;
 use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, SqlStateError};
 use crate::handles::{
@@ -72,15 +74,17 @@ use crate::handles::{
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
     OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle, RelFileLocator,
     RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
-    TBMIterateResultHandle, TM_FailureData, TMIndexDeleteOpHandle,
-    TableScanDescHandle, TupleTableSlotHandle, VacuumParamsHandle,
-    ValidateIndexStateHandle, VarlenaHandle,
+    TBMIterateResultHandle, TMIndexDeleteOpHandle, TableScanDescHandle,
+    TupleTableSlotHandle, VacuumParamsHandle, ValidateIndexStateHandle,
+    VarlenaHandle,
 };
 use crate::tuple::{Row, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
+use std::cell::RefCell;
 use std::fmt::{Display, Formatter};
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmFrameworkError {
@@ -131,6 +135,10 @@ impl From<AmFrameworkError> for ErrorReport {
 pub type AmError = PgReportError;
 pub type AmResult<T> = Result<T, AmError>;
 
+/// First `ItemPointer` block number reserved for core-owned temporary rows.
+/// Provider physical row-identity codecs must remain below this boundary.
+pub const TRIGGER_ROW_BLOCK_BASE: u32 = 0xC000_0000;
+
 /// Return PostgreSQL `FEATURE_NOT_SUPPORTED` for a table-AM callback that the
 /// implementing AM explicitly does not support.
 pub fn unsupported_callback<T>(method: &'static str) -> AmResult<T> {
@@ -143,14 +151,22 @@ pub fn unsupported_callback<T>(method: &'static str) -> AmResult<T> {
 /// [`AmRelation`], [`AmIndexCallbacks`], [`AmDdl`]) and implemented directly
 /// on the AM identity type. Per-operation state lives behind associated
 /// types: [`Self::ScanSession`], [`Self::IndexFetchSession`],
-/// [`Self::DmlSession`]. See the [module-level docs](self) for the full
-/// rationale.
+/// [`Self::ModifyQueryState`], [`Self::ModifyState`], [`Self::CopySession`].
+/// See the [module-level docs](self) for the full rationale.
 pub trait TableAccessMethod:
     AmScan + AmRelation + AmIndexCallbacks + AmDdl + 'static
 {
     type ScanSession: AmScanSession;
     type IndexFetchSession: AmIndexFetchSession;
-    type DmlSession: AmDmlSession + 'static;
+    type ModifyQueryState: AmModifyQueryState;
+    type ModifyState: AmModifyState<QueryState = Self::ModifyQueryState> + 'static;
+    type CopySession: AmCopySession + 'static;
+
+    /// Resolve this access method's current catalog OID.
+    ///
+    /// Extensions must not cache this value: an access method can be created,
+    /// dropped, and recreated while a backend remains alive.
+    fn access_method_oid() -> Option<pg_sys::Oid>;
 
     fn am_routine() -> TableAmRoutine
     where
@@ -548,118 +564,320 @@ pub trait AmIndexCallbacks {
     }
 }
 
-/// Whether a relation-local row-level DML session logically depends on its
-/// ModifyTable target scan.
-///
-/// This is deliberately independent of whether a scan callback happened. The
-/// optimizer can prove a MERGE target unreachable (for example `ON FALSE`) and
-/// remove that scan, making its insert action an independent append. Conversely,
-/// a required read that was not observed is an AM/executor invariant failure,
-/// not an independent write. Arbitrary source-subquery reads and PostgreSQL SSI
-/// dependencies are outside this context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DmlTargetReadRequirement {
-    /// The write does not depend on a row-level scan of its target relation.
-    Independent,
-    /// The row-level operation depends on a target scan and its read snapshot.
-    ReadRequired,
-}
-
-/// Immutable frame context supplied when a relation-local DML session is
-/// created.
+/// Per-row INSERT context passed by the forked ModifyTable executor.
 #[derive(Debug, Clone, Copy)]
-pub struct DmlSessionContext {
-    cmd_type: pg_sys::CmdType::Type,
-    target_read: DmlTargetReadRequirement,
+pub struct MutationWriteContext {
+    pub cid: pg_sys::CommandId,
+    pub options: i32,
 }
 
-impl DmlSessionContext {
-    pub(crate) fn new(
+/// Per-row UPDATE context passed by the forked ModifyTable executor.
+pub struct MutationUpdateContext<'a> {
+    pub cid: pg_sys::CommandId,
+    pub snapshot: &'a SnapshotHandle<'a>,
+    pub crosscheck: Option<&'a SnapshotHandle<'a>>,
+    pub wait: bool,
+}
+
+/// Per-row DELETE context passed by the forked ModifyTable executor.
+pub struct MutationDeleteContext<'a> {
+    pub cid: pg_sys::CommandId,
+    pub snapshot: &'a SnapshotHandle<'a>,
+    pub crosscheck: Option<&'a SnapshotHandle<'a>>,
+    pub wait: bool,
+    pub changing_partition: bool,
+}
+
+/// Storage-format-neutral result of a row mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationOutcome {
+    Applied,
+    /// A ModifyState in the current PostgreSQL transaction already processed
+    /// this physical row.
+    ///
+    /// Providers report the physical-row fact and the modifying command's ID.
+    /// The PostgreSQL adapter owns the conversion to `TM_SelfModified` and its
+    /// `TM_FailureData`.
+    AlreadyModifiedInCurrentTransaction {
+        modifying_command_id: pg_sys::CommandId,
+    },
+    Deleted,
+}
+
+/// Row-level operations that one PostgreSQL ModifyTable node may execute.
+///
+/// A plain INSERT/UPDATE/DELETE contains exactly one operation. MERGE carries
+/// the union of its concrete actions so providers can allocate only the sinks
+/// and validation state that the planned statement can actually use.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModifyActions(u8);
+
+impl ModifyActions {
+    pub const NONE: Self = Self(0);
+    pub const INSERT: Self = Self(1 << 0);
+    pub const UPDATE: Self = Self(1 << 1);
+    pub const DELETE: Self = Self(1 << 2);
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn may_insert(self) -> bool {
+        self.0 & Self::INSERT.0 != 0
+    }
+
+    pub const fn may_update(self) -> bool {
+        self.0 & Self::UPDATE.0 != 0
+    }
+
+    pub const fn may_delete(self) -> bool {
+        self.0 & Self::DELETE.0 != 0
+    }
+
+    pub const fn writes_rows(self) -> bool {
+        self.may_insert() || self.may_update()
+    }
+
+    pub const fn writes_position_deletes(self) -> bool {
+        self.may_update() || self.may_delete()
+    }
+}
+
+/// Typed, single-backend handle to AM state shared by every Lakebase
+/// ModifyTable node in one PostgreSQL executor query.
+pub(crate) struct ModifyQueryShared<Q: AmModifyQueryState> {
+    provider: RefCell<Q>,
+    trigger_rows: RefCell<TriggerQueryState>,
+}
+
+impl<Q: AmModifyQueryState> ModifyQueryShared<Q> {
+    pub(crate) fn new() -> AmResult<Self> {
+        Ok(Self {
+            provider: RefCell::new(Q::new()?),
+            trigger_rows: RefCell::new(TriggerQueryState::default()),
+        })
+    }
+}
+
+pub struct ModifyQueryState<Q: AmModifyQueryState> {
+    inner: Rc<ModifyQueryShared<Q>>,
+}
+
+impl<Q: AmModifyQueryState> Clone for ModifyQueryState<Q> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+        }
+    }
+}
+
+impl<Q: AmModifyQueryState> ModifyQueryState<Q> {
+    /// Create an independent query-state owner.
+    ///
+    /// Normal ModifyTable execution acquires this handle from core's `EState`
+    /// registry so sibling nodes share it. Independent write paths such as
+    /// COPY can use this constructor because they have no target scan identity
+    /// to share.
+    pub fn new() -> AmResult<Self> {
+        Ok(Self {
+            inner: Rc::new(ModifyQueryShared::new()?),
+        })
+    }
+
+    pub(crate) fn from_shared(inner: Rc<ModifyQueryShared<Q>>) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Mutably borrow the AM query state for one short, non-reentrant operation.
+    pub fn update<R>(
+        &self,
+        operation: impl FnOnce(&mut Q) -> AmResult<R>,
+    ) -> AmResult<R> {
+        let mut state = self.inner.provider.try_borrow_mut().map_err(|_| {
+            PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                "Modify query state is already borrowed",
+            )
+        })?;
+        operation(&mut state)
+    }
+
+    /// Preserve one complete relation-shaped row for a queued AFTER ROW
+    /// trigger in the core-owned query state.
+    ///
+    /// # Safety
+    ///
+    /// PostgreSQL must keep `tuple_desc` live for the query and `slot` live for
+    /// this call.
+    pub(crate) unsafe fn preserve_trigger_row<A: TableAccessMethod>(
+        &self,
+        relation_oid: pg_sys::Oid,
+        tuple_desc: pg_sys::TupleDesc,
+        slot: *mut pg_sys::TupleTableSlot,
+    ) -> AmResult<ItemPointer> {
+        let mut trigger_rows =
+            self.inner.trigger_rows.try_borrow_mut().map_err(|_| {
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "Modify query trigger-row state is already borrowed",
+                )
+            })?;
+        unsafe { trigger_rows.preserve::<A>(relation_oid, tuple_desc, slot) }
+    }
+}
+
+/// Storage-specific state shared by all ModifyTable nodes belonging to one
+/// PostgreSQL executor query.
+pub trait AmModifyQueryState: 'static {
+    /// Storage source shared by a group of physical row identities, such as an
+    /// Iceberg data-file path. The source is registered once per physical scan
+    /// run, never once per logical row.
+    type ScanIdentitySource<'a>;
+
+    /// Compact source token returned to the scan after query-level registration.
+    type RegisteredScanIdentity: Copy + 'static;
+
+    /// Storage-specific per-row identity within a registered source.
+    type ScanIdentity<'a>;
+
+    fn new() -> AmResult<Self>
+    where
+        Self: Sized;
+
+    /// Register a storage identity source in the query-level namespace for one
+    /// result relation.
+    fn register_scan_identity_source(
+        &mut self,
+        relation_oid: pg_sys::Oid,
+        source: &Self::ScanIdentitySource<'_>,
+    ) -> AmResult<Self::RegisteredScanIdentity>;
+
+    /// Encode one row within a registered source into PostgreSQL's row-id
+    /// carrier. This is deliberately stateless and remains on the per-row scan
+    /// hot path. Core reserves `ItemPointer::block_number >= 0xC0000000` for
+    /// query-local AFTER-trigger row identities; provider physical identities
+    /// must stay below that range.
+    fn encode_row_identity(
+        source: Self::RegisteredScanIdentity,
+        identity: &Self::ScanIdentity<'_>,
+    ) -> AmResult<ItemPointer>;
+}
+
+/// Immutable context supplied when a relation-local modify state is created.
+#[derive(Clone)]
+pub struct ModifyStateContext<Q: AmModifyQueryState, C> {
+    query_state: ModifyQueryState<Q>,
+    cmd_type: pg_sys::CmdType::Type,
+    actions: ModifyActions,
+    scan_context: Option<C>,
+}
+
+impl<Q: AmModifyQueryState, C> ModifyStateContext<Q, C> {
+    /// Construct a session whose writes do not depend on a target scan.
+    pub fn independent(
+        query_state: ModifyQueryState<Q>,
         cmd_type: pg_sys::CmdType::Type,
-        target_read: DmlTargetReadRequirement,
+        actions: ModifyActions,
     ) -> Self {
         Self {
+            query_state,
             cmd_type,
-            target_read,
+            actions,
+            scan_context: None,
         }
     }
 
-    /// PostgreSQL command type for the owning DML frame.
-    pub fn cmd_type(self) -> pg_sys::CmdType::Type {
+    /// Construct a session tied to the supplied Modify-scan context.
+    pub fn target_read(
+        query_state: ModifyQueryState<Q>,
+        cmd_type: pg_sys::CmdType::Type,
+        actions: ModifyActions,
+        scan_context: C,
+    ) -> Self {
+        Self {
+            query_state,
+            cmd_type,
+            actions,
+            scan_context: Some(scan_context),
+        }
+    }
+
+    /// PostgreSQL command type for the owning ModifyTable execution.
+    pub fn cmd_type(&self) -> pg_sys::CmdType::Type {
         self.cmd_type
     }
 
-    /// Logical target-read requirement resolved from the owning frame's plan.
-    pub fn target_read(self) -> DmlTargetReadRequirement {
-        self.target_read
+    /// Concrete row operations present in the owning plan.
+    pub fn actions(&self) -> ModifyActions {
+        self.actions
+    }
+
+    /// The target-scan context, absent for independent INSERT/COPY.
+    pub fn scan_context(&self) -> Option<&C> {
+        self.scan_context.as_ref()
+    }
+
+    /// Consume this context into its independently owned parts.
+    pub fn into_parts(
+        self,
+    ) -> (
+        ModifyQueryState<Q>,
+        pg_sys::CmdType::Type,
+        ModifyActions,
+        Option<C>,
+    ) {
+        (
+            self.query_state,
+            self.cmd_type,
+            self.actions,
+            self.scan_context,
+        )
     }
 }
 
-/// Relation-local AM state for one managed PostgreSQL DML frame.
-///
-/// This trait is the AM-facing `dml_init`/`dml_fini` abstraction.  PostgreSQL
-/// does not expose such callbacks directly in `TableAmRoutine`; it exposes
-/// tuple-level callbacks instead.  The framework creates an `AmDmlSession` on
-/// the first tuple callback for a relation inside a managed frame, calls
-/// [`begin_modify`](Self::begin_modify), dispatches all tuple callbacks for that
-/// relation to the same session, and then calls [`end_modify`](Self::end_modify)
-/// exactly once when the frame completes successfully.
+/// Relation-local state owned directly by one Custom ModifyTable execution.
 ///
 /// Abort paths are separate.  If PostgreSQL raises ERROR, aborts the
 /// transaction, or rolls back to a savepoint, ResourceOwner cleanup drops the
-/// frame and unfinalized sessions receive [`abort_modify`](Self::abort_modify)
+/// execution state and unfinalized sessions receive [`abort_modify`](Self::abort_modify)
 /// instead of `end_modify`.
-///
-/// The [`DmlSessionContext`] passed to [`new`](Self::new) describes the
-/// PostgreSQL frame operation and whether that relation-local write logically
-/// depends on reading the target. For MERGE the command is `CMD_MERGE`, while
-/// the actual physical action for each row is still expressed by the callback
-/// being invoked (`tuple_insert`, `tuple_update`, or `tuple_delete`).
-///
-/// # Reentrancy contract
-///
-/// A tuple callback ([`tuple_insert_slot`](Self::tuple_insert_slot),
-/// [`multi_insert_slots`](Self::multi_insert_slots), the update/delete/lock
-/// variants, etc.) MUST NOT synchronously re-enter the table-AM write path for
-/// the *same* relation in the *same* DML frame before it returns. Concretely, a
-/// callback must not call `table_tuple_insert` / `table_multi_insert` /
-/// `table_tuple_update` / `table_tuple_delete` (or SPI / executor entry points
-/// that do) against the relation it is currently writing.
-///
-/// The framework relies on this to hand each callback a unique
-/// `&mut` to the per-relation session without a per-row runtime guard: the hot
-/// path resolves the session once and reuses a cached pointer, which is sound
-/// only while no second `&mut` to the same session can be created concurrently.
-/// PostgreSQL's standard executor already upholds the contract — it runs
-/// `table_tuple_*` to completion before index maintenance and AFTER triggers,
-/// and nested trigger / SPI DML runs in a *new* ModifyTable frame — so normal
-/// AMs need do nothing special. Nested DML against *other* relations is fine
-/// when routed through the executor (it opens a new frame); doing raw table-AM
-/// writes from inside a callback is what the contract forbids.
-pub trait AmDmlSession {
-    /// Construct the write session for a DML frame.
+pub trait AmModifyState {
+    type QueryState: AmModifyQueryState;
+
+    /// Storage-specific metadata captured by the Modify-purpose target scan.
+    type ScanContext: Clone + PartialEq + 'static;
+
+    /// Construct the write session for one result relation.
     ///
     /// `rel` is borrowed only for the duration of construction (symmetric with
     /// [`AmScanSession::new`]); the AM derives everything it needs from the
     /// handle (relation OID, file locator, WAL requirement, and any column
     /// layout) and must capture it into owned fields rather than retaining the
-    /// handle. `context` carries the frame's PostgreSQL command type and target
-    /// read requirement (see the trait docs for the MERGE note).
-    fn new(rel: &RelationHandle, context: DmlSessionContext) -> AmResult<Self>
+    /// handle. `context` carries the PostgreSQL command and, for target-reading
+    /// mutation, the provider context captured by the Modify scan.
+    fn new(
+        rel: &RelationHandle,
+        context: ModifyStateContext<Self::QueryState, Self::ScanContext>,
+    ) -> AmResult<Self>
     where
         Self: Sized;
 
-    /// Opens relation-local resources for the current DML frame.
+    /// Opens relation-local resources for the current execution.
     ///
     /// Typical implementations load table metadata, create file writers, and
-    /// allocate buffers here.  This is frame-scoped, not transaction-scoped: a
+    /// allocate buffers here. This is execution-scoped, not transaction-scoped: a
     /// single transaction may create many sessions across multiple statements,
     /// partitions, nested SPI calls, COPY frames, or MERGE frames.
     fn begin_modify(&mut self) -> AmResult<()>;
 
-    /// Finishes the relation-local write session for a successful DML frame.
+    /// Finishes the relation-local write session for a successful execution.
     ///
-    /// A single PostgreSQL DML frame can host multiple AM sessions, for example
+    /// A single PostgreSQL ModifyTable execution can host multiple AM sessions, for example
     /// partition routing or COPY into a partitioned table. Implementations
     /// should not make per-session writes externally visible here unless that
     /// publication can remain correct when a later session in the same frame
@@ -676,24 +894,57 @@ pub trait AmDmlSession {
     /// must not assume `end_modify()` ran.
     fn abort_modify(&mut self) {}
 
-    fn tuple_insert(
+    /// Insert the final relation-shaped tuple produced by PostgreSQL.
+    fn insert_slot(
         &mut self,
-        row: Row,
-        cid: pg_sys::CommandId,
-        options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
+        new: TupleSlotRow<'_>,
+        context: MutationWriteContext,
     ) -> AmResult<()> {
-        let _ = (row, cid, options, bistate);
-        unsupported_callback("tuple_insert")
+        let _ = (new, context);
+        unsupported_callback("insert_slot")
     }
 
-    /// Insert from a PostgreSQL tuple-slot view.
+    /// Update a row using explicit physical identity plus OLD and final NEW
+    /// relation-shaped slots.
+    fn update_slot(
+        &mut self,
+        row_id: ItemPointer,
+        old: TupleSlotRow<'_>,
+        new: TupleSlotRow<'_>,
+        context: MutationUpdateContext<'_>,
+    ) -> AmResult<MutationOutcome> {
+        let _ = (row_id, old, new, context);
+        unsupported_callback("update_slot")
+    }
+
+    /// Delete a row using explicit physical identity.
     ///
-    /// This is the first method reached by the TableAM callback. The default
-    /// implementation materializes an owned [`Row`] and calls
-    /// [`Self::tuple_insert`], which is appropriate for row-oriented AMs.
-    /// Columnar AMs should override this method and append `PgDatumRef` values
-    /// from `row` directly into their column builders.
+    /// PostgreSQL executor consumers such as row triggers, transition tables,
+    /// and `RETURNING` obtain OLD from the planner-visible `wholerow`; storage
+    /// deletion does not receive an unconditional copy of the business row.
+    fn delete_slot(
+        &mut self,
+        row_id: ItemPointer,
+        context: MutationDeleteContext<'_>,
+    ) -> AmResult<MutationOutcome> {
+        let _ = (row_id, context);
+        unsupported_callback("delete_slot")
+    }
+}
+
+/// Relation-local COPY FROM state. COPY bypasses ModifyTable and therefore has
+/// a separate utility-scoped lifecycle and callback surface.
+pub trait AmCopySession {
+    fn new(rel: &RelationHandle) -> AmResult<Self>
+    where
+        Self: Sized;
+
+    fn begin_copy(&mut self) -> AmResult<()>;
+
+    fn end_copy(&mut self) -> AmResult<()>;
+
+    fn abort_copy(&mut self) {}
+
     fn tuple_insert_slot(
         &mut self,
         row: TupleSlotRow<'_>,
@@ -701,54 +952,10 @@ pub trait AmDmlSession {
         options: i32,
         bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
-        self.tuple_insert(row.to_owned_row(), cid, options, bistate)
+        let _ = (row, cid, options, bistate);
+        unsupported_callback("copy tuple_insert_slot")
     }
 
-    fn tuple_insert_speculative(
-        &mut self,
-        row: Row,
-        cid: pg_sys::CommandId,
-        options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
-        spec_token: u32,
-    ) -> AmResult<()> {
-        let _ = (row, cid, options, bistate, spec_token);
-        unsupported_callback("tuple_insert_speculative")
-    }
-
-    fn tuple_insert_speculative_slot(
-        &mut self,
-        row: TupleSlotRow<'_>,
-        cid: pg_sys::CommandId,
-        options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
-        spec_token: u32,
-    ) -> AmResult<()> {
-        self.tuple_insert_speculative(
-            row.to_owned_row(),
-            cid,
-            options,
-            bistate,
-            spec_token,
-        )
-    }
-
-    fn multi_insert(
-        &mut self,
-        rows: Vec<Row>,
-        cid: pg_sys::CommandId,
-        options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
-    ) -> AmResult<()> {
-        let _ = (rows, cid, options, bistate);
-        unsupported_callback("multi_insert")
-    }
-
-    /// Multi-insert from PostgreSQL tuple-slot views.
-    ///
-    /// The default implementation materializes a `Vec<Row>` and calls
-    /// [`Self::multi_insert`]. Columnar AMs should override this method to
-    /// append every slot row directly into their columnar batch buffer.
     fn multi_insert_slots(
         &mut self,
         rows: TupleSlotBatch<'_>,
@@ -756,116 +963,13 @@ pub trait AmDmlSession {
         options: i32,
         bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
-        self.multi_insert(rows.to_owned_rows(), cid, options, bistate)
-    }
-
-    fn tuple_delete(
-        &mut self,
-        tid: &ItemPointer,
-        cid: pg_sys::CommandId,
-        snapshot: &SnapshotHandle,
-        crosscheck: Option<&SnapshotHandle>,
-        wait: bool,
-        tmfd: &mut TM_FailureData,
-        changing_part: bool,
-    ) -> AmResult<pg_sys::TM_Result::Type> {
-        let _ = (tid, cid, snapshot, crosscheck, wait, tmfd, changing_part);
-        unsupported_callback("tuple_delete")
-    }
-
-    fn tuple_update(
-        &mut self,
-        otid: &ItemPointer,
-        row: Row,
-        cid: pg_sys::CommandId,
-        snapshot: &SnapshotHandle,
-        crosscheck: Option<&SnapshotHandle>,
-        wait: bool,
-        tmfd: &mut TM_FailureData,
-        lockmode: &mut pg_sys::LockTupleMode::Type,
-        update_indexes: &mut pg_sys::TU_UpdateIndexes::Type,
-    ) -> AmResult<pg_sys::TM_Result::Type> {
-        let _ = (
-            otid,
-            row,
-            cid,
-            snapshot,
-            crosscheck,
-            wait,
-            tmfd,
-            lockmode,
-            update_indexes,
-        );
-        unsupported_callback("tuple_update")
-    }
-
-    /// Update from a PostgreSQL tuple-slot view.
-    ///
-    /// This mirrors [`Self::tuple_insert_slot`]: the default row-mode fallback
-    /// materializes an owned [`Row`], while columnar AMs can override it to
-    /// avoid intermediate row/cell allocation.
-    fn tuple_update_slot(
-        &mut self,
-        otid: &ItemPointer,
-        row: TupleSlotRow<'_>,
-        cid: pg_sys::CommandId,
-        snapshot: &SnapshotHandle,
-        crosscheck: Option<&SnapshotHandle>,
-        wait: bool,
-        tmfd: &mut TM_FailureData,
-        lockmode: &mut pg_sys::LockTupleMode::Type,
-        update_indexes: &mut pg_sys::TU_UpdateIndexes::Type,
-    ) -> AmResult<pg_sys::TM_Result::Type> {
-        self.tuple_update(
-            otid,
-            row.to_owned_row(),
-            cid,
-            snapshot,
-            crosscheck,
-            wait,
-            tmfd,
-            lockmode,
-            update_indexes,
-        )
-    }
-
-    fn tuple_lock(
-        &mut self,
-        tid: &ItemPointer,
-        snapshot: &SnapshotHandle,
-        row: &mut Row,
-        cid: pg_sys::CommandId,
-        mode: pg_sys::LockTupleMode::Type,
-        wait_policy: pg_sys::LockWaitPolicy::Type,
-        flags: u8,
-        tmfd: &mut TM_FailureData,
-    ) -> AmResult<pg_sys::TM_Result::Type> {
-        let _ = (tid, snapshot, row, cid, mode, wait_policy, flags, tmfd);
-        unsupported_callback("tuple_lock")
+        let _ = (rows, cid, options, bistate);
+        unsupported_callback("copy multi_insert_slots")
     }
 
     fn finish_bulk_insert(&mut self, options: i32) -> AmResult<()> {
         let _ = options;
         Ok(())
-    }
-
-    fn tuple_complete_speculative(
-        &mut self,
-        row: Row,
-        spec_token: u32,
-        succeeded: bool,
-    ) -> AmResult<()> {
-        let _ = (row, spec_token, succeeded);
-        unsupported_callback("tuple_complete_speculative")
-    }
-
-    fn tuple_complete_speculative_slot(
-        &mut self,
-        row: TupleSlotRow<'_>,
-        spec_token: u32,
-        succeeded: bool,
-    ) -> AmResult<()> {
-        self.tuple_complete_speculative(row.to_owned_row(), spec_token, succeeded)
     }
 }
 
