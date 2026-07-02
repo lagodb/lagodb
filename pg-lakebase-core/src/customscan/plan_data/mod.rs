@@ -7,4 +7,7 @@
 pub mod codec;
 pub(crate) mod custom_exprs;
 pub mod custom_private;
+mod purpose;
 pub(crate) mod tuple_layout;
+
+pub use purpose::ScanPurpose;

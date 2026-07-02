@@ -2,7 +2,9 @@
 
 use pgrx::pg_sys;
 
+use crate::customscan::ScanPurpose;
 use crate::customscan::candidate::CustomScanCandidate;
+use crate::customscan::error::CustomScanError;
 use crate::customscan::parameterized::{
     ParameterizedPathGroup, ParameterizedPathPlanner, ParameterizedPathResolver,
 };
@@ -42,27 +44,24 @@ impl CustomScanPathPlanner {
     }
 
     /// Emit Plain first, followed by useful JoinParameterized variants.
-    pub(super) unsafe fn emit(&self) {
-        unsafe {
-            self.emit_plain_variant();
-            self.emit_parameterized_variants();
-        }
+    pub(super) unsafe fn emit(&self) -> Result<usize, CustomScanError> {
+        Ok(usize::from(unsafe { self.emit_plain_variant()? })
+            + unsafe { self.emit_parameterized_variants()? })
     }
 
-    unsafe fn emit_plain_variant(&self) {
+    unsafe fn emit_plain_variant(&self) -> Result<bool, CustomScanError> {
         let root = self.candidate.root();
         let rel = self.candidate.rel();
         let required_outer = unsafe { pg_sys::bms_copy((*rel).lateral_relids) };
 
         if required_outer.is_null() {
-            unsafe {
+            return unsafe {
                 self.emit_path(
                     PathVariantKind::Plain,
                     required_outer,
                     &self.base_split,
                 )
             };
-            return;
         }
 
         let lateral_split = unsafe {
@@ -72,10 +71,10 @@ impl CustomScanPathPlanner {
         let split = self
             .base_split
             .merged_with_rebased_expr_indexes(&lateral_split);
-        unsafe { self.emit_path(PathVariantKind::Plain, required_outer, &split) };
+        unsafe { self.emit_path(PathVariantKind::Plain, required_outer, &split) }
     }
 
-    unsafe fn emit_parameterized_variants(&self) {
+    unsafe fn emit_parameterized_variants(&self) -> Result<usize, CustomScanError> {
         let root = self.candidate.root();
         let rel = self.candidate.rel();
         let groups = unsafe {
@@ -83,20 +82,25 @@ impl CustomScanPathPlanner {
                 .enumerate((*rel).joininfo)
         };
 
+        let mut emitted = 0;
         for group in groups {
-            let Some(split) =
-                ParameterizedVariant::new(&self.base_split, &group).merged_split()
-            else {
+            let Some(split) = ParameterizedVariant::new(
+                self.candidate.purpose(),
+                &self.base_split,
+                &group,
+            )
+            .merged_split() else {
                 continue;
             };
-            unsafe {
+            emitted += usize::from(unsafe {
                 self.emit_path(
                     PathVariantKind::JoinParameterized,
                     group.outer_relids,
                     &split,
-                )
-            };
+                )?
+            });
         }
+        Ok(emitted)
     }
 
     unsafe fn emit_path(
@@ -104,36 +108,44 @@ impl CustomScanPathPlanner {
         kind: PathVariantKind,
         required_outer: *mut pg_sys::Bitmapset,
         split: &PlanPushdownSplit,
-    ) {
+    ) -> Result<bool, CustomScanError> {
         let ctx = crate::customscan::builder::EmitCustomPathContext {
             root: self.candidate.root(),
             baserel: self.candidate.rel(),
+            purpose: self.candidate.purpose(),
             kind,
             required_outer,
             split,
         };
-        unsafe { self.provider.emit_path(&ctx) };
+        unsafe { self.provider.emit_path(&ctx) }
     }
 }
 
 struct ParameterizedVariant<'a> {
+    purpose: ScanPurpose,
     base_split: &'a PlanPushdownSplit,
     group: &'a ParameterizedPathGroup,
 }
 
 impl<'a> ParameterizedVariant<'a> {
     fn new(
+        purpose: ScanPurpose,
         base_split: &'a PlanPushdownSplit,
         group: &'a ParameterizedPathGroup,
     ) -> Self {
-        Self { base_split, group }
+        Self {
+            purpose,
+            base_split,
+            group,
+        }
     }
 
     fn merged_split(&self) -> Option<PlanPushdownSplit> {
-        self.group.ppi_split.has_pushed_predicates().then(|| {
-            self.base_split
-                .merged_with_rebased_expr_indexes(&self.group.ppi_split)
-        })
+        (self.purpose.is_modify() || self.group.ppi_split.has_pushed_predicates())
+            .then(|| {
+                self.base_split
+                    .merged_with_rebased_expr_indexes(&self.group.ppi_split)
+            })
     }
 }
 

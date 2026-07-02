@@ -13,13 +13,90 @@ use crate::customscan::error::{CustomScanError, CustomScanPhase};
 pub use crate::customscan::exec_params::RuntimeParamRefs;
 use crate::customscan::provider::{
     BeginContext, CreateStateContext, EndContext, LakebaseCustomScanProvider,
-    NextSlotContext, ReScanContext,
+    ModifyBindContext, NextSlotContext, ReScanContext,
 };
 use crate::customscan::state::CustomScanStateWrapper;
 use crate::diag::ReportableError;
 use crate::handles::{RelationHandle, SnapshotHandle};
 use pgrx::pg_guard;
 use pgrx::pg_sys;
+
+/// Return the semantic purpose when `plan` is this provider's base CustomScan.
+///
+/// # Safety
+///
+/// `plan` must be NULL or a live planner/executor-owned plan node.
+pub unsafe fn provider_scan_purpose<P: LakebaseCustomScanProvider>(
+    plan: *mut pg_sys::Plan,
+) -> Result<Option<crate::customscan::ScanPurpose>, CustomScanError> {
+    if plan.is_null() || unsafe { (*plan).type_ } != pg_sys::NodeTag::T_CustomScan {
+        return Ok(None);
+    }
+    let scan = plan.cast::<pg_sys::CustomScan>();
+    if unsafe { (*scan).methods }
+        != crate::customscan::provider::method_tables_for::<P>().scan()
+    {
+        return Ok(None);
+    }
+    let private = unsafe { decode_private((*scan).custom_private) }?;
+    crate::customscan::custom_private::assert_provider_name_matches(
+        private.provider_id_or_name.as_c_str(),
+        P::NAME,
+    )?;
+    Ok(Some(private.purpose))
+}
+
+/// Bind a provider scan planned with `ScanPurpose::Modify` to the stable
+/// relation state owned by its outer ModifyTable executor.
+///
+/// # Safety
+///
+/// `node` must be this provider's initialized query-live CustomScanState, and
+/// `binding` must remain valid until the inner plan is ended.
+pub unsafe fn bind_modify_scan<
+    P: crate::customscan::provider::LakebaseCustomModifyProvider,
+>(
+    node: *mut pg_sys::CustomScanState,
+    binding: crate::access::mutation::ModifyScanBinding<
+        <P::AccessMethod as crate::api::TableAccessMethod>::ModifyQueryState,
+    >,
+) -> Result<(), CustomScanError> {
+    if node.is_null()
+        || unsafe { (*node).methods }
+            != crate::customscan::provider::method_tables_for::<P>().exec()
+    {
+        return Err(CustomScanError::modify_binding(
+            "attempted to bind a CustomScan owned by another provider",
+        ));
+    }
+    let plan = unsafe { (*node).ss.ps.plan };
+    if unsafe { provider_scan_purpose::<P>(plan) }?
+        != Some(crate::customscan::ScanPurpose::Modify)
+    {
+        return Err(CustomScanError::modify_binding(
+            "attempted to bind a CustomScan not planned for Modify",
+        ));
+    }
+
+    let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
+    if !wrapper.provider_state_initialized || !wrapper.provider_began {
+        return Err(CustomScanError::modify_binding(
+            "Modify CustomScan binding occurred before provider begin completed",
+        ));
+    }
+    let relation = unsafe { (*node).ss.ss_currentRelation };
+    if relation.is_null() {
+        return Err(CustomScanError::modify_binding(
+            "Modify CustomScan has no open relation",
+        ));
+    }
+    let provider_state = unsafe { wrapper.provider_state.assume_init_mut() };
+    P::bind_modify(ModifyBindContext::new(
+        provider_state,
+        unsafe { RelationHandle::from_raw(relation) },
+        binding,
+    ))
+}
 
 #[cfg(test)]
 use crate::customscan::custom_exprs::validate_custom_expr_section_counts;
@@ -96,6 +173,7 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
     // decode_private on every ReScanCustomScan invocation. Move (not clone)
     // the Vecs from the decoded payload into the cache.
     wrapper.cached_envelope = Some(crate::customscan::state::CachedEnvelope {
+        purpose: priv_payload.purpose,
         pushed_contracts: priv_payload.pushed_contracts,
         column_refs: priv_payload.column_refs,
         tuple_layout: priv_payload.tuple_layout,
@@ -178,6 +256,7 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
     let begin_ctx = BeginContext::<P>::new(
         provider_state_ref,
         decoded_private_ref,
+        envelope.purpose,
         expr_sections.pushed(),
         &envelope.column_refs,
         &envelope.pushed_contracts,
@@ -278,6 +357,7 @@ pub unsafe extern "C-unwind" fn rescan_custom_scan_trampoline<
     let rescan_ctx = ReScanContext::<P>::new(
         provider_state_ref,
         params_changed,
+        envelope.purpose,
         expr_sections.pushed(),
         &envelope.column_refs,
         &envelope.pushed_contracts,

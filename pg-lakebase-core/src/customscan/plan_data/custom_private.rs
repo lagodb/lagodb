@@ -1,12 +1,13 @@
 //! Framework plan-data layout for `CustomScan.custom_private` (`encode_split` /
 //! `decode_private`). Positional `copyObject`-safe `List*`; provider payload
-//! in cell 6.
+//! in cell 7.
 
 use std::ffi::{CStr, CString};
 use std::ptr;
 
 use pgrx::pg_sys;
 
+use crate::customscan::ScanPurpose;
 use crate::customscan::codec::{PrivateDataReader, PrivateDataWriter};
 use crate::customscan::error::CustomScanError;
 use crate::customscan::tuple_layout::ScanTupleLayout;
@@ -15,14 +16,15 @@ use crate::expr::split::{ColumnRef, PushdownContract};
 // Positional indices into the top-level `T_List` payload. Both encode and
 // decode reference these so the layout is described in exactly one place.
 const FIELD_PROVIDER_NAME: i32 = 0;
-const FIELD_RELATION_OID: i32 = 1;
-const FIELD_PUSHED_COUNT: i32 = 2;
-const FIELD_RECHECK_COUNT: i32 = 3;
-const FIELD_PUSHED_CONTRACTS: i32 = 4;
-const FIELD_COLUMN_REFS: i32 = 5;
-const FIELD_PROVIDER_METADATA: i32 = 6;
-const FIELD_TUPLE_LAYOUT: i32 = 7;
-const TOP_LEVEL_LEN: usize = 8;
+const FIELD_SCAN_PURPOSE: i32 = 1;
+const FIELD_RELATION_OID: i32 = 2;
+const FIELD_PUSHED_COUNT: i32 = 3;
+const FIELD_RECHECK_COUNT: i32 = 4;
+const FIELD_PUSHED_CONTRACTS: i32 = 5;
+const FIELD_COLUMN_REFS: i32 = 6;
+const FIELD_PROVIDER_METADATA: i32 = 7;
+const FIELD_TUPLE_LAYOUT: i32 = 8;
+const TOP_LEVEL_LEN: usize = 9;
 
 // Wire encoding for `PushdownContract` inside the `T_IntList` at
 // `FIELD_PUSHED_CONTRACTS`. Decode is exhaustive over these values.
@@ -153,12 +155,100 @@ pub(crate) enum DecodeError {
     /// Tuple-layout kind tag is not recognized.
     #[error("custom_private tuple layout has unknown kind tag {value}")]
     UnknownTupleLayoutKind { value: i32 },
+    /// Scan-purpose tag is not recognized.
+    #[error("custom_private has unknown scan purpose tag {value}")]
+    UnknownScanPurpose { value: i32 },
     /// Tuple-layout column lists only contain positive `AttrNumber` values.
     #[error("custom_private tuple layout attnos[{index}] has invalid value {value}")]
     InvalidTupleLayoutAttno { index: usize, value: i32 },
     /// A base attribute may appear only once in a tuple-layout column list.
     #[error("custom_private tuple layout contains duplicate base attno {attno}")]
     DuplicateTupleLayoutAttno { attno: pg_sys::AttrNumber },
+    /// Path-stage wrapper around provider metadata is invalid.
+    #[error("custom path private data is malformed: {reason}")]
+    MalformedPathPrivate { reason: &'static str },
+}
+
+/// Decoded path-stage wrapper. Unlike final `custom_private`, this exists only
+/// between `create_path` and `PlanCustomPath`.
+pub(crate) struct EncodedPathPrivate {
+    pub(crate) purpose: ScanPurpose,
+    pub(crate) requires_wholerow: bool,
+    pub(crate) provider_metadata: *mut pg_sys::List,
+}
+
+/// Wrap provider path metadata with the semantic scan purpose.
+///
+/// # Safety
+///
+/// `provider_metadata` must be NULL or a copyObject-safe PostgreSQL list.
+pub(crate) unsafe fn encode_path_private(
+    purpose: ScanPurpose,
+    requires_wholerow: bool,
+    provider_metadata: *mut pg_sys::List,
+) -> *mut pg_sys::List {
+    unsafe {
+        let mut list = ptr::null_mut();
+        list = pg_sys::lappend(list, pg_sys::makeInteger(purpose.to_wire()).cast());
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(i32::from(requires_wholerow)).cast(),
+        );
+        pg_sys::lappend(list, provider_metadata.cast())
+    }
+}
+
+/// Decode the path-stage purpose wrapper.
+///
+/// # Safety
+///
+/// `list` must be a live path-owned PostgreSQL list.
+pub(crate) unsafe fn decode_path_private(
+    list: *mut pg_sys::List,
+) -> Result<EncodedPathPrivate, CustomScanError> {
+    let decoded = (|| {
+        if list.is_null() || unsafe { pg_sys::list_length(list) } != 3 {
+            return Err(DecodeError::MalformedPathPrivate {
+                reason: "expected a three-cell list",
+            });
+        }
+        let purpose_node =
+            unsafe { pg_sys::list_nth(list, 0) }.cast::<pg_sys::Node>();
+        if purpose_node.is_null()
+            || unsafe { (*purpose_node).type_ } != pg_sys::NodeTag::T_Integer
+        {
+            return Err(DecodeError::MalformedPathPrivate {
+                reason: "purpose is not an Integer node",
+            });
+        }
+        let purpose_raw = unsafe { (*purpose_node.cast::<pg_sys::Integer>()).ival };
+        let purpose = ScanPurpose::from_wire(purpose_raw)
+            .ok_or(DecodeError::UnknownScanPurpose { value: purpose_raw })?;
+        let wholerow_node =
+            unsafe { pg_sys::list_nth(list, 1) }.cast::<pg_sys::Node>();
+        if wholerow_node.is_null()
+            || unsafe { (*wholerow_node).type_ } != pg_sys::NodeTag::T_Integer
+        {
+            return Err(DecodeError::MalformedPathPrivate {
+                reason: "requires_wholerow is not an Integer node",
+            });
+        }
+        let requires_wholerow =
+            unsafe { (*wholerow_node.cast::<pg_sys::Integer>()).ival };
+        if !matches!(requires_wholerow, 0 | 1) {
+            return Err(DecodeError::MalformedPathPrivate {
+                reason: "requires_wholerow is not boolean",
+            });
+        }
+        let provider_metadata =
+            unsafe { pg_sys::list_nth(list, 2) }.cast::<pg_sys::List>();
+        Ok(EncodedPathPrivate {
+            purpose,
+            requires_wholerow: requires_wholerow == 1,
+            provider_metadata,
+        })
+    })();
+    decoded.map_err(CustomScanError::private_codec)
 }
 
 /// Provider-extensible encode/decode for the opaque tail of `custom_private`.
@@ -191,6 +281,9 @@ impl CustomScanPrivate for NoPrivateData {
 pub struct EncodedPrivate {
     /// Matches the registered `LakebaseCustomScanProvider::NAME`.
     pub provider_id_or_name: CString,
+
+    /// Query scan or modification-target scan using the same provider.
+    pub purpose: ScanPurpose,
 
     /// `pg_class` OID of the scan relation.
     pub relation_oid: pg_sys::Oid,
@@ -239,6 +332,7 @@ pub unsafe fn encode_split(
     unsafe {
         encode_split_with_layout(
             provider_id_or_name,
+            ScanPurpose::Query,
             relation_oid,
             pushed_count,
             recheck_count,
@@ -252,6 +346,7 @@ pub unsafe fn encode_split(
 
 pub(crate) unsafe fn encode_split_with_layout(
     provider_id_or_name: &CStr,
+    purpose: ScanPurpose,
     relation_oid: pg_sys::Oid,
     pushed_count: usize,
     recheck_count: usize,
@@ -263,6 +358,7 @@ pub(crate) unsafe fn encode_split_with_layout(
     unsafe {
         encode_split_impl(
             provider_id_or_name,
+            purpose,
             relation_oid,
             pushed_count,
             recheck_count,
@@ -277,6 +373,7 @@ pub(crate) unsafe fn encode_split_with_layout(
 
 unsafe fn encode_split_impl(
     provider_id_or_name: &CStr,
+    purpose: ScanPurpose,
     relation_oid: pg_sys::Oid,
     pushed_count: usize,
     recheck_count: usize,
@@ -306,6 +403,10 @@ unsafe fn encode_split_impl(
         let name_pg = pg_sys::pstrdup(name_cstring.as_ptr());
         let provider_name_node = pg_sys::makeString(name_pg);
         top = pg_sys::lappend(top, provider_name_node.cast());
+
+        // FIELD_SCAN_PURPOSE: T_Integer
+        let purpose_node = pg_sys::makeInteger(purpose.to_wire());
+        top = pg_sys::lappend(top, purpose_node.cast());
 
         // FIELD_RELATION_OID: T_Integer (Oid round-tripped via i32 bitcast)
         let relation_oid_node = pg_sys::makeInteger(relation_oid.to_u32() as i32);
@@ -441,6 +542,11 @@ unsafe fn decode_private_impl(
         }
         CStr::from_ptr(sval).to_owned()
     };
+
+    // FIELD_SCAN_PURPOSE: T_Integer
+    let purpose_raw = unsafe { read_integer_cell(list, FIELD_SCAN_PURPOSE)? };
+    let purpose = ScanPurpose::from_wire(purpose_raw)
+        .ok_or(DecodeError::UnknownScanPurpose { value: purpose_raw })?;
 
     // FIELD_RELATION_OID: T_Integer (Oid round-tripped via i32 bitcast)
     let relation_oid = unsafe {
@@ -639,6 +745,7 @@ unsafe fn decode_private_impl(
 
     Ok(EncodedPrivate {
         provider_id_or_name,
+        purpose,
         relation_oid,
         pushed_count,
         recheck_count,

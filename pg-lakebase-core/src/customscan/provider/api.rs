@@ -2,14 +2,16 @@
 //! PG-`Expr` lives in the plan tree; native predicates live in `State` at
 //! runtime. Use [`PathVariant::kind`], not `param_info.is_some()`, for variants.
 
-use core::ffi::CStr;
+use core::ffi::{CStr, c_void};
 use core::marker::PhantomData;
 use core::ptr;
 
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 
+use crate::api::{AmModifyState, TableAccessMethod};
 use crate::batch::ScanBatchDriver;
+pub use crate::customscan::ScanPurpose;
 use crate::customscan::custom_private::CustomScanPrivate;
 pub use crate::customscan::custom_private::NoPrivateData;
 use crate::expr::nodes::PgParamValue;
@@ -23,7 +25,7 @@ use crate::tuple::{Row, SlotColumns, TupleSlotWriter};
 /// Provider runtime error; re-exported from [`crate::customscan::error`].
 pub use crate::customscan::error::CustomScanError;
 pub use crate::customscan::tuple_layout::{
-    NeededColumns, ScanTupleDescriptor, ScanTupleLayout,
+    NeededColumns, ScanTupleDescriptor, ScanTupleLayout, WHOLEROW_NAME,
 };
 #[cfg(feature = "pg_test")]
 #[doc(hidden)]
@@ -102,6 +104,9 @@ impl PathPushdownSummary {
 
 /// Per-variant input to [`LakebaseCustomScanProvider::create_path`].
 pub struct PathVariant<'a> {
+    /// Query scan or modification-target scan using the same provider.
+    pub purpose: ScanPurpose,
+
     /// Branch on this, not `param_info.is_some()`.
     pub kind: PathVariantKind,
 
@@ -229,6 +234,93 @@ impl RelPathContext {
         unsafe { (*self.baserel).tuples }
     }
 
+    /// Planner-estimated width of the relation's ordinary output tuple.
+    #[inline]
+    pub fn baserel_width(&self) -> i32 {
+        debug_assert!(
+            !self.baserel.is_null(),
+            "RelPathContext::baserel_width requires a with_planner context",
+        );
+        let target = unsafe { (*self.baserel).reltarget };
+        debug_assert!(!target.is_null());
+        unsafe { (*target).width }
+    }
+
+    /// Whether the base relation PathTarget requests a whole-row value from
+    /// this relation. Modify providers use this to cost the optional PostgreSQL
+    /// `wholerow` column from the same planner-visible contract that drives the
+    /// final scan tuple layout.
+    pub fn modify_requests_wholerow(&self) -> bool {
+        debug_assert!(
+            !self.baserel.is_null(),
+            "RelPathContext::modify_requests_wholerow requires a with_planner context",
+        );
+        let target = unsafe { (*self.baserel).reltarget };
+        if target.is_null() {
+            return false;
+        }
+        let exprs = unsafe { (*target).exprs };
+        let len = unsafe { pg_sys::list_length(exprs) };
+        for index in 0..len {
+            let mut expr =
+                unsafe { pg_sys::list_nth(exprs, index) }.cast::<pg_sys::Expr>();
+            if !expr.is_null()
+                && unsafe { (*expr).type_ } == pg_sys::NodeTag::T_ConvertRowtypeExpr
+            {
+                expr = unsafe { (*expr.cast::<pg_sys::ConvertRowtypeExpr>()).arg };
+            }
+            if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
+                continue;
+            }
+            let var = expr.cast::<pg_sys::Var>();
+            if unsafe {
+                (*var).varno == (*self.baserel).relid as i32
+                    && (*var).varattno
+                        == pg_sys::InvalidAttrNumber as pg_sys::AttrNumber
+                    && (*var).varlevelsup == 0
+            } {
+                return true;
+            }
+        }
+
+        // Partition child PathTargets can lose the nominal target's direct
+        // whole-row Var during appendrel translation. The rewrite-complete
+        // Query targetlist carries the injected target wholerow before path
+        // creation, so every Modify leaf must retain all business columns.
+        let parse = unsafe { (*self.root).parse };
+        let query_targetlist = if parse.is_null() {
+            ptr::null_mut()
+        } else {
+            unsafe { (*parse).targetList }
+        };
+        let len = unsafe { pg_sys::list_length(query_targetlist) };
+        for index in 0..len {
+            let tle = unsafe { pg_sys::list_nth(query_targetlist, index) }
+                .cast::<pg_sys::TargetEntry>();
+            if tle.is_null() {
+                continue;
+            }
+            let mut expr = unsafe { (*tle).expr };
+            if !expr.is_null()
+                && unsafe { (*expr).type_ } == pg_sys::NodeTag::T_ConvertRowtypeExpr
+            {
+                expr = unsafe { (*expr.cast::<pg_sys::ConvertRowtypeExpr>()).arg };
+            }
+            if !expr.is_null() && unsafe { (*expr).type_ } == pg_sys::NodeTag::T_Var {
+                let var = expr.cast::<pg_sys::Var>();
+                if unsafe {
+                    (*var).varno == (*parse).resultRelation
+                        && (*var).varattno
+                            == pg_sys::InvalidAttrNumber as pg_sys::AttrNumber
+                        && (*var).varlevelsup == 0
+                } {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Combined selectivity of the given qual exprs via `clauselist_selectivity`;
     /// returns `1.0` when empty. Path stage passes costed-pruning pushed exprs only.
     pub(crate) fn clauselist_selectivity_for_exprs(
@@ -350,12 +442,45 @@ impl<'a> PushedPredicateInputs<'a> {
     /// current executor callback.
     unsafe fn translate<T, F>(
         &self,
-        mut make_translator: F,
+        make_translator: F,
     ) -> Result<Vec<T::Predicate>, CustomScanError>
     where
         T: PgPredicateTranslator,
         T::Error: Send + Sync,
         F: FnMut(usize) -> T,
+    {
+        unsafe { self.translate_selected(make_translator, |_| true) }
+    }
+
+    /// Translate only predicates whose executor expression contains no
+    /// PARAM_EXTERN/PARAM_EXEC node. This is suitable for commit-time conflict
+    /// scopes, which must not depend on values that can change across rescans.
+    unsafe fn translate_static<T, F>(
+        &self,
+        make_translator: F,
+    ) -> Result<Vec<T::Predicate>, CustomScanError>
+    where
+        T: PgPredicateTranslator,
+        T::Error: Send + Sync,
+        F: FnMut(usize) -> T,
+    {
+        unsafe {
+            self.translate_selected(make_translator, |expr| {
+                !RuntimeParamDetector::contains(expr)
+            })
+        }
+    }
+
+    unsafe fn translate_selected<T, F, I>(
+        &self,
+        mut make_translator: F,
+        mut include: I,
+    ) -> Result<Vec<T::Predicate>, CustomScanError>
+    where
+        T: PgPredicateTranslator,
+        T::Error: Send + Sync,
+        F: FnMut(usize) -> T,
+        I: FnMut(*mut pg_sys::Expr) -> bool,
     {
         debug_assert_eq!(
             self.pushed_exprs.len(),
@@ -365,6 +490,9 @@ impl<'a> PushedPredicateInputs<'a> {
 
         let mut out: Vec<T::Predicate> = Vec::with_capacity(self.pushed_exprs.len());
         for i in 0..self.pushed_exprs.len() {
+            if !include(self.pushed_exprs[i]) {
+                continue;
+            }
             let mut translator = make_translator(i);
             let result = unsafe {
                 let mut builder = PredicateBuilder::with_var_resolver(
@@ -401,6 +529,40 @@ impl<'a> PushedPredicateInputs<'a> {
     }
 }
 
+struct RuntimeParamDetector;
+
+impl RuntimeParamDetector {
+    unsafe fn contains(expr: *mut pg_sys::Expr) -> bool {
+        unsafe { Self::walk(expr.cast(), ptr::null_mut()) }
+    }
+
+    unsafe extern "C-unwind" fn walk(
+        node: *mut pg_sys::Node,
+        context: *mut c_void,
+    ) -> bool {
+        if node.is_null() {
+            return false;
+        }
+        match unsafe { (*node).type_ } {
+            pg_sys::NodeTag::T_Param => {
+                matches!(
+                    unsafe { (*node.cast::<pg_sys::Param>()).paramkind },
+                    pg_sys::ParamKind::PARAM_EXTERN | pg_sys::ParamKind::PARAM_EXEC
+                )
+            }
+            pg_sys::NodeTag::T_RestrictInfo => unsafe {
+                Self::walk(
+                    (*node.cast::<pg_sys::RestrictInfo>()).clause.cast(),
+                    context,
+                )
+            },
+            _ => unsafe {
+                pg_sys::expression_tree_walker(node, Some(Self::walk), context)
+            },
+        }
+    }
+}
+
 /// Context for [`LakebaseCustomScanProvider::begin`].
 pub struct BeginContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     /// Provider's per-scan runtime state.
@@ -408,6 +570,9 @@ pub struct BeginContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
 
     /// Decoded provider `PrivateData` for this scan.
     pub private_data: &'a P::PrivateData,
+
+    /// Query or modification-target purpose selected by the planner.
+    pub purpose: ScanPurpose,
 
     pushed_exprs: &'a [*mut pg_sys::Expr],
 
@@ -444,6 +609,7 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
     pub(crate) fn new(
         state: &'a mut P::State,
         private_data: &'a P::PrivateData,
+        purpose: ScanPurpose,
         pushed_exprs: &'a [*mut pg_sys::Expr],
         column_refs: &'a [crate::expr::split::ColumnRef],
         pushed_contracts: &'a [crate::expr::split::PushdownContract],
@@ -460,6 +626,7 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
         Self {
             state,
             private_data,
+            purpose,
             pushed_exprs,
             column_refs,
             pushed_contracts,
@@ -503,6 +670,26 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
         unsafe { self.pushed_predicate_inputs().translate(make_translator) }
     }
 
+    /// Translate only pushed predicates that are independent of executor
+    /// parameters. Dropping dynamic conjuncts widens the result and is safe
+    /// for provider conflict-detection scopes.
+    pub fn translate_static_pushed_predicates<T, F>(
+        &self,
+        make_translator: F,
+    ) -> Result<Vec<T::Predicate>, CustomScanError>
+    where
+        T: PgPredicateTranslator,
+        T::Error: Send + Sync,
+        F: FnMut(usize) -> T,
+    {
+        // SAFETY: same live expression contract as
+        // `translate_pushed_predicates`; the static filter only inspects nodes.
+        unsafe {
+            self.pushed_predicate_inputs()
+                .translate_static(make_translator)
+        }
+    }
+
     fn pushed_predicate_inputs(&self) -> PushedPredicateInputs<'_> {
         PushedPredicateInputs::new(
             self.pushed_exprs,
@@ -523,6 +710,33 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
     /// Actual executor descriptor for the provider-filled raw scan slot.
     pub fn scan_tuple(&self) -> ScanTupleDescriptor<'_> {
         unsafe { ScanTupleDescriptor::new(self.scan_tuple_desc, self.tuple_layout) }
+    }
+}
+
+/// One-time outer-executor binding for a provider scan in `Modify` purpose.
+pub struct ModifyBindContext<'a, P: LakebaseCustomModifyProvider + ?Sized> {
+    pub state: &'a mut P::State,
+    pub relation: RelationHandle<'a>,
+    pub binding: crate::access::mutation::ModifyScanBinding<
+        <P::AccessMethod as TableAccessMethod>::ModifyQueryState,
+    >,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, P: LakebaseCustomModifyProvider> ModifyBindContext<'a, P> {
+    pub(crate) fn new(
+        state: &'a mut P::State,
+        relation: RelationHandle<'a>,
+        binding: crate::access::mutation::ModifyScanBinding<
+            <P::AccessMethod as TableAccessMethod>::ModifyQueryState,
+        >,
+    ) -> Self {
+        Self {
+            state,
+            relation,
+            binding,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -596,6 +810,16 @@ impl<'a, P: LakebaseCustomScanProvider> NextSlotContext<'a, P> {
         &mut self,
         driver: &mut D,
     ) -> Result<bool, CustomScanError> {
+        self.emit_with(|columns| driver.next_into_slot(columns))
+    }
+
+    /// Fill the raw scan slot through one cohesive slot-first operation.
+    /// Providers use this when a tuple layout contains metadata fields in
+    /// addition to the ordinary decoded relation columns.
+    pub fn emit_with<F>(&mut self, advance: F) -> Result<bool, CustomScanError>
+    where
+        F: FnOnce(&mut SlotColumns<'_>) -> crate::api::AmResult<bool>,
+    {
         let slot = self.slot;
         // Slot datums are palloc'd into the scan node's per-tuple memory context,
         // which `ExecScan` resets at the start of each tuple cycle (after the
@@ -610,7 +834,7 @@ impl<'a, P: LakebaseCustomScanProvider> NextSlotContext<'a, P> {
                     // SAFETY: the live slot descriptor is the sole source of
                     // width; `target_ctx` is the target for varlena palloc.
                     let mut cols = SlotColumns::new(slot, target_ctx);
-                    driver.next_into_slot(&mut cols)
+                    advance(&mut cols)
                 })
             },
             // SAFETY: slot is the live scan slot for this callback.
@@ -653,6 +877,9 @@ pub struct ReScanContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     /// Rebuild predicate when true; else reopen cursor only.
     pub params_changed: bool,
 
+    /// Query or modification-target purpose selected by the planner.
+    pub purpose: ScanPurpose,
+
     pushed_exprs: &'a [*mut pg_sys::Expr],
 
     column_refs: &'a [crate::expr::split::ColumnRef],
@@ -687,6 +914,7 @@ impl<'a, P: LakebaseCustomScanProvider> ReScanContext<'a, P> {
     pub(crate) fn new(
         state: &'a mut P::State,
         params_changed: bool,
+        purpose: ScanPurpose,
         pushed_exprs: &'a [*mut pg_sys::Expr],
         column_refs: &'a [crate::expr::split::ColumnRef],
         pushed_contracts: &'a [crate::expr::split::PushdownContract],
@@ -701,6 +929,7 @@ impl<'a, P: LakebaseCustomScanProvider> ReScanContext<'a, P> {
         Self {
             state,
             params_changed,
+            purpose,
             pushed_exprs,
             column_refs,
             pushed_contracts,
@@ -853,6 +1082,83 @@ pub trait LakebaseCustomScanProvider: 'static {
     ) -> *mut pg_sys::List {
         private
     }
+}
+
+/// PostgreSQL executor features accepted by one Custom ModifyTable provider.
+///
+/// Core validates these capabilities once when it initializes the wrapped
+/// ModifyTable. Provider-specific policy therefore does not leak into the
+/// generic executor or its C fork.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModifyCapabilities {
+    postgres_indexes: bool,
+    speculative_insert: bool,
+}
+
+impl ModifyCapabilities {
+    pub const NONE: Self = Self::new(false, false);
+    /// Core maintains PostgreSQL index entries after provider INSERT/UPDATE.
+    /// The provider must return a valid index-fetchable `tts_tid` for the new
+    /// row and implement the corresponding TableAM index visibility contract.
+    pub const POSTGRES_INDEXES: Self = Self::new(true, false);
+    /// In addition to [`Self::POSTGRES_INDEXES`], the provider's TableAM
+    /// implements PostgreSQL's speculative insertion callbacks.
+    pub const POSTGRES_INDEXES_AND_SPECULATIVE_INSERT: Self = Self::new(true, true);
+
+    const fn new(postgres_indexes: bool, speculative_insert: bool) -> Self {
+        Self {
+            postgres_indexes,
+            speculative_insert,
+        }
+    }
+
+    pub const fn postgres_indexes(self) -> bool {
+        self.postgres_indexes
+    }
+
+    pub const fn speculative_insert(self) -> bool {
+        self.speculative_insert
+    }
+}
+
+/// Provider contract for the generic Custom ModifyTable framework.
+///
+/// This deliberately links an existing scan provider to one TableAM identity;
+/// core owns PostgreSQL plan/executor mechanics while the provider owns scan
+/// metadata extraction and the AM owns relation-local mutation state.
+pub trait LakebaseCustomModifyProvider: LakebaseCustomScanProvider {
+    type AccessMethod: TableAccessMethod;
+
+    /// Unique PostgreSQL CustomScan method name for the outer ModifyTable
+    /// wrapper. It must not equal [`LakebaseCustomScanProvider::NAME`] or any
+    /// other registered modify provider name.
+    const MODIFY_NAME: &'static CStr;
+
+    const MODIFY_CAPABILITIES: ModifyCapabilities;
+
+    /// Attach this provider's Modify-purpose scan to the stable relation state
+    /// owned by the outer ModifyTable execution.
+    fn bind_modify(ctx: ModifyBindContext<'_, Self>) -> Result<(), CustomScanError>
+    where
+        Self: Sized;
+
+    /// Whether the relation can be the nominal target of the outer
+    /// ModifyTable. The default matches a directly scannable relation;
+    /// partition-aware providers override this to accept partitioned roots
+    /// while [`LakebaseCustomScanProvider::supports_relation`] continues to
+    /// accept only physical scan leaves.
+    fn supports_modify_target(context: &RelPathContext) -> bool {
+        Self::supports_relation(context)
+    }
+
+    /// Return the immutable storage context captured when a Modify-purpose
+    /// scan opened. Core clones it only once when constructing the relation's
+    /// AM modify state.
+    fn modify_scan_context(
+        state: &Self::State,
+    ) -> Option<
+        <<Self::AccessMethod as TableAccessMethod>::ModifyState as AmModifyState>::ScanContext,
+    >;
 }
 
 #[cfg(test)]

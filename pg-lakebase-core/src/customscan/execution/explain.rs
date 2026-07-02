@@ -17,6 +17,7 @@ use crate::expr::split::PushdownContract;
 
 const GROUP_LABEL: &CStr = c"Lakebase Pushdown";
 const PROP_PROVIDER: &CStr = c"Provider";
+const PROP_SCAN_PURPOSE: &CStr = c"Scan Purpose";
 const PROP_PUSHED_FILTER: &CStr = c"Pushed Filter";
 const PROP_PUSHED_FILTER_EXACT: &CStr = c"Pushed Filter Exact";
 const PROP_PUSHED_FILTER_CONSERVATIVE_PRUNING: &CStr =
@@ -92,6 +93,16 @@ pub unsafe extern "C-unwind" fn explain_custom_scan_trampoline<
     let is_text =
         unsafe { (*es).format == pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT };
     let verbose = unsafe { (*es).verbose };
+
+    if priv_payload.purpose.is_modify() || verbose {
+        unsafe {
+            pg_sys::ExplainPropertyText(
+                PROP_SCAN_PURPOSE.as_ptr(),
+                priv_payload.purpose.label().as_ptr(),
+                es,
+            );
+        }
+    }
 
     let need_deparse = !expr_sections.pushed().is_empty()
         || (verbose && !expr_sections.recheck().is_empty());

@@ -15,6 +15,8 @@ const LAYOUT_RELATION: i32 = 0;
 const LAYOUT_PROJECTED_BASE: i32 = 1;
 const LAYOUT_RELATION_PRUNED: i32 = 2;
 
+pub const WHOLEROW_NAME: &std::ffi::CStr = c"wholerow";
+
 /// Borrowed storage-column requirement exposed to scan providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeededColumns<'a> {
@@ -172,11 +174,6 @@ impl ScanTupleLayout {
             LAYOUT_RELATION => Err(DecodeError::MalformedTupleLayout {
                 reason: "relation layout contains trailing data",
             }),
-            LAYOUT_RELATION_PRUNED if len == 1 => {
-                Err(DecodeError::MalformedTupleLayout {
-                    reason: "relation-pruned layout has no storage attnos",
-                })
-            }
             LAYOUT_RELATION_PRUNED => {
                 let attnos = unsafe { decode_attno_tail(wire, len)? };
                 Ok(Self::relation_with_storage_hint(Some(attnos)))
@@ -364,7 +361,7 @@ pub(crate) struct PlannedScanTuple {
 }
 
 impl PlannedScanTuple {
-    fn relation() -> Self {
+    pub(crate) fn relation() -> Self {
         Self {
             custom_scan_tlist: ptr::null_mut(),
             layout: ScanTupleLayout::relation(),
@@ -471,6 +468,29 @@ impl BaseScanTuplePlanner {
             custom_scan_tlist,
             layout: ScanTupleLayout::projected_base(attnos_by_resno),
         }
+    }
+
+    /// Build a relation-shaped scan tuple while preserving storage-column
+    /// pruning. Modify scans use this form so PostgreSQL can evaluate standard
+    /// system Vars (`ctid`, `tableoid`) from slot metadata and form whole-row
+    /// values in executor projection.
+    pub(crate) unsafe fn plan_relation_scan(
+        &self,
+        targetlist: *mut pg_sys::List,
+        path_target_exprs: *mut pg_sys::List,
+        qual: *mut pg_sys::List,
+        custom_exprs: *mut pg_sys::List,
+    ) -> PlannedScanTuple {
+        let mut analysis = LayoutAnalysis::default();
+        unsafe { self.inspect_targetlist(targetlist, &mut analysis) };
+        unsafe { self.inspect_path_target(path_target_exprs, &mut analysis) };
+        unsafe { self.inspect_expr_list(qual, &mut analysis) };
+        unsafe { self.inspect_expr_list(custom_exprs, &mut analysis) };
+
+        let storage_attnos = analysis
+            .can_prune_storage
+            .then(|| analysis.vars_by_attno.keys().copied().collect());
+        PlannedScanTuple::relation_with_storage_hint(storage_attnos)
     }
 
     /// `CUSTOMPATH_SUPPORT_PROJECTION` lets PostgreSQL call PlanCustomPath with
@@ -727,6 +747,34 @@ impl ScanTuplePlanProbe {
     ) -> Self {
         let planned = unsafe {
             BaseScanTuplePlanner::new(scan_relid, relation_oid).plan(
+                targetlist,
+                path_target_exprs,
+                qual,
+                custom_exprs,
+            )
+        };
+        Self {
+            custom_scan_tlist: planned.custom_scan_tlist,
+            layout: planned.layout,
+        }
+    }
+
+    /// Run the relation-shaped storage-pruning planner used by Modify scans.
+    ///
+    /// # Safety
+    ///
+    /// Every pointer must be NULL or a live PostgreSQL planner node of the
+    /// documented list shape.
+    pub unsafe fn plan_relation_scan(
+        scan_relid: pg_sys::Index,
+        relation_oid: pg_sys::Oid,
+        targetlist: *mut pg_sys::List,
+        path_target_exprs: *mut pg_sys::List,
+        qual: *mut pg_sys::List,
+        custom_exprs: *mut pg_sys::List,
+    ) -> Self {
+        let planned = unsafe {
+            BaseScanTuplePlanner::new(scan_relid, relation_oid).plan_relation_scan(
                 targetlist,
                 path_target_exprs,
                 qual,

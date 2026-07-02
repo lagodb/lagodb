@@ -2,6 +2,7 @@
 
 use pgrx::pg_sys;
 
+use crate::customscan::ScanPurpose;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
 
 /// Reason a relation cannot participate in CustomScan planning.
@@ -9,7 +10,6 @@ use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScop
 pub enum CustomScanRejection {
     NotARegularRelation,
     UnsupportedRelKind { relkind: u8 },
-    DmlTarget,
     HasRowMark,
     SystemColumnReference,
 }
@@ -20,6 +20,7 @@ pub struct CustomScanCandidate {
     root: *mut pg_sys::PlannerInfo,
     rel: *mut pg_sys::RelOptInfo,
     rte: *mut pg_sys::RangeTblEntry,
+    purpose: ScanPurpose,
 }
 
 impl CustomScanCandidate {
@@ -32,7 +33,17 @@ impl CustomScanCandidate {
         rel: *mut pg_sys::RelOptInfo,
         rte: *mut pg_sys::RangeTblEntry,
     ) -> Result<Self, CustomScanRejection> {
-        let candidate = Self { root, rel, rte };
+        let purpose = if unsafe { Self::is_modify_target(root, rel) } {
+            ScanPurpose::Modify
+        } else {
+            ScanPurpose::Query
+        };
+        let candidate = Self {
+            root,
+            rel,
+            rte,
+            purpose,
+        };
         unsafe { candidate.validate()? };
         Ok(candidate)
     }
@@ -52,10 +63,6 @@ impl CustomScanCandidate {
             return Err(CustomScanRejection::UnsupportedRelKind { relkind });
         }
 
-        if unsafe { self.is_dml_target() } {
-            return Err(CustomScanRejection::DmlTarget);
-        }
-
         let relid = unsafe { (*self.rel).relid };
         let row_marks = unsafe { (*self.root).rowMarks };
         if unsafe { Self::has_rowmark_for(row_marks, relid) } {
@@ -63,10 +70,11 @@ impl CustomScanCandidate {
         }
 
         let usage = unsafe { self.collect_usage() };
-        if usage
-            .system_attnos()
-            .iter()
-            .any(|&attno| Self::is_rejected_system_attno(attno))
+        if self.purpose == ScanPurpose::Query
+            && usage
+                .system_attnos()
+                .iter()
+                .any(|&attno| Self::is_rejected_system_attno(attno))
         {
             return Err(CustomScanRejection::SystemColumnReference);
         }
@@ -84,6 +92,11 @@ impl CustomScanCandidate {
         self.rel
     }
 
+    #[inline]
+    pub(super) fn purpose(self) -> ScanPurpose {
+        self.purpose
+    }
+
     pub(super) unsafe fn provider_context(
         self,
     ) -> crate::customscan::provider::RelPathContext {
@@ -94,20 +107,32 @@ impl CustomScanCandidate {
         }
     }
 
-    unsafe fn is_dml_target(self) -> bool {
-        let parse = unsafe { (*self.root).parse };
+    unsafe fn is_modify_target(
+        root: *mut pg_sys::PlannerInfo,
+        rel: *mut pg_sys::RelOptInfo,
+    ) -> bool {
+        let parse = unsafe { (*root).parse };
         debug_assert!(
             !parse.is_null(),
             "CustomScanCandidate: root->parse must be non-null"
         );
         let command_type = unsafe { (*parse).commandType };
-        if command_type == pg_sys::CmdType::CMD_SELECT {
+        if !matches!(
+            command_type,
+            pg_sys::CmdType::CMD_UPDATE
+                | pg_sys::CmdType::CMD_DELETE
+                | pg_sys::CmdType::CMD_MERGE
+        ) {
             return false;
         }
 
-        let relid = unsafe { (*self.rel).relid } as core::ffi::c_int;
-        let all_result_relids = unsafe { (*self.root).all_result_relids };
-        unsafe { pg_sys::bms_is_member(relid, all_result_relids) }
+        let relid = unsafe { (*rel).relid } as core::ffi::c_int;
+        let all_result_relids = unsafe { (*root).all_result_relids };
+        let leaf_result_relids = unsafe { (*root).leaf_result_relids };
+        unsafe {
+            pg_sys::bms_is_member(relid, all_result_relids)
+                || pg_sys::bms_is_member(relid, leaf_result_relids)
+        }
     }
 
     /// Relation-local expression usage consulted by path-stage gates.

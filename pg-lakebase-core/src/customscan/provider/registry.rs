@@ -37,7 +37,7 @@ pub trait ErasedProvider: Sync {
     unsafe fn emit_path(
         &self,
         ctx: &crate::customscan::builder::EmitCustomPathContext<'_>,
-    );
+    ) -> Result<bool, CustomScanError>;
 }
 
 /// Phantom wrapper for `P: LakebaseCustomScanProvider` in the registry.
@@ -76,7 +76,7 @@ impl<P: LakebaseCustomScanProvider> ErasedProvider for ProviderEntry<P> {
     unsafe fn emit_path(
         &self,
         ctx: &crate::customscan::builder::EmitCustomPathContext<'_>,
-    ) {
+    ) -> Result<bool, CustomScanError> {
         // SAFETY: caller upholds emit_custom_path contract.
         unsafe { crate::customscan::builder::emit_custom_path::<P>(ctx) }
     }

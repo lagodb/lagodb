@@ -1,10 +1,11 @@
-# CustomScan filter pushdown
+# Provider CustomScan framework
 
 This module is the generic CustomScan framework inside `pg-lakebase-core`.
 Its job is to let lake table providers (today `pg-iceberg-am`, later
 `pg-hudi-am` / `pg-delta-am`) push SQL `WHERE` filters down into their own
 scan backend instead of relying on PostgreSQL to evaluate every qual above
-an ordinary TableAM scan.
+an ordinary TableAM scan. The same framework also supplies modification scans
+that extend the raw tuple with storage row identity.
 
 This README is for maintainers. It explains *why* the module is shaped the
 way it is and *how* a query flows through it. It deliberately avoids
@@ -46,8 +47,9 @@ into the executor, where the provider turns them into a native scan
 predicate.
 
 The provider here is the lake access method (Iceberg, etc.). It is **not**
-the PostgreSQL TableAM scan callback — the existing TableAM scan path is kept
-as a fallback.
+the PostgreSQL TableAM scan callback. Query scans may keep the TableAM path as
+a fallback; Modify scans may not, because that path cannot emit storage row
+identity outside the relation TupleDesc.
 
 ## End-to-end flow
 
@@ -55,6 +57,7 @@ as a fallback.
 SQL WHERE
   -> PostgreSQL planner
   -> set_rel_pathlist_hook (core router)
+       classify ScanPurpose as Query or Modify
        gate the relation (see "Gating")
        classify quals into pushed / residual / recheck
        enumerate a plain CustomPath plus parameterized variants
@@ -64,16 +67,19 @@ SQL WHERE
        re-classify the final scan_clauses
        unwrap RestrictInfo to bare Expr
        collect PathTarget + target + residual + pushed/recheck dependencies
-       build a narrow Var-only custom_scan_tlist and base-attno mapping
+       Query: build a narrow Var-only custom_scan_tlist and base-attno mapping
+       Modify: retain a relation-shaped slot and prune only storage columns
   -> CustomScan plan node
        plan.qual      = residual quals (PG evaluates these)
        custom_exprs   = pushed + recheck PG Exprs (PG rewrites, never runs)
        custom_private = copyObject-safe metadata + tuple-layout contract
   -> PG runs setrefs + nestloop param rewrite over plan.qual / custom_exprs
-       base Vars become INDEX_VAR references into the narrow scan tuple
+       projected query Vars become INDEX_VAR references into the narrow scan tuple
+       Modify system Vars use standard slot tts_tid/tts_tableOid metadata
   -> executor Begin / ReScan
        translate pushed predicates -> provider native predicate
-       resolve params, load current metadata, prune files, open cursor
+       resolve params, load current metadata, prune files
+       Query opens its cursor; Modify waits for outer relation-state binding
   -> ExecScan
        fetch rows from the provider
        evaluate residual plan.qual + projection
@@ -139,20 +145,29 @@ Doing the split again at plan stage is necessary because the clause list the
 provider finally receives is not identical to what it saw during path
 enumeration.
 
-## Gating: what never becomes a CustomScan
+## Gating and scan purpose
 
 Before any provider is consulted, the router declines the relation in cases
 where a lake scan cannot honor PostgreSQL's contract. These gates live in
 core so a provider cannot accidentally relax them:
 
-- **DML targets** — UPDATE / DELETE / MERGE result relations. A lake scan
-  cannot produce the row-identity tuple `ModifyTable` needs.
-- **Rowmarks** — `SELECT ... FOR UPDATE/SHARE`, and EPQ rowmarks added for
-  any non-target base rel in a DML plan. A lake scan has no `ctid` identity
-  and cannot re-fetch a locked row. In practice this means CustomScan
-  pushdown is disabled for *any* relation involved in UPDATE / DELETE /
-  MERGE, even read-only join sources — a known v1 gap pending a row-identity
-  contract.
+- **Modification targets** — UPDATE / DELETE / MERGE result relations use
+  `ScanPurpose::Modify`. Providers choose `TableAm` when their ordinary scan
+  can populate a complete `tts_tid`, or `CustomRequired` when storage metadata
+  cannot be supplied by the ordinary scan. `TableAm` retains standard paths
+  and may also emit an optional provider CustomScan; costing chooses between
+  them. During executor initialization ModifyTable eagerly creates each
+  selected target SeqScan's descriptor under a one-shot binding; it is removed
+  immediately after `scan_begin` accepts the target. This pins every partition's
+  read context before writes begin, trigger/SPI scans cannot inherit it, and
+  the per-row scan hot path is unchanged. The AM can then read private metadata
+  such as Iceberg `_file`/`_pos` without exposing extra PostgreSQL columns.
+  Query and CustomScan-based Modify reuse the same provider, classifier, projection,
+  costing, scan specification, cursor, and runtime state; purpose only selects
+  tuple layout and binding lifecycle.
+- **Rowmarks** — `SELECT ... FOR UPDATE/SHARE` and unsupported concurrent
+  EPQ/recheck paths remain rejected. A Modify scan's synthetic `ctid` is an
+  executor-local token and does not provide heap row-lock or re-fetch semantics.
 - **Unsupported system columns** — `ctid`, `xmin`, `xmax`, `cmin`, `cmax`.
   `tableoid` is supported, and whole-row Var is supported only when the slot
   matches the base relation rowtype exactly.
@@ -164,8 +179,11 @@ core so a provider cannot accidentally relax them:
   security level). This preserves RLS / security-barrier ordering. For join
   clauses, movability gates compose with this.
 
-When any gate fails, the framework does nothing and leaves PG's default
-seqscan / indexscan paths in place.
+When a Query gate fails, the framework leaves PG's default paths in place.
+For a `CustomRequired` Modify, failure to create a provider path is an error;
+falling back to SeqScan would silently lose storage row identity. A `TableAm`
+Modify retains PostgreSQL's ordinary scan paths and costs provider CustomScan
+paths as optional projection/pushdown alternatives.
 
 ## Parameterized paths
 

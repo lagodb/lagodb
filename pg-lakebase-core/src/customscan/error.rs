@@ -216,6 +216,16 @@ impl CustomScanError {
         ))
     }
 
+    pub(crate) fn required_modify_path(provider: &CStr) -> Self {
+        Self::framework(format!(
+            "required Modify CustomScan provider {provider:?} emitted no path"
+        ))
+    }
+
+    pub(crate) fn modify_binding(message: impl Into<String>) -> Self {
+        Self::framework(message.into())
+    }
+
     pub(crate) fn provider_name_mismatch(expected: CString, found: CString) -> Self {
         Self::framework(format!(
             "customscan: provider name mismatch in custom_private \

@@ -64,6 +64,8 @@ pub struct CustomScanStateWrapper<P: LakebaseCustomScanProvider> {
 /// in `BeginCustomScan` to avoid re-parsing `custom_private` each rescan.
 #[derive(Debug)]
 pub struct CachedEnvelope {
+    /// Query or modification-target use of the provider scan.
+    pub purpose: crate::customscan::ScanPurpose,
     /// Per-pushed-expression pushdown contract (aligned with pushed section).
     pub pushed_contracts: Vec<crate::expr::split::PushdownContract>,
     /// Pre-resolved column metadata for the pushed expressions.
@@ -117,6 +119,16 @@ impl<P: LakebaseCustomScanProvider> CustomScanStateWrapper<P> {
     /// Upcast to `*mut Node`.
     pub fn as_node(&mut self) -> *mut pg_sys::Node {
         self.as_node_ptr().cast()
+    }
+
+    /// Borrow the provider state after a successful BeginCustomScan.
+    pub fn active_provider_state_mut(&mut self) -> Option<&mut P::State> {
+        if !self.provider_state_initialized || !self.provider_began {
+            return None;
+        }
+        // SAFETY: the lifecycle flags are set only after this field is written
+        // and cleared before it is dropped.
+        Some(unsafe { self.provider_state.assume_init_mut() })
     }
 }
 

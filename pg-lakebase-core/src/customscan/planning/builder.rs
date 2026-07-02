@@ -1,8 +1,8 @@
 //! Planning-side `CustomPath` / `CustomScan` builders: [`CustomPathBuilder`],
 //! [`emit_custom_path`], and the `PlanCustomPath` trampoline.
 //!
-//! Path-stage `custom_private` is a provider-encoded `List*`; plan-stage
-//! [`plan_custom_path_trampoline`] re-splits clauses and wraps it via
+//! Path-stage `custom_private` wraps scan purpose plus provider metadata;
+//! plan-stage [`plan_custom_path_trampoline`] re-splits clauses and wraps it via
 //! [`encode_split`].
 
 use core::ffi::c_void;
@@ -12,16 +12,18 @@ use core::ptr;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
+use crate::customscan::ScanPurpose;
 use crate::customscan::codec::PrivateDataWriter;
 use crate::customscan::custom_private::{
-    CustomScanPrivate, encode_split_with_layout,
+    CustomScanPrivate, decode_path_private, encode_path_private,
+    encode_split_with_layout,
 };
 use crate::customscan::error::CustomScanError;
 use crate::customscan::provider::{
     LakebaseCustomScanProvider, PathPushdownSummary, PathVariant, PathVariantKind,
     PlanTranslateContext,
 };
-use crate::customscan::tuple_layout::BaseScanTuplePlanner;
+use crate::customscan::tuple_layout::{BaseScanTuplePlanner, PlannedScanTuple};
 use crate::diag::ReportableError;
 use crate::expr::predicate::PlanPredicate;
 use crate::expr::split::{
@@ -35,6 +37,7 @@ pub struct CustomPathBuilder<P: LakebaseCustomScanProvider> {
     scanned_pages: Option<f64>,
     scanned_tuples: Option<f64>,
     extra_startup_cost: Option<f64>,
+    extra_tuple_width: i32,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -44,6 +47,7 @@ impl<P: LakebaseCustomScanProvider> CustomPathBuilder<P> {
             scanned_pages: None,
             scanned_tuples: None,
             extra_startup_cost: None,
+            extra_tuple_width: 0,
             _marker: PhantomData,
         }
     }
@@ -78,12 +82,20 @@ impl<P: LakebaseCustomScanProvider> CustomPathBuilder<P> {
         self
     }
 
+    /// Additional raw scan-tuple width used by upper-node costing.
+    pub fn extra_tuple_width(mut self, width: i32) -> Self {
+        debug_assert!(width >= 0);
+        self.extra_tuple_width = width;
+        self
+    }
+
     /// Finish the path and attach the provider's typed plan data.
     pub fn build(self, private_data: P::PrivateData) -> CustomPathPlan<P> {
         CustomPathPlan {
             scanned_pages: self.scanned_pages,
             scanned_tuples: self.scanned_tuples,
             extra_startup_cost: self.extra_startup_cost,
+            extra_tuple_width: self.extra_tuple_width,
             private_data,
             _marker: PhantomData,
         }
@@ -95,6 +107,7 @@ pub struct CustomPathPlan<P: LakebaseCustomScanProvider> {
     pub(crate) scanned_pages: Option<f64>,
     pub(crate) scanned_tuples: Option<f64>,
     pub(crate) extra_startup_cost: Option<f64>,
+    pub(crate) extra_tuple_width: i32,
     pub(crate) private_data: P::PrivateData,
     _marker: PhantomData<fn() -> P>,
 }
@@ -130,7 +143,9 @@ pub(crate) unsafe extern "C-unwind" fn plan_custom_path_trampoline<
         "PlanCustomPath: best_path must be non-null at plan-stage",
     );
 
-    let provider_metadata: *mut pg_sys::List = unsafe { (*best_path).custom_private };
+    let path_private =
+        unsafe { decode_path_private((*best_path).custom_private) }.report_unwrap();
+    let provider_metadata = path_private.provider_metadata;
     let final_clause_sources = unsafe { FinalScanClauseSources::new(rel) };
 
     let translate_ctx = unsafe { PlanTranslateContext::new(rel) };
@@ -172,17 +187,33 @@ pub(crate) unsafe extern "C-unwind" fn plan_custom_path_trampoline<
 
     let relation_oid =
         unsafe { PlanRelationResolver::new(root).rel_oid((*rel).relid) };
-    let scan_tuple = unsafe {
-        BaseScanTuplePlanner::new((*rel).relid, relation_oid).plan(
-            tlist,
-            (*(*best_path).path.pathtarget).exprs,
-            plan_qual,
-            custom_exprs,
-        )
+    let tuple_planner =
+        BaseScanTuplePlanner::new(unsafe { (*rel).relid }, relation_oid);
+    let scan_tuple = if path_private.requires_wholerow {
+        PlannedScanTuple::relation()
+    } else if path_private.purpose.is_modify() {
+        unsafe {
+            tuple_planner.plan_relation_scan(
+                tlist,
+                (*(*best_path).path.pathtarget).exprs,
+                plan_qual,
+                custom_exprs,
+            )
+        }
+    } else {
+        unsafe {
+            tuple_planner.plan(
+                tlist,
+                (*(*best_path).path.pathtarget).exprs,
+                plan_qual,
+                custom_exprs,
+            )
+        }
     };
     let custom_private = unsafe {
         encode_split_with_layout(
             P::NAME,
+            path_private.purpose,
             relation_oid,
             pushed_count,
             recheck_count,
@@ -288,13 +319,28 @@ pub(crate) unsafe extern "C-unwind" fn reparameterize_custom_path_by_child_tramp
     custom_private: *mut pg_sys::List,
     child_rel: *mut pg_sys::RelOptInfo,
 ) -> *mut pg_sys::List {
-    unsafe { P::reparameterize_private_data(root, custom_private, child_rel) }
+    let path_private = unsafe { decode_path_private(custom_private) }.report_unwrap();
+    let provider_metadata = unsafe {
+        P::reparameterize_private_data(
+            root,
+            path_private.provider_metadata,
+            child_rel,
+        )
+    };
+    unsafe {
+        encode_path_private(
+            path_private.purpose,
+            path_private.requires_wholerow,
+            provider_metadata,
+        )
+    }
 }
 
 /// Context for [`emit_custom_path`].
 pub struct EmitCustomPathContext<'a> {
     pub root: *mut pg_sys::PlannerInfo,
     pub baserel: *mut pg_sys::RelOptInfo,
+    pub purpose: ScanPurpose,
     pub kind: PathVariantKind,
     pub required_outer: pg_sys::Relids,
     /// Path-stage split hint; plan-stage recomputes authoritatively.
@@ -308,7 +354,7 @@ pub struct EmitCustomPathContext<'a> {
 /// Planner pointers in `ctx` must be live in the per-query memory context.
 pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
     ctx: &EmitCustomPathContext<'_>,
-) {
+) -> Result<bool, CustomScanError> {
     let lateral_relids = unsafe { (*ctx.baserel).lateral_relids };
     let rel_relids = unsafe { (*ctx.baserel).relids };
 
@@ -362,6 +408,7 @@ pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
         rel_path_ctx.clauselist_selectivity_for_exprs(&costed_pushed),
     );
     let variant = PathVariant {
+        purpose: ctx.purpose,
         kind: ctx.kind,
         param_info: if param_info.is_null() {
             None
@@ -377,7 +424,7 @@ pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
         CustomPathBuilder::<P>::new(),
     ) {
         Some(plan) => plan,
-        None => return, // provider declined this variant
+        None => return Ok(false), // provider declined this variant
     };
 
     let cpath_ptr = unsafe {
@@ -391,7 +438,17 @@ pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
         path.type_ = pg_sys::NodeTag::T_CustomPath;
         path.pathtype = pg_sys::NodeTag::T_CustomScan;
         path.parent = ctx.baserel;
-        path.pathtarget = (*ctx.baserel).reltarget;
+        let base_target = (*ctx.baserel).reltarget;
+        if plan.extra_tuple_width == 0 {
+            path.pathtarget = base_target;
+        } else {
+            let widened = pg_sys::palloc0(core::mem::size_of::<pg_sys::PathTarget>())
+                .cast::<pg_sys::PathTarget>();
+            core::ptr::copy_nonoverlapping(base_target, widened, 1);
+            (*widened).width =
+                (*widened).width.saturating_add(plan.extra_tuple_width);
+            path.pathtarget = widened;
+        }
         path.param_info = param_info;
         path.parallel_aware = false;
         path.parallel_safe = false;
@@ -432,15 +489,19 @@ pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
             .private_data
             .encode(&mut writer)
             .and_then(|()| writer.finish())
-            .map_err(CustomScanError::encode_custom_private)
-            .report_unwrap();
-        (*cpath_ptr).custom_private = provider_metadata;
+            .map_err(CustomScanError::encode_custom_private)?;
+        (*cpath_ptr).custom_private = encode_path_private(
+            ctx.purpose,
+            ctx.purpose.is_modify() && rel_path_ctx.modify_requests_wholerow(),
+            provider_metadata,
+        );
 
         (*cpath_ptr).methods =
             crate::customscan::provider::method_tables_for::<P>().path();
 
         pg_sys::add_path(ctx.baserel, &mut (*cpath_ptr).path as *mut pg_sys::Path);
     }
+    Ok(true)
 }
 
 /// `rt_fetch(rel->relid, root->parse->rtable)`.

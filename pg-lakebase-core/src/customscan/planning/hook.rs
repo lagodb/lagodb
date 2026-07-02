@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
+use crate::customscan::ScanPurpose;
+use crate::customscan::error::CustomScanError;
 use crate::customscan::gucs;
 use crate::customscan::paths::CustomScanPathPlanner;
 use crate::customscan::provider::find_matching_provider;
@@ -44,14 +46,13 @@ unsafe extern "C-unwind" fn set_rel_pathlist_callback(
         unsafe { prev(root, rel, rti, rte) };
     }
 
-    if !gucs::enabled() {
-        return;
-    }
-
     let candidate = match unsafe { CustomScanCandidate::inspect(root, rel, rte) } {
         Ok(candidate) => candidate,
         Err(_) => return,
     };
+    if candidate.purpose() == ScanPurpose::Query && !gucs::enabled() {
+        return;
+    }
     let ctx = unsafe { candidate.provider_context() };
 
     let provider = match find_matching_provider(&ctx).report_unwrap() {
@@ -59,8 +60,36 @@ unsafe extern "C-unwind" fn set_rel_pathlist_callback(
         None => return,
     };
 
+    if candidate.purpose() == ScanPurpose::Modify {
+        if !crate::customscan::has_modify_provider_for(&ctx) {
+            // A scan provider without a registered ModifyTable provider must
+            // never emit a Modify-purpose scan that cannot be bound.
+            return;
+        }
+
+        // Row-level mutation requires the provider CustomScan: it emits the
+        // storage-backed row identity and captures the exact OCC scan context.
+        let original_paths = unsafe { (*candidate.rel()).pathlist };
+        let original_partial = unsafe { (*candidate.rel()).partial_pathlist };
+        unsafe {
+            (*candidate.rel()).pathlist = core::ptr::null_mut();
+            (*candidate.rel()).partial_pathlist = core::ptr::null_mut();
+        }
+        let planner = unsafe { CustomScanPathPlanner::new(candidate, provider) };
+        let emitted = unsafe { planner.emit() }.report_unwrap();
+        if emitted == 0 {
+            unsafe {
+                (*candidate.rel()).pathlist = original_paths;
+                (*candidate.rel()).partial_pathlist = original_partial;
+            }
+            Err::<(), _>(CustomScanError::required_modify_path(provider.name()))
+                .report_unwrap();
+        }
+        return;
+    }
+
     let planner = unsafe { CustomScanPathPlanner::new(candidate, provider) };
-    unsafe { planner.emit() };
+    let _ = unsafe { planner.emit() }.report_unwrap();
 }
 
 /// Assert [`set_rel_pathlist_callback`] matches `set_rel_pathlist_hook_type`.

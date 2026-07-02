@@ -1,6 +1,8 @@
-//! Generic CustomScan framework: planner/executor pushdown for TableAM lake providers.
+//! Generic PostgreSQL CustomPath/CustomScan framework.
 //!
-//! Downstream extensions call [`provider::register_provider`] then [`init`] from `_PG_init`.
+//! Downstream extensions call [`provider::register_provider`] then [`init`]
+//! from `_PG_init`. The `modify` module owns the PG17 wrapper around
+//! `ModifyTable`.
 
 mod error;
 mod execution;
@@ -10,9 +12,8 @@ mod plan_data;
 mod planning;
 pub mod provider;
 
-// Stable facade paths for provider crates. Internally, ownership follows the
-// planning / plan-data / execution lifecycle boundaries above.
 pub use execution::{exec, explain, state};
+pub use plan_data::ScanPurpose;
 pub use plan_data::{codec, custom_private};
 pub use planning::{builder, hook};
 
@@ -22,6 +23,23 @@ pub(crate) use planning::{candidate, parameterized, paths};
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(feature = "pg17")]
+pub mod modify;
+
+#[cfg(feature = "pg17")]
+pub(crate) fn has_modify_provider_for(
+    context: &crate::customscan::provider::RelPathContext,
+) -> bool {
+    modify::has_provider_for(context)
+}
+
+#[cfg(not(feature = "pg17"))]
+pub(crate) fn has_modify_provider_for(
+    _context: &crate::customscan::provider::RelPathContext,
+) -> bool {
+    false
+}
 
 /// Register GUCs and install the `set_rel_pathlist_hook` router. Idempotent.
 pub fn init() {
