@@ -58,10 +58,6 @@ impl ProjectionPolicy {
             NeededColumns::Subset(attnos) => attnos,
         };
 
-        if attnos.is_empty() {
-            return Err(ProjectionError::EmptyProjectedLayout);
-        }
-
         let mut columns = Vec::with_capacity(attnos.len());
         for &attno in attnos {
             let destination = resolve_destination(attno)
@@ -80,8 +76,6 @@ impl ProjectionPolicy {
 
 #[derive(Debug, thiserror::Error)]
 enum ProjectionError {
-    #[error("projected scan tuple layout contains no source columns")]
-    EmptyProjectedLayout,
     #[error("projected attno {0} has no destination in the scan tuple layout")]
     UnmappedAttno(pg_sys::AttrNumber),
     #[error(
@@ -195,12 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn policy_empty_subset_is_contract_error() {
+    fn policy_empty_subset_builds_metadata_only_projection() {
         let rel = rel_no_dropped();
-        assert!(matches!(
-            rel.run(NeededColumns::Subset(&[])),
-            Err(ProjectionError::EmptyProjectedLayout)
-        ));
+        let projection = rel
+            .run(NeededColumns::Subset(&[]))
+            .expect("empty storage projection is valid")
+            .expect("subset always produces a projection");
+        assert!(projection.columns().is_empty());
     }
 
     #[test]

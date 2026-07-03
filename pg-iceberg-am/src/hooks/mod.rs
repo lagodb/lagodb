@@ -17,14 +17,14 @@
 //! module only routes PostgreSQL hook events into those parsers and into the
 //! Iceberg catalog.
 
-use pg_lakebase_core::access::dml;
+use pg_lakebase_core::access::mutation;
 
 pub mod object_access;
 pub mod table_ddl;
 pub mod tablespace_ddl;
 
 pub fn init_hooks() {
-    dml::init_lifecycle_hooks();
+    mutation::init_lifecycle_hooks();
     tablespace_ddl::init_hook();
     table_ddl::init_hook();
     object_access::init_hook();

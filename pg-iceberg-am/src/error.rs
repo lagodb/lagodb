@@ -77,6 +77,14 @@ pub enum IcebergError {
     MetadataTracker(String),
 
     #[error(
+        "Iceberg mutation exceeds the synthetic ctid limit of {max_files} data files per transaction and relation"
+    )]
+    FileIdLimitExceeded { max_files: usize },
+
+    #[error("Iceberg row identity exceeds the synthetic ctid capacity")]
+    RowIdentityLimitExceeded,
+
+    #[error(
         "failed to commit metadata for relid {relid} after {max_retries} retries due to concurrent updates"
     )]
     MetadataCommitConflict {
@@ -212,6 +220,11 @@ impl SqlStateError for IcebergError {
 
             IcebergError::MetadataTracker(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
+
+            IcebergError::FileIdLimitExceeded { .. }
+            | IcebergError::RowIdentityLimitExceeded => {
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED
             }
 
             IcebergError::MetadataCommitConflict { .. } => {

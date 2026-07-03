@@ -79,7 +79,7 @@ use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
 use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
 pub use crate::transaction::row_delta::{
-    DmlCommand, RowDeltaAction, RowDeltaValidation,
+    RowDeltaAction, RowDeltaValidation, RowLevelCommand,
 };
 use crate::transaction::snapshot_delta::SnapshotDeltaAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
@@ -163,7 +163,7 @@ impl Transaction {
         SnapshotDeltaAction::new(delta)
     }
 
-    /// Creates an action that commits a transaction-local row delta with DML validation.
+    /// Creates an action that commits a transaction-local row delta with row-delta conflict validation.
     pub fn row_delta(&self, delta: Arc<SnapshotDelta>) -> RowDeltaAction {
         RowDeltaAction::new(delta)
     }

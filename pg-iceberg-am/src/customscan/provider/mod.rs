@@ -7,13 +7,16 @@ use core::ffi::CStr;
 
 use pg_lakebase_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-    CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-    NoPrivateData, PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
+    CustomScanError, EndContext, LakebaseCustomModifyProvider,
+    LakebaseCustomScanProvider, ModifyBindContext, ModifyCapabilities,
+    NextSlotContext, NoPrivateData, PathVariant, PlanTranslateContext, ReScanContext,
+    RelPathContext,
 };
 use pg_lakebase_core::expr::predicate::PlanPredicate;
 use pg_lakebase_core::expr::split::QualPushdownDecision;
 use pgrx::pg_sys;
 
+use crate::IcebergTableAm;
 use crate::catalog::IcebergAccessMethod;
 use crate::error::IcebergError;
 use crate::predicate::IcebergPredicateClassifier;
@@ -63,29 +66,28 @@ impl LakebaseCustomScanProvider for IcebergCustomScanProvider {
         ctx: &PlanTranslateContext,
         predicate: &PlanPredicate,
     ) -> QualPushdownDecision {
-        IcebergPredicateClassifier::default().classify_predicate(ctx, predicate)
+        IcebergPredicateClassifier.classify_predicate(ctx, predicate)
     }
 
-    /// Emit a CustomPath when core reports pushed predicates; scale baseline cost
-    /// by [`PathVariant::pushdown`] selectivity so the planner sees pruning benefit.
+    /// Query paths require pushed predicates. Modify paths remain eligible even
+    /// when the pushdown set is empty so projection pruning can compete with
+    /// the standard TableAM path through normal costing.
     fn create_path(
         ctx: &RelPathContext,
         variant: &PathVariant<'_>,
         builder: CustomPathBuilder<Self>,
     ) -> Option<CustomPathPlan<Self>> {
-        if !variant.pushdown.has_pushed_predicates() {
+        if !variant.purpose.is_modify() && !variant.pushdown.has_pushed_predicates() {
             return None;
         }
 
         let fraction =
             crate::gucs::scan_fraction(variant.pushdown.pruning_selectivity);
 
-        Some(
-            builder
-                .scanned_pages(ctx.baserel_pages() * fraction)
-                .scanned_tuples(ctx.baserel_tuples() * fraction)
-                .build(NoPrivateData),
-        )
+        let builder = builder
+            .scanned_pages(ctx.baserel_pages() * fraction)
+            .scanned_tuples(ctx.baserel_tuples() * fraction);
+        Some(builder.build(NoPrivateData))
     }
 
     fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
@@ -106,6 +108,34 @@ impl LakebaseCustomScanProvider for IcebergCustomScanProvider {
 
     fn end(ctx: EndContext<'_, Self>) -> Result<(), CustomScanError> {
         IcebergScanState::end(ctx)
+    }
+}
+
+impl LakebaseCustomModifyProvider for IcebergCustomScanProvider {
+    type AccessMethod = IcebergTableAm;
+
+    const MODIFY_NAME: &'static CStr = c"LakebaseModifyTable";
+
+    const MODIFY_CAPABILITIES: ModifyCapabilities = ModifyCapabilities::NONE;
+
+    fn bind_modify(ctx: ModifyBindContext<'_, Self>) -> Result<(), CustomScanError> {
+        IcebergScanState::bind_modify(ctx)
+    }
+
+    fn supports_modify_target(ctx: &RelPathContext) -> bool {
+        ctx.rtekind() == pg_sys::RTEKind::RTE_RELATION
+            && matches!(
+                ctx.relkind(),
+                pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE
+            )
+            && IcebergAccessMethod::oid()
+                .is_some_and(|oid| ctx.access_method_oid() == oid)
+    }
+
+    fn modify_scan_context(
+        state: &Self::State,
+    ) -> Option<crate::access::mutation::IcebergModifyScanContext> {
+        state.modify_scan_context()
     }
 }
 

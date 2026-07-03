@@ -22,10 +22,10 @@ use std::str::FromStr;
 use crate::compression::CompressionCodec;
 use crate::{Error, ErrorKind, Result};
 
-/// Isolation level used by Iceberg row-level DML validation.
+/// Isolation level governing Iceberg row-delta conflict validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
-    /// Validate concurrent appended data files that may match the DML filter.
+    /// Validate concurrent appended data files that may match the row-delta conflict filter.
     Serializable,
     /// Allow concurrent appends, while still validating target-file and delete-file conflicts.
     Snapshot,
@@ -270,7 +270,7 @@ impl TableProperties {
     /// Property key for merge command isolation level.
     pub const PROPERTY_WRITE_MERGE_ISOLATION_LEVEL: &str =
         "write.merge.isolation-level";
-    /// Default DML isolation level.
+    /// Default write isolation level.
     pub const PROPERTY_WRITE_ISOLATION_LEVEL_DEFAULT: IsolationLevel =
         IsolationLevel::Serializable;
 

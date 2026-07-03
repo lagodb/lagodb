@@ -145,7 +145,7 @@ impl StorageContext {
     fn local(relation_needs_wal: bool) -> IcebergResult<Self> {
         // Local storage is the only backend that can emit Iceberg file WAL.
         // The caller owns the relation-aware decision; the default helper
-        // passes false, and DML/write paths pass RelationNeedsWAL.
+        // passes false, and mutation/write paths pass RelationNeedsWAL.
         let needs_wal = relation_needs_wal;
 
         let data_dir = unsafe {

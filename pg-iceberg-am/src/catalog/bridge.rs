@@ -26,7 +26,7 @@
 //! `iceberg-lite::transaction::Transaction::commit` accepts `&dyn Catalog`,
 //! so any code that drives a `Transaction` through commit must hand it a
 //! type that implements `Catalog`. Inside this crate that path is exactly
-//! one: DML rebases pending appends and commits via [`StagedCatalog`].
+//! one: mutation rebases pending appends and commits via [`StagedCatalog`].
 //!
 //! The other path — `CREATE TABLE` writing the very first metadata file —
 //! does **not** go through `Transaction::commit`. It just needs to stamp out
@@ -173,7 +173,7 @@ impl BootstrapWriter {
 }
 
 // ---------------------------------------------------------------------------
-// StagedCatalog — DML rebase + commit against an already-loaded base table.
+// StagedCatalog — mutation rebase + commit against an already-loaded base table.
 // ---------------------------------------------------------------------------
 
 /// Build a `FeatureUnsupported` error for a method this adapter does not

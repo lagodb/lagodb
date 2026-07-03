@@ -44,10 +44,10 @@ impl ProjectedName {
 
 /// A resolved column projection in stable base-schema read order.
 ///
-/// Invariant (enforced by the provider's `resolve_projection`): a `Projection`
-/// v1 builds always has **≥ 1** column. Select-all is represented by a `None`
-/// projection on [`ScanSpec`](super::scan::ScanSpec), never by an empty
-/// `Projection`.
+/// Select-all is represented by a `None` projection on
+/// [`ScanSpec`](super::scan::ScanSpec). An empty projection is valid for a
+/// Modify identity-only scan, where Iceberg metadata columns still drive one
+/// output row but no business column is decoded.
 #[derive(Debug, Clone)]
 pub(crate) struct Projection {
     columns: Vec<ProjectedName>,
@@ -55,7 +55,7 @@ pub(crate) struct Projection {
 
 impl Projection {
     /// Build a projection from resolved source/destination/name entries in
-    /// storage read order. Callers guarantee `columns` is non-empty.
+    /// storage read order.
     pub(crate) fn new(columns: Vec<ProjectedName>) -> Self {
         Self { columns }
     }

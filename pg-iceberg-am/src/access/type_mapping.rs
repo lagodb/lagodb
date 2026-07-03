@@ -21,7 +21,7 @@
 //! pg-iceberg-am had its own mapping that disagreed with iceberg-lite (notably
 //! mapping `timestamp_ns`/`timestamptz_ns` to microsecond Arrow types while the
 //! Parquet writer's view of the table expected nanoseconds), which produced
-//! silent schema-mismatch failures on the DML write path. [`IcebergTypeExt`] /
+//! silent schema-mismatch failures on the mutation write path. [`IcebergTypeExt`] /
 //! [`IcebergSchemaExt`] are thin error-mapping wrappers over those converters
 //! so callers stay on [`IcebergResult`].
 //!
@@ -143,7 +143,7 @@ pub(crate) trait IcebergFieldExt {
     /// PostgreSQL type, keyed on the pair `(Arrow DataType, PgColumnType)`.
     ///
     /// This is the **single** point where a column's rule is resolved (and
-    /// thereby validated): both scan-plan construction and the DML write path
+    /// thereby validated): both scan-plan construction and the mutation write path
     /// bind their per-column rules through here, so an unsupported or
     /// incompatible pair surfaces as a `ConvError`/[`IcebergError`] at session
     /// begin rather than mid-row.
@@ -183,7 +183,7 @@ pub(crate) trait IcebergSchemaExt {
     /// Convert this Iceberg schema to an Arrow schema.
     ///
     /// Thin adapter over [`iceberg_lite::arrow::schema_to_arrow_schema`]. The
-    /// Arrow schema produced here is what the DML write path's columnar slot
+    /// Arrow schema produced here is what the mutation write path's columnar slot
     /// buffer hands to the Parquet writer; making sure it is the same schema
     /// the Parquet writer derives internally is the point of going through the
     /// single iceberg-lite source of truth.
@@ -200,7 +200,7 @@ impl IcebergSchemaExt for IcebergSchema {
 // Supportability gate
 // ---------------------------------------------------------------------------
 
-/// Reject types that pg-iceberg-am's DML/scan paths cannot handle.
+/// Reject types that pg-iceberg-am's mutation/scan paths cannot handle.
 ///
 /// Implemented for [`Type`] and [`PrimitiveType`] and invoked per field from
 /// [`IcebergFieldExt::resolve_rule`], so the gate is scoped to exactly the

@@ -25,7 +25,7 @@ pub struct SlotRecordBatchBuffer {
     rows: usize,
     /// Running sum of the per-column encoders' `estimated_size`, kept current on
     /// every append so `estimated_size` / `should_flush` (called once per row by
-    /// the DML path) stay O(1) instead of re-summing every column each row.
+    /// the mutation path) stay O(1) instead of re-summing every column each row.
     estimated_bytes: usize,
 }
 

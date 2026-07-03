@@ -12,7 +12,7 @@
 //!   both scan paths consume.
 //! - [`WriteColumns`] (write): holds the bound Arrow schema and one
 //!   [`pg_arrow_conv::ColumnRule`] per column, and builds the columnar slot
-//!   buffer the DML write path appends tuple slots into directly.
+//!   buffer the mutation write path appends tuple slots into directly.
 //!
 //! ## Position arithmetic lives here
 //!
@@ -346,6 +346,7 @@ impl ColumnMapping {
 /// exposed so callers that need it for adjacent work (e.g. translating
 /// PostgreSQL `ScanKey`s into Iceberg `Predicate`s) do not need to keep a
 /// second reference.
+#[derive(Clone)]
 pub(crate) struct ScanColumns {
     schema: Arc<IcebergSchema>,
     plan: ColumnMapping,
@@ -420,12 +421,12 @@ impl ScanColumns {
 // WriteColumns: bound write-side column plan
 // ---------------------------------------------------------------------------
 
-/// The relation-bound columnar write buffer for the DML path — the write-side
+/// The relation-bound columnar write buffer for the mutation path — the write-side
 /// analogue of [`ScanColumns`] (and a sibling of the read cursor, which bundles
 /// its decoder and batch source the same way).
 ///
 /// It owns both the per-column Arrow write buffer and the source-slot mapping,
-/// so the DML sink drives a single cohesive object rather than coordinating a
+/// so the mutation sink drives a single cohesive object rather than coordinating a
 /// loose buffer and a separate plan.
 pub(crate) struct WriteColumns {
     /// Per-column Arrow write buffer (one encoder per output column), bound to
@@ -603,194 +604,8 @@ impl WriteColumns {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests — ColumnMapping position arithmetic
-// ---------------------------------------------------------------------------
-//
-// The assertions are pure position arithmetic (`entries` order, `dest`,
-// `src_col`), but building a `ColumnMapping` resolves each column's rule through
-// `PgColumnType::from_pg_type`, which calls `pg_sys::get_element_type` (a
-// `#[pg_guard]` syscache lookup) to recognize array types. That pulls in
-// PostgreSQL backend symbols, so the path cannot link into a host `#[test]`
-// binary on Linux (see `docs/testing.md`). These therefore run as `#[pg_test]`
-// inside the backend — the `#[pg_test]` body is compiled into the extension
-// `.so`, not the host test binary, so the backend symbol never reaches the
-// host link step.
-
-#[cfg(any(test, feature = "pg_test"))]
-#[pgrx::pg_schema]
-mod tests {
-    use std::sync::Arc;
-
-    use iceberg_lite::spec::{
-        NestedField, PrimitiveType, Schema as IcebergSchema, Type,
-    };
-    use pgrx::pg_sys;
-    use pgrx::pg_test;
-
-    use super::*;
-
-    /// Build an Iceberg schema with `names.len()` required `int` fields,
-    /// assigning sequential field ids `1..=n`. The field *names* model the
-    /// relation's live (non-dropped) columns in attno order.
-    fn int_schema(names: &[&str]) -> IcebergSchema {
-        let fields: Vec<_> = names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                Arc::new(NestedField::required(
-                    (i + 1) as i32,
-                    *name,
-                    Type::Primitive(PrimitiveType::Int),
-                ))
-            })
-            .collect();
-        IcebergSchema::builder()
-            .with_fields(fields)
-            .build()
-            .expect("failed to build test iceberg schema")
-    }
-
-    /// Build a `LiveColumn` list from `(attno, name)` pairs.
-    fn live_cols(cols: &[(i16, &str)]) -> Vec<LiveColumn> {
-        cols.iter()
-            .map(|(attno, name)| LiveColumn::new(*attno, (*name).to_string()))
-            .collect()
-    }
-
-    /// Full-width `(oid, typmod)` list of `n` `int4` columns — the relation-side
-    /// `TupleDesc` view a real scan supplies. `int4` pairs with the `Int32`
-    /// Arrow type the [`int_schema`] `int` fields produce, so every column's
-    /// rule resolves cleanly.
-    fn int_attr_types(n: usize) -> Vec<(pg_sys::Oid, i32)> {
-        vec![(pg_sys::INT4OID, -1); n]
-    }
-
-    // --- from_full_schema -------------------------------------------------
-
-    #[pg_test]
-    fn from_full_schema_no_dropped_columns_is_identity() {
-        let schema = int_schema(&["a", "b", "c"]);
-        let plan = ColumnMapping::from_full_schema(
-            &schema,
-            &live_cols(&[(1, "a"), (2, "b"), (3, "c")]),
-            3,
-            &int_attr_types(3),
-        )
-        .unwrap();
-
-        assert_eq!(plan.entries.len(), 3);
-        for (j, entry) in plan.entries.iter().enumerate() {
-            assert_eq!(entry.dest, j, "identity dest at entry {j}");
-            assert_eq!(entry.src_col, j, "identity src_col at entry {j}");
-        }
-    }
-
-    #[pg_test]
-    fn from_full_schema_with_dropped_column_leaves_gap() {
-        let schema = int_schema(&["a", "b", "d"]);
-        let plan = ColumnMapping::from_full_schema(
-            &schema,
-            &live_cols(&[(1, "a"), (2, "b"), (4, "d")]),
-            4,
-            &int_attr_types(4),
-        )
-        .unwrap();
-
-        let dests: Vec<usize> = plan.entries.iter().map(|e| e.dest).collect();
-        assert_eq!(dests, vec![0, 1, 3]);
-        let srcs: Vec<usize> = plan.entries.iter().map(|e| e.src_col).collect();
-        assert_eq!(srcs, vec![0, 1, 2]);
-    }
-
-    #[pg_test]
-    fn from_full_schema_iceberg_wider_than_live_columns_resolves_by_name() {
-        let schema = int_schema(&["a", "b", "c"]);
-        let plan = ColumnMapping::from_full_schema(
-            &schema,
-            &live_cols(&[(1, "a"), (3, "c")]),
-            3,
-            &int_attr_types(3),
-        )
-        .unwrap();
-
-        assert_eq!(plan.entries.len(), 2);
-        assert_eq!(plan.entries[0].src_col, 0);
-        assert_eq!(plan.entries[0].dest, 0);
-        assert_eq!(plan.entries[1].src_col, 2);
-        assert_eq!(plan.entries[1].dest, 2);
-    }
-
-    #[pg_test]
-    fn from_full_schema_errors_on_unresolved_name() {
-        let schema = int_schema(&["a", "b"]);
-        let err = ColumnMapping::from_full_schema(
-            &schema,
-            &live_cols(&[(1, "a"), (2, "z")]),
-            2,
-            &int_attr_types(2),
-        );
-        assert!(matches!(err, Err(IcebergError::ColumnNotFound(_))));
-    }
-
-    // --- from_projection --------------------------------------------------
-
-    #[pg_test]
-    fn from_projection_decouples_source_order_from_scan_destination() {
-        let schema = int_schema(&["a", "b", "c", "d", "e"]);
-        let pairs = vec![
-            ProjectedName::new(2, 1, "b".to_string()),
-            ProjectedName::new(5, 0, "e".to_string()),
-        ];
-        let plan =
-            ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2))
-                .unwrap();
-
-        let dests: Vec<usize> = plan.entries.iter().map(|e| e.dest).collect();
-        assert_eq!(dests, vec![1, 0]);
-        let sources: Vec<usize> = plan.entries.iter().map(|e| e.src_col).collect();
-        assert_eq!(sources, vec![0, 1]);
-    }
-
-    #[pg_test]
-    fn from_projection_with_dropped_column_uses_attno_minus_one() {
-        let schema = int_schema(&["a", "b", "e"]);
-        let pairs = vec![
-            ProjectedName::new(2, 0, "b".to_string()),
-            ProjectedName::new(4, 1, "e".to_string()),
-        ];
-        let plan =
-            ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2))
-                .unwrap();
-
-        let dests: Vec<usize> = plan.entries.iter().map(|e| e.dest).collect();
-        assert_eq!(dests, vec![0, 1]);
-    }
-
-    #[pg_test]
-    fn from_projection_errors_on_unresolved_name() {
-        let schema = int_schema(&["a", "b"]);
-        let pairs = vec![ProjectedName::new(1, 0, "does_not_exist".to_string())];
-        let err =
-            ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2));
-        assert!(matches!(err, Err(IcebergError::ColumnNotFound(_))));
-    }
-
-    #[pg_test]
-    fn from_projection_errors_on_attno_below_one() {
-        let schema = int_schema(&["a", "b"]);
-        let pairs = vec![ProjectedName::new(0, 0, "a".to_string())];
-        let err =
-            ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2));
-        assert!(matches!(err, Err(IcebergError::InvariantViolated(_))));
-    }
-
-    #[pg_test]
-    fn from_projection_errors_on_dest_out_of_range() {
-        let schema = int_schema(&["a", "b"]);
-        let pairs = vec![ProjectedName::new(2, 5, "b".to_string())];
-        let err =
-            ColumnMapping::from_projection(&schema, &pairs, 2, &int_attr_types(2));
-        assert!(matches!(err, Err(IcebergError::InvariantViolated(_))));
-    }
-}
+// These tests resolve PostgreSQL types through backend syscache functions.
+// Keep them out of the host `cfg(test)` binary; see `docs/testing.md`.
+#[cfg(feature = "pg_test")]
+#[path = "column_mapping_pg_test.rs"]
+mod pg_test;

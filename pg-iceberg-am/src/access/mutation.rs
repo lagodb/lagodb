@@ -1,4 +1,4 @@
-//! Iceberg DML operations.
+//! Iceberg mutation operations.
 //!
 //! Implements INSERT/UPDATE/DELETE/MERGE for Iceberg tables. INSERT writes
 //! Parquet data files; DELETE writes position delete files; UPDATE writes both
@@ -6,14 +6,13 @@
 //! MERGE may combine those outcomes. All files are staged in `TxMetadata` and
 //! committed through iceberg-lite's transaction API.
 //!
-//! [`DataFileSink`] owns the slot -> Parquet data-file pipeline; [`IcebergModify`]
+//! [`DataFileSink`] owns the slot -> Parquet data-file pipeline; [`IcebergModifyState`]
 //! is the AM session that wires tuple callbacks to the sink, crosses the
 //! `IcebergError -> AmError` boundary, and stages finished files into the
 //! per-transaction Iceberg metadata. All initialization happens in
-//! [`IcebergModify::open`], so `begin_modify` is a no-op.
+//! [`IcebergModifyState::open`], so `begin_modify` is a no-op.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arrow_array::{
@@ -21,12 +20,15 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::arrow::schema_to_arrow_schema;
+use iceberg_lite::expr::Predicate;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::metadata_columns::{delete_file_path_field, delete_file_pos_field};
 use iceberg_lite::spec::{
     DataFile, DataFileFormat, FormatVersion, Schema as IcebergSchema, TableMetadata,
 };
-use iceberg_lite::transaction::{DmlCommand, IsolationLevel, RowDeltaValidation};
+use iceberg_lite::transaction::{
+    IsolationLevel, RowDeltaValidation, RowLevelCommand,
+};
 
 use iceberg_lite::writer::base_writer::data_file_writer::{
     DataFileWriter, DataFileWriterBuilder,
@@ -45,21 +47,19 @@ use parquet::file::properties::WriterProperties;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
-use roaring::RoaringTreemap;
 
 use crate::access::column_mapping::{RelationShape, WriteColumns};
-use crate::access::conflict_filter::{
-    ConflictValidationScope, DmlConflictFilterResolver,
-};
 use crate::access::isolation::PgTransactionIsolation;
-use crate::access::row_location::{
-    DmlScanObservation, RowLocation, current_dml_scan_observation,
-};
 use crate::catalog::metadata_tracker::TxMetadata;
+use crate::catalog::row_mutations::{
+    ICEBERG_FILE_ID_BITS, IcebergFileId, ModifyStateId, OwnedRowPositions,
+    RelationRowRegistry, RowMutationClaim,
+};
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
 use crate::options::IcebergTableOptions;
 use crate::storage::StorageContext;
+use pg_lakebase_core::api::TRIGGER_ROW_BLOCK_BASE;
 
 type ParquetDataFileWriter = DataFileWriter<
     ParquetWriterBuilder,
@@ -74,6 +74,195 @@ type ParquetPositionDeleteFileWriter = PositionDeleteFileWriter<
 >;
 
 const POSITION_DELETE_BATCH_ROWS: usize = 8192;
+
+/// Iceberg metadata captured once by a Modify-purpose target scan and consumed
+/// when the corresponding relation-local modify state is opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IcebergModifyScanContext {
+    starting_snapshot_id: Option<i64>,
+    conflict_filter: Predicate,
+}
+
+impl IcebergModifyScanContext {
+    pub(crate) fn new(
+        starting_snapshot_id: Option<i64>,
+        conflict_filter: Predicate,
+    ) -> Self {
+        Self {
+            starting_snapshot_id,
+            conflict_filter,
+        }
+    }
+}
+
+/// Compact Iceberg row identity decoded from the PostgreSQL `ctid` carrier.
+/// File paths remain interned and are resolved only when delete files are
+/// finalized, never on the per-row UPDATE/DELETE hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IcebergRowIdentity {
+    file_id: IcebergFileId,
+    row_position: u32,
+}
+
+impl IcebergRowIdentity {
+    const fn new(file_id: IcebergFileId, row_position: u32) -> Self {
+        Self {
+            file_id,
+            row_position,
+        }
+    }
+
+    pub(crate) const fn file_id(self) -> IcebergFileId {
+        self.file_id
+    }
+
+    pub(crate) const fn row_position(self) -> u32 {
+        self.row_position
+    }
+
+    fn encode(file_id: IcebergFileId, position: u64) -> IcebergResult<ItemPointer> {
+        if u64::from(file_id.raw()) > FILE_MASK || position > MAX_POSITION {
+            return Err(IcebergError::RowIdentityLimitExceeded);
+        }
+        let payload = (u64::from(file_id.raw()) << POSITION_BITS) | position;
+        let block_number = u32::try_from(payload / OFFSET_BASE).map_err(|_| {
+            IcebergError::InvariantViolated("synthetic ctid block number overflow")
+        })?;
+        if block_number >= TRIGGER_ROW_BLOCK_BASE {
+            return Err(IcebergError::InvariantViolated(
+                "Iceberg row identity overlaps the trigger-row namespace",
+            ));
+        }
+        let offset = u16::try_from((payload % OFFSET_BASE) + 1).map_err(|_| {
+            IcebergError::InvariantViolated("synthetic ctid offset overflow")
+        })?;
+        Ok(ItemPointer {
+            block_number,
+            offset,
+        })
+    }
+
+    fn decode(tid: &ItemPointer) -> IcebergResult<Self> {
+        if tid.offset == 0 || tid.block_number >= TRIGGER_ROW_BLOCK_BASE {
+            return Err(IcebergError::InvariantViolated(
+                "ctid is not an Iceberg physical row identity",
+            ));
+        }
+        let payload = u64::from(tid.block_number)
+            .checked_mul(OFFSET_BASE)
+            .and_then(|base| base.checked_add(u64::from(tid.offset - 1)))
+            .ok_or_else(|| {
+                IcebergError::InvariantViolated("synthetic ctid payload overflow")
+            })?;
+        if payload >= PAYLOAD_LIMIT {
+            return Err(IcebergError::InvariantViolated(
+                "ctid is not an Iceberg physical row identity",
+            ));
+        }
+        let file_id = u32::try_from((payload >> POSITION_BITS) & FILE_MASK)
+            .map(IcebergFileId::from_raw)
+            .map_err(|_| {
+                IcebergError::InvariantViolated("synthetic ctid file id overflow")
+            })?;
+        let row_position = u32::try_from(payload & POSITION_MASK).map_err(|_| {
+            IcebergError::InvariantViolated("synthetic ctid row position overflow")
+        })?;
+        Ok(Self::new(file_id, row_position))
+    }
+}
+
+// TODO(synthetic-ctid-capacity): this 17/30-bit split caps one relation at
+// 131,072 registered files and each file at 2^30 rows. Target scans may
+// register files before quals eliminate all their rows, so redesign the
+// identity carrier/registry before workloads can approach either bound.
+const POSITION_BITS: u32 = 30;
+const MAX_POSITION: u64 = (1u64 << POSITION_BITS) - 1;
+const FILE_MASK: u64 = (1u64 << ICEBERG_FILE_ID_BITS) - 1;
+const POSITION_MASK: u64 = (1u64 << POSITION_BITS) - 1;
+const PAYLOAD_LIMIT: u64 = 1u64 << (ICEBERG_FILE_ID_BITS + POSITION_BITS);
+const OFFSET_BASE: u64 = u16::MAX as u64;
+
+/// Borrowed data-file source registered once per contiguous scan run.
+#[derive(Debug, Clone, Copy)]
+pub struct IcebergFileSource<'a>(&'a str);
+
+impl<'a> IcebergFileSource<'a> {
+    pub(crate) const fn new(path: &'a str) -> Self {
+        Self(path)
+    }
+}
+
+/// Iceberg identity registry shared by all ModifyTable nodes in one PostgreSQL
+/// executor query. It caches only handles to transaction-owned relation
+/// registries; file paths and file-ID namespaces never live at query scope.
+#[derive(Debug, Default)]
+pub struct IcebergModifyQueryState {
+    relations: HashMap<pg_sys::Oid, RelationRowRegistry>,
+}
+
+impl IcebergModifyQueryState {
+    fn relation_registry(
+        &mut self,
+        relation_oid: pg_sys::Oid,
+    ) -> AmResult<RelationRowRegistry> {
+        if let Some(registry) = self.relations.get(&relation_oid) {
+            return Ok(registry.clone());
+        }
+        let registry = TxMetadata::current().row_registry(relation_oid)?;
+        self.relations.insert(relation_oid, registry.clone());
+        Ok(registry)
+    }
+}
+
+impl AmModifyQueryState for IcebergModifyQueryState {
+    type ScanIdentitySource<'a> = IcebergFileSource<'a>;
+    type RegisteredScanIdentity = IcebergFileId;
+    type ScanIdentity<'a> = u64;
+
+    fn new() -> AmResult<Self> {
+        Ok(Self::default())
+    }
+
+    fn register_scan_identity_source(
+        &mut self,
+        relation_oid: pg_sys::Oid,
+        source: &Self::ScanIdentitySource<'_>,
+    ) -> AmResult<Self::RegisteredScanIdentity> {
+        Ok(self
+            .relation_registry(relation_oid)?
+            .register_file(source.0)?)
+    }
+
+    fn encode_row_identity(
+        source: Self::RegisteredScanIdentity,
+        position: &Self::ScanIdentity<'_>,
+    ) -> AmResult<ItemPointer> {
+        Ok(IcebergRowIdentity::encode(source, *position)?)
+    }
+}
+
+#[derive(Debug)]
+enum ConflictValidationScope {
+    StaticTarget(Predicate),
+    WholeTable,
+}
+
+impl ConflictValidationScope {
+    fn from_predicate(predicate: Predicate) -> Self {
+        if predicate == Predicate::AlwaysTrue {
+            Self::WholeTable
+        } else {
+            Self::StaticTarget(predicate)
+        }
+    }
+
+    fn into_predicate(self) -> Predicate {
+        match self {
+            Self::StaticTarget(predicate) => predicate,
+            Self::WholeTable => Predicate::AlwaysTrue,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModifyCommand {
@@ -91,25 +280,17 @@ impl ModifyCommand {
             pg_sys::CmdType::CMD_UPDATE => Ok(Self::Update),
             pg_sys::CmdType::CMD_MERGE => Ok(Self::Merge),
             _ => Err(IcebergError::NotImplemented(
-                "unsupported PostgreSQL DML command for Iceberg table",
+                "unsupported PostgreSQL mutation command for Iceberg table",
             )),
         }
     }
 
-    fn writes_data(self) -> bool {
-        matches!(self, Self::Insert | Self::Update | Self::Merge)
-    }
-
-    fn writes_position_deletes(self) -> bool {
-        matches!(self, Self::Delete | Self::Update | Self::Merge)
-    }
-
-    fn validation_command(self) -> Option<DmlCommand> {
+    fn validation_command(self) -> Option<RowLevelCommand> {
         match self {
             Self::Insert => None,
-            Self::Delete => Some(DmlCommand::Delete),
-            Self::Update => Some(DmlCommand::Update),
-            Self::Merge => Some(DmlCommand::Merge),
+            Self::Delete => Some(RowLevelCommand::Delete),
+            Self::Update => Some(RowLevelCommand::Update),
+            Self::Merge => Some(RowLevelCommand::Merge),
         }
     }
 
@@ -151,7 +332,7 @@ struct DataFileSink {
     /// A Rust-heap session field (never in a PG memory context), so per-tuple
     /// context resets cannot clobber it.
     columns: WriteColumns,
-    /// Row-buffer memory threshold for this DML session.
+    /// Row-buffer memory threshold for this modify state.
     flush_threshold_bytes: usize,
     /// Active rolling Parquet writer. `None` only after [`Self::close_writer`]
     /// consumes it (during `finish` / `abort`).
@@ -202,7 +383,7 @@ impl DataFileSink {
     }
 
     /// Best-effort cleanup of in-memory state for the failure path. Persistent
-    /// artifacts are unwound by ResourceOwner cleanup; see [`IcebergModify::end_modify`].
+    /// artifacts are unwound by ResourceOwner cleanup; see [`IcebergModifyState::end_modify`].
     fn abort(&mut self) {
         self.columns.clear();
         self.writer.take();
@@ -335,25 +516,29 @@ impl PositionDeleteSink {
     fn write_files(
         &self,
         deletes: &PositionDeleteAccumulator,
+        row_registry: &RelationRowRegistry,
     ) -> IcebergResult<Vec<PositionDeleteOutput>> {
         let mut outputs = Vec::new();
-        for (referenced_data_file, positions) in deletes.files() {
-            let mut writer = self.build_writer(referenced_data_file)?;
+        for (file_id, positions) in deletes.files() {
+            let referenced_data_file = row_registry.file_path(file_id)?;
+            let mut writer = self.build_writer(&referenced_data_file)?;
             let mut chunk = Vec::with_capacity(POSITION_DELETE_BATCH_ROWS);
+            let positions = positions.borrow()?;
             for position in positions.iter() {
-                chunk.push(position);
+                chunk.push(u64::from(position));
                 if chunk.len() == POSITION_DELETE_BATCH_ROWS {
-                    writer.write(self.record_batch(referenced_data_file, &chunk)?)?;
+                    writer
+                        .write(self.record_batch(&referenced_data_file, &chunk)?)?;
                     chunk.clear();
                 }
             }
             if !chunk.is_empty() {
-                writer.write(self.record_batch(referenced_data_file, &chunk)?)?;
+                writer.write(self.record_batch(&referenced_data_file, &chunk)?)?;
             }
             for delete_file in writer.close()? {
                 outputs.push(PositionDeleteOutput {
                     delete_file,
-                    referenced_data_file: referenced_data_file.as_ref().to_owned(),
+                    referenced_data_file: referenced_data_file.to_string(),
                 });
             }
         }
@@ -414,86 +599,71 @@ impl PositionDeleteSink {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TouchResult {
-    Added,
-    SelfModified,
-}
-
 #[derive(Debug, Default)]
 struct PositionDeleteAccumulator {
-    by_file: BTreeMap<Rc<str>, RoaringTreemap>,
+    /// One shared owner bitmap per file touched by this ModifyState. The
+    /// registry performs the only per-row insertion; this list is updated only
+    /// when the state first touches a file.
+    files: Vec<(IcebergFileId, OwnedRowPositions)>,
 }
 
 impl PositionDeleteAccumulator {
-    fn add(&mut self, location: RowLocation) -> TouchResult {
-        let inserted = self
-            .by_file
-            .entry(location.data_file_path)
-            .or_default()
-            .insert(location.position);
-        if inserted {
-            TouchResult::Added
-        } else {
-            TouchResult::SelfModified
-        }
-    }
-
-    fn contains(&self, location: &RowLocation) -> bool {
-        self.by_file
-            .get(&location.data_file_path)
-            .is_some_and(|positions| positions.contains(location.position))
+    fn add_file_positions(
+        &mut self,
+        file_id: IcebergFileId,
+        positions: OwnedRowPositions,
+    ) {
+        debug_assert!(
+            self.files.iter().all(|(existing, _)| *existing != file_id),
+            "one ModifyState must own exactly one bitmap per file"
+        );
+        self.files.push((file_id, positions));
     }
 
     fn is_empty(&self) -> bool {
-        self.by_file.is_empty()
+        self.files.is_empty()
     }
 
-    fn files(&self) -> &BTreeMap<Rc<str>, RoaringTreemap> {
-        &self.by_file
+    fn files(&self) -> impl Iterator<Item = (IcebergFileId, &OwnedRowPositions)> {
+        self.files
+            .iter()
+            .map(|(file_id, positions)| (*file_id, positions))
     }
 
-    fn referenced_data_files(&self) -> BTreeSet<String> {
-        self.by_file
-            .keys()
-            .map(|path| path.as_ref().to_owned())
+    fn referenced_data_files(
+        &self,
+        row_registry: &RelationRowRegistry,
+    ) -> IcebergResult<BTreeSet<String>> {
+        self.files()
+            .map(|(file_id, _)| {
+                row_registry.file_path(file_id).map(|path| path.to_string())
+            })
             .collect()
     }
 
     fn clear(&mut self) {
-        self.by_file.clear();
+        self.files.clear();
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetDependency {
     Independent,
-    ReadRequired(DmlScanObservation),
+    ReadRequired(Option<i64>),
 }
 
 impl TargetDependency {
-    fn from_frame(
-        requirement: DmlTargetReadRequirement,
-        observation: DmlScanObservation,
-    ) -> Self {
-        match requirement {
-            DmlTargetReadRequirement::Independent => Self::Independent,
-            DmlTargetReadRequirement::ReadRequired => Self::ReadRequired(observation),
-        }
+    fn from_context(scan_context: Option<&IcebergModifyScanContext>) -> Self {
+        scan_context.map_or(Self::Independent, |context| {
+            Self::ReadRequired(context.starting_snapshot_id)
+        })
     }
 
     fn required_snapshot(self) -> IcebergResult<Option<i64>> {
         match self {
-            Self::ReadRequired(DmlScanObservation::Observed(snapshot_id)) => {
-                Ok(snapshot_id)
-            }
-            Self::ReadRequired(DmlScanObservation::Unobserved) => {
-                Err(IcebergError::InvariantViolated(
-                    "row-level DML produced an Iceberg delta without observing its required target read",
-                ))
-            }
+            Self::ReadRequired(snapshot_id) => Ok(snapshot_id),
             Self::Independent => Err(IcebergError::InvariantViolated(
-                "independent DML has no target snapshot",
+                "independent mutation has no target snapshot",
             )),
         }
     }
@@ -501,9 +671,9 @@ impl TargetDependency {
 
 /// Final output of one relation-local PostgreSQL ModifyTable session.
 ///
-/// Target dependency is explicit: the DML frame decides whether the finalized
-/// plan logically needs a target read, while row-location tracking contributes
-/// the snapshot observation only for a required read.
+/// Target dependency is explicit: the owning relation execution decides
+/// whether the finalized plan needs a target read, and its pinned scan context
+/// supplies the snapshot used for validation.
 struct StatementOutcome {
     command: ModifyCommand,
     target_dependency: TargetDependency,
@@ -519,7 +689,7 @@ impl StatementOutcome {
 
     fn row_delta_validation(
         &self,
-    ) -> IcebergResult<Option<(DmlCommand, Option<i64>)>> {
+    ) -> IcebergResult<Option<(RowLevelCommand, Option<i64>)>> {
         if !self.has_delta() {
             return Ok(None);
         }
@@ -533,33 +703,165 @@ impl StatementOutcome {
     }
 }
 
-/// Iceberg DML state for INSERT/UPDATE/DELETE/MERGE operations.
+/// Iceberg mutation state for INSERT/UPDATE/DELETE/MERGE operations.
 ///
 /// Constructed eagerly: storage context, schemas, and writer are all wired up
 /// by the time this struct exists.
-pub struct IcebergModify {
+pub struct IcebergModifyState {
     /// OID of the relation being modified.
     rel_oid: pg_sys::Oid,
     /// File IO for staging produced data files into transaction metadata.
     file_io: FileIO,
     command: ModifyCommand,
-    target_read: DmlTargetReadRequirement,
+    target_dependency: TargetDependency,
     isolation_level: Option<IsolationLevel>,
     conflict_scope: Option<ConflictValidationScope>,
     /// The slot -> data-file production pipeline.
     data_sink: Option<DataFileSink>,
     position_delete_sink: Option<PositionDeleteSink>,
     position_deletes: PositionDeleteAccumulator,
+    row_registry: RelationRowRegistry,
+    modify_state_id: ModifyStateId,
 }
 
-impl AmDmlSession for IcebergModify {
-    fn new(rel: &RelationHandle, context: DmlSessionContext) -> AmResult<Self> {
-        Ok(Self::open(rel, context)?)
+impl AmModifyState for IcebergModifyState {
+    type QueryState = IcebergModifyQueryState;
+    type ScanContext = IcebergModifyScanContext;
+
+    fn new(
+        rel: &RelationHandle,
+        context: ModifyStateContext<Self::QueryState, Self::ScanContext>,
+    ) -> AmResult<Self> {
+        Self::open(rel, context)
     }
 
     fn begin_modify(&mut self) -> AmResult<()> {
         // Intentionally empty: all initialization happens in `new`.
         Ok(())
+    }
+
+    fn insert_slot(
+        &mut self,
+        new: TupleSlotRow<'_>,
+        _context: MutationWriteContext,
+    ) -> AmResult<()> {
+        self.data_sink_mut()?.append(new)?;
+        Ok(())
+    }
+
+    fn update_slot(
+        &mut self,
+        row_id: ItemPointer,
+        _old: TupleSlotRow<'_>,
+        new: TupleSlotRow<'_>,
+        context: MutationUpdateContext<'_>,
+    ) -> AmResult<MutationOutcome> {
+        self.ensure_position_delete_capable()?;
+        let identity = IcebergRowIdentity::decode(&row_id)?;
+        let claim = self.row_registry.claim(
+            self.modify_state_id,
+            identity.file_id(),
+            identity.row_position(),
+            context.cid,
+        )?;
+        match claim {
+            RowMutationClaim::FirstTouch { new_file_positions } => {
+                if let Some(positions) = new_file_positions {
+                    self.position_deletes
+                        .add_file_positions(identity.file_id(), positions);
+                }
+                self.data_sink_mut()?.append(new)?;
+                Ok(MutationOutcome::Applied)
+            }
+            RowMutationClaim::PreviouslyModified {
+                modifying_command_id,
+            } => Ok(MutationOutcome::AlreadyModifiedInCurrentTransaction {
+                modifying_command_id,
+            }),
+        }
+    }
+
+    fn delete_slot(
+        &mut self,
+        row_id: ItemPointer,
+        context: MutationDeleteContext<'_>,
+    ) -> AmResult<MutationOutcome> {
+        self.ensure_position_delete_capable()?;
+        let identity = IcebergRowIdentity::decode(&row_id)?;
+        let claim = self.row_registry.claim(
+            self.modify_state_id,
+            identity.file_id(),
+            identity.row_position(),
+            context.cid,
+        )?;
+        match claim {
+            RowMutationClaim::FirstTouch { new_file_positions } => {
+                if let Some(positions) = new_file_positions {
+                    self.position_deletes
+                        .add_file_positions(identity.file_id(), positions);
+                }
+                Ok(MutationOutcome::Applied)
+            }
+            RowMutationClaim::PreviouslyModified {
+                modifying_command_id,
+            } => Ok(MutationOutcome::AlreadyModifiedInCurrentTransaction {
+                modifying_command_id,
+            }),
+        }
+    }
+
+    fn abort_modify(&mut self) {
+        // Best-effort in-memory cleanup; persistent artifacts are unwound by
+        // ResourceOwner cleanup (see the orphan-file note in `end_modify`).
+        if let Some(sink) = self.data_sink.as_mut() {
+            sink.abort();
+        }
+        self.position_deletes.clear();
+    }
+
+    fn end_modify(&mut self) -> AmResult<()> {
+        // Orphan-file note: data files already uploaded before a later flush
+        // failure are NOT leaked. Every produced file is registered via
+        // `register_object_file_staged()` / `mark_object_file_uploaded()`, and
+        // `StorageArtifactResource::on_abort` unlinks staging files or issues
+        // remote deletes on abort. Do not re-introduce a separate cleanup list here.
+        let outcome = self.finish_statement()?;
+        self.stage_statement(outcome)?;
+        Ok(())
+    }
+}
+
+impl AmCopySession for IcebergModifyState {
+    fn new(rel: &RelationHandle) -> AmResult<Self> {
+        let query_state = ModifyQueryState::<IcebergModifyQueryState>::new()?;
+        Self::open(
+            rel,
+            ModifyStateContext::<
+                IcebergModifyQueryState,
+                IcebergModifyScanContext,
+            >::independent(
+                query_state,
+                pg_sys::CmdType::CMD_INSERT,
+                ModifyActions::INSERT,
+            ),
+        )
+    }
+
+    fn begin_copy(&mut self) -> AmResult<()> {
+        Ok(())
+    }
+
+    fn end_copy(&mut self) -> AmResult<()> {
+        let outcome = self.finish_statement()?;
+        self.stage_statement(outcome)?;
+        Ok(())
+    }
+
+    fn abort_copy(&mut self) {
+        if let Some(sink) = self.data_sink.as_mut() {
+            sink.abort();
+        }
+        self.position_deletes.clear();
     }
 
     fn tuple_insert_slot(
@@ -585,114 +887,9 @@ impl AmDmlSession for IcebergModify {
         }
         Ok(())
     }
-
-    fn tuple_delete(
-        &mut self,
-        tid: &ItemPointer,
-        cid: pg_sys::CommandId,
-        _snapshot: &SnapshotHandle,
-        _crosscheck: Option<&SnapshotHandle>,
-        _wait: bool,
-        tmfd: &mut TM_FailureData,
-        _changing_part: bool,
-    ) -> AmResult<pg_sys::TM_Result::Type> {
-        self.ensure_position_delete_capable()?;
-        // `tuple_delete` only runs inside `ExecModifyTable` (frame active) with a
-        // ctid this relation's scan synthesized, so a missing row location is an
-        // invariant violation, not a concurrently deleted row.
-        let location = RowLocation::lookup_current(self.rel_oid, tid)?.ok_or(
-            IcebergError::InvariantViolated(
-                "tuple_delete reached a ctid with no active Iceberg row location",
-            ),
-        )?;
-        match self.position_deletes.add(location) {
-            TouchResult::Added => Ok(pg_sys::TM_Result::TM_Ok),
-            TouchResult::SelfModified => {
-                self.mark_self_modified(tmfd, tid, cid);
-                Ok(pg_sys::TM_Result::TM_SelfModified)
-            }
-        }
-    }
-
-    fn tuple_update_slot(
-        &mut self,
-        otid: &ItemPointer,
-        row: TupleSlotRow<'_>,
-        cid: pg_sys::CommandId,
-        _snapshot: &SnapshotHandle,
-        _crosscheck: Option<&SnapshotHandle>,
-        _wait: bool,
-        tmfd: &mut TM_FailureData,
-        lockmode: &mut pg_sys::LockTupleMode::Type,
-        update_indexes: &mut pg_sys::TU_UpdateIndexes::Type,
-    ) -> AmResult<pg_sys::TM_Result::Type> {
-        self.ensure_position_delete_capable()?;
-        // As in `tuple_delete`: `tuple_update_slot` only runs inside
-        // `ExecModifyTable` with a ctid this relation's scan synthesized, so a
-        // missing row location is an invariant violation.
-        let location = RowLocation::lookup_current(self.rel_oid, otid)?.ok_or(
-            IcebergError::InvariantViolated(
-                "tuple_update_slot reached a ctid with no active Iceberg row location",
-            ),
-        )?;
-        match self.position_deletes.add(location) {
-            TouchResult::Added => {
-                self.data_sink_mut()?.append(row)?;
-                *lockmode = pg_sys::LockTupleMode::LockTupleExclusive;
-                *update_indexes = pg_sys::TU_UpdateIndexes::TU_None;
-                Ok(pg_sys::TM_Result::TM_Ok)
-            }
-            TouchResult::SelfModified => {
-                self.mark_self_modified(tmfd, otid, cid);
-                *update_indexes = pg_sys::TU_UpdateIndexes::TU_None;
-                Ok(pg_sys::TM_Result::TM_SelfModified)
-            }
-        }
-    }
-
-    fn tuple_lock(
-        &mut self,
-        tid: &ItemPointer,
-        _snapshot: &SnapshotHandle,
-        _row: &mut Row,
-        cid: pg_sys::CommandId,
-        _mode: pg_sys::LockTupleMode::Type,
-        _wait_policy: pg_sys::LockWaitPolicy::Type,
-        _flags: u8,
-        tmfd: &mut TM_FailureData,
-    ) -> AmResult<pg_sys::TM_Result::Type> {
-        let Some(location) = RowLocation::lookup_current(self.rel_oid, tid)? else {
-            return Ok(pg_sys::TM_Result::TM_Deleted);
-        };
-        if self.position_deletes.contains(&location) {
-            self.mark_self_modified(tmfd, tid, cid);
-            return Ok(pg_sys::TM_Result::TM_SelfModified);
-        }
-        Ok(pg_sys::TM_Result::TM_Ok)
-    }
-
-    fn abort_modify(&mut self) {
-        // Best-effort in-memory cleanup; persistent artifacts are unwound by
-        // ResourceOwner cleanup (see the orphan-file note in `end_modify`).
-        if let Some(sink) = self.data_sink.as_mut() {
-            sink.abort();
-        }
-        self.position_deletes.clear();
-    }
-
-    fn end_modify(&mut self) -> AmResult<()> {
-        // Orphan-file note: data files already uploaded before a later flush
-        // failure are NOT leaked. Every produced file is registered via
-        // `register_object_file_staged()` / `mark_object_file_uploaded()`, and
-        // `StorageArtifactResource::on_abort` unlinks staging files or issues
-        // remote deletes on abort. Do not re-introduce a separate cleanup list here.
-        let outcome = self.finish_statement()?;
-        self.stage_statement(outcome)?;
-        Ok(())
-    }
 }
 
-impl IcebergModify {
+impl IcebergModifyState {
     /// Construct a fully-initialized session, performing all storage IO and
     /// schema/writer setup inline.
     ///
@@ -700,11 +897,21 @@ impl IcebergModify {
     /// for storage, the relation OID for the metadata tracker, and the live
     /// columns / tuple width / attribute types that bind the write-side
     /// source-slot mapping ([`WriteColumns`]). The handle is not retained.
-    fn open(rel: &RelationHandle, context: DmlSessionContext) -> IcebergResult<Self> {
-        let command = ModifyCommand::from_pg(context.cmd_type())?;
-        let target_read = context.target_read();
+    fn open(
+        rel: &RelationHandle,
+        context: ModifyStateContext<
+            IcebergModifyQueryState,
+            IcebergModifyScanContext,
+        >,
+    ) -> AmResult<Self> {
+        let (query_state, cmd_type, actions, scan_context) = context.into_parts();
+        let command = ModifyCommand::from_pg(cmd_type)?;
+        let target_dependency = TargetDependency::from_context(scan_context.as_ref());
         let transaction_isolation = PgTransactionIsolation::current()?;
         let rel_oid = rel.oid();
+        let row_registry =
+            query_state.update(|state| state.relation_registry(rel_oid))?;
+        let modify_state_id = row_registry.begin_modify_state()?;
         // `locator().spc_oid` is the *resolved* physical tablespace (default
         // tablespaces resolve here), unlike `reltablespace`.
         let ctx = StorageContext::for_tablespace_with_wal(
@@ -716,24 +923,31 @@ impl IcebergModify {
         // Registers the relation with the per-transaction tracker, rebases
         // pending changes, and returns the base metadata in one step.
         let loaded = TxMetadata::current().begin_table_modify(rel_oid, &file_io)?;
-        let writes_position_deletes = command.writes_position_deletes()
-            && target_read == DmlTargetReadRequirement::ReadRequired;
+        let writes_position_deletes =
+            actions.writes_position_deletes() && scan_context.is_some();
         if writes_position_deletes
             && loaded.metadata.format_version() < FormatVersion::V2
         {
             return Err(IcebergError::NotImplemented(
-                "UPDATE/DELETE and target-reading MERGE require Iceberg format v2 or later",
-            ));
+                "UPDATE/DELETE and MERGE actions that update or delete require Iceberg format v2 or later",
+            )
+            .into());
         }
+        // TODO(iceberg-v3-deletion-vectors): this check currently lets format
+        // v3 reach the position-delete sink, but v3 forbids adding new
+        // position-delete files. Add deletion-vector writing (or reject these
+        // actions) before claiming v3 UPDATE/DELETE support.
         let iceberg_schema = loaded.metadata.current_schema().clone();
-        let table_properties = loaded.metadata.table_properties()?;
+        let table_properties = loaded
+            .metadata
+            .table_properties()
+            .map_err(IcebergError::from)?;
         let isolation_level = command
             .effective_isolation_level(&table_properties, transaction_isolation);
-        let conflict_scope = if target_read == DmlTargetReadRequirement::ReadRequired
-        {
-            command
-                .validation_command()
-                .map(|_| DmlConflictFilterResolver::new(rel_oid).resolve())
+        let conflict_scope = if command.validation_command().is_some() {
+            scan_context.map(|context| {
+                ConflictValidationScope::from_predicate(context.conflict_filter)
+            })
         } else {
             None
         };
@@ -742,7 +956,7 @@ impl IcebergModify {
             .set_compression(write_options.parquet_compression())
             .build();
 
-        let data_sink = if command.writes_data() {
+        let data_sink = if actions.writes_rows() {
             // The shared relation shape drives the read and write column
             // mappings, keeping dropped-column and type-position handling
             // consistent. DELETE-only sessions do not allocate it.
@@ -753,7 +967,7 @@ impl IcebergModify {
                 &relation_shape,
                 &loaded.metadata,
                 &writer_properties,
-                gucs::dml_buffer_flush_bytes(),
+                gucs::mutation_buffer_flush_bytes(),
             )?)
         } else {
             None
@@ -772,12 +986,14 @@ impl IcebergModify {
             rel_oid,
             file_io,
             command,
-            target_read,
+            target_dependency,
             isolation_level,
             conflict_scope,
             data_sink,
             position_delete_sink,
             position_deletes: PositionDeleteAccumulator::default(),
+            row_registry,
+            modify_state_id,
         })
     }
 
@@ -800,13 +1016,13 @@ impl IcebergModify {
 
     fn stage_validation(
         &mut self,
-        command: DmlCommand,
+        command: RowLevelCommand,
         starting_snapshot_id: Option<i64>,
         referenced_data_files: BTreeSet<String>,
     ) -> IcebergResult<()> {
         let Some(isolation_level) = self.isolation_level else {
             return Err(IcebergError::InvariantViolated(
-                "row-level DML validation has no effective isolation level",
+                "row-level mutation validation has no effective isolation level",
             ));
         };
         let conflict_filter = self
@@ -829,14 +1045,13 @@ impl IcebergModify {
 
     fn finish_statement(&mut self) -> IcebergResult<StatementOutcome> {
         let new_data_files = self.finish_data_files()?;
-        let referenced_data_files = self.position_deletes.referenced_data_files();
+        let referenced_data_files = self
+            .position_deletes
+            .referenced_data_files(&self.row_registry)?;
         let position_delete_files = self.finish_position_deletes()?;
         Ok(StatementOutcome {
             command: self.command,
-            target_dependency: TargetDependency::from_frame(
-                self.target_read,
-                current_dml_scan_observation(self.rel_oid),
-            ),
+            target_dependency: self.target_dependency,
             new_data_files,
             position_delete_files,
             referenced_data_files,
@@ -876,14 +1091,14 @@ impl IcebergModify {
             return Ok(Vec::new());
         }
         self.position_delete_sink_ref()?
-            .write_files(&self.position_deletes)
+            .write_files(&self.position_deletes, &self.row_registry)
     }
 
     fn data_sink_mut(&mut self) -> IcebergResult<&mut DataFileSink> {
         self.data_sink
             .as_mut()
             .ok_or(IcebergError::InvariantViolated(
-                "data-file callback reached a DML command without a data sink",
+                "data-file callback reached a mutation command without a data sink",
             ))
     }
 
@@ -891,33 +1106,79 @@ impl IcebergModify {
         self.position_delete_sink
             .as_ref()
             .ok_or(IcebergError::InvariantViolated(
-                "position-delete callback reached a DML command without a delete sink",
+                "position-delete callback reached a mutation command without a delete sink",
             ))
     }
 
     fn ensure_position_delete_capable(&self) -> IcebergResult<()> {
         if self.position_delete_sink.is_none() {
             return Err(IcebergError::InvariantViolated(
-                "position-delete callback reached a DML command without a delete sink",
+                "position-delete callback reached a mutation command without a delete sink",
             ));
         }
         Ok(())
     }
-
-    fn mark_self_modified(
-        &self,
-        tmfd: &mut TM_FailureData,
-        tid: &ItemPointer,
-        cid: pg_sys::CommandId,
-    ) {
-        tmfd.ctid = *tid;
-        tmfd.cmax = cid;
-    }
 }
 
 #[cfg(test)]
-mod dml_state_tests {
+mod mutation_state_tests {
     use super::*;
+
+    #[test]
+    fn synthetic_ctid_round_trips_boundaries() {
+        let cases = [
+            (0, 0),
+            (0, MAX_POSITION),
+            (u32::try_from(FILE_MASK).unwrap(), 0),
+            (u32::try_from(FILE_MASK).unwrap(), MAX_POSITION),
+        ];
+        for (file_id, position) in cases {
+            let file_id = IcebergFileId::from_raw(file_id);
+            let tid = IcebergRowIdentity::encode(file_id, position).unwrap();
+            assert_ne!(tid.offset, 0);
+            assert!(tid.block_number < TRIGGER_ROW_BLOCK_BASE);
+            let decoded = IcebergRowIdentity::decode(&tid).unwrap();
+            assert_eq!(decoded.file_id(), file_id);
+            assert_eq!(u64::from(decoded.row_position()), position);
+        }
+    }
+
+    #[test]
+    fn synthetic_ctid_rejects_out_of_range_values() {
+        assert!(
+            IcebergRowIdentity::encode(
+                IcebergFileId::from_raw(1 << ICEBERG_FILE_ID_BITS),
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            IcebergRowIdentity::encode(IcebergFileId::from_raw(0), MAX_POSITION + 1,)
+                .is_err()
+        );
+        assert!(IcebergRowIdentity::decode(&ItemPointer::default()).is_err());
+        assert!(
+            IcebergRowIdentity::decode(&ItemPointer {
+                block_number: TRIGGER_ROW_BLOCK_BASE,
+                offset: 1,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn relation_registry_interns_each_path_once() {
+        let registry = RelationRowRegistry::default();
+        let first_file = registry.register_file("data/a.parquet").unwrap();
+        let second_file = registry.register_file("data/a.parquet").unwrap();
+        let other_file = registry.register_file("data/b.parquet").unwrap();
+        assert_eq!(first_file, second_file);
+        assert_ne!(first_file, other_file);
+        assert_eq!(
+            registry.file_path(other_file).unwrap().as_ref(),
+            "data/b.parquet"
+        );
+    }
 
     #[test]
     fn commands_read_their_own_isolation_property() {
@@ -965,45 +1226,15 @@ mod dml_state_tests {
 
     #[test]
     fn target_dependency_separates_independent_and_required_reads() {
-        let empty_table_read = TargetDependency::from_frame(
-            DmlTargetReadRequirement::ReadRequired,
-            DmlScanObservation::Observed(None),
-        );
+        let empty_scan = IcebergModifyScanContext::new(None, Predicate::AlwaysTrue);
+        let empty_table_read = TargetDependency::from_context(Some(&empty_scan));
         assert_eq!(empty_table_read.required_snapshot().unwrap(), None);
 
-        let missing_required_read = TargetDependency::from_frame(
-            DmlTargetReadRequirement::ReadRequired,
-            DmlScanObservation::Unobserved,
-        );
-        assert!(missing_required_read.required_snapshot().is_err());
-
-        let independent = TargetDependency::from_frame(
-            DmlTargetReadRequirement::Independent,
-            DmlScanObservation::Unobserved,
-        );
+        let independent = TargetDependency::from_context(None);
         assert_eq!(independent, TargetDependency::Independent);
     }
-
-    #[test]
-    fn positions_are_deduplicated_and_iterated_in_order() {
-        let location = |position| RowLocation {
-            data_file_path: Rc::from("data.parquet"),
-            position,
-        };
-        let mut accumulator = PositionDeleteAccumulator::default();
-
-        assert_eq!(accumulator.add(location(9)), TouchResult::Added);
-        assert_eq!(accumulator.add(location(1)), TouchResult::Added);
-        assert_eq!(accumulator.add(location(5)), TouchResult::Added);
-        assert_eq!(accumulator.add(location(5)), TouchResult::SelfModified);
-        assert!(accumulator.contains(&location(5)));
-
-        let positions: Vec<_> = accumulator
-            .files()
-            .get("data.parquet")
-            .unwrap()
-            .iter()
-            .collect();
-        assert_eq!(positions, vec![1, 5, 9]);
-    }
 }
+
+#[cfg(feature = "pg_test")]
+#[path = "mutation_pg_test.rs"]
+mod pg_test;

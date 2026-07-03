@@ -14,9 +14,10 @@ mod predicate;
 pub mod storage;
 pub mod wal;
 
-use access::dml::IcebergModify;
 use access::index::IcebergIndexFetch;
+use access::mutation::{IcebergModifyQueryState, IcebergModifyState};
 use access::scan::IcebergScan;
+use customscan::IcebergCustomScanProvider;
 use pg_lakebase_core::worker::storage as storage_worker;
 
 /// Get the cached Iceberg TableAmRoutine pointer.
@@ -60,6 +61,9 @@ extern "C-unwind" fn _PG_init() {
     // `pg_lakebase_core::customscan::init`) is "register all
     // providers first, then install the hook in `_PG_init`".
     customscan::register();
+    pg_lakebase_core::customscan::modify::register_provider::<
+        IcebergCustomScanProvider,
+    >();
     pg_lakebase_core::customscan::init();
 }
 
@@ -77,7 +81,13 @@ pub struct IcebergTableAm;
 impl TableAccessMethod for IcebergTableAm {
     type ScanSession = IcebergScan;
     type IndexFetchSession = IcebergIndexFetch;
-    type DmlSession = IcebergModify;
+    type ModifyQueryState = IcebergModifyQueryState;
+    type ModifyState = IcebergModifyState;
+    type CopySession = IcebergModifyState;
+
+    fn access_method_oid() -> Option<pg_sys::Oid> {
+        crate::catalog::IcebergAccessMethod::oid()
+    }
 }
 
 #[cfg(test)]

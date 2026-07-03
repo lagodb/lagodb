@@ -42,7 +42,7 @@ pub const OPT_WRITE_FORMAT: &str = "write.format.default";
 pub const OPT_WRITE_FORMAT_DEFAULT: &str = WriteFormatOption::Parquet.as_str();
 pub const OPT_WRITE_FORMAT_VALUES: &[&str] = &[WriteFormatOption::Parquet.as_str()];
 
-/// Command-specific Iceberg row-level DML isolation.
+/// Command-specific Iceberg row-level write isolation.
 pub const OPT_WRITE_DELETE_ISOLATION_LEVEL: &str =
     TableProperties::PROPERTY_WRITE_DELETE_ISOLATION_LEVEL;
 pub const OPT_WRITE_UPDATE_ISOLATION_LEVEL: &str =
@@ -329,7 +329,7 @@ impl ResolvedIcebergOptions {
 
     /// Cache only values used by the relation-local write hot path.
     ///
-    /// DML isolation remains authoritative in Iceberg metadata and is resolved
+    /// Write isolation remains authoritative in Iceberg metadata and is resolved
     /// from `TableProperties` when a modify session opens.
     fn into_cache(self) -> IcebergTableOptionCache {
         IcebergTableOptionCache {

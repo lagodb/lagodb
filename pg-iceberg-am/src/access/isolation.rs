@@ -1,6 +1,6 @@
 //! PostgreSQL transaction isolation as it applies to Iceberg access.
 //!
-//! PostgreSQL transaction isolation and Iceberg row-level DML isolation are
+//! PostgreSQL transaction isolation and Iceberg row-level write isolation are
 //! separate contracts. The transaction level supplies a minimum requirement
 //! for the current PostgreSQL transaction, while the command-specific Iceberg
 //! table property may request stronger conflict validation. Resolution is
@@ -52,7 +52,7 @@ impl PgTransactionIsolation {
             }
             value if value == pg_sys::XACT_SERIALIZABLE as i32 => {
                 // TODO(pg-serializable-ssi): this currently strengthens
-                // Iceberg row-level DML conflict validation only. Integrate
+                // Iceberg row-delta conflict validation only. Integrate
                 // PredicateLock*/CheckForSerializableConflict* before claiming
                 // full PostgreSQL SSI semantics.
                 Ok(Self::Serializable)

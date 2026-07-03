@@ -24,7 +24,6 @@ use std::sync::Arc;
 
 use arrow_array::types::Int32Type;
 use arrow_array::{Array, ArrayRef, Int64Array, RecordBatch, RunArray, StringArray};
-use iceberg_lite::arrow::PhysicalRowReadContext;
 use iceberg_lite::expr::Predicate;
 use iceberg_lite::metadata_columns::{
     RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE,
@@ -36,6 +35,7 @@ use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use pg_arrow_conv::{ArrowBatchSource, ArrowColumnDecoder, BoundBatch};
+use pg_lakebase_core::access::mutation::ModifyScanBinding;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
@@ -43,10 +43,11 @@ use pgrx::pg_sys;
 use crate::IcebergTableAm;
 use crate::access::column_mapping::{RelationShape, ScanColumns};
 use crate::access::isolation::PgTransactionIsolation;
+use crate::access::mutation::{IcebergFileSource, IcebergModifyQueryState};
 use crate::access::projection::Projection;
-use crate::access::row_location::{RowLocationMapHandle, begin_dml_scan};
 use crate::catalog::bridge::IcebergTableId;
 use crate::catalog::metadata_tracker::TxMetadata;
+use crate::catalog::row_mutations::IcebergFileId;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::StorageContext;
 
@@ -73,8 +74,6 @@ pub(crate) struct ScanSpec {
     filter: Option<Predicate>,
     /// Transaction-local Iceberg file delta captured for this statement.
     delta: Option<Arc<SnapshotDelta>>,
-    /// Schema and name mapping retained for `SnapshotAny` physical tuple fetches.
-    physical_read_context: PhysicalRowReadContext,
 }
 
 impl ScanSpec {
@@ -106,8 +105,6 @@ impl ScanSpec {
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
         let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
-        let physical_read_context =
-            PhysicalRowReadContext::try_new(table.metadata())?;
         let plan = ScanColumns::new(schema, shape)?;
         Ok(Self {
             table: Arc::new(table),
@@ -115,7 +112,6 @@ impl ScanSpec {
             projection: None,
             filter: predicate,
             delta,
-            physical_read_context,
         })
     }
 
@@ -135,8 +131,6 @@ impl ScanSpec {
         scan_attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
-        let physical_read_context =
-            PhysicalRowReadContext::try_new(table.metadata())?;
         let plan = ScanColumns::with_projection(
             schema,
             projection.columns(),
@@ -149,7 +143,6 @@ impl ScanSpec {
             projection: Some(projection),
             filter: predicate,
             delta,
-            physical_read_context,
         })
     }
 
@@ -188,16 +181,34 @@ impl ScanSpec {
     }
 
     /// Construct a fresh slot-first [`IcebergBatchCursor`] for the TableAM scan.
-    pub(crate) fn open_batch_cursor(
-        &self,
-        row_locations: Option<RowLocationMapHandle>,
-    ) -> IcebergResult<IcebergBatchCursor> {
-        let include_row_locations = row_locations.is_some();
+    pub(crate) fn open_batch_cursor(&self) -> IcebergResult<IcebergBatchCursor> {
         let source = ArrowBatchSource::new(IcebergArrowBatches(
-            self.build_scan(include_row_locations)?.to_arrow()?,
+            self.build_scan(false)?.to_arrow()?,
         ));
         let decoder = ArrowColumnDecoder::new(self.plan.decoded_columns());
-        Ok(IcebergBatchCursor::new(source, decoder, row_locations))
+        Ok(IcebergBatchCursor::new(source, decoder, None))
+    }
+
+    /// Open the provider cursor for `ScanPurpose::Modify`. The cursor consumes
+    /// Iceberg's metadata columns to produce the executor's synthetic `ctid`.
+    pub(crate) fn open_mutation_batch_cursor(
+        &self,
+        binding: ModifyScanBinding<IcebergModifyQueryState>,
+        table_oid: pg_sys::Oid,
+    ) -> IcebergResult<IcebergBatchCursor> {
+        let source = ArrowBatchSource::new(IcebergArrowBatches(
+            self.build_scan(true)?.to_arrow()?,
+        ));
+        let decoder = ArrowColumnDecoder::new(self.plan.decoded_columns());
+        Ok(IcebergBatchCursor::new(
+            source,
+            decoder,
+            Some(ModifyCursorContext {
+                binding,
+                table_oid,
+                last_file: None,
+            }),
+        ))
     }
 
     /// Build the Iceberg [`TableScan`] for this spec's projection and filter.
@@ -213,10 +224,7 @@ impl ScanSpec {
     //   1. plan once and reuse the cached task list across rescans (a
     //      nested-loop-driven UPDATE/DELETE rescans the target per outer row),
     //      and
-    //   2. feed the planned data-file count into `begin_dml_scan` so the
-    //      row-location ctid codec can size its file/row bit split dynamically
-    //      (à la pg_lake) instead of the fixed 17/30 split in `row_location.rs`,
-    //      without paying for a second planning pass.
+    //   2. share planned file tasks with the provider's Modify scan.
     fn build_scan(&self, include_row_locations: bool) -> IcebergResult<TableScan> {
         let mut builder = self.table.scan();
         match self.scan_column_names(include_row_locations) {
@@ -256,7 +264,7 @@ impl ScanSpec {
         names
     }
 
-    fn starting_snapshot_id(&self) -> Option<i64> {
+    pub(crate) fn starting_snapshot_id(&self) -> Option<i64> {
         self.table.metadata().current_snapshot_id()
     }
 
@@ -274,7 +282,7 @@ impl ScanSpec {
 /// reclassified as a `ConvError::DatumConversionError` (`DATA_EXCEPTION`).
 /// `pg-arrow-conv` stays format-neutral: it only requires the error to map into
 /// the boundary error, which `IcebergError` already does.
-pub struct IcebergArrowBatches(ArrowRecordBatchIterator);
+struct IcebergArrowBatches(ArrowRecordBatchIterator);
 
 impl Iterator for IcebergArrowBatches {
     type Item = Result<RecordBatch, IcebergError>;
@@ -298,24 +306,54 @@ type IcebergArrowBatchSource = ArrowBatchSource<IcebergArrowBatches, IcebergErro
 struct IcebergBoundBatch {
     decoded: BoundBatch,
     pos_column: Option<Int64Array>,
-    file_indices: Option<Vec<u32>>,
+    file_runs: Option<Box<[RegisteredFileRun]>>,
+}
+
+struct RegisteredFileRun {
+    end_row: usize,
+    file_id: IcebergFileId,
 }
 
 #[derive(Clone)]
-struct MetadataStringColumn {
-    array: ArrayRef,
+struct ModifyCursorContext {
+    binding: ModifyScanBinding<IcebergModifyQueryState>,
+    table_oid: pg_sys::Oid,
+    /// Fast path for adjacent runs/batches from the same planned file. This
+    /// avoids re-hashing a long file path while retaining the transaction
+    /// registry as the sole identity authority.
+    last_file: Option<(Box<str>, IcebergFileId)>,
+}
+
+impl ModifyCursorContext {
+    fn register_file(&mut self, path: &str) -> AmResult<IcebergFileId> {
+        if let Some((cached_path, file_id)) = self.last_file.as_ref()
+            && cached_path.as_ref() == path
+        {
+            return Ok(*file_id);
+        }
+        let source = IcebergFileSource::new(path);
+        let file_id = self.binding.register_identity_source(&source)?;
+        self.last_file = Some((path.into(), file_id));
+        Ok(file_id)
+    }
+}
+
+#[derive(Clone)]
+enum MetadataStringColumn {
+    Plain(StringArray),
+    RunEndEncoded(RunArray<Int32Type>),
 }
 
 impl MetadataStringColumn {
     fn try_new(array: ArrayRef, name: &'static str) -> AmResult<Self> {
-        if array.as_any().is::<StringArray>() {
-            return Ok(Self { array });
+        if let Some(strings) = array.as_any().downcast_ref::<StringArray>() {
+            return Ok(Self::Plain(strings.clone()));
         }
 
         if let Some(run_array) = array.as_any().downcast_ref::<RunArray<Int32Type>>()
             && run_array.values().as_any().is::<StringArray>()
         {
-            return Ok(Self { array });
+            return Ok(Self::RunEndEncoded(run_array.clone()));
         }
 
         Err(IcebergError::ArrowTypeMismatch(format!(
@@ -325,140 +363,143 @@ impl MetadataStringColumn {
         .into())
     }
 
-    fn is_null(&self, row_idx: usize) -> bool {
-        if let Some(string_array) = self.array.as_any().downcast_ref::<StringArray>()
-        {
-            return string_array.is_null(row_idx);
+    /// Visit contiguous logical runs without expanding run-end encoding.
+    fn try_for_each_run<E>(
+        &self,
+        mut visit: impl FnMut(usize, &str) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<IcebergError>,
+    {
+        match self {
+            Self::Plain(strings) => {
+                let mut start = 0;
+                while start < strings.len() {
+                    if strings.is_null(start) {
+                        return Err(IcebergError::InvariantViolated(
+                            "Row identity file cannot be NULL",
+                        )
+                        .into());
+                    }
+                    let path = strings.value(start);
+                    let mut end = start + 1;
+                    while end < strings.len()
+                        && !strings.is_null(end)
+                        && strings.value(end) == path
+                    {
+                        end += 1;
+                    }
+                    visit(end, path)?;
+                    start = end;
+                }
+            }
+            Self::RunEndEncoded(runs) => {
+                let values =
+                    runs.values().as_any().downcast_ref::<StringArray>().expect(
+                        "metadata string column values type checked at construction",
+                    );
+                let first_value = runs.get_start_physical_index();
+                for (value_idx, end_row) in
+                    (first_value..).zip(runs.run_ends().sliced_values())
+                {
+                    if values.is_null(value_idx) {
+                        return Err(IcebergError::InvariantViolated(
+                            "Row identity file cannot be NULL",
+                        )
+                        .into());
+                    }
+                    let end_row = usize::try_from(end_row).map_err(|_| {
+                        IcebergError::InvariantViolated(
+                            "Row identity run end cannot be negative",
+                        )
+                    })?;
+                    visit(end_row, values.value(value_idx))?;
+                }
+            }
         }
-
-        let run_array = self
-            .array
-            .as_any()
-            .downcast_ref::<RunArray<Int32Type>>()
-            .expect("metadata string column type checked at construction");
-        let value_idx = run_array.get_physical_index(row_idx);
-        run_array
-            .values()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("metadata string column values type checked at construction")
-            .is_null(value_idx)
-    }
-
-    fn value(&self, row_idx: usize) -> &str {
-        if let Some(string_array) = self.array.as_any().downcast_ref::<StringArray>()
-        {
-            return string_array.value(row_idx);
-        }
-
-        let run_array = self
-            .array
-            .as_any()
-            .downcast_ref::<RunArray<Int32Type>>()
-            .expect("metadata string column type checked at construction");
-        let value_idx = run_array.get_physical_index(row_idx);
-        run_array
-            .values()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("metadata string column values type checked at construction")
-            .value(value_idx)
+        Ok(())
     }
 }
 
-/// The TableAM scan driver: Arrow batches decoded straight into the slot, with
-/// optional DML row-location synthesis from `_file`/`_pos`.
+/// Arrow batches decoded straight into the slot. Provider Modify mode consumes
+/// `_file`/`_pos` internally to synthesize the PostgreSQL row-identity column.
 pub struct IcebergBatchCursor {
     source: IcebergArrowBatchSource,
     decoder: ArrowColumnDecoder,
     current: Option<IcebergBoundBatch>,
     row_idx: usize,
-    row_locations: Option<RowLocationMapHandle>,
+    file_run_idx: usize,
+    modify: Option<ModifyCursorContext>,
 }
 
 impl IcebergBatchCursor {
     fn new(
         source: IcebergArrowBatchSource,
         decoder: ArrowColumnDecoder,
-        row_locations: Option<RowLocationMapHandle>,
+        modify: Option<ModifyCursorContext>,
     ) -> Self {
         Self {
             source,
             decoder,
             current: None,
             row_idx: 0,
-            row_locations,
+            file_run_idx: 0,
+            modify,
         }
     }
 
-    fn bind_batch(&self, batch: RecordBatch) -> AmResult<IcebergBoundBatch> {
-        let (pos_column, file_indices) =
-            if let Some(row_locations) = self.row_locations {
-                let file_column = MetadataStringColumn::try_new(
-                    Self::metadata_column_ref(
-                        &batch,
-                        RESERVED_FIELD_ID_FILE,
-                        RESERVED_COL_NAME_FILE,
-                    )?,
-                    RESERVED_COL_NAME_FILE,
-                )?;
-                let file_indices = Self::build_file_indices(
-                    &file_column,
-                    batch.num_rows(),
-                    row_locations,
-                )?;
-                let pos_column = Self::typed_metadata_column::<Int64Array>(
+    fn bind_batch(&mut self, batch: RecordBatch) -> AmResult<IcebergBoundBatch> {
+        let (pos_column, file_column) = if self.modify.is_some() {
+            let file_column = MetadataStringColumn::try_new(
+                Self::metadata_column_ref(
                     &batch,
-                    RESERVED_FIELD_ID_POS,
-                    RESERVED_COL_NAME_POS,
-                )?;
+                    RESERVED_FIELD_ID_FILE,
+                    RESERVED_COL_NAME_FILE,
+                )?,
+                RESERVED_COL_NAME_FILE,
+            )?;
+            let pos_column = Self::typed_metadata_column::<Int64Array>(
+                &batch,
+                RESERVED_FIELD_ID_POS,
+                RESERVED_COL_NAME_POS,
+            )?;
 
-                (Some(pos_column), Some(file_indices))
-            } else {
-                (None, None)
-            };
+            (Some(pos_column), Some(file_column))
+        } else {
+            (None, None)
+        };
 
+        let file_runs = match (&file_column, self.modify.as_mut()) {
+            (Some(files), Some(modify)) => {
+                Some(Self::register_file_runs(files, modify)?)
+            }
+            (None, None) => None,
+            _ => {
+                return Err(IcebergError::InvariantViolated(
+                    "row-location columns and Modify binding disagree",
+                )
+                .into());
+            }
+        };
         let decoded = self.decoder.bind(batch)?;
         Ok(IcebergBoundBatch {
             decoded,
             pos_column,
-            file_indices,
+            file_runs,
         })
     }
 
-    fn build_file_indices(
-        file_column: &MetadataStringColumn,
-        num_rows: usize,
-        row_locations: RowLocationMapHandle,
-    ) -> AmResult<Vec<u32>> {
-        let mut file_indices = Vec::with_capacity(num_rows);
-        let mut cached_path: Option<&str> = None;
-        let mut cached_index: Option<u32> = None;
-
-        for row_idx in 0..num_rows {
-            if file_column.is_null(row_idx) {
-                return Err(IcebergError::InvariantViolated(
-                    "DML row-location metadata cannot be NULL",
-                )
-                .into());
-            }
-
-            let file_path = file_column.value(row_idx);
-            let file_index = if cached_path == Some(file_path) {
-                cached_index.ok_or(IcebergError::InvariantViolated(
-                    "cached DML file index is missing",
-                ))?
-            } else {
-                let file_index = row_locations.file_index_for(file_path)?;
-                cached_path = Some(file_path);
-                cached_index = Some(file_index);
-                file_index
-            };
-
-            file_indices.push(file_index);
-        }
-
-        Ok(file_indices)
+    fn register_file_runs(
+        files: &MetadataStringColumn,
+        modify: &mut ModifyCursorContext,
+    ) -> AmResult<Box<[RegisteredFileRun]>> {
+        let mut runs = Vec::new();
+        files.try_for_each_run(|end_row, path| -> AmResult<()> {
+            let file_id = modify.register_file(path)?;
+            runs.push(RegisteredFileRun { end_row, file_id });
+            Ok(())
+        })?;
+        Ok(runs.into_boxed_slice())
     }
 
     fn typed_metadata_column<T: Array + Clone + 'static>(
@@ -478,7 +519,7 @@ impl IcebergBatchCursor {
                     == Some(field_id)
             })
             .ok_or(IcebergError::InvariantViolated(
-                "row-location metadata column is missing from DML scan",
+                "row-location metadata column is missing from mutation scan",
             ))?;
         let array = batch.column(index);
         array.as_any().downcast_ref::<T>().cloned().ok_or_else(|| {
@@ -507,71 +548,69 @@ impl IcebergBatchCursor {
                     == Some(field_id)
             })
             .ok_or(IcebergError::InvariantViolated(
-                "row-location metadata column is missing from DML scan",
+                "row-location metadata column is missing from mutation scan",
             ))?;
         Ok(Arc::clone(batch.column(index)))
     }
 
-    fn set_row_location_tid(
-        &self,
-        bound: &IcebergBoundBatch,
-        row_idx: usize,
+    /// Emit one modification row and encode its Iceberg row identity into the
+    /// PostgreSQL `ctid` carried by the plan.
+    pub(crate) fn next_mutation_into_slot(
+        &mut self,
         out: &mut SlotColumns<'_>,
-    ) -> AmResult<()> {
-        let Some(row_locations) = self.row_locations else {
-            return Ok(());
-        };
-
-        let file_indices =
-            bound
-                .file_indices
-                .as_ref()
-                .ok_or(IcebergError::InvariantViolated(
-                    "DML scan is missing file index cache",
-                ))?;
-        let pos_column =
-            bound
-                .pos_column
-                .as_ref()
-                .ok_or(IcebergError::InvariantViolated(
-                    "DML scan is missing _pos column",
-                ))?;
-
-        if pos_column.is_null(row_idx) {
-            return Err(IcebergError::InvariantViolated(
-                "DML row-location metadata cannot be NULL",
-            )
-            .into());
-        }
-
-        let position = pos_column.value(row_idx);
-        if position < 0 {
-            return Err(IcebergError::InvariantViolated(
-                "DML row position cannot be negative",
-            )
-            .into());
-        }
-
-        let file_index =
-            *file_indices
-                .get(row_idx)
-                .ok_or(IcebergError::InvariantViolated(
-                    "DML file index cache is too short",
-                ))?;
-        let tid = row_locations.tid_for_file_index(file_index, position as u64)?;
-        out.set_tid(&tid);
-        Ok(())
-    }
-}
-
-impl ScanBatchDriver for IcebergBatchCursor {
-    fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+    ) -> AmResult<bool> {
+        let table_oid = self
+            .modify
+            .as_ref()
+            .ok_or(IcebergError::InvariantViolated(
+                "mutation cursor has no Modify binding",
+            ))?
+            .table_oid;
         loop {
             if let Some(bound) = self.current.as_ref()
                 && self.row_idx < self.decoder.num_rows(&bound.decoded)
             {
-                self.decoder.write_row(&bound.decoded, self.row_idx, out)?;
-                self.set_row_location_tid(bound, self.row_idx, out)?;
+                let row_idx = self.row_idx;
+                self.decoder.write_row(&bound.decoded, row_idx, out)?;
+                let pos_column = bound.pos_column.as_ref().ok_or(
+                    IcebergError::InvariantViolated(
+                        "Modify scan is missing _pos metadata",
+                    ),
+                )?;
+                if pos_column.is_null(row_idx) {
+                    return Err(IcebergError::InvariantViolated(
+                        "Row identity metadata cannot be NULL",
+                    )
+                    .into());
+                }
+                let position =
+                    u64::try_from(pos_column.value(row_idx)).map_err(|_| {
+                        IcebergError::InvariantViolated(
+                            "Row position cannot be negative",
+                        )
+                    })?;
+
+                let runs = bound.file_runs.as_ref().ok_or(
+                    IcebergError::InvariantViolated(
+                        "Modify scan has no registered file runs",
+                    ),
+                )?;
+                while self.file_run_idx < runs.len()
+                    && row_idx >= runs[self.file_run_idx].end_row
+                {
+                    self.file_run_idx += 1;
+                }
+                let run = runs.get(self.file_run_idx).ok_or(
+                    IcebergError::InvariantViolated(
+                        "Modify row has no registered file identity",
+                    ),
+                )?;
+                let tid = IcebergModifyQueryState::encode_row_identity(
+                    run.file_id,
+                    &position,
+                )?;
+                out.set_tid(&tid);
+                out.set_table_oid(table_oid);
                 self.row_idx += 1;
                 return Ok(true);
             }
@@ -581,6 +620,34 @@ impl ScanBatchDriver for IcebergBatchCursor {
                 Some(batch) => {
                     self.current = Some(self.bind_batch(batch)?);
                     self.row_idx = 0;
+                    self.file_run_idx = 0;
+                }
+                None => return Ok(false),
+            }
+        }
+    }
+}
+
+impl ScanBatchDriver for IcebergBatchCursor {
+    fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+        if self.modify.is_some() {
+            return self.next_mutation_into_slot(out);
+        }
+        loop {
+            if let Some(bound) = self.current.as_ref()
+                && self.row_idx < self.decoder.num_rows(&bound.decoded)
+            {
+                self.decoder.write_row(&bound.decoded, self.row_idx, out)?;
+                self.row_idx += 1;
+                return Ok(true);
+            }
+
+            self.current = None;
+            match self.source.next_batch()? {
+                Some(batch) => {
+                    self.current = Some(self.bind_batch(batch)?);
+                    self.row_idx = 0;
+                    self.file_run_idx = 0;
                 }
                 None => return Ok(false),
             }
@@ -625,12 +692,7 @@ impl AmScanSession for IcebergScan {
 
     fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
         let spec = ScanSpec::build(self.rel_oid, self.spc_oid, keys, &self.shape)?;
-        let row_locations = begin_dml_scan(
-            self.rel_oid,
-            spec.starting_snapshot_id(),
-            spec.physical_read_context.clone(),
-        )?;
-        let cursor = spec.open_batch_cursor(row_locations)?;
+        let cursor = spec.open_batch_cursor()?;
         self.spec = Some(spec);
         self.cursor = Some(cursor);
         Ok(())
@@ -669,12 +731,7 @@ impl AmScanSession for IcebergScan {
         };
 
         spec.refresh_filter(keys)?;
-        let row_locations = begin_dml_scan(
-            self.rel_oid,
-            spec.starting_snapshot_id(),
-            spec.physical_read_context.clone(),
-        )?;
-        self.cursor = Some(spec.open_batch_cursor(row_locations)?);
+        self.cursor = Some(spec.open_batch_cursor()?);
         Ok(())
     }
 
@@ -701,4 +758,67 @@ fn scan_keys_to_predicate(
     // strategy/subtype/argument -> Predicate, combine with `Predicate::and`,
     // and return `Ok(None)` for the whole set if any key cannot be translated.
     Ok(None)
+}
+
+#[cfg(test)]
+mod metadata_column_tests {
+    use super::*;
+    use arrow_array::Int32Array;
+
+    #[test]
+    fn plain_strings_are_grouped_into_logical_runs() {
+        let column = MetadataStringColumn::Plain(StringArray::from(vec![
+            "a.parquet",
+            "a.parquet",
+            "b.parquet",
+        ]));
+        let mut actual = Vec::new();
+
+        column
+            .try_for_each_run(|end_row, path| -> IcebergResult<()> {
+                actual.push((end_row, path.to_owned()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            actual,
+            vec![(2, "a.parquet".to_owned()), (3, "b.parquet".to_owned())]
+        );
+    }
+
+    #[test]
+    fn run_end_encoded_strings_visit_physical_runs_only() {
+        let run_ends = Int32Array::from(vec![2, 5, 6]);
+        let values = StringArray::from(vec!["a.parquet", "b.parquet", "c.parquet"]);
+        let runs = RunArray::<Int32Type>::try_new(&run_ends, &values).unwrap();
+        let column = MetadataStringColumn::RunEndEncoded(runs.slice(1, 4));
+        let mut actual = Vec::new();
+
+        column
+            .try_for_each_run(|end_row, path| -> IcebergResult<()> {
+                actual.push((end_row, path.to_owned()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            actual,
+            vec![(1, "a.parquet".to_owned()), (4, "b.parquet".to_owned())]
+        );
+    }
+
+    #[test]
+    fn run_end_encoded_null_file_is_rejected_without_expansion() {
+        let run_ends = Int32Array::from(vec![4]);
+        let values = StringArray::from(vec![None::<&str>]);
+        let runs = RunArray::<Int32Type>::try_new(&run_ends, &values).unwrap();
+        let column = MetadataStringColumn::RunEndEncoded(runs);
+
+        assert!(
+            column
+                .try_for_each_run(|_, _| -> IcebergResult<()> { Ok(()) })
+                .is_err()
+        );
+    }
 }

@@ -13,7 +13,7 @@
 //! sub-abort callbacks.
 //!
 //! The single thread-local `Rc<TxMetadata>` is reached through
-//! [`TxMetadata::current`]; callers (DML, scan) never touch the TLS directly.
+//! [`TxMetadata::current`]; callers (mutation, scan) never touch the TLS directly.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +35,7 @@ use pgrx::pg_sys;
 
 use crate::catalog::bridge::{IcebergTableId, StagedCatalog};
 use crate::catalog::metadata_table::{CasUpdate, IcebergMetadata};
+use crate::catalog::row_mutations::RelationRowRegistry;
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
 use crate::storage::transactional_artifacts::MetadataAttempt;
@@ -65,17 +66,12 @@ struct TableState {
     /// Iceberg metadata for statement-local reads.
     ///
     /// Stored behind `Arc` so scan specs can hold a stable statement view.
-    /// Later DML calls mutate through `Arc::make_mut`, preserving any older
+    /// Later mutation calls mutate through `Arc::make_mut`, preserving any older
     /// scan's snapshot of the delta.
     delta: Arc<SnapshotDelta>,
 
     /// FileIO captured from the first statement to drive the final commit.
     file_io: Option<FileIO>,
-
-    /// Transaction nest level at which this table was first registered.
-    /// Used by sub-abort to drop tables that only existed inside the
-    /// rolled-back savepoint.
-    first_modified_at_level: i32,
 
     /// Savepoint history stack. Each frame is the state BEFORE a write at
     /// `nest_level`, so sub-abort can restore it by popping frames whose
@@ -88,6 +84,10 @@ struct TableState {
     /// Row-level conflict validations that must be checked at Iceberg commit
     /// time before materializing this transaction's delta.
     validations: Vec<RowDeltaValidation>,
+
+    /// Physical-row claims used to reproduce PostgreSQL `TM_SelfModified`
+    /// semantics across sibling ModifyTable nodes and nested SPI executions.
+    row_registry: RelationRowRegistry,
 }
 
 /// Owned per-table state detached from the tracker before commit I/O begins.
@@ -102,13 +102,13 @@ struct TableCommitInput {
 }
 
 impl TableState {
-    fn new(nest_level: i32) -> Self {
+    fn new() -> Self {
         Self {
             delta: Arc::new(SnapshotDelta::new()),
             file_io: None,
-            first_modified_at_level: nest_level,
             level_history: Vec::new(),
             validations: Vec::new(),
+            row_registry: RelationRowRegistry::default(),
         }
     }
 
@@ -222,6 +222,7 @@ impl TableState {
             Arc::make_mut(&mut self.delta).truncate(frame.marker);
             self.validations.truncate(frame.validation_len);
         }
+        self.row_registry.rollback_to_level(target_level);
     }
 
     /// Promote every nest level `>= from_level` down to `from_level - 1`.
@@ -236,9 +237,6 @@ impl TableState {
     /// `ROLLBACK TO` of the sibling would incorrectly throw away changes
     /// that were already promoted to the parent.
     fn promote_to_level(&mut self, from_level: i32) {
-        if self.first_modified_at_level >= from_level {
-            self.first_modified_at_level = from_level - 1;
-        }
         for frame in &mut self.level_history {
             if frame.nest_level >= from_level {
                 frame.nest_level = from_level - 1;
@@ -248,6 +246,7 @@ impl TableState {
         // drops the whole tracker, and sibling savepoints must not roll them
         // back.
         self.level_history.retain(|frame| frame.nest_level > 1);
+        self.row_registry.promote_to_level(from_level);
     }
 }
 
@@ -454,8 +453,7 @@ impl TxMetadata {
         if inner.tables.contains_key(&relid) {
             return;
         }
-        let nest_level = current_nest_level();
-        let state = TableState::new(nest_level);
+        let state = TableState::new();
         inner.tables.insert(relid, state);
     }
 
@@ -602,7 +600,7 @@ impl TxMetadata {
         })
     }
 
-    /// Write-side entry point for DML.
+    /// Write-side entry point for mutation.
     ///
     /// Registers the relation with this transaction's tracker (idempotent),
     /// then returns the latest committed metadata plus any prior
@@ -619,6 +617,31 @@ impl TxMetadata {
     ) -> IcebergResult<LoadedTableMetadata> {
         self.register_table(relid);
         self.current_table_metadata(relid, file_io)
+    }
+
+    /// Return the transaction-scoped physical-row registry for one relation.
+    ///
+    /// The clone is a single-backend `Rc` handle. Callers retain it across row
+    /// callbacks so the hot path does not re-enter the relation HashMap.
+    pub(crate) fn row_registry(
+        &self,
+        relid: pg_sys::Oid,
+    ) -> IcebergResult<RelationRowRegistry> {
+        self.register_table(relid);
+        let inner = self.inner.try_borrow().map_err(|_| {
+            IcebergError::InvariantViolated(
+                "transaction metadata tracker is already mutably borrowed",
+            )
+        })?;
+        inner
+            .tables
+            .get(&relid)
+            .map(|state| state.row_registry.clone())
+            .ok_or_else(|| {
+                IcebergError::MetadataTracker(format!(
+                    "table {relid} has no row registry"
+                ))
+            })
     }
 
     // -------------------------------------------------------------------------
@@ -678,7 +701,7 @@ impl TxMetadata {
                 // SnapshotDeltaAction/RowDeltaAction. AddData is an overlay
                 // operation, so append-only and mixed append/delete/remove
                 // transactions must share the same read and materialization
-                // semantics. RowDelta adds Iceberg DML conflict validation
+                // semantics. RowDelta adds Iceberg row-delta conflict validation
                 // when DELETE/UPDATE/MERGE produced a statement delta.
                 let tx = if validations.is_empty() {
                     tx.snapshot_delta(Arc::clone(&delta)).apply(tx)?
@@ -755,20 +778,15 @@ impl TxMetadata {
 
     /// Roll back every tracked table to `target_level`.
     ///
-    /// Two cleanups:
-    /// 1. Drop tables that were first registered at or above `target_level`
-    ///    (they only existed inside the rolled-back savepoint).
-    /// 2. Pop history frames at or above `target_level` from surviving tables.
+    /// Empty table entries are intentionally retained until transaction end:
+    /// their file registry is the authority for transaction-stable synthetic
+    /// ctid IDs, and IDs allocated inside an aborted savepoint must not be
+    /// reused. Empty deltas are ignored by `commit_input`.
     fn rollback_to_level(&self, target_level: i32) {
         let mut inner = self.inner.borrow_mut();
-        inner.tables.retain(|_, state| {
-            if state.first_modified_at_level >= target_level {
-                false
-            } else {
-                state.rollback_to_level(target_level);
-                true
-            }
-        });
+        for state in inner.tables.values_mut() {
+            state.rollback_to_level(target_level);
+        }
     }
 
     /// Promote every table's internal nest levels down to `from_level - 1`.
@@ -778,9 +796,7 @@ impl TxMetadata {
     /// to its parent, so its recorded nest level must drop accordingly.
     /// Without this, a sibling savepoint opened later at the same nest
     /// level would alias the released one. A `ROLLBACK TO` of the sibling
-    /// would then incorrectly discard already-promoted writes (or worse,
-    /// drop the entire `TableState` if the table was first registered
-    /// inside the released savepoint).
+    /// would then incorrectly discard already-promoted writes.
     fn promote_to_level(&self, from_level: i32) {
         let mut inner = self.inner.borrow_mut();
         for state in inner.tables.values_mut() {
@@ -825,8 +841,8 @@ impl TransactionResource for TxMetadata {
     fn on_commit_sub(&self, current_nest_level: i32) {
         // RELEASE SAVEPOINT promotes the released subtransaction's state to
         // its parent. The framework only updates `nest_level()` on the
-        // resource itself, but our per-table `first_modified_at_level` and
-        // per-frame `nest_level` are owned here and must be promoted too.
+        // resource itself, but per-frame and mutation-owner `nest_level`
+        // values are owned here and must be promoted too.
         // See `TxMetadata::promote_to_level` for why this is required.
         self.promote_to_level(current_nest_level);
     }

@@ -34,7 +34,7 @@ use crate::{Error, ErrorKind, Result};
 
 /// SQL row-level command whose conflict rules are applied to a row delta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DmlCommand {
+pub enum RowLevelCommand {
     /// DELETE writes delete files only.
     Delete,
     /// UPDATE writes delete files for old rows and data files for new rows.
@@ -43,7 +43,7 @@ pub enum DmlCommand {
     Merge,
 }
 
-impl DmlCommand {
+impl RowLevelCommand {
     fn validates_conflicting_delete_files(self) -> bool {
         matches!(self, Self::Update | Self::Merge)
     }
@@ -53,7 +53,7 @@ impl DmlCommand {
 #[derive(Debug, Clone)]
 pub struct RowDeltaValidation {
     /// Command type whose Iceberg validation rules should be applied.
-    pub command: DmlCommand,
+    pub command: RowLevelCommand,
     /// Snapshot that was used to plan/scan the affected rows.
     pub starting_snapshot_id: Option<i64>,
     /// Predicate used for conflict detection against concurrently added files.
@@ -67,7 +67,7 @@ pub struct RowDeltaValidation {
 impl RowDeltaValidation {
     /// Creates validation for a row-level statement.
     pub fn new(
-        command: DmlCommand,
+        command: RowLevelCommand,
         conflict_detection_filter: Predicate,
         isolation_level: IsolationLevel,
     ) -> Self {
@@ -111,7 +111,7 @@ impl RowDeltaValidation {
     }
 }
 
-/// Transaction action that commits a [`SnapshotDelta`] with row-level DML validation.
+/// Transaction action that commits a [`SnapshotDelta`] with row-delta conflict validation.
 pub struct RowDeltaAction {
     delta: Arc<SnapshotDelta>,
     validations: Vec<RowDeltaValidation>,

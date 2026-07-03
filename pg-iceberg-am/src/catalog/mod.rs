@@ -2,6 +2,7 @@ pub mod access_method;
 pub mod bridge;
 pub mod metadata_table;
 pub mod metadata_tracker;
+pub(crate) mod row_mutations;
 pub mod table_lifecycle;
 
 // `schema_builder` is intentionally crate-private: PostgreSQL → Iceberg type
