@@ -197,7 +197,7 @@ impl<'a> IcebergFileSource<'a> {
 /// registries; file paths and file-ID namespaces never live at query scope.
 #[derive(Debug, Default)]
 pub struct IcebergModifyQueryState {
-    relations: HashMap<pg_sys::Oid, RelationRowRegistry>,
+    pub(crate) relations: HashMap<pg_sys::Oid, RelationRowRegistry>,
 }
 
 impl IcebergModifyQueryState {
@@ -1235,6 +1235,3 @@ mod mutation_state_tests {
     }
 }
 
-#[cfg(feature = "pg_test")]
-#[path = "mutation_pg_test.rs"]
-mod pg_test;

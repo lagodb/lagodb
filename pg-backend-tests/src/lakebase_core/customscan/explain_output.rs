@@ -750,7 +750,7 @@ mod tests {
         }
     }
 
-    /// VERBOSE TEXT: provider line plus per-class labelled predicate lines.
+    /// VERBOSE TEXT: purpose/provider lines plus per-class labelled predicates.
     #[pg_test]
     fn explain_verbose_classified_predicates() {
         let harness = ExplainHarness::create("explain_classified_predicates_t");
@@ -758,13 +758,14 @@ mod tests {
             let built = harness.build(&ScenarioSpec::example());
             let output = harness.render_text(&built, /* verbose */ true);
 
-            let expected = "Provider: explain-output-test-provider\n\
+            let expected = "Scan Purpose: Query\n\
+                            Provider: explain-output-test-provider\n\
                             Pushed Filter Exact: (a = 1)\n\
                             Pushed Filter Conservative Pruning: (b = 2)\n\
                             Recheck: (a = 3)\n";
             assert_eq!(
                 output, expected,
-                "VERBOSE output must carry Provider + per-class labelled \
+                "VERBOSE output must carry Scan Purpose + Provider + per-class labelled \
                  predicate lines with no count lines \
                  (got {output:?}, expected {expected:?})",
             );
@@ -1036,7 +1037,7 @@ mod tests {
         );
     }
 
-    /// VERBOSE TEXT carries exactly one Provider line plus one
+    /// VERBOSE TEXT carries exactly one purpose and Provider line plus one
     /// ` AND `-joined labelled line per non-empty class, matching the oracle.
     #[pg_test]
     fn explain_verbose_classification_property() {
@@ -1051,8 +1052,9 @@ mod tests {
             let built = harness.build(&spec);
             let output = harness.render_text(&built, /* verbose */ true);
 
-            let mut expected =
-                String::from("Provider: explain-output-test-provider\n");
+            let mut expected = String::from(
+                "Scan Purpose: Query\nProvider: explain-output-test-provider\n",
+            );
             if !built.exact.is_empty() {
                 let parts = harness.deparse_parts(&built, &built.exact);
                 expected.push_str(&format!(
@@ -1075,7 +1077,7 @@ mod tests {
             prop_assert_eq!(
                 &output,
                 &expected,
-                "VERBOSE output must carry exactly one Provider line plus \
+                "VERBOSE output must carry exactly one purpose and Provider line plus \
                      one ` AND `-joined labelled line per non-empty class \
                      (ExactRowFilter / ConservativePruning / Recheck) in \
                      custom_exprs order"

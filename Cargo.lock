@@ -4120,9 +4120,11 @@ name = "pg-lakebase-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cc",
  "pg-lakebase-macros",
  "pg-lakebase-storage",
  "pgrx",
+ "pgrx-pg-config",
  "pgrx-tests",
  "proptest",
  "thiserror 1.0.69",

@@ -47,7 +47,7 @@ mod tests {
         for &attno in attnos {
             wire = unsafe { pg_sys::lappend_int(wire, attno as i32) };
         }
-        let cell = unsafe { pg_sys::list_nth_cell(envelope, 7) };
+        let cell = unsafe { pg_sys::list_nth_cell(envelope, 8) };
         assert!(!cell.is_null(), "tuple-layout envelope cell must exist");
         unsafe {
             (*cell).ptr_value = wire.cast();
@@ -216,8 +216,8 @@ mod tests {
             );
             assert_eq!(
                 (*top).length,
-                8,
-                "top-level custom_private must keep the 8-cell envelope layout",
+                9,
+                "top-level custom_private must keep the 9-cell envelope layout",
             );
 
             let cell_tag = |i: i32| -> pg_sys::NodeTag {
@@ -230,12 +230,13 @@ mod tests {
             assert_eq!(cell_tag(1), pg_sys::NodeTag::T_Integer);
             assert_eq!(cell_tag(2), pg_sys::NodeTag::T_Integer);
             assert_eq!(cell_tag(3), pg_sys::NodeTag::T_Integer);
-            assert_eq!(cell_tag(4), pg_sys::NodeTag::T_IntList);
-            assert_eq!(cell_tag(5), pg_sys::NodeTag::T_List);
+            assert_eq!(cell_tag(4), pg_sys::NodeTag::T_Integer);
+            assert_eq!(cell_tag(5), pg_sys::NodeTag::T_IntList);
             assert_eq!(cell_tag(6), pg_sys::NodeTag::T_List);
-            assert_eq!(cell_tag(7), pg_sys::NodeTag::T_IntList);
+            assert_eq!(cell_tag(7), pg_sys::NodeTag::T_List);
+            assert_eq!(cell_tag(8), pg_sys::NodeTag::T_IntList);
 
-            let metadata = pg_sys::list_nth(top, 6) as *mut pg_sys::List;
+            let metadata = pg_sys::list_nth(top, 7) as *mut pg_sys::List;
             assert!(
                 !metadata.is_null(),
                 "provider_metadata cell must be non-NULL"
@@ -275,7 +276,7 @@ mod tests {
             column_refs,
         ) = synthetic_inputs();
 
-        for (kind, expected) in [(1, &[3, 1][..]), (2, &[1, 4][..])] {
+        for (kind, expected) in [(1, &[3, 1][..]), (2, &[1, 4][..]), (2, &[][..])] {
             unsafe {
                 let envelope = encode_split(
                     provider_name,
@@ -314,7 +315,6 @@ mod tests {
         for (kind, attnos, expected_error) in [
             (99, &[][..], "unknown kind tag 99"),
             (1, &[][..], "projected base layout is empty"),
-            (2, &[][..], "relation-pruned layout has no storage attnos"),
             (1, &[0][..], "invalid value 0"),
             (1, &[2, 2][..], "duplicate base attno 2"),
         ] {

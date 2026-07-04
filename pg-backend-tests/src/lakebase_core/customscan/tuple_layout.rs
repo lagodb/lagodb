@@ -57,6 +57,20 @@ mod tests {
             }
         }
 
+        unsafe fn ctid_var() -> *mut pg_sys::Expr {
+            unsafe {
+                pg_sys::makeVar(
+                    SCAN_RELID as c_int,
+                    pg_sys::SelfItemPointerAttributeNumber as pg_sys::AttrNumber,
+                    pg_sys::TIDOID,
+                    -1,
+                    pg_sys::Oid::INVALID,
+                    0,
+                )
+                .cast()
+            }
+        }
+
         unsafe fn subplan(
             testexpr: *mut pg_sys::Expr,
             args: &[*mut pg_sys::Expr],
@@ -99,6 +113,22 @@ mod tests {
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            }
+        }
+
+        unsafe fn relation_plan(
+            targetlist: *mut pg_sys::List,
+            qual: *mut pg_sys::List,
+        ) -> ScanTuplePlanProbe {
+            unsafe {
+                ScanTuplePlanProbe::plan_relation_scan(
+                    SCAN_RELID,
+                    pg_sys::Oid::INVALID,
+                    targetlist,
+                    ptr::null_mut(),
+                    qual,
                     ptr::null_mut(),
                 )
             }
@@ -257,6 +287,32 @@ mod tests {
         unsafe {
             let plan = TupleLayoutFixture::count_only_plan(relation_oid);
             assert_projected(&plan, &[1]);
+        }
+    }
+
+    #[pg_test]
+    fn modify_relation_layout_prunes_to_predicate_columns() {
+        unsafe {
+            let targetlist =
+                TupleLayoutFixture::targetlist(&[TupleLayoutFixture::ctid_var()]);
+            let qual = TupleLayoutFixture::expr_list(&[TupleLayoutFixture::eq(3)]);
+            let plan = TupleLayoutFixture::relation_plan(targetlist, qual);
+
+            assert_eq!(plan.shape(), ScanTupleShape::Relation);
+            assert!(plan.custom_scan_tlist().is_null());
+            assert_subset(plan.required_columns(), &[3]);
+        }
+    }
+
+    #[pg_test]
+    fn identity_only_modify_reads_no_business_columns() {
+        unsafe {
+            let targetlist =
+                TupleLayoutFixture::targetlist(&[TupleLayoutFixture::ctid_var()]);
+            let plan = TupleLayoutFixture::relation_plan(targetlist, ptr::null_mut());
+
+            assert_eq!(plan.shape(), ScanTupleShape::Relation);
+            assert_subset(plan.required_columns(), &[]);
         }
     }
 }

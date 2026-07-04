@@ -115,7 +115,8 @@ The public API separates callbacks by lifecycle:
 - Stateless facets are implemented on the AM identity type:
   `AmScan`, `AmRelation`, `AmIndexCallbacks`, and `AmDdl`.
 - Stateful operation lifecycles are associated session types:
-  `AmScanSession`, `AmIndexFetchSession`, and `AmDmlSession`.
+  `AmScanSession`, `AmIndexFetchSession`, `AmModifyQueryState`, and
+  `AmModifyState`.
 
 This keeps relation-level and DDL callbacks from requiring empty marker state,
 while preserving real per-operation state for scans, index fetches, and DML.
@@ -127,22 +128,30 @@ should convert to PostgreSQL errors at the callback boundary.
 ## DML Lifecycle
 
 PostgreSQL exposes tuple-level write callbacks, but lakehouse-style storage
-usually needs a broader write frame for writers, metadata staging, and cleanup.
-The DML framework derives that lifecycle from PostgreSQL execution boundaries:
+needs query-shared row identity, relation-local writers, metadata staging, and
+cleanup. Core owns one typed `ModifyQueryState` per `EState` and AM; every
+outer wrapper owns a `ModifyNodeState`, and each matching `ResultRelInfo` owns
+one provider `ModifyState`. COPY FROM bypasses ModifyTable and has its own
+utility-scoped frame:
 
 ```text
-frame starts
-  relation-local session starts on first write
-  tuple callbacks are dispatched to the session
-frame succeeds
-  touched sessions are finalized
-frame fails, aborts, or rolls back
-  unfinalized sessions discard their work
+ModifyTable starts
+  core acquires the EState-scoped AM ModifyQueryState
+  core associates target scans with stable ResultRelationState objects
+  target scans register physical identity sources in that query state
+  each matching relation lazily constructs its AM ModifyState
+  C executor callbacks dispatch directly to the cached relation state
+ModifyTable succeeds
+  constructed ModifyState objects are finalized
+ModifyTable fails, aborts, or rolls back
+  unfinalized ModifyState objects discard their work
 ```
 
 `ResourceOwner` cleanup handles ERROR, abort, and rollback paths that normal
 Rust returns cannot observe reliably. Transaction-scoped publication should use
-the transaction callbacks instead of relying on per-tuple callbacks.
+the transaction callbacks instead of relying on per-tuple callbacks. AFTER ROW
+OLD/NEW values already carried by the executor are retained in a PostgreSQL
+tuplestore, rather than re-read from object storage.
 
 DML tuple flow is slot-first. The callback shims pass slot or batch views into
 the AM session. Row-oriented AMs use the default fallback to materialize owned
@@ -230,7 +239,9 @@ pub struct MyTableAm;
 impl TableAccessMethod for MyTableAm {
     type ScanSession = MyScanSession;
     type IndexFetchSession = MyIndexFetchSession;
-    type DmlSession = MyDmlSession;
+    type ModifyQueryState = MyModifyQueryState;
+    type ModifyState = MyModifyState;
+    type CopySession = MyCopySession;
 }
 ```
 

@@ -1,4 +1,4 @@
-//! Backend tests for [`super::ColumnMapping`].
+//! Backend tests for [`super::column_mapping::ColumnMapping`].
 //!
 //! The assertions cover position arithmetic, but constructing a mapping calls
 //! PostgreSQL type-resolution functions. The tests must therefore execute
@@ -13,7 +13,9 @@ mod tests {
     };
     use pgrx::pg_sys;
 
-    use super::super::*;
+    use crate::access::column_mapping::{ColumnMapping, LiveColumn};
+    use crate::access::projection::ProjectedName;
+    use crate::error::IcebergError;
 
     fn int_schema(names: &[&str]) -> IcebergSchema {
         let fields: Vec<_> = names

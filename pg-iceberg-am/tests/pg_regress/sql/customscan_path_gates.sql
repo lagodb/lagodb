@@ -47,13 +47,10 @@ SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 -- For `UPDATE lake` / `DELETE FROM lake` / `MERGE INTO lake ...`,
 -- PG sets `root->parse->commandType` to `CMD_UPDATE` /
 -- `CMD_DELETE` / `CMD_MERGE` and records the `lake` rel in
--- `root->all_result_relids`. The framework's `path_stage_gates`
--- (`pg-lakebase-core/src/customscan/hook.rs`) checks
--- `commandType != CMD_SELECT && bms_is_member(rel->relid,
--- root->all_result_relids)` and refuses the CustomPath
--- (`PathStageRejection::DmlTarget`). EXPLAIN must therefore show
--- the inner scan as `Seq Scan on customscan_dml_lake`, not a
--- CustomScan. PG wraps it in a `Modify Table` node either way.
+-- `root->all_result_relids`. The framework classifies that base scan as
+-- `ScanPurpose::Modify`. Modify-purpose CustomScan is mandatory correctness
+-- infrastructure, so both `force` and `off` select it; the GUC only controls
+-- Query-purpose scans. PG17 DML wraps the input with LakebaseModifyTable.
 
 -- A.1 UPDATE lake
 SET pg_lakebase.customscan_mode = 'force';
@@ -94,15 +91,13 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
 -- For `UPDATE other SET v = lake.v FROM lake WHERE other.k = lake.k`
 -- the `lake` rel is an `RTE_RELATION` *source*, not the result rel.
 -- `bms_is_member(lake_rti, root->all_result_relids)` is FALSE on
--- `lake`, so the DML-target gate (Block A) does NOT fire on it.
+-- `lake`, so it is classified as `ScanPurpose::Query`, not `Modify`.
 -- The active rejection is the rowmark gate: `preprocess_rowmarks`
 -- (PG17 `planner.c:2295`) adds a `PlanRowMark` for every
 -- non-target base rel in any UPDATE/DELETE/MERGE plan, so
 -- `get_plan_rowmark(root->rowMarks, lake_rti) != NULL` and the
--- rowmark gate refuses the CustomPath. The two gates handle
--- different cases independently — Block A pins the target-side
--- rejection; this block pins the source-side rejection — so
--- both exist in the framework as independent defenses.
+-- rowmark gate refuses the CustomPath. Block A verifies mandatory Modify
+-- scans; this block independently verifies unsupported source-side rowmarks.
 
 SET pg_lakebase.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -122,8 +117,8 @@ WHERE o.k = l.k;
 -- Block C: Rowmark gate triggered by FOR UPDATE / FOR SHARE
 -- ============================================================================
 -- `SELECT ... FOR UPDATE` / `FOR SHARE` is a top-level SELECT
--- (`commandType == CMD_SELECT`), so the DML-target gate does not
--- fire. The active rejection is again the rowmark gate: PG attaches
+-- (`commandType == CMD_SELECT`), so the scan purpose is Query. The active
+-- rejection is again the rowmark gate: PG attaches
 -- a `PlanRowMark { rti = lake_rti, markType = ROW_MARK_REFERENCE
 -- (or LockRows-related) }` for the FOR UPDATE/SHARE locking clause,
 -- and `path_stage_gates` rejects any rel for which

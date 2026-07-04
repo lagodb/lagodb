@@ -50,15 +50,15 @@ use crate::error::{IcebergError, IcebergResult};
 /// Iceberg schema wider than the live PG columns — see
 /// [`ColumnMapping::from_full_schema`]) and `attno` becomes `dest = attno - 1`.
 #[derive(Debug, Clone)]
-struct LiveColumn {
+pub(crate) struct LiveColumn {
     /// 1-based PG attribute number of the live column.
-    attno: pg_sys::AttrNumber,
+    pub(crate) attno: pg_sys::AttrNumber,
     /// Column name (== Iceberg field name).
-    name: String,
+    pub(crate) name: String,
 }
 
 impl LiveColumn {
-    fn new(attno: pg_sys::AttrNumber, name: String) -> Self {
+    pub(crate) fn new(attno: pg_sys::AttrNumber, name: String) -> Self {
         Self { attno, name }
     }
 }
@@ -112,10 +112,10 @@ impl RelationShape {
 /// batch column it is read from, and the destination slot index it must be
 /// written to.
 #[derive(Clone)]
-struct ProjectedColumn {
+pub(crate) struct ProjectedColumn {
     /// Original base-relation attribute number used to resolve the Iceberg
     /// source field. It is intentionally distinct from `dest`.
-    source_base_attno: pg_sys::AttrNumber,
+    pub(crate) source_base_attno: pg_sys::AttrNumber,
     /// Index of the source column in the Arrow batch the scan produces.
     ///
     /// This is decoupled from the entry's position because the two scan
@@ -128,16 +128,16 @@ struct ProjectedColumn {
     ///   than the live PG columns (see `from_full_schema`).
     /// - projection (`from_projection`): `TableScan::select` preserves request
     ///   order, so `src_col` is the projection entry index.
-    src_col: usize,
+    pub(crate) src_col: usize,
     /// Destination cell index in the actual PG scan tuple.
-    dest: usize,
+    pub(crate) dest: usize,
     /// The `pg-arrow-conv` conversion rule for this column, resolved once at
     /// construction from the pair `(Arrow DataType, PgColumnType)` (see
     /// [`IcebergFieldExt::resolve_rule`]). The hot loops dispatch through this
     /// already-resolved rule rather than re-resolving per row.
-    rule: ColumnRule,
+    pub(crate) rule: ColumnRule,
     /// Actual destination descriptor OID, cached once for decoder binding.
-    target_oid: pg_sys::Oid,
+    pub(crate) target_oid: pg_sys::Oid,
 }
 
 /// Projection-aware column plan: the single owner of position arithmetic.
@@ -159,8 +159,8 @@ struct ProjectedColumn {
 /// live PG columns (a dropped column that still lingers in the Iceberg
 /// metadata schema — see [`ColumnMapping::from_full_schema`]).
 #[derive(Clone)]
-struct ColumnMapping {
-    entries: Arc<[ProjectedColumn]>,
+pub(crate) struct ColumnMapping {
+    pub(crate) entries: Arc<[ProjectedColumn]>,
 }
 
 impl ColumnMapping {
@@ -183,7 +183,7 @@ impl ColumnMapping {
     /// carries that lingering column, so `src_col` (its schema index) is what
     /// lines the live columns up with their batch columns.
     ///
-    fn from_full_schema(
+    pub(crate) fn from_full_schema(
         schema: &IcebergSchema,
         live_columns: &[LiveColumn],
         slot_width: usize,
@@ -232,7 +232,7 @@ impl ColumnMapping {
     /// `src_col == j`. Errors — producing no
     /// `ColumnMapping` — when a name does not resolve, an `attno < 1`, or a
     /// computed `dest >= slot_width`.
-    fn from_projection(
+    pub(crate) fn from_projection(
         schema: &IcebergSchema,
         pairs: &[ProjectedName],
         slot_width: usize,
@@ -604,8 +604,3 @@ impl WriteColumns {
     }
 }
 
-// These tests resolve PostgreSQL types through backend syscache functions.
-// Keep them out of the host `cfg(test)` binary; see `docs/testing.md`.
-#[cfg(feature = "pg_test")]
-#[path = "column_mapping_pg_test.rs"]
-mod pg_test;

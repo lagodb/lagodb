@@ -7,3 +7,6 @@ pub mod projection;
 pub mod relation;
 pub mod scan;
 pub mod type_mapping;
+
+#[cfg(feature = "pg_test")]
+mod pg_test;

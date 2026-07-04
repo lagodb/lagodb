@@ -137,18 +137,16 @@ mod tests {
     }
 
     #[pg_test]
-    fn path_stage_rejects_dml_target() {
+    fn path_stage_accepts_mutation_target_as_modify_scan() {
         unsafe {
             let (root, baserel, rte) = make_psg_state();
             (*(*root).parse).commandType = pg_sys::CmdType::CMD_UPDATE;
             (*root).all_result_relids = psg_singleton_bitmap(PSG_RELID as i32);
 
             let result = CustomScanCandidate::inspect(root, baserel, rte);
-            assert_eq!(
-                result,
-                Err(CustomScanRejection::DmlTarget),
-                "DML target gate must reject when commandType != SELECT and \
-                 rel->relid is in root->all_result_relids",
+            assert!(
+                result.is_ok(),
+                "a mutation target must become a mandatory Modify scan candidate: {result:?}",
             );
         }
     }

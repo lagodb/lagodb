@@ -11,6 +11,7 @@ mod tests {
         make_econtext_stub, make_estate_stub,
     };
     use crate::lakebase_core::support::pg::{OpExprSpec, PgNodeBuilder};
+    use pg_lakebase_core::customscan::ScanPurpose;
     use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
     use pg_lakebase_core::customscan::custom_private::{
         CustomScanPrivate, encode_split,
@@ -307,6 +308,7 @@ mod tests {
                 name: None,
             }];
             (*wrapper_ptr).cached_envelope = Some(CachedEnvelope {
+                purpose: ScanPurpose::Query,
                 pushed_contracts: vec![PushdownContract::ExactRowFilter],
                 column_refs,
                 tuple_layout: ScanTupleLayout::default(),

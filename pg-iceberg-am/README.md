@@ -75,7 +75,8 @@ free to the planner.
 ### Prerequisites
 
 - Rust 1.96.0 or later
-- PostgreSQL 16 or 17
+- PostgreSQL 17 (PG16 intentionally fails at build time while the versioned
+  ModifyTable executor is PG17-only)
 - `cargo-pgrx` installed (`cargo install --locked cargo-pgrx`)
 
 ### Building

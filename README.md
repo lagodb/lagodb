@@ -23,6 +23,10 @@ for PostgreSQL integration.
   predicates are pushed into the Iceberg scan for file/row-group pruning and
   row-level filtering, instead of scanning everything and filtering in the
   executor.
+- PG17 INSERT/UPDATE/DELETE/MERGE uses a
+  [Custom ModifyTable executor](docs/custom-modifytable-pg17.md) with explicit
+  Iceberg row identity and slot-first mutation; COPY FROM keeps an independent
+  utility lifecycle.
 - Object storage is available through distributed tablespaces backed by
   `pg-lakebase-storage`, a Unix-socket cache service. The storage layer supports
   AWS S3, S3-compatible endpoints, Google Cloud Storage, and Azure Blob Storage.
@@ -258,8 +262,6 @@ detail.
 | Area | Goal | Status | Design notes |
 |------|------|--------|--------------|
 | DataFusion query offload | Push lake-table query fragments such as joins, aggregates, sort, and limit into embedded DataFusion execution over Arrow batches, with PostgreSQL receiving only the final result rows. Layers on top of the existing single-relation filter pushdown and falls back when a fragment cannot be offloaded. | Design roadmap, no implementation | [datafusion-offload-roadmap.md](./pg-lakebase-core/docs/datafusion-offload-roadmap.md) |
-| Iceberg metadata tracker | Maintain PostgreSQL-style Read Committed visibility by overlaying each transaction's staged Iceberg file delta on the latest committed metadata, then materializing that delta once at top-level commit with catalog CAS. A PostgreSQL heap-table file catalog is not part of the current roadmap. | Core overlay implemented; hardening and broader DML coverage remain | [catalog/README.md](./pg-iceberg-am/src/catalog/README.md) |
-| Expanded DML | Support `UPDATE` and `DELETE` in addition to `INSERT`, using Iceberg position/equality delete files. | Planned | — |
 | Expanded DDL | Support schema evolution through `ALTER TABLE` (add / drop / rename column, type changes where Iceberg allows). | Planned | — |
 | Partitioned tables | Support creating and querying Iceberg partitioned tables, including partition-aware pruning on the scan path. | Planned | — |
 

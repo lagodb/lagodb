@@ -76,7 +76,7 @@ SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
 -- ============================================================================
 -- Test 3: EXPLAIN VERBOSE carries the provider identity and the
 -- classified labeled predicate lines.
--- Under `force` and VERBOSE, the output carries a `Provider:` line
+-- Under `force` and VERBOSE, the output carries `Scan Purpose: Query` and a `Provider:` line
 -- plus the deparsed predicate text on labeled lines `Pushed Filter
 -- Exact:` and `Recheck:` (both non-empty for this plan). The empty
 -- classes (`Pushed Filter Conservative Pruning:`, and any local residual) are
@@ -90,10 +90,11 @@ SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
 -------------------------------------------------------------
  Custom Scan (pg-iceberg-am) on public.customscan_where_eq_t
    Output: a, b
+   Scan Purpose: Query
    Provider: pg-iceberg-am
    Pushed Filter Exact: (a = 1)
    Recheck: (a = 1)
-(5 rows)
+(6 rows)
 
 -- ============================================================================
 -- Cleanup
@@ -1220,10 +1221,11 @@ WHERE a = 1 AND length(b) > 0;
  Custom Scan (pg-iceberg-am) on public.customscan_partial_pushdown_t
    Output: a, b
    Filter: (length(customscan_partial_pushdown_t.b) > 0)
+   Scan Purpose: Query
    Provider: pg-iceberg-am
    Pushed Filter Exact: (a = 1)
    Recheck: (a = 1)
-(6 rows)
+(7 rows)
 
 -- ============================================================================
 -- Test 2: OR-no-pushdown
