@@ -1234,4 +1234,3 @@ mod mutation_state_tests {
         assert_eq!(independent, TargetDependency::Independent);
     }
 }
-

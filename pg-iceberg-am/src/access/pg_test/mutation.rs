@@ -2,11 +2,11 @@
 
 #[pgrx::pg_schema]
 mod tests {
-    use pgrx::pg_sys;
     use pg_lakebase_core::prelude::*;
+    use pgrx::pg_sys;
 
+    use crate::access::mutation::{IcebergFileSource, IcebergModifyQueryState};
     use crate::catalog::row_mutations::RelationRowRegistry;
-    use crate::access::mutation::{IcebergModifyQueryState, IcebergFileSource};
 
     #[pgrx::pg_test(schema = "tests")]
     fn independent_query_states_share_transaction_file_ids_despite_scan_order() {

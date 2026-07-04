@@ -603,4 +603,3 @@ impl WriteColumns {
         self.buffer.clear();
     }
 }
-
