@@ -199,6 +199,12 @@ impl DataFile {
     pub fn file_format(&self) -> DataFileFormat {
         self.file_format
     }
+    /// Returns true when this manifest data file entry is an Iceberg v3
+    /// deletion vector.
+    pub fn is_deletion_vector(&self) -> bool {
+        self.content == DataContentType::PositionDeletes
+            && self.file_format == DataFileFormat::Puffin
+    }
     /// Get the partition values of the file.
     pub fn partition(&self) -> &Struct {
         &self.partition
@@ -287,7 +293,7 @@ impl DataFile {
     /// Writers may store the path explicitly in `referenced_data_file`. When
     /// that field is absent, a position delete file is still file-scoped if
     /// the delete file's `file_path` column lower and upper bounds are equal.
-    pub(crate) fn position_delete_target_data_file_path(&self) -> Option<&str> {
+    pub fn position_delete_target_data_file_path(&self) -> Option<&str> {
         if self.content != DataContentType::PositionDeletes {
             return None;
         }
@@ -379,7 +385,9 @@ pub fn read_data_files_from_avro<R: Read>(
 
 /// Type of content stored by the data file: data, equality deletes, or
 /// position deletes (all v1 files are data files)
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize, Default,
+)]
 pub enum DataContentType {
     /// value: 0
     #[default]
@@ -407,7 +415,9 @@ impl TryFrom<i32> for DataContentType {
 }
 
 /// Format of this data.
-#[derive(Debug, PartialEq, Eq, Clone, Copy, SerializeDisplay, DeserializeFromStr)]
+#[derive(
+    Debug, PartialEq, Eq, Hash, Clone, Copy, SerializeDisplay, DeserializeFromStr,
+)]
 pub enum DataFileFormat {
     /// Avro file format: <https://avro.apache.org/>
     Avro,

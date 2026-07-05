@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::io::Cursor;
 use std::ops::BitOrAssign;
 
 use roaring::RoaringTreemap;
@@ -29,6 +30,14 @@ pub struct DeleteVector {
 }
 
 impl DeleteVector {
+    const PUFFIN_V1_MAGIC: u32 = 1681511377;
+    const PUFFIN_V1_LENGTH_SIZE: usize = 4;
+    const PUFFIN_V1_MAGIC_SIZE: usize = 4;
+    const PUFFIN_V1_CRC_SIZE: usize = 4;
+    const PUFFIN_V1_MIN_SIZE: usize = Self::PUFFIN_V1_LENGTH_SIZE
+        + Self::PUFFIN_V1_MAGIC_SIZE
+        + Self::PUFFIN_V1_CRC_SIZE;
+
     #[allow(unused)]
     pub fn new(roaring_treemap: RoaringTreemap) -> DeleteVector {
         DeleteVector {
@@ -43,6 +52,10 @@ impl DeleteVector {
 
     pub fn insert(&mut self, pos: u64) -> bool {
         self.inner.insert(pos)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 
     /// Marks the given `positions` as deleted and returns the number of elements appended.
@@ -67,6 +80,179 @@ impl DeleteVector {
     #[allow(unused)]
     pub fn len(&self) -> u64 {
         self.inner.len()
+    }
+
+    pub fn cardinality(&self) -> u64 {
+        self.len()
+    }
+
+    pub fn merge_ref(&mut self, other: &DeleteVector) {
+        self.inner.bitor_assign(&other.inner);
+    }
+
+    /// Serialize this delete vector as Iceberg Puffin `deletion-vector-v1` bytes.
+    ///
+    /// The inner bitmap bytes are the portable 64-bit RoaringTreemap format.
+    /// Iceberg wraps that payload with a big-endian length, little-endian
+    /// magic number, and big-endian CRC32 over magic + payload.
+    pub fn to_puffin_v1_bytes(&self) -> Result<Vec<u8>> {
+        let roaring_size = self.inner.serialized_size();
+        let content_length = Self::PUFFIN_V1_MAGIC_SIZE
+            .checked_add(roaring_size)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "deletion vector serialized length overflow",
+                )
+            })?;
+        let content_length_u32 = u32::try_from(content_length).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector serialized length does not fit u32",
+            )
+        })?;
+
+        let mut bytes = Vec::with_capacity(
+            Self::PUFFIN_V1_LENGTH_SIZE + content_length + Self::PUFFIN_V1_CRC_SIZE,
+        );
+        bytes.extend_from_slice(&content_length_u32.to_be_bytes());
+        bytes.extend_from_slice(&Self::PUFFIN_V1_MAGIC.to_le_bytes());
+        self.inner.serialize_into(&mut bytes).map_err(|err| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "failed to serialize deletion vector roaring bitmap",
+            )
+            .with_source(err)
+        })?;
+
+        let crc = crc32fast::hash(&bytes[Self::PUFFIN_V1_LENGTH_SIZE..]);
+        bytes.extend_from_slice(&crc.to_be_bytes());
+        Ok(bytes)
+    }
+
+    /// Deserialize Iceberg Puffin `deletion-vector-v1` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte envelope is malformed, the CRC does not
+    /// match, the Roaring bitmap is invalid, or the decoded cardinality does
+    /// not match `expected_cardinality`.
+    pub fn from_puffin_v1_bytes(
+        bytes: &[u8],
+        expected_cardinality: u64,
+    ) -> Result<Self> {
+        if bytes.len() < Self::PUFFIN_V1_MIN_SIZE {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector blob is too small",
+            ));
+        }
+
+        let content_length = Self::read_u32_be(
+            &bytes[..Self::PUFFIN_V1_LENGTH_SIZE],
+            "deletion vector content length",
+        )? as usize;
+        let expected_blob_len = Self::PUFFIN_V1_LENGTH_SIZE
+            .checked_add(content_length)
+            .and_then(|len| len.checked_add(Self::PUFFIN_V1_CRC_SIZE))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "deletion vector blob length overflow",
+                )
+            })?;
+        if expected_blob_len != bytes.len() {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "deletion vector blob length mismatch: header says {expected_blob_len}, actual {}",
+                    bytes.len()
+                ),
+            ));
+        }
+
+        let content_start = Self::PUFFIN_V1_LENGTH_SIZE;
+        let content_end = content_start + content_length;
+        let content = &bytes[content_start..content_end];
+        if content.len() < Self::PUFFIN_V1_MAGIC_SIZE {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector content is too small",
+            ));
+        }
+
+        let actual_crc =
+            Self::read_u32_be(&bytes[content_end..], "deletion vector crc")?;
+        let expected_crc = crc32fast::hash(content);
+        if actual_crc != expected_crc {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector crc mismatch",
+            ));
+        }
+
+        let magic = Self::read_u32_le(
+            &content[..Self::PUFFIN_V1_MAGIC_SIZE],
+            "deletion vector magic",
+        )?;
+        if magic != Self::PUFFIN_V1_MAGIC {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "deletion vector magic mismatch: expected {}, actual {magic}",
+                    Self::PUFFIN_V1_MAGIC
+                ),
+            ));
+        }
+
+        let roaring_bytes = &content[Self::PUFFIN_V1_MAGIC_SIZE..];
+        let mut cursor = Cursor::new(roaring_bytes);
+        let inner = RoaringTreemap::deserialize_from(&mut cursor).map_err(|err| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "failed to deserialize deletion vector roaring bitmap",
+            )
+            .with_source(err)
+        })?;
+        if cursor.position() != roaring_bytes.len() as u64 {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector roaring bitmap has trailing bytes",
+            ));
+        }
+
+        let delete_vector = DeleteVector { inner };
+        if delete_vector.cardinality() != expected_cardinality {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "deletion vector cardinality mismatch: expected {expected_cardinality}, actual {}",
+                    delete_vector.cardinality()
+                ),
+            ));
+        }
+
+        Ok(delete_vector)
+    }
+
+    fn read_u32_be(bytes: &[u8], name: &str) -> Result<u32> {
+        let raw = <[u8; 4]>::try_from(bytes).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("{name} must contain exactly 4 bytes"),
+            )
+        })?;
+        Ok(u32::from_be_bytes(raw))
+    }
+
+    fn read_u32_le(bytes: &[u8], name: &str) -> Result<u32> {
+        let raw = <[u8; 4]>::try_from(bytes).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("{name} must contain exactly 4 bytes"),
+            )
+        })?;
+        Ok(u32::from_le_bytes(raw))
     }
 }
 
@@ -144,6 +330,12 @@ impl BitOrAssign for DeleteVector {
     }
 }
 
+impl BitOrAssign<&DeleteVector> for DeleteVector {
+    fn bitor_assign(&mut self, other: &DeleteVector) {
+        self.merge_ref(other);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +391,47 @@ mod tests {
         let positions = vec![1, 3, 5, 5];
         let res = dv.insert_positions(&positions);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_puffin_v1_round_trip() {
+        let mut dv = DeleteVector::default();
+        for pos in [0, 1, 42, u64::from(u32::MAX) + 3, 1 << 40] {
+            dv.insert(pos);
+        }
+
+        let bytes = dv.to_puffin_v1_bytes().unwrap();
+        let decoded =
+            DeleteVector::from_puffin_v1_bytes(&bytes, dv.cardinality()).unwrap();
+
+        assert_eq!(
+            decoded.iter().collect::<Vec<_>>(),
+            dv.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_puffin_v1_rejects_bad_crc() {
+        let mut dv = DeleteVector::default();
+        dv.insert(42);
+        let mut bytes = dv.to_puffin_v1_bytes().unwrap();
+        let payload_index = DeleteVector::PUFFIN_V1_LENGTH_SIZE
+            + DeleteVector::PUFFIN_V1_MAGIC_SIZE
+            + 1;
+        bytes[payload_index] ^= 0x01;
+
+        let err =
+            DeleteVector::from_puffin_v1_bytes(&bytes, dv.cardinality()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
+    }
+
+    #[test]
+    fn test_puffin_v1_rejects_cardinality_mismatch() {
+        let mut dv = DeleteVector::default();
+        dv.insert(42);
+        let bytes = dv.to_puffin_v1_bytes().unwrap();
+
+        let err = DeleteVector::from_puffin_v1_bytes(&bytes, 2).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
     }
 }

@@ -68,6 +68,15 @@ impl PuffinWriter {
         blob: Blob,
         compression_codec: CompressionCodec,
     ) -> Result<()> {
+        self.add_with_metadata(blob, compression_codec).map(|_| ())
+    }
+
+    /// Adds blob to Puffin file and returns the generated blob metadata.
+    pub fn add_with_metadata(
+        &mut self,
+        blob: Blob,
+        compression_codec: CompressionCodec,
+    ) -> Result<BlobMetadata> {
         validate_puffin_compression(compression_codec)?;
 
         self.write_header_once()?;
@@ -76,7 +85,7 @@ impl PuffinWriter {
         let compressed_bytes = compression_codec.compress(blob.data)?;
         let length = compressed_bytes.len().try_into()?;
         self.write(&compressed_bytes)?;
-        self.written_blobs_metadata.push(BlobMetadata {
+        let metadata = BlobMetadata {
             r#type: blob.r#type,
             fields: blob.fields,
             snapshot_id: blob.snapshot_id,
@@ -85,9 +94,10 @@ impl PuffinWriter {
             length,
             compression_codec,
             properties: blob.properties,
-        });
+        };
+        self.written_blobs_metadata.push(metadata.clone());
 
-        Ok(())
+        Ok(metadata)
     }
 
     /// Finalizes the Puffin file
