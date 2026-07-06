@@ -22,7 +22,7 @@ use crate::delete_vector::DeleteVector;
 use crate::expr::Predicate::AlwaysTrue;
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::scan::{FileScanTask, FileScanTaskDeleteFile};
-use crate::spec::DataContentType;
+use crate::spec::{DataContentType, DataFileFormat};
 use crate::{Error, ErrorKind, Result};
 use once_cell::sync::OnceCell;
 
@@ -49,11 +49,30 @@ struct DeleteFileFilterState {
 
     /// One OnceCell per positional delete file.
     /// Ensures each file is loaded exactly once, even with concurrent access.
-    positional_deletes: HashMap<String, Arc<OnceCell<PosDelLoadResult>>>,
+    positional_deletes: HashMap<DeleteFileLoadKey, Arc<OnceCell<PosDelLoadResult>>>,
 
     /// One OnceCell per equality delete file.
     /// Ensures each file is loaded exactly once, even with concurrent access.
     equality_deletes: HashMap<String, Arc<OnceCell<EqDelLoadResult>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DeleteFileLoadKey {
+    file_path: String,
+    file_format: DataFileFormat,
+    content_offset: Option<i64>,
+    content_size_in_bytes: Option<i64>,
+}
+
+impl DeleteFileLoadKey {
+    pub(crate) fn from_position_delete(task: &FileScanTaskDeleteFile) -> Self {
+        Self {
+            file_path: task.file_path.clone(),
+            file_format: task.file_format,
+            content_offset: task.content_offset,
+            content_size_in_bytes: task.content_size_in_bytes,
+        }
+    }
 }
 
 /// Thread-safe delete filter with OnceCell-based concurrent loading.
@@ -91,12 +110,12 @@ impl DeleteFilter {
     /// This ensures we have a single OnceCell instance per file path.
     fn get_or_create_pos_del_cell(
         &self,
-        file_path: &str,
+        key: DeleteFileLoadKey,
     ) -> Arc<OnceCell<PosDelLoadResult>> {
         let mut state = self.state.write().unwrap();
         state
             .positional_deletes
-            .entry(file_path.to_string())
+            .entry(key)
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone()
     }
@@ -122,14 +141,14 @@ impl DeleteFilter {
     /// The loader function should return a map of data file path -> delete vector.
     pub(crate) fn load_pos_del_file<F>(
         &self,
-        file_path: &str,
+        key: DeleteFileLoadKey,
         loader: F,
     ) -> Result<()>
     where
         F: FnOnce() -> Result<HashMap<String, DeleteVector>>,
     {
         // Get or create the OnceLock for this file
-        let cell = self.get_or_create_pos_del_cell(file_path);
+        let cell = self.get_or_create_pos_del_cell(key);
 
         // get_or_try_init guarantees only one thread executes the loader
         // Other threads will block and wait, then get the cached result
@@ -368,8 +387,13 @@ pub(crate) mod tests {
                 table_location.to_str().unwrap()
             ),
             file_type: DataContentType::PositionDeletes,
+            file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
             equality_ids: None,
+            referenced_data_file: None,
+            content_offset: None,
+            content_size_in_bytes: None,
+            record_count: 0,
         };
 
         let pos_del_2 = FileScanTaskDeleteFile {
@@ -379,8 +403,13 @@ pub(crate) mod tests {
                 table_location.to_str().unwrap()
             ),
             file_type: DataContentType::PositionDeletes,
+            file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
             equality_ids: None,
+            referenced_data_file: None,
+            content_offset: None,
+            content_size_in_bytes: None,
+            record_count: 0,
         };
 
         let pos_del_3 = FileScanTaskDeleteFile {
@@ -390,8 +419,13 @@ pub(crate) mod tests {
                 table_location.to_str().unwrap()
             ),
             file_type: DataContentType::PositionDeletes,
+            file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
             equality_ids: None,
+            referenced_data_file: None,
+            content_offset: None,
+            content_size_in_bytes: None,
+            record_count: 0,
         };
 
         let file_scan_tasks = vec![
@@ -406,6 +440,7 @@ pub(crate) mod tests {
                     table_location.to_str().unwrap()
                 ),
                 data_file_format: DataFileFormat::Parquet,
+                partition_spec_id: 0,
                 schema: data_file_schema.clone(),
                 project_field_ids: vec![],
                 predicate: None,
@@ -426,6 +461,7 @@ pub(crate) mod tests {
                     table_location.to_str().unwrap()
                 ),
                 data_file_format: DataFileFormat::Parquet,
+                partition_spec_id: 0,
                 schema: data_file_schema.clone(),
                 project_field_ids: vec![],
                 predicate: None,
@@ -486,6 +522,7 @@ pub(crate) mod tests {
             first_row_id: None,
             data_file_path: "data.parquet".to_string(),
             data_file_format: crate::spec::DataFileFormat::Parquet,
+            partition_spec_id: 0,
             schema: schema.clone(),
             project_field_ids: vec![],
             predicate: None,
@@ -493,8 +530,13 @@ pub(crate) mod tests {
                 file_size_in_bytes: 0,
                 file_path: "eq-del.parquet".to_string(),
                 file_type: DataContentType::EqualityDeletes,
+                file_format: crate::spec::DataFileFormat::Parquet,
                 partition_spec_id: 0,
                 equality_ids: None,
+                referenced_data_file: None,
+                content_offset: None,
+                content_size_in_bytes: None,
+                record_count: 0,
             }],
             partition: None,
             partition_spec: None,
@@ -535,8 +577,14 @@ pub(crate) mod tests {
                 let filter = filter_clone.clone();
                 let load_count = load_count_clone.clone();
                 thread::spawn(move || {
+                    let key = DeleteFileLoadKey {
+                        file_path: "test-file.parquet".to_owned(),
+                        file_format: DataFileFormat::Parquet,
+                        content_offset: None,
+                        content_size_in_bytes: None,
+                    };
                     filter
-                        .load_pos_del_file("test-file.parquet", || {
+                        .load_pos_del_file(key, || {
                             // Count how many times the loader is actually called
                             load_count.fetch_add(1, Ordering::SeqCst);
                             // Simulate some work

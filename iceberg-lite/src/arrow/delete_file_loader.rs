@@ -24,9 +24,11 @@ use crate::arrow::ArrowReader;
 use crate::arrow::reader::ParquetReadOptions;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::scan_metrics::ScanMetrics;
+use crate::delete_vector::DeleteVector;
 use crate::io::FileIO;
 use crate::scan::{ArrowRecordBatchIterator, FileScanTaskDeleteFile};
-use crate::spec::{Schema, SchemaRef};
+use crate::spec::{DataContentType, DataFileFormat, Schema, SchemaRef};
+use crate::{Error, ErrorKind};
 
 /// Delete File Loader
 #[allow(unused)]
@@ -88,6 +90,52 @@ impl BasicDeleteFileLoader {
         let iterator = record_batch_reader.map(|batch| batch.map_err(|e| e.into()));
 
         Ok(Box::new(iterator) as ArrowRecordBatchIterator)
+    }
+
+    pub(crate) fn read_deletion_vector(
+        &self,
+        task: &FileScanTaskDeleteFile,
+    ) -> Result<DeleteVector> {
+        if task.file_type != DataContentType::PositionDeletes
+            || task.file_format != DataFileFormat::Puffin
+        {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector task must be a Puffin position delete",
+            ));
+        }
+
+        let offset = task.content_offset.ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector delete file is missing content_offset",
+            )
+        })?;
+        let size = task.content_size_in_bytes.ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector delete file is missing content_size_in_bytes",
+            )
+        })?;
+        let offset = u64::try_from(offset).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector content_offset cannot be negative",
+            )
+        })?;
+        let size = u64::try_from(size).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "deletion vector content_size_in_bytes cannot be negative",
+            )
+        })?;
+        let end = offset.checked_add(size).ok_or_else(|| {
+            Error::new(ErrorKind::DataInvalid, "deletion vector range overflow")
+        })?;
+
+        let reader = self.file_io.new_input(&task.file_path)?.reader()?;
+        let bytes = reader.read_range(offset..end)?;
+        DeleteVector::from_puffin_v1_bytes(&bytes, task.record_count)
     }
 
     /// Evolves the schema of the RecordBatches from an equality delete file.

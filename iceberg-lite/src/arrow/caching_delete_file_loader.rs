@@ -19,9 +19,14 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Not;
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
+use arrow_array::downcast_dictionary_array;
+use arrow_array::types::ArrowDictionaryKeyType;
+use arrow_array::{
+    Array, ArrayRef, DictionaryArray, Int64Array, LargeStringArray, StringArray,
+    StringViewArray, StructArray,
+};
 
-use super::delete_filter::DeleteFilter;
+use super::delete_filter::{DeleteFileLoadKey, DeleteFilter};
 use crate::arrow::delete_file_loader::BasicDeleteFileLoader;
 use crate::arrow::scan_metrics::ScanMetrics;
 use crate::arrow::{arrow_primitive_to_literal, arrow_schema_to_schema};
@@ -31,9 +36,9 @@ use crate::expr::{Predicate, Reference};
 use crate::io::FileIO;
 use crate::scan::{ArrowRecordBatchIterator, FileScanTaskDeleteFile};
 use crate::spec::{
-    DataContentType, Datum, ListType, MapType, NestedField, NestedFieldRef,
-    PartnerAccessor, PrimitiveType, Schema, SchemaRef, SchemaWithPartnerVisitor,
-    StructType, Type, visit_schema_with_partner,
+    DataContentType, DataFileFormat, Datum, ListType, MapType, NestedField,
+    NestedFieldRef, PartnerAccessor, PrimitiveType, Schema, SchemaRef,
+    SchemaWithPartnerVisitor, StructType, Type, visit_schema_with_partner,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -82,14 +87,25 @@ impl CachingDeleteFileLoader {
         schema: SchemaRef,
     ) -> Result<DeleteFilter> {
         for task in delete_file_entries {
-            match task.file_type {
-                DataContentType::PositionDeletes => {
+            match (task.file_type, task.file_format) {
+                (DataContentType::PositionDeletes, DataFileFormat::Parquet) => {
                     self.load_positional_delete(task)?;
                 }
-                DataContentType::EqualityDeletes => {
+                (DataContentType::PositionDeletes, DataFileFormat::Puffin) => {
+                    self.load_deletion_vector(task)?;
+                }
+                (DataContentType::PositionDeletes, format) => {
+                    return Err(Error::new(
+                        ErrorKind::FeatureUnsupported,
+                        format!(
+                            "position delete file format {format} is not supported"
+                        ),
+                    ));
+                }
+                (DataContentType::EqualityDeletes, _) => {
                     self.load_equality_delete(task, schema.clone())?;
                 }
-                DataContentType::Data => {
+                (DataContentType::Data, _) => {
                     return Err(Error::new(
                         ErrorKind::Unexpected,
                         "tasks with files of type Data not expected here",
@@ -109,11 +125,30 @@ impl CachingDeleteFileLoader {
         let file_path = task.file_path.clone();
         let file_size_in_bytes = task.file_size_in_bytes;
         let loader = self.basic_delete_file_loader.clone();
+        let key = DeleteFileLoadKey::from_position_delete(task);
 
-        self.delete_filter.load_pos_del_file(&file_path, || {
+        self.delete_filter.load_pos_del_file(key, || {
             let iterator =
                 loader.parquet_to_batch_iterator(&file_path, file_size_in_bytes)?;
             Self::parse_positional_deletes_record_batch_iterator(iterator)
+        })
+    }
+
+    fn load_deletion_vector(&self, task: &FileScanTaskDeleteFile) -> Result<()> {
+        let referenced_data_file =
+            task.referenced_data_file.clone().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "deletion vector delete file is missing referenced_data_file",
+                )
+            })?;
+        let loader = self.basic_delete_file_loader.clone();
+        let task = task.clone();
+        let key = DeleteFileLoadKey::from_position_delete(&task);
+
+        self.delete_filter.load_pos_del_file(key, || {
+            let delete_vector = loader.read_deletion_vector(&task)?;
+            Ok(HashMap::from([(referenced_data_file, delete_vector)]))
         })
     }
 
@@ -150,7 +185,7 @@ impl CachingDeleteFileLoader {
     /// Parses a record batch iterator from positional delete files.
     ///
     /// Returns a map of data file path to delete vector.
-    fn parse_positional_deletes_record_batch_iterator(
+    pub(crate) fn parse_positional_deletes_record_batch_iterator(
         iterator: ArrowRecordBatchIterator,
     ) -> Result<HashMap<String, DeleteVector>> {
         let mut result: HashMap<String, DeleteVector> = HashMap::default();
@@ -159,13 +194,13 @@ impl CachingDeleteFileLoader {
             let batch = batch?;
             let columns = batch.columns();
 
-            let Some(file_paths) = columns[0].as_any().downcast_ref::<StringArray>()
-            else {
+            if columns.len() < 2 {
                 return Err(Error::new(
                     ErrorKind::DataInvalid,
-                    "Could not downcast file paths array to StringArray",
+                    "position delete file must contain at least file path and position columns",
                 ));
-            };
+            }
+
             let Some(positions) = columns[1].as_any().downcast_ref::<Int64Array>()
             else {
                 return Err(Error::new(
@@ -174,22 +209,109 @@ impl CachingDeleteFileLoader {
                 ));
             };
 
-            for (file_path, pos) in file_paths.iter().zip(positions.iter()) {
-                let (Some(file_path), Some(pos)) = (file_path, pos) else {
-                    return Err(Error::new(
-                        ErrorKind::DataInvalid,
-                        "null values in delete file",
-                    ));
-                };
+            Self::visit_position_delete_paths(
+                columns[0].as_ref(),
+                |row, file_path| {
+                    let Some(file_path) = file_path else {
+                        return Err(Error::new(
+                            ErrorKind::DataInvalid,
+                            "null values in delete file",
+                        ));
+                    };
+                    if positions.is_null(row) {
+                        return Err(Error::new(
+                            ErrorKind::DataInvalid,
+                            "null values in delete file",
+                        ));
+                    }
+                    let pos = u64::try_from(positions.value(row)).map_err(|_| {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            "position delete file contains a negative row position",
+                        )
+                    })?;
 
-                result
-                    .entry(file_path.to_string())
-                    .or_default()
-                    .insert(pos as u64);
-            }
+                    if let Some(delete_vector) = result.get_mut(file_path) {
+                        delete_vector.insert(pos);
+                    } else {
+                        let mut delete_vector = DeleteVector::default();
+                        delete_vector.insert(pos);
+                        result.insert(file_path.to_owned(), delete_vector);
+                    }
+                    Ok(())
+                },
+            )?;
         }
 
         Ok(result)
+    }
+
+    fn visit_position_delete_paths<F>(file_paths: &dyn Array, visit: F) -> Result<()>
+    where
+        F: FnMut(usize, Option<&str>) -> Result<()>,
+    {
+        downcast_dictionary_array!(
+            file_paths => Self::visit_dictionary_paths(file_paths, visit),
+            arrow_schema::DataType::Utf8 => {
+                let strings = file_paths.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                    Error::new(ErrorKind::DataInvalid, "position delete file path column is not Utf8")
+                })?;
+                Self::visit_path_values(strings.iter(), visit)
+            }
+            arrow_schema::DataType::LargeUtf8 => {
+                let strings = file_paths.as_any().downcast_ref::<LargeStringArray>().ok_or_else(|| {
+                    Error::new(ErrorKind::DataInvalid, "position delete file path column is not LargeUtf8")
+                })?;
+                Self::visit_path_values(strings.iter(), visit)
+            }
+            arrow_schema::DataType::Utf8View => {
+                let strings = file_paths.as_any().downcast_ref::<StringViewArray>().ok_or_else(|| {
+                    Error::new(ErrorKind::DataInvalid, "position delete file path column is not Utf8View")
+                })?;
+                Self::visit_path_values(strings.iter(), visit)
+            }
+            data_type => Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!("unsupported position delete file path column type {data_type}"),
+            ))
+        )
+    }
+
+    fn visit_dictionary_paths<K, F>(
+        file_paths: &DictionaryArray<K>,
+        visit: F,
+    ) -> Result<()>
+    where
+        K: ArrowDictionaryKeyType,
+        F: FnMut(usize, Option<&str>) -> Result<()>,
+    {
+        if let Some(strings) = file_paths.downcast_dict::<StringArray>() {
+            return Self::visit_path_values(strings.into_iter(), visit);
+        }
+        if let Some(strings) = file_paths.downcast_dict::<LargeStringArray>() {
+            return Self::visit_path_values(strings.into_iter(), visit);
+        }
+        if let Some(strings) = file_paths.downcast_dict::<StringViewArray>() {
+            return Self::visit_path_values(strings.into_iter(), visit);
+        }
+        Err(Error::new(
+            ErrorKind::DataInvalid,
+            format!(
+                "unsupported dictionary value type for position delete file path column {}",
+                file_paths.values().data_type()
+            ),
+        ))
+    }
+
+    fn visit_path_values<'a, I, F>(values: I, mut visit: F) -> Result<()>
+    where
+        I: IntoIterator<Item = Option<&'a str>>,
+        F: FnMut(usize, Option<&'a str>) -> Result<()>,
+    {
+        for (row, value) in values.into_iter().enumerate() {
+            visit(row, value)?;
+        }
+        Ok(())
     }
 
     /// Parses a record batch iterator from equality delete files.
@@ -480,7 +602,7 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::{
         ArrayRef, BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray,
-        StructArray,
+        StructArray, UInt8Array, UInt8DictionaryArray,
     };
     use arrow_schema::{DataType, Field, Fields};
     use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
@@ -492,6 +614,87 @@ mod tests {
     use crate::arrow::delete_filter::tests::setup;
     use crate::scan::FileScanTaskDeleteFile;
     use crate::spec::{DataContentType, Schema};
+
+    #[test]
+    fn test_parse_positional_deletes_accepts_dictionary_paths() {
+        let file_keys = UInt8Array::from_iter_values([0, 0, 1]);
+        let file_values: ArrayRef = Arc::new(StringArray::from_iter_values([
+            "data/a.parquet",
+            "data/b.parquet",
+        ]));
+        let file_array: ArrayRef =
+            Arc::new(UInt8DictionaryArray::try_new(file_keys, file_values).unwrap());
+        let pos_array: ArrayRef = Arc::new(Int64Array::from_iter_values([1, 2, 3]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            Field::new(
+                "file_path",
+                DataType::Dictionary(
+                    Box::new(DataType::UInt8),
+                    Box::new(DataType::Utf8),
+                ),
+                false,
+            ),
+            Field::new("pos", DataType::Int64, false),
+        ]));
+        let batch =
+            RecordBatch::try_new(schema, vec![file_array, pos_array]).unwrap();
+        let iterator: ArrowRecordBatchIterator = Box::new(std::iter::once(Ok(batch)));
+
+        let deletes =
+            CachingDeleteFileLoader::parse_positional_deletes_record_batch_iterator(
+                iterator,
+            )
+            .unwrap();
+
+        let a_positions: Vec<_> = deletes["data/a.parquet"].iter().collect();
+        let b_positions: Vec<_> = deletes["data/b.parquet"].iter().collect();
+        assert_eq!(a_positions, vec![1, 2]);
+        assert_eq!(b_positions, vec![3]);
+    }
+
+    #[test]
+    fn test_parse_positional_deletes_rejects_negative_positions() {
+        let file_array: ArrayRef =
+            Arc::new(StringArray::from_iter_values(["data/a.parquet"]));
+        let pos_array: ArrayRef = Arc::new(Int64Array::from_iter_values([-1]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            Field::new("file_path", DataType::Utf8, false),
+            Field::new("pos", DataType::Int64, false),
+        ]));
+        let batch =
+            RecordBatch::try_new(schema, vec![file_array, pos_array]).unwrap();
+        let iterator: ArrowRecordBatchIterator = Box::new(std::iter::once(Ok(batch)));
+
+        let err =
+            CachingDeleteFileLoader::parse_positional_deletes_record_batch_iterator(
+                iterator,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("negative row position"));
+    }
+
+    #[test]
+    fn test_parse_positional_deletes_rejects_missing_position_column() {
+        let file_array: ArrayRef =
+            Arc::new(StringArray::from_iter_values(["data/a.parquet"]));
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+            "file_path",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![file_array]).unwrap();
+        let iterator: ArrowRecordBatchIterator = Box::new(std::iter::once(Ok(batch)));
+
+        let err =
+            CachingDeleteFileLoader::parse_positional_deletes_record_batch_iterator(
+                iterator,
+            )
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
+        assert!(err.to_string().contains("file path and position columns"));
+    }
 
     #[test]
     fn test_delete_file_loader_parse_equality_deletes() {
@@ -821,16 +1024,26 @@ mod tests {
             file_size_in_bytes: 0,
             file_path: pos_del_path,
             file_type: DataContentType::PositionDeletes,
+            file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
             equality_ids: None,
+            referenced_data_file: None,
+            content_offset: None,
+            content_size_in_bytes: None,
+            record_count: 0,
         };
 
         let eq_del = FileScanTaskDeleteFile {
             file_size_in_bytes: 0,
             file_path: eq_delete_path.clone(),
             file_type: DataContentType::EqualityDeletes,
+            file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
             equality_ids: Some(vec![2, 3]), // Only use field IDs that exist in both schemas
+            referenced_data_file: None,
+            content_offset: None,
+            content_size_in_bytes: None,
+            record_count: 0,
         };
 
         let file_scan_task = FileScanTask {
@@ -844,6 +1057,7 @@ mod tests {
                 table_location.to_str().unwrap()
             ),
             data_file_format: DataFileFormat::Parquet,
+            partition_spec_id: 0,
             schema: data_file_schema.clone(),
             project_field_ids: vec![2, 3],
             predicate: None,
@@ -867,6 +1081,87 @@ mod tests {
             "Failed to build equality delete predicate: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_load_multiple_deletion_vectors_from_same_puffin_file() {
+        use crate::scan::FileScanTask;
+        use crate::spec::{DataFileFormat, Schema, Struct};
+        use crate::writer::base_writer::deletion_vector_writer::{
+            DeletionVectorFileWriter, ReferencedDataFile,
+        };
+
+        let tmp_dir = TempDir::new().unwrap();
+        let table_location = tmp_dir.path();
+        let file_io =
+            FileIO::from_path(table_location.as_os_str().to_str().unwrap()).unwrap();
+        let puffin_path =
+            format!("{}/delete-vectors.puffin", table_location.to_str().unwrap());
+
+        let mut writer = DeletionVectorFileWriter::new(file_io.clone(), &puffin_path);
+        writer
+            .delete_all(
+                ReferencedDataFile::new("data-a.parquet", Struct::empty(), 0),
+                [1, 3],
+            )
+            .unwrap();
+        writer
+            .delete_all(
+                ReferencedDataFile::new("data-b.parquet", Struct::empty(), 0),
+                [2, 4, 6],
+            )
+            .unwrap();
+        let delete_files = writer.close().unwrap().into_delete_files();
+
+        let schema = Arc::new(Schema::builder().build().unwrap());
+        let deletes: Vec<FileScanTaskDeleteFile> = delete_files
+            .into_iter()
+            .map(|file| FileScanTaskDeleteFile {
+                file_size_in_bytes: file.file_size_in_bytes(),
+                file_path: file.file_path().to_owned(),
+                file_type: file.content_type(),
+                file_format: file.file_format(),
+                partition_spec_id: file.partition_spec_id,
+                equality_ids: file.equality_ids(),
+                referenced_data_file: file
+                    .referenced_data_file_path()
+                    .map(str::to_owned),
+                content_offset: file.content_offset(),
+                content_size_in_bytes: file.content_size_in_bytes(),
+                record_count: file.record_count(),
+            })
+            .collect();
+        let task = FileScanTask {
+            file_size_in_bytes: 0,
+            start: 0,
+            length: 0,
+            record_count: None,
+            first_row_id: None,
+            data_file_path: "data-a.parquet".to_owned(),
+            data_file_format: DataFileFormat::Parquet,
+            partition_spec_id: 0,
+            schema: schema.clone(),
+            project_field_ids: vec![],
+            predicate: None,
+            deletes,
+            partition: None,
+            partition_spec: None,
+            name_mapping: None,
+            case_sensitive: true,
+        };
+
+        let delete_filter = CachingDeleteFileLoader::new(file_io, 10)
+            .load_deletes(&task.deletes, schema)
+            .unwrap();
+
+        let data_a = delete_filter
+            .get_delete_vector_for_path("data-a.parquet")
+            .unwrap();
+        let data_b = delete_filter
+            .get_delete_vector_for_path("data-b.parquet")
+            .unwrap();
+        assert_eq!(data_a.lock().unwrap().cardinality(), 2);
+        assert_eq!(data_b.lock().unwrap().cardinality(), 3);
     }
 
     #[test]

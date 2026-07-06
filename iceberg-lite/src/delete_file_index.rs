@@ -17,7 +17,9 @@
 
 use crate::scan::{DeleteFileContext, FileScanTaskDeleteFile};
 use crate::spec::{DataContentType, DataFile, Struct};
+use crate::{Error, ErrorKind, Result};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
 /// Builder for constructing a `DeleteFileIndex`.
@@ -40,8 +42,8 @@ impl DeleteFileIndexBuilder {
     /// Insert a delete file context into the index.
     ///
     /// This method is thread-safe and can be called concurrently from multiple threads.
-    pub(crate) fn insert(&self, ctx: DeleteFileContext) {
-        self.inner.lock().unwrap().insert(ctx);
+    pub(crate) fn insert(&self, ctx: DeleteFileContext) -> Result<()> {
+        self.inner.lock().unwrap().insert(ctx)
     }
 
     /// Consume the builder and return an immutable, shareable `DeleteFileIndex`.
@@ -80,11 +82,11 @@ struct PopulatedDeleteFileIndex {
     eq_deletes_by_partition: HashMap<Struct, Vec<Arc<DeleteFileContext>>>,
     pos_deletes_by_partition: HashMap<Struct, Vec<Arc<DeleteFileContext>>>,
     pos_deletes_by_path: HashMap<String, Vec<Arc<DeleteFileContext>>>,
-    // TODO: Deletion Vector support
+    deletion_vectors_by_path: HashMap<String, Arc<DeleteFileContext>>,
 }
 
 impl PopulatedDeleteFileIndex {
-    fn insert(&mut self, ctx: DeleteFileContext) {
+    fn insert(&mut self, ctx: DeleteFileContext) -> Result<()> {
         let arc_ctx = Arc::new(ctx);
 
         // The spec states that "Equality delete files stored with an unpartitioned spec are applied as global deletes".
@@ -98,7 +100,7 @@ impl PopulatedDeleteFileIndex {
                     .is_empty()
                 {
                     self.global_equality_deletes.push(arc_ctx);
-                    return;
+                    return Ok(());
                 }
 
                 let partition =
@@ -109,14 +111,45 @@ impl PopulatedDeleteFileIndex {
                     .push(arc_ctx);
             }
             DataContentType::PositionDeletes => {
-                if let Some(target_path) = arc_ctx
-                    .manifest_entry
-                    .data_file()
-                    .position_delete_target_data_file_path()
-                    .map(str::to_owned)
+                let data_file = arc_ctx.manifest_entry.data_file();
+                if data_file.is_deletion_vector() {
+                    let target_path = data_file
+                        .referenced_data_file_path()
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::DataInvalid,
+                                format!(
+                                    "deletion vector {} is missing referenced_data_file",
+                                    data_file.file_path()
+                                ),
+                            )
+                        })?
+                        .to_owned();
+                    match self.deletion_vectors_by_path.entry(target_path) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(arc_ctx);
+                        }
+                        Entry::Occupied(entry) => {
+                            return Err(Error::new(
+                                ErrorKind::DataInvalid,
+                                format!(
+                                    "multiple deletion vectors apply to data file {}: {} and {}",
+                                    entry.key(),
+                                    entry
+                                        .get()
+                                        .manifest_entry
+                                        .data_file()
+                                        .file_path(),
+                                    data_file.file_path()
+                                ),
+                            ));
+                        }
+                    }
+                } else if let Some(target_path) =
+                    data_file.position_delete_target_data_file_path()
                 {
                     self.pos_deletes_by_path
-                        .entry(target_path)
+                        .entry(target_path.to_owned())
                         .or_insert_with(Vec::new)
                         .push(arc_ctx);
                 } else {
@@ -130,6 +163,8 @@ impl PopulatedDeleteFileIndex {
             }
             DataContentType::Data => unreachable!(),
         }
+
+        Ok(())
     }
 
     /// Determine all the delete files that apply to the provided `DataFile`.
@@ -166,6 +201,20 @@ impl PopulatedDeleteFileIndex {
                         && data_file.partition_spec_id == delete.partition_spec_id
                 })
                 .for_each(|delete| results.push(delete.as_ref().into()));
+        }
+
+        if let Some(deletion_vector) =
+            self.deletion_vectors_by_path.get(data_file.file_path())
+        {
+            let applies = seq_num
+                .map(|seq_num| {
+                    deletion_vector.manifest_entry.sequence_number() >= Some(seq_num)
+                })
+                .unwrap_or(true);
+            if applies {
+                results.push(deletion_vector.as_ref().into());
+                return results;
+            }
         }
 
         if let Some(deletes) =
@@ -240,7 +289,7 @@ mod tests {
 
         let builder = DeleteFileIndexBuilder::new();
         for ctx in delete_contexts {
-            builder.insert(ctx);
+            builder.insert(ctx).unwrap();
         }
         let delete_file_index = builder.build();
 
@@ -353,7 +402,7 @@ mod tests {
 
         let builder = DeleteFileIndexBuilder::new();
         for ctx in delete_contexts {
-            builder.insert(ctx);
+            builder.insert(ctx).unwrap();
         }
         let delete_file_index = builder.build();
 
@@ -448,10 +497,12 @@ mod tests {
             build_pos_delete_for_data_file(&partition, 0, data_file.file_path());
 
         let builder = DeleteFileIndexBuilder::new();
-        builder.insert(DeleteFileContext {
-            manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
-            partition_spec_id: 0,
-        });
+        builder
+            .insert(DeleteFileContext {
+                manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
+                partition_spec_id: 0,
+            })
+            .unwrap();
         let delete_file_index = builder.build();
 
         assert_eq!(
@@ -480,10 +531,12 @@ mod tests {
         );
 
         let builder = DeleteFileIndexBuilder::new();
-        builder.insert(DeleteFileContext {
-            manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
-            partition_spec_id: 0,
-        });
+        builder
+            .insert(DeleteFileContext {
+                manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
+                partition_spec_id: 0,
+            })
+            .unwrap();
         let delete_file_index = builder.build();
 
         assert_eq!(
@@ -509,10 +562,12 @@ mod tests {
         );
 
         let builder = DeleteFileIndexBuilder::new();
-        builder.insert(DeleteFileContext {
-            manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
-            partition_spec_id: 1,
-        });
+        builder
+            .insert(DeleteFileContext {
+                manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
+                partition_spec_id: 1,
+            })
+            .unwrap();
         let delete_file_index = builder.build();
 
         assert_eq!(
@@ -536,10 +591,12 @@ mod tests {
         );
 
         let builder = DeleteFileIndexBuilder::new();
-        builder.insert(DeleteFileContext {
-            manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
-            partition_spec_id: 0,
-        });
+        builder
+            .insert(DeleteFileContext {
+                manifest_entry: build_added_manifest_entry(5, &delete_file).into(),
+                partition_spec_id: 0,
+            })
+            .unwrap();
         let delete_file_index = builder.build();
 
         assert_eq!(

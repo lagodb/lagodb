@@ -51,6 +51,10 @@ where
     ))
 }
 
+fn default_delete_file_format() -> DataFileFormat {
+    DataFileFormat::Parquet
+}
+
 /// A task to scan part of file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TypedBuilder)]
 #[builder(field_defaults(setter(prefix = "with_")))]
@@ -80,6 +84,11 @@ pub struct FileScanTask {
 
     /// The format of the file to scan.
     pub data_file_format: DataFileFormat,
+
+    /// ID of the partition spec used to encode this data file's partition.
+    #[serde(default)]
+    #[builder(default)]
+    pub partition_spec_id: i32,
 
     /// The schema of the file to scan.
     pub schema: SchemaRef,
@@ -144,6 +153,16 @@ impl FileScanTask {
         self.predicate.as_ref()
     }
 
+    /// Replace the predicate used by the reader for this task.
+    ///
+    /// File planning and row filtering can intentionally use different
+    /// predicates: planning needs a stable pruning predicate, while repeated
+    /// reads of the same planned task list may need the current runtime row
+    /// predicate.
+    pub fn set_predicate(&mut self, predicate: Option<BoundPredicate>) {
+        self.predicate = predicate;
+    }
+
     /// Returns the schema of this file scan task as a reference
     pub fn schema(&self) -> &Schema {
         &self.schema
@@ -152,6 +171,11 @@ impl FileScanTask {
     /// Returns the schema of this file scan task as a SchemaRef
     pub fn schema_ref(&self) -> SchemaRef {
         self.schema.clone()
+    }
+
+    /// Returns the partition spec id for this file scan task.
+    pub fn partition_spec_id(&self) -> i32 {
+        self.partition_spec_id
     }
 }
 
@@ -163,12 +187,23 @@ pub(crate) struct DeleteFileContext {
 
 impl From<&DeleteFileContext> for FileScanTaskDeleteFile {
     fn from(ctx: &DeleteFileContext) -> Self {
+        let data_file = &ctx.manifest_entry.data_file;
+        let referenced_data_file = if data_file.is_deletion_vector() {
+            data_file.referenced_data_file_path()
+        } else {
+            data_file.position_delete_target_data_file_path()
+        };
         FileScanTaskDeleteFile {
             file_path: ctx.manifest_entry.file_path().to_string(),
             file_size_in_bytes: ctx.manifest_entry.file_size_in_bytes(),
             file_type: ctx.manifest_entry.content_type(),
+            file_format: ctx.manifest_entry.file_format(),
             partition_spec_id: ctx.partition_spec_id,
             equality_ids: ctx.manifest_entry.data_file.equality_ids.clone(),
+            referenced_data_file: referenced_data_file.map(str::to_owned),
+            content_offset: data_file.content_offset(),
+            content_size_in_bytes: data_file.content_size_in_bytes(),
+            record_count: data_file.record_count(),
         }
     }
 }
@@ -186,10 +221,75 @@ pub struct FileScanTaskDeleteFile {
     /// delete file type
     pub file_type: DataContentType,
 
+    /// delete file format
+    #[serde(default = "default_delete_file_format")]
+    #[builder(default = DataFileFormat::Parquet)]
+    pub file_format: DataFileFormat,
+
     /// partition id
     pub partition_spec_id: i32,
 
     /// equality ids for equality deletes (null for anything other than equality-deletes)
+    #[serde(default)]
     #[builder(default)]
     pub equality_ids: Option<Vec<i32>>,
+
+    /// Effective data file path referenced by file-scoped position deletes or
+    /// deletion vectors.
+    ///
+    /// For legacy Parquet position deletes this may be inferred from
+    /// `file_path` lower/upper bounds in the delete manifest entry, not only
+    /// from the manifest's explicit `referenced_data_file` field.
+    #[serde(default)]
+    #[builder(default)]
+    pub referenced_data_file: Option<String>,
+
+    /// Offset of a referenced Puffin blob for deletion vectors.
+    #[serde(default)]
+    #[builder(default)]
+    pub content_offset: Option<i64>,
+
+    /// Size of a referenced Puffin blob for deletion vectors.
+    #[serde(default)]
+    #[builder(default)]
+    pub content_size_in_bytes: Option<i64>,
+
+    /// Delete record count, or deletion-vector cardinality for Puffin DVs.
+    #[serde(default)]
+    #[builder(default)]
+    pub record_count: u64,
+}
+
+impl FileScanTaskDeleteFile {
+    /// Returns true when this scan task delete file is a position delete file.
+    pub fn is_position_delete(&self) -> bool {
+        self.file_type == DataContentType::PositionDeletes
+    }
+
+    /// Returns true when this scan task delete file is an Iceberg deletion
+    /// vector.
+    pub fn is_deletion_vector(&self) -> bool {
+        self.is_position_delete() && self.file_format == DataFileFormat::Puffin
+    }
+
+    /// Returns the effective target data file path for a file-scoped position
+    /// delete or deletion vector.
+    pub fn referenced_data_file_path(&self) -> Option<&str> {
+        self.referenced_data_file.as_deref()
+    }
+
+    /// Returns true when this is a legacy position delete that may contain
+    /// deletes for more than one data file.
+    pub fn is_broad_scoped_position_delete(&self) -> bool {
+        self.is_position_delete()
+            && !self.is_deletion_vector()
+            && self.referenced_data_file.is_none()
+    }
+
+    /// Returns true when a DV rewrite that has merged this effective
+    /// file-scoped delete can remove the old delete file from table metadata.
+    pub fn can_remove_after_dv_rewrite(&self) -> bool {
+        self.is_deletion_vector()
+            || (self.is_position_delete() && self.referenced_data_file.is_some())
+    }
 }

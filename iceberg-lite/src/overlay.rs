@@ -7,14 +7,178 @@
 //! code can later materialize the same logical changes through normal Iceberg
 //! metadata writes.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::scan::DeleteFileContext;
 use crate::spec::{
-    DataContentType, DataFile, ManifestEntry, ManifestEntryRef, ManifestStatus,
+    DataContentType, DataFile, ManifestContentType, ManifestEntry, ManifestEntryRef,
+    ManifestStatus,
 };
 use crate::{Error, ErrorKind, Result};
+
+/// Stable identity of a delete manifest entry.
+///
+/// Puffin deletion vectors can share one physical file path, so delete-file
+/// removal must include the blob offset and size when they are present.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeleteFileIdentity {
+    file_path: String,
+    content_offset: Option<i64>,
+    content_size_in_bytes: Option<i64>,
+}
+
+impl DeleteFileIdentity {
+    /// Creates a delete-file identity.
+    #[must_use]
+    pub fn new(
+        file_path: impl Into<String>,
+        content_offset: Option<i64>,
+        content_size_in_bytes: Option<i64>,
+    ) -> Self {
+        Self {
+            file_path: file_path.into(),
+            content_offset,
+            content_size_in_bytes,
+        }
+    }
+
+    /// Creates a delete-file identity from manifest data-file metadata.
+    #[must_use]
+    pub fn from_data_file(data_file: &DataFile) -> Self {
+        Self::new(
+            data_file.file_path(),
+            data_file.content_offset(),
+            data_file.content_size_in_bytes(),
+        )
+    }
+
+    /// Returns the delete file path.
+    #[must_use]
+    pub fn file_path(&self) -> &str {
+        &self.file_path
+    }
+
+    /// Returns the Puffin blob offset, if present.
+    #[must_use]
+    pub fn content_offset(&self) -> Option<i64> {
+        self.content_offset
+    }
+
+    /// Returns the Puffin blob size, if present.
+    #[must_use]
+    pub fn content_size_in_bytes(&self) -> Option<i64> {
+        self.content_size_in_bytes
+    }
+
+    fn cmp_data_file(&self, data_file: &DataFile) -> Ordering {
+        self.file_path
+            .as_str()
+            .cmp(data_file.file_path())
+            .then_with(|| self.content_offset.cmp(&data_file.content_offset()))
+            .then_with(|| {
+                self.content_size_in_bytes
+                    .cmp(&data_file.content_size_in_bytes())
+            })
+    }
+}
+
+/// Owned net-effect view of manifest entries removed by a snapshot delta.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SnapshotDeltaRemovals {
+    removed_data_paths: Vec<String>,
+    removed_delete_files: Vec<DeleteFileIdentity>,
+}
+
+impl SnapshotDeltaRemovals {
+    fn from_resolved(resolved: &ResolvedSnapshotDelta<'_>) -> Self {
+        // Resolved removals are sorted by the builder; preserve that order so
+        // lookups can use binary search without per-entry allocations.
+        Self {
+            removed_data_paths: resolved
+                .removed_data_paths
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect(),
+            removed_delete_files: resolved
+                .removed_delete_files
+                .iter()
+                .map(|identity| (*identity).clone())
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.removed_data_paths.is_empty() && self.removed_delete_files.is_empty()
+    }
+
+    pub(crate) fn removed_data_paths(&self) -> &[String] {
+        &self.removed_data_paths
+    }
+
+    pub(crate) fn removed_delete_files(&self) -> &[DeleteFileIdentity] {
+        &self.removed_delete_files
+    }
+}
+
+/// Lookup interface for manifest entries hidden by a resolved snapshot delta.
+pub(crate) trait SnapshotDeltaRemovalLookup {
+    /// Return true when this delta explicitly removes a committed data path.
+    fn has_removed_data_path(&self, path: &str) -> bool;
+
+    /// Return true when this delta explicitly removes this delete-file entry.
+    ///
+    /// This checks exact delete-file identity only. [`Self::removes_manifest_entry`]
+    /// also handles deletion vectors made obsolete by removing their referenced
+    /// data file.
+    fn has_removed_delete_file(&self, data_file: &DataFile) -> bool;
+
+    /// Return true when a committed manifest entry is hidden by this delta.
+    fn removes_manifest_entry(
+        &self,
+        manifest_content: ManifestContentType,
+        entry: &ManifestEntry,
+    ) -> bool {
+        match manifest_content {
+            ManifestContentType::Data => {
+                self.has_removed_data_path(entry.file_path())
+            }
+            ManifestContentType::Deletes => {
+                let data_file = entry.data_file();
+                self.has_removed_delete_file(data_file)
+                    || (data_file.is_deletion_vector()
+                        && data_file
+                            .referenced_data_file_path()
+                            .is_some_and(|path| self.has_removed_data_path(path)))
+            }
+        }
+    }
+
+    /// Return true when a committed manifest entry remains visible.
+    fn retains_manifest_entry(
+        &self,
+        manifest_content: ManifestContentType,
+        entry: &ManifestEntry,
+    ) -> bool {
+        !self.removes_manifest_entry(manifest_content, entry)
+    }
+}
+
+impl SnapshotDeltaRemovalLookup for SnapshotDeltaRemovals {
+    fn has_removed_data_path(&self, path: &str) -> bool {
+        self.removed_data_paths
+            .binary_search_by(|removed| removed.as_str().cmp(path))
+            .is_ok()
+    }
+
+    fn has_removed_delete_file(&self, data_file: &DataFile) -> bool {
+        self.removed_delete_files
+            .binary_search_by(|identity| identity.cmp_data_file(data_file))
+            .is_ok()
+    }
+}
 
 /// File-level statistics exposed by a transaction-local [`SnapshotDelta`].
 ///
@@ -42,6 +206,7 @@ pub(crate) struct ResolvedSnapshotDelta<'a> {
     pub(crate) added_data_files: Vec<ResolvedDataFile<'a>>,
     pub(crate) position_delete_files: Vec<ResolvedPositionDeleteFile<'a>>,
     pub(crate) removed_data_paths: Vec<&'a str>,
+    pub(crate) removed_delete_files: Vec<&'a DeleteFileIdentity>,
     pub(crate) added_file_paths: Vec<&'a str>,
 }
 
@@ -57,6 +222,10 @@ pub(crate) struct ResolvedPositionDeleteFile<'a> {
 }
 
 impl ResolvedSnapshotDelta<'_> {
+    pub(crate) fn removals(&self) -> SnapshotDeltaRemovals {
+        SnapshotDeltaRemovals::from_resolved(self)
+    }
+
     pub(crate) fn data_manifest_entries(
         &self,
         base_sequence_number: i64,
@@ -97,6 +266,20 @@ impl ResolvedSnapshotDelta<'_> {
     }
 }
 
+impl SnapshotDeltaRemovalLookup for ResolvedSnapshotDelta<'_> {
+    fn has_removed_data_path(&self, path: &str) -> bool {
+        self.removed_data_paths
+            .binary_search_by(|removed| (*removed).cmp(path))
+            .is_ok()
+    }
+
+    fn has_removed_delete_file(&self, data_file: &DataFile) -> bool {
+        self.removed_delete_files
+            .binary_search_by(|identity| identity.cmp_data_file(data_file))
+            .is_ok()
+    }
+}
+
 /// A rollback marker for [`SnapshotDelta`].
 ///
 /// Savepoints should store a marker before adding operations and pass it back
@@ -112,8 +295,9 @@ pub struct SnapshotDeltaMarker {
 pub struct SnapshotDelta {
     ops: Vec<DeltaOp>,
     added_data_file_paths: HashSet<String>,
-    added_delete_file_paths: HashSet<String>,
+    added_delete_files: HashSet<DeleteFileIdentity>,
     removed_data_paths: HashSet<String>,
+    removed_delete_files: HashSet<DeleteFileIdentity>,
     next_ordinal: i64,
 }
 
@@ -131,6 +315,7 @@ enum DeltaOpKind {
         referenced_data_files: Vec<String>,
     },
     RemoveDataFile(String),
+    RemoveDeleteFile(DeleteFileIdentity),
 }
 
 impl Default for SnapshotDelta {
@@ -138,8 +323,9 @@ impl Default for SnapshotDelta {
         Self {
             ops: Vec::new(),
             added_data_file_paths: HashSet::new(),
-            added_delete_file_paths: HashSet::new(),
+            added_delete_files: HashSet::new(),
             removed_data_paths: HashSet::new(),
+            removed_delete_files: HashSet::new(),
             next_ordinal: 1,
         }
     }
@@ -184,7 +370,7 @@ impl SnapshotDelta {
                 "snapshot delta data file must have data content type",
             ));
         }
-        self.ensure_can_add_path(data_file.file_path())?;
+        self.ensure_can_add_data_path(data_file.file_path())?;
         self.push(DeltaOpKind::AddData(Arc::new(data_file)))?;
         Ok(self)
     }
@@ -217,7 +403,7 @@ impl SnapshotDelta {
             ));
         }
 
-        self.ensure_can_add_path(delete_file.file_path())?;
+        self.ensure_can_add_delete_file(&delete_file)?;
         self.push(DeltaOpKind::AddPositionDelete {
             file: Arc::new(delete_file),
             referenced_data_files,
@@ -237,7 +423,11 @@ impl SnapshotDelta {
                 "snapshot delta remove requires a non-empty file path",
             ));
         }
-        if self.added_delete_file_paths.contains(&file_path) {
+        if self
+            .added_delete_files
+            .iter()
+            .any(|identity| identity.file_path() == file_path)
+        {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
                 format!(
@@ -254,6 +444,30 @@ impl SnapshotDelta {
             ));
         }
         self.push(DeltaOpKind::RemoveDataFile(file_path))?;
+        Ok(self)
+    }
+
+    /// Remove a delete manifest entry from the overlaid snapshot.
+    pub fn remove_delete_file(
+        &mut self,
+        identity: DeleteFileIdentity,
+    ) -> Result<&mut Self> {
+        if identity.file_path().is_empty() {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "snapshot delta remove delete requires a non-empty file path",
+            ));
+        }
+        if self.removed_delete_files.contains(&identity) {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "snapshot delta cannot remove an already removed delete file: {}",
+                    identity.file_path()
+                ),
+            ));
+        }
+        self.push(DeltaOpKind::RemoveDeleteFile(identity))?;
         Ok(self)
     }
 
@@ -286,6 +500,35 @@ impl SnapshotDelta {
         stats
     }
 
+    /// Return the currently visible transaction-local data files.
+    #[must_use]
+    pub fn added_data_files(&self) -> Vec<DataFile> {
+        self.resolve()
+            .added_data_files
+            .into_iter()
+            .map(|data_file| data_file.file.clone())
+            .collect()
+    }
+
+    /// Return the currently visible transaction-local position delete files.
+    ///
+    /// Multi-target position delete files are expanded into one clone per
+    /// referenced data file so callers can reason about file-scoped deletes
+    /// without depending on the delta's internal representation.
+    #[must_use]
+    pub fn position_delete_files(&self) -> Vec<DataFile> {
+        let resolved = self.resolve();
+        let mut files = Vec::new();
+        for delete_file in resolved.position_delete_files {
+            for referenced_data_file in delete_file.referenced_data_files {
+                let mut file = delete_file.file.clone();
+                file.referenced_data_file = Some(referenced_data_file.to_owned());
+                files.push(file);
+            }
+        }
+        files
+    }
+
     pub(crate) fn resolve(&self) -> ResolvedSnapshotDelta<'_> {
         let mut builder = ResolvedSnapshotDeltaBuilder::default();
         for op in &self.ops {
@@ -304,10 +547,8 @@ impl SnapshotDelta {
         Ok(())
     }
 
-    fn ensure_can_add_path(&self, file_path: &str) -> Result<()> {
-        if self.added_data_file_paths.contains(file_path)
-            || self.added_delete_file_paths.contains(file_path)
-        {
+    fn ensure_can_add_data_path(&self, file_path: &str) -> Result<()> {
+        if self.added_data_file_paths.contains(file_path) {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
                 format!("duplicate file path in snapshot delta: {file_path}"),
@@ -318,6 +559,20 @@ impl SnapshotDelta {
                 ErrorKind::DataInvalid,
                 format!(
                     "snapshot delta cannot re-add a removed file path: {file_path}"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_can_add_delete_file(&self, delete_file: &DataFile) -> Result<()> {
+        let identity = DeleteFileIdentity::from_data_file(delete_file);
+        if self.added_delete_files.contains(&identity) {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "duplicate delete file in snapshot delta: {}",
+                    identity.file_path()
                 ),
             ));
         }
@@ -340,37 +595,42 @@ impl SnapshotDelta {
 
     fn rebuild_path_indexes(&mut self) {
         let mut added_data_file_paths = HashSet::new();
-        let mut added_delete_file_paths = HashSet::new();
+        let mut added_delete_files = HashSet::new();
         let mut removed_data_paths = HashSet::new();
+        let mut removed_delete_files = HashSet::new();
 
         for op in &self.ops {
             Self::index_kind(
                 &op.kind,
                 &mut added_data_file_paths,
-                &mut added_delete_file_paths,
+                &mut added_delete_files,
                 &mut removed_data_paths,
+                &mut removed_delete_files,
             );
         }
 
         self.added_data_file_paths = added_data_file_paths;
-        self.added_delete_file_paths = added_delete_file_paths;
+        self.added_delete_files = added_delete_files;
         self.removed_data_paths = removed_data_paths;
+        self.removed_delete_files = removed_delete_files;
     }
 
     fn index_op(&mut self, kind: &DeltaOpKind) {
         Self::index_kind(
             kind,
             &mut self.added_data_file_paths,
-            &mut self.added_delete_file_paths,
+            &mut self.added_delete_files,
             &mut self.removed_data_paths,
+            &mut self.removed_delete_files,
         );
     }
 
     fn index_kind(
         kind: &DeltaOpKind,
         added_data_file_paths: &mut HashSet<String>,
-        added_delete_file_paths: &mut HashSet<String>,
+        added_delete_files: &mut HashSet<DeleteFileIdentity>,
         removed_data_paths: &mut HashSet<String>,
+        removed_delete_files: &mut HashSet<DeleteFileIdentity>,
     ) {
         match kind {
             DeltaOpKind::AddData(data_file) => {
@@ -378,11 +638,13 @@ impl SnapshotDelta {
                 added_data_file_paths.insert(file_path);
             }
             DeltaOpKind::AddPositionDelete { file, .. } => {
-                let file_path = file.file_path().to_owned();
-                added_delete_file_paths.insert(file_path);
+                added_delete_files.insert(DeleteFileIdentity::from_data_file(file));
             }
             DeltaOpKind::RemoveDataFile(path) => {
                 removed_data_paths.insert(path.clone());
+            }
+            DeltaOpKind::RemoveDeleteFile(identity) => {
+                removed_delete_files.insert(identity.clone());
             }
         }
     }
@@ -421,8 +683,10 @@ struct ResolvedSnapshotDeltaBuilder<'a> {
     added_data_index: HashMap<&'a str, usize>,
     canceled_added_paths: HashSet<&'a str>,
     removed_paths: HashSet<&'a str>,
+    removed_delete_files: HashSet<&'a DeleteFileIdentity>,
     added_file_paths: HashSet<&'a str>,
-    position_delete_files: Vec<PendingPositionDeleteResolution<'a>>,
+    position_delete_files: Vec<Option<PendingPositionDeleteResolution<'a>>>,
+    position_delete_index: HashMap<DeleteFileIdentity, usize>,
 }
 
 struct PendingPositionDeleteResolution<'a> {
@@ -448,12 +712,16 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
                 file,
                 referenced_data_files,
             } => {
-                self.position_delete_files
-                    .push(PendingPositionDeleteResolution {
+                let identity = DeleteFileIdentity::from_data_file(file);
+                let index = self.position_delete_files.len();
+                self.position_delete_index.insert(identity, index);
+                self.position_delete_files.push(Some(
+                    PendingPositionDeleteResolution {
                         file: file.as_ref(),
                         referenced_data_files: referenced_data_files.as_slice(),
                         ordinal: op.ordinal,
-                    });
+                    },
+                ));
             }
             DeltaOpKind::RemoveDataFile(path) => {
                 let path = path.as_str();
@@ -465,13 +733,21 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
                     self.removed_paths.insert(path);
                 }
             }
+            DeltaOpKind::RemoveDeleteFile(identity) => {
+                if let Some(index) = self.position_delete_index.remove(identity) {
+                    self.position_delete_files[index] = None;
+                    self.added_file_paths.remove(identity.file_path());
+                } else {
+                    self.removed_delete_files.insert(identity);
+                }
+            }
         }
     }
 
     fn build(mut self) -> ResolvedSnapshotDelta<'a> {
         let added_data_files = self.added_data_files.into_iter().flatten().collect();
         let mut position_delete_files = Vec::new();
-        for pending in self.position_delete_files {
+        for pending in self.position_delete_files.into_iter().flatten() {
             let mut referenced_data_files: Vec<&str> = pending
                 .referenced_data_files
                 .iter()
@@ -498,6 +774,10 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
             self.removed_paths.into_iter().collect();
         removed_data_paths.sort_unstable();
 
+        let mut removed_delete_files: Vec<&DeleteFileIdentity> =
+            self.removed_delete_files.into_iter().collect();
+        removed_delete_files.sort_unstable();
+
         let mut added_file_paths: Vec<&str> =
             self.added_file_paths.into_iter().collect();
         added_file_paths.sort_unstable();
@@ -506,6 +786,7 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
             added_data_files,
             position_delete_files,
             removed_data_paths,
+            removed_delete_files,
             added_file_paths,
         }
     }
@@ -665,6 +946,47 @@ mod tests {
         assert_eq!(stats.removed_data_paths, vec!["file-a.parquet".to_owned()]);
     }
 
+    #[test]
+    fn resolved_removals_match_delete_file_identity() {
+        let removed_delete =
+            deletion_vector_file("delete-a.puffin", "data-a.parquet", 10, 100);
+        let retained_delete =
+            deletion_vector_file("delete-a.puffin", "data-a.parquet", 20, 100);
+        let mut delta = SnapshotDelta::new();
+        delta
+            .remove_delete_file(DeleteFileIdentity::from_data_file(&removed_delete))
+            .unwrap();
+        let resolved = delta.resolve();
+
+        assert!(resolved.has_removed_delete_file(&removed_delete));
+        assert!(!resolved.has_removed_delete_file(&retained_delete));
+    }
+
+    #[test]
+    fn resolved_removals_remove_dv_for_removed_data_file() {
+        let removed_data = data_file("data-a.parquet");
+        let dv_for_removed_data =
+            deletion_vector_file("delete-a.puffin", "data-a.parquet", 10, 100);
+        let dv_for_live_data =
+            deletion_vector_file("delete-b.puffin", "data-b.parquet", 10, 100);
+        let mut delta = SnapshotDelta::new();
+        delta.remove_data_file(removed_data.file_path()).unwrap();
+        let resolved = delta.resolve();
+
+        assert!(resolved.removes_manifest_entry(
+            ManifestContentType::Data,
+            &manifest_entry(removed_data),
+        ));
+        assert!(resolved.removes_manifest_entry(
+            ManifestContentType::Deletes,
+            &manifest_entry(dv_for_removed_data),
+        ));
+        assert!(resolved.retains_manifest_entry(
+            ManifestContentType::Deletes,
+            &manifest_entry(dv_for_live_data),
+        ));
+    }
+
     fn data_file(path: &str) -> DataFile {
         data_file_with_metrics(path, 1, 100)
     }
@@ -693,5 +1015,36 @@ mod tests {
 
     fn position_delete_file(path: &str) -> DataFile {
         data_file_with_content(DataContentType::PositionDeletes, path, 1, 100)
+    }
+
+    fn deletion_vector_file(
+        path: &str,
+        referenced_data_file: &str,
+        offset: i64,
+        size: i64,
+    ) -> DataFile {
+        DataFileBuilder::default()
+            .content(DataContentType::PositionDeletes)
+            .file_path(path.to_owned())
+            .file_format(DataFileFormat::Puffin)
+            .partition(Struct::empty())
+            .partition_spec_id(0)
+            .record_count(1)
+            .file_size_in_bytes(100)
+            .referenced_data_file(Some(referenced_data_file.to_owned()))
+            .content_offset(Some(offset))
+            .content_size_in_bytes(Some(size))
+            .build()
+            .unwrap()
+    }
+
+    fn manifest_entry(data_file: DataFile) -> ManifestEntry {
+        ManifestEntry::builder()
+            .status(ManifestStatus::Added)
+            .snapshot_id(1)
+            .sequence_number(1)
+            .file_sequence_number(1)
+            .data_file(data_file)
+            .build()
     }
 }

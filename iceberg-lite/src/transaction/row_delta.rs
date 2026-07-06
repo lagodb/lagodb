@@ -22,10 +22,10 @@ use uuid::Uuid;
 
 use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluator;
 use crate::expr::{Bind, BoundPredicate, Predicate};
-use crate::overlay::SnapshotDelta;
+use crate::overlay::{SnapshotDelta, SnapshotDeltaRemovalLookup};
 use crate::spec::{
-    DataContentType, IsolationLevel, ManifestContentType, ManifestEntry,
-    ManifestStatus, SnapshotRef,
+    DataContentType, DataFileFormat, IsolationLevel, ManifestContentType,
+    ManifestEntry, ManifestStatus, SnapshotRef,
 };
 use crate::table::Table;
 use crate::transaction::action::{ActionCommit, TransactionAction};
@@ -240,11 +240,55 @@ impl<'a> RowDeltaValidator<'a> {
             self.validate_no_conflicting_delete_files(validation, &snapshot_ids)?;
         }
 
+        self.validate_no_concurrent_deletion_vectors(validation, &snapshot_ids)?;
+
         if validation.isolation_level == IsolationLevel::Serializable {
             self.validate_no_conflicting_data_files(validation, &snapshot_ids)?;
         }
 
         Ok(())
+    }
+
+    fn validate_no_concurrent_deletion_vectors(
+        &self,
+        validation: &RowDeltaValidation,
+        snapshot_ids: &BTreeSet<i64>,
+    ) -> Result<()> {
+        if snapshot_ids.is_empty()
+            || validation.referenced_data_files.is_empty()
+            || !self.plan.position_delete_files.iter().any(|file| {
+                file.content_type() == DataContentType::PositionDeletes
+                    && file.file_format() == DataFileFormat::Puffin
+            })
+        {
+            return Ok(());
+        }
+
+        let conflicts = self.find_conflicting_entries(
+            ManifestContentType::Deletes,
+            snapshot_ids,
+            |entry| {
+                if !Self::is_added_in_history(entry, snapshot_ids)
+                    || entry.content_type() != DataContentType::PositionDeletes
+                    || entry.data_file().file_format() != DataFileFormat::Puffin
+                {
+                    return Ok(false);
+                }
+
+                Ok(entry.data_file().referenced_data_file_path().is_some_and(
+                    |path| validation.referenced_data_files.contains(path),
+                ))
+            },
+        )?;
+
+        if conflicts.is_empty() {
+            return Ok(());
+        }
+
+        Err(self.conflict_error(format!(
+            "row delta conflicts with deletion vectors added after scan snapshot: {} conflicting deletion vectors",
+            conflicts.len()
+        )))
     }
 
     fn live_data_file_paths_for(
@@ -268,8 +312,8 @@ impl<'a> RowDeltaValidator<'a> {
             .iter()
             .filter_map(|path| {
                 self.plan
-                    .removed_paths
-                    .contains(path)
+                    .removals
+                    .has_removed_data_path(path)
                     .then_some(path.as_str())
             })
             .collect();
@@ -398,7 +442,7 @@ impl<'a> RowDeltaValidator<'a> {
                 match entry.data_file().position_delete_target_data_file_path() {
                     Some(target) => {
                         Ok(validation.referenced_data_files.contains(target)
-                            || self.plan.removed_paths.contains(target))
+                            || self.plan.removals.has_removed_data_path(target))
                     }
                     // A position delete without a referenced data file can
                     // target rows in any data file, so it must be treated

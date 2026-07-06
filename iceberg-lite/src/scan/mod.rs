@@ -23,7 +23,6 @@ mod context;
 use context::*;
 mod task;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -35,10 +34,11 @@ use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluato
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::io::FileIO;
 use crate::metadata_columns::{get_metadata_field_id, is_metadata_column_name};
-use crate::overlay::SnapshotDelta;
+use crate::overlay::{SnapshotDelta, SnapshotDeltaRemovalLookup};
 
 use crate::spec::{
-    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, NameMapping, SnapshotRef,
+    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, ManifestContentType, NameMapping,
+    SnapshotRef,
 };
 use crate::table::Table;
 use crate::util::available_parallelism;
@@ -444,24 +444,28 @@ impl TableScan {
             for entry in entries {
                 if let Some(delete_ctx) = Self::process_delete_manifest_entry(entry)?
                 {
-                    builder.insert(delete_ctx);
+                    if resolved_delta.as_ref().is_some_and(|delta| {
+                        !delta.retains_manifest_entry(
+                            ManifestContentType::Deletes,
+                            delete_ctx.manifest_entry.as_ref(),
+                        )
+                    }) {
+                        continue;
+                    }
+                    builder.insert(delete_ctx)?;
                 }
             }
         }
         if let Some(delta) = resolved_delta.as_ref() {
             let base_sequence_number = plan_context.base_sequence_number();
             for delete_ctx in delta.delete_file_contexts(base_sequence_number)? {
-                builder.insert(delete_ctx);
+                builder.insert(delete_ctx)?;
             }
         }
 
         // 2. Build the immutable index and distribute to data manifest contexts
         let delete_file_index = builder.build();
         let mut file_scan_tasks = Vec::new();
-        let removed_data_paths: HashSet<&str> = resolved_delta
-            .as_ref()
-            .map(|delta| delta.removed_data_paths.iter().copied().collect())
-            .unwrap_or_default();
 
         for ctx in &mut data_manifest_contexts {
             // Clone is cheap: only increments Arc reference count
@@ -469,7 +473,12 @@ impl TableScan {
 
             let entries = ctx.fetch_manifest_entries()?;
             for entry in entries {
-                if removed_data_paths.contains(entry.manifest_entry.file_path()) {
+                if resolved_delta.as_ref().is_some_and(|delta| {
+                    !delta.retains_manifest_entry(
+                        ManifestContentType::Data,
+                        entry.manifest_entry.as_ref(),
+                    )
+                }) {
                     continue;
                 }
                 if let Some(task) = Self::process_data_manifest_entry(entry)? {
@@ -2242,6 +2251,7 @@ pub mod tests {
             record_count: Some(100),
             first_row_id: None,
             data_file_format: DataFileFormat::Parquet,
+            partition_spec_id: 0,
             deletes: vec![],
             partition: None,
             partition_spec: None,
@@ -2262,6 +2272,7 @@ pub mod tests {
             record_count: None,
             first_row_id: None,
             data_file_format: DataFileFormat::Avro,
+            partition_spec_id: 0,
             deletes: vec![],
             partition: None,
             partition_spec: None,

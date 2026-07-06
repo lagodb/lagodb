@@ -26,7 +26,8 @@ use crate::scan::{
 };
 use crate::spec::{
     FirstRowIdInheritance, ManifestContentType, ManifestEntryRef, ManifestFile,
-    ManifestList, NameMapping, SchemaRef, SnapshotRef, TableMetadataRef,
+    ManifestList, NameMapping, PartitionSpecRef, SchemaRef, SnapshotRef,
+    TableMetadataRef,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -44,6 +45,7 @@ pub(crate) struct ManifestFileContext {
     pub delete_file_index: Option<DeleteFileIndex>,
     pub name_mapping: Option<Arc<NameMapping>>,
     pub case_sensitive: bool,
+    pub partition_spec: PartitionSpecRef,
 }
 
 /// Wraps a [`ManifestEntryRef`] alongside the objects that are needed
@@ -56,6 +58,7 @@ pub(crate) struct ManifestEntryContext {
     pub bound_predicates: Option<Arc<BoundPredicates>>,
     pub snapshot_bound_predicate: Option<Arc<BoundPredicate>>,
     pub partition_spec_id: i32,
+    pub partition_spec: PartitionSpecRef,
     pub snapshot_schema: SchemaRef,
     pub delete_file_index: Option<DeleteFileIndex>,
     pub name_mapping: Option<Arc<NameMapping>>,
@@ -80,6 +83,7 @@ impl ManifestFileContext {
                 expression_evaluator_cache: self.expression_evaluator_cache.clone(),
                 field_ids: self.field_ids.clone(),
                 partition_spec_id: self.manifest_file.partition_spec_id,
+                partition_spec: self.partition_spec.clone(),
                 bound_predicates: self.bound_predicates.clone(),
                 snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
                 snapshot_schema: self.snapshot_schema.clone(),
@@ -122,6 +126,7 @@ impl ManifestEntryContext {
 
             data_file_path: self.manifest_entry.file_path().to_string(),
             data_file_format: self.manifest_entry.file_format(),
+            partition_spec_id: self.partition_spec_id,
 
             schema: self.snapshot_schema,
             project_field_ids: self.field_ids.to_vec(),
@@ -134,8 +139,7 @@ impl ManifestEntryContext {
 
             // Include partition data and spec from manifest entry
             partition: Some(self.manifest_entry.data_file.partition.clone()),
-            // TODO: Pass actual PartitionSpec through context chain for native flow
-            partition_spec: None,
+            partition_spec: Some(self.partition_spec),
             name_mapping: self.name_mapping,
             case_sensitive: self.case_sensitive,
         })
@@ -187,12 +191,14 @@ impl PlanContext {
         partition_spec_id: i32,
         bound_predicates: Option<Arc<BoundPredicates>>,
         delete_file_index: Option<DeleteFileIndex>,
-    ) -> ManifestEntryContext {
-        ManifestEntryContext {
+    ) -> Result<ManifestEntryContext> {
+        let partition_spec = self.partition_spec(partition_spec_id)?;
+        Ok(ManifestEntryContext {
             manifest_entry,
             expression_evaluator_cache: self.expression_evaluator_cache.clone(),
             field_ids: self.field_ids.clone(),
             partition_spec_id,
+            partition_spec,
             bound_predicates,
             snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
             snapshot_schema: self.snapshot_schema.clone(),
@@ -200,7 +206,7 @@ impl PlanContext {
             name_mapping: self.name_mapping.clone(),
             first_row_id: None,
             case_sensitive: self.case_sensitive,
-        }
+        })
     }
 
     pub(crate) fn create_delta_manifest_entry_context(
@@ -215,12 +221,12 @@ impl PlanContext {
             None
         };
         let bound_predicates = self.bound_predicates(partition_filter);
-        Ok(self.create_manifest_entry_context(
+        self.create_manifest_entry_context(
             manifest_entry,
             partition_spec_id,
             bound_predicates,
             delete_file_index,
-        ))
+        )
     }
 
     fn get_partition_filter(
@@ -250,6 +256,18 @@ impl PlanContext {
                 .as_ref()
                 .bind(self.snapshot_schema.clone(), self.case_sensitive)?,
         )
+    }
+
+    fn partition_spec(&self, partition_spec_id: i32) -> Result<PartitionSpecRef> {
+        self.table_metadata
+            .partition_spec_by_id(partition_spec_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("unknown partition spec id {partition_spec_id}"),
+                )
+            })
     }
 
     /// Build manifest file contexts, separating data and delete manifests.
@@ -287,7 +305,7 @@ impl PlanContext {
             let mfc = self.create_manifest_file_context(
                 manifest_file,
                 partition_bound_predicate,
-            );
+            )?;
 
             match manifest_file.content {
                 ManifestContentType::Data => data_manifest_contexts.push(mfc),
@@ -302,10 +320,11 @@ impl PlanContext {
         &self,
         manifest_file: &ManifestFile,
         partition_filter: Option<Arc<BoundPredicate>>,
-    ) -> ManifestFileContext {
+    ) -> Result<ManifestFileContext> {
         let bound_predicates = self.bound_predicates(partition_filter);
+        let partition_spec = self.partition_spec(manifest_file.partition_spec_id)?;
 
-        ManifestFileContext {
+        Ok(ManifestFileContext {
             manifest_file: manifest_file.clone(),
             bound_predicates,
             snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
@@ -316,7 +335,8 @@ impl PlanContext {
             delete_file_index: None,
             name_mapping: self.name_mapping.clone(),
             case_sensitive: self.case_sensitive,
-        }
+            partition_spec,
+        })
     }
 
     fn bound_predicates(

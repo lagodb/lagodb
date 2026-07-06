@@ -20,7 +20,10 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::overlay::{ResolvedSnapshotDelta, SnapshotDelta};
+use crate::overlay::{
+    DeleteFileIdentity, ResolvedSnapshotDelta, SnapshotDelta,
+    SnapshotDeltaRemovalLookup, SnapshotDeltaRemovals,
+};
 use crate::spec::{
     DataContentType, DataFile, DataFileFormat, FirstRowIdInheritance, FormatVersion,
     MAIN_BRANCH, ManifestContentType, ManifestFile, ManifestListWriter,
@@ -116,7 +119,7 @@ impl TransactionAction for SnapshotDeltaAction {
 pub(super) struct DeltaPlan {
     pub(super) added_data_files: Vec<DataFile>,
     pub(super) position_delete_files: Vec<DataFile>,
-    pub(super) removed_paths: HashSet<String>,
+    pub(super) removals: SnapshotDeltaRemovals,
     pub(super) added_file_paths: HashSet<String>,
     pub(super) referenced_data_files: BTreeSet<String>,
 }
@@ -127,6 +130,7 @@ impl DeltaPlan {
     }
 
     fn from_resolved(resolved: ResolvedSnapshotDelta<'_>) -> Self {
+        let removals = resolved.removals();
         let added_data_files = resolved
             .added_data_files
             .into_iter()
@@ -164,11 +168,7 @@ impl DeltaPlan {
         Self {
             added_data_files,
             position_delete_files,
-            removed_paths: resolved
-                .removed_data_paths
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            removals,
             added_file_paths: resolved
                 .added_file_paths
                 .into_iter()
@@ -181,13 +181,13 @@ impl DeltaPlan {
     pub(super) fn is_empty(&self) -> bool {
         self.added_data_files.is_empty()
             && self.position_delete_files.is_empty()
-            && self.removed_paths.is_empty()
+            && self.removals.is_empty()
     }
 
     fn operation(&self) -> Operation {
         let has_adds = !self.added_data_files.is_empty();
         let has_deletes =
-            !self.position_delete_files.is_empty() || !self.removed_paths.is_empty();
+            !self.position_delete_files.is_empty() || !self.removals.is_empty();
 
         match (has_adds, has_deletes) {
             (true, false) => Operation::Append,
@@ -234,14 +234,72 @@ impl<'a> DeltaSnapshotProducer<'a> {
             ));
         }
 
+        let mut added_dv_targets = HashSet::new();
         for data_file in &plan.added_data_files {
             self.validate_data_file(data_file, DataContentType::Data)?;
         }
         for delete_file in &plan.position_delete_files {
             self.validate_data_file(delete_file, DataContentType::PositionDeletes)?;
+            self.validate_position_delete_file_for_version(delete_file)?;
+            if Self::is_deletion_vector(delete_file) {
+                let target = delete_file.referenced_data_file_path().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        "deletion vector delete file must set referenced_data_file",
+                    )
+                })?;
+                if !added_dv_targets.insert(target.to_owned()) {
+                    return Err(Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "snapshot delta contains multiple deletion vectors for data file {target}"
+                        ),
+                    ));
+                }
+            }
         }
 
         Ok(())
+    }
+
+    fn validate_position_delete_file_for_version(
+        &self,
+        delete_file: &DataFile,
+    ) -> Result<()> {
+        match self.table.metadata().format_version() {
+            FormatVersion::V1 => unreachable!("v1 delete files are rejected earlier"),
+            FormatVersion::V2 => {
+                if delete_file.file_format() == DataFileFormat::Puffin {
+                    return Err(Error::new(
+                        ErrorKind::FeatureUnsupported,
+                        "deletion vectors require Iceberg table format v3 or newer",
+                    ));
+                }
+            }
+            FormatVersion::V3 => {
+                if !Self::is_deletion_vector(delete_file) {
+                    return Err(Error::new(
+                        ErrorKind::FeatureUnsupported,
+                        "Iceberg table format v3 requires new position deletes to be deletion vectors",
+                    ));
+                }
+                if delete_file.content_offset().is_none()
+                    || delete_file.content_size_in_bytes().is_none()
+                {
+                    return Err(Error::new(
+                        ErrorKind::DataInvalid,
+                        "deletion vector delete file must set content_offset and content_size_in_bytes",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_deletion_vector(delete_file: &DataFile) -> bool {
+        delete_file.content_type() == DataContentType::PositionDeletes
+            && delete_file.file_format() == DataFileFormat::Puffin
     }
 
     fn validate_data_file(
@@ -308,8 +366,8 @@ impl<'a> DeltaSnapshotProducer<'a> {
     pub(super) fn commit(mut self, plan: DeltaPlan) -> Result<ActionCommit> {
         let operation = plan.operation();
         let mut summary_collector = self.new_summary_collector();
-        let mut manifests = self
-            .rewrite_removed_manifests(&plan.removed_paths, &mut summary_collector)?;
+        let mut manifests =
+            self.rewrite_removed_manifests(&plan.removals, &mut summary_collector)?;
 
         self.write_added_manifests(
             ManifestContentType::Data,
@@ -363,11 +421,11 @@ impl<'a> DeltaSnapshotProducer<'a> {
 
     fn rewrite_removed_manifests(
         &mut self,
-        removed_paths: &HashSet<String>,
+        removals: &SnapshotDeltaRemovals,
         summary_collector: &mut SnapshotSummaryCollector,
     ) -> Result<Vec<ManifestFile>> {
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
-            if removed_paths.is_empty() {
+            if removals.is_empty() {
                 return Ok(Vec::new());
             }
             return Err(Error::new(
@@ -379,7 +437,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
         let manifest_list = current_snapshot
             .load_manifest_list(self.table.file_io(), &self.table.metadata_ref())?;
 
-        if removed_paths.is_empty() {
+        if removals.is_empty() {
             // Carry existing manifests directly from the manifest list. No
             // entries can be affected when this delta does not remove files.
             let mut manifests = Vec::with_capacity(manifest_list.entries().len());
@@ -395,18 +453,21 @@ impl<'a> DeltaSnapshotProducer<'a> {
 
         let mut manifests = Vec::new();
         let mut found_removed_paths = HashSet::new();
+        let mut found_removed_delete_files = HashSet::new();
         for manifest_file in manifest_list.entries() {
             let manifest = manifest_file.load_manifest(self.table.file_io())?;
             let is_affected = manifest.entries().iter().any(|entry| {
-                entry.is_alive() && removed_paths.contains(entry.file_path())
+                entry.is_alive()
+                    && removals.removes_manifest_entry(manifest_file.content, entry)
             });
 
             if is_affected {
                 let rewritten = self.rewrite_manifest(
                     manifest_file,
                     manifest.entries(),
-                    removed_paths,
+                    removals,
                     &mut found_removed_paths,
+                    &mut found_removed_delete_files,
                     summary_collector,
                 )?;
                 manifests.push(rewritten);
@@ -417,11 +478,13 @@ impl<'a> DeltaSnapshotProducer<'a> {
             }
         }
 
-        if found_removed_paths.len() != removed_paths.len() {
-            let mut missing: Vec<&str> = removed_paths
+        if found_removed_paths.len() != removals.removed_data_paths().len() {
+            let mut missing: Vec<&str> = removals
+                .removed_data_paths()
                 .iter()
                 .filter_map(|path| {
-                    (!found_removed_paths.contains(path)).then_some(path.as_str())
+                    (!found_removed_paths.contains(path.as_str()))
+                        .then_some(path.as_str())
                 })
                 .collect();
             missing.sort_unstable();
@@ -434,6 +497,25 @@ impl<'a> DeltaSnapshotProducer<'a> {
             ));
         }
 
+        if found_removed_delete_files.len() != removals.removed_delete_files().len() {
+            let mut missing: Vec<&str> = removals
+                .removed_delete_files()
+                .iter()
+                .filter_map(|identity| {
+                    (!found_removed_delete_files.contains(identity))
+                        .then_some(identity.file_path())
+                })
+                .collect();
+            missing.sort_unstable();
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "cannot remove delete files that are not live in current snapshot: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+
         Ok(manifests)
     }
 
@@ -441,8 +523,9 @@ impl<'a> DeltaSnapshotProducer<'a> {
         &mut self,
         manifest_file: &ManifestFile,
         entries: &[Arc<crate::spec::ManifestEntry>],
-        removed_paths: &HashSet<String>,
+        removals: &SnapshotDeltaRemovals,
         found_removed_paths: &mut HashSet<String>,
+        found_removed_delete_files: &mut HashSet<DeleteFileIdentity>,
         summary_collector: &mut SnapshotSummaryCollector,
     ) -> Result<ManifestFile> {
         let mut writer = self.new_manifest_writer(
@@ -506,8 +589,19 @@ impl<'a> DeltaSnapshotProducer<'a> {
                     .transpose()?;
             }
 
-            if removed_paths.contains(entry.file_path()) {
-                found_removed_paths.insert(entry.file_path().to_owned());
+            if removals.removes_manifest_entry(manifest_file.content, entry) {
+                match manifest_file.content {
+                    ManifestContentType::Data => {
+                        found_removed_paths.insert(entry.file_path().to_owned());
+                    }
+                    ManifestContentType::Deletes => {
+                        let identity =
+                            DeleteFileIdentity::from_data_file(entry.data_file());
+                        if removals.has_removed_delete_file(entry.data_file()) {
+                            found_removed_delete_files.insert(identity);
+                        }
+                    }
+                }
                 writer.add_delete_file(
                     data_file,
                     sequence_number,
