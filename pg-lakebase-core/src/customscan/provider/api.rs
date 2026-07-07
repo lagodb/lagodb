@@ -471,6 +471,26 @@ impl<'a> PushedPredicateInputs<'a> {
         }
     }
 
+    /// Translate predicates whose executor expression is stable for the life of
+    /// one scan execution. `PARAM_EXTERN` is fixed after `BeginCustomScan`, but
+    /// `PARAM_EXEC` can change when PostgreSQL rescans a parameterized inner
+    /// path.
+    unsafe fn translate_rescan_stable<T, F>(
+        &self,
+        make_translator: F,
+    ) -> Result<Vec<T::Predicate>, CustomScanError>
+    where
+        T: PgPredicateTranslator,
+        T::Error: Send + Sync,
+        F: FnMut(usize) -> T,
+    {
+        unsafe {
+            self.translate_selected(make_translator, |expr| {
+                !RuntimeParamDetector::contains_exec(expr)
+            })
+        }
+    }
+
     unsafe fn translate_selected<T, F, I>(
         &self,
         mut make_translator: F,
@@ -536,6 +556,10 @@ impl RuntimeParamDetector {
         unsafe { Self::walk(expr.cast(), ptr::null_mut()) }
     }
 
+    unsafe fn contains_exec(expr: *mut pg_sys::Expr) -> bool {
+        unsafe { Self::walk_exec(expr.cast(), ptr::null_mut()) }
+    }
+
     unsafe extern "C-unwind" fn walk(
         node: *mut pg_sys::Node,
         context: *mut c_void,
@@ -558,6 +582,30 @@ impl RuntimeParamDetector {
             },
             _ => unsafe {
                 pg_sys::expression_tree_walker(node, Some(Self::walk), context)
+            },
+        }
+    }
+
+    unsafe extern "C-unwind" fn walk_exec(
+        node: *mut pg_sys::Node,
+        context: *mut c_void,
+    ) -> bool {
+        if node.is_null() {
+            return false;
+        }
+        match unsafe { (*node).type_ } {
+            pg_sys::NodeTag::T_Param => {
+                let paramkind = unsafe { (*node.cast::<pg_sys::Param>()).paramkind };
+                paramkind == pg_sys::ParamKind::PARAM_EXEC
+            }
+            pg_sys::NodeTag::T_RestrictInfo => unsafe {
+                Self::walk_exec(
+                    (*node.cast::<pg_sys::RestrictInfo>()).clause.cast(),
+                    context,
+                )
+            },
+            _ => unsafe {
+                pg_sys::expression_tree_walker(node, Some(Self::walk_exec), context)
             },
         }
     }
@@ -687,6 +735,27 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
         unsafe {
             self.pushed_predicate_inputs()
                 .translate_static(make_translator)
+        }
+    }
+
+    /// Translate pushed predicates that are stable across rescans of this scan
+    /// node. These predicates may use `PARAM_EXTERN`, but never `PARAM_EXEC`.
+    /// Providers can use them for stable file/task planning while still using
+    /// the full pushed predicate set as the exact row filter.
+    pub fn translate_rescan_stable_pushed_predicates<T, F>(
+        &self,
+        make_translator: F,
+    ) -> Result<Vec<T::Predicate>, CustomScanError>
+    where
+        T: PgPredicateTranslator,
+        T::Error: Send + Sync,
+        F: FnMut(usize) -> T,
+    {
+        // SAFETY: same live expression contract as
+        // `translate_pushed_predicates`; the stable filter only inspects nodes.
+        unsafe {
+            self.pushed_predicate_inputs()
+                .translate_rescan_stable(make_translator)
         }
     }
 

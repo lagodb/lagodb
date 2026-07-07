@@ -60,6 +60,11 @@ use crate::{Error, ErrorKind};
 #[allow(clippy::large_enum_variant)]
 enum FileReadRequest {
     Scan(FileScanTask),
+    SharedScan {
+        tasks: Arc<[FileScanTask]>,
+        task_index: usize,
+        predicate: Option<Arc<BoundPredicate>>,
+    },
     Physical(PhysicalRowReadRequest),
 }
 
@@ -83,9 +88,24 @@ struct FileReadPlan<'a> {
 }
 
 impl FileReadRequest {
-    fn plan(&self) -> FileReadPlan<'_> {
+    fn scan_task(&self) -> Result<Option<&FileScanTask>> {
         match self {
-            Self::Scan(task) => FileReadPlan {
+            Self::Scan(task) => Ok(Some(task)),
+            Self::SharedScan {
+                tasks, task_index, ..
+            } => tasks.get(*task_index).map(Some).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "shared file scan task index is out of bounds",
+                )
+            }),
+            Self::Physical(_) => Ok(None),
+        }
+    }
+
+    fn plan(&self) -> Result<FileReadPlan<'_>> {
+        match self {
+            Self::Scan(task) => Ok(FileReadPlan {
                 file_size_in_bytes: task.file_size_in_bytes,
                 start: task.start,
                 length: task.length,
@@ -100,8 +120,36 @@ impl FileReadRequest {
                 has_deletes: !task.deletes.is_empty(),
                 has_equality_deletes: task.deletes.iter().any(is_equality_delete),
                 row_position: None,
-            },
-            Self::Physical(request) => FileReadPlan {
+            }),
+            Self::SharedScan {
+                tasks,
+                task_index,
+                predicate,
+            } => {
+                let task = tasks.get(*task_index).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "shared file scan task index is out of bounds",
+                    )
+                })?;
+                Ok(FileReadPlan {
+                    file_size_in_bytes: task.file_size_in_bytes,
+                    start: task.start,
+                    length: task.length,
+                    first_row_id: task.first_row_id,
+                    data_file_path: &task.data_file_path,
+                    schema: &task.schema,
+                    project_field_ids: &task.project_field_ids,
+                    predicate: predicate.as_deref(),
+                    partition: task.partition.as_ref(),
+                    partition_spec: task.partition_spec.as_ref(),
+                    name_mapping: task.name_mapping.as_ref(),
+                    has_deletes: !task.deletes.is_empty(),
+                    has_equality_deletes: task.deletes.iter().any(is_equality_delete),
+                    row_position: None,
+                })
+            }
+            Self::Physical(request) => Ok(FileReadPlan {
                 file_size_in_bytes: 0,
                 start: 0,
                 length: 0,
@@ -116,7 +164,7 @@ impl FileReadRequest {
                 has_deletes: false,
                 has_equality_deletes: false,
                 row_position: Some(request.position),
-            },
+            }),
         }
     }
 }
@@ -154,6 +202,25 @@ impl ArrowReader {
     /// Returns an iterator of Arrow RecordBatches containing the data from the files
     pub fn read(self, tasks: Vec<FileScanTask>) -> Result<ArrowRecordBatchIterator> {
         Ok(self.read_with_metrics(tasks)?.stream())
+    }
+
+    /// Take a shared list of FileScanTasks and replace each task's reader
+    /// predicate with the supplied predicate while preserving immutable task
+    /// metadata.
+    pub fn read_shared_with_filter(
+        self,
+        tasks: Arc<[FileScanTask]>,
+        predicate: Option<BoundPredicate>,
+    ) -> Result<ArrowRecordBatchIterator> {
+        let predicate = predicate.map(Arc::new);
+        let requests =
+            (0..tasks.len()).map(move |task_index| FileReadRequest::SharedScan {
+                tasks: Arc::clone(&tasks),
+                task_index,
+                predicate: predicate.clone(),
+            });
+
+        Ok(self.read_requests_with_metrics(requests)?.stream())
     }
 
     /// Take a list of FileScanTasks and read all the files.
@@ -251,7 +318,7 @@ impl ArrowReader {
         parquet_read_options: ParquetReadOptions,
         scan_metrics: ScanMetrics,
     ) -> Result<ArrowRecordBatchIterator> {
-        let plan = request.plan();
+        let plan = request.plan()?;
         let predicate_page_pruning = row_selection_enabled
             && (plan.predicate.is_some() || plan.has_equality_deletes);
         let column_index_policy = if predicate_page_pruning {
@@ -270,8 +337,8 @@ impl ArrowReader {
         let parquet_read_options = parquet_read_options
             .with_index_policies(column_index_policy, offset_index_policy);
 
-        let (delete_predicate, positional_delete_indexes) = match &request {
-            FileReadRequest::Scan(file_scan_task) => {
+        let (delete_predicate, positional_delete_indexes) =
+            if let Some(file_scan_task) = request.scan_task()? {
                 let delete_filter = delete_file_loader.load_deletes(
                     &file_scan_task.deletes,
                     file_scan_task.schema_ref(),
@@ -281,11 +348,11 @@ impl ArrowReader {
                 let positional_delete_indexes =
                     delete_filter.get_delete_vector(file_scan_task);
                 (delete_predicate, positional_delete_indexes)
-            }
-            // SnapshotAny physical fetches return the exact stored row and must
-            // not apply the table's logical delete files.
-            FileReadRequest::Physical(_) => (None, None),
-        };
+            } else {
+                // SnapshotAny physical fetches return the exact stored row and
+                // must not apply the table's logical delete files.
+                (None, None)
+            };
 
         let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
             plan.data_file_path,

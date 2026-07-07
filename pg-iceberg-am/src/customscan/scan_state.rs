@@ -35,6 +35,38 @@ impl Default for IcebergScanState {
     }
 }
 
+enum RowFilterUpdate {
+    Unchanged,
+    Replace(Option<Predicate>),
+}
+
+impl RowFilterUpdate {
+    fn from_rescan(
+        ctx: &ReScanContext<'_, IcebergCustomScanProvider>,
+    ) -> Result<Self, CustomScanError> {
+        if !ctx.params_changed {
+            return Ok(Self::Unchanged);
+        }
+
+        let translated =
+            ctx.translate_pushed_predicates(|_| IcebergPredicateTranslator::new())?;
+        Ok(Self::Replace(IcebergPredicateTranslator::conjoin(
+            translated,
+        )))
+    }
+
+    fn apply_to(self, spec: &mut ScanSpec) {
+        match self {
+            Self::Unchanged => {}
+            // Replace(None) is intentional: PARAM_EXEC changed, but no pushed
+            // predicate survived translation for the current value. Keeping the
+            // old row filter would reuse stale parameter values and could drop
+            // valid rows before PostgreSQL's residual qual sees them.
+            Self::Replace(predicate) => spec.set_row_filter(predicate),
+        }
+    }
+}
+
 impl IcebergScanState {
     /// Translate pushed quals, build [`ScanSpec`]/[`IcebergBatchCursor`] against
     /// `estate.es_snapshot`, and capture the tuple width.
@@ -44,10 +76,15 @@ impl IcebergScanState {
         let rel_oid = ctx.relation.oid();
         let spc_oid = ctx.relation.tablespace_oid();
 
-        let predicate = if !ctx.has_pushed_predicates() {
+        let row_filter = if !ctx.has_pushed_predicates() {
             None
         } else {
             Self::translate_predicates(&ctx)?
+        };
+        let planning_filter = if !ctx.has_pushed_predicates() {
+            None
+        } else {
+            Self::translate_rescan_stable_predicates(&ctx)?
         };
         let conflict_filter = if ctx.purpose.is_modify() {
             IcebergPredicateTranslator::conjoin(
@@ -65,17 +102,22 @@ impl IcebergScanState {
             .resolve(ctx.required_columns(), scan_tuple)?;
         let shape = RelationShape::from_relation(&ctx.relation);
 
-        let spec = match projection {
-            None => {
-                ScanSpec::build_with_predicate(rel_oid, spc_oid, predicate, &shape)?
-            }
+        let mut spec = match projection {
+            None => ScanSpec::build_with_predicates(
+                rel_oid,
+                spc_oid,
+                planning_filter,
+                row_filter,
+                &shape,
+            )?,
             Some(proj) => {
                 let scan_attr_types = scan_tuple.attr_types();
                 ScanSpec::build_with_projection(
                     rel_oid,
                     spc_oid,
                     proj,
-                    predicate,
+                    planning_filter,
+                    row_filter,
                     &scan_attr_types,
                 )?
             }
@@ -85,29 +127,30 @@ impl IcebergScanState {
         let state = ctx.state;
         state.purpose = purpose;
         state.conflict_filter = conflict_filter;
-        state.spec = Some(spec);
-        state.cursor = if purpose.is_modify() {
+        if purpose.is_modify() {
+            spec.prepare_mutation_tasks()?;
+        }
+
+        let cursor = if purpose.is_modify() {
             None
         } else {
-            Some(
-                state
-                    .spec
-                    .as_ref()
-                    .expect("scan spec was just installed")
-                    .open_batch_cursor()?,
-            )
+            Some(spec.open_batch_cursor()?)
         };
+        state.spec = Some(spec);
+        state.cursor = cursor;
         state.modify_binding = None;
 
         Ok(())
     }
 
     pub(crate) fn modify_scan_context(&self) -> Option<IcebergModifyScanContext> {
-        self.spec.as_ref().map(|spec| {
-            IcebergModifyScanContext::new(
+        self.spec.as_ref().and_then(|spec| {
+            let scan_tasks = spec.prepared_mutation_tasks()?;
+            Some(IcebergModifyScanContext::new(
                 spec.starting_snapshot_id(),
                 self.conflict_filter.clone(),
-            )
+                scan_tasks,
+            ))
         })
     }
 
@@ -164,7 +207,7 @@ impl IcebergScanState {
                 })?;
                 ctx.state
                     .spec
-                    .as_ref()
+                    .as_mut()
                     .ok_or_else(|| {
                         CustomScanError::provider(
                             crate::error::IcebergError::InvariantViolated(
@@ -187,15 +230,7 @@ impl IcebergScanState {
     pub(super) fn rescan(
         ctx: ReScanContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        let translated = if ctx.params_changed {
-            Some(IcebergPredicateTranslator::conjoin(
-                ctx.translate_pushed_predicates(|_| {
-                    IcebergPredicateTranslator::new()
-                })?,
-            ))
-        } else {
-            None
-        };
+        let row_filter_update = RowFilterUpdate::from_rescan(&ctx)?;
 
         let relation_oid = ctx.relation.oid();
         let state = ctx.state;
@@ -203,9 +238,7 @@ impl IcebergScanState {
             return Ok(());
         };
 
-        if let Some(filter) = translated {
-            spec.set_filter(filter);
-        }
+        row_filter_update.apply_to(spec);
 
         state.cursor = Some(if state.purpose.is_modify() {
             let binding = state.modify_binding.clone().ok_or_else(|| {
@@ -239,6 +272,19 @@ impl IcebergScanState {
     ) -> Result<Option<Predicate>, CustomScanError> {
         let translated =
             ctx.translate_pushed_predicates(|_| IcebergPredicateTranslator::new())?;
+        Ok(IcebergPredicateTranslator::conjoin(translated))
+    }
+
+    /// Translate pushed predicates that can safely participate in stable file
+    /// planning. `PARAM_EXEC` predicates are deliberately excluded because
+    /// PostgreSQL may change those values across rescans of a parameterized
+    /// inner path.
+    fn translate_rescan_stable_predicates(
+        ctx: &BeginContext<'_, IcebergCustomScanProvider>,
+    ) -> Result<Option<Predicate>, CustomScanError> {
+        let translated = ctx.translate_rescan_stable_pushed_predicates(|_| {
+            IcebergPredicateTranslator::new()
+        })?;
         Ok(IcebergPredicateTranslator::conjoin(translated))
     }
 }

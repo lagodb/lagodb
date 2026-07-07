@@ -475,6 +475,66 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.unrelated, lake.id, lake.payload;
 
+-- B.5: PARAM_EXEC changes from a representable ConservativePruning value to
+-- a value that cannot be encoded as an Iceberg Datum. The pushed predicate is
+-- a ConservativePruning OR, so translation failure must widen by clearing the
+-- Iceberg row_filter and relying on the residual qual. Keeping the previous
+-- row_filter would reuse stale PARAM_EXEC values and filter out the marker=2
+-- row before PostgreSQL can evaluate the residual OR.
+CREATE TABLE customscan_rescan_date_lake (
+    d date,
+    marker integer,
+    payload text
+) USING iceberg;
+INSERT INTO customscan_rescan_date_lake VALUES
+    (DATE '2024-01-01', 1, 'finite_1'),
+    (DATE '2024-01-02', 2, 'finite_2'),
+    (DATE '2024-01-03', 3, 'finite_3');
+-- Pin DateStyle so the date::text rendering below is independent of the
+-- environment's default, matching the DateStyle-independence pattern used by
+-- type_conversion.
+SET DateStyle = 'ISO, MDY';
+
+SET pg_lakebase.customscan_mode = 'force';
+WITH outer_rel(d, marker) AS (
+    VALUES (DATE '2024-01-01', 1), (DATE 'infinity', 2)
+)
+SELECT outer_rel.marker AS outer_marker,
+       outer_rel.d::text AS outer_d,
+       lake.marker AS lake_marker,
+       lake.d::text AS lake_d,
+       lake.payload
+FROM outer_rel
+CROSS JOIN LATERAL (
+    SELECT d, marker, payload
+    FROM customscan_rescan_date_lake lake
+    WHERE lake.d = outer_rel.d
+       OR lake.marker = outer_rel.marker
+    OFFSET 0
+) lake
+ORDER BY outer_marker, lake_marker, lake.payload;
+
+SET pg_lakebase.customscan_mode = 'off';
+WITH outer_rel(d, marker) AS (
+    VALUES (DATE '2024-01-01', 1), (DATE 'infinity', 2)
+)
+SELECT outer_rel.marker AS outer_marker,
+       outer_rel.d::text AS outer_d,
+       lake.marker AS lake_marker,
+       lake.d::text AS lake_d,
+       lake.payload
+FROM outer_rel
+CROSS JOIN LATERAL (
+    SELECT d, marker, payload
+    FROM customscan_rescan_date_lake lake
+    WHERE lake.d = outer_rel.d
+       OR lake.marker = outer_rel.marker
+    OFFSET 0
+) lake
+ORDER BY outer_marker, lake_marker, lake.payload;
+
+DROP TABLE customscan_rescan_date_lake;
+
 -- Restore planner GUCs so test isolation is preserved.
 RESET enable_hashjoin;
 RESET enable_mergejoin;

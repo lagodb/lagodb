@@ -509,6 +509,15 @@ impl TableScan {
 
     /// Returns an [`ArrowRecordBatchIterator`].
     pub fn to_arrow(&self) -> Result<ArrowRecordBatchIterator> {
+        let tasks = self.plan_files()?;
+        self.to_arrow_with_tasks(tasks)
+    }
+
+    /// Returns an [`ArrowRecordBatchIterator`] for a pre-planned task list.
+    pub fn to_arrow_with_tasks(
+        &self,
+        tasks: Vec<FileScanTask>,
+    ) -> Result<ArrowRecordBatchIterator> {
         let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
             .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
             .with_row_group_filtering_enabled(self.row_group_filtering_enabled)
@@ -518,8 +527,65 @@ impl TableScan {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
         }
 
-        let tasks = self.plan_files()?;
         arrow_reader_builder.build().read(tasks)
+    }
+
+    /// Returns an [`ArrowRecordBatchIterator`] for a pre-planned task list,
+    /// replacing each task's reader predicate with `filter`.
+    ///
+    /// This lets callers cache file planning based on a stable pruning
+    /// predicate and later apply the current row predicate without rebuilding
+    /// manifests or delete indexes.
+    pub fn to_arrow_with_tasks_and_filter(
+        &self,
+        mut tasks: Vec<FileScanTask>,
+        filter: Option<Predicate>,
+    ) -> Result<ArrowRecordBatchIterator> {
+        let bound_filter = match (filter, self.plan_context.as_ref()) {
+            (Some(filter), Some(plan_context)) => Some(
+                filter
+                    .rewrite_not()
+                    .bind(plan_context.snapshot_schema.clone(), true)?,
+            ),
+            (Some(_), None) | (None, _) => None,
+        };
+
+        for task in &mut tasks {
+            task.set_predicate(bound_filter.clone());
+        }
+
+        self.to_arrow_with_tasks(tasks)
+    }
+
+    /// Returns an [`ArrowRecordBatchIterator`] for a shared pre-planned task
+    /// list, replacing each task's reader predicate with `filter` without
+    /// cloning or mutating the cached tasks.
+    pub fn to_arrow_with_shared_tasks_and_filter(
+        &self,
+        tasks: Arc<[FileScanTask]>,
+        filter: Option<Predicate>,
+    ) -> Result<ArrowRecordBatchIterator> {
+        let bound_filter = match (filter, self.plan_context.as_ref()) {
+            (Some(filter), Some(plan_context)) => Some(
+                filter
+                    .rewrite_not()
+                    .bind(plan_context.snapshot_schema.clone(), true)?,
+            ),
+            (Some(_), None) | (None, _) => None,
+        };
+
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
+            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+            .with_row_group_filtering_enabled(self.row_group_filtering_enabled)
+            .with_row_selection_enabled(self.row_selection_enabled);
+
+        if let Some(batch_size) = self.batch_size {
+            arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
+        }
+
+        arrow_reader_builder
+            .build()
+            .read_shared_with_filter(tasks, bound_filter)
     }
 
     /// Returns a reference to the column names of the table scan.
@@ -1694,8 +1760,8 @@ pub mod tests {
 
     #[test]
     fn test_open_parquet_no_deletions() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Create table scan for current snapshot and plan files
         let table_scan = fixture
@@ -1759,8 +1825,8 @@ pub mod tests {
 
     #[test]
     fn test_open_parquet_no_deletions_by_separate_reader() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Create table scan for current snapshot and plan files
         let table_scan = fixture
@@ -1786,8 +1852,8 @@ pub mod tests {
 
     #[test]
     fn test_open_parquet_with_projection() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Create table scan for current snapshot and plan files
         let table_scan = fixture
@@ -1846,8 +1912,8 @@ pub mod tests {
 
     #[test]
     fn test_filter_on_arrow_lt() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Filter: y < 3
         let mut builder = fixture.table.scan();
@@ -1874,8 +1940,8 @@ pub mod tests {
 
     #[test]
     fn test_filter_on_arrow_gt_eq() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Filter: y >= 5
         let mut builder = fixture.table.scan();
@@ -2040,8 +2106,8 @@ pub mod tests {
 
     #[test]
     fn test_filter_on_arrow_lt_and_gt() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Filter: y < 5 AND z >= 4
         let mut builder = fixture.table.scan();
@@ -2078,8 +2144,8 @@ pub mod tests {
 
     #[test]
     fn test_filter_on_arrow_lt_or_gt() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Filter: y < 5 AND z >= 4
         let mut builder = fixture.table.scan();
@@ -2286,8 +2352,8 @@ pub mod tests {
     fn test_select_with_file_column() {
         use arrow_array::cast::AsArray;
 
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Select regular columns plus the _file column
         let table_scan = fixture
@@ -2507,8 +2573,8 @@ pub mod tests {
 
     #[test]
     fn test_select_with_repeated_column_names() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
 
         // Select with repeated column names - both regular columns and virtual columns
         // Repeated columns should appear multiple times in the result (duplicates are allowed)
