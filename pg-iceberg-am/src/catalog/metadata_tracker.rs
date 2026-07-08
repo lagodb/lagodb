@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
-use iceberg_lite::overlay::{SnapshotDelta, SnapshotDeltaMarker};
+use iceberg_lite::overlay::{DeleteFileIdentity, SnapshotDelta, SnapshotDeltaMarker};
 use iceberg_lite::spec::{
     DataContentType, DataFile, ManifestContentType, TableMetadata,
 };
@@ -176,6 +176,17 @@ impl TableState {
     ) -> IcebergResult<()> {
         self.record_delta_mutation(nest_level, |delta| {
             delta.add_position_delete_file(delete_file, referenced_data_files)?;
+            Ok(())
+        })
+    }
+
+    fn record_remove_delete_file(
+        &mut self,
+        nest_level: i32,
+        identity: DeleteFileIdentity,
+    ) -> IcebergResult<()> {
+        self.record_delta_mutation(nest_level, |delta| {
+            delta.remove_delete_file(identity)?;
             Ok(())
         })
     }
@@ -491,6 +502,19 @@ impl TxMetadata {
                 delete_file,
                 referenced_data_files,
             )
+        })
+    }
+
+    /// Statement write path: remove a live delete manifest entry by identity
+    /// in the transaction-local delta.
+    pub fn stage_remove_delete_file(
+        &self,
+        relid: pg_sys::Oid,
+        identity: DeleteFileIdentity,
+        file_io: &FileIO,
+    ) -> IcebergResult<()> {
+        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+            state.record_remove_delete_file(nest_level, identity)
         })
     }
 

@@ -23,8 +23,11 @@ use iceberg_lite::arrow::schema_to_arrow_schema;
 use iceberg_lite::expr::Predicate;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::metadata_columns::{delete_file_path_field, delete_file_pos_field};
+use iceberg_lite::overlay::{DeleteFileIdentity, SnapshotDelta};
+use iceberg_lite::scan::{FileScanTask, FileScanTaskDeleteFile};
 use iceberg_lite::spec::{
-    DataFile, DataFileFormat, FormatVersion, Schema as IcebergSchema, TableMetadata,
+    DataFile, DataFileFormat, FormatVersion, Schema as IcebergSchema, Struct,
+    TableMetadata,
 };
 use iceberg_lite::transaction::{
     IsolationLevel, RowDeltaValidation, RowLevelCommand,
@@ -33,13 +36,17 @@ use iceberg_lite::transaction::{
 use iceberg_lite::writer::base_writer::data_file_writer::{
     DataFileWriter, DataFileWriterBuilder,
 };
+use iceberg_lite::writer::base_writer::deletion_vector_writer::{
+    DeletionVectorFileWriter, ExistingPositionDeleteFile, ReferencedDataFile,
+};
 use iceberg_lite::writer::base_writer::position_delete_writer::{
     PositionDeleteFileWriter, PositionDeleteFileWriterBuilder,
     PositionDeleteWriterConfig,
 };
 use iceberg_lite::writer::file_writer::ParquetWriterBuilder;
 use iceberg_lite::writer::file_writer::location_generator::{
-    DefaultFileNameGenerator, DefaultLocationGenerator,
+    DefaultFileNameGenerator, DefaultLocationGenerator, FileNameGenerator,
+    LocationGenerator,
 };
 use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
@@ -50,6 +57,7 @@ use pgrx::pg_sys;
 
 use crate::access::column_mapping::{RelationShape, WriteColumns};
 use crate::access::isolation::PgTransactionIsolation;
+use crate::access::scan::PlannedScanTasks;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::catalog::row_mutations::{
     ICEBERG_FILE_ID_BITS, IcebergFileId, ModifyStateId, OwnedRowPositions,
@@ -77,21 +85,36 @@ const POSITION_DELETE_BATCH_ROWS: usize = 8192;
 
 /// Iceberg metadata captured once by a Modify-purpose target scan and consumed
 /// when the corresponding relation-local modify state is opened.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct IcebergModifyScanContext {
     starting_snapshot_id: Option<i64>,
     conflict_filter: Predicate,
+    scan_tasks: Arc<PlannedScanTasks>,
 }
 
 impl IcebergModifyScanContext {
     pub(crate) fn new(
         starting_snapshot_id: Option<i64>,
         conflict_filter: Predicate,
+        scan_tasks: Arc<PlannedScanTasks>,
     ) -> Self {
         Self {
             starting_snapshot_id,
             conflict_filter,
+            scan_tasks,
         }
+    }
+
+    pub(crate) fn scan_tasks(&self) -> Arc<PlannedScanTasks> {
+        Arc::clone(&self.scan_tasks)
+    }
+}
+
+impl PartialEq for IcebergModifyScanContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.starting_snapshot_id == other.starting_snapshot_id
+            && self.conflict_filter == other.conflict_filter
+            && Arc::ptr_eq(&self.scan_tasks, &other.scan_tasks)
     }
 }
 
@@ -457,9 +480,127 @@ impl DataFileSink {
     }
 }
 
-struct PositionDeleteOutput {
+struct RowDeleteOutput {
     delete_file: DataFile,
-    referenced_data_file: String,
+    referenced_data_files: Vec<String>,
+    removed_delete_files: Vec<DeleteFileIdentity>,
+}
+
+struct PlannedDataFile {
+    target: ReferencedDataFile,
+    position_delete_files: Vec<FileScanTaskDeleteFile>,
+}
+
+impl PlannedDataFile {
+    fn from_scan_tasks(path: &str, tasks: Vec<FileScanTask>) -> IcebergResult<Self> {
+        let mut tasks = tasks.into_iter();
+        let first = tasks.next().ok_or_else(|| {
+            IcebergError::MetadataTracker(format!(
+                "cannot find Iceberg scan task metadata for deletion target {path}"
+            ))
+        })?;
+        let target = Self::target_from_task(&first)?;
+        if target.file_path() != path {
+            return Err(IcebergError::InvariantViolated(
+                "Iceberg scan task path does not match requested deletion target",
+            ));
+        }
+        let mut data_file = Self {
+            target,
+            position_delete_files: Vec::new(),
+        };
+        data_file.merge_delete_files(first)?;
+        for task in tasks {
+            data_file.merge_task(path, task)?;
+        }
+        Ok(data_file)
+    }
+
+    fn merge_task(&mut self, path: &str, task: FileScanTask) -> IcebergResult<()> {
+        let target = Self::target_from_task(&task)?;
+        if target.file_path() != path {
+            return Err(IcebergError::InvariantViolated(
+                "Iceberg scan task path does not match requested deletion target",
+            ));
+        }
+        if self.target != target {
+            return Err(IcebergError::InvariantViolated(
+                "Iceberg scan planned conflicting metadata for one data file",
+            ));
+        }
+        self.merge_delete_files(task)
+    }
+
+    fn merge_delete_files(&mut self, task: FileScanTask) -> IcebergResult<()> {
+        for delete_file in task.deletes {
+            if !delete_file.is_position_delete() {
+                continue;
+            }
+
+            match delete_file.referenced_data_file_path() {
+                Some(target) if target == self.target.file_path() => {
+                    self.push_position_delete_file(delete_file);
+                }
+                Some(_) => {}
+                None if delete_file.is_deletion_vector() => {
+                    return Err(IcebergError::MetadataTracker(format!(
+                        "deletion vector delete file {} is missing a referenced data file",
+                        delete_file.file_path
+                    )));
+                }
+                None => {
+                    self.push_position_delete_file(delete_file);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn push_position_delete_file(&mut self, delete_file: FileScanTaskDeleteFile) {
+        if !self.position_delete_files.contains(&delete_file) {
+            self.position_delete_files.push(delete_file);
+        }
+    }
+
+    fn target_from_task(task: &FileScanTask) -> IcebergResult<ReferencedDataFile> {
+        if let Some(partition_spec) = task.partition_spec.as_ref()
+            && partition_spec.spec_id() != task.partition_spec_id
+        {
+            return Err(IcebergError::InvariantViolated(
+                "Iceberg scan task partition spec id does not match its partition spec",
+            ));
+        }
+        Ok(ReferencedDataFile::new(
+            task.data_file_path.clone(),
+            task.partition.clone().unwrap_or_else(Struct::empty),
+            task.partition_spec_id,
+        ))
+    }
+}
+
+enum RowDeleteSink {
+    Position(Box<PositionDeleteSink>),
+    DeletionVector(Box<DeletionVectorSink>),
+}
+
+impl RowDeleteSink {
+    fn write_files(
+        &self,
+        deletes: &PositionDeleteAccumulator,
+        row_registry: &RelationRowRegistry,
+        scan_tasks: Option<&Arc<PlannedScanTasks>>,
+    ) -> IcebergResult<Vec<RowDeleteOutput>> {
+        match self {
+            Self::Position(sink) => sink.write_files(deletes, row_registry),
+            Self::DeletionVector(sink) => {
+                let scan_tasks =
+                    scan_tasks.ok_or(IcebergError::InvariantViolated(
+                        "deletion-vector write has no target scan task cache",
+                    ))?;
+                sink.write_files(deletes, row_registry, scan_tasks)
+            }
+        }
+    }
 }
 
 /// Writes Iceberg position delete files for rows accumulated by
@@ -517,7 +658,7 @@ impl PositionDeleteSink {
         &self,
         deletes: &PositionDeleteAccumulator,
         row_registry: &RelationRowRegistry,
-    ) -> IcebergResult<Vec<PositionDeleteOutput>> {
+    ) -> IcebergResult<Vec<RowDeleteOutput>> {
         let mut outputs = Vec::new();
         for (file_id, positions) in deletes.files() {
             let referenced_data_file = row_registry.file_path(file_id)?;
@@ -536,9 +677,10 @@ impl PositionDeleteSink {
                 writer.write(self.record_batch(&referenced_data_file, &chunk)?)?;
             }
             for delete_file in writer.close()? {
-                outputs.push(PositionDeleteOutput {
+                outputs.push(RowDeleteOutput {
                     delete_file,
-                    referenced_data_file: referenced_data_file.to_string(),
+                    referenced_data_files: vec![referenced_data_file.to_string()],
+                    removed_delete_files: Vec::new(),
                 });
             }
         }
@@ -596,6 +738,102 @@ impl PositionDeleteSink {
             Arc::clone(&self.batch_schema),
             vec![file_array, pos_array],
         )?)
+    }
+}
+
+struct DeletionVectorSink {
+    file_io: FileIO,
+    location_generator: DefaultLocationGenerator,
+}
+
+impl DeletionVectorSink {
+    fn new(
+        file_io: &FileIO,
+        table_metadata: &TableMetadata,
+        _delta: Option<&Arc<SnapshotDelta>>,
+    ) -> IcebergResult<Self> {
+        Ok(Self {
+            file_io: file_io.clone(),
+            location_generator: DefaultLocationGenerator::new(table_metadata)?,
+        })
+    }
+
+    fn write_files(
+        &self,
+        deletes: &PositionDeleteAccumulator,
+        row_registry: &RelationRowRegistry,
+        scan_tasks: &PlannedScanTasks,
+    ) -> IcebergResult<Vec<RowDeleteOutput>> {
+        let file_name_generator = DefaultFileNameGenerator::new(
+            format!("delete-{}", uuid::Uuid::now_v7()),
+            None,
+            DataFileFormat::Puffin,
+        );
+        let output_path = self
+            .location_generator
+            .generate_location(None, &file_name_generator.generate_file_name());
+        let mut writer =
+            DeletionVectorFileWriter::new(self.file_io.clone(), output_path);
+        let mut removed_delete_files_by_target: HashMap<
+            String,
+            BTreeSet<DeleteFileIdentity>,
+        > = HashMap::new();
+
+        for (file_id, positions) in deletes.files() {
+            let referenced_data_file = row_registry.file_path(file_id)?;
+            let planned_data_file = PlannedDataFile::from_scan_tasks(
+                referenced_data_file.as_ref(),
+                scan_tasks.mutation_tasks_for_path(referenced_data_file.as_ref())?,
+            )?;
+            let target = planned_data_file.target.clone();
+
+            let removed_delete_files = removed_delete_files_by_target
+                .entry(target.file_path().to_owned())
+                .or_default();
+            for existing_delete_file in &planned_data_file.position_delete_files {
+                let existing = ExistingPositionDeleteFile::new(
+                    &existing_delete_file.file_path,
+                    existing_delete_file.file_size_in_bytes,
+                    existing_delete_file.file_format,
+                    existing_delete_file.referenced_data_file_path(),
+                    existing_delete_file.content_offset,
+                    existing_delete_file.content_size_in_bytes,
+                    existing_delete_file.record_count,
+                );
+                let merge = writer.merge_existing_position_delete_file(
+                    target.clone(),
+                    &existing,
+                    &self.file_io,
+                )?;
+                if merge.can_remove()
+                    && existing_delete_file.can_remove_after_dv_rewrite()
+                {
+                    removed_delete_files.insert(DeleteFileIdentity::new(
+                        existing_delete_file.file_path.clone(),
+                        existing_delete_file.content_offset,
+                        existing_delete_file.content_size_in_bytes,
+                    ));
+                }
+            }
+
+            let positions = positions.borrow()?;
+            writer.delete_all(target, positions.iter().map(u64::from))?;
+        }
+
+        let (delete_files, referenced_data_files) = writer.close()?.into_parts();
+        Ok(delete_files
+            .into_iter()
+            .zip(referenced_data_files)
+            .map(|(delete_file, referenced_data_file)| RowDeleteOutput {
+                delete_file,
+                removed_delete_files: removed_delete_files_by_target
+                    .remove(&referenced_data_file)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+                referenced_data_files: vec![referenced_data_file],
+            })
+            .collect())
     }
 }
 
@@ -678,13 +916,13 @@ struct StatementOutcome {
     command: ModifyCommand,
     target_dependency: TargetDependency,
     new_data_files: Vec<DataFile>,
-    position_delete_files: Vec<PositionDeleteOutput>,
+    row_delete_files: Vec<RowDeleteOutput>,
     referenced_data_files: BTreeSet<String>,
 }
 
 impl StatementOutcome {
     fn has_delta(&self) -> bool {
-        !self.new_data_files.is_empty() || !self.position_delete_files.is_empty()
+        !self.new_data_files.is_empty() || !self.row_delete_files.is_empty()
     }
 
     fn row_delta_validation(
@@ -718,10 +956,11 @@ pub struct IcebergModifyState {
     conflict_scope: Option<ConflictValidationScope>,
     /// The slot -> data-file production pipeline.
     data_sink: Option<DataFileSink>,
-    position_delete_sink: Option<PositionDeleteSink>,
+    row_delete_sink: Option<RowDeleteSink>,
     position_deletes: PositionDeleteAccumulator,
     row_registry: RelationRowRegistry,
     modify_state_id: ModifyStateId,
+    scan_tasks: Option<Arc<PlannedScanTasks>>,
 }
 
 impl AmModifyState for IcebergModifyState {
@@ -907,6 +1146,9 @@ impl IcebergModifyState {
         let (query_state, cmd_type, actions, scan_context) = context.into_parts();
         let command = ModifyCommand::from_pg(cmd_type)?;
         let target_dependency = TargetDependency::from_context(scan_context.as_ref());
+        let scan_tasks = scan_context
+            .as_ref()
+            .map(IcebergModifyScanContext::scan_tasks);
         let transaction_isolation = PgTransactionIsolation::current()?;
         let rel_oid = rel.oid();
         let row_registry =
@@ -933,10 +1175,6 @@ impl IcebergModifyState {
             )
             .into());
         }
-        // TODO(iceberg-v3-deletion-vectors): this check currently lets format
-        // v3 reach the position-delete sink, but v3 forbids adding new
-        // position-delete files. Add deletion-vector writing (or reject these
-        // actions) before claiming v3 UPDATE/DELETE support.
         let iceberg_schema = loaded.metadata.current_schema().clone();
         let table_properties = loaded
             .metadata
@@ -945,8 +1183,10 @@ impl IcebergModifyState {
         let isolation_level = command
             .effective_isolation_level(&table_properties, transaction_isolation);
         let conflict_scope = if command.validation_command().is_some() {
-            scan_context.map(|context| {
-                ConflictValidationScope::from_predicate(context.conflict_filter)
+            scan_context.as_ref().map(|context| {
+                ConflictValidationScope::from_predicate(
+                    context.conflict_filter.clone(),
+                )
             })
         } else {
             None
@@ -972,12 +1212,26 @@ impl IcebergModifyState {
         } else {
             None
         };
-        let position_delete_sink = if writes_position_deletes {
-            Some(PositionDeleteSink::new(
-                &file_io,
-                &loaded.metadata,
-                &writer_properties,
-            )?)
+        let row_delete_sink = if writes_position_deletes {
+            match loaded.metadata.format_version() {
+                FormatVersion::V1 => {
+                    unreachable!("v1 row deletes are rejected earlier")
+                }
+                FormatVersion::V2 => {
+                    Some(RowDeleteSink::Position(Box::new(PositionDeleteSink::new(
+                        &file_io,
+                        &loaded.metadata,
+                        &writer_properties,
+                    )?)))
+                }
+                FormatVersion::V3 => Some(RowDeleteSink::DeletionVector(Box::new(
+                    DeletionVectorSink::new(
+                        &file_io,
+                        &loaded.metadata,
+                        loaded.delta.as_ref(),
+                    )?,
+                ))),
+            }
         } else {
             None
         };
@@ -990,10 +1244,11 @@ impl IcebergModifyState {
             isolation_level,
             conflict_scope,
             data_sink,
-            position_delete_sink,
+            row_delete_sink,
             position_deletes: PositionDeleteAccumulator::default(),
             row_registry,
             modify_state_id,
+            scan_tasks,
         })
     }
 
@@ -1002,14 +1257,18 @@ impl IcebergModifyState {
         TxMetadata::current().stage_data_files(self.rel_oid, new_files, &self.file_io)
     }
 
-    fn stage_position_delete_file(
-        &self,
-        output: PositionDeleteOutput,
-    ) -> IcebergResult<()> {
+    fn stage_row_delete_file(&self, output: RowDeleteOutput) -> IcebergResult<()> {
+        for identity in output.removed_delete_files {
+            TxMetadata::current().stage_remove_delete_file(
+                self.rel_oid,
+                identity,
+                &self.file_io,
+            )?;
+        }
         TxMetadata::current().stage_position_delete_file(
             self.rel_oid,
             output.delete_file,
-            std::iter::once(output.referenced_data_file),
+            output.referenced_data_files,
             &self.file_io,
         )
     }
@@ -1048,12 +1307,12 @@ impl IcebergModifyState {
         let referenced_data_files = self
             .position_deletes
             .referenced_data_files(&self.row_registry)?;
-        let position_delete_files = self.finish_position_deletes()?;
+        let row_delete_files = self.finish_position_deletes()?;
         Ok(StatementOutcome {
             command: self.command,
             target_dependency: self.target_dependency,
             new_data_files,
-            position_delete_files,
+            row_delete_files,
             referenced_data_files,
         })
     }
@@ -1064,8 +1323,8 @@ impl IcebergModifyState {
         if !outcome.new_data_files.is_empty() {
             self.stage_data_files(outcome.new_data_files)?;
         }
-        for output in outcome.position_delete_files {
-            self.stage_position_delete_file(output)?;
+        for output in outcome.row_delete_files {
+            self.stage_row_delete_file(output)?;
         }
         if let Some((command, starting_snapshot_id)) = validation {
             self.stage_validation(
@@ -1084,14 +1343,15 @@ impl IcebergModifyState {
         }
     }
 
-    fn finish_position_deletes(
-        &mut self,
-    ) -> IcebergResult<Vec<PositionDeleteOutput>> {
+    fn finish_position_deletes(&mut self) -> IcebergResult<Vec<RowDeleteOutput>> {
         if self.position_deletes.is_empty() {
             return Ok(Vec::new());
         }
-        self.position_delete_sink_ref()?
-            .write_files(&self.position_deletes, &self.row_registry)
+        self.row_delete_sink_ref()?.write_files(
+            &self.position_deletes,
+            &self.row_registry,
+            self.scan_tasks.as_ref(),
+        )
     }
 
     fn data_sink_mut(&mut self) -> IcebergResult<&mut DataFileSink> {
@@ -1102,8 +1362,8 @@ impl IcebergModifyState {
             ))
     }
 
-    fn position_delete_sink_ref(&self) -> IcebergResult<&PositionDeleteSink> {
-        self.position_delete_sink
+    fn row_delete_sink_ref(&self) -> IcebergResult<&RowDeleteSink> {
+        self.row_delete_sink
             .as_ref()
             .ok_or(IcebergError::InvariantViolated(
                 "position-delete callback reached a mutation command without a delete sink",
@@ -1111,7 +1371,7 @@ impl IcebergModifyState {
     }
 
     fn ensure_position_delete_capable(&self) -> IcebergResult<()> {
-        if self.position_delete_sink.is_none() {
+        if self.row_delete_sink.is_none() {
             return Err(IcebergError::InvariantViolated(
                 "position-delete callback reached a mutation command without a delete sink",
             ));
@@ -1226,7 +1486,11 @@ mod mutation_state_tests {
 
     #[test]
     fn target_dependency_separates_independent_and_required_reads() {
-        let empty_scan = IcebergModifyScanContext::new(None, Predicate::AlwaysTrue);
+        let empty_scan = IcebergModifyScanContext::new(
+            None,
+            Predicate::AlwaysTrue,
+            Arc::new(PlannedScanTasks::mutation(Vec::new())),
+        );
         let empty_table_read = TargetDependency::from_context(Some(&empty_scan));
         assert_eq!(empty_table_read.required_snapshot().unwrap(), None);
 
