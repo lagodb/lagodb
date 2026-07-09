@@ -428,37 +428,26 @@ mod tests {
 
         // test not in
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("1970-01-01").unwrap(),
-                    Datum::date_from_str("1969-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![Datum::timestamp_micros(0), Datum::timestamp_micros(-1)]
-                        .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![Datum::timestamptz_micros(0), Datum::timestamptz_micros(-1)]
-                        .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![Datum::timestamp_nanos(0), Datum::timestamp_nanos(-1)]
-                        .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![Datum::timestamptz_nanos(0), Datum::timestamptz_nanos(-1)]
-                        .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("1970-01-01").unwrap(),
+                Datum::date_from_str("1969-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(0),
+                Datum::timestamp_micros(-1),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(0),
+                Datum::timestamptz_micros(-1),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(0),
+                Datum::timestamp_nanos(-1),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(0),
+                Datum::timestamptz_nanos(-1),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -466,19 +455,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("1970-01-01").unwrap(),
-                    Datum::date_from_str("1969-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![Datum::timestamp_micros(0), Datum::timestamp_micros(-1)]
-                        .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("1970-01-01").unwrap(),
+                Datum::date_from_str("1969-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(0),
+                Datum::timestamp_micros(-1),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -696,49 +680,26 @@ mod tests {
 
         // test not in (col1 NOT IN (2017-01-01, 2017-12-02)) AND (col2 NOT IN (2017-01-01, 2017-12-02)) AND (col3 NOT IN (2017-01-01, 2017-12-02)) AND (col4 NOT IN (2017-01-01, 2017-12-02)) AND (col5 NOT IN (2017-01-01, 2017-12-02))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                    Datum::date_from_str("2017-12-02").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(1483228800000000),
-                        Datum::timestamp_micros(1512182400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(1483228800000000),
-                        Datum::timestamptz_micros(1512182400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(1483228800000000000),
-                        Datum::timestamp_nanos(1512182400000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(1483228800000000000),
-                        Datum::timestamptz_nanos(1512182400000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("2017-01-01").unwrap(),
+                Datum::date_from_str("2017-12-02").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(1483228800000000),
+                Datum::timestamp_micros(1512182400000000),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(1483228800000000),
+                Datum::timestamptz_micros(1512182400000000),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(1483228800000000000),
+                Datum::timestamp_nanos(1512182400000000000),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(1483228800000000000),
+                Datum::timestamptz_nanos(1512182400000000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -746,22 +707,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                    Datum::date_from_str("2017-01-02").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(1483228800000000),
-                        Datum::timestamp_micros(1483315200000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("2017-01-01").unwrap(),
+                Datum::date_from_str("2017-01-02").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(1483228800000000),
+                Datum::timestamp_micros(1483315200000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -956,49 +909,26 @@ mod tests {
 
         // test not in: (col1 NOT IN (1969-01-01, 1969-12-31)) AND (col2 NOT IN (1969-01-01, 1969-12-31)) AND (col3 NOT IN (1969-01-01, 1969-12-31)) AND (col4 NOT IN (1969-01-01, 1969-12-31)) AND (col5 NOT IN (1969-01-01, 1969-12-31))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("1969-01-01").unwrap(),
-                    Datum::date_from_str("1969-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(-31536000000000),
-                        Datum::timestamp_micros(-86400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(-86400000000),
-                        Datum::timestamptz_micros(-31536000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(-86400000000000),
-                        Datum::timestamp_nanos(-31536000000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(-86400000000000),
-                        Datum::timestamptz_nanos(-31536000000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("1969-01-01").unwrap(),
+                Datum::date_from_str("1969-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(-31536000000000),
+                Datum::timestamp_micros(-86400000000),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(-86400000000),
+                Datum::timestamptz_micros(-31536000000000),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(-86400000000000),
+                Datum::timestamp_nanos(-31536000000000000),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(-86400000000000),
+                Datum::timestamptz_nanos(-31536000000000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1006,22 +936,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("1969-01-01").unwrap(),
-                    Datum::date_from_str("1969-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(-315619200000000),
-                        Datum::timestamp_micros(-86400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("1969-01-01").unwrap(),
+                Datum::date_from_str("1969-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(-315619200000000),
+                Datum::timestamp_micros(-86400000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1216,49 +1138,26 @@ mod tests {
 
         // test not in: (col1 NOT IN (2017-12-31, 2017-01-01)) AND (col2 NOT IN (2017-12-31, 2017-01-01)) AND (col3 NOT IN (2017-12-31, 2017-01-01)) AND (col4 NOT IN (2017-12-31, 2017-01-01)) AND (col5 NOT IN (2017-12-31, 2017-01-01))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("2017-12-31").unwrap(),
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(1514764799000000),
-                        Datum::timestamp_micros(1483228800000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(1514764799000000),
-                        Datum::timestamptz_micros(1483228800000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(1514764799000000000),
-                        Datum::timestamp_nanos(1483228800000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(1514764799000000000),
-                        Datum::timestamptz_nanos(1483228800000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("2017-12-31").unwrap(),
+                Datum::date_from_str("2017-01-01").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(1514764799000000),
+                Datum::timestamp_micros(1483228800000000),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(1514764799000000),
+                Datum::timestamptz_micros(1483228800000000),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(1514764799000000000),
+                Datum::timestamp_nanos(1483228800000000000),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(1514764799000000000),
+                Datum::timestamptz_nanos(1483228800000000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1266,22 +1165,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("2017-12-31").unwrap(),
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(1514764799000000),
-                        Datum::timestamp_micros(1483228800000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("2017-12-31").unwrap(),
+                Datum::date_from_str("2017-01-01").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(1514764799000000),
+                Datum::timestamp_micros(1483228800000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1666,49 +1557,26 @@ mod tests {
 
         // test not in: (col1 NOT IN (2017-01-01, 2017-12-31)) AND (col2 NOT IN (2017-01-01, 2017-12-31)) AND (col3 NOT IN (2017-01-01, 2017-12-31)) AND (col4 NOT IN (2017-01-01, 2017-12-31)) AND (col5 NOT IN (2017-01-01, 2017-12-31))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                    Datum::date_from_str("2017-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(1483228800000000),
-                        Datum::timestamp_micros(1514764799000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(1483228800000000),
-                        Datum::timestamptz_micros(1514764799000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(1483228800000000000),
-                        Datum::timestamp_nanos(1514764799000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(1483228800000000000),
-                        Datum::timestamptz_nanos(1514764799000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("2017-01-01").unwrap(),
+                Datum::date_from_str("2017-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(1483228800000000),
+                Datum::timestamp_micros(1514764799000000),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(1483228800000000),
+                Datum::timestamptz_micros(1514764799000000),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(1483228800000000000),
+                Datum::timestamp_nanos(1514764799000000000),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(1483228800000000000),
+                Datum::timestamptz_nanos(1514764799000000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1716,22 +1584,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                    Datum::date_from_str("2017-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(1483228800000000),
-                        Datum::timestamp_micros(1514764799000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("2017-01-01").unwrap(),
+                Datum::date_from_str("2017-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(1483228800000000),
+                Datum::timestamp_micros(1514764799000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1930,49 +1790,26 @@ mod tests {
 
         // test not in: (col1 NOT IN (1969-12-30, 1969-12-31)) AND (col2 NOT IN (1969-12-30, 1969-12-31)) AND (col3 NOT IN (1969-12-30, 1969-12-31)) AND (col4 NOT IN (1969-12-30, 1969-12-31)) AND (col5 NOT IN (1969-12-30, 1969-12-31))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("1969-12-30").unwrap(),
-                    Datum::date_from_str("1969-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(-172800000000),
-                        Datum::timestamp_micros(-1),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(-172800000000),
-                        Datum::timestamptz_micros(-1),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(-172800000000000),
-                        Datum::timestamp_nanos(-1),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(-172800000000000),
-                        Datum::timestamptz_nanos(-1),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("1969-12-30").unwrap(),
+                Datum::date_from_str("1969-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(-172800000000),
+                Datum::timestamp_micros(-1),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(-172800000000),
+                Datum::timestamptz_micros(-1),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(-172800000000000),
+                Datum::timestamp_nanos(-1),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(-172800000000000),
+                Datum::timestamptz_nanos(-1),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -1980,22 +1817,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("1969-12-30").unwrap(),
-                    Datum::date_from_str("1969-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(-172800000000),
-                        Datum::timestamp_micros(-1),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("1969-12-30").unwrap(),
+                Datum::date_from_str("1969-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(-172800000000),
+                Datum::timestamp_micros(-1),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2190,49 +2019,26 @@ mod tests {
 
         // test not in: (col1 NOT IN (2017-01-01, 2017-12-31)) AND (col2 NOT IN (2017-01-01, 2017-12-31)) AND (col3 NOT IN (2017-01-01, 2017-12-31)) AND (col4 NOT IN (2017-01-01, 2017-12-31)) AND (col5 NOT IN (2017-01-01, 2017-12-31))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                    Datum::date_from_str("2016-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(1483228800000000),
-                        Datum::timestamp_micros(1483142400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(1483228800000000),
-                        Datum::timestamptz_micros(1483142400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(1483228800000000000),
-                        Datum::timestamp_nanos(1483142400000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(1483228800000000000),
-                        Datum::timestamptz_nanos(1483142400000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("2017-01-01").unwrap(),
+                Datum::date_from_str("2016-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(1483228800000000),
+                Datum::timestamp_micros(1483142400000000),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(1483228800000000),
+                Datum::timestamptz_micros(1483142400000000),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(1483228800000000000),
+                Datum::timestamp_nanos(1483142400000000000),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(1483228800000000000),
+                Datum::timestamptz_nanos(1483142400000000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2240,22 +2046,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                    Datum::date_from_str("2017-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(1483228800000000),
-                        Datum::timestamp_micros(1514764799000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("2017-01-01").unwrap(),
+                Datum::date_from_str("2017-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(1483228800000000),
+                Datum::timestamp_micros(1514764799000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2418,49 +2216,26 @@ mod tests {
 
         // test not in: (col1 NOT IN (1970-01-01, 1970-12-31)) AND (col2 NOT IN (1970-01-01, 1970-12-31)) AND (col3 NOT IN (1970-01-01, 1970-12-31)) AND (col4 NOT IN (1970-01-01, 1970-12-31)) AND (col5 NOT IN (1970-01-01, 1970-12-31))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("1970-01-01").unwrap(),
-                    Datum::date_from_str("1970-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(0),
-                        Datum::timestamp_micros(3153599999000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(0),
-                        Datum::timestamptz_micros(3153599999000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(0),
-                        Datum::timestamp_nanos(3153599999000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(0),
-                        Datum::timestamptz_nanos(3153599999000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("1970-01-01").unwrap(),
+                Datum::date_from_str("1970-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(0),
+                Datum::timestamp_micros(3153599999000000),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(0),
+                Datum::timestamptz_micros(3153599999000000),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(0),
+                Datum::timestamp_nanos(3153599999000000000),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(0),
+                Datum::timestamptz_nanos(3153599999000000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2468,22 +2243,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("1970-01-01").unwrap(),
-                    Datum::date_from_str("1970-12-31").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(0),
-                        Datum::timestamp_micros(3153599999000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("1970-01-01").unwrap(),
+                Datum::date_from_str("1970-12-31").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(0),
+                Datum::timestamp_micros(3153599999000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2678,49 +2445,26 @@ mod tests {
 
         // test not in: (col1 NOT IN (2017-12-31, 2016-01-01)) AND (col2 NOT IN (2017-12-31, 2016-01-01)) AND (col3 NOT IN (2017-12-31, 2016-01-01)) AND (col4 NOT IN (2017-12-31, 2016-01-01)) AND (col5 NOT IN (2017-12-31, 2016-01-01))
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![
-                    Datum::date_from_str("2017-12-31").unwrap(),
-                    Datum::date_from_str("2016-01-01").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_not_in(
-                    vec![
-                        Datum::timestamp_micros(1514764799000000),
-                        Datum::timestamp_micros(1451606400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::timestamptz_micros(1514764799000000),
-                        Datum::timestamptz_micros(1451606400000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![
-                        Datum::timestamp_nanos(1514764799000000000),
-                        Datum::timestamp_nanos(1451606400000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::timestamptz_nanos(1514764799000000000),
-                        Datum::timestamptz_nanos(1451606400000000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_not_in(vec![
+                Datum::date_from_str("2017-12-31").unwrap(),
+                Datum::date_from_str("2016-01-01").unwrap(),
+            ])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::timestamp_micros(1514764799000000),
+                Datum::timestamp_micros(1451606400000000),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::timestamptz_micros(1514764799000000),
+                Datum::timestamptz_micros(1451606400000000),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::timestamp_nanos(1514764799000000000),
+                Datum::timestamp_nanos(1451606400000000000),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::timestamptz_nanos(1514764799000000000),
+                Datum::timestamptz_nanos(1451606400000000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2728,22 +2472,14 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![
-                    Datum::date_from_str("2017-12-31").unwrap(),
-                    Datum::date_from_str("2017-01-01").unwrap(),
-                ]
-                .into_iter(),
-            )
-            .and(
-                Reference::new("col2").is_in(
-                    vec![
-                        Datum::timestamp_micros(1514764799000000),
-                        Datum::timestamp_micros(1483228800000000),
-                    ]
-                    .into_iter(),
-                ),
-            )
+            .is_in(vec![
+                Datum::date_from_str("2017-12-31").unwrap(),
+                Datum::date_from_str("2017-01-01").unwrap(),
+            ])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::timestamp_micros(1514764799000000),
+                Datum::timestamp_micros(1483228800000000),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2856,21 +2592,14 @@ mod tests {
                     "abcdefg".as_bytes().to_vec(),
                 )),
             )
-            .and(
-                Reference::new("col6").is_in(
-                    vec![
-                        Datum::uuid(
-                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c8")
-                                .unwrap(),
-                        ),
-                        Datum::uuid(
-                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c9")
-                                .unwrap(),
-                        ),
-                    ]
-                    .into_iter(),
+            .and(Reference::new("col6").is_in(vec![
+                Datum::uuid(
+                    Uuid::parse_str("00000000-0000-007b-0000-0000000001c8").unwrap(),
                 ),
-            )
+                Datum::uuid(
+                    Uuid::parse_str("00000000-0000-007b-0000-0000000001c9").unwrap(),
+                ),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -2878,70 +2607,51 @@ mod tests {
 
         // test not in
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter(),
-            )
-            .and(Reference::new("col2").is_not_in(
-                vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
-            ))
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(9900),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10000),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10100),
-                        ),
-                    ]
-                    .into_iter(),
+            .is_not_in(vec![Datum::int(99), Datum::int(100), Datum::int(101)])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::long(99),
+                Datum::long(100),
+                Datum::long(101),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(9900),
                 ),
-            )
-            .and(
-                Reference::new("col4").is_not_in(
-                    vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")]
-                        .into_iter(),
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10000),
                 ),
-            )
-            .and(
-                Reference::new("col5").is_not_in(
-                    vec![
-                        Datum::binary("abcdefg".as_bytes().to_vec()),
-                        Datum::binary("abcdehij".as_bytes().to_vec()),
-                    ]
-                    .into_iter(),
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10100),
                 ),
-            )
-            .and(
-                Reference::new("col6").is_not_in(
-                    vec![
-                        Datum::uuid(
-                            Uuid::parse_str("00000000-0000-007b-0000-0000000001c8")
-                                .unwrap(),
-                        ),
-                        Datum::uuid(
-                            Uuid::parse_str("00000000-0000-01c8-0000-00000000007b")
-                                .unwrap(),
-                        ),
-                    ]
-                    .into_iter(),
+            ]))
+            .and(Reference::new("col4").is_not_in(vec![
+                Datum::string("abcdefg"),
+                Datum::string("abcdefgabc"),
+            ]))
+            .and(Reference::new("col5").is_not_in(vec![
+                Datum::binary("abcdefg".as_bytes().to_vec()),
+                Datum::binary("abcdehij".as_bytes().to_vec()),
+            ]))
+            .and(Reference::new("col6").is_not_in(vec![
+                Datum::uuid(
+                    Uuid::parse_str("00000000-0000-007b-0000-0000000001c8").unwrap(),
                 ),
-            )
+                Datum::uuid(
+                    Uuid::parse_str("00000000-0000-01c8-0000-00000000007b").unwrap(),
+                ),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3038,7 +2748,7 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(vec![Datum::long(100), Datum::long(101)].into_iter())
+            .is_in(vec![Datum::long(100), Datum::long(101)])
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3046,7 +2756,7 @@ mod tests {
 
         // test not in
         let predicate = Reference::new("col1")
-            .is_not_in(vec![Datum::long(100), Datum::long(101)].into_iter())
+            .is_not_in(vec![Datum::long(100), Datum::long(101)])
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3194,40 +2904,35 @@ mod tests {
 
         // test not in
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter(),
-            )
-            .and(Reference::new("col2").is_not_in(
-                vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
-            ))
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(9900),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10000),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10100),
-                        ),
-                    ]
-                    .into_iter(),
+            .is_not_in(vec![Datum::int(99), Datum::int(100), Datum::int(101)])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::long(99),
+                Datum::long(100),
+                Datum::long(101),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(9900),
                 ),
-            )
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10000),
+                ),
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10100),
+                ),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3239,38 +2944,35 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(vec![Datum::int(99), Datum::int(100), Datum::int(101)].into_iter())
-            .and(Reference::new("col2").is_in(
-                vec![Datum::long(99), Datum::long(100), Datum::long(101)].into_iter(),
-            ))
-            .and(
-                Reference::new("col3").is_in(
-                    vec![
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(9900),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10000),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10100),
-                        ),
-                    ]
-                    .into_iter(),
+            .is_in(vec![Datum::int(99), Datum::int(100), Datum::int(101)])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::long(99),
+                Datum::long(100),
+                Datum::long(101),
+            ]))
+            .and(Reference::new("col3").is_in(vec![
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(9900),
                 ),
-            )
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10000),
+                ),
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10100),
+                ),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3417,40 +3119,35 @@ mod tests {
 
         // test not in
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![Datum::int(99), Datum::int(100), Datum::int(98)].into_iter(),
-            )
-            .and(Reference::new("col2").is_not_in(
-                vec![Datum::long(99), Datum::long(100), Datum::long(98)].into_iter(),
-            ))
-            .and(
-                Reference::new("col3").is_not_in(
-                    vec![
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(9999),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(9899),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10099),
-                        ),
-                    ]
-                    .into_iter(),
+            .is_not_in(vec![Datum::int(99), Datum::int(100), Datum::int(98)])
+            .and(Reference::new("col2").is_not_in(vec![
+                Datum::long(99),
+                Datum::long(100),
+                Datum::long(98),
+            ]))
+            .and(Reference::new("col3").is_not_in(vec![
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(9999),
                 ),
-            )
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(9899),
+                ),
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10099),
+                ),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3462,38 +3159,35 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(vec![Datum::int(99), Datum::int(100), Datum::int(98)].into_iter())
-            .and(Reference::new("col2").is_in(
-                vec![Datum::long(99), Datum::long(100), Datum::long(98)].into_iter(),
-            ))
-            .and(
-                Reference::new("col3").is_in(
-                    vec![
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(9999),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(9899),
-                        ),
-                        Datum::new(
-                            PrimitiveType::Decimal {
-                                precision: 9,
-                                scale: 2,
-                            },
-                            PrimitiveLiteral::Int128(10099),
-                        ),
-                    ]
-                    .into_iter(),
+            .is_in(vec![Datum::int(99), Datum::int(100), Datum::int(98)])
+            .and(Reference::new("col2").is_in(vec![
+                Datum::long(99),
+                Datum::long(100),
+                Datum::long(98),
+            ]))
+            .and(Reference::new("col3").is_in(vec![
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(9999),
                 ),
-            )
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(9899),
+                ),
+                Datum::new(
+                    PrimitiveType::Decimal {
+                        precision: 9,
+                        scale: 2,
+                    },
+                    PrimitiveLiteral::Int128(10099),
+                ),
+            ]))
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3566,10 +3260,7 @@ mod tests {
 
         // test not in
         let predicate = Reference::new("col1")
-            .is_not_in(
-                vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")]
-                    .into_iter(),
-            )
+            .is_not_in(vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")])
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();
@@ -3577,10 +3268,7 @@ mod tests {
 
         // test in
         let predicate = Reference::new("col1")
-            .is_in(
-                vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")]
-                    .into_iter(),
-            )
+            .is_in(vec![Datum::string("abcdefg"), Datum::string("abcdefgabc")])
             .bind(schema.clone(), false)
             .unwrap();
         let result = strict_projection.strict_project(&predicate).unwrap();

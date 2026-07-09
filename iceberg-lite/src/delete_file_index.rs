@@ -107,7 +107,7 @@ impl PopulatedDeleteFileIndex {
                     arc_ctx.manifest_entry.data_file().partition().clone();
                 self.eq_deletes_by_partition
                     .entry(partition)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(arc_ctx);
             }
             DataContentType::PositionDeletes => {
@@ -150,14 +150,14 @@ impl PopulatedDeleteFileIndex {
                 {
                     self.pos_deletes_by_path
                         .entry(target_path.to_owned())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(arc_ctx);
                 } else {
                     let partition =
                         arc_ctx.manifest_entry.data_file().partition().clone();
                     self.pos_deletes_by_partition
                         .entry(partition)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(arc_ctx);
                 }
             }

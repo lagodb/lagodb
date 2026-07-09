@@ -441,7 +441,7 @@ pub(crate) mod tests {
         namespace_idents: &Vec<&NamespaceIdent>,
     ) {
         for namespace_ident in namespace_idents {
-            let _ = create_namespace(catalog, namespace_ident);
+            create_namespace(catalog, namespace_ident);
         }
     }
 
@@ -1432,7 +1432,7 @@ pub(crate) mod tests {
 
         let table_ident_1 = TableIdent::new(namespace_ident.clone(), "tbl1".into());
         let table_ident_2 = TableIdent::new(namespace_ident.clone(), "tbl2".into());
-        let _ = create_tables(&catalog, vec![&table_ident_1, &table_ident_2]);
+        create_tables(&catalog, vec![&table_ident_1, &table_ident_2]);
 
         assert_eq!(
             to_set(catalog.list_tables(&namespace_ident).unwrap()),
@@ -1450,7 +1450,7 @@ pub(crate) mod tests {
         let table_ident_1 = TableIdent::new(namespace_ident_1.clone(), "tbl1".into());
         let table_ident_2 = TableIdent::new(namespace_ident_1.clone(), "tbl2".into());
         let table_ident_3 = TableIdent::new(namespace_ident_2.clone(), "tbl1".into());
-        let _ = create_tables(
+        create_tables(
             &catalog,
             vec![&table_ident_1, &table_ident_2, &table_ident_3],
         );

@@ -291,17 +291,15 @@ impl SchemaWithPartnerVisitor<ArrayRef> for ArrowArrayToIcebergStructConverter {
                     })?;
                 if let DataType::Decimal128(arrow_precision, arrow_scale) =
                     array.data_type()
+                    && (*arrow_precision as u32 != *precision
+                        || *arrow_scale as u32 != *scale)
                 {
-                    if *arrow_precision as u32 != *precision
-                        || *arrow_scale as u32 != *scale
-                    {
-                        return Err(Error::new(
-                            ErrorKind::DataInvalid,
-                            format!(
-                                "The precision or scale ({arrow_precision},{arrow_scale}) of arrow decimal128 array is not compatible with iceberg decimal type ({precision},{scale})"
-                            ),
-                        ));
-                    }
+                    return Err(Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "The precision or scale ({arrow_precision},{arrow_scale}) of arrow decimal128 array is not compatible with iceberg decimal type ({precision},{scale})"
+                        ),
+                    ));
                 }
                 Ok(array.iter().map(|v| v.map(Literal::decimal)).collect())
             }

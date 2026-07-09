@@ -67,10 +67,10 @@ impl ArrowReader {
                     // we need to call next() to update the cache with the newly positioned value.
                     delete_vector_iter.advance_to(next_row_group_base_idx);
                     // Only update the cache if the cached value is stale (in the skipped range)
-                    if let Some(cached_idx) = next_deleted_row_idx_opt {
-                        if cached_idx < next_row_group_base_idx {
-                            next_deleted_row_idx_opt = delete_vector_iter.next();
-                        }
+                    if let Some(cached_idx) = next_deleted_row_idx_opt
+                        && cached_idx < next_row_group_base_idx
+                    {
+                        next_deleted_row_idx_opt = delete_vector_iter.next();
                     }
 
                     // still increment the current page base index but then skip to the next row group

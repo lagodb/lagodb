@@ -50,6 +50,9 @@ use crate::{Error, ErrorKind, Result};
 #[cfg_attr(test, automock)]
 pub trait Catalog: Debug + Sync + Send {
     /// List namespaces inside the catalog.
+    // The explicit lifetime is required so `automock` can generate a valid mock
+    // for this sync method; clippy's `needless_lifetimes` is a false positive here.
+    #[allow(clippy::needless_lifetimes)]
     fn list_namespaces<'a>(
         &self,
         parent: Option<&'a NamespaceIdent>,
@@ -1049,13 +1052,13 @@ mod _serde_set_statistics {
             snapshot_id,
             statistics,
         } = SetStatistics::deserialize(deserializer)?;
-        if let Some(snapshot_id) = snapshot_id {
-            if snapshot_id != statistics.snapshot_id {
-                return Err(serde::de::Error::custom(format!(
-                    "Snapshot id to set {snapshot_id} does not match the statistics file snapshot id {}",
-                    statistics.snapshot_id
-                )));
-            }
+        if let Some(snapshot_id) = snapshot_id
+            && snapshot_id != statistics.snapshot_id
+        {
+            return Err(serde::de::Error::custom(format!(
+                "Snapshot id to set {snapshot_id} does not match the statistics file snapshot id {}",
+                statistics.snapshot_id
+            )));
         }
 
         Ok(statistics)

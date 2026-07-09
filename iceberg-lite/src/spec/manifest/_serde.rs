@@ -427,7 +427,7 @@ mod tests {
         let mut buffer = Vec::new();
         let _ = write_data_files_to_avro(
             &mut buffer,
-            data_files.clone().into_iter(),
+            data_files.clone(),
             &StructType::new(vec![]),
             FormatVersion::V2,
         )
@@ -453,7 +453,7 @@ mod tests {
         let mut buffer = Vec::new();
         let _ = write_data_files_to_avro(
             &mut buffer,
-            data_files.clone().into_iter(),
+            data_files.clone(),
             &StructType::new(vec![]),
             FormatVersion::V1,
         )

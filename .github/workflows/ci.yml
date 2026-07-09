@@ -133,7 +133,7 @@ jobs:
           test -x "$("${PG_CONFIG}" --pkglibdir)/pgxs/src/test/isolation/pg_isolation_regress"
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --locked --exclude iceberg-lite --no-deps --no-default-features --features "${PG_FEATURE}" -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --no-deps --no-default-features --features "${PG_FEATURE}" -- -D warnings
 
       - name: Verify Docker
         run: |

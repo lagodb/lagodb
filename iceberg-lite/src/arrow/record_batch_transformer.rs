@@ -828,9 +828,9 @@ impl RecordBatchTransformer {
         };
 
         match column {
-            GeneratedMetadataColumn::Position => Ok(Arc::new(Int64Array::from(
-                positions.iter().copied().collect::<Vec<_>>(),
-            ))),
+            GeneratedMetadataColumn::Position => {
+                Ok(Arc::new(Int64Array::from(positions.to_vec())))
+            }
             GeneratedMetadataColumn::RowId { first_row_id } => {
                 let values: Result<Vec<i64>> = positions
                     .iter()

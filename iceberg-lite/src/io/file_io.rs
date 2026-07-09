@@ -79,7 +79,7 @@ impl FileIO {
     }
 
     pub fn local() -> Self {
-        Self::new(Arc::new(LocalStorage::default()))
+        Self::new(Arc::new(LocalStorage))
     }
 
     pub fn from_scheme_with_props(
@@ -88,7 +88,7 @@ impl FileIO {
     ) -> Result<Self> {
         let mut storage: Arc<dyn Storage> = match scheme {
             "memory" => Arc::new(MemoryStorage::new()),
-            "file" | "" => Arc::new(LocalStorage::default()),
+            "file" | "" => Arc::new(LocalStorage),
             _ => {
                 return Err(Error::new(
                     ErrorKind::FeatureUnsupported,
@@ -98,10 +98,10 @@ impl FileIO {
         };
 
         // Initialize storage with props if any
-        if !props.is_empty() {
-            if let Some(s) = Arc::get_mut(&mut storage) {
-                s.initialize(props)?;
-            }
+        if !props.is_empty()
+            && let Some(s) = Arc::get_mut(&mut storage)
+        {
+            s.initialize(props)?;
         }
 
         Ok(Self::new(storage))
@@ -405,10 +405,7 @@ impl io::Write for OutputFileWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.writer.as_mut() {
             Some(writer) => writer.write(buf),
-            None => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "output file writer is already closed",
-            )),
+            None => Err(io::Error::other("output file writer is already closed")),
         }
     }
 
@@ -428,12 +425,10 @@ impl FileWrite for OutputFileWriter {
 
 impl Drop for OutputFileWriter {
     fn drop(&mut self) {
-        if !self.local_closed {
-            if let Err(error) = self.close_local() {
-                log::error!(
-                    "failed to close output file writer during drop: {error}"
-                );
-            }
+        if !self.local_closed
+            && let Err(error) = self.close_local()
+        {
+            log::error!("failed to close output file writer during drop: {error}");
         }
     }
 }

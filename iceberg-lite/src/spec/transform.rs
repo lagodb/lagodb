@@ -828,10 +828,10 @@ impl Transform {
             }
             PredicateOperator::StartsWith => match datum.literal() {
                 PrimitiveLiteral::String(s) => {
-                    if let Some(w) = width {
-                        if s.len() == w as usize {
-                            return Some(PredicateOperator::Eq);
-                        }
+                    if let Some(w) = width
+                        && s.len() == w as usize
+                    {
+                        return Some(PredicateOperator::Eq);
                     };
                     Some(*op)
                 }

@@ -1810,12 +1810,12 @@ mod tests {
         };
 
         let float_32_col = Arc::new(Float32Array::from_iter_values_with_nulls(
-            [1.0_f32, f32::NAN, 2.0, 2.0].into_iter(),
+            [1.0_f32, f32::NAN, 2.0, 2.0],
             None,
         )) as ArrayRef;
 
         let float_64_col = Arc::new(Float64Array::from_iter_values_with_nulls(
-            [1.0_f64, f64::NAN, 2.0, 2.0].into_iter(),
+            [1.0_f64, f64::NAN, 2.0, 2.0],
             None,
         )) as ArrayRef;
 
@@ -1951,7 +1951,7 @@ mod tests {
         };
 
         let float_32_col = Arc::new(Float32Array::from_iter_values_with_nulls(
-            [1.0_f32, f32::NAN, 2.0, 2.0].into_iter(),
+            [1.0_f32, f32::NAN, 2.0, 2.0],
             None,
         )) as ArrayRef;
 

@@ -286,13 +286,13 @@ impl CachingDeleteFileLoader {
         F: FnMut(usize, Option<&str>) -> Result<()>,
     {
         if let Some(strings) = file_paths.downcast_dict::<StringArray>() {
-            return Self::visit_path_values(strings.into_iter(), visit);
+            return Self::visit_path_values(strings, visit);
         }
         if let Some(strings) = file_paths.downcast_dict::<LargeStringArray>() {
-            return Self::visit_path_values(strings.into_iter(), visit);
+            return Self::visit_path_values(strings, visit);
         }
         if let Some(strings) = file_paths.downcast_dict::<StringViewArray>() {
-            return Self::visit_path_values(strings.into_iter(), visit);
+            return Self::visit_path_values(strings, visit);
         }
         Err(Error::new(
             ErrorKind::DataInvalid,

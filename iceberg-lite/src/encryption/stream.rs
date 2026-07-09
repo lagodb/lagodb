@@ -446,7 +446,7 @@ impl FileWrite for AesGcmFileWrite {
 }
 
 fn to_io_error(error: Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, error)
+    std::io::Error::other(error)
 }
 
 #[cfg(test)]

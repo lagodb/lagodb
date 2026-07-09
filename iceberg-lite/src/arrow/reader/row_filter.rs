@@ -77,13 +77,13 @@ impl TransformedRecordBatchFilter {
             .with_source(err)
         })?;
 
-        Ok(filter_record_batch(&batch, &filter).map_err(|err| {
+        filter_record_batch(&batch, &filter).map_err(|err| {
             Error::new(
                 ErrorKind::Unexpected,
                 "failed to filter transformed record batch",
             )
             .with_source(err)
-        })?)
+        })
     }
 }
 
@@ -228,10 +228,10 @@ impl ArrowReader {
         }
 
         // If all row groups were filtered out, return an empty RowSelection (select no rows)
-        if let Some(selected_row_groups) = selected_row_groups {
-            if selected_row_groups.is_empty() {
-                return Ok(Some(RowSelection::from(Vec::new())));
-            }
+        if let Some(selected_row_groups) = selected_row_groups
+            && selected_row_groups.is_empty()
+        {
+            return Ok(Some(RowSelection::from(Vec::new())));
         }
 
         let mut selected_row_groups_idx = 0;
@@ -264,10 +264,10 @@ impl ArrowReader {
 
             results.push(selections_for_page);
 
-            if let Some(selected_row_groups) = selected_row_groups {
-                if selected_row_groups_idx == selected_row_groups.len() {
-                    break;
-                }
+            if let Some(selected_row_groups) = selected_row_groups
+                && selected_row_groups_idx == selected_row_groups.len()
+            {
+                break;
             }
         }
 

@@ -593,16 +593,16 @@ impl BoundPredicateVisitor for PageIndexEvaluator<'_> {
                     return Ok(false);
                 }
 
-                if let Some(min) = min {
-                    if min.gt(datum) {
-                        return Ok(false);
-                    }
+                if let Some(min) = min
+                    && min.gt(datum)
+                {
+                    return Ok(false);
                 }
 
-                if let Some(max) = max {
-                    if max.lt(datum) {
-                        return Ok(false);
-                    }
+                if let Some(max) = max
+                    && max.lt(datum)
+                {
+                    return Ok(false);
                 }
 
                 Ok(true)
@@ -799,11 +799,11 @@ impl BoundPredicateVisitor for PageIndexEvaluator<'_> {
                             return Ok(false);
                         }
                     }
-                    (_, Some(max)) => {
-                        if !literals.iter().any(|datum| datum.le(&max)) {
-                            // if all values are greater than upper bound, rows cannot match.
-                            return Ok(false);
-                        }
+                    (_, Some(max))
+                        if !literals.iter().any(|datum| datum.le(&max)) =>
+                    {
+                        // if all values are greater than upper bound, rows cannot match.
+                        return Ok(false);
                     }
 
                     _ => {}

@@ -386,14 +386,14 @@ pub(super) fn apply_name_mapping_to_arrow_schema(
 
             let mut metadata = field.metadata().clone();
 
-            if let Some(mapped_field) = mapped_field_opt {
-                if let Some(field_id) = mapped_field.field_id() {
-                    // Field found in mapping with a field_id → assign it
-                    metadata.insert(
-                        PARQUET_FIELD_ID_META_KEY.to_string(),
-                        field_id.to_string(),
-                    );
-                }
+            if let Some(mapped_field) = mapped_field_opt
+                && let Some(field_id) = mapped_field.field_id()
+            {
+                // Field found in mapping with a field_id → assign it
+                metadata.insert(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    field_id.to_string(),
+                );
             }
             // If field_id is None, leave the field without an ID (will be filtered by projection)
 
