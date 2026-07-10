@@ -38,12 +38,25 @@ pub type Term = Reference;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reference {
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    field_id: Option<i32>,
 }
 
 impl Reference {
     /// Create a new unbound reference.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            field_id: None,
+        }
+    }
+
+    /// Create a reference that displays as `name` but binds by Iceberg field id.
+    pub fn new_bound_field(name: impl Into<String>, field_id: i32) -> Self {
+        Self {
+            name: name.into(),
+            field_id: Some(field_id),
+        }
     }
 
     /// Return the name of this reference.
@@ -319,7 +332,9 @@ impl Bind for Reference {
         schema: SchemaRef,
         case_sensitive: bool,
     ) -> crate::Result<Self::Bound> {
-        let field = if case_sensitive {
+        let field = if let Some(field_id) = self.field_id {
+            schema.field_by_id(field_id)
+        } else if case_sensitive {
             schema.field_by_name(&self.name)
         } else {
             schema.field_by_name_case_insensitive(&self.name)
@@ -328,7 +343,13 @@ impl Bind for Reference {
         let field = field.ok_or_else(|| {
             Error::new(
                 ErrorKind::DataInvalid,
-                format!("Field {} not found in schema", self.name),
+                match self.field_id {
+                    Some(field_id) => format!(
+                        "Field {} (id {field_id}) not found in schema",
+                        self.name
+                    ),
+                    None => format!("Field {} not found in schema", self.name),
+                },
             )
         })?;
 
@@ -453,6 +474,24 @@ mod tests {
         let accessor_ref = Arc::new(StructAccessor::new(1, PrimitiveType::Int));
         let expected_ref = BoundReference::new(
             "BAR",
+            NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
+                .into(),
+            accessor_ref.clone(),
+        );
+
+        assert_eq!(expected_ref, reference);
+    }
+
+    #[test]
+    fn test_bind_reference_by_field_id_preserves_display_name() {
+        let schema = table_schema_simple();
+        let reference = Reference::new_bound_field("renamed_bar", 2)
+            .bind(schema, true)
+            .unwrap();
+
+        let accessor_ref = Arc::new(StructAccessor::new(1, PrimitiveType::Int));
+        let expected_ref = BoundReference::new(
+            "renamed_bar",
             NestedField::required(2, "bar", Type::Primitive(PrimitiveType::Int))
                 .into(),
             accessor_ref.clone(),

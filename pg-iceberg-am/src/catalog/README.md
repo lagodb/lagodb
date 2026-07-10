@@ -44,9 +44,10 @@ to `Serializable`.
 
 ## Current `metadata_tracker.rs` behavior
 
-`metadata_tracker.rs` keeps a transaction-local `SnapshotDelta` per modified
-Iceberg table. The delta records logical file operations such as added data
-files, position delete files, and removed data files. It is not written to
+`metadata_tracker.rs` keeps a transaction-local action log per modified Iceberg
+table. The log preserves the order of prepared schema updates and data epochs;
+data epochs contain `SnapshotDelta` file operations such as added data files,
+position delete files, and removed data files. These actions are not written to
 Iceberg metadata during statement execution.
 
 The read path for scans and planner statistics is:
@@ -55,7 +56,8 @@ The read path for scans and planner statistics is:
 current_table_metadata
   -> IcebergMetadata::get(relid)                    // latest committed catalog pointer
   -> TableMetadata::read_from(file_io, &location)   // committed Iceberg metadata
-  -> attach Arc<SnapshotDelta> if this transaction has staged changes
+  -> replay staged schema actions
+  -> attach combined Arc<SnapshotDelta> if this transaction has staged file changes
 ```
 
 The scan path then plans files from the committed metadata plus the attached
@@ -69,10 +71,11 @@ The write setup path adds idempotent registration in front:
 ```text
 begin_table_modify
   -> register_table(relid)                          // tracker state only
-  -> current_table_metadata(relid, file_io)          // latest committed metadata + overlay
+  -> current_table_metadata(relid, file_io)          // latest committed metadata + action overlay
 ```
 
-Statement write staging records logical file operations only:
+Statement write staging records logical file operations in the current data
+epoch:
 
 ```text
 stage_data_files
@@ -85,10 +88,12 @@ stage_remove_data_file
   -> SnapshotDelta::remove_data_file(...)
 ```
 
-Each mutation is bracketed by a `SnapshotDeltaMarker` when it happens inside a
-savepoint, so `ROLLBACK TO SAVEPOINT` can truncate the delta back to the correct
-logical state. Top-level mutations do not need history frames because top-level
-abort drops the whole tracker.
+Each mutation inside a savepoint stores a lightweight action-log marker: the
+action length plus the current data epoch's `SnapshotDeltaMarker` and validation
+length, when the last action is a data epoch. `ROLLBACK TO SAVEPOINT` truncates
+the action log back to that marker, then truncates the current data epoch if it
+existed. Top-level mutations do not need history frames because top-level abort
+drops the whole tracker.
 
 The top-level pre-commit path is the only place that writes Iceberg metadata:
 
@@ -97,7 +102,7 @@ on_pre_commit
   -> commit_all
        -> IcebergMetadata::get(relid)                         // latest committed base
        -> TableMetadata::read_from(file_io, &latest_location)
-       -> Transaction::snapshot_delta(Arc<SnapshotDelta>)
+       -> apply staged schema/data actions in log order
        -> Transaction::commit(&StagedCatalog)                 // writes manifests/metadata
        -> IcebergMetadata::cas_update(expected = latest_location)
        -> on conflict: read latest base and retry

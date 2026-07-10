@@ -1,0 +1,68 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_begin s1_add_local s1_insert_local s2_swap_metadata s1_commit s3_columns s3_rows
+step s1_begin: BEGIN;
+step s1_add_local: ALTER TABLE schema_evolution_iso.concurrent_t ADD COLUMN local_col int;
+step s1_insert_local: INSERT INTO schema_evolution_iso.concurrent_t (id, local_col) VALUES (1, 10);
+step s2_swap_metadata: 
+  UPDATE lakebase.iceberg_metadata AS target
+  SET metadata_location = shadow.metadata_location,
+      previous_metadata_location = target.metadata_location
+  FROM lakebase.iceberg_metadata AS shadow
+  WHERE target.relid = 'schema_evolution_iso.concurrent_t'::regclass
+    AND shadow.relid = 'schema_evolution_iso.shadow_t'::regclass;
+
+step s1_commit: COMMIT;
+ERROR:  Iceberg schema evolution conflict: PreconditionFailed => Cannot apply prepared schema update: current schema id changed from 0 to 1
+step s3_columns: 
+  SELECT string_agg(attname, ',' ORDER BY attnum) AS cols
+  FROM pg_attribute
+  WHERE attrelid = 'schema_evolution_iso.concurrent_t'::regclass
+    AND attnum > 0
+    AND NOT attisdropped;
+
+cols
+----
+id  
+(1 row)
+
+step s3_rows: SELECT count(*) AS rows FROM schema_evolution_iso.concurrent_t;
+rows
+----
+   0
+(1 row)
+
+
+starting permutation: s1_begin_rebase s1_add_rebase s2_swap_data_metadata s1_commit_rebase s3_rebase_columns s3_rebase_rows
+step s1_begin_rebase: BEGIN;
+step s1_add_rebase: ALTER TABLE schema_evolution_iso.data_rebase_t ADD COLUMN added_col int;
+step s2_swap_data_metadata: 
+  UPDATE lakebase.iceberg_metadata AS target
+  SET metadata_location = shadow.metadata_location,
+      previous_metadata_location = target.metadata_location
+  FROM lakebase.iceberg_metadata AS shadow
+  WHERE target.relid = 'schema_evolution_iso.data_rebase_t'::regclass
+    AND shadow.relid = 'schema_evolution_iso.data_shadow_t'::regclass;
+
+step s1_commit_rebase: COMMIT;
+step s3_rebase_columns: 
+  SELECT string_agg(attname, ',' ORDER BY attnum) AS cols
+  FROM pg_attribute
+  WHERE attrelid = 'schema_evolution_iso.data_rebase_t'::regclass
+    AND attnum > 0
+    AND NOT attisdropped;
+
+cols        
+------------
+id,added_col
+(1 row)
+
+step s3_rebase_rows: 
+  SELECT count(*) AS rows, count(added_col) AS added_values
+  FROM schema_evolution_iso.data_rebase_t;
+
+rows|added_values
+----+------------
+   1|           0
+(1 row)
+

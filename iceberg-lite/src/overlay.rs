@@ -375,6 +375,34 @@ impl SnapshotDelta {
         Ok(self)
     }
 
+    /// Append another delta's operation log to this delta, preserving operation
+    /// order while re-validating path-level invariants.
+    pub fn append_delta(&mut self, other: &SnapshotDelta) -> Result<&mut Self> {
+        for op in &other.ops {
+            match &op.kind {
+                DeltaOpKind::AddData(data_file) => {
+                    self.add_data_file(data_file.as_ref().clone())?;
+                }
+                DeltaOpKind::AddPositionDelete {
+                    file,
+                    referenced_data_files,
+                } => {
+                    self.add_position_delete_file(
+                        file.as_ref().clone(),
+                        referenced_data_files.iter().cloned(),
+                    )?;
+                }
+                DeltaOpKind::RemoveDataFile(path) => {
+                    self.remove_data_file(path.clone())?;
+                }
+                DeltaOpKind::RemoveDeleteFile(identity) => {
+                    self.remove_delete_file(identity.clone())?;
+                }
+            }
+        }
+        Ok(self)
+    }
+
     /// Add a position delete file with explicit referenced data-file mapping.
     pub fn add_position_delete_file<I, S>(
         &mut self,

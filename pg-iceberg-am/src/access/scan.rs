@@ -3,7 +3,7 @@
 //! A scan's state is split in two:
 //!
 //! - [`ScanSpec`] is the immutable scan description (table, [`ScanColumns`],
-//!   optional projection, optional [`Predicate`]). Built once in
+//!   optional [`Predicate`]). Built once in
 //!   [`AmScanSession::scan_begin`] and preserved across `scan_rescan`, so the
 //!   visible snapshot is frozen for the scan's duration. This matches the Read
 //!   Committed contract: every `scan_rescan` comes from the same statement that
@@ -126,9 +126,6 @@ pub(crate) struct ScanSpec {
     /// Schema-bound column plan for the captured snapshot. Drives the cursor
     /// decoder and exposes the `IcebergSchema` for predicate translation.
     plan: ScanColumns,
-    /// Column projection. `None` means select-all; a `Some` always has ≥ 1
-    /// column. Populated only on the CustomScan `build_with_projection` path.
-    projection: Option<Projection>,
     /// Stable predicate used only for file planning. It must not contain
     /// `PARAM_EXEC`, because those values can change across rescans while the
     /// planned task cache remains fixed.
@@ -180,7 +177,6 @@ impl ScanSpec {
         Ok(Self {
             table: Arc::new(table),
             plan,
-            projection: None,
             planning_filter,
             row_filter,
             delta,
@@ -191,7 +187,7 @@ impl ScanSpec {
 
     /// Build a `ScanSpec` for the CustomScan path with a column projection.
     ///
-    /// `projection` drives both `select(names)` (read fewer columns) and a
+    /// `projection` drives both `select_field_ids` (read fewer columns) and a
     /// projected [`ColumnMapping`](crate::access::column_mapping). The decoder
     /// writes only the projected `dest` slots; projected-away positions are
     /// left untouched, which is safe because they are never read (see
@@ -203,19 +199,20 @@ impl ScanSpec {
         projection: Projection,
         planning_filter: Option<Predicate>,
         row_filter: Option<Predicate>,
+        shape: &RelationShape,
         scan_attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
         let plan = ScanColumns::with_projection(
             schema,
-            projection.columns(),
+            shape,
+            &projection,
             scan_attr_types.len(),
             scan_attr_types,
         )?;
         Ok(Self {
             table: Arc::new(table),
             plan,
-            projection: Some(projection),
             planning_filter,
             row_filter,
             delta,
@@ -265,6 +262,22 @@ impl ScanSpec {
         self.planning_filter.clone_from(&predicate);
         self.row_filter = predicate;
         Ok(())
+    }
+
+    /// Replace the planning and row predicates independently. Used by
+    /// CustomScan after it builds field-id predicate bindings from the same
+    /// schema as the scan plan.
+    pub(crate) fn set_predicates(
+        &mut self,
+        planning_filter: Option<Predicate>,
+        row_filter: Option<Predicate>,
+    ) {
+        if self.planning_filter != planning_filter {
+            self.query_tasks = None;
+            self.mutation_tasks = None;
+        }
+        self.planning_filter = planning_filter;
+        self.row_filter = row_filter;
     }
 
     /// Replace only the current row predicate. Used by CustomScan rescans when
@@ -360,10 +373,8 @@ impl ScanSpec {
         filter: Option<&Predicate>,
     ) -> IcebergResult<TableScan> {
         let mut builder = self.table.scan();
-        match self.scan_column_names(include_row_locations) {
-            Some(names) => builder = builder.select(names),
-            None => builder = builder.select_all(),
-        }
+        builder =
+            builder.select_field_ids(self.scan_field_ids(include_row_locations));
         if let Some(predicate) = filter {
             builder = builder.with_filter(predicate.clone());
         }
@@ -373,32 +384,21 @@ impl ScanSpec {
         Ok(builder.build()?)
     }
 
-    fn scan_column_names(&self, include_row_locations: bool) -> Option<Vec<String>> {
-        let mut names = match self.projection.as_ref() {
-            Some(proj) => Some(proj.names().map(ToOwned::to_owned).collect()),
-            None if include_row_locations => Some(
-                self.plan
-                    .schema()
-                    .as_struct()
-                    .fields()
-                    .iter()
-                    .map(|field| field.name.clone())
-                    .collect(),
-            ),
-            None => None,
-        };
-
+    fn scan_field_ids(&self, include_row_locations: bool) -> Vec<i32> {
+        let mut field_ids = self.plan.project_field_ids().to_vec();
         if include_row_locations {
-            let names = names.get_or_insert_with(Vec::new);
-            names.push(RESERVED_COL_NAME_FILE.to_owned());
-            names.push(RESERVED_COL_NAME_POS.to_owned());
+            field_ids.push(RESERVED_FIELD_ID_FILE);
+            field_ids.push(RESERVED_FIELD_ID_POS);
         }
-
-        names
+        field_ids
     }
 
     pub(crate) fn starting_snapshot_id(&self) -> Option<i64> {
         self.table.metadata().current_snapshot_id()
+    }
+
+    pub(crate) fn schema(&self) -> &IcebergSchema {
+        self.plan.schema()
     }
 
     /// Re-translate the current effective [`OwnedScanKeys`] into a filter.

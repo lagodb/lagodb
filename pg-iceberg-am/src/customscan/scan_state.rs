@@ -1,9 +1,9 @@
 //! Iceberg-specific runtime state and scan lifecycle.
 
-use crate::access::column_mapping::RelationShape;
+use crate::access::column_mapping::{RelationFieldMap, RelationShape};
 use crate::access::mutation::{IcebergModifyQueryState, IcebergModifyScanContext};
 use crate::access::scan::{IcebergBatchCursor, ScanSpec};
-use crate::predicate::IcebergPredicateTranslator;
+use crate::predicate::{IcebergPredicateTranslator, PredicateFieldBindings};
 use iceberg_lite::expr::Predicate;
 use pg_lakebase_core::access::mutation::ModifyScanBinding;
 use pg_lakebase_core::customscan::provider::{
@@ -43,13 +43,15 @@ enum RowFilterUpdate {
 impl RowFilterUpdate {
     fn from_rescan(
         ctx: &ReScanContext<'_, IcebergCustomScanProvider>,
+        field_bindings: &PredicateFieldBindings,
     ) -> Result<Self, CustomScanError> {
         if !ctx.params_changed {
             return Ok(Self::Unchanged);
         }
 
-        let translated =
-            ctx.translate_pushed_predicates(|_| IcebergPredicateTranslator::new())?;
+        let translated = ctx.translate_pushed_predicates(|_| {
+            IcebergPredicateTranslator::with_field_bindings(field_bindings.clone())
+        })?;
         Ok(Self::Replace(IcebergPredicateTranslator::conjoin(
             translated,
         )))
@@ -75,53 +77,53 @@ impl IcebergScanState {
     ) -> Result<(), CustomScanError> {
         let rel_oid = ctx.relation.oid();
         let spc_oid = ctx.relation.tablespace_oid();
-
-        let row_filter = if !ctx.has_pushed_predicates() {
-            None
-        } else {
-            Self::translate_predicates(&ctx)?
-        };
-        let planning_filter = if !ctx.has_pushed_predicates() {
-            None
-        } else {
-            Self::translate_rescan_stable_predicates(&ctx)?
-        };
-        let conflict_filter = if ctx.purpose.is_modify() {
-            IcebergPredicateTranslator::conjoin(
-                ctx.translate_static_pushed_predicates(|_| {
-                    IcebergPredicateTranslator::new()
-                })?,
-            )
-            .unwrap_or(Predicate::AlwaysTrue)
-        } else {
-            Predicate::AlwaysTrue
-        };
-
         let scan_tuple = ctx.scan_tuple();
-        let projection = ProjectionResolver::new(rel_oid)
-            .resolve(ctx.required_columns(), scan_tuple)?;
+        let projection =
+            ProjectionResolver::new().resolve(ctx.required_columns(), scan_tuple)?;
         let shape = RelationShape::from_relation(&ctx.relation);
 
         let mut spec = match projection {
-            None => ScanSpec::build_with_predicates(
-                rel_oid,
-                spc_oid,
-                planning_filter,
-                row_filter,
-                &shape,
-            )?,
+            None => {
+                ScanSpec::build_with_predicates(rel_oid, spc_oid, None, None, &shape)?
+            }
             Some(proj) => {
                 let scan_attr_types = scan_tuple.attr_types();
                 ScanSpec::build_with_projection(
                     rel_oid,
                     spc_oid,
                     proj,
-                    planning_filter,
-                    row_filter,
+                    None,
+                    None,
+                    &shape,
                     &scan_attr_types,
                 )?
             }
         };
+
+        let field_bindings = Self::predicate_field_bindings(spec.schema(), &shape)?;
+        let row_filter = if !ctx.has_pushed_predicates() {
+            None
+        } else {
+            Self::translate_predicates(&ctx, &field_bindings)?
+        };
+        let planning_filter = if !ctx.has_pushed_predicates() {
+            None
+        } else {
+            Self::translate_rescan_stable_predicates(&ctx, &field_bindings)?
+        };
+        let conflict_filter = if ctx.purpose.is_modify() {
+            IcebergPredicateTranslator::conjoin(
+                ctx.translate_static_pushed_predicates(|_| {
+                    IcebergPredicateTranslator::with_field_bindings(
+                        field_bindings.clone(),
+                    )
+                })?,
+            )
+            .unwrap_or(Predicate::AlwaysTrue)
+        } else {
+            Predicate::AlwaysTrue
+        };
+        spec.set_predicates(planning_filter, row_filter);
 
         let purpose = ctx.purpose;
         let state = ctx.state;
@@ -230,9 +232,16 @@ impl IcebergScanState {
     pub(super) fn rescan(
         ctx: ReScanContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        let row_filter_update = RowFilterUpdate::from_rescan(&ctx)?;
-
         let relation_oid = ctx.relation.oid();
+        let shape = RelationShape::from_relation(&ctx.relation);
+        let field_bindings = {
+            let Some(spec) = ctx.state.spec.as_ref() else {
+                return Ok(());
+            };
+            Self::predicate_field_bindings(spec.schema(), &shape)?
+        };
+        let row_filter_update = RowFilterUpdate::from_rescan(&ctx, &field_bindings)?;
+
         let state = ctx.state;
         let Some(spec) = state.spec.as_mut() else {
             return Ok(());
@@ -269,9 +278,11 @@ impl IcebergScanState {
     /// Translate pushed expressions and AND the survivors into one predicate.
     fn translate_predicates(
         ctx: &BeginContext<'_, IcebergCustomScanProvider>,
+        field_bindings: &PredicateFieldBindings,
     ) -> Result<Option<Predicate>, CustomScanError> {
-        let translated =
-            ctx.translate_pushed_predicates(|_| IcebergPredicateTranslator::new())?;
+        let translated = ctx.translate_pushed_predicates(|_| {
+            IcebergPredicateTranslator::with_field_bindings(field_bindings.clone())
+        })?;
         Ok(IcebergPredicateTranslator::conjoin(translated))
     }
 
@@ -281,11 +292,24 @@ impl IcebergScanState {
     /// inner path.
     fn translate_rescan_stable_predicates(
         ctx: &BeginContext<'_, IcebergCustomScanProvider>,
+        field_bindings: &PredicateFieldBindings,
     ) -> Result<Option<Predicate>, CustomScanError> {
         let translated = ctx.translate_rescan_stable_pushed_predicates(|_| {
-            IcebergPredicateTranslator::new()
+            IcebergPredicateTranslator::with_field_bindings(field_bindings.clone())
         })?;
         Ok(IcebergPredicateTranslator::conjoin(translated))
+    }
+
+    fn predicate_field_bindings(
+        schema: &iceberg_lite::spec::Schema,
+        shape: &RelationShape,
+    ) -> Result<PredicateFieldBindings, CustomScanError> {
+        let field_map = RelationFieldMap::from_shape(schema, shape)?;
+        Ok(PredicateFieldBindings::from_iter(
+            field_map.bindings().iter().map(|binding| {
+                (binding.attno, binding.debug_name.clone(), binding.field_id)
+            }),
+        ))
     }
 }
 

@@ -33,7 +33,9 @@ use crate::delete_file_index::DeleteFileIndexBuilder;
 use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluator;
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::io::FileIO;
-use crate::metadata_columns::{get_metadata_field_id, is_metadata_column_name};
+use crate::metadata_columns::{
+    get_metadata_field_id, is_metadata_column_name, is_metadata_field,
+};
 use crate::overlay::{SnapshotDelta, SnapshotDeltaRemovalLookup};
 
 use crate::spec::{
@@ -51,8 +53,7 @@ pub type ArrowRecordBatchIterator =
 /// Builder to create table scan.
 pub struct TableScanBuilder<'a> {
     table: &'a Table,
-    // Defaults to none which means select all columns
-    column_names: Option<Vec<String>>,
+    projection: ScanProjection,
     snapshot_id: Option<i64>,
     batch_size: Option<usize>,
     case_sensitive: bool,
@@ -65,13 +66,21 @@ pub struct TableScanBuilder<'a> {
     delta: Option<Arc<SnapshotDelta>>,
 }
 
+#[derive(Debug, Clone, Default)]
+enum ScanProjection {
+    #[default]
+    All,
+    Names(Vec<String>),
+    FieldIds(Vec<i32>),
+}
+
 impl<'a> TableScanBuilder<'a> {
     pub(crate) fn new(table: &'a Table) -> Self {
         let num_cpus = available_parallelism().get();
 
         Self {
             table,
-            column_names: None,
+            projection: ScanProjection::All,
             snapshot_id: None,
             batch_size: None,
             case_sensitive: true,
@@ -108,13 +117,13 @@ impl<'a> TableScanBuilder<'a> {
 
     /// Select all columns.
     pub fn select_all(mut self) -> Self {
-        self.column_names = None;
+        self.projection = ScanProjection::All;
         self
     }
 
     /// Select empty columns.
     pub fn select_empty(mut self) -> Self {
-        self.column_names = Some(vec![]);
+        self.projection = ScanProjection::Names(Vec::new());
         self
     }
 
@@ -123,12 +132,25 @@ impl<'a> TableScanBuilder<'a> {
         mut self,
         column_names: impl IntoIterator<Item = impl ToString>,
     ) -> Self {
-        self.column_names = Some(
+        self.projection = ScanProjection::Names(
             column_names
                 .into_iter()
                 .map(|item| item.to_string())
                 .collect(),
         );
+        self
+    }
+
+    /// Select top-level table columns by Iceberg field id.
+    ///
+    /// This is equivalent to [`Self::select`] after name-to-id resolution, but
+    /// lets PostgreSQL integrations bind catalog attributes to Iceberg field
+    /// ids once and avoid using column names as execution identity.
+    pub fn select_field_ids(
+        mut self,
+        field_ids: impl IntoIterator<Item = i32>,
+    ) -> Self {
+        self.projection = ScanProjection::FieldIds(field_ids.into_iter().collect());
         self
     }
 
@@ -202,6 +224,7 @@ impl<'a> TableScanBuilder<'a> {
 
     /// Build the table scan.
     pub fn build(self) -> Result<TableScan> {
+        let use_current_schema = self.snapshot_id.is_none();
         let snapshot = match self.snapshot_id {
             Some(snapshot_id) => self
                 .table
@@ -223,7 +246,7 @@ impl<'a> TableScanBuilder<'a> {
                 {
                     return Ok(TableScan {
                         batch_size: self.batch_size,
-                        column_names: self.column_names,
+                        column_names: self.projection.column_names(),
                         file_io: self.table.file_io().clone(),
                         plan_context: None,
                         delta: None,
@@ -241,69 +264,21 @@ impl<'a> TableScanBuilder<'a> {
             }
         };
 
-        let schema = match snapshot.as_ref() {
-            Some(snapshot) => snapshot.schema(self.table.metadata())?,
-            None => self.table.metadata().current_schema().clone(),
+        let schema = if use_current_schema {
+            // A current table scan projects the table's current schema, not the
+            // schema that happened to write the current snapshot. Schema-only
+            // evolution can advance current-schema-id without creating a new
+            // snapshot; newly-added fields must still project as NULL for old
+            // files.
+            self.table.metadata().current_schema().clone()
+        } else {
+            match snapshot.as_ref() {
+                Some(snapshot) => snapshot.schema(self.table.metadata())?,
+                None => self.table.metadata().current_schema().clone(),
+            }
         };
 
-        // Check that all column names exist in the schema (skip reserved columns).
-        if let Some(column_names) = self.column_names.as_ref() {
-            for column_name in column_names {
-                // Skip reserved columns that don't exist in the schema
-                if is_metadata_column_name(column_name) {
-                    continue;
-                }
-                if schema.field_by_name(column_name).is_none() {
-                    return Err(Error::new(
-                        ErrorKind::DataInvalid,
-                        format!(
-                            "Column {column_name} not found in table. Schema: {schema}"
-                        ),
-                    ));
-                }
-            }
-        }
-
-        let mut field_ids = vec![];
-        let column_names = self.column_names.clone().unwrap_or_else(|| {
-            schema
-                .as_struct()
-                .fields()
-                .iter()
-                .map(|f| f.name.clone())
-                .collect()
-        });
-
-        for column_name in column_names.iter() {
-            // Handle metadata columns (like "_file")
-            if is_metadata_column_name(column_name) {
-                field_ids.push(get_metadata_field_id(column_name)?);
-                continue;
-            }
-
-            let field_id = schema.field_id_by_name(column_name).ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!(
-                        "Column {column_name} not found in table. Schema: {schema}"
-                    ),
-                )
-            })?;
-
-            schema
-                .as_struct()
-                .field_by_id(field_id)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::FeatureUnsupported,
-                        format!(
-                        "Column {column_name} is not a direct child of schema but a nested field, which is not supported now. Schema: {schema}"
-                    ),
-                )
-            })?;
-
-            field_ids.push(field_id);
-        }
+        let field_ids = self.projection.field_ids(&schema)?;
 
         // TODO(metadata-column predicate binding): `Predicate::bind` below is
         // intentionally a table-schema binder, so `_pos`, `_file`, and
@@ -374,7 +349,7 @@ impl<'a> TableScanBuilder<'a> {
 
         Ok(TableScan {
             batch_size: self.batch_size,
-            column_names: self.column_names,
+            column_names: self.projection.column_names(),
             file_io: self.table.file_io().clone(),
             plan_context: Some(plan_context),
             delta: self.delta,
@@ -385,6 +360,84 @@ impl<'a> TableScanBuilder<'a> {
             row_group_filtering_enabled: self.row_group_filtering_enabled,
             row_selection_enabled: self.row_selection_enabled,
         })
+    }
+}
+
+impl ScanProjection {
+    fn column_names(self) -> Option<Vec<String>> {
+        match self {
+            Self::All | Self::FieldIds(_) => None,
+            Self::Names(names) => Some(names),
+        }
+    }
+
+    fn field_ids(&self, schema: &crate::spec::Schema) -> Result<Vec<i32>> {
+        match self {
+            Self::All => Ok(schema
+                .as_struct()
+                .fields()
+                .iter()
+                .map(|field| field.id)
+                .collect()),
+            Self::Names(column_names) => {
+                let mut field_ids = Vec::with_capacity(column_names.len());
+                for column_name in column_names {
+                    if is_metadata_column_name(column_name) {
+                        field_ids.push(get_metadata_field_id(column_name)?);
+                        continue;
+                    }
+
+                    let field_id =
+                        schema.field_id_by_name(column_name).ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::DataInvalid,
+                                format!(
+                                    "Column {column_name} not found in table. Schema: {schema}"
+                                ),
+                            )
+                        })?;
+                    Self::ensure_top_level_field(schema, field_id, column_name)?;
+                    field_ids.push(field_id);
+                }
+                Ok(field_ids)
+            }
+            Self::FieldIds(field_ids) => {
+                for field_id in field_ids {
+                    if is_metadata_field(*field_id) {
+                        continue;
+                    }
+                    Self::ensure_top_level_field(
+                        schema,
+                        *field_id,
+                        &field_id.to_string(),
+                    )?;
+                }
+                Ok(field_ids.clone())
+            }
+        }
+    }
+
+    fn ensure_top_level_field(
+        schema: &crate::spec::Schema,
+        field_id: i32,
+        label: &str,
+    ) -> Result<()> {
+        schema.as_struct().field_by_id(field_id).ok_or_else(|| {
+            if schema.field_by_id(field_id).is_some() {
+                Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    format!(
+                        "Column {label} is not a direct child of schema but a nested field, which is not supported now. Schema: {schema}"
+                    ),
+                )
+            } else {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Column {label} not found in table. Schema: {schema}"),
+                )
+            }
+        })?;
+        Ok(())
     }
 }
 
@@ -741,6 +794,7 @@ pub mod tests {
         TableMetadata, Type,
     };
     use crate::table::Table;
+    use crate::transaction::{AddColumn, Transaction};
 
     fn render_template(template: &str, ctx: Value) -> String {
         let mut env = Environment::new();
@@ -2660,6 +2714,60 @@ pub mod tests {
             ),
             "_file column (duplicate) should use RunEndEncoded type"
         );
+    }
+
+    #[test]
+    fn test_select_with_field_ids() {
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
+
+        let table_scan = fixture
+            .table
+            .scan()
+            .select_field_ids([3, 1])
+            .build()
+            .unwrap();
+
+        let batch_iterator = table_scan.to_arrow().unwrap();
+        let batches: Vec<_> = batch_iterator.collect::<Result<Vec<_>>>().unwrap();
+
+        assert_eq!(batches[0].num_columns(), 2);
+        let schema = batches[0].schema();
+        assert_eq!(schema.field(0).name(), "z");
+        assert_eq!(schema.field(1).name(), "x");
+    }
+
+    #[test]
+    fn current_scan_accepts_fields_added_after_current_snapshot() {
+        let mut fixture = TableTestFixture::new_unpartitioned();
+        fixture.setup_unpartitioned_manifest_files();
+        let mut metadata = fixture.table.metadata().clone();
+        metadata.last_column_id = 100;
+        fixture.table = fixture.table.with_metadata(Arc::new(metadata));
+
+        let prepared = Transaction::new(&fixture.table)
+            .update_schema()
+            .add_column(AddColumn::optional(
+                "schema_only_col",
+                Type::Primitive(PrimitiveType::Int),
+            ))
+            .prepare(&fixture.table)
+            .unwrap();
+        let metadata = prepared
+            .apply_to_metadata(fixture.table.metadata())
+            .unwrap();
+        let field_id = metadata
+            .current_schema()
+            .field_id_by_name("schema_only_col")
+            .unwrap();
+        fixture.table = fixture.table.with_metadata(Arc::new(metadata));
+
+        fixture
+            .table
+            .scan()
+            .select_field_ids([field_id])
+            .build()
+            .unwrap();
     }
 
     #[test]

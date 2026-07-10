@@ -1,16 +1,17 @@
 use crate::catalog::metadata_table::IcebergMetadata;
+use crate::catalog::schema_evolution::SchemaEvolutionUpdate;
 use crate::catalog::table_lifecycle::IcebergTableLifecycle;
 use crate::catalog::{IcebergAccessMethod, IcebergRelationExt};
 use crate::options::{ICEBERG_TABLE_OPTIONS, ResolvedIcebergOptions};
 use pg_lakebase_core::catalog::{
-    CatalogRelation, CatalogScanKey, CatalogSnapshot, get_tablespace_oid,
-    range_var_get_relid,
+    CatalogRelation, CatalogScanKey, CatalogSnapshot, find_all_inheritors,
+    get_tablespace_oid, range_var_get_relid,
 };
-use pg_lakebase_core::handles::RelationGuard;
+use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
 use pg_lakebase_core::hooks::{
     AlterTableMoveAllStmtNode, AlterTableStmtNode, CreateStmtNode,
-    CreateTableAsStmtNode, HookError, PostUtilityContext, UtilityHook,
-    UtilityHookError, UtilityNode, register_utility_hook,
+    CreateTableAsStmtNode, HookError, PostUtilityContext, RenameStmtNode,
+    UtilityHook, UtilityHookError, UtilityNode, register_utility_hook,
 };
 use pg_lakebase_core::options::TableOptions;
 use pgrx::pg_sys;
@@ -22,12 +23,46 @@ struct IcebergTableHook;
 struct IcebergCreateTableAsGuard;
 struct IcebergAlterTableGuard;
 struct IcebergAlterTableMoveAllGuard;
+struct IcebergRenameColumnHook;
 
 #[derive(Debug, Default)]
 struct AlterTableIcebergOperations {
     sets_access_method: bool,
     sets_access_method_to_iceberg: bool,
     sets_tablespace: bool,
+    schema_update: SchemaEvolutionUpdate,
+    unsupported_schema_operation: Option<String>,
+    required_lockmode: pg_sys::LOCKMODE,
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum AlterTableSchemaPass {
+    Drop,
+    AddColumn,
+}
+
+#[derive(Debug)]
+enum AlterTableSchemaOp {
+    AddNullableColumn(String),
+    DropColumn(String),
+    DropNotNull(String),
+}
+
+#[derive(Debug)]
+struct PlannedSchemaOp {
+    pass: AlterTableSchemaPass,
+    original_index: i32,
+    op: AlterTableSchemaOp,
+}
+
+#[derive(Debug, Default)]
+struct AlterTableSchemaPlan {
+    ops: Vec<PlannedSchemaOp>,
+}
+
+enum SchemaEvolutionTarget {
+    Physical(pg_sys::Oid),
+    PartitionedRoot { descendant_relids: Vec<pg_sys::Oid> },
 }
 
 /// Parse-tree probes that decide whether a DDL statement targets the Iceberg
@@ -92,7 +127,7 @@ impl IcebergStmtProbe {
         let parent_oid = unsafe {
             range_var_get_relid(
                 parent,
-                pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
                 true,
             )
         }?;
@@ -117,6 +152,130 @@ impl IcebergStmtProbe {
     }
 }
 
+impl AlterTableSchemaOp {
+    fn append_to(self, update: &mut SchemaEvolutionUpdate) {
+        match self {
+            Self::AddNullableColumn(name) => update.add_nullable_column(name),
+            Self::DropColumn(name) => update.drop_column(name),
+            Self::DropNotNull(name) => update.drop_not_null(name),
+        }
+    }
+}
+
+impl AlterTableSchemaPlan {
+    fn push(
+        &mut self,
+        pass: AlterTableSchemaPass,
+        original_index: i32,
+        op: AlterTableSchemaOp,
+    ) {
+        self.ops.push(PlannedSchemaOp {
+            pass,
+            original_index,
+            op,
+        });
+    }
+
+    fn into_update(mut self) -> SchemaEvolutionUpdate {
+        self.ops.sort_by_key(|op| (op.pass, op.original_index));
+        let mut update = SchemaEvolutionUpdate::new();
+        for op in self.ops {
+            op.op.append_to(&mut update);
+        }
+        update
+    }
+}
+
+impl SchemaEvolutionTarget {
+    fn resolve(
+        rel: &RelationHandle<'_>,
+        descendant_lockmode: pg_sys::LOCKMODE,
+    ) -> Result<Option<Self>, UtilityHookError> {
+        if !rel.is_iceberg() {
+            return Ok(None);
+        }
+
+        match rel.relkind() as u8 {
+            pg_sys::RELKIND_RELATION => Ok(Some(Self::Physical(rel.oid()))),
+            pg_sys::RELKIND_PARTITIONED_TABLE => {
+                let descendant_relids =
+                    find_all_inheritors(rel.oid(), descendant_lockmode)?
+                        .into_iter()
+                        .filter(|relid| *relid != rel.oid())
+                        .collect();
+                Ok(Some(Self::PartitionedRoot { descendant_relids }))
+            }
+            _ => Err(HookError::with_code(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "schema evolution is only supported for physical and partitioned Iceberg relations",
+            )),
+        }
+    }
+
+    fn for_each_physical_relation<F>(&self, mut f: F) -> Result<(), UtilityHookError>
+    where
+        F: FnMut(&RelationHandle<'_>) -> Result<(), UtilityHookError>,
+    {
+        // Callers acquire the target/descendant locks before constructing this
+        // target, matching PostgreSQL's ALTER TABLE recursion path. Open with
+        // NoLock here so we do not introduce a weaker pre-lock or a lock
+        // upgrade path that differs from tablecmds.c.
+        match self {
+            Self::Physical(relid) => {
+                let guard =
+                    RelationGuard::open(*relid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+                let rel = guard.as_handle();
+                f(&rel)
+            }
+            Self::PartitionedRoot { descendant_relids } => {
+                for relid in descendant_relids {
+                    let guard = RelationGuard::open(
+                        *relid,
+                        pg_sys::NoLock as pg_sys::LOCKMODE,
+                    )?;
+                    let rel = guard.as_handle();
+                    match rel.relkind() as u8 {
+                        pg_sys::RELKIND_RELATION => {
+                            if !rel.is_iceberg() {
+                                return Err(HookError::with_code(
+                                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                                    "partitioned Iceberg schema evolution requires every physical partition to use the Iceberg access method",
+                                ));
+                            }
+                            f(&rel)?;
+                        }
+                        pg_sys::RELKIND_PARTITIONED_TABLE => {}
+                        _ => {
+                            return Err(HookError::with_code(
+                                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                                "partitioned Iceberg schema evolution found an unsupported partition relation kind",
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn preflight(
+        &self,
+        update: &SchemaEvolutionUpdate,
+    ) -> Result<(), UtilityHookError> {
+        self.for_each_physical_relation(|rel| {
+            update.preflight_existing_schema_for_relation(rel)?;
+            Ok(())
+        })
+    }
+
+    fn stage(&self, update: &SchemaEvolutionUpdate) -> Result<(), UtilityHookError> {
+        self.for_each_physical_relation(|rel| {
+            update.stage_for_relation(rel)?;
+            Ok(())
+        })
+    }
+}
+
 impl AlterTableIcebergOperations {
     fn from_command_list(cmds: *mut pg_sys::List) -> Self {
         let mut result = Self::default();
@@ -124,6 +283,7 @@ impl AlterTableIcebergOperations {
             return result;
         }
 
+        let mut schema_plan = AlterTableSchemaPlan::default();
         let len = unsafe { pg_sys::list_length(cmds) };
         for idx in 0..len {
             let cmd = unsafe {
@@ -136,6 +296,7 @@ impl AlterTableIcebergOperations {
             let (subtype, name_ptr) = unsafe { ((*cmd).subtype, (*cmd).name) };
             match subtype {
                 pg_sys::AlterTableType::AT_SetAccessMethod => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
                     result.sets_access_method = true;
                     // SAFETY: `name_ptr` belongs to the same AlterTableCmd we
                     // borrow from the parse tree.
@@ -144,30 +305,253 @@ impl AlterTableIcebergOperations {
                     };
                 }
                 pg_sys::AlterTableType::AT_SetTableSpace => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
                     result.sets_tablespace = true;
                 }
-                // TODO(schema-evolution): ALTER TABLE subcommands that mutate
-                // the column set (notably AT_DropColumn, also AT_AddColumn /
-                // AT_AlterColumnType) fall through here and are never
-                // propagated to the stored Iceberg metadata schema. This is a
-                // real, reachable data-path bug, not a theoretical edge:
-                // dropping a NOT NULL column leaves a `required` field with no
-                // live PG source lingering in the Iceberg schema, so every
-                // subsequent INSERT fails permanently in
-                // `WriteColumns::resolve_columns` with
-                // `RequiredColumnMissingSource`. The fix is to translate these
-                // subcommands into proper Iceberg schema-evolution updates
-                // (and at minimum downgrade the dropped field's `required`
-                // bit), not to widen this guard. Deferred for now.
+                pg_sys::AlterTableType::AT_AddColumn => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    if let Some(op) = result.inspect_add_column(cmd) {
+                        schema_plan.push(AlterTableSchemaPass::AddColumn, idx, op);
+                    }
+                }
+                pg_sys::AlterTableType::AT_DropColumn => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    if let Some(op) = result.inspect_drop_column(cmd) {
+                        schema_plan.push(AlterTableSchemaPass::Drop, idx, op);
+                    }
+                }
+                pg_sys::AlterTableType::AT_DropNotNull => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    if let Some(op) = result.inspect_drop_not_null(cmd) {
+                        schema_plan.push(AlterTableSchemaPass::Drop, idx, op);
+                    }
+                }
+                pg_sys::AlterTableType::AT_ColumnDefault
+                | pg_sys::AlterTableType::AT_CookedColumnDefault => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    result.reject_schema_operation(
+                        "ALTER COLUMN SET/DROP DEFAULT is not supported for Iceberg relations",
+                    );
+                }
+                pg_sys::AlterTableType::AT_SetNotNull => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    result.reject_schema_operation(
+                        "ALTER COLUMN SET NOT NULL is not supported for Iceberg relations",
+                    );
+                }
+                pg_sys::AlterTableType::AT_AlterColumnType => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    result.reject_schema_operation(
+                        "ALTER COLUMN TYPE is not supported for Iceberg relations",
+                    );
+                }
+                pg_sys::AlterTableType::AT_AddConstraint => {
+                    result.require_lock(Self::add_constraint_lockmode(cmd));
+                    result.reject_schema_operation(
+                        "column constraints, identity, and generated columns are not supported for Iceberg relations",
+                    );
+                }
+                pg_sys::AlterTableType::AT_DropConstraint
+                | pg_sys::AlterTableType::AT_AlterConstraint
+                | pg_sys::AlterTableType::AT_AddIdentity
+                | pg_sys::AlterTableType::AT_SetIdentity
+                | pg_sys::AlterTableType::AT_DropIdentity
+                | pg_sys::AlterTableType::AT_DropExpression => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    result.reject_schema_operation(
+                        "column constraints, identity, and generated columns are not supported for Iceberg relations",
+                    );
+                }
+                #[cfg(feature = "pg17")]
+                pg_sys::AlterTableType::AT_SetExpression => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    result.reject_schema_operation(
+                        "column constraints, identity, and generated columns are not supported for Iceberg relations",
+                    );
+                }
                 _ => {}
             }
         }
 
+        result.schema_update = schema_plan.into_update();
         result
     }
 
+    fn require_lock(&mut self, lockmode: pg_sys::LOCKMODE) {
+        if lockmode > self.required_lockmode {
+            self.required_lockmode = lockmode;
+        }
+    }
+
+    fn lockmode(&self) -> pg_sys::LOCKMODE {
+        debug_assert!(self.has_guarded_operation());
+        if self.required_lockmode == pg_sys::NoLock as pg_sys::LOCKMODE {
+            pg_sys::AccessShareLock as pg_sys::LOCKMODE
+        } else {
+            self.required_lockmode
+        }
+    }
+
+    fn add_constraint_lockmode(
+        cmd: *const pg_sys::AlterTableCmd,
+    ) -> pg_sys::LOCKMODE {
+        let command = unsafe { &*cmd };
+        if command.def.is_null() {
+            return pg_sys::AccessExclusiveLock as _;
+        }
+
+        let constraint = command.def as *const pg_sys::Constraint;
+        if unsafe { (*constraint).contype } == pg_sys::ConstrType::CONSTR_FOREIGN {
+            pg_sys::ShareRowExclusiveLock as _
+        } else {
+            pg_sys::AccessExclusiveLock as _
+        }
+    }
+
     fn has_guarded_operation(&self) -> bool {
-        self.sets_access_method || self.sets_tablespace
+        self.sets_access_method
+            || self.sets_tablespace
+            || !self.schema_update.is_empty()
+            || self.unsupported_schema_operation.is_some()
+    }
+
+    fn reject_schema_operation(&mut self, message: impl Into<String>) {
+        if self.unsupported_schema_operation.is_none() {
+            self.unsupported_schema_operation = Some(message.into());
+        }
+    }
+
+    fn inspect_add_column(
+        &mut self,
+        cmd: *const pg_sys::AlterTableCmd,
+    ) -> Option<AlterTableSchemaOp> {
+        let command = unsafe { &*cmd };
+        if command.missing_ok {
+            self.reject_schema_operation(
+                "ALTER TABLE ADD COLUMN IF NOT EXISTS is not supported for Iceberg relations",
+            );
+            return None;
+        }
+
+        let coldef = command.def as *const pg_sys::ColumnDef;
+        if coldef.is_null() {
+            self.reject_schema_operation(
+                "invalid ALTER TABLE ADD COLUMN command tree for Iceberg schema evolution",
+            );
+            return None;
+        }
+
+        let coldef = unsafe { &*coldef };
+        if coldef.is_not_null {
+            self.reject_schema_operation(
+                "ALTER TABLE ADD COLUMN with NOT NULL is not supported for Iceberg relations",
+            );
+            return None;
+        }
+        if !coldef.raw_default.is_null() || !coldef.cooked_default.is_null() {
+            self.reject_schema_operation(
+                "ALTER TABLE ADD COLUMN with DEFAULT is not supported for Iceberg relations",
+            );
+            return None;
+        }
+        if coldef.identity != 0 {
+            self.reject_schema_operation(
+                "ALTER TABLE ADD COLUMN with identity is not supported for Iceberg relations",
+            );
+            return None;
+        }
+        if coldef.generated != 0 {
+            self.reject_schema_operation(
+                "ALTER TABLE ADD COLUMN with generated expression is not supported for Iceberg relations",
+            );
+            return None;
+        }
+        if Self::has_extra_column_constraints(coldef) {
+            self.reject_schema_operation(
+                "ALTER TABLE ADD COLUMN constraints are not supported for Iceberg relations",
+            );
+            return None;
+        }
+
+        match Self::string_from_ptr(coldef.colname) {
+            Some(name) => Some(AlterTableSchemaOp::AddNullableColumn(name)),
+            None => {
+                self.reject_schema_operation(
+                    "invalid ALTER TABLE ADD COLUMN command tree for Iceberg schema evolution",
+                );
+                None
+            }
+        }
+    }
+
+    fn inspect_drop_column(
+        &mut self,
+        cmd: *const pg_sys::AlterTableCmd,
+    ) -> Option<AlterTableSchemaOp> {
+        let command = unsafe { &*cmd };
+        if command.missing_ok {
+            self.reject_schema_operation(
+                "ALTER TABLE DROP COLUMN IF EXISTS is not supported for Iceberg relations",
+            );
+            return None;
+        }
+        if command.behavior == pg_sys::DropBehavior::DROP_CASCADE {
+            self.reject_schema_operation(
+                "ALTER TABLE DROP COLUMN CASCADE is not supported for Iceberg relations",
+            );
+            return None;
+        }
+
+        match Self::string_from_ptr(command.name) {
+            Some(name) => Some(AlterTableSchemaOp::DropColumn(name)),
+            None => {
+                self.reject_schema_operation(
+                    "invalid ALTER TABLE DROP COLUMN command tree for Iceberg schema evolution",
+                );
+                None
+            }
+        }
+    }
+
+    fn inspect_drop_not_null(
+        &mut self,
+        cmd: *const pg_sys::AlterTableCmd,
+    ) -> Option<AlterTableSchemaOp> {
+        let command = unsafe { &*cmd };
+        match Self::string_from_ptr(command.name) {
+            Some(name) => Some(AlterTableSchemaOp::DropNotNull(name)),
+            None => {
+                self.reject_schema_operation(
+                    "invalid ALTER TABLE ALTER COLUMN DROP NOT NULL command tree for Iceberg schema evolution",
+                );
+                None
+            }
+        }
+    }
+
+    fn has_extra_column_constraints(coldef: &pg_sys::ColumnDef) -> bool {
+        if coldef.constraints.is_null() {
+            return false;
+        }
+
+        let len = unsafe { pg_sys::list_length(coldef.constraints) };
+        for idx in 0..len {
+            let constraint = unsafe { pg_sys::list_nth(coldef.constraints, idx) }
+                as *const pg_sys::Constraint;
+            if constraint.is_null() {
+                return true;
+            }
+            let contype = unsafe { (*constraint).contype };
+            if contype != pg_sys::ConstrType::CONSTR_NULL {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn string_from_ptr(ptr: *const std::ffi::c_char) -> Option<String> {
+        (!ptr.is_null())
+            .then(|| unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() })
     }
 }
 
@@ -288,7 +672,7 @@ impl UtilityHook for IcebergCreateTableAsGuard {
 
 impl UtilityHook for IcebergAlterTableGuard {
     fn name(&self) -> &'static str {
-        "iceberg alter table storage identity guard"
+        "iceberg alter table DDL guard"
     }
 
     fn on_pre(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
@@ -307,19 +691,13 @@ impl UtilityHook for IcebergAlterTableGuard {
             return Ok(());
         }
 
-        let oid = unsafe {
-            range_var_get_relid(
-                stmt.relation,
-                pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-                true,
-            )
-        }?;
+        let oid =
+            unsafe { range_var_get_relid(stmt.relation, ops.lockmode(), true) }?;
         if oid == pg_sys::InvalidOid {
             return Ok(());
         }
 
-        let guard =
-            RelationGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)?;
+        let guard = RelationGuard::open(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         let rel = guard.as_handle();
         let current_is_iceberg = rel.is_iceberg();
 
@@ -339,10 +717,161 @@ impl UtilityHook for IcebergAlterTableGuard {
             ));
         }
 
+        if current_is_iceberg {
+            if let Some(message) = ops.unsupported_schema_operation.as_deref() {
+                return Err(HookError::with_code(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    message,
+                ));
+            }
+            if !ops.schema_update.is_empty() {
+                let Some(target) = SchemaEvolutionTarget::resolve(
+                    &rel,
+                    pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
+                )?
+                else {
+                    return Ok(());
+                };
+                target.preflight(&ops.schema_update)?;
+            }
+        }
+
         Ok(())
     }
 
-    fn on_post(&self, _context: &PostUtilityContext) -> Result<(), UtilityHookError> {
+    fn on_post(&self, context: &PostUtilityContext) -> Result<(), UtilityHookError> {
+        let stmt = context
+            .original_stmt()
+            .cast::<AlterTableStmtNode>()
+            .expect("Hook registered for T_AlterTableStmt");
+
+        if stmt.objtype != pg_sys::ObjectType::OBJECT_TABLE
+            && stmt.objtype != pg_sys::ObjectType::OBJECT_MATVIEW
+        {
+            return Ok(());
+        }
+
+        let ops = AlterTableIcebergOperations::from_command_list(stmt.cmds);
+        if ops.schema_update.is_empty() {
+            return Ok(());
+        }
+
+        let oid = unsafe {
+            range_var_get_relid(
+                stmt.relation,
+                pg_sys::NoLock as pg_sys::LOCKMODE,
+                true,
+            )
+        }?;
+        if oid == pg_sys::InvalidOid {
+            return Ok(());
+        }
+
+        let guard = RelationGuard::open(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+        let rel = guard.as_handle();
+        let Some(target) =
+            SchemaEvolutionTarget::resolve(&rel, pg_sys::NoLock as pg_sys::LOCKMODE)?
+        else {
+            return Ok(());
+        };
+        target.stage(&ops.schema_update)?;
+        Ok(())
+    }
+}
+
+impl IcebergRenameColumnHook {
+    fn update_from_stmt(stmt: &pg_sys::RenameStmt) -> Option<SchemaEvolutionUpdate> {
+        if stmt.renameType != pg_sys::ObjectType::OBJECT_COLUMN {
+            return None;
+        }
+        if stmt.relation.is_null() {
+            return None;
+        }
+
+        let old_name = AlterTableIcebergOperations::string_from_ptr(stmt.subname)?;
+        let new_name = AlterTableIcebergOperations::string_from_ptr(stmt.newname)?;
+
+        let mut update = SchemaEvolutionUpdate::new();
+        update.rename_column(old_name, new_name);
+        Some(update)
+    }
+
+    fn iceberg_relation_guard(
+        stmt: &pg_sys::RenameStmt,
+        lookup_lockmode: pg_sys::LOCKMODE,
+    ) -> Result<Option<RelationGuard>, UtilityHookError> {
+        if stmt.renameType != pg_sys::ObjectType::OBJECT_COLUMN
+            || stmt.relation.is_null()
+        {
+            return Ok(None);
+        }
+
+        let oid =
+            unsafe { range_var_get_relid(stmt.relation, lookup_lockmode, true) }?;
+        if oid == pg_sys::InvalidOid {
+            return Ok(None);
+        }
+
+        let guard = RelationGuard::open(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+        if guard.as_handle().is_iceberg() {
+            Ok(Some(guard))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl UtilityHook for IcebergRenameColumnHook {
+    fn name(&self) -> &'static str {
+        "iceberg rename column schema evolution"
+    }
+
+    fn on_pre(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
+        let stmt = context
+            .cast::<RenameStmtNode>()
+            .expect("Hook registered for T_RenameStmt");
+        let Some(update) = Self::update_from_stmt(stmt) else {
+            return Ok(());
+        };
+        let Some(guard) = Self::iceberg_relation_guard(
+            stmt,
+            pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
+        )?
+        else {
+            return Ok(());
+        };
+        let rel = guard.as_handle();
+        let Some(target) = SchemaEvolutionTarget::resolve(
+            &rel,
+            pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
+        )?
+        else {
+            return Ok(());
+        };
+        target.preflight(&update)?;
+        Ok(())
+    }
+
+    fn on_post(&self, context: &PostUtilityContext) -> Result<(), UtilityHookError> {
+        let stmt = context
+            .original_stmt()
+            .cast::<RenameStmtNode>()
+            .expect("Hook registered for T_RenameStmt");
+        let Some(update) = Self::update_from_stmt(stmt) else {
+            return Ok(());
+        };
+        let Some(guard) =
+            Self::iceberg_relation_guard(stmt, pg_sys::NoLock as pg_sys::LOCKMODE)?
+        else {
+            return Ok(());
+        };
+        let rel = guard.as_handle();
+        let Some(target) =
+            SchemaEvolutionTarget::resolve(&rel, pg_sys::NoLock as pg_sys::LOCKMODE)?
+        else {
+            return Ok(());
+        };
+        target.stage(&update)?;
         Ok(())
     }
 }
@@ -470,6 +999,10 @@ pub fn init_hook() {
     register_utility_hook(
         pg_sys::NodeTag::T_AlterTableStmt,
         Box::new(IcebergAlterTableGuard),
+    );
+    register_utility_hook(
+        pg_sys::NodeTag::T_RenameStmt,
+        Box::new(IcebergRenameColumnHook),
     );
     register_utility_hook(
         pg_sys::NodeTag::T_AlterTableMoveAllStmt,

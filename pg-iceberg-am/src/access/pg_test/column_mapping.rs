@@ -13,8 +13,10 @@ mod tests {
     };
     use pgrx::pg_sys;
 
-    use crate::access::column_mapping::{ColumnMapping, LiveColumn};
-    use crate::access::projection::ProjectedName;
+    use crate::access::column_mapping::{
+        ColumnMapping, LiveColumn, RelationFieldMap, RelationShape,
+    };
+    use crate::access::projection::{ProjectedField, Projection};
     use crate::error::IcebergError;
 
     fn int_schema(names: &[&str]) -> IcebergSchema {
@@ -46,16 +48,23 @@ mod tests {
         vec![(pg_sys::INT4OID, -1); count]
     }
 
+    fn shape(columns: &[(i16, &str)], slot_width: usize) -> RelationShape {
+        RelationShape::for_test(
+            live_columns(columns),
+            slot_width,
+            int_attribute_types(slot_width),
+        )
+    }
+
     #[pgrx::pg_test(schema = "tests")]
-    fn from_full_schema_without_dropped_columns_is_identity() {
+    fn from_field_map_without_dropped_columns_is_identity() {
         let schema = int_schema(&["a", "b", "c"]);
-        let plan = ColumnMapping::from_full_schema(
+        let field_map = RelationFieldMap::from_shape(
             &schema,
-            &live_columns(&[(1, "a"), (2, "b"), (3, "c")]),
-            3,
-            &int_attribute_types(3),
+            &shape(&[(1, "a"), (2, "b"), (3, "c")], 3),
         )
         .unwrap();
+        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
 
         assert_eq!(plan.entries.len(), 3);
         for (index, entry) in plan.entries.iter().enumerate() {
@@ -65,15 +74,14 @@ mod tests {
     }
 
     #[pgrx::pg_test(schema = "tests")]
-    fn from_full_schema_with_dropped_column_leaves_gap() {
+    fn from_field_map_with_dropped_column_leaves_gap() {
         let schema = int_schema(&["a", "b", "d"]);
-        let plan = ColumnMapping::from_full_schema(
+        let field_map = RelationFieldMap::from_shape(
             &schema,
-            &live_columns(&[(1, "a"), (2, "b"), (4, "d")]),
-            4,
-            &int_attribute_types(4),
+            &shape(&[(1, "a"), (2, "b"), (4, "d")], 4),
         )
         .unwrap();
+        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
 
         assert_eq!(
             plan.entries
@@ -92,30 +100,23 @@ mod tests {
     }
 
     #[pgrx::pg_test(schema = "tests")]
-    fn from_full_schema_resolves_wider_iceberg_schema_by_name() {
+    fn from_field_map_resolves_wider_iceberg_schema_by_field_id() {
         let schema = int_schema(&["a", "b", "c"]);
-        let plan = ColumnMapping::from_full_schema(
-            &schema,
-            &live_columns(&[(1, "a"), (3, "c")]),
-            3,
-            &int_attribute_types(3),
-        )
-        .unwrap();
+        let field_map =
+            RelationFieldMap::from_shape(&schema, &shape(&[(1, "a"), (3, "c")], 3))
+                .unwrap();
+        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
 
         assert_eq!(plan.entries.len(), 2);
         assert_eq!((plan.entries[0].src_col, plan.entries[0].dest), (0, 0));
-        assert_eq!((plan.entries[1].src_col, plan.entries[1].dest), (2, 2));
+        assert_eq!((plan.entries[1].src_col, plan.entries[1].dest), (1, 2));
     }
 
     #[pgrx::pg_test(schema = "tests")]
-    fn from_full_schema_rejects_unresolved_name() {
+    fn from_field_map_rejects_unresolved_name() {
         let schema = int_schema(&["a", "b"]);
-        let result = ColumnMapping::from_full_schema(
-            &schema,
-            &live_columns(&[(1, "a"), (2, "z")]),
-            2,
-            &int_attribute_types(2),
-        );
+        let result =
+            RelationFieldMap::from_shape(&schema, &shape(&[(1, "a"), (2, "z")], 2));
 
         assert!(matches!(result, Err(IcebergError::ColumnNotFound(_))));
     }
@@ -123,17 +124,19 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_decouples_source_order_from_destination() {
         let schema = int_schema(&["a", "b", "c", "d", "e"]);
-        let projection = vec![
-            ProjectedName::new(2, 1, "b".to_owned()),
-            ProjectedName::new(5, 0, "e".to_owned()),
-        ];
-        let plan = ColumnMapping::from_projection(
+        let full_map = RelationFieldMap::from_shape(
             &schema,
-            &projection,
-            2,
-            &int_attribute_types(2),
+            &shape(&[(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")], 5),
         )
         .unwrap();
+        let projection = Projection::new(vec![
+            ProjectedField::new(2, 1),
+            ProjectedField::new(5, 0),
+        ]);
+        let field_map = full_map
+            .project(&projection, 2, &int_attribute_types(2))
+            .unwrap();
+        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
 
         assert_eq!(
             plan.entries
@@ -154,17 +157,19 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_with_dropped_column_uses_attribute_position() {
         let schema = int_schema(&["a", "b", "e"]);
-        let projection = vec![
-            ProjectedName::new(2, 0, "b".to_owned()),
-            ProjectedName::new(4, 1, "e".to_owned()),
-        ];
-        let plan = ColumnMapping::from_projection(
+        let full_map = RelationFieldMap::from_shape(
             &schema,
-            &projection,
-            2,
-            &int_attribute_types(2),
+            &shape(&[(1, "a"), (2, "b"), (4, "e")], 4),
         )
         .unwrap();
+        let projection = Projection::new(vec![
+            ProjectedField::new(2, 0),
+            ProjectedField::new(4, 1),
+        ]);
+        let field_map = full_map
+            .project(&projection, 2, &int_attribute_types(2))
+            .unwrap();
+        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
 
         assert_eq!(
             plan.entries
@@ -178,13 +183,10 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_rejects_unresolved_name() {
         let schema = int_schema(&["a", "b"]);
-        let projection = vec![ProjectedName::new(1, 0, "does_not_exist".to_owned())];
-        let result = ColumnMapping::from_projection(
-            &schema,
-            &projection,
-            2,
-            &int_attribute_types(2),
-        );
+        let full_map =
+            RelationFieldMap::from_shape(&schema, &shape(&[(2, "b")], 2)).unwrap();
+        let projection = Projection::new(vec![ProjectedField::new(1, 0)]);
+        let result = full_map.project(&projection, 2, &int_attribute_types(2));
 
         assert!(matches!(result, Err(IcebergError::ColumnNotFound(_))));
     }
@@ -192,13 +194,10 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_rejects_attribute_number_below_one() {
         let schema = int_schema(&["a", "b"]);
-        let projection = vec![ProjectedName::new(0, 0, "a".to_owned())];
-        let result = ColumnMapping::from_projection(
-            &schema,
-            &projection,
-            2,
-            &int_attribute_types(2),
-        );
+        let full_map =
+            RelationFieldMap::from_shape(&schema, &shape(&[(1, "a")], 2)).unwrap();
+        let projection = Projection::new(vec![ProjectedField::new(0, 0)]);
+        let result = full_map.project(&projection, 2, &int_attribute_types(2));
 
         assert!(matches!(result, Err(IcebergError::InvariantViolated(_))));
     }
@@ -206,13 +205,10 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_rejects_destination_out_of_range() {
         let schema = int_schema(&["a", "b"]);
-        let projection = vec![ProjectedName::new(2, 5, "b".to_owned())];
-        let result = ColumnMapping::from_projection(
-            &schema,
-            &projection,
-            2,
-            &int_attribute_types(2),
-        );
+        let full_map =
+            RelationFieldMap::from_shape(&schema, &shape(&[(2, "b")], 2)).unwrap();
+        let projection = Projection::new(vec![ProjectedField::new(2, 5)]);
+        let result = full_map.project(&projection, 2, &int_attribute_types(2));
 
         assert!(matches!(result, Err(IcebergError::InvariantViolated(_))));
     }

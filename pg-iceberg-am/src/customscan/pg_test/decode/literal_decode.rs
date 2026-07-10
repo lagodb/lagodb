@@ -57,7 +57,7 @@ mod tests {
                 "fixture Const must be NULL (constisnull = true)"
             );
 
-            let mut translator = IcebergPredicateTranslator::new();
+            let mut translator = IcebergPredicateTranslator::new_unbound_for_tests();
             let result = translator.literal(lit);
 
             match result {

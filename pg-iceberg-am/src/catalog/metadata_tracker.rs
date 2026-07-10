@@ -3,7 +3,7 @@
 //! [`TxMetadata`] owns the bookkeeping for every Iceberg table modified inside
 //! a single PostgreSQL top-level transaction:
 //!
-//! - the transaction-local Iceberg file delta accumulated across statements,
+//! - the transaction-local schema/data action log accumulated across statements,
 //! - a per-savepoint history stack used to roll back on
 //!   `ROLLBACK TO SAVEPOINT`,
 //! - one final metadata materialization during top-level pre-commit.
@@ -27,7 +27,7 @@ use iceberg_lite::spec::{
 };
 use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{
-    ApplyTransactionAction, RowDeltaValidation, Transaction,
+    ApplyTransactionAction, PreparedSchemaUpdate, RowDeltaValidation, Transaction,
 };
 use pg_lakebase_core::diag;
 use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
@@ -51,27 +51,21 @@ const TOTAL_FILES_SIZE: &str = "total-files-size";
 ///
 /// Captures the state BEFORE a statement that wrote to this table at
 /// `nest_level`, so a later `ROLLBACK TO SAVEPOINT` can restore it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct HistoryFrame {
     nest_level: i32,
-    marker: SnapshotDeltaMarker,
-    validation_len: usize,
+    marker: TxTableActionLogMarker,
 }
 
 /// Metadata location bookkeeping for a single Iceberg table inside one
 /// top-level transaction.
 #[derive(Debug)]
 struct TableState {
-    /// Transaction-local file operations layered over the latest committed
-    /// Iceberg metadata for statement-local reads.
-    ///
-    /// Stored behind `Arc` so scan specs can hold a stable statement view.
-    /// Later mutation calls mutate through `Arc::make_mut`, preserving any older
-    /// scan's snapshot of the delta.
-    delta: Arc<SnapshotDelta>,
-
     /// FileIO captured from the first statement to drive the final commit.
     file_io: Option<FileIO>,
+
+    /// Ordered transaction-local schema/data actions.
+    actions: TxTableActionLog,
 
     /// Savepoint history stack. Each frame is the state BEFORE a write at
     /// `nest_level`, so sub-abort can restore it by popping frames whose
@@ -80,10 +74,6 @@ struct TableState {
     /// Top-level writes do not need frames: top-level abort drops the whole
     /// tracker, and top-level commit never rolls back through this stack.
     level_history: Vec<HistoryFrame>,
-
-    /// Row-level conflict validations that must be checked at Iceberg commit
-    /// time before materializing this transaction's delta.
-    validations: Vec<RowDeltaValidation>,
 
     /// Physical-row claims used to reproduce PostgreSQL `TM_SelfModified`
     /// semantics across sibling ModifyTable nodes and nested SPI executions.
@@ -96,51 +86,221 @@ struct TableState {
 /// [`TxMetadataInner`] before metadata reads, transaction materialization, and
 /// catalog CAS retries.
 struct TableCommitInput {
+    actions: TxTableActionLog,
+    file_io: FileIO,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TxTableActionLog {
+    actions: Vec<TxTableAction>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TxTableActionLogMarker {
+    action_len: usize,
+    current_data_epoch: Option<TxDataEpochMarker>,
+}
+
+#[derive(Debug, Clone)]
+enum TxTableAction {
+    Schema(PreparedSchemaUpdate),
+    Data(TxDataEpoch),
+}
+
+#[derive(Debug, Clone)]
+struct TxDataEpoch {
     delta: Arc<SnapshotDelta>,
     validations: Vec<RowDeltaValidation>,
-    file_io: FileIO,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TxDataEpochMarker {
+    delta: SnapshotDeltaMarker,
+    validation_len: usize,
+}
+
+impl Default for TxDataEpoch {
+    fn default() -> Self {
+        Self {
+            delta: Arc::new(SnapshotDelta::new()),
+            validations: Vec::new(),
+        }
+    }
+}
+
+impl TxDataEpoch {
+    fn is_empty(&self) -> bool {
+        self.delta.is_empty() && self.validations.is_empty()
+    }
+}
+
+impl TxTableActionLog {
+    fn mark(&self) -> TxTableActionLogMarker {
+        let current_data_epoch = match self.actions.last() {
+            Some(TxTableAction::Data(epoch)) => Some(TxDataEpochMarker {
+                delta: epoch.delta.mark(),
+                validation_len: epoch.validations.len(),
+            }),
+            _ => None,
+        };
+
+        TxTableActionLogMarker {
+            action_len: self.actions.len(),
+            current_data_epoch,
+        }
+    }
+
+    fn truncate(&mut self, marker: TxTableActionLogMarker) {
+        self.actions.truncate(marker.action_len);
+        if let Some(epoch_marker) = marker.current_data_epoch
+            && let Some(TxTableAction::Data(epoch)) = self.actions.last_mut()
+        {
+            Arc::make_mut(&mut epoch.delta).truncate(epoch_marker.delta);
+            epoch.validations.truncate(epoch_marker.validation_len);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.actions.iter().all(|action| match action {
+            TxTableAction::Schema(update) => update.is_empty(),
+            TxTableAction::Data(epoch) => epoch.is_empty(),
+        })
+    }
+
+    fn stage_schema(&mut self, update: PreparedSchemaUpdate) {
+        if !update.is_empty() {
+            self.actions.push(TxTableAction::Schema(update));
+        }
+    }
+
+    fn current_data_epoch_mut(&mut self) -> &mut TxDataEpoch {
+        let needs_new_epoch =
+            !matches!(self.actions.last(), Some(TxTableAction::Data(_)));
+        if needs_new_epoch {
+            self.actions
+                .push(TxTableAction::Data(TxDataEpoch::default()));
+        }
+        match self.actions.last_mut() {
+            Some(TxTableAction::Data(epoch)) => epoch,
+            _ => unreachable!("last action must be a data epoch"),
+        }
+    }
+
+    fn record_data_files(
+        &mut self,
+        new_data_files: Vec<DataFile>,
+    ) -> IcebergResult<()> {
+        if new_data_files.is_empty() {
+            return Ok(());
+        }
+        let epoch = self.current_data_epoch_mut();
+        let delta = Arc::make_mut(&mut epoch.delta);
+        for data_file in new_data_files {
+            delta.add_data_file(data_file)?;
+        }
+        Ok(())
+    }
+
+    fn record_position_delete_file(
+        &mut self,
+        delete_file: DataFile,
+        referenced_data_files: Vec<String>,
+    ) -> IcebergResult<()> {
+        let epoch = self.current_data_epoch_mut();
+        Arc::make_mut(&mut epoch.delta)
+            .add_position_delete_file(delete_file, referenced_data_files)?;
+        Ok(())
+    }
+
+    fn record_remove_delete_file(
+        &mut self,
+        identity: DeleteFileIdentity,
+    ) -> IcebergResult<()> {
+        let epoch = self.current_data_epoch_mut();
+        Arc::make_mut(&mut epoch.delta).remove_delete_file(identity)?;
+        Ok(())
+    }
+
+    fn record_remove_data_file(&mut self, file_path: String) -> IcebergResult<()> {
+        let epoch = self.current_data_epoch_mut();
+        Arc::make_mut(&mut epoch.delta).remove_data_file(file_path)?;
+        Ok(())
+    }
+
+    fn record_validation(&mut self, validation: RowDeltaValidation) {
+        self.current_data_epoch_mut().validations.push(validation);
+    }
+
+    fn overlay_metadata(
+        &self,
+        mut metadata: TableMetadata,
+    ) -> IcebergResult<TableMetadata> {
+        for action in &self.actions {
+            if let TxTableAction::Schema(update) = action {
+                update
+                    .validate_base_metadata(&metadata)
+                    .map_err(IcebergError::schema_evolution_conflict)?;
+                metadata = update
+                    .apply_to_metadata(&metadata)
+                    .map_err(IcebergError::from)?;
+            }
+        }
+        Ok(metadata)
+    }
+
+    fn combined_delta(&self) -> IcebergResult<Option<Arc<SnapshotDelta>>> {
+        let mut combined = SnapshotDelta::new();
+        let mut has_delta = false;
+        for action in &self.actions {
+            if let TxTableAction::Data(epoch) = action
+                && !epoch.delta.is_empty()
+            {
+                combined.append_delta(&epoch.delta)?;
+                has_delta = true;
+            }
+        }
+        Ok(has_delta.then(|| Arc::new(combined)))
+    }
+
+    fn actions(&self) -> &[TxTableAction] {
+        &self.actions
+    }
 }
 
 impl TableState {
     fn new() -> Self {
         Self {
-            delta: Arc::new(SnapshotDelta::new()),
             file_io: None,
+            actions: TxTableActionLog::default(),
             level_history: Vec::new(),
-            validations: Vec::new(),
             row_registry: RelationRowRegistry::default(),
         }
     }
 
-    fn record_history(&mut self, nest_level: i32) -> (SnapshotDeltaMarker, bool) {
-        let marker = self.delta.mark();
+    fn record_history(&mut self, nest_level: i32) -> (TxTableActionLogMarker, bool) {
+        let marker = self.actions.mark();
         let should_record_history = nest_level > 1;
         if should_record_history {
-            self.level_history.push(HistoryFrame {
-                nest_level,
-                marker,
-                validation_len: self.validations.len(),
-            });
+            self.level_history.push(HistoryFrame { nest_level, marker });
         }
         (marker, should_record_history)
     }
 
-    fn record_delta_mutation<F>(
+    fn record_action_mutation<F>(
         &mut self,
         nest_level: i32,
         mutation: F,
     ) -> IcebergResult<()>
     where
-        F: FnOnce(&mut SnapshotDelta) -> iceberg_lite::Result<()>,
+        F: FnOnce(&mut TxTableActionLog) -> IcebergResult<()>,
     {
         let (marker, should_record_history) = self.record_history(nest_level);
-        let delta = Arc::make_mut(&mut self.delta);
-        if let Err(err) = mutation(delta) {
-            delta.truncate(marker);
+        if let Err(err) = mutation(&mut self.actions) {
+            self.actions.truncate(marker);
             if should_record_history {
                 self.level_history.pop();
             }
-            return Err(err.into());
+            return Err(err);
         }
 
         Ok(())
@@ -148,7 +308,20 @@ impl TableState {
 
     fn record_validation(&mut self, nest_level: i32, validation: RowDeltaValidation) {
         self.record_history(nest_level);
-        self.validations.push(validation);
+        self.actions.record_validation(validation);
+    }
+
+    fn record_schema_update(
+        &mut self,
+        nest_level: i32,
+        update: PreparedSchemaUpdate,
+    ) {
+        if update.is_empty() {
+            return;
+        }
+
+        self.record_history(nest_level);
+        self.actions.stage_schema(update);
     }
 
     fn record_data_files(
@@ -160,11 +333,8 @@ impl TableState {
             return Ok(());
         }
 
-        self.record_delta_mutation(nest_level, |delta| {
-            for data_file in new_data_files {
-                delta.add_data_file(data_file)?;
-            }
-            Ok(())
+        self.record_action_mutation(nest_level, |actions| {
+            actions.record_data_files(new_data_files)
         })
     }
 
@@ -174,9 +344,8 @@ impl TableState {
         delete_file: DataFile,
         referenced_data_files: Vec<String>,
     ) -> IcebergResult<()> {
-        self.record_delta_mutation(nest_level, |delta| {
-            delta.add_position_delete_file(delete_file, referenced_data_files)?;
-            Ok(())
+        self.record_action_mutation(nest_level, |actions| {
+            actions.record_position_delete_file(delete_file, referenced_data_files)
         })
     }
 
@@ -185,9 +354,8 @@ impl TableState {
         nest_level: i32,
         identity: DeleteFileIdentity,
     ) -> IcebergResult<()> {
-        self.record_delta_mutation(nest_level, |delta| {
-            delta.remove_delete_file(identity)?;
-            Ok(())
+        self.record_action_mutation(nest_level, |actions| {
+            actions.record_remove_delete_file(identity)
         })
     }
 
@@ -196,9 +364,8 @@ impl TableState {
         nest_level: i32,
         file_path: String,
     ) -> IcebergResult<()> {
-        self.record_delta_mutation(nest_level, |delta| {
-            delta.remove_data_file(file_path)?;
-            Ok(())
+        self.record_action_mutation(nest_level, |actions| {
+            actions.record_remove_data_file(file_path)
         })
     }
 
@@ -230,8 +397,7 @@ impl TableState {
                 break;
             }
             let frame = self.level_history.pop().unwrap();
-            Arc::make_mut(&mut self.delta).truncate(frame.marker);
-            self.validations.truncate(frame.validation_len);
+            self.actions.truncate(frame.marker);
         }
         self.row_registry.rollback_to_level(target_level);
     }
@@ -476,7 +642,7 @@ impl TxMetadata {
         new_data_files: Vec<DataFile>,
         file_io: &FileIO,
     ) -> IcebergResult<()> {
-        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
             state.record_data_files(nest_level, new_data_files)
         })
     }
@@ -496,7 +662,7 @@ impl TxMetadata {
     {
         let referenced_data_files: Vec<String> =
             referenced_data_files.into_iter().map(Into::into).collect();
-        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
             state.record_position_delete_file(
                 nest_level,
                 delete_file,
@@ -513,7 +679,7 @@ impl TxMetadata {
         identity: DeleteFileIdentity,
         file_io: &FileIO,
     ) -> IcebergResult<()> {
-        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
             state.record_remove_delete_file(nest_level, identity)
         })
     }
@@ -526,7 +692,7 @@ impl TxMetadata {
         validation: RowDeltaValidation,
         file_io: &FileIO,
     ) -> IcebergResult<()> {
-        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
             state.record_validation(nest_level, validation);
             Ok(())
         })
@@ -564,12 +730,26 @@ impl TxMetadata {
                 file_path
             )));
         }
-        self.stage_delta_mutation(relid, file_io, |state, nest_level| {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
             state.record_remove_data_file(nest_level, file_path)
         })
     }
 
-    fn stage_delta_mutation<F>(
+    /// Statement write/DDL path: record a prepared Iceberg schema update
+    /// without generating metadata files immediately.
+    pub fn stage_schema_update(
+        &self,
+        relid: pg_sys::Oid,
+        update: PreparedSchemaUpdate,
+        file_io: &FileIO,
+    ) -> IcebergResult<()> {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
+            state.record_schema_update(nest_level, update);
+            Ok(())
+        })
+    }
+
+    fn stage_table_mutation<F>(
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
@@ -596,27 +776,37 @@ impl TxMetadata {
     /// Read-side entry point for scans and planner statistics.
     ///
     /// Reads the latest committed metadata location every time, then attaches
-    /// any transaction-local delta for this relation. That gives Read
-    /// Committed behavior without writing statement-time metadata files.
+    /// any transaction-local schema update and file delta for this relation.
+    /// That gives Read Committed behavior without writing statement-time
+    /// metadata files.
     pub fn current_table_metadata(
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
     ) -> IcebergResult<LoadedTableMetadata> {
-        let delta = {
+        let actions = {
             let mut inner = self.inner.borrow_mut();
-            inner.tables.get_mut(&relid).and_then(|state| {
-                if state.file_io.is_none() {
-                    state.file_io = Some(file_io.clone());
+            match inner.tables.get_mut(&relid) {
+                Some(state) => {
+                    if state.file_io.is_none() {
+                        state.file_io = Some(file_io.clone());
+                    }
+                    Some(state.actions.clone())
                 }
-                (!state.delta.is_empty()).then(|| Arc::clone(&state.delta))
-            })
+                None => None,
+            }
         };
 
         let location = IcebergMetadata::get(relid)?
             .metadata_location
             .ok_or(IcebergError::MetadataLocationNull)?;
-        let metadata = TableMetadata::read_from(file_io, &location)?;
+        let mut metadata = TableMetadata::read_from(file_io, &location)?;
+        let delta = if let Some(actions) = actions {
+            metadata = actions.overlay_metadata(metadata)?;
+            actions.combined_delta()?
+        } else {
+            None
+        };
         Ok(LoadedTableMetadata {
             location,
             metadata,
@@ -628,7 +818,8 @@ impl TxMetadata {
     ///
     /// Registers the relation with this transaction's tracker (idempotent),
     /// then returns the latest committed metadata plus any prior
-    /// transaction-local delta for statement-local reads.
+    /// transaction-local schema update and file delta for statement-local
+    /// reads.
     ///
     /// This is the single supported way for a writer to obtain its base
     /// snapshot: it bundles `register_table` with the metadata read so a
@@ -675,20 +866,17 @@ impl TxMetadata {
     /// Commit every tracked table to the catalog with optimistic concurrency
     /// control.
     ///
-    /// Per table: materialize the transaction-local delta on top of the latest
-    /// global metadata, then attempt a CAS update from that base to the new
-    /// metadata location. On `MetadataCatalogConflict`, rebase and retry up
-    /// to `gucs::max_commit_retries()`.
+    /// Per table: materialize the transaction-local schema/data action log on
+    /// top of the latest global metadata, then attempt a CAS update from that
+    /// base to the new metadata location. On `MetadataCatalogConflict`, rebase
+    /// and retry up to `gucs::max_commit_retries()`.
     fn commit_all(&self) -> IcebergResult<()> {
         let table_oids: Vec<pg_sys::Oid> =
             self.inner.borrow().tables.keys().copied().collect();
 
         for relid in table_oids {
-            let Some(TableCommitInput {
-                delta,
-                validations,
-                file_io,
-            }) = self.commit_input(relid)?
+            let Some(TableCommitInput { actions, file_io }) =
+                self.commit_input(relid)?
             else {
                 continue;
             };
@@ -720,20 +908,34 @@ impl TxMetadata {
                     .build()?;
 
                 let catalog = StagedCatalog::new(&base_table);
-                let tx = Transaction::new(&base_table);
-                // The tracker commits every staged overlay through
-                // SnapshotDeltaAction/RowDeltaAction. AddData is an overlay
-                // operation, so append-only and mixed append/delete/remove
-                // transactions must share the same read and materialization
-                // semantics. RowDelta adds Iceberg row-delta conflict validation
-                // when DELETE/UPDATE/MERGE produced a statement delta.
-                let tx = if validations.is_empty() {
-                    tx.snapshot_delta(Arc::clone(&delta)).apply(tx)?
-                } else {
-                    tx.row_delta(Arc::clone(&delta))
-                        .add_validations(validations.clone())
-                        .apply(tx)?
-                };
+                let mut tx = Transaction::new(&base_table);
+                let mut schema_metadata = base_table.metadata().clone();
+                for action in actions.actions() {
+                    match action {
+                        TxTableAction::Schema(schema_update) => {
+                            schema_update
+                                .validate_base_metadata(&schema_metadata)
+                                .map_err(IcebergError::schema_evolution_conflict)?;
+                            schema_metadata = schema_update
+                                .apply_to_metadata(&schema_metadata)
+                                .map_err(IcebergError::from)?;
+                            tx = schema_update.clone().apply(tx)?;
+                        }
+                        TxTableAction::Data(epoch) => {
+                            if epoch.is_empty() {
+                                continue;
+                            }
+                            tx = if epoch.validations.is_empty() {
+                                tx.snapshot_delta(Arc::clone(&epoch.delta))
+                                    .apply(tx)?
+                            } else {
+                                tx.row_delta(Arc::clone(&epoch.delta))
+                                    .add_validations(epoch.validations.clone())
+                                    .apply(tx)?
+                            };
+                        }
+                    }
+                }
                 // FileIO registrations during materialization belong to this
                 // attempt until the catalog CAS decides whether they survive.
                 let metadata_attempt = MetadataAttempt::begin()?;
@@ -780,18 +982,17 @@ impl TxMetadata {
         let Some(state) = inner.tables.get(&relid) else {
             return Ok(None);
         };
-        if state.delta.is_empty() && state.validations.is_empty() {
+        if state.actions.is_empty() {
             return Ok(None);
         }
         let file_io = state.file_io.clone().ok_or_else(|| {
             IcebergError::MetadataTracker(format!(
-                "table {} has staged Iceberg delta without FileIO",
+                "table {} has staged Iceberg metadata changes without FileIO",
                 relid
             ))
         })?;
         Ok(Some(TableCommitInput {
-            delta: Arc::clone(&state.delta),
-            validations: state.validations.clone(),
+            actions: state.actions.clone(),
             file_io,
         }))
     }
@@ -805,7 +1006,8 @@ impl TxMetadata {
     /// Empty table entries are intentionally retained until transaction end:
     /// their file registry is the authority for transaction-stable synthetic
     /// ctid IDs, and IDs allocated inside an aborted savepoint must not be
-    /// reused. Empty deltas are ignored by `commit_input`.
+    /// reused. Entries with no delta, validation, or schema update are ignored
+    /// by `commit_input`.
     fn rollback_to_level(&self, target_level: i32) {
         let mut inner = self.inner.borrow_mut();
         for state in inner.tables.values_mut() {

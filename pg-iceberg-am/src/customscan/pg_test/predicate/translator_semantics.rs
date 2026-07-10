@@ -57,7 +57,7 @@ mod tests {
     /// (SQL three-valued logic: strict comparison with NULL is UNKNOWN).
     #[pgrx::pg_test(schema = "tests")]
     fn comparison_null_left_folds_to_always_false() {
-        let mut t = IcebergPredicateTranslator::new();
+        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
         let got = t
             .comparison(
                 op_triple(96),
@@ -70,7 +70,7 @@ mod tests {
 
     #[pgrx::pg_test(schema = "tests")]
     fn comparison_null_right_folds_to_always_false() {
-        let mut t = IcebergPredicateTranslator::new();
+        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
         let got = t
             .comparison(
                 op_triple(96),
@@ -83,7 +83,7 @@ mod tests {
 
     #[pgrx::pg_test(schema = "tests")]
     fn comparison_null_both_folds_to_always_false() {
-        let mut t = IcebergPredicateTranslator::new();
+        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
         let got = t
             .comparison(
                 op_triple(96),
@@ -98,7 +98,7 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn comparison_each_strict_operator_with_null_folds() {
         for opno in ALLOWLISTED_OPNOS {
-            let mut t = IcebergPredicateTranslator::new();
+            let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
             let got = t
                 .comparison(
                     op_triple(opno),
@@ -114,7 +114,7 @@ mod tests {
                 "opno {opno} with NULL on RHS must fold to AlwaysFalse",
             );
 
-            let mut t = IcebergPredicateTranslator::new();
+            let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
             let got = t
                 .comparison(
                     op_triple(opno),
@@ -136,7 +136,7 @@ mod tests {
     /// (mirrors the NULL `Const` literal path), carrying the param's type OID.
     #[pgrx::pg_test(schema = "tests")]
     fn param_value_null_decodes_to_null() {
-        let mut translator = IcebergPredicateTranslator::new();
+        let mut translator = IcebergPredicateTranslator::new_unbound_for_tests();
         let null_param = PgParamValue {
             param_id: 1,
             paramkind: pg_sys::ParamKind::PARAM_EXTERN,

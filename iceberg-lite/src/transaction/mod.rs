@@ -68,7 +68,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
-pub use update_schema::AddColumn;
+pub use update_schema::{AddColumn, PreparedSchemaUpdate};
 
 use crate::error::Result;
 use crate::overlay::SnapshotDelta;
@@ -116,10 +116,12 @@ impl Transaction {
     }
 
     /// Applies an [`ActionCommit`] to the given [`Table`], returning a new [`Table`] with updated metadata.
-    /// Also appends any derived [`TableUpdate`]s and [`TableRequirement`]s to the provided vectors.
+    /// Also appends any derived [`TableUpdate`]s and catalog-visible [`TableRequirement`]s
+    /// to the provided vectors.
     fn apply(
         table: Table,
         mut action_commit: ActionCommit,
+        base_metadata: &crate::spec::TableMetadata,
         existing_updates: &mut Vec<TableUpdate>,
         existing_requirements: &mut Vec<TableRequirement>,
     ) -> Result<Table> {
@@ -133,7 +135,11 @@ impl Transaction {
         let updated_table = Self::update_table_metadata(table, &updates)?;
 
         existing_updates.extend(updates);
-        existing_requirements.extend(requirements);
+        existing_requirements.extend(
+            requirements
+                .into_iter()
+                .filter(|requirement| requirement.check(Some(base_metadata)).is_ok()),
+        );
 
         Ok(updated_table)
     }
@@ -261,6 +267,7 @@ impl Transaction {
             current_table = Self::apply(
                 current_table,
                 action_commit,
+                self.table.metadata(),
                 &mut existing_updates,
                 &mut existing_requirements,
             )?;

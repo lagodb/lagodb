@@ -154,6 +154,12 @@ pub enum IcebergError {
     #[error("iceberg error: {0}")]
     IcebergLiteError(#[from] iceberg_lite::Error),
 
+    #[error("Iceberg schema evolution conflict: {source}")]
+    SchemaEvolutionConflict {
+        #[source]
+        source: iceberg_lite::Error,
+    },
+
     #[error("arrow error: {0}")]
     ArrowError(#[from] arrow_schema::ArrowError),
 
@@ -261,6 +267,10 @@ impl SqlStateError for IcebergError {
                 iceberg_lite_sql_error_code(error)
             }
 
+            IcebergError::SchemaEvolutionConflict { .. } => {
+                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+            }
+
             IcebergError::ArrowError(_)
             | IcebergError::ArrowTypeMismatch(_)
             | IcebergError::JsonError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
@@ -292,6 +302,10 @@ impl IcebergError {
         source: PgError,
     ) -> Self {
         Self::MetadataCatalog { operation, source }
+    }
+
+    pub fn schema_evolution_conflict(source: iceberg_lite::Error) -> Self {
+        Self::SchemaEvolutionConflict { source }
     }
 }
 
@@ -421,6 +435,20 @@ mod tests {
         assert_eq!(
             error.sql_error_code(),
             PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+        );
+    }
+
+    #[test]
+    fn schema_evolution_conflict_reports_serialization_failure() {
+        let error =
+            IcebergError::schema_evolution_conflict(iceberg_lite::Error::new(
+                iceberg_lite::ErrorKind::PreconditionFailed,
+                "prepared schema update base changed",
+            ));
+
+        assert_eq!(
+            error.sql_error_code(),
+            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
         );
     }
 

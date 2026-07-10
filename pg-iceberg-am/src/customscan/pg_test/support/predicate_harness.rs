@@ -154,7 +154,7 @@ impl PredicateTestHarness {
             }];
             let exprs = [expr];
             let resolved_params: [PgParamValue; 0] = [];
-            let mut translator = IcebergPredicateTranslator::new();
+            let mut translator = IcebergPredicateTranslator::new_unbound_for_tests();
             let mut builder = PredicateBuilder::new(
                 &mut translator,
                 &exprs,

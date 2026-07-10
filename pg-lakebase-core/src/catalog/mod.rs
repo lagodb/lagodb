@@ -53,6 +53,13 @@ pub unsafe fn range_var_get_relid(
     unsafe { PgWrapper::range_var_get_relid(relation, lockmode, missing_ok) }
 }
 
+pub fn find_all_inheritors(
+    parent_rel_id: pg_sys::Oid,
+    lockmode: pg_sys::LOCKMODE,
+) -> Result<Vec<pg_sys::Oid>, PgError> {
+    PgWrapper::find_all_inheritors(parent_rel_id, lockmode)
+}
+
 pub fn get_tablespace_oid(
     spcname: &CStr,
     missing_ok: bool,

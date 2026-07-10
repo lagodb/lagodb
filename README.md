@@ -35,11 +35,12 @@ for PostgreSQL integration.
   Arrow⇆PostgreSQL value conversion both the scan and DML paths rely on. FDW
   support is still a project direction, not a completed public API.
 - Iceberg transaction-local visibility is handled by the metadata tracker using
-  an in-memory `SnapshotDelta` overlay. Each statement reads the latest
-  committed Iceberg metadata pointer and layers the current transaction's staged
-  file operations on top; top-level commit materializes that delta once and
-  publishes it with catalog CAS. This removes the need for statement-time
-  intermediate metadata files or a PostgreSQL heap-table file catalog.
+  an in-memory schema/data action log. Each statement reads the latest
+  committed Iceberg metadata pointer, replays staged schema updates, and layers
+  the current transaction's staged file operations on top; top-level commit
+  materializes the action log in order and publishes it with catalog CAS. This
+  removes the need for statement-time intermediate metadata files or a
+  PostgreSQL heap-table file catalog.
 
 ## Architecture Overview
 

@@ -10,11 +10,14 @@
 //!                                                          └─► Iceberg Type
 //! ```
 //!
-//! There is exactly one entry point: [`tuple_desc_to_schema`]. The module
-//! itself, [`PgType`], and [`SchemaBuilder`] are crate-private so that the
-//! "single field-id counter" invariant is enforced by the type system, not by
-//! a comment: there is no public surface anyone could call to start a second,
-//! divergent counter.
+//! There are two crate-private entry points:
+//!
+//! - [`tuple_desc_to_schema`] builds a full table schema and owns top-level
+//!   field-id allocation.
+//! - [`column_type_to_iceberg_type`] converts one PostgreSQL column type for
+//!   schema evolution. Its nested ids are placeholders; the Iceberg schema
+//!   update layer reassigns fresh ids against the table's current
+//!   `last-column-id`.
 //!
 //! [`SchemaBuilder`] owns field-id allocation and the recursion into nested
 //! types. [`PgType`] is the thin `(oid, typmod)` wrapper that handles only
@@ -22,7 +25,8 @@
 
 use crate::error::{IcebergError, IcebergResult};
 use iceberg_lite::spec::{
-    ListType, NestedField, NestedFieldRef, PrimitiveType, Schema, Type,
+    ListType, NestedField, NestedFieldRef, PrimitiveType, SCHEMA_NAME_DELIMITER,
+    Schema, Type,
 };
 use pg_lakebase_core::diag;
 use pg_lakebase_core::handles::RelationHandle;
@@ -155,6 +159,21 @@ impl PgType {
         }
     }
 
+    fn report_default_numeric_warning(&self, column_name: &str) {
+        if self.oid != PgBuiltInOids::NUMERICOID.value()
+            || self.numeric_precision_scale().is_some()
+        {
+            return;
+        }
+
+        diag::report_warning(&format!(
+            "numeric column \"{column_name}\" has no precision/scale; defaulting to \
+             decimal({DEFAULT_NUMERIC_PRECISION}, {DEFAULT_NUMERIC_SCALE}). \
+             Use numeric(p, s) explicitly to avoid runtime overflow on values \
+             wider than {DEFAULT_NUMERIC_PRECISION} digits.",
+        ));
+    }
+
     /// Convert a PostgreSQL `numeric(p, s)` to an Iceberg `decimal`.
     ///
     /// Three cases:
@@ -250,6 +269,11 @@ impl SchemaBuilder {
         required: bool,
     ) -> IcebergResult<&mut Self> {
         let name = name.into();
+        if name.contains(SCHEMA_NAME_DELIMITER) {
+            return Err(IcebergError::SchemaBuildError(format!(
+                "Cannot add column with ambiguous name: {name}"
+            )));
+        }
 
         // WARNING (not NOTICE) on numeric-without-modifier defaulting: the
         // fallback silently changes what values the schema can hold, and
@@ -260,16 +284,7 @@ impl SchemaBuilder {
         // The PgType layer is intentionally column-name-agnostic, so the
         // user-facing message is assembled here where the column name is
         // in scope.
-        if pg_type.oid == PgBuiltInOids::NUMERICOID.value()
-            && pg_type.numeric_precision_scale().is_none()
-        {
-            diag::report_warning(&format!(
-                "numeric column \"{name}\" has no precision/scale; defaulting to \
-                 decimal({DEFAULT_NUMERIC_PRECISION}, {DEFAULT_NUMERIC_SCALE}). \
-                 Use numeric(p, s) explicitly to avoid runtime overflow on values \
-                 wider than {DEFAULT_NUMERIC_PRECISION} digits.",
-            ));
-        }
+        pg_type.report_default_numeric_warning(&name);
 
         let field_id = self.allocate_field_id();
         let iceberg_type = self.convert(&pg_type)?;
@@ -367,6 +382,22 @@ pub(crate) fn tuple_desc_to_schema(rel: &RelationHandle) -> IcebergResult<Schema
         builder.add_field(name, pg_type, attr.attnotnull)?;
     }
     builder.build()
+}
+
+/// Convert one PostgreSQL column type for schema evolution.
+///
+/// The returned [`Type`] must not be inserted directly into an Iceberg schema:
+/// nested list/map/struct field ids, if any, are placeholders allocated only to
+/// build a well-formed type. `iceberg-lite`'s schema update planner rewrites
+/// every id against the current table metadata when the column is prepared.
+pub(crate) fn column_type_to_iceberg_type(
+    column_name: &str,
+    type_oid: pg_sys::Oid,
+    type_mod: i32,
+) -> IcebergResult<Type> {
+    let pg_type = PgType::new(type_oid, type_mod);
+    pg_type.report_default_numeric_warning(column_name);
+    SchemaBuilder::new().convert(&pg_type)
 }
 
 // ============================================================================

@@ -2,6 +2,9 @@
 //!
 //! It owns scalar decoding and predicate-tree assembly.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
 };
@@ -285,13 +288,62 @@ unsafe fn decode_timestamptz(
 // Translator
 // =============================================================================
 
+#[derive(Debug, Clone)]
+pub struct PredicateFieldBinding {
+    name: String,
+    field_id: i32,
+}
+
+/// Field-id bindings for pushed predicate column references.
+#[derive(Debug, Clone, Default)]
+pub struct PredicateFieldBindings {
+    by_attno: Arc<HashMap<pg_sys::AttrNumber, PredicateFieldBinding>>,
+}
+
+impl PredicateFieldBindings {
+    pub fn from_iter(
+        bindings: impl IntoIterator<Item = (pg_sys::AttrNumber, String, i32)>,
+    ) -> Self {
+        let by_attno = bindings
+            .into_iter()
+            .map(|(attno, name, field_id)| {
+                (attno, PredicateFieldBinding { name, field_id })
+            })
+            .collect();
+        Self {
+            by_attno: Arc::new(by_attno),
+        }
+    }
+
+    fn get(&self, attno: pg_sys::AttrNumber) -> Option<&PredicateFieldBinding> {
+        self.by_attno.get(&attno)
+    }
+}
+
 /// Runtime [`PgPredicateTranslator`] for Iceberg: column refs, datum decode, predicate assembly.
-#[derive(Debug, Default)]
-pub struct IcebergPredicateTranslator;
+#[derive(Debug)]
+pub struct IcebergPredicateTranslator {
+    field_bindings: Option<PredicateFieldBindings>,
+}
 
 impl IcebergPredicateTranslator {
-    pub fn new() -> Self {
-        Self
+    /// Build the legacy name-binding translator for tests that exercise the
+    /// scalar/predicate algebra without a real relation schema.
+    ///
+    /// Production CustomScan paths must use [`Self::with_field_bindings`] so
+    /// column identity is the Iceberg field id resolved by `RelationFieldMap`,
+    /// not a late `attno -> name` lookup.
+    #[cfg(any(test, feature = "pg_test"))]
+    pub(crate) fn new_unbound_for_tests() -> Self {
+        Self {
+            field_bindings: None,
+        }
+    }
+
+    pub fn with_field_bindings(field_bindings: PredicateFieldBindings) -> Self {
+        Self {
+            field_bindings: Some(field_bindings),
+        }
     }
 
     /// Combine translated predicates as a left-associative conjunction.
@@ -316,9 +368,26 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
     type Error = IcebergTranslationError;
 
     fn column(&mut self, col: PgColumnRef<'_>) -> Result<Self::Scalar, Self::Error> {
-        let name = Self::resolve_column_name(col.name, col.rel_oid, col.attno)?;
+        let reference = if let Some(field_bindings) = self.field_bindings.as_ref() {
+            if col.attno <= 0 {
+                return Err(IcebergTranslationError::SystemOrWholeRowColumn {
+                    rel_oid: col.rel_oid,
+                    attno: col.attno,
+                });
+            }
+            let binding = field_bindings.get(col.attno).ok_or(
+                IcebergTranslationError::ColumnLookupFailed {
+                    rel_oid: col.rel_oid,
+                    attno: col.attno,
+                },
+            )?;
+            Reference::new_bound_field(binding.name.clone(), binding.field_id)
+        } else {
+            let name = Self::resolve_column_name(col.name, col.rel_oid, col.attno)?;
+            Reference::new(name)
+        };
         Ok(IcebergScalar::Column {
-            reference: Reference::new(name),
+            reference,
             atttypid: col.atttypid,
         })
     }
@@ -568,7 +637,8 @@ mod tests {
     fn map_comparison_operator(
         op: PgComparisonOp,
     ) -> Result<PredicateOperator, IcebergTranslationError> {
-        IcebergPredicateTranslator::new().map_comparison_operator(op)
+        IcebergPredicateTranslator::new_unbound_for_tests()
+            .map_comparison_operator(op)
     }
 
     fn op_triple(opno: u32) -> PgComparisonOp {
@@ -658,7 +728,7 @@ mod tests {
 
     #[test]
     fn is_null_with_null_scalar_fails_closed() {
-        let mut t = IcebergPredicateTranslator::new();
+        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
         assert!(matches!(
             t.is_null(null_scalar(INT4_TYPE_OID)),
             Err(IcebergTranslationError::NullTestOnNonColumn)
@@ -667,7 +737,7 @@ mod tests {
 
     #[test]
     fn is_not_null_with_null_scalar_fails_closed() {
-        let mut t = IcebergPredicateTranslator::new();
+        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
         assert!(matches!(
             t.is_not_null(null_scalar(INT4_TYPE_OID)),
             Err(IcebergTranslationError::NullTestOnNonColumn)
@@ -685,7 +755,7 @@ mod predicate_algebra_tests {
 
     #[test]
     fn mirror_operator_is_self_inverse_for_directional_ops() {
-        let t = IcebergPredicateTranslator::new();
+        let t = IcebergPredicateTranslator::new_unbound_for_tests();
         for op in [
             PredicateOperator::LessThan,
             PredicateOperator::LessThanOrEq,
@@ -698,7 +768,7 @@ mod predicate_algebra_tests {
 
     #[test]
     fn mirror_operator_is_identity_for_symmetric_ops() {
-        let t = IcebergPredicateTranslator::new();
+        let t = IcebergPredicateTranslator::new_unbound_for_tests();
         for op in [
             PredicateOperator::Eq,
             PredicateOperator::NotEq,
@@ -711,7 +781,7 @@ mod predicate_algebra_tests {
 
     #[test]
     fn mirror_operator_swaps_lt_and_gt() {
-        let t = IcebergPredicateTranslator::new();
+        let t = IcebergPredicateTranslator::new_unbound_for_tests();
         assert_eq!(
             t.mirror_operator(PredicateOperator::LessThan),
             PredicateOperator::GreaterThan,
@@ -724,7 +794,7 @@ mod predicate_algebra_tests {
 
     #[test]
     fn fold_predicates_handles_single_child() {
-        let t = IcebergPredicateTranslator::new();
+        let t = IcebergPredicateTranslator::new_unbound_for_tests();
         let only = Reference::new("a").equal_to(Datum::int(1));
         let folded = t.fold_predicates(vec![only.clone()], true).unwrap();
         assert_eq!(folded, only);
@@ -732,7 +802,7 @@ mod predicate_algebra_tests {
 
     #[test]
     fn fold_predicates_chains_and_left_assoc() {
-        let t = IcebergPredicateTranslator::new();
+        let t = IcebergPredicateTranslator::new_unbound_for_tests();
         let a = Reference::new("a").equal_to(Datum::int(1));
         let b = Reference::new("b").equal_to(Datum::int(2));
         let c = Reference::new("c").equal_to(Datum::int(3));
@@ -745,7 +815,7 @@ mod predicate_algebra_tests {
 
     #[test]
     fn fold_predicates_chains_or() {
-        let t = IcebergPredicateTranslator::new();
+        let t = IcebergPredicateTranslator::new_unbound_for_tests();
         let a = Reference::new("a").equal_to(Datum::int(1));
         let b = Reference::new("b").equal_to(Datum::int(2));
         let folded = t
@@ -757,7 +827,7 @@ mod predicate_algebra_tests {
 
     #[test]
     fn fold_predicates_rejects_empty_input() {
-        let t = IcebergPredicateTranslator::new();
+        let t = IcebergPredicateTranslator::new_unbound_for_tests();
         assert!(matches!(
             t.fold_predicates(vec![], true),
             Err(IcebergTranslationError::EmptyBoolExpr),
