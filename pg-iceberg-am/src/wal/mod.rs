@@ -20,10 +20,11 @@
 //!
 //! # Supported Operations
 //!
-//! The WAL module supports two local file system operations:
+//! The WAL module supports three local file system operations:
 //!
 //! 1. **WriteFile** - Write data to a file (creates file and parent directories if offset is 0)
 //! 2. **DeleteDirectory** - Remove a directory and all its contents after commit
+//! 3. **DeleteFiles** - Remove canceled transaction-created files after commit
 //!
 //! # Usage Example
 //!
@@ -50,8 +51,8 @@
 //!
 //! - WriteFile: Creates parent directories and file at offset 0, writes at later
 //!   offsets, and skips later chunks if the base file is missing during lossy replay
-//! - DeleteDirectory: Best-effort removal; missing paths and delete failures do
-//!   not stop recovery
+//! - DeleteDirectory and DeleteFiles: Best-effort removal; missing paths and
+//!   delete failures do not stop recovery
 
 pub mod record;
 pub mod rmgr;
@@ -59,7 +60,9 @@ pub mod rmgr;
 use pg_lakebase_core::wal::register_wal_rmgr;
 
 // Re-export commonly used types and functions
-pub use record::{IcebergWalOp, log_delete_directory, log_write_file};
+pub use record::{
+    IcebergWalOp, log_delete_directory, log_delete_files, log_write_file,
+};
 pub use rmgr::{ICEBERG_RMGR_ID, ICEBERG_RMGR_ID_U8, IcebergRmgr};
 
 /// Initialize the Iceberg WAL resource manager

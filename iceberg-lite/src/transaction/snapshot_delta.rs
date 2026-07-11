@@ -47,6 +47,7 @@ const META_ROOT_PATH: &str = "metadata";
 /// semantics.
 pub struct SnapshotDeltaAction {
     delta: Arc<SnapshotDelta>,
+    truncate_base: bool,
     check_duplicate: bool,
     commit_uuid: Option<Uuid>,
     key_metadata: Option<Vec<u8>>,
@@ -57,11 +58,19 @@ impl SnapshotDeltaAction {
     pub(crate) fn new(delta: Arc<SnapshotDelta>) -> Self {
         Self {
             delta,
+            truncate_base: false,
             check_duplicate: true,
             commit_uuid: None,
             key_metadata: None,
             snapshot_properties: HashMap::new(),
         }
+    }
+
+    /// Remove all content inherited from the action's base snapshot.
+    #[must_use]
+    pub fn truncate_base(mut self) -> Self {
+        self.truncate_base = true;
+        self
     }
 
     /// Set whether to check duplicate file paths against the current snapshot.
@@ -94,7 +103,8 @@ impl SnapshotDeltaAction {
 
 impl TransactionAction for SnapshotDeltaAction {
     fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
-        let plan = DeltaPlan::from_delta(&self.delta);
+        let plan =
+            DeltaPlan::from_delta_with_truncate(&self.delta, self.truncate_base);
         if plan.is_empty() {
             return Ok(ActionCommit::new(Vec::new(), Vec::new()));
         }
@@ -125,8 +135,15 @@ pub(super) struct DeltaPlan {
 }
 
 impl DeltaPlan {
-    pub(super) fn from_delta(delta: &SnapshotDelta) -> Self {
-        Self::from_resolved(delta.resolve())
+    pub(super) fn from_delta_with_truncate(
+        delta: &SnapshotDelta,
+        truncate_base: bool,
+    ) -> Self {
+        let mut plan = Self::from_resolved(delta.resolve());
+        if truncate_base {
+            plan.removals.set_truncates_base();
+        }
+        plan
     }
 
     fn from_resolved(resolved: ResolvedSnapshotDelta<'_>) -> Self {
@@ -365,6 +382,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
 
     pub(super) fn commit(mut self, plan: DeltaPlan) -> Result<ActionCommit> {
         let operation = plan.operation();
+        let truncate_full_table = plan.removals.truncates_base();
         let mut summary_collector = self.new_summary_collector();
         let mut manifests =
             self.rewrite_removed_manifests(&plan.removals, &mut summary_collector)?;
@@ -387,7 +405,8 @@ impl<'a> DeltaSnapshotProducer<'a> {
             return Ok(ActionCommit::new(Vec::new(), Vec::new()));
         }
 
-        let summary = self.summary(operation, summary_collector)?;
+        let summary =
+            self.summary(operation, summary_collector, truncate_full_table)?;
         let (manifest_list_path, writer_next_row_id) =
             self.write_manifest_list(manifests)?;
         let new_snapshot =
@@ -425,7 +444,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
         summary_collector: &mut SnapshotSummaryCollector,
     ) -> Result<Vec<ManifestFile>> {
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
-            if removals.is_empty() {
+            if removals.is_empty() || removals.truncates_base() {
                 return Ok(Vec::new());
             }
             return Err(Error::new(
@@ -592,7 +611,9 @@ impl<'a> DeltaSnapshotProducer<'a> {
             if removals.removes_manifest_entry(manifest_file.content, entry) {
                 match manifest_file.content {
                     ManifestContentType::Data => {
-                        found_removed_paths.insert(entry.file_path().to_owned());
+                        if removals.has_removed_data_path(entry.file_path()) {
+                            found_removed_paths.insert(entry.file_path().to_owned());
+                        }
                     }
                     ManifestContentType::Deletes => {
                         let identity =
@@ -732,6 +753,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
         &self,
         operation: Operation,
         summary_collector: SnapshotSummaryCollector,
+        truncate_full_table: bool,
     ) -> Result<Summary> {
         let mut additional_properties = summary_collector.build();
         additional_properties.extend(self.snapshot_properties.clone());
@@ -747,7 +769,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
                 .metadata()
                 .current_snapshot()
                 .map(|s| s.summary()),
-            false,
+            truncate_full_table,
         )
     }
 
@@ -1125,6 +1147,120 @@ mod tests {
         assert_eq!(manifest.entries().len(), 1);
         assert_eq!(manifest.entries()[0].status(), ManifestStatus::Deleted);
         assert_eq!(manifest.entries()[0].file_path(), "test/base.parquet");
+    }
+
+    #[test]
+    fn snapshot_delta_truncate_rewrites_data_and_delete_manifests() {
+        let catalog = new_memory_catalog();
+        let table = make_v2_table_in_catalog(&catalog);
+        let mut append = SnapshotDelta::new();
+        append
+            .add_data_file(data_file("test/base.parquet"))
+            .unwrap();
+        append
+            .add_position_delete_file(
+                position_delete_file("test/base-delete.parquet"),
+                ["test/base.parquet"],
+            )
+            .unwrap();
+        let table = commit_delta(&catalog, &table, append);
+        let parent_snapshot_id = table.metadata().current_snapshot_id();
+
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .snapshot_delta(Arc::new(SnapshotDelta::new()))
+            .truncate_base()
+            .apply(tx)
+            .unwrap();
+        let updated = tx.commit(&catalog).unwrap();
+
+        assert_ne!(updated.metadata().current_snapshot_id(), parent_snapshot_id);
+        assert!(
+            updated
+                .scan()
+                .build()
+                .unwrap()
+                .plan_files()
+                .unwrap()
+                .is_empty()
+        );
+        let snapshot = updated.metadata().current_snapshot().unwrap();
+        assert_eq!(snapshot.parent_snapshot_id(), parent_snapshot_id);
+        assert_eq!(snapshot.summary().operation, Operation::Delete);
+        assert_eq!(
+            snapshot.summary().additional_properties["total-data-files"],
+            "0"
+        );
+        assert_eq!(
+            snapshot.summary().additional_properties["total-delete-files"],
+            "0"
+        );
+
+        let manifest_list = current_manifest_list(&updated);
+        assert_eq!(manifest_list.entries().len(), 2);
+        for manifest_file in manifest_list.entries() {
+            assert!(manifest_file.has_deleted_files());
+            let manifest = manifest_file.load_manifest(updated.file_io()).unwrap();
+            assert!(
+                manifest
+                    .entries()
+                    .iter()
+                    .all(|entry| entry.status() == ManifestStatus::Deleted)
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_delta_truncate_with_add_is_overwrite() {
+        let catalog = new_memory_catalog();
+        let table = make_v2_table_in_catalog(&catalog);
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .fast_append()
+            .add_data_files([data_file("test/base.parquet")])
+            .apply(tx)
+            .unwrap();
+        let table = tx.commit(&catalog).unwrap();
+        let mut replacement = SnapshotDelta::new();
+        replacement
+            .add_data_file(data_file("test/replacement.parquet"))
+            .unwrap();
+
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .snapshot_delta(Arc::new(replacement))
+            .truncate_base()
+            .apply(tx)
+            .unwrap();
+        let updated = tx.commit(&catalog).unwrap();
+
+        let tasks = updated.scan().build().unwrap().plan_files().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].data_file_path(), "test/replacement.parquet");
+        let summary = updated.metadata().current_snapshot().unwrap().summary();
+        assert_eq!(summary.operation, Operation::Overwrite);
+        assert_eq!(summary.additional_properties["total-data-files"], "1");
+        assert_eq!(summary.additional_properties["total-records"], "1");
+    }
+
+    #[test]
+    fn snapshot_delta_truncate_empty_table_is_noop() {
+        let catalog = new_memory_catalog();
+        let table = make_v2_table_in_catalog(&catalog);
+
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .snapshot_delta(Arc::new(SnapshotDelta::new()))
+            .truncate_base()
+            .apply(tx)
+            .unwrap();
+        let updated = tx.commit(&catalog).unwrap();
+
+        assert_eq!(
+            updated.metadata().current_snapshot_id(),
+            table.metadata().current_snapshot_id()
+        );
+        assert_eq!(updated.metadata_location(), table.metadata_location());
     }
 
     #[test]

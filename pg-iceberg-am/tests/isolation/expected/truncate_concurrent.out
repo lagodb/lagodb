@@ -1,0 +1,108 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_truncate s2_location_unchanged s2_swap_metadata s1_commit s2_target_rows
+step s1_begin: BEGIN;
+step s1_truncate: TRUNCATE truncate_iso.target_t;
+step s2_location_unchanged: 
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM lakebase.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.target_t'::regclass;
+
+unchanged
+---------
+t        
+(1 row)
+
+step s2_swap_metadata: 
+  UPDATE lakebase.iceberg_metadata AS target
+  SET metadata_location = shadow.metadata_location,
+      previous_metadata_location = target.metadata_location
+  FROM lakebase.iceberg_metadata AS shadow
+  WHERE target.relid = 'truncate_iso.target_t'::regclass
+    AND shadow.relid = 'truncate_iso.shadow_t'::regclass;
+
+step s1_commit: COMMIT;
+ERROR:  cannot commit truncate: Iceberg metadata changed after TRUNCATE
+step s2_target_rows: SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.target_t;
+rows
+----
+{2} 
+(1 row)
+
+
+starting permutation: s1_begin_abort s1_truncate_abort s2_abort_location_unchanged s1_abort s2_abort_location_unchanged s2_abort_rows
+step s1_begin_abort: BEGIN;
+step s1_truncate_abort: TRUNCATE truncate_iso.abort_t;
+step s2_abort_location_unchanged: 
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM lakebase.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.abort_t'::regclass;
+
+unchanged
+---------
+t        
+(1 row)
+
+step s1_abort: ROLLBACK;
+step s2_abort_location_unchanged: 
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM lakebase.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.abort_t'::regclass;
+
+unchanged
+---------
+t        
+(1 row)
+
+step s2_abort_rows: SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.abort_t;
+rows
+----
+{3} 
+(1 row)
+
+
+starting permutation: s1_begin_multi s1_truncate_multi s2_swap_multi_metadata s1_commit_multi s2_multi_first_location_unchanged s2_multi_first_rows s2_multi_conflict_rows
+step s1_begin_multi: BEGIN;
+step s1_truncate_multi: 
+  TRUNCATE truncate_iso.multi_first_t, truncate_iso.multi_conflict_t;
+
+step s2_swap_multi_metadata: 
+  UPDATE lakebase.iceberg_metadata AS target
+  SET metadata_location = shadow.metadata_location,
+      previous_metadata_location = target.metadata_location
+  FROM lakebase.iceberg_metadata AS shadow
+  WHERE target.relid = 'truncate_iso.multi_conflict_t'::regclass
+    AND shadow.relid = 'truncate_iso.multi_shadow_t'::regclass;
+
+step s1_commit_multi: COMMIT;
+ERROR:  cannot commit truncate: Iceberg metadata changed after TRUNCATE
+step s2_multi_first_location_unchanged: 
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM lakebase.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.multi_first_t'::regclass;
+
+unchanged
+---------
+t        
+(1 row)
+
+step s2_multi_first_rows: 
+  SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.multi_first_t;
+
+rows
+----
+{4} 
+(1 row)
+
+step s2_multi_conflict_rows: 
+  SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.multi_conflict_t;
+
+rows
+----
+{6} 
+(1 row)
+

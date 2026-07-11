@@ -1,0 +1,48 @@
+-- Only the supported ALTER TABLE path may drop an Iceberg column.
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION pg_iceberg_am;
+CREATE SCHEMA schema_dependency_drop_guard;
+CREATE TABLE schema_dependency_drop_guard.controlled_t (
+    id integer,
+    value text
+) USING iceberg;
+ALTER TABLE schema_dependency_drop_guard.controlled_t DROP COLUMN value;
+SELECT string_agg(attname, ',' ORDER BY attnum) AS live_columns
+FROM pg_attribute
+WHERE attrelid = 'schema_dependency_drop_guard.controlled_t'::regclass
+  AND attnum > 0
+  AND NOT attisdropped;
+ live_columns 
+--------------
+ id
+(1 row)
+
+CREATE COLLATION schema_dependency_drop_guard.drop_me FROM "C";
+CREATE TABLE schema_dependency_drop_guard.dependency_t (
+    id integer,
+    value text COLLATE schema_dependency_drop_guard.drop_me
+) USING iceberg;
+INSERT INTO schema_dependency_drop_guard.dependency_t VALUES (1, 'kept');
+\set VERBOSITY terse
+DROP COLLATION schema_dependency_drop_guard.drop_me CASCADE;
+ERROR:  cannot drop column attribute 2 from Iceberg relation "dependency_t" outside supported ALTER TABLE DROP COLUMN
+\set VERBOSITY default
+SELECT string_agg(attname, ',' ORDER BY attnum) AS live_columns
+FROM pg_attribute
+WHERE attrelid = 'schema_dependency_drop_guard.dependency_t'::regclass
+  AND attnum > 0
+  AND NOT attisdropped;
+ live_columns 
+--------------
+ id,value
+(1 row)
+
+SELECT count(*) AS rows_after_rejected_dependency_drop
+FROM schema_dependency_drop_guard.dependency_t;
+ rows_after_rejected_dependency_drop 
+-------------------------------------
+                                   1
+(1 row)
+
+DROP SCHEMA schema_dependency_drop_guard CASCADE;
+DROP EXTENSION pg_iceberg_am CASCADE;

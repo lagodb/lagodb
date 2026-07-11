@@ -356,7 +356,11 @@ pub(crate) fn update_snapshot_summaries(
 
     let mut summary = match previous_summary {
         Some(prev_summary)
-            if truncate_full_table && summary.operation == Operation::Overwrite =>
+            if truncate_full_table
+                && matches!(
+                    summary.operation,
+                    Operation::Delete | Operation::Overwrite
+                ) =>
         {
             truncate_table_summary(summary, prev_summary).map_err(|err| {
                 Error::new(ErrorKind::Unexpected, "Failed to truncate table summary.")
@@ -748,6 +752,39 @@ mod tests {
                 .unwrap(),
             "2"
         );
+    }
+
+    #[test]
+    fn test_update_snapshot_summaries_delete_truncate_resets_totals() {
+        let previous_summary = Summary {
+            operation: Operation::Append,
+            additional_properties: [
+                (TOTAL_DATA_FILES.to_owned(), "2".to_owned()),
+                (TOTAL_DELETE_FILES.to_owned(), "1".to_owned()),
+                (TOTAL_RECORDS.to_owned(), "20".to_owned()),
+                (TOTAL_FILE_SIZE.to_owned(), "250".to_owned()),
+                (TOTAL_POSITION_DELETES.to_owned(), "4".to_owned()),
+                (TOTAL_EQUALITY_DELETES.to_owned(), "0".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let summary = Summary {
+            operation: Operation::Delete,
+            additional_properties: HashMap::new(),
+        };
+
+        let updated =
+            update_snapshot_summaries(summary, Some(&previous_summary), true)
+                .unwrap();
+
+        assert_eq!(updated.additional_properties[TOTAL_DATA_FILES], "0");
+        assert_eq!(updated.additional_properties[TOTAL_DELETE_FILES], "0");
+        assert_eq!(updated.additional_properties[TOTAL_RECORDS], "0");
+        assert_eq!(updated.additional_properties[TOTAL_FILE_SIZE], "0");
+        assert_eq!(updated.additional_properties[TOTAL_POSITION_DELETES], "0");
+        assert_eq!(updated.additional_properties[DELETED_DATA_FILES], "2");
+        assert_eq!(updated.additional_properties[REMOVED_DELETE_FILES], "1");
     }
 
     #[test]

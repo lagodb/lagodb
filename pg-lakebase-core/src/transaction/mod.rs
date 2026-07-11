@@ -51,6 +51,14 @@ pub trait TransactionResource: Debug {
         Ok(())
     }
 
+    /// Called before PostgreSQL prepares a two-phase transaction.
+    ///
+    /// Resources whose state cannot be serialized into the prepared
+    /// transaction must reject the operation here.
+    fn on_pre_prepare(&self) -> TransactionResult<()> {
+        Ok(())
+    }
+
     /// Called when a subtransaction is committed (RELEASE SAVEPOINT).
     fn on_commit_sub(&self, _current_nest_level: i32) {}
 
@@ -160,6 +168,17 @@ unsafe extern "C-unwind" fn xact_callback(
                 {
                     // PgReportError::report() raises PostgreSQL ERROR and
                     // does not return, so this aborts the pre-commit loop.
+                    error.report();
+                }
+            }
+        }
+        XACT_EVENT_PRE_PREPARE => {
+            let snapshot: Vec<Rc<dyn TransactionResource>> =
+                RESOURCES.with(|res| res.borrow().clone());
+            for r in &snapshot {
+                if r.nest_level() >= current_nest_level
+                    && let Err(error) = r.on_pre_prepare()
+                {
                     error.report();
                 }
             }

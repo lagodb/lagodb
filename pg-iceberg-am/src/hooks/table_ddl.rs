@@ -2,6 +2,7 @@ use crate::catalog::metadata_table::IcebergMetadata;
 use crate::catalog::schema_evolution::SchemaEvolutionUpdate;
 use crate::catalog::table_lifecycle::IcebergTableLifecycle;
 use crate::catalog::{IcebergAccessMethod, IcebergRelationExt};
+use crate::hooks::column_drop_guard::ControlledColumnDrops;
 use crate::options::{ICEBERG_TABLE_OPTIONS, ResolvedIcebergOptions};
 use pg_lakebase_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, find_all_inheritors,
@@ -274,6 +275,39 @@ impl SchemaEvolutionTarget {
             Ok(())
         })
     }
+
+    fn controlled_column_drop_keys(
+        &self,
+        update: &SchemaEvolutionUpdate,
+    ) -> Result<Vec<(pg_sys::Oid, i32)>, UtilityHookError> {
+        let names: Vec<&str> = update.drop_column_names().collect();
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut keys = Vec::new();
+        self.for_each_physical_relation(|rel| {
+            let columns = rel.live_columns();
+            for name in &names {
+                let (attnum, _) = columns
+                    .iter()
+                    .find(|(_, column_name)| column_name.as_str() == *name)
+                    .ok_or_else(|| {
+                        HookError::with_code(
+                            PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN,
+                            format!(
+                                "column \"{}\" does not exist on Iceberg relation \"{}\"",
+                                name,
+                                rel.relation_name()
+                            ),
+                        )
+                    })?;
+                keys.push((rel.oid(), i32::from(*attnum)));
+            }
+            Ok(())
+        })?;
+        Ok(keys)
+    }
 }
 
 impl AlterTableIcebergOperations {
@@ -307,6 +341,13 @@ impl AlterTableIcebergOperations {
                 pg_sys::AlterTableType::AT_SetTableSpace => {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
                     result.sets_tablespace = true;
+                }
+                pg_sys::AlterTableType::AT_SetLogged
+                | pg_sys::AlterTableType::AT_SetUnLogged => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    result.reject_schema_operation(
+                        "ALTER TABLE SET LOGGED/UNLOGGED is not supported for Iceberg relations",
+                    );
                 }
                 pg_sys::AlterTableType::AT_AddColumn => {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
@@ -569,6 +610,13 @@ impl UtilityHook for IcebergTableHook {
             return Ok(());
         }
 
+        if stmt.oncommit == pg_sys::OnCommitAction::ONCOMMIT_DELETE_ROWS {
+            return Err(HookError::with_code(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "Iceberg tables do not support ON COMMIT DELETE ROWS",
+            ));
+        }
+
         TableOptions::extract_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?;
         Ok(())
     }
@@ -733,6 +781,9 @@ impl UtilityHook for IcebergAlterTableGuard {
                     return Ok(());
                 };
                 target.preflight(&ops.schema_update)?;
+                ControlledColumnDrops::authorize(
+                    target.controlled_column_drop_keys(&ops.schema_update)?,
+                );
             }
         }
 
@@ -775,6 +826,9 @@ impl UtilityHook for IcebergAlterTableGuard {
             return Ok(());
         };
         target.stage(&ops.schema_update)?;
+        if ops.schema_update.has_drop_column() {
+            ControlledColumnDrops::finish()?;
+        }
         Ok(())
     }
 }

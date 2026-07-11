@@ -972,7 +972,6 @@ ERROR:  0A000
 ALTER TABLE dml_lifecycle.after_ctas_t SET TABLESPACE pg_default;
 ERROR:  0A000
 TRUNCATE dml_lifecycle.after_ctas_t;
-ERROR:  0A000
 \set VERBOSITY default
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;

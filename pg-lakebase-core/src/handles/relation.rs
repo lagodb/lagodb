@@ -29,6 +29,18 @@ impl<'a> RelationHandle<'a> {
         unsafe { self.inner.as_ref().rd_id }
     }
 
+    /// Whether PostgreSQL created this relation in the current subtransaction.
+    ///
+    /// Table AMs use this to distinguish the initial
+    /// `relation_set_new_filelocator` callback from a transactional rewrite of
+    /// an existing relation.
+    #[inline]
+    pub fn is_being_created_in_current_subtransaction(&self) -> bool {
+        unsafe {
+            self.inner.as_ref().rd_createSubid == pg_sys::GetCurrentSubTransactionId()
+        }
+    }
+
     #[inline]
     pub fn access_method_oid(&self) -> pg_sys::Oid {
         unsafe { (*self.rd_rel()).relam }

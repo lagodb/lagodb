@@ -18,6 +18,8 @@
 //! - `ObjectFile(Staged)` → warn, then unlink the staging file (best-effort).
 //! - unresolved metadata-attempt artifacts → abort-style cleanup instead of
 //!   preserving files that no successful catalog CAS references.
+//! - final-action-canceled data/delete files → one aggregated post-commit
+//!   cleanup resource; local WAL-enabled storage flushes `DELETE_FILES` first.
 //! - Everything else → no-op.
 //!
 //! **Abort behaviour:**
@@ -52,6 +54,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
+use pg_lakebase_core::transaction::cleanup::{
+    CleanupTiming, PendingDelete, register_pending_delete,
+};
 use pg_lakebase_core::transaction::{self, TransactionResource};
 use pg_lakebase_core::wal::flush_wal;
 use pg_lakebase_storage::{ObjectLocation, StorageClient, StorageErrorKind};
@@ -59,9 +64,49 @@ use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::LocalStorage;
-use crate::wal::record::log_delete_directory;
+use crate::wal::record::{log_delete_directory, log_delete_files};
 
 const TOP_LEVEL_NEST_LEVEL: i32 = 1;
+
+struct CanceledFilesDelete {
+    file_io: FileIO,
+    paths: Box<[String]>,
+}
+
+impl std::fmt::Debug for CanceledFilesDelete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanceledFilesDelete")
+            .field("path_count", &self.paths.len())
+            .finish()
+    }
+}
+
+impl PendingDelete for CanceledFilesDelete {
+    fn execute(&self) {
+        if ArtifactRegistry::local_needs_wal(&self.file_io)
+            && let Some(lsn) = log_delete_files(&self.paths)
+        {
+            // XLogInsert only places the cleanup fact in the WAL stream. Flush
+            // its end LSN before unlinking so crash/archive recovery cannot
+            // lose that fact after the primary deletion. Like PG's non-temp
+            // relation pending-delete path, this may force an otherwise async
+            // commit (`synchronous_commit=off`) to durable storage.
+            flush_wal(lsn);
+        }
+        for path in &self.paths {
+            if let Err(error) = self.file_io.delete(path) {
+                pg_lakebase_core::diag::report_warning(&format!(
+                    "failed to delete transaction-created file canceled by truncate '{}': {}",
+                    path, error
+                ));
+            }
+        }
+    }
+
+    fn timing(&self) -> CleanupTiming {
+        CleanupTiming::OnCommit
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Artifact model
@@ -711,6 +756,23 @@ pub fn register_local_file_created(path: PathBuf) {
     res.inner
         .borrow_mut()
         .add(ArtifactKind::CreatedLocalFile { path });
+}
+
+/// Delete transaction-created files that the final metadata commit does not
+/// reference. Registration during pre-commit is safe: the transaction
+/// framework includes newly registered resources in the later commit/abort
+/// callbacks even though they do not receive another pre-commit callback.
+pub(crate) fn register_canceled_files_for_commit(
+    file_io: FileIO,
+    paths: Vec<String>,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    register_pending_delete(Box::new(CanceledFilesDelete {
+        file_io,
+        paths: paths.into_boxed_slice(),
+    }));
 }
 
 /// Register a newly-created table directory for abort cleanup.

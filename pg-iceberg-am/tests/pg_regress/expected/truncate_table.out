@@ -1,0 +1,191 @@
+-- Transactional Iceberg TRUNCATE semantics and action ordering.
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION pg_iceberg_am;
+CREATE SCHEMA truncate_table_test;
+SET pg_lakebase.customscan_mode = 'force';
+CREATE TABLE truncate_table_test.t (
+    id integer,
+    payload text
+) USING iceberg;
+BEGIN;
+CREATE TABLE truncate_table_test.created_and_truncated (id integer) USING iceberg;
+TRUNCATE truncate_table_test.created_and_truncated;
+COMMIT;
+SELECT count(*) AS create_then_truncate_rows
+FROM truncate_table_test.created_and_truncated;
+ create_then_truncate_rows 
+---------------------------
+                         0
+(1 row)
+
+INSERT INTO truncate_table_test.t VALUES (1, 'base'), (2, 'base');
+TRUNCATE truncate_table_test.t;
+SELECT count(*) AS basic_truncate_rows FROM truncate_table_test.t;
+ basic_truncate_rows 
+---------------------
+                   0
+(1 row)
+
+INSERT INTO truncate_table_test.t VALUES (10, 'rollback');
+BEGIN;
+TRUNCATE truncate_table_test.t;
+SELECT count(*) AS rows_inside_rollback FROM truncate_table_test.t;
+ rows_inside_rollback 
+----------------------
+                    0
+(1 row)
+
+ROLLBACK;
+SELECT array_agg(id ORDER BY id) AS rows_after_rollback
+FROM truncate_table_test.t;
+ rows_after_rollback 
+---------------------
+ {10}
+(1 row)
+
+BEGIN;
+INSERT INTO truncate_table_test.t VALUES (20, 'before');
+TRUNCATE truncate_table_test.t;
+SELECT count(*) AS insert_then_truncate_rows FROM truncate_table_test.t;
+ insert_then_truncate_rows 
+---------------------------
+                         0
+(1 row)
+
+COMMIT;
+SELECT count(*) AS insert_then_truncate_committed FROM truncate_table_test.t;
+ insert_then_truncate_committed 
+--------------------------------
+                              0
+(1 row)
+
+BEGIN;
+TRUNCATE truncate_table_test.t;
+INSERT INTO truncate_table_test.t VALUES (30, 'after');
+COMMIT;
+SELECT array_agg(id ORDER BY id) AS truncate_then_insert_rows
+FROM truncate_table_test.t;
+ truncate_then_insert_rows 
+---------------------------
+ {30}
+(1 row)
+
+BEGIN;
+INSERT INTO truncate_table_test.t VALUES (40, 'first');
+TRUNCATE truncate_table_test.t;
+INSERT INTO truncate_table_test.t VALUES (50, 'second');
+TRUNCATE truncate_table_test.t;
+INSERT INTO truncate_table_test.t VALUES (60, 'last');
+COMMIT;
+SELECT array_agg(id ORDER BY id) AS multiple_truncate_rows
+FROM truncate_table_test.t;
+ multiple_truncate_rows 
+------------------------
+ {60}
+(1 row)
+
+INSERT INTO truncate_table_test.t VALUES (61, 'savepoint-base');
+BEGIN;
+SAVEPOINT before_truncate;
+TRUNCATE truncate_table_test.t;
+INSERT INTO truncate_table_test.t VALUES (70, 'discarded');
+ROLLBACK TO SAVEPOINT before_truncate;
+COMMIT;
+SELECT array_agg(id ORDER BY id) AS truncate_savepoint_rollback_rows
+FROM truncate_table_test.t;
+ truncate_savepoint_rollback_rows 
+----------------------------------
+ {60,61}
+(1 row)
+
+BEGIN;
+TRUNCATE truncate_table_test.t;
+SAVEPOINT after_truncate;
+INSERT INTO truncate_table_test.t VALUES (80, 'discarded');
+ROLLBACK TO SAVEPOINT after_truncate;
+INSERT INTO truncate_table_test.t VALUES (81, 'kept');
+COMMIT;
+SELECT array_agg(id ORDER BY id) AS post_truncate_savepoint_rows
+FROM truncate_table_test.t;
+ post_truncate_savepoint_rows 
+------------------------------
+ {81}
+(1 row)
+
+BEGIN;
+ALTER TABLE truncate_table_test.t ADD COLUMN extra integer;
+INSERT INTO truncate_table_test.t VALUES (90, 'before-alter-truncate', 90);
+TRUNCATE truncate_table_test.t;
+ALTER TABLE truncate_table_test.t RENAME COLUMN payload TO label;
+INSERT INTO truncate_table_test.t VALUES (91, 'after-alter-truncate', 91);
+COMMIT;
+SELECT id, label, extra FROM truncate_table_test.t ORDER BY id;
+ id |        label         | extra 
+----+----------------------+-------
+ 91 | after-alter-truncate |    91
+(1 row)
+
+ALTER TABLE truncate_table_test.t SET UNLOGGED;
+ERROR:  ALTER TABLE SET LOGGED/UNLOGGED is not supported for Iceberg relations
+SELECT array_agg(id ORDER BY id) AS rows_after_rewrite_guard
+FROM truncate_table_test.t;
+ rows_after_rewrite_guard 
+--------------------------
+ {91}
+(1 row)
+
+CREATE TABLE truncate_table_test.trigger_log (
+    phase text,
+    visible_rows bigint
+);
+CREATE FUNCTION truncate_table_test.log_truncate()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO truncate_table_test.trigger_log
+    SELECT TG_WHEN, count(*) FROM truncate_table_test.t;
+    IF TG_WHEN = 'BEFORE' THEN
+        INSERT INTO truncate_table_test.t VALUES (99, 'from-before', 99);
+    ELSE
+        INSERT INTO truncate_table_test.t VALUES (100, 'from-after', 100);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER truncate_before
+BEFORE TRUNCATE ON truncate_table_test.t
+FOR EACH STATEMENT EXECUTE FUNCTION truncate_table_test.log_truncate();
+CREATE TRIGGER truncate_after
+AFTER TRUNCATE ON truncate_table_test.t
+FOR EACH STATEMENT EXECUTE FUNCTION truncate_table_test.log_truncate();
+TRUNCATE truncate_table_test.t;
+SELECT phase, visible_rows FROM truncate_table_test.trigger_log ORDER BY phase;
+ phase  | visible_rows 
+--------+--------------
+ AFTER  |            0
+ BEFORE |            1
+(2 rows)
+
+SELECT id, label, extra FROM truncate_table_test.t ORDER BY id;
+ id  |   label    | extra 
+-----+------------+-------
+ 100 | from-after |   100
+(1 row)
+
+CREATE TEMP TABLE unsupported_on_commit (id integer)
+USING iceberg ON COMMIT DELETE ROWS;
+ERROR:  Iceberg tables do not support ON COMMIT DELETE ROWS
+CREATE TABLE truncate_table_test.drop_after_truncate (id integer) USING iceberg;
+INSERT INTO truncate_table_test.drop_after_truncate VALUES (1);
+BEGIN;
+TRUNCATE truncate_table_test.drop_after_truncate;
+DROP TABLE truncate_table_test.drop_after_truncate;
+COMMIT;
+SELECT to_regclass('truncate_table_test.drop_after_truncate') IS NULL
+    AS truncate_then_drop_succeeded;
+ truncate_then_drop_succeeded 
+------------------------------
+ t
+(1 row)
+
+DROP SCHEMA truncate_table_test CASCADE;
+DROP EXTENSION pg_iceberg_am CASCADE;

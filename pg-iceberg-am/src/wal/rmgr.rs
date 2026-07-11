@@ -1,6 +1,8 @@
 use super::record::{
-    DeleteDirectoryHeader, IcebergWalOp, SIZE_OF_DELETE_DIRECTORY,
-    SIZE_OF_WRITE_FILE, WriteFileHeader,
+    DeleteDirectoryHeader, DeleteFilesHeader, IcebergWalOp,
+    MAX_DELETE_FILES_PAYLOAD_BYTES, MAX_DELETE_FILES_PER_RECORD,
+    SIZE_OF_DELETE_DIRECTORY, SIZE_OF_DELETE_FILES, SIZE_OF_WRITE_FILE,
+    WriteFileHeader,
 };
 use pg_lakebase_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
 use pg_lakebase_core::{diag, wal};
@@ -40,10 +42,11 @@ pub const ICEBERG_RMGR_ID: RmgrId = RmgrId::new(ICEBERG_RMGR_ID_U8);
 ///   best-effort basis because the target system may not have local Iceberg
 ///   files. Missing base files are skipped in lossy mode rather than aborting
 ///   PostgreSQL recovery.
-/// - Directory deletes are post-commit cleanup records. PostgreSQL does not let
-///   an extension attach arbitrary paths to core transaction commit/abort
-///   records, and PG17 `smgr` is not extension-customizable, so delete WAL is
-///   emitted only after commit is known to have succeeded.
+/// - Directory and canceled-file deletes are post-commit cleanup records.
+///   PostgreSQL does not let an extension attach arbitrary paths to core
+///   transaction commit/abort records, and PG17 `smgr` is not
+///   extension-customizable, so delete WAL is emitted only after commit is
+///   known to have succeeded.
 /// - Distributed storage (S3, GCS, Azure) doesn't need WAL-based redo because:
 /// 1. The storage layer guarantees durability after successful write
 /// 2. Orphaned files should be cleaned via garbage collection
@@ -75,6 +78,7 @@ impl WalResourceManager for IcebergRmgr {
         match op {
             IcebergWalOp::DeleteDirectory => self.redo_delete_directory(record),
             IcebergWalOp::WriteFile => self.redo_write_file(record),
+            IcebergWalOp::DeleteFiles => self.redo_delete_files(record),
         }
     }
 
@@ -101,6 +105,14 @@ impl WalResourceManager for IcebergRmgr {
                                     " path={} offset={} len={}",
                                     path, offset, data_len
                                 ),
+                            );
+                        }
+                    }
+                    IcebergWalOp::DeleteFiles => {
+                        if let Some(paths) = self.extract_delete_file_paths(data) {
+                            let _ = std::fmt::write(
+                                buf,
+                                format_args!(" paths={}", paths.len()),
                             );
                         }
                     }
@@ -213,6 +225,38 @@ impl IcebergRmgr {
             }
         }
 
+        Ok(())
+    }
+
+    /// Redo post-commit cleanup of transaction-created files canceled by the
+    /// final Iceberg metadata commit. Missing files and unlink failures are
+    /// cleanup outcomes, not recovery-fatal table corruption.
+    fn redo_delete_files(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
+        let data = record
+            .main_data()
+            .ok_or_else(|| WalRmgrError::InvalidRecord("Missing main data".into()))?;
+        let paths = self.extract_delete_file_paths(data).ok_or_else(|| {
+            WalRmgrError::InvalidRecord("Invalid DELETE_FILES record".into())
+        })?;
+
+        for path in paths {
+            Self::unmark_lossy_skipped_write_path(&path);
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    diag::log_debug1(&format!(
+                        "Deleted canceled Iceberg file during redo: {}",
+                        path
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    diag::report_warning(&format!(
+                        "Failed to delete canceled Iceberg file during lossy redo: {} - {}",
+                        path, error
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -395,6 +439,43 @@ impl IcebergRmgr {
         std::str::from_utf8(path_bytes).ok().map(|s| s.to_string())
     }
 
+    fn extract_delete_file_paths(&self, data: &[u8]) -> Option<Vec<String>> {
+        if data.len() < SIZE_OF_DELETE_FILES {
+            return None;
+        }
+        let header = unsafe {
+            std::ptr::read_unaligned(data.as_ptr() as *const DeleteFilesHeader)
+        };
+        if header.path_count == 0
+            || header.path_count as usize > MAX_DELETE_FILES_PER_RECORD
+            || header.payload_len as usize > MAX_DELETE_FILES_PAYLOAD_BYTES
+        {
+            return None;
+        }
+        let payload_end =
+            SIZE_OF_DELETE_FILES.checked_add(header.payload_len as usize)?;
+        if data.len() != payload_end {
+            return None;
+        }
+
+        let mut cursor = SIZE_OF_DELETE_FILES;
+        let mut paths = Vec::with_capacity(header.path_count as usize);
+        for _ in 0..header.path_count {
+            let length_end = cursor.checked_add(std::mem::size_of::<u32>())?;
+            let length_bytes: [u8; 4] =
+                data.get(cursor..length_end)?.try_into().ok()?;
+            let path_len = u32::from_ne_bytes(length_bytes) as usize;
+            let path_end = length_end.checked_add(path_len)?;
+            let path_bytes = data.get(length_end..path_end)?;
+            if path_bytes.is_empty() || path_bytes.contains(&0) {
+                return None;
+            }
+            paths.push(std::str::from_utf8(path_bytes).ok()?.to_owned());
+            cursor = path_end;
+        }
+        (cursor == payload_end).then_some(paths)
+    }
+
     /// Extract file info from WriteFileHeader + path bytes + data
     fn extract_write_file_info(&self, data: &[u8]) -> Option<(String, i64, usize)> {
         if data.len() < SIZE_OF_WRITE_FILE {
@@ -458,6 +539,22 @@ mod tests {
         data
     }
 
+    fn delete_files_record(paths: &[&[u8]]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        for path in paths {
+            payload.extend_from_slice(&(path.len() as u32).to_ne_bytes());
+            payload.extend_from_slice(path);
+        }
+        let header = DeleteFilesHeader {
+            path_count: paths.len() as u32,
+            payload_len: payload.len() as u32,
+        };
+        let mut data = Vec::new();
+        data.extend_from_slice(header_bytes(&header));
+        data.extend_from_slice(&payload);
+        data
+    }
+
     #[test]
     fn wal_op_from_info_masks_postgres_flags() {
         assert_eq!(
@@ -468,7 +565,11 @@ mod tests {
             IcebergWalOp::from_info(IcebergWalOp::WriteFile as u8 | 0x0f),
             Some(IcebergWalOp::WriteFile)
         );
-        assert_eq!(IcebergWalOp::from_info(0x20), None);
+        assert_eq!(
+            IcebergWalOp::from_info(IcebergWalOp::DeleteFiles as u8 | 0x0f),
+            Some(IcebergWalOp::DeleteFiles)
+        );
+        assert_eq!(IcebergWalOp::from_info(0x30), None);
     }
 
     #[test]
@@ -500,6 +601,73 @@ mod tests {
         );
         assert_eq!(
             rmgr.extract_delete_directory_path(&delete_directory_record(&[0xff], 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_delete_file_paths() {
+        let rmgr = IcebergRmgr;
+        let data = delete_files_record(&[
+            &b"base/1/data-a.parquet"[..],
+            &b"base/1/delete-a.parquet"[..],
+        ]);
+
+        assert_eq!(
+            rmgr.extract_delete_file_paths(&data),
+            Some(vec![
+                "base/1/data-a.parquet".to_owned(),
+                "base/1/delete-a.parquet".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_delete_files_records() {
+        let rmgr = IcebergRmgr;
+        assert_eq!(rmgr.extract_delete_file_paths(&[]), None);
+
+        let empty_header = DeleteFilesHeader {
+            path_count: 0,
+            payload_len: 0,
+        };
+        assert_eq!(
+            rmgr.extract_delete_file_paths(header_bytes(&empty_header)),
+            None
+        );
+
+        let too_many_paths = DeleteFilesHeader {
+            path_count: (MAX_DELETE_FILES_PER_RECORD + 1) as u32,
+            payload_len: 0,
+        };
+        assert_eq!(
+            rmgr.extract_delete_file_paths(header_bytes(&too_many_paths)),
+            None
+        );
+
+        let oversized_payload = DeleteFilesHeader {
+            path_count: 1,
+            payload_len: (MAX_DELETE_FILES_PAYLOAD_BYTES + 1) as u32,
+        };
+        assert_eq!(
+            rmgr.extract_delete_file_paths(header_bytes(&oversized_payload)),
+            None
+        );
+
+        let mut truncated = delete_files_record(&[&b"abc"[..]]);
+        truncated.pop();
+        assert_eq!(rmgr.extract_delete_file_paths(&truncated), None);
+
+        let mut trailing = delete_files_record(&[&b"abc"[..]]);
+        trailing.push(0);
+        assert_eq!(rmgr.extract_delete_file_paths(&trailing), None);
+
+        assert_eq!(
+            rmgr.extract_delete_file_paths(&delete_files_record(&[&b"a\0b"[..]])),
+            None
+        );
+        assert_eq!(
+            rmgr.extract_delete_file_paths(&delete_files_record(&[&[0xff_u8][..]])),
             None
         );
     }

@@ -87,6 +87,7 @@ impl DeleteFileIdentity {
 /// Owned net-effect view of manifest entries removed by a snapshot delta.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SnapshotDeltaRemovals {
+    truncates_base: bool,
     removed_data_paths: Vec<String>,
     removed_delete_files: Vec<DeleteFileIdentity>,
 }
@@ -96,6 +97,7 @@ impl SnapshotDeltaRemovals {
         // Resolved removals are sorted by the builder; preserve that order so
         // lookups can use binary search without per-entry allocations.
         Self {
+            truncates_base: resolved.truncates_base,
             removed_data_paths: resolved
                 .removed_data_paths
                 .iter()
@@ -111,7 +113,18 @@ impl SnapshotDeltaRemovals {
 
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
-        self.removed_data_paths.is_empty() && self.removed_delete_files.is_empty()
+        !self.truncates_base
+            && self.removed_data_paths.is_empty()
+            && self.removed_delete_files.is_empty()
+    }
+
+    #[must_use]
+    pub(crate) fn truncates_base(&self) -> bool {
+        self.truncates_base
+    }
+
+    pub(crate) fn set_truncates_base(&mut self) {
+        self.truncates_base = true;
     }
 
     pub(crate) fn removed_data_paths(&self) -> &[String] {
@@ -125,6 +138,9 @@ impl SnapshotDeltaRemovals {
 
 /// Lookup interface for manifest entries hidden by a resolved snapshot delta.
 pub(crate) trait SnapshotDeltaRemovalLookup {
+    /// Return true when all entries inherited from the base snapshot are removed.
+    fn truncates_base(&self) -> bool;
+
     /// Return true when this delta explicitly removes a committed data path.
     fn has_removed_data_path(&self, path: &str) -> bool;
 
@@ -141,6 +157,9 @@ pub(crate) trait SnapshotDeltaRemovalLookup {
         manifest_content: ManifestContentType,
         entry: &ManifestEntry,
     ) -> bool {
+        if self.truncates_base() && entry.is_alive() {
+            return true;
+        }
         match manifest_content {
             ManifestContentType::Data => {
                 self.has_removed_data_path(entry.file_path())
@@ -167,6 +186,10 @@ pub(crate) trait SnapshotDeltaRemovalLookup {
 }
 
 impl SnapshotDeltaRemovalLookup for SnapshotDeltaRemovals {
+    fn truncates_base(&self) -> bool {
+        self.truncates_base
+    }
+
     fn has_removed_data_path(&self, path: &str) -> bool {
         self.removed_data_paths
             .binary_search_by(|removed| removed.as_str().cmp(path))
@@ -187,6 +210,8 @@ impl SnapshotDeltaRemovalLookup for SnapshotDeltaRemovals {
 /// depending on operation ordering or concrete delta variants.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SnapshotDeltaStats {
+    /// Whether this delta removes all content inherited from the base snapshot.
+    pub truncates_base: bool,
     /// Records in newly added data files that remain visible in the delta.
     pub added_data_records: u64,
     /// Bytes in newly added data files that remain visible in the delta.
@@ -203,11 +228,13 @@ pub struct SnapshotDeltaStats {
 /// commit materialization. It hides operation-log ordering details and exposes
 /// only the files that remain effective after local add/remove cancellation.
 pub(crate) struct ResolvedSnapshotDelta<'a> {
+    pub(crate) truncates_base: bool,
     pub(crate) added_data_files: Vec<ResolvedDataFile<'a>>,
     pub(crate) position_delete_files: Vec<ResolvedPositionDeleteFile<'a>>,
     pub(crate) removed_data_paths: Vec<&'a str>,
     pub(crate) removed_delete_files: Vec<&'a DeleteFileIdentity>,
     pub(crate) added_file_paths: Vec<&'a str>,
+    pub(crate) canceled_added_file_paths: Vec<&'a str>,
 }
 
 pub(crate) struct ResolvedDataFile<'a> {
@@ -267,6 +294,10 @@ impl ResolvedSnapshotDelta<'_> {
 }
 
 impl SnapshotDeltaRemovalLookup for ResolvedSnapshotDelta<'_> {
+    fn truncates_base(&self) -> bool {
+        self.truncates_base
+    }
+
     fn has_removed_data_path(&self, path: &str) -> bool {
         self.removed_data_paths
             .binary_search_by(|removed| (*removed).cmp(path))
@@ -294,7 +325,11 @@ pub struct SnapshotDeltaMarker {
 #[derive(Debug, Clone)]
 pub struct SnapshotDelta {
     ops: Vec<DeltaOp>,
+    /// Every data path ever added in this operation log. This enforces path
+    /// uniqueness even after truncate cancels the file.
     added_data_file_paths: HashSet<String>,
+    /// Data paths visible in the current resolved transaction view.
+    live_added_data_file_paths: HashSet<String>,
     added_delete_files: HashSet<DeleteFileIdentity>,
     removed_data_paths: HashSet<String>,
     removed_delete_files: HashSet<DeleteFileIdentity>,
@@ -309,6 +344,7 @@ struct DeltaOp {
 
 #[derive(Debug, Clone)]
 enum DeltaOpKind {
+    TruncateTable,
     AddData(Arc<DataFile>),
     AddPositionDelete {
         file: Arc<DataFile>,
@@ -323,6 +359,7 @@ impl Default for SnapshotDelta {
         Self {
             ops: Vec::new(),
             added_data_file_paths: HashSet::new(),
+            live_added_data_file_paths: HashSet::new(),
             added_delete_files: HashSet::new(),
             removed_data_paths: HashSet::new(),
             removed_delete_files: HashSet::new(),
@@ -370,9 +407,7 @@ impl SnapshotDelta {
                 "snapshot delta data file must have data content type",
             ));
         }
-        self.ensure_can_add_data_path(data_file.file_path())?;
-        self.push(DeltaOpKind::AddData(Arc::new(data_file)))?;
-        Ok(self)
+        self.add_data_file_arc(Arc::new(data_file))
     }
 
     /// Append another delta's operation log to this delta, preserving operation
@@ -380,17 +415,21 @@ impl SnapshotDelta {
     pub fn append_delta(&mut self, other: &SnapshotDelta) -> Result<&mut Self> {
         for op in &other.ops {
             match &op.kind {
+                DeltaOpKind::TruncateTable => {
+                    self.truncate_table()?;
+                }
                 DeltaOpKind::AddData(data_file) => {
-                    self.add_data_file(data_file.as_ref().clone())?;
+                    self.add_data_file_arc(Arc::clone(data_file))?;
                 }
                 DeltaOpKind::AddPositionDelete {
                     file,
                     referenced_data_files,
                 } => {
-                    self.add_position_delete_file(
-                        file.as_ref().clone(),
-                        referenced_data_files.iter().cloned(),
-                    )?;
+                    self.ensure_can_add_delete_file(file)?;
+                    self.push(DeltaOpKind::AddPositionDelete {
+                        file: Arc::clone(file),
+                        referenced_data_files: referenced_data_files.clone(),
+                    })?;
                 }
                 DeltaOpKind::RemoveDataFile(path) => {
                     self.remove_data_file(path.clone())?;
@@ -400,6 +439,13 @@ impl SnapshotDelta {
                 }
             }
         }
+        Ok(self)
+    }
+
+    /// Hide all content inherited from the base snapshot and cancel files
+    /// added earlier in this transaction-local operation log.
+    pub fn truncate_table(&mut self) -> Result<&mut Self> {
+        self.push(DeltaOpKind::TruncateTable)?;
         Ok(self)
     }
 
@@ -503,7 +549,10 @@ impl SnapshotDelta {
     #[must_use]
     pub fn stats(&self) -> SnapshotDeltaStats {
         let resolved = self.resolve();
-        let mut stats = SnapshotDeltaStats::default();
+        let mut stats = SnapshotDeltaStats {
+            truncates_base: resolved.truncates_base,
+            ..SnapshotDeltaStats::default()
+        };
 
         for data_file in resolved.added_data_files {
             stats.added_data_records = stats
@@ -526,6 +575,47 @@ impl SnapshotDelta {
             .map(str::to_owned)
             .collect();
         stats
+    }
+
+    /// Return physical file paths created by add operations in this delta.
+    ///
+    /// This includes files that are no longer visible after a later remove or
+    /// truncate operation so transaction cleanup can retire them on commit.
+    #[must_use]
+    pub fn created_file_paths(&self) -> Vec<String> {
+        let mut paths = HashSet::new();
+        for op in &self.ops {
+            match &op.kind {
+                DeltaOpKind::AddData(file)
+                | DeltaOpKind::AddPositionDelete { file, .. } => {
+                    paths.insert(file.file_path().to_owned());
+                }
+                DeltaOpKind::TruncateTable
+                | DeltaOpKind::RemoveDataFile(_)
+                | DeltaOpKind::RemoveDeleteFile(_) => {}
+            }
+        }
+        let mut paths: Vec<String> = paths.into_iter().collect();
+        paths.sort_unstable();
+        paths
+    }
+
+    /// Return transaction-created files canceled by local remove/truncate ops.
+    #[must_use]
+    pub fn canceled_created_file_paths(&self) -> Vec<String> {
+        self.resolve()
+            .canceled_added_file_paths
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Return whether this delta hides all content inherited from its base.
+    #[must_use]
+    pub fn truncates_base(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(&op.kind, DeltaOpKind::TruncateTable))
     }
 
     /// Return the currently visible transaction-local data files.
@@ -575,6 +665,12 @@ impl SnapshotDelta {
         Ok(())
     }
 
+    fn add_data_file_arc(&mut self, data_file: Arc<DataFile>) -> Result<&mut Self> {
+        self.ensure_can_add_data_path(data_file.file_path())?;
+        self.push(DeltaOpKind::AddData(data_file))?;
+        Ok(self)
+    }
+
     fn ensure_can_add_data_path(&self, file_path: &str) -> Result<()> {
         if self.added_data_file_paths.contains(file_path) {
             return Err(Error::new(
@@ -611,8 +707,7 @@ impl SnapshotDelta {
     /// with `file_path`.
     #[must_use]
     pub fn has_live_added_data_file_path(&self, file_path: &str) -> bool {
-        self.added_data_file_paths.contains(file_path)
-            && !self.removed_data_paths.contains(file_path)
+        self.live_added_data_file_paths.contains(file_path)
     }
 
     /// Return true when the delta contains a remove operation for `file_path`.
@@ -623,6 +718,7 @@ impl SnapshotDelta {
 
     fn rebuild_path_indexes(&mut self) {
         let mut added_data_file_paths = HashSet::new();
+        let mut live_added_data_file_paths = HashSet::new();
         let mut added_delete_files = HashSet::new();
         let mut removed_data_paths = HashSet::new();
         let mut removed_delete_files = HashSet::new();
@@ -631,6 +727,7 @@ impl SnapshotDelta {
             Self::index_kind(
                 &op.kind,
                 &mut added_data_file_paths,
+                &mut live_added_data_file_paths,
                 &mut added_delete_files,
                 &mut removed_data_paths,
                 &mut removed_delete_files,
@@ -638,6 +735,7 @@ impl SnapshotDelta {
         }
 
         self.added_data_file_paths = added_data_file_paths;
+        self.live_added_data_file_paths = live_added_data_file_paths;
         self.added_delete_files = added_delete_files;
         self.removed_data_paths = removed_data_paths;
         self.removed_delete_files = removed_delete_files;
@@ -647,6 +745,7 @@ impl SnapshotDelta {
         Self::index_kind(
             kind,
             &mut self.added_data_file_paths,
+            &mut self.live_added_data_file_paths,
             &mut self.added_delete_files,
             &mut self.removed_data_paths,
             &mut self.removed_delete_files,
@@ -656,20 +755,24 @@ impl SnapshotDelta {
     fn index_kind(
         kind: &DeltaOpKind,
         added_data_file_paths: &mut HashSet<String>,
+        live_added_data_file_paths: &mut HashSet<String>,
         added_delete_files: &mut HashSet<DeleteFileIdentity>,
         removed_data_paths: &mut HashSet<String>,
         removed_delete_files: &mut HashSet<DeleteFileIdentity>,
     ) {
         match kind {
+            DeltaOpKind::TruncateTable => live_added_data_file_paths.clear(),
             DeltaOpKind::AddData(data_file) => {
                 let file_path = data_file.file_path().to_owned();
-                added_data_file_paths.insert(file_path);
+                added_data_file_paths.insert(file_path.clone());
+                live_added_data_file_paths.insert(file_path);
             }
             DeltaOpKind::AddPositionDelete { file, .. } => {
                 added_delete_files.insert(DeleteFileIdentity::from_data_file(file));
             }
             DeltaOpKind::RemoveDataFile(path) => {
                 removed_data_paths.insert(path.clone());
+                live_added_data_file_paths.remove(path);
             }
             DeltaOpKind::RemoveDeleteFile(identity) => {
                 removed_delete_files.insert(identity.clone());
@@ -707,6 +810,7 @@ impl SnapshotDelta {
 
 #[derive(Default)]
 struct ResolvedSnapshotDeltaBuilder<'a> {
+    truncates_base: bool,
     added_data_files: Vec<Option<ResolvedDataFile<'a>>>,
     added_data_index: HashMap<&'a str, usize>,
     canceled_added_paths: HashSet<&'a str>,
@@ -726,6 +830,7 @@ struct PendingPositionDeleteResolution<'a> {
 impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
     fn apply(&mut self, op: &'a DeltaOp) {
         match &op.kind {
+            DeltaOpKind::TruncateTable => self.apply_truncate(),
             DeltaOpKind::AddData(data_file) => {
                 let path = data_file.file_path();
                 let index = self.added_data_files.len();
@@ -765,11 +870,30 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
                 if let Some(index) = self.position_delete_index.remove(identity) {
                     self.position_delete_files[index] = None;
                     self.added_file_paths.remove(identity.file_path());
+                    self.canceled_added_paths.insert(identity.file_path());
                 } else {
                     self.removed_delete_files.insert(identity);
                 }
             }
         }
+    }
+
+    fn apply_truncate(&mut self) {
+        for added in self.added_data_files.iter().flatten() {
+            self.canceled_added_paths.insert(added.file.file_path());
+        }
+        for pending in self.position_delete_files.iter().flatten() {
+            self.canceled_added_paths.insert(pending.file.file_path());
+        }
+
+        self.truncates_base = true;
+        self.added_data_files.clear();
+        self.added_data_index.clear();
+        self.removed_paths.clear();
+        self.removed_delete_files.clear();
+        self.added_file_paths.clear();
+        self.position_delete_files.clear();
+        self.position_delete_index.clear();
     }
 
     fn build(mut self) -> ResolvedSnapshotDelta<'a> {
@@ -783,6 +907,8 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
                 .filter(|path| {
                     !self.removed_paths.contains(*path)
                         && !self.canceled_added_paths.contains(*path)
+                        && (!self.truncates_base
+                            || self.added_data_index.contains_key(*path))
                 })
                 .collect();
             referenced_data_files.sort_unstable();
@@ -795,6 +921,8 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
                     referenced_data_files,
                     ordinal: pending.ordinal,
                 });
+            } else {
+                self.canceled_added_paths.insert(pending.file.file_path());
             }
         }
 
@@ -810,12 +938,18 @@ impl<'a> ResolvedSnapshotDeltaBuilder<'a> {
             self.added_file_paths.into_iter().collect();
         added_file_paths.sort_unstable();
 
+        let mut canceled_added_file_paths: Vec<&str> =
+            self.canceled_added_paths.into_iter().collect();
+        canceled_added_file_paths.sort_unstable();
+
         ResolvedSnapshotDelta {
+            truncates_base: self.truncates_base,
             added_data_files,
             position_delete_files,
             removed_data_paths,
             removed_delete_files,
             added_file_paths,
+            canceled_added_file_paths,
         }
     }
 }
@@ -1013,6 +1147,138 @@ mod tests {
             ManifestContentType::Deletes,
             &manifest_entry(dv_for_live_data),
         ));
+    }
+
+    #[test]
+    fn truncate_hides_base_entries_and_keeps_later_adds() {
+        let mut delta = SnapshotDelta::new();
+        delta.add_data_file(data_file("before.parquet")).unwrap();
+        delta.truncate_table().unwrap();
+        delta.add_data_file(data_file("after.parquet")).unwrap();
+
+        let resolved = delta.resolve();
+        assert!(resolved.truncates_base());
+        assert!(resolved.removes_manifest_entry(
+            ManifestContentType::Data,
+            &manifest_entry(data_file("committed.parquet")),
+        ));
+        assert_eq!(resolved.added_data_files.len(), 1);
+        assert_eq!(
+            resolved.added_data_files[0].file.file_path(),
+            "after.parquet"
+        );
+        assert_eq!(resolved.canceled_added_file_paths, vec!["before.parquet"]);
+    }
+
+    #[test]
+    fn truncate_cancels_position_deletes_and_resets_stats() {
+        let mut delta = SnapshotDelta::new();
+        delta
+            .add_data_file(data_file_with_metrics("before.parquet", 3, 300))
+            .unwrap();
+        delta
+            .add_position_delete_file(
+                position_delete_file("before-delete.parquet"),
+                ["before.parquet"],
+            )
+            .unwrap();
+        delta.truncate_table().unwrap();
+
+        let stats = delta.stats();
+        assert!(stats.truncates_base);
+        assert_eq!(stats.added_data_records, 0);
+        assert_eq!(stats.added_data_file_bytes, 0);
+        assert_eq!(stats.added_delete_file_bytes, 0);
+        assert_eq!(
+            delta.canceled_created_file_paths(),
+            vec![
+                "before-delete.parquet".to_owned(),
+                "before.parquet".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_marker_rollback_restores_prior_overlay() {
+        let mut delta = SnapshotDelta::new();
+        delta.add_data_file(data_file("before.parquet")).unwrap();
+        let marker = delta.mark();
+        delta.truncate_table().unwrap();
+        delta.add_data_file(data_file("after.parquet")).unwrap();
+
+        delta.truncate(marker);
+
+        assert!(!delta.truncates_base());
+        assert!(delta.has_live_added_data_file_path("before.parquet"));
+        assert!(!delta.has_live_added_data_file_path("after.parquet"));
+    }
+
+    #[test]
+    fn multiple_truncates_keep_only_the_last_region() {
+        let mut delta = SnapshotDelta::new();
+        delta.add_data_file(data_file("first.parquet")).unwrap();
+        delta.truncate_table().unwrap();
+        delta.add_data_file(data_file("second.parquet")).unwrap();
+        delta.truncate_table().unwrap();
+        delta.add_data_file(data_file("third.parquet")).unwrap();
+
+        assert_eq!(
+            delta
+                .added_data_files()
+                .iter()
+                .map(DataFile::file_path)
+                .collect::<Vec<_>>(),
+            vec!["third.parquet"]
+        );
+        assert_eq!(
+            delta.canceled_created_file_paths(),
+            vec!["first.parquet".to_owned(), "second.parquet".to_owned()]
+        );
+    }
+
+    #[test]
+    fn truncate_rejects_reusing_a_canceled_path() {
+        let mut delta = SnapshotDelta::new();
+        delta.add_data_file(data_file("same.parquet")).unwrap();
+        delta.truncate_table().unwrap();
+
+        let error = delta.add_data_file(data_file("same.parquet")).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DataInvalid);
+    }
+
+    #[test]
+    fn position_delete_after_truncate_requires_a_post_truncate_data_file() {
+        let mut delta = SnapshotDelta::new();
+        delta.truncate_table().unwrap();
+        delta
+            .add_position_delete_file(
+                position_delete_file("orphan-delete.parquet"),
+                ["committed.parquet"],
+            )
+            .unwrap();
+
+        assert!(delta.position_delete_files().is_empty());
+        assert_eq!(
+            delta.canceled_created_file_paths(),
+            vec!["orphan-delete.parquet".to_owned()]
+        );
+    }
+
+    #[test]
+    fn append_delta_shares_arc_backed_data_files() {
+        let mut source = SnapshotDelta::new();
+        source.add_data_file(data_file("shared.parquet")).unwrap();
+        let DeltaOpKind::AddData(source_file) = &source.ops[0].kind else {
+            panic!("expected added data file");
+        };
+
+        let mut combined = SnapshotDelta::new();
+        combined.append_delta(&source).unwrap();
+        let DeltaOpKind::AddData(combined_file) = &combined.ops[0].kind else {
+            panic!("expected added data file");
+        };
+
+        assert!(Arc::ptr_eq(source_file, combined_file));
     }
 
     fn data_file(path: &str) -> DataFile {

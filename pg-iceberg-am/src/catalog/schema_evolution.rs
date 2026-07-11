@@ -157,6 +157,21 @@ impl SchemaEvolutionUpdate {
             .any(|op| matches!(op, SchemaEvolutionOp::AddNullableColumn { .. }))
     }
 
+    pub(crate) fn drop_column_names(&self) -> impl Iterator<Item = &str> {
+        self.ops.iter().filter_map(|op| match op {
+            SchemaEvolutionOp::DropColumn { name } => Some(name.as_str()),
+            SchemaEvolutionOp::AddNullableColumn { .. }
+            | SchemaEvolutionOp::RenameColumn { .. }
+            | SchemaEvolutionOp::DropNotNull { .. } => None,
+        })
+    }
+
+    pub(crate) fn has_drop_column(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(op, SchemaEvolutionOp::DropColumn { .. }))
+    }
+
     fn has_existing_schema_op(&self) -> bool {
         self.ops
             .iter()

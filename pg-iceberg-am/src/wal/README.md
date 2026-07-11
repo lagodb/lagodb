@@ -33,11 +33,11 @@ Because of that limitation:
 - Missing local files during replay are treated as lossy reconstruction gaps,
   not PostgreSQL recovery-fatal corruption, when the missing file is the base
   for a later `WRITE_FILE` chunk.
-- There is intentionally no single-file `DELETE_FILE` WAL operation today.
-  Abort cleanup and staging cleanup are not committed table-state facts. They
-  could only be represented by a separate post-abort maintenance WAL stream,
-  which still has a crash gap because extensions cannot attach those paths to
-  PostgreSQL's core abort record.
+- There is no abort-time `DELETE_FILE` WAL operation. Abort and staging cleanup
+  are not committed table-state facts and still rely on primary-local cleanup
+  plus orphan maintenance. A bounded post-commit `DELETE_FILES` operation is
+  used only for transaction-created files canceled by a successful final
+  metadata commit.
 - Local table-directory deletion is modeled as post-commit cleanup: write and
   flush `DELETE_DIRECTORY`, then remove the primary directory.
 
@@ -58,6 +58,40 @@ queries because scans follow committed Iceberg metadata.
 
 Use Iceberg orphan cleanup, such as `remove_orphan_files`, to reclaim files that
 were created but never referenced by committed table metadata.
+
+### Canceled transaction-created files
+
+A canceled file is a data/delete file created by the current PostgreSQL
+transaction that the final effective Iceberg action no longer references. For
+example, an INSERT may create `D1`, and a later TRUNCATE in the same transaction
+may discard that INSERT. The committed catalog pointer never references `D1`.
+This is different from a file inherited from an older committed snapshot, which
+must remain available for snapshot history, refs, and time travel.
+
+Deleting a canceled file is not required for WAL, transaction, or recovery
+correctness. If deletion fails, the file is an unreachable orphan; it does not
+become visible because Iceberg readers follow committed metadata. The bounded
+post-commit `DELETE_FILES` record mirrors this cleanup to standby and
+archive-recovery targets that previously replayed `WRITE_FILE`. It remains a
+physical storage-hygiene enhancement, not a truncate correctness requirement,
+and cannot close the crash window between PostgreSQL commit and emission of the
+cleanup record.
+
+That operation belongs to this Iceberg resource manager, not to
+`pg_lakebase_core::wal`: core owns generic custom-rmgr mechanics, while local
+Iceberg path policy, record layout, validation, and redo belong in
+`pg-iceberg-am/src/wal`. It should only be emitted for local storage using the
+Iceberg `WRITE_FILE` WAL path. Object/distributed storage must continue to use
+its storage API and orphan maintenance; WAL replay must not require remote
+credentials or network availability and must not assume ownership of shared
+objects.
+
+Cleanup redo is idempotent, treats a missing file as success, and remains best
+effort for other unlink failures. The primary writes and flushes cleanup WAL
+before unlinking. Each record is bounded to 256 paths and 64 KiB of path payload;
+larger cleanup sets are split into multiple records, and flushing the last LSN
+flushes all preceding batches. This does not replace periodic orphan-file
+maintenance.
 
 ## Lossy Replay
 

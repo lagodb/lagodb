@@ -92,6 +92,9 @@ pub enum IcebergError {
         max_retries: i32,
     },
 
+    #[error("cannot commit truncate: Iceberg metadata changed after TRUNCATE")]
+    TruncateCommitConflict { relid: pg_sys::Oid },
+
     #[error("tablespace error: {0}")]
     TablespaceError(#[from] TablespaceError),
 
@@ -233,7 +236,8 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED
             }
 
-            IcebergError::MetadataCommitConflict { .. } => {
+            IcebergError::MetadataCommitConflict { .. }
+            | IcebergError::TruncateCommitConflict { .. } => {
                 PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
             }
 

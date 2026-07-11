@@ -1,4 +1,5 @@
 use super::rmgr::ICEBERG_RMGR_ID;
+use pg_lakebase_core::diag;
 use pg_lakebase_core::wal::{WalRecordBuilder, XLogRecPtr};
 
 // ============================================================================
@@ -13,6 +14,7 @@ use pg_lakebase_core::wal::{WalRecordBuilder, XLogRecPtr};
 ///   offset is 0)
 /// - DeleteDirectory: Remove a directory and its contents after the PostgreSQL
 ///   transaction has committed
+/// - DeleteFiles: Remove transaction-created files canceled by the final commit
 ///
 /// Invariants:
 /// - These WAL records are only for local file systems. Distributed storage
@@ -23,10 +25,10 @@ use pg_lakebase_core::wal::{WalRecordBuilder, XLogRecPtr};
 /// - Standby WAL replay or archive recovery uses these records for best-effort,
 ///   lossy reconstruction because local Iceberg files may not exist on the
 ///   target system.
-/// - `DELETE_DIRECTORY` is post-commit cleanup. PostgreSQL extensions cannot
-///   add arbitrary AM paths to core commit/abort records, and PostgreSQL's
-///   `smgr` switch is not extension-customizable, so we must never log a delete
-///   record before the transaction outcome is known.
+/// - `DELETE_DIRECTORY` and `DELETE_FILES` are post-commit cleanup. PostgreSQL
+///   extensions cannot add arbitrary AM paths to core commit/abort records, and
+///   PostgreSQL's `smgr` switch is not extension-customizable, so we must never
+///   log a delete record before the transaction outcome is known.
 /// - Orphaned files on distributed storage should be cleaned up via a separate
 ///   garbage collection mechanism (e.g., Iceberg's remove_orphan_files).
 #[repr(u8)]
@@ -36,6 +38,8 @@ pub enum IcebergWalOp {
     DeleteDirectory = 0x00,
     /// Write data to a file (creates file and parent directories if offset is 0)
     WriteFile = 0x10,
+    /// Delete bounded batches of canceled transaction-created files after commit.
+    DeleteFiles = 0x20,
 }
 
 impl IcebergWalOp {
@@ -49,6 +53,7 @@ impl IcebergWalOp {
         match op {
             0x00 => Some(Self::DeleteDirectory),
             0x10 => Some(Self::WriteFile),
+            0x20 => Some(Self::DeleteFiles),
             _ => None,
         }
     }
@@ -58,6 +63,7 @@ impl IcebergWalOp {
         match self {
             Self::DeleteDirectory => "DELETE_DIRECTORY",
             Self::WriteFile => "WRITE_FILE",
+            Self::DeleteFiles => "DELETE_FILES",
         }
     }
 }
@@ -81,6 +87,24 @@ pub struct DeleteDirectoryHeader {
 /// Size of DeleteDirectoryHeader in bytes
 pub const SIZE_OF_DELETE_DIRECTORY: usize =
     std::mem::size_of::<DeleteDirectoryHeader>();
+
+/// Header for one bounded batch of file paths.
+///
+/// The payload repeats `[path_len: u32][path bytes]` `path_count` times.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DeleteFilesHeader {
+    pub path_count: u32,
+    pub payload_len: u32,
+}
+
+pub const SIZE_OF_DELETE_FILES: usize = std::mem::size_of::<DeleteFilesHeader>();
+
+/// Project batching policy, not PostgreSQL's WAL record limit. These bounds
+/// keep one cleanup record and its redo path vector small; larger transactions
+/// are split across records rather than rejected.
+pub const MAX_DELETE_FILES_PER_RECORD: usize = 256;
+pub const MAX_DELETE_FILES_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// WAL record header for WriteFile operation
 ///
@@ -141,6 +165,73 @@ pub fn log_delete_directory(path: &str) -> XLogRecPtr {
     builder.register_data(path.as_bytes());
 
     builder.insert(ICEBERG_RMGR_ID.as_u8(), IcebergWalOp::DeleteDirectory as u8)
+}
+
+/// Log bounded batches of local canceled-file deletions after commit.
+///
+/// Returns the last inserted LSN so the caller can flush every preceding batch
+/// before deleting the files on the primary. Paths that cannot fit the record
+/// representation are skipped with a warning; their primary cleanup may still
+/// proceed and standby orphan maintenance can reclaim any replayed copy.
+pub fn log_delete_files(paths: &[String]) -> Option<XLogRecPtr> {
+    let mut payload = Vec::with_capacity(MAX_DELETE_FILES_PAYLOAD_BYTES);
+    let mut path_count = 0_u32;
+    let mut last_lsn = None;
+
+    for path in paths {
+        if path.is_empty() || path.as_bytes().contains(&0) {
+            diag::report_warning(
+                "skipping DELETE_FILES WAL for empty path or path containing NUL",
+            );
+            continue;
+        }
+        let Ok(path_len) = u32::try_from(path.len()) else {
+            diag::report_warning(&format!(
+                "skipping DELETE_FILES WAL for path longer than u32: {} bytes",
+                path.len()
+            ));
+            continue;
+        };
+        let encoded_len = std::mem::size_of::<u32>() + path.len();
+        if encoded_len > MAX_DELETE_FILES_PAYLOAD_BYTES {
+            diag::report_warning(&format!(
+                "skipping DELETE_FILES WAL for path exceeding bounded payload: {} bytes",
+                path.len()
+            ));
+            continue;
+        }
+        if path_count > 0
+            && (path_count as usize >= MAX_DELETE_FILES_PER_RECORD
+                || payload.len() + encoded_len > MAX_DELETE_FILES_PAYLOAD_BYTES)
+        {
+            last_lsn = Some(insert_delete_files_record(path_count, &payload));
+            payload.clear();
+            path_count = 0;
+        }
+
+        payload.extend_from_slice(&path_len.to_ne_bytes());
+        payload.extend_from_slice(path.as_bytes());
+        path_count += 1;
+    }
+
+    if path_count > 0 {
+        last_lsn = Some(insert_delete_files_record(path_count, &payload));
+    }
+    last_lsn
+}
+
+fn insert_delete_files_record(path_count: u32, payload: &[u8]) -> XLogRecPtr {
+    let header = DeleteFilesHeader {
+        path_count,
+        payload_len: u32::try_from(payload.len())
+            .expect("bounded DELETE_FILES payload must fit u32"),
+    };
+    let mut builder = WalRecordBuilder::begin();
+    unsafe {
+        builder.register_data_as(&header);
+    }
+    builder.register_data(payload);
+    builder.insert(ICEBERG_RMGR_ID.as_u8(), IcebergWalOp::DeleteFiles as u8)
 }
 
 /// Log a file write to WAL

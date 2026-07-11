@@ -1,6 +1,8 @@
 use crate::catalog::IcebergRelationExt;
 use crate::catalog::metadata_table::IcebergMetadata;
+use crate::catalog::metadata_tracker::TxMetadata;
 use crate::catalog::table_lifecycle::IcebergTableLifecycle;
+use crate::hooks::column_drop_guard::ControlledColumnDrops;
 use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
 use pg_lakebase_core::hooks::{
     self, HookError, ObjectAccessEvent, ObjectAccessHook, ObjectAccessHookError,
@@ -17,6 +19,32 @@ impl ObjectAccessHook for IcebergObjectAccessHook {
         event: &mut ObjectAccessEvent<'_>,
     ) -> Result<(), ObjectAccessHookError> {
         match event {
+            ObjectAccessEvent::Drop {
+                class_id,
+                object_id,
+                sub_id,
+                ..
+            } if *class_id == pg_sys::RelationRelationId && *sub_id > 0 => {
+                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)?
+                else {
+                    return Ok(());
+                };
+                if !ControlledColumnDrops::consume(*object_id, *sub_id) {
+                    // TODO(schema-evolution): dependency-driven drops could be
+                    // supported by staging schema actions from actual OAT order.
+                    // Until that design handles multi-object CASCADE and avoids
+                    // duplicate ALTER TABLE staging, rejecting is required to
+                    // keep PostgreSQL and Iceberg schemas consistent.
+                    return Err(HookError::with_code(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "cannot drop column attribute {} from Iceberg relation \"{}\" outside supported ALTER TABLE DROP COLUMN",
+                            sub_id,
+                            guard.as_handle().relation_name()
+                        ),
+                    ));
+                }
+            }
             // sub_id == 0 means the main relation, not a column.
             ObjectAccessEvent::Drop {
                 class_id,
@@ -29,13 +57,6 @@ impl ObjectAccessHook for IcebergObjectAccessHook {
                     return Ok(());
                 };
                 Self::handle_drop_relation(&guard.as_handle())?;
-            }
-            ObjectAccessEvent::Truncate { object_id } => {
-                let Some(guard) = Self::open_iceberg_physical_relation(*object_id)?
-                else {
-                    return Ok(());
-                };
-                Self::handle_truncate_relation(&guard.as_handle())?;
             }
             _ => {}
         }
@@ -55,8 +76,7 @@ impl IcebergObjectAccessHook {
             return Ok(None);
         }
 
-        // OAT_DROP is called before the object is removed, and OAT_TRUNCATE is
-        // called while PostgreSQL is operating on the live relation.
+        // OAT_DROP is called before the object is removed.
         let guard =
             RelationGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)?;
 
@@ -70,6 +90,8 @@ impl IcebergObjectAccessHook {
     fn handle_drop_relation(
         rel: &RelationHandle<'_>,
     ) -> Result<(), ObjectAccessHookError> {
+        TxMetadata::stage_drop_if_tracked(rel.oid())?;
+
         // `regclass NOT NULL PRIMARY KEY` stores an OID value; it is not a
         // PostgreSQL dependency or foreign key. These Lakebase catalog rows
         // must be deleted explicitly in the same transaction as DROP TABLE.
@@ -84,18 +106,6 @@ impl IcebergObjectAccessHook {
         IcebergTableLifecycle::new(rel)?.register_drop_cleanup();
 
         Ok(())
-    }
-
-    fn handle_truncate_relation(
-        rel: &RelationHandle<'_>,
-    ) -> Result<(), ObjectAccessHookError> {
-        Err(HookError::with_code(
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!(
-                "cannot TRUNCATE Iceberg table \"{}\": Iceberg truncate requires metadata rewrite support",
-                rel.relation_name()
-            ),
-        ))
     }
 }
 

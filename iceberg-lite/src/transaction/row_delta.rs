@@ -114,6 +114,7 @@ impl RowDeltaValidation {
 /// Transaction action that commits a [`SnapshotDelta`] with row-delta conflict validation.
 pub struct RowDeltaAction {
     delta: Arc<SnapshotDelta>,
+    truncate_base: bool,
     validations: Vec<RowDeltaValidation>,
     check_duplicate: bool,
     commit_uuid: Option<Uuid>,
@@ -125,12 +126,20 @@ impl RowDeltaAction {
     pub(crate) fn new(delta: Arc<SnapshotDelta>) -> Self {
         Self {
             delta,
+            truncate_base: false,
             validations: Vec::new(),
             check_duplicate: true,
             commit_uuid: None,
             key_metadata: None,
             snapshot_properties: HashMap::new(),
         }
+    }
+
+    /// Remove all content inherited from the action's base snapshot.
+    #[must_use]
+    pub fn truncate_base(mut self) -> Self {
+        self.truncate_base = true;
+        self
     }
 
     /// Adds validation for one row-level SQL statement.
@@ -184,7 +193,8 @@ impl RowDeltaAction {
 
 impl TransactionAction for RowDeltaAction {
     fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
-        let plan = DeltaPlan::from_delta(&self.delta);
+        let plan =
+            DeltaPlan::from_delta_with_truncate(&self.delta, self.truncate_base);
         if plan.is_empty() {
             return Ok(ActionCommit::new(Vec::new(), Vec::new()));
         }
@@ -523,6 +533,9 @@ impl<'a> RowDeltaValidator<'a> {
             .iter()
             .map(|file| file.file_path().to_owned())
             .collect();
+        if self.plan.removals.truncates_base() {
+            return Ok(paths);
+        }
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
             return Ok(paths);
         };

@@ -15,7 +15,7 @@
 //! The single thread-local `Rc<TxMetadata>` is reached through
 //! [`TxMetadata::current`]; callers (mutation, scan) never touch the TLS directly.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -29,9 +29,10 @@ use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{
     ApplyTransactionAction, PreparedSchemaUpdate, RowDeltaValidation, Transaction,
 };
-use pg_lakebase_core::diag;
+use pg_lakebase_core::diag::{self, PgReportError};
 use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
+use pgrx::prelude::PgSqlErrorCode;
 
 use crate::catalog::bridge::{IcebergTableId, StagedCatalog};
 use crate::catalog::metadata_table::{CasUpdate, IcebergMetadata};
@@ -65,7 +66,7 @@ struct TableState {
     file_io: Option<FileIO>,
 
     /// Ordered transaction-local schema/data actions.
-    actions: TxTableActionLog,
+    actions: Rc<TxTableActionLog>,
 
     /// Savepoint history stack. Each frame is the state BEFORE a write at
     /// `nest_level`, so sub-abort can restore it by popping frames whose
@@ -82,17 +83,22 @@ struct TableState {
 
 /// Owned per-table state detached from the tracker before commit I/O begins.
 ///
-/// Keeping this snapshot owned releases the [`RefCell`] borrow on
+/// The action log is an immutable shared snapshot. Keeping it owned releases
+/// the [`RefCell`] borrow on
 /// [`TxMetadataInner`] before metadata reads, transaction materialization, and
 /// catalog CAS retries.
 struct TableCommitInput {
-    actions: TxTableActionLog,
+    actions: Rc<TxTableActionLog>,
     file_io: FileIO,
 }
 
 #[derive(Debug, Clone, Default)]
 struct TxTableActionLog {
     actions: Vec<TxTableAction>,
+    /// Cached transaction-local file overlay. It depends only on Data,
+    /// Truncate, and Drop actions; schema actions are replayed separately onto
+    /// the latest committed metadata and do not invalidate this value.
+    combined_delta_cache: OnceCell<Option<Arc<SnapshotDelta>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,12 +111,34 @@ struct TxTableActionLogMarker {
 enum TxTableAction {
     Schema(PreparedSchemaUpdate),
     Data(TxDataEpoch),
+    Truncate(TxTruncateAction),
+    Drop,
+}
+
+#[derive(Debug, Clone)]
+struct TxTruncateAction {
+    expected_metadata_location: String,
 }
 
 #[derive(Debug, Clone)]
 struct TxDataEpoch {
     delta: Arc<SnapshotDelta>,
     validations: Vec<RowDeltaValidation>,
+}
+
+struct TxTableCommitPlan<'a> {
+    actions: Vec<EffectiveCommitAction<'a>>,
+    expected_metadata_location: Option<&'a str>,
+    canceled_created_paths: Vec<String>,
+}
+
+enum EffectiveCommitAction<'a> {
+    Schema(&'a PreparedSchemaUpdate),
+    Data {
+        epoch: &'a TxDataEpoch,
+        truncate_base: bool,
+    },
+    TruncateOnly,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -135,6 +163,80 @@ impl TxDataEpoch {
 }
 
 impl TxTableActionLog {
+    fn invalidate_combined_delta(&mut self) {
+        self.combined_delta_cache.take();
+    }
+
+    fn last_truncate(&self) -> Option<(usize, &TxTruncateAction)> {
+        self.actions
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, action)| match action {
+                TxTableAction::Truncate(truncate) => Some((index, truncate)),
+                TxTableAction::Schema(_)
+                | TxTableAction::Data(_)
+                | TxTableAction::Drop => None,
+            })
+    }
+
+    fn commit_plan(&self) -> IcebergResult<TxTableCommitPlan<'_>> {
+        let last_truncate = self.last_truncate();
+        let last_truncate_index = last_truncate.map(|(index, _)| index);
+        let expected_metadata_location = last_truncate
+            .map(|(_, truncate)| truncate.expected_metadata_location.as_str());
+        let mut effective_actions = Vec::with_capacity(self.actions.len());
+        let mut paths = HashSet::new();
+        let mut pending_truncate = last_truncate.is_some();
+
+        for (index, action) in self.actions.iter().enumerate() {
+            match action {
+                TxTableAction::Schema(update) => {
+                    effective_actions.push(EffectiveCommitAction::Schema(update));
+                }
+                TxTableAction::Data(epoch) => {
+                    if let Some(truncate_index) = last_truncate_index {
+                        let canceled = if index < truncate_index {
+                            epoch.delta.created_file_paths()
+                        } else {
+                            epoch.delta.canceled_created_file_paths()
+                        };
+                        paths.extend(canceled);
+
+                        if index < truncate_index {
+                            continue;
+                        }
+                    }
+                    if epoch.is_empty() {
+                        continue;
+                    }
+                    effective_actions.push(EffectiveCommitAction::Data {
+                        epoch,
+                        truncate_base: pending_truncate,
+                    });
+                    pending_truncate = false;
+                }
+                TxTableAction::Truncate(_) => {}
+                TxTableAction::Drop => {
+                    return Err(IcebergError::InvariantViolated(
+                        "dropped table reached Iceberg commit planning",
+                    ));
+                }
+            }
+        }
+        if pending_truncate {
+            effective_actions.push(EffectiveCommitAction::TruncateOnly);
+        }
+
+        let mut canceled_created_paths: Vec<String> = paths.into_iter().collect();
+        canceled_created_paths.sort_unstable();
+        Ok(TxTableCommitPlan {
+            actions: effective_actions,
+            expected_metadata_location,
+            canceled_created_paths,
+        })
+    }
+
     fn mark(&self) -> TxTableActionLogMarker {
         let current_data_epoch = match self.actions.last() {
             Some(TxTableAction::Data(epoch)) => Some(TxDataEpochMarker {
@@ -151,6 +253,7 @@ impl TxTableActionLog {
     }
 
     fn truncate(&mut self, marker: TxTableActionLogMarker) {
+        self.invalidate_combined_delta();
         self.actions.truncate(marker.action_len);
         if let Some(epoch_marker) = marker.current_data_epoch
             && let Some(TxTableAction::Data(epoch)) = self.actions.last_mut()
@@ -164,6 +267,8 @@ impl TxTableActionLog {
         self.actions.iter().all(|action| match action {
             TxTableAction::Schema(update) => update.is_empty(),
             TxTableAction::Data(epoch) => epoch.is_empty(),
+            TxTableAction::Truncate(_) => false,
+            TxTableAction::Drop => false,
         })
     }
 
@@ -174,6 +279,7 @@ impl TxTableActionLog {
     }
 
     fn current_data_epoch_mut(&mut self) -> &mut TxDataEpoch {
+        self.invalidate_combined_delta();
         let needs_new_epoch =
             !matches!(self.actions.last(), Some(TxTableAction::Data(_)));
         if needs_new_epoch {
@@ -184,6 +290,22 @@ impl TxTableActionLog {
             Some(TxTableAction::Data(epoch)) => epoch,
             _ => unreachable!("last action must be a data epoch"),
         }
+    }
+
+    fn stage_truncate(&mut self, expected_metadata_location: String) {
+        self.invalidate_combined_delta();
+        self.actions.push(TxTableAction::Truncate(TxTruncateAction {
+            expected_metadata_location,
+        }));
+    }
+
+    fn stage_drop(&mut self) {
+        self.invalidate_combined_delta();
+        self.actions.push(TxTableAction::Drop);
+    }
+
+    fn is_dropped(&self) -> bool {
+        matches!(self.actions.last(), Some(TxTableAction::Drop))
     }
 
     fn record_data_files(
@@ -249,21 +371,35 @@ impl TxTableActionLog {
     }
 
     fn combined_delta(&self) -> IcebergResult<Option<Arc<SnapshotDelta>>> {
+        if let Some(delta) = self.combined_delta_cache.get() {
+            return Ok(delta.clone());
+        }
+
         let mut combined = SnapshotDelta::new();
         let mut has_delta = false;
         for action in &self.actions {
-            if let TxTableAction::Data(epoch) = action
-                && !epoch.delta.is_empty()
-            {
-                combined.append_delta(&epoch.delta)?;
-                has_delta = true;
+            match action {
+                TxTableAction::Data(epoch) if !epoch.delta.is_empty() => {
+                    combined.append_delta(&epoch.delta)?;
+                    has_delta = true;
+                }
+                TxTableAction::Truncate(_) => {
+                    combined.truncate_table()?;
+                    has_delta = true;
+                }
+                TxTableAction::Drop => return Ok(None),
+                TxTableAction::Schema(_) | TxTableAction::Data(_) => {}
             }
         }
-        Ok(has_delta.then(|| Arc::new(combined)))
-    }
-
-    fn actions(&self) -> &[TxTableAction] {
-        &self.actions
+        let delta = has_delta.then(|| Arc::new(combined));
+        self.combined_delta_cache
+            .set(delta.clone())
+            .map_err(|_| {
+                IcebergError::InvariantViolated(
+                    "combined delta cache was initialized more than once without invalidation",
+                )
+            })?;
+        Ok(delta)
     }
 }
 
@@ -271,7 +407,7 @@ impl TableState {
     fn new() -> Self {
         Self {
             file_io: None,
-            actions: TxTableActionLog::default(),
+            actions: Rc::new(TxTableActionLog::default()),
             level_history: Vec::new(),
             row_registry: RelationRowRegistry::default(),
         }
@@ -295,8 +431,8 @@ impl TableState {
         F: FnOnce(&mut TxTableActionLog) -> IcebergResult<()>,
     {
         let (marker, should_record_history) = self.record_history(nest_level);
-        if let Err(err) = mutation(&mut self.actions) {
-            self.actions.truncate(marker);
+        if let Err(err) = mutation(Rc::make_mut(&mut self.actions)) {
+            Rc::make_mut(&mut self.actions).truncate(marker);
             if should_record_history {
                 self.level_history.pop();
             }
@@ -308,7 +444,7 @@ impl TableState {
 
     fn record_validation(&mut self, nest_level: i32, validation: RowDeltaValidation) {
         self.record_history(nest_level);
-        self.actions.record_validation(validation);
+        Rc::make_mut(&mut self.actions).record_validation(validation);
     }
 
     fn record_schema_update(
@@ -321,7 +457,7 @@ impl TableState {
         }
 
         self.record_history(nest_level);
-        self.actions.stage_schema(update);
+        Rc::make_mut(&mut self.actions).stage_schema(update);
     }
 
     fn record_data_files(
@@ -335,6 +471,24 @@ impl TableState {
 
         self.record_action_mutation(nest_level, |actions| {
             actions.record_data_files(new_data_files)
+        })
+    }
+
+    fn record_truncate(
+        &mut self,
+        nest_level: i32,
+        expected_metadata_location: String,
+    ) -> IcebergResult<()> {
+        self.record_action_mutation(nest_level, |actions| {
+            actions.stage_truncate(expected_metadata_location);
+            Ok(())
+        })
+    }
+
+    fn record_drop(&mut self, nest_level: i32) -> IcebergResult<()> {
+        self.record_action_mutation(nest_level, |actions| {
+            actions.stage_drop();
+            Ok(())
         })
     }
 
@@ -397,7 +551,7 @@ impl TableState {
                 break;
             }
             let frame = self.level_history.pop().unwrap();
-            self.actions.truncate(frame.marker);
+            Rc::make_mut(&mut self.actions).truncate(frame.marker);
         }
         self.row_registry.rollback_to_level(target_level);
     }
@@ -465,17 +619,23 @@ impl LoadedTableMetadata {
         };
 
         let delta_stats = delta.stats();
+        if delta_stats.truncates_base {
+            rows = 0;
+            bytes = 0;
+        }
         rows = rows.saturating_add(delta_stats.added_data_records);
         bytes = bytes
             .saturating_add(delta_stats.added_data_file_bytes)
             .saturating_add(delta_stats.added_delete_file_bytes);
 
-        self.subtract_removed_data_file_stats(
-            file_io,
-            &delta_stats.removed_data_paths,
-            &mut rows,
-            &mut bytes,
-        )?;
+        if !delta_stats.truncates_base {
+            self.subtract_removed_data_file_stats(
+                file_io,
+                &delta_stats.removed_data_paths,
+                &mut rows,
+                &mut bytes,
+            )?;
+        }
 
         Ok((rows, bytes))
     }
@@ -494,6 +654,9 @@ impl LoadedTableMetadata {
                 return Ok(true);
             }
             if delta.has_removed_data_path(file_path) {
+                return Ok(false);
+            }
+            if delta.truncates_base() {
                 return Ok(false);
             }
         }
@@ -749,6 +912,37 @@ impl TxMetadata {
         })
     }
 
+    /// Stage a full-table truncate against the metadata location visible when
+    /// PostgreSQL invokes the table AM truncate callback.
+    pub fn stage_truncate(
+        &self,
+        relid: pg_sys::Oid,
+        file_io: &FileIO,
+    ) -> IcebergResult<()> {
+        let expected_metadata_location = IcebergMetadata::get(relid)?
+            .metadata_location
+            .ok_or(IcebergError::MetadataLocationNull)?;
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
+            state.record_truncate(nest_level, expected_metadata_location)
+        })
+    }
+
+    /// Mark a tracked relation as dropped without creating tracker state for a
+    /// relation that had no staged metadata changes. The action is retained so
+    /// savepoint rollback can restore pre-DROP actions.
+    pub fn stage_drop_if_tracked(relid: pg_sys::Oid) -> IcebergResult<()> {
+        let tracker = CURRENT.with(|slot| slot.borrow().as_ref().cloned());
+        let Some(tracker) = tracker else {
+            return Ok(());
+        };
+        let nest_level = current_nest_level();
+        let mut inner = tracker.inner.borrow_mut();
+        if let Some(state) = inner.tables.get_mut(&relid) {
+            state.record_drop(nest_level)?;
+        }
+        Ok(())
+    }
+
     fn stage_table_mutation<F>(
         &self,
         relid: pg_sys::Oid,
@@ -791,7 +985,7 @@ impl TxMetadata {
                     if state.file_io.is_none() {
                         state.file_io = Some(file_io.clone());
                     }
-                    Some(state.actions.clone())
+                    Some(Rc::clone(&state.actions))
                 }
                 None => None,
             }
@@ -871,8 +1065,13 @@ impl TxMetadata {
     /// base to the new metadata location. On `MetadataCatalogConflict`, rebase
     /// and retry up to `gucs::max_commit_retries()`.
     fn commit_all(&self) -> IcebergResult<()> {
-        let table_oids: Vec<pg_sys::Oid> =
+        let mut table_oids: Vec<pg_sys::Oid> =
             self.inner.borrow().tables.keys().copied().collect();
+        // A transaction may publish several physical Iceberg tables (partition
+        // expansion or TRUNCATE CASCADE). Stable OID order makes partial-failure
+        // behavior reproducible and avoids HashMap iteration order influencing
+        // catalog lock acquisition.
+        table_oids.sort_unstable_by_key(|oid| u32::from(*oid));
 
         for relid in table_oids {
             let Some(TableCommitInput { actions, file_io }) =
@@ -880,6 +1079,7 @@ impl TxMetadata {
             else {
                 continue;
             };
+            let plan = actions.commit_plan()?;
 
             let mut retries = 0;
             let max_retries = gucs::max_commit_retries();
@@ -896,6 +1096,11 @@ impl TxMetadata {
                 let latest_global_location = IcebergMetadata::get(relid)?
                     .metadata_location
                     .ok_or(IcebergError::MetadataLocationNull)?;
+                if plan.expected_metadata_location.is_some_and(|expected| {
+                    expected != latest_global_location.as_str()
+                }) {
+                    return Err(IcebergError::TruncateCommitConflict { relid });
+                }
                 let metadata =
                     TableMetadata::read_from(&file_io, &latest_global_location)?;
                 let base_table = Table::builder()
@@ -910,29 +1115,43 @@ impl TxMetadata {
                 let catalog = StagedCatalog::new(&base_table);
                 let mut tx = Transaction::new(&base_table);
                 let mut schema_metadata = base_table.metadata().clone();
-                for action in actions.actions() {
+                for action in &plan.actions {
                     match action {
-                        TxTableAction::Schema(schema_update) => {
+                        EffectiveCommitAction::Schema(schema_update) => {
                             schema_update
                                 .validate_base_metadata(&schema_metadata)
                                 .map_err(IcebergError::schema_evolution_conflict)?;
                             schema_metadata = schema_update
                                 .apply_to_metadata(&schema_metadata)
                                 .map_err(IcebergError::from)?;
-                            tx = schema_update.clone().apply(tx)?;
+                            tx = (**schema_update).clone().apply(tx)?;
                         }
-                        TxTableAction::Data(epoch) => {
-                            if epoch.is_empty() {
-                                continue;
-                            }
+                        EffectiveCommitAction::Data {
+                            epoch,
+                            truncate_base,
+                        } => {
                             tx = if epoch.validations.is_empty() {
-                                tx.snapshot_delta(Arc::clone(&epoch.delta))
-                                    .apply(tx)?
+                                let mut action =
+                                    tx.snapshot_delta(Arc::clone(&epoch.delta));
+                                if *truncate_base {
+                                    action = action.truncate_base();
+                                }
+                                action.apply(tx)?
                             } else {
-                                tx.row_delta(Arc::clone(&epoch.delta))
-                                    .add_validations(epoch.validations.clone())
-                                    .apply(tx)?
+                                let mut action = tx
+                                    .row_delta(Arc::clone(&epoch.delta))
+                                    .add_validations(epoch.validations.clone());
+                                if *truncate_base {
+                                    action = action.truncate_base();
+                                }
+                                action.apply(tx)?
                             };
+                        }
+                        EffectiveCommitAction::TruncateOnly => {
+                            tx = tx
+                                .snapshot_delta(Arc::new(SnapshotDelta::new()))
+                                .truncate_base()
+                                .apply(tx)?;
                         }
                     }
                 }
@@ -945,6 +1164,10 @@ impl TxMetadata {
                     .ok_or(IcebergError::MetadataLocationNull)?;
                 if new_metadata_location == latest_global_location {
                     metadata_attempt.discard()?;
+                    crate::storage::transactional_artifacts::register_canceled_files_for_commit(
+                        file_io.clone(),
+                        plan.canceled_created_paths.clone(),
+                    );
                     break;
                 }
 
@@ -958,6 +1181,10 @@ impl TxMetadata {
                 ) {
                     Ok(()) => {
                         metadata_attempt.promote()?;
+                        crate::storage::transactional_artifacts::register_canceled_files_for_commit(
+                            file_io.clone(),
+                            plan.canceled_created_paths.clone(),
+                        );
                         break;
                     }
                     Err(IcebergError::MetadataCatalogConflict) => {
@@ -985,6 +1212,9 @@ impl TxMetadata {
         if state.actions.is_empty() {
             return Ok(None);
         }
+        if state.actions.is_dropped() {
+            return Ok(None);
+        }
         let file_io = state.file_io.clone().ok_or_else(|| {
             IcebergError::MetadataTracker(format!(
                 "table {} has staged Iceberg metadata changes without FileIO",
@@ -992,7 +1222,7 @@ impl TxMetadata {
             ))
         })?;
         Ok(Some(TableCommitInput {
-            actions: state.actions.clone(),
+            actions: Rc::clone(&state.actions),
             file_io,
         }))
     }
@@ -1055,6 +1285,22 @@ impl TransactionResource for TxMetadata {
         Ok(())
     }
 
+    fn on_pre_prepare(&self) -> TransactionResult<()> {
+        let has_staged_actions = self
+            .inner
+            .borrow()
+            .tables
+            .values()
+            .any(|state| !state.actions.is_empty());
+        if has_staged_actions {
+            return Err(PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "cannot PREPARE a transaction with staged Iceberg metadata changes",
+            ));
+        }
+        Ok(())
+    }
+
     fn on_commit(&self) {
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
@@ -1087,4 +1333,230 @@ impl TransactionResource for TxMetadata {
 
 fn current_nest_level() -> i32 {
     unsafe { pg_sys::GetCurrentTransactionNestLevel() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iceberg_lite::spec::{DataFileBuilder, DataFileFormat, Struct};
+
+    #[test]
+    fn combined_delta_keeps_only_data_after_last_truncate() {
+        let mut actions = TxTableActionLog::default();
+        actions
+            .record_data_files(vec![data_file("before.parquet")])
+            .unwrap();
+        actions.stage_truncate("metadata-v1.json".to_owned());
+        actions
+            .record_data_files(vec![data_file("after.parquet")])
+            .unwrap();
+
+        let delta = actions.combined_delta().unwrap().unwrap();
+        assert!(delta.truncates_base());
+        assert_eq!(
+            delta
+                .added_data_files()
+                .iter()
+                .map(DataFile::file_path)
+                .collect::<Vec<_>>(),
+            vec!["after.parquet"]
+        );
+        assert_eq!(
+            actions.commit_plan().unwrap().canceled_created_paths,
+            vec!["before.parquet".to_owned()]
+        );
+        let plan = actions.commit_plan().unwrap();
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [EffectiveCommitAction::Data {
+                truncate_base: true,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn commit_plan_preserves_data_only_epochs_without_truncate() {
+        let mut actions = TxTableActionLog::default();
+        actions
+            .record_data_files(vec![data_file("data.parquet")])
+            .unwrap();
+
+        let plan = actions.commit_plan().unwrap();
+        assert!(plan.expected_metadata_location.is_none());
+        assert!(plan.canceled_created_paths.is_empty());
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [EffectiveCommitAction::Data {
+                truncate_base: false,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn commit_plan_replaces_pre_truncate_data_with_truncate_only() {
+        let mut actions = TxTableActionLog::default();
+        actions
+            .record_data_files(vec![data_file("discarded.parquet")])
+            .unwrap();
+        actions.stage_truncate("metadata-v1.json".to_owned());
+
+        let plan = actions.commit_plan().unwrap();
+        assert_eq!(plan.expected_metadata_location, Some("metadata-v1.json"));
+        assert_eq!(
+            plan.canceled_created_paths,
+            vec!["discarded.parquet".to_owned()]
+        );
+        assert!(matches!(
+            plan.actions.as_slice(),
+            [EffectiveCommitAction::TruncateOnly]
+        ));
+    }
+
+    #[test]
+    fn combined_delta_is_shared_until_the_action_log_changes() {
+        let mut actions = TxTableActionLog::default();
+        actions
+            .record_data_files(vec![data_file("first.parquet")])
+            .unwrap();
+
+        let first = actions.combined_delta().unwrap().unwrap();
+        let cached = actions.combined_delta().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &cached));
+
+        actions
+            .record_data_files(vec![data_file("second.parquet")])
+            .unwrap();
+        let rebuilt = actions.combined_delta().unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&first, &rebuilt));
+        assert!(rebuilt.has_live_added_data_file_path("second.parquet"));
+    }
+
+    #[test]
+    fn populated_combined_delta_cache_is_invalidated_by_savepoint_rollback() {
+        let mut actions = TxTableActionLog::default();
+        actions
+            .record_data_files(vec![data_file("before.parquet")])
+            .unwrap();
+        let marker = actions.mark();
+        let before = actions.combined_delta().unwrap().unwrap();
+
+        actions.stage_truncate("metadata-v1.json".to_owned());
+        let truncated = actions.combined_delta().unwrap().unwrap();
+        assert!(truncated.truncates_base());
+        assert!(!Arc::ptr_eq(&before, &truncated));
+
+        actions.truncate(marker);
+        let restored = actions.combined_delta().unwrap().unwrap();
+        assert!(!restored.truncates_base());
+        assert!(restored.has_live_added_data_file_path("before.parquet"));
+        assert!(!Arc::ptr_eq(&truncated, &restored));
+    }
+
+    #[test]
+    fn shared_action_log_snapshot_is_copy_on_write() {
+        let mut current = Rc::new(TxTableActionLog::default());
+        Rc::make_mut(&mut current)
+            .record_data_files(vec![data_file("before.parquet")])
+            .unwrap();
+        let commit_snapshot = Rc::clone(&current);
+
+        Rc::make_mut(&mut current)
+            .record_data_files(vec![data_file("after.parquet")])
+            .unwrap();
+
+        let snapshotted_delta = commit_snapshot.combined_delta().unwrap().unwrap();
+        assert!(snapshotted_delta.has_live_added_data_file_path("before.parquet"));
+        assert!(!snapshotted_delta.has_live_added_data_file_path("after.parquet"));
+        let current_delta = current.combined_delta().unwrap().unwrap();
+        assert!(current_delta.has_live_added_data_file_path("after.parquet"));
+    }
+
+    #[test]
+    fn last_truncate_controls_baseline_and_canceled_regions() {
+        let mut actions = TxTableActionLog::default();
+        actions.stage_truncate("metadata-v1.json".to_owned());
+        actions
+            .record_data_files(vec![data_file("middle.parquet")])
+            .unwrap();
+        actions.stage_truncate("metadata-v2.json".to_owned());
+        actions
+            .record_data_files(vec![data_file("after.parquet")])
+            .unwrap();
+
+        let (index, truncate) = actions.last_truncate().unwrap();
+        assert_eq!(index, 2);
+        assert_eq!(truncate.expected_metadata_location, "metadata-v2.json");
+        assert_eq!(
+            actions.commit_plan().unwrap().canceled_created_paths,
+            vec!["middle.parquet".to_owned()]
+        );
+    }
+
+    #[test]
+    fn action_log_marker_rolls_back_truncate_and_later_data() {
+        let mut actions = TxTableActionLog::default();
+        actions
+            .record_data_files(vec![data_file("before.parquet")])
+            .unwrap();
+        let marker = actions.mark();
+        actions.stage_truncate("metadata-v1.json".to_owned());
+        actions
+            .record_data_files(vec![data_file("after.parquet")])
+            .unwrap();
+
+        actions.truncate(marker);
+
+        assert!(actions.last_truncate().is_none());
+        let delta = actions.combined_delta().unwrap().unwrap();
+        assert!(!delta.truncates_base());
+        assert!(delta.has_live_added_data_file_path("before.parquet"));
+        assert!(!delta.has_live_added_data_file_path("after.parquet"));
+    }
+
+    #[test]
+    fn canceled_paths_include_local_removes_after_truncate() {
+        let mut actions = TxTableActionLog::default();
+        actions.stage_truncate("metadata-v1.json".to_owned());
+        actions
+            .record_data_files(vec![data_file("after.parquet")])
+            .unwrap();
+        actions
+            .record_remove_data_file("after.parquet".to_owned())
+            .unwrap();
+
+        assert_eq!(
+            actions.commit_plan().unwrap().canceled_created_paths,
+            vec!["after.parquet".to_owned()]
+        );
+    }
+
+    #[test]
+    fn drop_suppresses_commit_but_marker_can_restore_actions() {
+        let mut actions = TxTableActionLog::default();
+        actions.stage_truncate("metadata-v1.json".to_owned());
+        let marker = actions.mark();
+        actions.stage_drop();
+
+        assert!(actions.is_dropped());
+        assert!(actions.combined_delta().unwrap().is_none());
+
+        actions.truncate(marker);
+        assert!(!actions.is_dropped());
+        assert!(actions.combined_delta().unwrap().unwrap().truncates_base());
+    }
+
+    fn data_file(path: &str) -> DataFile {
+        DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path(path.to_owned())
+            .file_format(DataFileFormat::Parquet)
+            .partition(Struct::empty())
+            .partition_spec_id(0)
+            .record_count(1)
+            .file_size_in_bytes(100)
+            .build()
+            .unwrap()
+    }
 }

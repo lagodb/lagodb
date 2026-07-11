@@ -1,25 +1,34 @@
 use crate::IcebergTableAm;
-use pg_lakebase_core::diag::PgReportError;
+use crate::catalog::metadata_tracker::TxMetadata;
+use crate::storage::StorageContext;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
-use pgrx::prelude::PgSqlErrorCode;
+
+impl IcebergTableAm {
+    fn stage_truncate(rel: &RelationHandle<'_>) -> AmResult<()> {
+        let file_io = StorageContext::for_tablespace_with_wal(
+            rel.locator().spc_oid,
+            rel.needs_wal(),
+        )?
+        .into_file_io();
+        TxMetadata::current().stage_truncate(rel.oid(), &file_io)?;
+        Ok(())
+    }
+}
 
 impl AmDdl for IcebergTableAm {
     fn relation_set_new_filelocator(
-        _rel: &RelationHandle,
+        rel: &RelationHandle,
         _newrlocator: &RelFileLocator,
         _persistence: u8,
     ) -> AmResult<(pg_sys::TransactionId, pg_sys::MultiXactId)> {
+        if !rel.is_being_created_in_current_subtransaction() {
+            Self::stage_truncate(rel)?;
+        }
         Ok((pg_sys::InvalidTransactionId, 0u32.into()))
     }
 
     fn relation_nontransactional_truncate(rel: &RelationHandle) -> AmResult<()> {
-        Err(PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!(
-                "cannot TRUNCATE Iceberg table \"{}\": Iceberg truncate requires metadata rewrite support",
-                rel.relation_name()
-            ),
-        ))
+        Self::stage_truncate(rel)
     }
 }
