@@ -784,6 +784,70 @@ async fn client_delete_prefix_removes_all_matching_objects_and_rejects_empty_pre
 }
 
 #[tokio::test]
+async fn client_bulk_delete_and_explicit_cursor_close_are_end_to_end() {
+    let root = test_root("bulk-delete-cache");
+    let socket = test_root("bulk-delete.sock");
+    let backend = Arc::new(MemoryObjectBackend::new());
+    for key in ["scope/a", "scope/b", "scope/c"] {
+        backend.insert(
+            ObjectLocation::new(TEST_STORE_ID, "bucket", key).unwrap(),
+            b"x".to_vec(),
+        );
+    }
+    let cache = Arc::new(
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(4, 4),
+    );
+    cache.spawn_large_fill_reaper();
+    let registry = StoreRegistry::new()
+        .with_shared_backend(TEST_STORE_ID, backend.clone())
+        .unwrap();
+    let service = Arc::new(StorageService::with_registry(registry, cache));
+    let server = StorageServer::bind(&socket, service).await.unwrap();
+    let server_task = tokio::spawn(async move {
+        let _ = server.serve_forever().await;
+    });
+
+    let socket_for_client = socket.clone();
+    tokio::task::spawn_blocking(move || {
+        let client = StorageClient::connect(&socket_for_client).unwrap();
+        let first_page = client
+            .list_page(TEST_STORE_ID, "bucket", Some("scope/"), None, 1)
+            .unwrap();
+        let cursor = first_page.next_cursor.expect("more objects must remain");
+        client.close_list_cursor(cursor.clone()).unwrap();
+        let closed = client
+            .list_page(TEST_STORE_ID, "bucket", Some("scope/"), Some(cursor), 1)
+            .unwrap_err();
+        assert_eq!(closed.kind(), StorageErrorKind::ExpiredCursor);
+
+        let deleted = client
+            .delete_objects(
+                TEST_STORE_ID,
+                "bucket",
+                vec!["scope/a".to_owned(), "scope/b".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(deleted, 2);
+    })
+    .await
+    .unwrap();
+
+    for gone in ["scope/a", "scope/b"] {
+        let key = ObjectLocation::new(TEST_STORE_ID, "bucket", gone).unwrap();
+        assert!(backend.get_range(&key, 0..1).await.is_err());
+    }
+    let survivor = ObjectLocation::new(TEST_STORE_ID, "bucket", "scope/c").unwrap();
+    assert!(backend.get_range(&survivor, 0..1).await.is_ok());
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn client_list_iterates_pages_and_returns_every_object() {
     let root = test_root("list-cache");
     let socket = test_root("list.sock");

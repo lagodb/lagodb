@@ -249,6 +249,48 @@ impl WireDecode for Vec<u8> {
     }
 }
 
+// ---- Vec<String> for bounded bulk-delete requests ---------------------------------------------
+
+impl WireEncode for Vec<String> {
+    fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {
+        let limit = super::super::limits::MAX_BULK_DELETE_OBJECT_KEYS;
+        if self.len() > limit {
+            return Err(StorageError::resource_exhausted(format!(
+                "bulk-delete request exceeds {limit} keys"
+            )));
+        }
+        out.put_u32(self.len() as u32);
+        for value in self {
+            value.encode(out)?;
+        }
+        Ok(())
+    }
+}
+
+impl WireDecode for Vec<String> {
+    fn decode(input: &mut impl Buf) -> StorageResult<Self> {
+        let len = get_u32(input)? as usize;
+        let limit = super::super::limits::MAX_BULK_DELETE_OBJECT_KEYS;
+        if len > limit {
+            return Err(StorageError::resource_exhausted(format!(
+                "bulk-delete request exceeds {limit} keys"
+            )));
+        }
+        // Every encoded string contains at least its four-byte length prefix.
+        if len > input.remaining() / std::mem::size_of::<u32>() {
+            return Err(StorageError::protocol(format!(
+                "bulk-delete request declares {len} keys but only {} bytes remain",
+                input.remaining()
+            )));
+        }
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            values.push(String::decode(input)?);
+        }
+        Ok(values)
+    }
+}
+
 // ---- u32 / u64 scalar types --------------------------------------------------------------------
 
 impl WireEncode for u32 {

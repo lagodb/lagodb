@@ -19,6 +19,14 @@ WHERE backend_type = 'pg-lakebase-storage';
                 1
 (1 row)
 
+SELECT count(*) AS maintenance_worker_running
+FROM pg_stat_activity
+WHERE backend_type = 'pg-lakebase-maintenance';
+ maintenance_worker_running 
+----------------------------
+                          1
+(1 row)
+
 -- A2. Socket file exists at default path ($PGDATA/pg_lakebase/storage.sock)
 COPY (SELECT current_setting('data_directory') || '/pg_lakebase/storage.sock') TO '/tmp/_regress_socket_path.txt';
 \! test -S "$(cat /tmp/_regress_socket_path.txt)" && echo "socket_exists: true" || echo "socket_exists: false"
@@ -47,6 +55,24 @@ SELECT current_setting('pg_lakebase.storage_server_worker_threads') AS worker_th
  worker_threads 
 ----------------
  4
+(1 row)
+
+SELECT current_setting('pg_lakebase.maintenance_worker_enabled') AS maintenance_enabled;
+ maintenance_enabled 
+---------------------
+ on
+(1 row)
+
+SELECT current_setting('pg_lakebase.maintenance_actor_threads') AS maintenance_actor_threads;
+ maintenance_actor_threads 
+---------------------------
+ 4
+(1 row)
+
+SELECT current_setting('pg_lakebase.maintenance_batch_items') AS maintenance_batch_items;
+ maintenance_batch_items 
+-------------------------
+ 128
 (1 row)
 
 -- ============================================================

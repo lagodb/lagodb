@@ -9,7 +9,9 @@ use crate::protocol::MAX_READ_RESPONSE_DATA_BYTES;
 pub const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 256;
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 pub const DEFAULT_MAX_OPEN_HANDLES_PER_CONNECTION: usize = 1024;
-pub const DEFAULT_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS: i32 = 2_000;
+pub const DEFAULT_CONNECTION_DRAIN_TIMEOUT: Duration =
+    Duration::from_millis(DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS as u64);
 pub const DEFAULT_MAX_PENDING_RESPONSES: usize = 64;
 pub const DEFAULT_MAX_PENDING_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);

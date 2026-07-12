@@ -62,7 +62,9 @@ pub(crate) enum CommandOutput {
     InvalidateObjectCache(InvalidateObjectCacheOutput),
     Delete,
     DeletePrefix(DeletePrefixOutput),
+    DeleteObjects(DeleteObjectsOutput),
     List(ListOutput),
+    CloseList,
 }
 
 impl CommandOutput {
@@ -126,6 +128,11 @@ pub(crate) struct InvalidateObjectCacheOutput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DeletePrefixOutput {
     pub deleted: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DeleteObjectsOutput {
+    pub deleted: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

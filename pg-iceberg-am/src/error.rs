@@ -14,6 +14,7 @@
 //! perform the final conversion to PostgreSQL.
 
 use pg_lakebase_core::diag::{PgError, SqlStateError, domain_error_report};
+use pg_lakebase_core::maintenance::MaintenanceError;
 use pg_lakebase_core::options::TablespaceError;
 use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
 use pg_lakebase_storage::{StorageError, StorageErrorKind};
@@ -106,6 +107,12 @@ pub enum IcebergError {
 
     #[error("storage error: {0}")]
     StorageError(#[from] pg_lakebase_storage::StorageError),
+
+    #[error("maintenance error: {0}")]
+    MaintenanceError(#[from] MaintenanceError),
+
+    #[error("storage target is still being cleaned by maintenance")]
+    ActiveMaintenanceTarget,
 
     #[error("postgres error: {0}")]
     PgError(#[from] PgError),
@@ -219,6 +226,12 @@ impl SqlStateError for IcebergError {
 
             IcebergError::StorageError(error) => storage_sql_error_code(error),
 
+            IcebergError::MaintenanceError(error) => error.sql_error_code(),
+
+            IcebergError::ActiveMaintenanceTarget => {
+                PgSqlErrorCode::ERRCODE_OBJECT_IN_USE
+            }
+
             IcebergError::TablespaceNotFound => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
@@ -330,9 +343,9 @@ fn storage_sql_error_code(error: &StorageError) -> PgSqlErrorCode {
         | StorageErrorKind::Backend
         | StorageErrorKind::Cache
         | StorageErrorKind::CacheFillAborted => PgSqlErrorCode::ERRCODE_IO_ERROR,
-        StorageErrorKind::Protocol | StorageErrorKind::ClosedHandle => {
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
-        }
+        StorageErrorKind::Protocol
+        | StorageErrorKind::ClosedHandle
+        | StorageErrorKind::ExpiredCursor => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
     }
 }
 

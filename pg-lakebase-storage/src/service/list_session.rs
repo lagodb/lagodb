@@ -11,8 +11,8 @@
 //! * Each subsequent `List` call with the same cursor drains up to `page_size` entries from the
 //!   underlying stream.
 //! * The session is removed from the table when the underlying stream is fully drained
-//!   (`next_cursor = None` is returned), the cursor idles past [`Self::IDLE_TTL`], or the table
-//!   is told to drop everything (e.g. on shutdown).
+//!   (`next_cursor = None` is returned), the cursor idles past [`SESSION_IDLE_TTL`], or the table
+//!   is explicitly closed by its client or shutdown.
 //!
 //! ## Why a stateful cursor and not a stateless offset
 //!
@@ -31,9 +31,9 @@
 //! out to the object store) and one entry in the [`ListSessionTable`] map. There is **no upper
 //! bound on the number of concurrent sessions** today: the only reclamation paths are draining
 //! to end and idle expiry. A misbehaving or forgetful client that opens many list cursors and
-//! never finishes them will pin proportional resources for up to `SESSION_IDLE_TTL`.
+//! never finishes them will pin proportional resources for up to `LIST_CURSOR_IDLE_TTL_MS`.
 //!
-//! This is acceptable for the current single-tenant deployment. If the service grows a
+//! Paging clients must consume or explicitly close their cursor. If the service grows a
 //! multi-tenant or high-fanout list workload, the sensible follow-ups in priority order are:
 //!
 //! 1. A hard cap on `len()` with eviction of the oldest idle session when full,
@@ -53,14 +53,16 @@ use futures::stream::BoxStream;
 
 use crate::error::StorageResult;
 use crate::object::ListEntry;
-use crate::protocol::ListCursor;
+use crate::protocol::{ListCursor, MAX_LIST_PAGE_SIZE};
+use crate::service::LIST_CURSOR_IDLE_TTL_MS;
 
 /// Idle timeout after which a [`ListSession`] is reaped.
 ///
 /// Five minutes mirrors the design Q&A: long enough that a slow client iterating page-by-page
 /// stays alive between calls, short enough that a forgotten cursor does not pin a backend
 /// stream forever.
-const SESSION_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
+const SESSION_IDLE_TTL: Duration =
+    Duration::from_millis(LIST_CURSOR_IDLE_TTL_MS as u64);
 
 /// Default `page_size` when the client passes `0`.
 pub(crate) const DEFAULT_PAGE_SIZE: u32 = 1000;
@@ -69,7 +71,7 @@ pub(crate) const DEFAULT_PAGE_SIZE: u32 = 1000;
 ///
 /// Capped to keep one wire frame from blowing the framing budget; clients that need more than
 /// 10000 entries in one shot should iterate.
-pub(crate) const MAX_PAGE_SIZE: u32 = 10_000;
+pub(crate) const MAX_PAGE_SIZE: u32 = MAX_LIST_PAGE_SIZE;
 
 /// Active list iterator parked between successive `List` calls.
 struct ListSession {
@@ -180,7 +182,6 @@ impl ListSessionTable {
     }
 
     /// Drop a session without draining (e.g. server shutdown). No-op if the cursor is unknown.
-    #[cfg(test)]
     pub(crate) fn forget(&self, cursor: &ListCursor) {
         self.lock().remove(cursor);
     }

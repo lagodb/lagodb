@@ -41,15 +41,36 @@ fn decode_rejects_previous_protocol_version() {
         },
     })
     .unwrap();
-    frame[4..6].copy_from_slice(&2_u16.to_be_bytes());
+    frame[4..6].copy_from_slice(&3_u16.to_be_bytes());
 
     let error = decode_request(&frame).unwrap_err();
 
     assert!(
         error
             .wire_message()
-            .contains("unsupported protocol version 2")
+            .contains("unsupported protocol version 3")
     );
+}
+
+#[test]
+fn decode_rejects_bulk_delete_count_before_allocating_keys() {
+    let mut frame = encode_request(&WireRequest {
+        request_id: 42,
+        payload: WireRequestPayload::DeleteObjects {
+            store_id: "s".to_owned(),
+            bucket: "b".to_owned(),
+            keys: Vec::new(),
+        },
+    })
+    .unwrap();
+    // Header (15) + op (2) + two one-byte strings (5 bytes each).
+    const KEY_COUNT_OFFSET: usize = 15 + 2 + 5 + 5;
+    frame[KEY_COUNT_OFFSET..KEY_COUNT_OFFSET + 4]
+        .copy_from_slice(&10_001_u32.to_be_bytes());
+
+    let error = decode_request(&frame).unwrap_err();
+
+    assert_eq!(error.kind(), StorageErrorKind::ResourceExhausted);
 }
 
 #[test]
@@ -147,6 +168,11 @@ fn request_payloads_roundtrip() {
             bucket: "bucket".to_string(),
             prefix: "scope/".to_string(),
         },
+        WireRequestPayload::DeleteObjects {
+            store_id: "store-a".to_string(),
+            bucket: "bucket".to_string(),
+            keys: vec!["scope/a".to_string(), "scope/b".to_string()],
+        },
         WireRequestPayload::List {
             store_id: "store-a".to_string(),
             bucket: "bucket".to_string(),
@@ -162,6 +188,9 @@ fn request_payloads_roundtrip() {
             cursor: Some(crate::protocol::ListCursor::from_wire(
                 "ls-deadbeef".to_string(),
             )),
+        },
+        WireRequestPayload::CloseList {
+            cursor: crate::protocol::ListCursor::from_wire("ls-close".to_string()),
         },
     ] {
         let request = WireRequest {
@@ -200,6 +229,7 @@ fn response_payloads_roundtrip() {
         WireResponsePayload::InvalidateObjectCache { removed: true },
         WireResponsePayload::Delete,
         WireResponsePayload::DeletePrefix { deleted: 7 },
+        WireResponsePayload::DeleteObjects { deleted: 2 },
         WireResponsePayload::List {
             entries: vec![
                 crate::protocol::WireListEntry {
@@ -221,9 +251,14 @@ fn response_payloads_roundtrip() {
             entries: Vec::new(),
             next_cursor: None,
         },
+        WireResponsePayload::CloseList,
         WireResponsePayload::Error {
             kind: StorageErrorKind::Busy,
             message: "cache object is active".to_string(),
+        },
+        WireResponsePayload::Error {
+            kind: StorageErrorKind::ExpiredCursor,
+            message: "unknown or expired list cursor".to_string(),
         },
     ] {
         let response = WireResponse {
@@ -310,7 +345,7 @@ fn request_open_golden_frame() {
         encode_request(&request).unwrap(),
         vec![
             0x53, 0x54, 0x47, 0x31, // magic
-            0x00, 0x03, // version
+            0x00, 0x04, // version
             0x01, // request kind
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a, // request id
             0x00, 0x01, // open op
@@ -339,7 +374,7 @@ fn request_read_golden_frame() {
     assert_eq!(
         encode_request(&request).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00,
             0x0d,
@@ -378,7 +413,7 @@ fn response_open_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x01,
         ]
@@ -398,7 +433,7 @@ fn response_read_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x03, b'a', b'b',
             b'c',
         ]
@@ -437,7 +472,7 @@ fn response_error_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x03, 0xe8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0e, b'm',
             b'i', b's', b's', b'i', b'n', b'g', b' ', b'b', b'u', b'c', b'k', b'e',
             b't',

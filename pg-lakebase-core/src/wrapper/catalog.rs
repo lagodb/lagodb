@@ -55,6 +55,42 @@ impl Drop for CatalogIndexGuard {
 }
 
 impl PgWrapper {
+    /// Open all indexes belonging to a catalog relation for reuse across a
+    /// bounded sequence of tuple writes.
+    ///
+    /// # Safety
+    ///
+    /// `relation` must be a valid, open catalog relation.
+    pub(crate) unsafe fn catalog_open_indexes_raw(
+        relation: pg_sys::Relation,
+    ) -> Result<pg_sys::CatalogIndexState, PgError> {
+        let relation = AssertUnwindSafe(relation);
+        unsafe {
+            PgTryBuilder::new(move || Ok(pg_sys::CatalogOpenIndexes(*relation)))
+                .catch_others(|err| Err(PgError::from_caught(err)))
+                .execute()
+        }
+    }
+
+    /// Close catalog index state returned by [`Self::catalog_open_indexes_raw`].
+    ///
+    /// # Safety
+    ///
+    /// `state` must be live catalog index state that has not already been closed.
+    pub(crate) unsafe fn catalog_close_indexes_raw(
+        state: pg_sys::CatalogIndexState,
+    ) -> Result<(), PgError> {
+        let state = AssertUnwindSafe(state);
+        unsafe {
+            PgTryBuilder::new(move || {
+                pg_sys::CatalogCloseIndexes(*state);
+                Ok(())
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
+
     /// # Safety
     ///
     /// `relation` and `tuple` must be valid PostgreSQL objects, and `tuple`
@@ -68,6 +104,30 @@ impl PgWrapper {
         unsafe {
             PgTryBuilder::new(move || {
                 pg_sys::CatalogTupleInsert(*relation, *tuple);
+                Ok(())
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
+
+    /// Insert one tuple while reusing caller-owned catalog index state.
+    ///
+    /// # Safety
+    ///
+    /// `relation`, `tuple`, and `index_state` must belong to the same live
+    /// catalog relation.
+    pub(crate) unsafe fn catalog_tuple_insert_with_info_raw(
+        relation: pg_sys::Relation,
+        tuple: pg_sys::HeapTuple,
+        index_state: pg_sys::CatalogIndexState,
+    ) -> Result<(), PgError> {
+        let relation = AssertUnwindSafe(relation);
+        let tuple = AssertUnwindSafe(tuple);
+        let index_state = AssertUnwindSafe(index_state);
+        unsafe {
+            PgTryBuilder::new(move || {
+                pg_sys::CatalogTupleInsertWithInfo(*relation, *tuple, *index_state);
                 Ok(())
             })
             .catch_others(|err| Err(PgError::from_caught(err)))

@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"], default-feature
 tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
+uuid = { version = "1.16", features = ["v7"] }
 
 [dev-dependencies]
 pgrx-tests = { workspace = true }

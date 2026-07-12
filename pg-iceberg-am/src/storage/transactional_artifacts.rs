@@ -11,9 +11,9 @@
 //! [`TransactionResource`] the first time any artifact is recorded.
 //!
 //! **Commit behaviour:**
-//! - `DroppedTableDir` → after PostgreSQL commit, WAL-log local deletion only
+//! - `DroppedLocalTableRoot` → after PostgreSQL commit, WAL-log local deletion only
 //!   when the relation WAL policy requires it, then remove the table directory
-//!   or object-storage prefix.
+//!   recursively.
 //! - `ObjectFile(Uploaded)` → unlink the staging file (best-effort).
 //! - `ObjectFile(Staged)` → warn, then unlink the staging file (best-effort).
 //! - unresolved metadata-attempt artifacts → abort-style cleanup instead of
@@ -27,7 +27,7 @@
 //! - `CreatedTableDir` → remove the table directory.
 //! - `ObjectFile(Staged)` → unlink the staging file.
 //! - `ObjectFile(Uploaded)` → delete the remote object, then unlink the staging file.
-//! - `DroppedTableDir` → no-op (table survived).
+//! - `DroppedLocalTableRoot` → no-op (table survived).
 //!
 //! This abort behaviour is what makes a mid-statement writer failure safe with
 //! respect to remote orphan files. A typical concern: a rolling writer flushes
@@ -126,7 +126,7 @@ enum ArtifactKind {
         location: String,
         file_io: FileIO,
     },
-    DroppedTableDir {
+    DroppedLocalTableRoot {
         location: String,
         file_io: FileIO,
     },
@@ -152,8 +152,8 @@ impl std::fmt::Debug for ArtifactKind {
                 .debug_struct("CreatedTableDir")
                 .field("location", location)
                 .finish(),
-            Self::DroppedTableDir { location, .. } => f
-                .debug_struct("DroppedTableDir")
+            Self::DroppedLocalTableRoot { location, .. } => f
+                .debug_struct("DroppedLocalTableRoot")
                 .field("location", location)
                 .finish(),
             Self::ObjectFile {
@@ -430,7 +430,7 @@ impl ArtifactRegistry {
 
     fn commit_one(kind: ArtifactKind) {
         match kind {
-            ArtifactKind::DroppedTableDir {
+            ArtifactKind::DroppedLocalTableRoot {
                 ref location,
                 ref file_io,
             } => {
@@ -528,7 +528,7 @@ impl ArtifactRegistry {
                 let staging_unlinked = best_effort_unlink(staging_path);
                 remote_deleted && staging_unlinked
             }
-            ArtifactKind::DroppedTableDir { .. } => true,
+            ArtifactKind::DroppedLocalTableRoot { .. } => true,
         };
         (!cleaned).then_some(kind)
     }
@@ -783,12 +783,31 @@ pub fn register_table_dir_created(location: String, file_io: FileIO) {
         .add(ArtifactKind::CreatedTableDir { location, file_io });
 }
 
-/// Register a table directory to be removed on commit (DROP TABLE).
-pub fn register_table_dir_dropped(location: String, file_io: FileIO) {
+/// Register a local table root to be removed on commit (DROP TABLE).
+///
+/// # Errors
+///
+/// Returns an invariant error if a remote `FileIO` crosses this local-only
+/// boundary.
+pub fn register_local_table_root_dropped(
+    location: String,
+    file_io: FileIO,
+) -> IcebergResult<()> {
+    if file_io
+        .storage()
+        .as_any()
+        .downcast_ref::<LocalStorage>()
+        .is_none()
+    {
+        return Err(IcebergError::InvariantViolated(
+            "remote storage passed to local table-root cleanup",
+        ));
+    }
     let res = ensure_registry();
     res.inner
         .borrow_mut()
-        .add(ArtifactKind::DroppedTableDir { location, file_io });
+        .add(ArtifactKind::DroppedLocalTableRoot { location, file_io });
+    Ok(())
 }
 
 /// Register a staging file for an object-storage write.

@@ -153,6 +153,24 @@ impl StorageClient {
         })
     }
 
+    /// Connect with bounded blocking read/write calls.
+    ///
+    /// This is intended for long-lived background consumers that must remain
+    /// responsive to shutdown even if the storage service or provider stalls.
+    /// A zero timeout is rejected by `UnixStream` and therefore surfaces as an
+    /// I/O error.
+    pub fn connect_with_timeout(
+        socket_path: impl AsRef<Path>,
+        timeout: std::time::Duration,
+    ) -> StorageResult<Self> {
+        let stream = UnixStream::connect(socket_path)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(ClientConnection::new(stream))),
+        })
+    }
+
     fn connection(&self) -> StorageResult<RefMut<'_, ClientConnection>> {
         self.inner.try_borrow_mut().map_err(|_| {
             StorageError::protocol(
@@ -360,9 +378,8 @@ impl StorageClient {
     ///
     /// **Scaling out**: for prefixes large enough that the single-RPC duration matters
     /// (millions of objects, or interleaving with concurrent reads on the same client), prefer
-    /// driving the deletion explicitly via [`Self::list`] + [`Self::delete`] in parallel
-    /// batches across multiple `StorageClient` connections. `delete_prefix` is a convenience
-    /// method, not a bulk-throughput tool.
+    /// driving the deletion explicitly via [`Self::list_page`] + [`Self::delete_objects`]
+    /// in bounded batches. `delete_prefix` is a convenience method, not a bulk-throughput tool.
     pub fn delete_prefix(
         &self,
         store_id: impl Into<String>,
@@ -377,6 +394,24 @@ impl StorageClient {
         match response {
             WireResponsePayload::DeletePrefix { deleted } => Ok(deleted),
             other => Err(unexpected_response("delete-prefix", &other)),
+        }
+    }
+
+    /// Deletes one bounded group of object keys through the backend bulk-delete path.
+    pub fn delete_objects(
+        &self,
+        store_id: impl Into<String>,
+        bucket: impl Into<String>,
+        keys: Vec<String>,
+    ) -> StorageResult<u32> {
+        let (response, _) = self.request(WireRequestPayload::DeleteObjects {
+            store_id: store_id.into(),
+            bucket: bucket.into(),
+            keys,
+        })?;
+        match response {
+            WireResponsePayload::DeleteObjects { deleted } => Ok(deleted),
+            other => Err(unexpected_response("delete-objects", &other)),
         }
     }
 
@@ -420,6 +455,15 @@ impl StorageClient {
                 next_cursor,
             }),
             other => Err(unexpected_response("list", &other)),
+        }
+    }
+
+    /// Releases a retained list cursor. Closing an expired cursor is idempotent.
+    pub fn close_list_cursor(&self, cursor: ListCursor) -> StorageResult<()> {
+        let (response, _) = self.request(WireRequestPayload::CloseList { cursor })?;
+        match response {
+            WireResponsePayload::CloseList => Ok(()),
+            other => Err(unexpected_response("close-list", &other)),
         }
     }
 

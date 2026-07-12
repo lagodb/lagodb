@@ -927,19 +927,21 @@ impl TxMetadata {
         })
     }
 
-    /// Mark a tracked relation as dropped without creating tracker state for a
-    /// relation that had no staged metadata changes. The action is retained so
-    /// savepoint rollback can restore pre-DROP actions.
-    pub fn stage_drop_if_tracked(relid: pg_sys::Oid) -> IcebergResult<()> {
-        let tracker = CURRENT.with(|slot| slot.borrow().as_ref().cloned());
-        let Some(tracker) = tracker else {
-            return Ok(());
-        };
+    /// Mark an Iceberg relation as dropped. DROP always creates tracker state
+    /// so PREPARE can reject the non-serializable lifecycle action and
+    /// savepoint rollback can restore any earlier actions.
+    pub fn stage_drop(relid: pg_sys::Oid) -> IcebergResult<()> {
+        let tracker = Self::current();
+        tracker.register_table(relid);
         let nest_level = current_nest_level();
         let mut inner = tracker.inner.borrow_mut();
-        if let Some(state) = inner.tables.get_mut(&relid) {
-            state.record_drop(nest_level)?;
-        }
+        let state = inner.tables.get_mut(&relid).ok_or_else(|| {
+            IcebergError::MetadataTracker(format!(
+                "Table {} not registered before staging DROP",
+                relid
+            ))
+        })?;
+        state.record_drop(nest_level)?;
         Ok(())
     }
 

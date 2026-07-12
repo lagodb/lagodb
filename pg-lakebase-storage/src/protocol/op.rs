@@ -1,7 +1,7 @@
 use crate::error::{StorageError, StorageResult};
 
 pub(crate) const MAGIC: u32 = 0x53544731; // STG1
-pub(crate) const VERSION: u16 = 3;
+pub(crate) const VERSION: u16 = 4;
 pub(crate) const KIND_REQUEST: u8 = 1;
 pub(crate) const KIND_RESPONSE: u8 = 2;
 
@@ -25,6 +25,8 @@ pub(crate) enum WireOp {
     DeletePrefix,
     List,
     Head,
+    DeleteObjects,
+    CloseList,
     Error,
 }
 
@@ -43,6 +45,8 @@ impl WireOp {
             Self::DeletePrefix => 10,
             Self::List => 11,
             Self::Head => 12,
+            Self::DeleteObjects => 13,
+            Self::CloseList => 14,
             Self::Error => 1000,
         }
     }
@@ -61,6 +65,8 @@ impl WireOp {
             10 => Ok(Self::DeletePrefix),
             11 => Ok(Self::List),
             12 => Ok(Self::Head),
+            13 => Ok(Self::DeleteObjects),
+            14 => Ok(Self::CloseList),
             _ => Err(StorageError::protocol(format!("unknown request op {code}"))),
         }
     }
@@ -79,6 +85,8 @@ impl WireOp {
             10 => Ok(Self::DeletePrefix),
             11 => Ok(Self::List),
             12 => Ok(Self::Head),
+            13 => Ok(Self::DeleteObjects),
+            14 => Ok(Self::CloseList),
             1000 => Ok(Self::Error),
             _ => Err(StorageError::protocol(format!(
                 "unknown response op {code}"

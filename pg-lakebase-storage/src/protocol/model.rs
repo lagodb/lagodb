@@ -98,6 +98,12 @@ pub enum WireRequestPayload {
         bucket: String,
         prefix: String,
     },
+    /// Deletes one bounded set of keys using the backend bulk-delete path.
+    DeleteObjects {
+        store_id: String,
+        bucket: String,
+        keys: Vec<String>,
+    },
     /// Lists objects in `(store_id, bucket)` whose key starts with `prefix`. `cursor` is `None`
     /// for the first page; subsequent calls echo the `next_cursor` returned by the server.
     /// `page_size = 0` means "let the server pick a default".
@@ -107,6 +113,10 @@ pub enum WireRequestPayload {
         prefix: Option<String>,
         page_size: u32,
         cursor: Option<ListCursor>,
+    },
+    /// Releases a retained list cursor without draining the remaining stream.
+    CloseList {
+        cursor: ListCursor,
     },
 }
 
@@ -160,12 +170,16 @@ pub enum WireResponsePayload {
     DeletePrefix {
         deleted: u64,
     },
+    DeleteObjects {
+        deleted: u32,
+    },
     /// Reply to `List`. `next_cursor = None` indicates the listing is complete; otherwise the
     /// client must echo the cursor on its next `List` call to fetch the next page.
     List {
         entries: Vec<WireListEntry>,
         next_cursor: Option<ListCursor>,
     },
+    CloseList,
     Error {
         kind: StorageErrorKind,
         message: String,

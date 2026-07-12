@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "$#" -ne 4 ]; then
+    echo "usage: wait_for_maintenance_item STORE NAMESPACE PATH TIMEOUT_SECONDS" >&2
+    exit 2
+fi
+
+store_id=$1
+namespace=$2
+object_path=$3
+timeout_seconds=$4
+deadline=$(( $(date +%s) + timeout_seconds ))
+
+while :; do
+    complete=$(psql -XAtq -v ON_ERROR_STOP=1 \
+        --set=store_id="$store_id" \
+        --set=namespace="$namespace" \
+        --set=object_path="$object_path" \
+        -c "SELECT NOT EXISTS (SELECT 1 FROM lakebase.maintenance_queue WHERE operation = 2 AND store_id = :'store_id' AND object_namespace = :'namespace' AND object_path = :'object_path')")
+    if [ "$complete" = "t" ]; then
+        echo "maintenance_complete: true"
+        exit 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        psql -X -v ON_ERROR_STOP=1 \
+            --set=store_id="$store_id" \
+            --set=namespace="$namespace" \
+            --set=object_path="$object_path" \
+            -c "SELECT item_id, state, attempt_count, last_error FROM lakebase.maintenance_status WHERE operation = 'delete_tree' AND store_id = :'store_id' AND object_namespace = :'namespace' AND object_path = :'object_path'" >&2
+        echo "maintenance_complete: false" >&2
+        exit 1
+    fi
+    sleep 0.05
+done

@@ -7,15 +7,22 @@ CREATE EXTENSION pg_iceberg_am;
 -- Test 0: Basic CREATE and DROP (Top-level Transaction)
 --
 CREATE TABLE test_lifecycle (id int) USING iceberg;
+INSERT INTO test_lifecycle VALUES (1), (2), (3);
 
 -- capture path info while table exists (pg_relation_filepath returns null after drop)
 SELECT pg_relation_filepath('test_lifecycle') || '_iceberg' AS path_1 \gset
 -- Verify directory exists
 SELECT (pg_stat_file(:'path_1')).isdir as directory_found;
+SELECT EXISTS (
+    SELECT 1 FROM pg_ls_dir(:'path_1', true, false)
+) AS root_has_iceberg_artifacts;
 
 DROP TABLE test_lifecycle;
 -- Verify directory is gone
 SELECT (pg_stat_file(:'path_1', true)) is null as directory_missing;
+SELECT count(*) AS local_drop_remote_items
+FROM lakebase.maintenance_queue
+WHERE producer = 'iceberg-drop';
 
 
 --
@@ -42,6 +49,7 @@ SELECT (pg_stat_file(:'path_sub_1', true)) is null as directory_missing_after_ro
 -- Test 2: Drop table in sub-transaction and rollback (Commit Cleanup - Cancelled)
 --
 CREATE TABLE test_sub_drop (id int) USING iceberg;
+INSERT INTO test_sub_drop VALUES (10), (20);
 -- capture path now because we need to verify it still exists after rollback
 SELECT pg_relation_filepath('test_sub_drop') || '_iceberg' AS path_sub_2 \gset
 
@@ -53,6 +61,7 @@ COMMIT;
 
 -- Verify directory still exists (drop was cancelled)
 SELECT (pg_stat_file(:'path_sub_2')).isdir as directory_found_after_rollback;
+SELECT array_agg(id ORDER BY id) AS rows_after_drop_rollback FROM test_sub_drop;
 
 -- Cleanup
 DROP TABLE test_sub_drop;

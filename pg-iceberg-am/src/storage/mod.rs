@@ -1,10 +1,12 @@
 pub mod local;
 pub mod object;
+mod object_tree;
 pub mod transactional_artifacts;
 mod wait_event;
 
 pub use local::LocalStorage;
 pub use object::ObjectStorage;
+pub(crate) use object_tree::ObjectTreeObserver;
 
 use crate::error::IcebergResult;
 use iceberg_lite::io::FileIO;

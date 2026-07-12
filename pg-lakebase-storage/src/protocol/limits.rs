@@ -11,6 +11,12 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// unbounded buffers even when individually under [`MAX_FRAME_BYTES`].
 pub(crate) const MAX_STRING_FIELD_BYTES: usize = 1024 * 1024;
 
+/// Maximum number of object keys accepted by one bulk-delete request.
+pub const MAX_BULK_DELETE_OBJECT_KEYS: usize = 10_000;
+
+/// Maximum number of list entries returned by one paginated LIST response.
+pub const MAX_LIST_PAGE_SIZE: u32 = 10_000;
+
 /// Bytes occupied by a READ request frame: frame header + op code + handle + offset + requested length.
 pub(crate) const READ_REQUEST_BYTES: usize = FRAME_HEADER_BYTES + 2 + 8 + 8 + 4;
 

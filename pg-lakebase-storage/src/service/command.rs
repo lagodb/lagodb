@@ -21,7 +21,9 @@ pub(crate) enum StorageCommand {
     InvalidateObjectCache(InvalidateObjectCacheCommand),
     Delete(DeleteCommand),
     DeletePrefix(DeletePrefixCommand),
+    DeleteObjects(DeleteObjectsCommand),
     List(ListCommand),
+    CloseList(CloseListCommand),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,10 +104,22 @@ pub(crate) struct DeletePrefixCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeleteObjectsCommand {
+    pub store_id: String,
+    pub bucket: String,
+    pub keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ListCommand {
     pub store_id: String,
     pub bucket: String,
     pub prefix: Option<String>,
     pub page_size: u32,
     pub cursor: Option<ListCursor>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CloseListCommand {
+    pub cursor: ListCursor,
 }

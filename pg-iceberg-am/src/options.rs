@@ -197,6 +197,18 @@ impl ResolvedIcebergOptions {
     pub(crate) fn from_table_options(
         options: Option<&TableOptions>,
     ) -> Result<Self, TableOptionError> {
+        if let Some(options) = options {
+            for (name, _) in options.iter() {
+                if !ICEBERG_TABLE_OPTIONS
+                    .iter()
+                    .any(|option| option.name == name)
+                {
+                    return Err(TableOptionError::InvalidOption(format!(
+                        "unsupported Iceberg table option {name:?}"
+                    )));
+                }
+            }
+        }
         let format_version =
             match options.and_then(|options| options.get_str(OPT_FORMAT_VERSION)) {
                 Some(value) => value.parse::<i32>().map_err(|_| {
@@ -539,6 +551,25 @@ mod tests {
             ResolvedIcebergOptions::from_table_options(Some(&options)),
             Err(TableOptionError::InvalidOption(_)),
         ));
+    }
+
+    #[test]
+    fn managed_root_rejects_location_and_gc_overrides() {
+        for option in [
+            "write.data.path",
+            "write.metadata.path",
+            "write.folder-storage.path",
+            "gc.enabled",
+        ] {
+            let options = TableOptions::new(vec![(
+                option.to_owned(),
+                Some("unsafe".to_owned()),
+            )]);
+            assert!(matches!(
+                ResolvedIcebergOptions::from_table_options(Some(&options)),
+                Err(TableOptionError::InvalidOption(_)),
+            ));
+        }
     }
 
     #[test]

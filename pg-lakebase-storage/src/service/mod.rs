@@ -23,17 +23,18 @@ use crate::handle::FileHandle;
 use crate::object::{ObjectLocation, StoreId};
 use crate::protocol::WireListEntry;
 use crate::service::command::{
-    CloseCommand, DeleteCommand, DeletePrefixCommand, HeadCommand,
-    InvalidateObjectCacheCommand, ListCommand, PurgeStoreCacheCommand,
-    RegisterStoreCommand, StorageCommand, UnregisterStoreCommand, UploadCommand,
+    CloseCommand, CloseListCommand, DeleteCommand, DeleteObjectsCommand,
+    DeletePrefixCommand, HeadCommand, InvalidateObjectCacheCommand, ListCommand,
+    PurgeStoreCacheCommand, RegisterStoreCommand, StorageCommand,
+    UnregisterStoreCommand, UploadCommand,
 };
 use crate::service::list_session::{
     DEFAULT_PAGE_SIZE, ListSessionError, ListSessionTable, MAX_PAGE_SIZE,
 };
 use crate::service::reply::{
-    CommandOutput, DeletePrefixOutput, HeadOutput, InvalidateObjectCacheOutput,
-    ListOutput, RegisterStoreOutput, ServiceReply, UnregisterStoreOutput,
-    UploadOutput,
+    CommandOutput, DeleteObjectsOutput, DeletePrefixOutput, HeadOutput,
+    InvalidateObjectCacheOutput, ListOutput, RegisterStoreOutput, ServiceReply,
+    UnregisterStoreOutput, UploadOutput,
 };
 use crate::session::handle_table::HandleTable;
 use crate::staging::StagingUploader;
@@ -43,6 +44,9 @@ mod list_session;
 mod open;
 mod range_reader;
 pub(crate) mod reply;
+
+/// Idle TTL for retained paginated list cursors, in milliseconds.
+pub const LIST_CURSOR_IDLE_TTL_MS: i32 = 5 * 60 * 1000;
 
 /// Holds the backend registry, the [`CacheManager`], the staging uploader, and per-service limits.
 ///
@@ -138,7 +142,11 @@ impl<I: CacheIndex + 'static> StorageService<I> {
             StorageCommand::DeletePrefix(command) => {
                 self.handle_delete_prefix(command).await
             }
+            StorageCommand::DeleteObjects(command) => {
+                self.handle_delete_objects(command).await
+            }
             StorageCommand::List(command) => self.handle_list(command).await,
+            StorageCommand::CloseList(command) => self.handle_close_list(command),
         }
     }
 
@@ -364,6 +372,46 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         )))
     }
 
+    async fn handle_delete_objects(
+        &self,
+        command: DeleteObjectsCommand,
+    ) -> StorageResult<ServiceReply> {
+        const MAX_KEYS: usize = crate::protocol::MAX_BULK_DELETE_OBJECT_KEYS;
+        if command.keys.len() > MAX_KEYS {
+            return Err(StorageError::resource_exhausted(format!(
+                "delete_objects accepts at most {MAX_KEYS} keys"
+            )));
+        }
+        if command.keys.is_empty() {
+            return Ok(ServiceReply::new(CommandOutput::DeleteObjects(
+                DeleteObjectsOutput { deleted: 0 },
+            )));
+        }
+
+        let DeleteObjectsCommand {
+            store_id,
+            bucket,
+            keys,
+        } = command;
+        let store_id = StoreId::new(store_id)?;
+        let store = self.registry.resolve(&store_id)?;
+        use futures::StreamExt;
+        let key_stream =
+            futures::stream::iter(keys.into_iter().map(Ok::<_, StorageError>))
+                .boxed();
+        let mut deleted_stream = store.delete_stream(&bucket, key_stream);
+        let mut deleted = 0_u32;
+        while let Some(result) = deleted_stream.next().await {
+            let key = result?;
+            self.try_invalidate_local_cache_for_key(store_id.as_str(), &bucket, key)
+                .await;
+            deleted = deleted.saturating_add(1);
+        }
+        Ok(ServiceReply::new(CommandOutput::DeleteObjects(
+            DeleteObjectsOutput { deleted },
+        )))
+    }
+
     /// Best-effort local-cache cleanup for a key whose backend object has just been deleted.
     ///
     /// Shared between [`Self::handle_delete_prefix`] and any future bulk-delete callers. The
@@ -420,7 +468,7 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         let drain = match drain {
             Ok(drain) => drain,
             Err(ListSessionError::UnknownCursor) => {
-                return Err(StorageError::invalid_path(
+                return Err(StorageError::expired_cursor(
                     "unknown or expired list cursor",
                 ));
             }
@@ -442,12 +490,20 @@ impl<I: CacheIndex + 'static> StorageService<I> {
                 etag: entry.etag,
             })
             .collect();
-        let next_cursor = if drain.exhausted { None } else { Some(cursor) };
+        let next_cursor = (!drain.exhausted).then_some(cursor);
 
         Ok(ServiceReply::new(CommandOutput::List(ListOutput {
             entries,
             next_cursor,
         })))
+    }
+
+    fn handle_close_list(
+        &self,
+        command: CloseListCommand,
+    ) -> StorageResult<ServiceReply> {
+        self.list_sessions.forget(&command.cursor);
+        Ok(ServiceReply::new(CommandOutput::CloseList))
     }
 }
 

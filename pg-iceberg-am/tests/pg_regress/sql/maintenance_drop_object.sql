@@ -1,0 +1,41 @@
+-- End-to-end asynchronous remote DROP. The pg_regress environment provides
+-- the regress_object distributed tablespace backed by lakebase-regress.
+
+CREATE TABLE maintenance_remote_drop (id integer)
+USING iceberg TABLESPACE regress_object;
+INSERT INTO maintenance_remote_drop
+SELECT generate_series(1, 1000);
+
+SELECT 'regress_object' AS store_id,
+       'lakebase-regress' AS object_namespace,
+       (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
+       || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
+       || '/' || pg_relation_filenode('maintenance_remote_drop')::text
+       || '_iceberg/' AS object_path
+\gset
+
+SELECT NOT lakebase.object_tree_is_empty(
+    :'store_id', :'object_namespace', :'object_path'
+) AS tree_exists_before_drop;
+
+DROP TABLE maintenance_remote_drop;
+
+\! pg-iceberg-am/tests/pg_regress/bin/wait_for_maintenance_item :store_id :object_namespace :object_path 30
+
+SELECT lakebase.object_tree_is_empty(
+    :'store_id', :'object_namespace', :'object_path'
+) AS tree_empty_after_drop;
+SELECT count(*) AS relation_gone
+FROM pg_class WHERE relname = 'maintenance_remote_drop';
+SELECT count(*) AS maintenance_worker_running
+FROM pg_stat_activity WHERE backend_type = 'pg-lakebase-maintenance';
+
+CREATE TABLE maintenance_remote_rollback (id integer)
+USING iceberg TABLESPACE regress_object;
+INSERT INTO maintenance_remote_rollback VALUES (1), (2);
+BEGIN;
+DROP TABLE maintenance_remote_rollback;
+ROLLBACK;
+SELECT array_agg(id ORDER BY id) AS rows_after_drop_rollback
+FROM maintenance_remote_rollback;
+DROP TABLE maintenance_remote_rollback;

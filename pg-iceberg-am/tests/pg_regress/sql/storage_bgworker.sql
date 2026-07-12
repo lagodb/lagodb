@@ -18,6 +18,10 @@ SELECT count(*) AS bgworker_running
 FROM pg_stat_activity
 WHERE backend_type = 'pg-lakebase-storage';
 
+SELECT count(*) AS maintenance_worker_running
+FROM pg_stat_activity
+WHERE backend_type = 'pg-lakebase-maintenance';
+
 -- A2. Socket file exists at default path ($PGDATA/pg_lakebase/storage.sock)
 COPY (SELECT current_setting('data_directory') || '/pg_lakebase/storage.sock') TO '/tmp/_regress_socket_path.txt';
 \! test -S "$(cat /tmp/_regress_socket_path.txt)" && echo "socket_exists: true" || echo "socket_exists: false"
@@ -28,6 +32,9 @@ SELECT current_setting('pg_lakebase.storage_server_enabled') AS enabled;
 SELECT current_setting('pg_lakebase.storage_server_shutdown_timeout_ms') AS shutdown_timeout_ms;
 SELECT current_setting('pg_lakebase.storage_server_tablespace_reconcile_interval_ms') AS reconcile_interval_ms;
 SELECT current_setting('pg_lakebase.storage_server_worker_threads') AS worker_threads;
+SELECT current_setting('pg_lakebase.maintenance_worker_enabled') AS maintenance_enabled;
+SELECT current_setting('pg_lakebase.maintenance_actor_threads') AS maintenance_actor_threads;
+SELECT current_setting('pg_lakebase.maintenance_batch_items') AS maintenance_batch_items;
 
 -- ============================================================
 -- B. SIGHUP GUC reload

@@ -1,13 +1,10 @@
 use crate::catalog::IcebergRelationExt;
-use crate::catalog::metadata_table::IcebergMetadata;
-use crate::catalog::metadata_tracker::TxMetadata;
-use crate::catalog::table_lifecycle::IcebergTableLifecycle;
+use crate::catalog::table_drop::IcebergTableDrop;
 use crate::hooks::column_drop_guard::ControlledColumnDrops;
 use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
 use pg_lakebase_core::hooks::{
     self, HookError, ObjectAccessEvent, ObjectAccessHook, ObjectAccessHookError,
 };
-use pg_lakebase_core::options::TableOptions;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -90,21 +87,7 @@ impl IcebergObjectAccessHook {
     fn handle_drop_relation(
         rel: &RelationHandle<'_>,
     ) -> Result<(), ObjectAccessHookError> {
-        TxMetadata::stage_drop_if_tracked(rel.oid())?;
-
-        // `regclass NOT NULL PRIMARY KEY` stores an OID value; it is not a
-        // PostgreSQL dependency or foreign key. These Lakebase catalog rows
-        // must be deleted explicitly in the same transaction as DROP TABLE.
-        IcebergMetadata::delete_if_exists(rel.oid())?;
-        TableOptions::delete_from_catalog(rel.oid())?;
-
-        // DROP directory cleanup is a post-commit WAL action for local
-        // permanent relations. `IcebergTableStorage` resolves the storage
-        // context with the relation-aware WAL policy and computes the table
-        // location in exactly the same way as CREATE TABLE, so DROP can
-        // never disagree with CREATE on layout.
-        IcebergTableLifecycle::new(rel)?.register_drop_cleanup();
-
+        IcebergTableDrop::for_relation(rel)?.stage()?;
         Ok(())
     }
 }

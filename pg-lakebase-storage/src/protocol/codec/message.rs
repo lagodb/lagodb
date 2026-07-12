@@ -108,6 +108,16 @@ impl WireEncode for WireRequestPayload {
                 bucket.encode(out)?;
                 prefix.encode(out)
             }
+            Self::DeleteObjects {
+                store_id,
+                bucket,
+                keys,
+            } => {
+                out.put_u16(WireOp::DeleteObjects.code());
+                store_id.encode(out)?;
+                bucket.encode(out)?;
+                keys.encode(out)
+            }
             Self::List {
                 store_id,
                 bucket,
@@ -120,6 +130,10 @@ impl WireEncode for WireRequestPayload {
                 bucket.encode(out)?;
                 prefix.encode(out)?;
                 page_size.encode(out)?;
+                cursor.encode(out)
+            }
+            Self::CloseList { cursor } => {
+                out.put_u16(WireOp::CloseList.code());
                 cursor.encode(out)
             }
         }
@@ -179,11 +193,19 @@ impl WireDecode for WireRequestPayload {
                 bucket: WireDecode::decode(input)?,
                 prefix: WireDecode::decode(input)?,
             },
+            WireOp::DeleteObjects => Self::DeleteObjects {
+                store_id: WireDecode::decode(input)?,
+                bucket: WireDecode::decode(input)?,
+                keys: WireDecode::decode(input)?,
+            },
             WireOp::List => Self::List {
                 store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 prefix: WireDecode::decode(input)?,
                 page_size: WireDecode::decode(input)?,
+                cursor: WireDecode::decode(input)?,
+            },
+            WireOp::CloseList => Self::CloseList {
                 cursor: WireDecode::decode(input)?,
             },
             WireOp::Error => unreachable!("error op is not valid in requests"),
@@ -268,6 +290,10 @@ impl WireEncode for WireResponsePayload {
                 out.put_u16(WireOp::DeletePrefix.code());
                 deleted.encode(out)
             }
+            Self::DeleteObjects { deleted } => {
+                out.put_u16(WireOp::DeleteObjects.code());
+                deleted.encode(out)
+            }
             Self::List {
                 entries,
                 next_cursor,
@@ -275,6 +301,10 @@ impl WireEncode for WireResponsePayload {
                 out.put_u16(WireOp::List.code());
                 entries.encode(out)?;
                 next_cursor.encode(out)
+            }
+            Self::CloseList => {
+                out.put_u16(WireOp::CloseList.code());
+                Ok(())
             }
             Self::Error { kind, message } => {
                 out.put_u16(WireOp::Error.code());
@@ -321,10 +351,14 @@ impl WireDecode for WireResponsePayload {
             WireOp::DeletePrefix => Self::DeletePrefix {
                 deleted: WireDecode::decode(input)?,
             },
+            WireOp::DeleteObjects => Self::DeleteObjects {
+                deleted: WireDecode::decode(input)?,
+            },
             WireOp::List => Self::List {
                 entries: WireDecode::decode(input)?,
                 next_cursor: WireDecode::decode(input)?,
             },
+            WireOp::CloseList => Self::CloseList,
             WireOp::Error => Self::Error {
                 kind: WireDecode::decode(input)?,
                 message: WireDecode::decode(input)?,

@@ -3,6 +3,7 @@ use crate::handles::{
     HeapTupleGuard, HeapTupleRef, RelationGuard, RelationHandle, SnapshotHandle,
 };
 use crate::wrapper::PgWrapper;
+use pgrx::datum::Uuid;
 use pgrx::{IntoDatum, pg_sys};
 
 /// Result of a catalog tuple update operation.
@@ -76,6 +77,64 @@ impl CatalogScanKey {
         }
     }
 
+    pub fn uuid_eq(attribute_number: pg_sys::AttrNumber, value: Uuid) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_UUID_EQ),
+                value.into_datum().expect("UUID should convert to Datum"),
+            )
+        }
+    }
+
+    pub fn i16_eq(attribute_number: pg_sys::AttrNumber, value: i16) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_INT2EQ),
+                value.into_datum().expect("i16 should convert to Datum"),
+            )
+        }
+    }
+
+    pub fn bool_eq(attribute_number: pg_sys::AttrNumber, value: bool) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_BOOLEQ),
+                value.into_datum().expect("bool should convert to Datum"),
+            )
+        }
+    }
+
+    pub fn text_eq(attribute_number: pg_sys::AttrNumber, value: &str) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_TEXTEQ),
+                value.into_datum().expect("str should convert to Datum"),
+            )
+        }
+    }
+
+    pub fn timestamptz_le(
+        attribute_number: pg_sys::AttrNumber,
+        value: pg_sys::TimestampTz,
+    ) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTLessEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_TIMESTAMPTZ_LE),
+                pg_sys::Datum::from(value),
+            )
+        }
+    }
+
     #[inline]
     fn into_data(self) -> pg_sys::ScanKeyData {
         self.data
@@ -111,6 +170,16 @@ impl CatalogRelation {
     /// Insert an owned heap tuple into this catalog relation.
     pub fn catalog_insert(&self, tuple: &HeapTupleGuard) -> Result<(), PgError> {
         unsafe { PgWrapper::catalog_tuple_insert_raw(self.as_raw(), tuple.as_raw()) }
+    }
+
+    /// Open catalog indexes once for a bounded sequence of inserts.
+    pub fn writer(&self) -> Result<CatalogWriter<'_>, PgError> {
+        let index_state =
+            unsafe { PgWrapper::catalog_open_indexes_raw(self.as_raw())? };
+        Ok(CatalogWriter {
+            relation: self,
+            index_state,
+        })
     }
 
     /// Update a catalog tuple and keep PostgreSQL catalog indexes current.
@@ -190,6 +259,82 @@ impl CatalogRelation {
             _phantom: std::marker::PhantomData,
         })
     }
+
+    /// Begin a scan that explicitly guarantees index order.
+    pub fn begin_ordered_scan<'scan, I>(
+        &'scan self,
+        index_id: pg_sys::Oid,
+        snapshot: CatalogSnapshot<'_>,
+        keys: I,
+    ) -> Result<CatalogOrderedScan<'scan>, PgError>
+    where
+        I: IntoIterator<Item = CatalogScanKey>,
+    {
+        let index_relation = unsafe {
+            PgWrapper::index_open_raw(index_id, pg_sys::AccessShareLock as _)?
+        };
+        let mut keys: Vec<pg_sys::ScanKeyData> =
+            keys.into_iter().map(|key| key.into_data()).collect();
+        let key_ptr = if keys.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            keys.as_mut_ptr()
+        };
+        let scan = unsafe {
+            PgWrapper::systable_beginscan_ordered_raw(
+                self.as_raw(),
+                index_relation,
+                snapshot.as_raw(),
+                keys.len() as i32,
+                key_ptr,
+            )
+        };
+        match scan {
+            Ok(scan) => Ok(CatalogOrderedScan {
+                scan,
+                index_relation,
+                _phantom: std::marker::PhantomData,
+            }),
+            Err(error) => {
+                let _ = unsafe {
+                    PgWrapper::index_close_raw(
+                        index_relation,
+                        pg_sys::AccessShareLock as _,
+                    )
+                };
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Reusable catalog index state for a bounded sequence of inserts.
+#[derive(Debug)]
+pub struct CatalogWriter<'a> {
+    relation: &'a CatalogRelation,
+    index_state: pg_sys::CatalogIndexState,
+}
+
+impl CatalogWriter<'_> {
+    pub fn insert(&mut self, tuple: &HeapTupleGuard) -> Result<(), PgError> {
+        unsafe {
+            PgWrapper::catalog_tuple_insert_with_info_raw(
+                self.relation.as_raw(),
+                tuple.as_raw(),
+                self.index_state,
+            )
+        }
+    }
+}
+
+impl Drop for CatalogWriter<'_> {
+    fn drop(&mut self) {
+        if self.index_state.is_null() {
+            return;
+        }
+        let _ = unsafe { PgWrapper::catalog_close_indexes_raw(self.index_state) };
+        self.index_state = std::ptr::null_mut();
+    }
 }
 
 /// RAII guard for system table scan - automatically ends scan when dropped.
@@ -222,5 +367,32 @@ impl Drop for CatalogScan<'_> {
         // Drop cannot report PostgreSQL errors; ending the scan is best-effort
         // cleanup at this point.
         let _ = unsafe { PgWrapper::systable_endscan_raw(self.scan) };
+    }
+}
+
+/// RAII guard for a catalog scan with explicit index ordering.
+#[derive(Debug)]
+pub struct CatalogOrderedScan<'a> {
+    scan: pg_sys::SysScanDesc,
+    index_relation: pg_sys::Relation,
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl CatalogOrderedScan<'_> {
+    pub fn get_next(&mut self) -> Result<Option<HeapTupleRef<'_>>, PgError> {
+        let tuple = unsafe { PgWrapper::systable_getnext_ordered_raw(self.scan)? };
+        Ok(tuple.map(|tuple| unsafe { HeapTupleRef::from_raw(tuple) }))
+    }
+}
+
+impl Drop for CatalogOrderedScan<'_> {
+    fn drop(&mut self) {
+        let _ = unsafe { PgWrapper::systable_endscan_ordered_raw(self.scan) };
+        let _ = unsafe {
+            PgWrapper::index_close_raw(
+                self.index_relation,
+                pg_sys::AccessShareLock as _,
+            )
+        };
     }
 }

@@ -5,13 +5,14 @@ mod ids;
 mod syscache;
 
 pub use access::{
-    CatalogRelation, CatalogScan, CatalogScanKey, CatalogSnapshot,
-    CatalogUpdateResult,
+    CatalogOrderedScan, CatalogRelation, CatalogScan, CatalogScanKey,
+    CatalogSnapshot, CatalogUpdateResult, CatalogWriter,
 };
 pub use ids::{
     LAKEBASE_SCHEMA, TABLE_OPTIONS_PKEY, TABLE_OPTIONS_TABLE,
     get_lakebase_namespace_oid, get_table_options_oid, get_table_options_pkey_oid,
 };
+pub(crate) use ids::{MaintenanceCatalogIds, get_maintenance_catalog_ids};
 pub use syscache::{
     SysCacheTuple, SysCacheTupleCopy, search_syscache_copy, search_syscache1,
 };

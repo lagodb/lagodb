@@ -145,7 +145,9 @@ impl OperationMeta for WireRequestPayload {
             Self::InvalidateObjectCache { .. } => "invalidate_object_cache",
             Self::Delete { .. } => "delete",
             Self::DeletePrefix { .. } => "delete_prefix",
+            Self::DeleteObjects { .. } => "delete_objects",
             Self::List { .. } => "list",
+            Self::CloseList { .. } => "close_list",
         }
     }
 }

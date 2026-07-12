@@ -14,10 +14,10 @@ use crate::protocol::{
 };
 use crate::request::{RequestContext, RequestOutcome};
 use crate::service::command::{
-    CloseCommand, DeleteCommand, DeletePrefixCommand, HeadCommand,
-    InvalidateObjectCacheCommand, ListCommand, OpenCommand, PurgeStoreCacheCommand,
-    ReadCommand, RegisterStoreCommand, StorageCommand, UnregisterStoreCommand,
-    UploadCommand,
+    CloseCommand, CloseListCommand, DeleteCommand, DeleteObjectsCommand,
+    DeletePrefixCommand, HeadCommand, InvalidateObjectCacheCommand, ListCommand,
+    OpenCommand, PurgeStoreCacheCommand, ReadCommand, RegisterStoreCommand,
+    StorageCommand, UnregisterStoreCommand, UploadCommand,
 };
 use crate::service::reply::{
     CommandOutput, ReadBody, ResponseAttachment, ServiceReply,
@@ -295,6 +295,15 @@ impl From<WireRequestPayload> for StorageCommand {
                 bucket,
                 prefix,
             }),
+            WireRequestPayload::DeleteObjects {
+                store_id,
+                bucket,
+                keys,
+            } => Self::DeleteObjects(DeleteObjectsCommand {
+                store_id,
+                bucket,
+                keys,
+            }),
             WireRequestPayload::List {
                 store_id,
                 bucket,
@@ -308,6 +317,9 @@ impl From<WireRequestPayload> for StorageCommand {
                 page_size,
                 cursor,
             }),
+            WireRequestPayload::CloseList { cursor } => {
+                Self::CloseList(CloseListCommand { cursor })
+            }
         }
     }
 }
@@ -359,10 +371,16 @@ impl From<CommandOutput> for StorageHandlerPayload {
                     deleted: output.deleted,
                 })
             }
+            CommandOutput::DeleteObjects(output) => {
+                Self::Wire(WireResponsePayload::DeleteObjects {
+                    deleted: output.deleted,
+                })
+            }
             CommandOutput::List(output) => Self::Wire(WireResponsePayload::List {
                 entries: output.entries,
                 next_cursor: output.next_cursor,
             }),
+            CommandOutput::CloseList => Self::Wire(WireResponsePayload::CloseList),
         }
     }
 }

@@ -67,6 +67,9 @@ pub mod resource;
 /// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.
 pub mod transaction;
 
+/// Format-neutral durable maintenance queue and worker framework.
+pub mod maintenance;
+
 /// Helper functions and diagnostics
 pub mod diag;
 

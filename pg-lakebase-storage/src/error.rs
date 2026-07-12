@@ -20,6 +20,7 @@ pub enum StorageErrorKind {
     ResourceExhausted,
     Busy,
     CacheFillAborted,
+    ExpiredCursor,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +76,9 @@ pub enum StorageError {
 
     #[error("cache fill aborted: {message}")]
     CacheFillAborted { message: String },
+
+    #[error("expired cursor: {message}")]
+    ExpiredCursor { message: String },
 }
 
 impl StorageErrorKind {
@@ -92,6 +96,7 @@ impl StorageErrorKind {
             Self::ResourceExhausted => 10,
             Self::Busy => 11,
             Self::CacheFillAborted => 12,
+            Self::ExpiredCursor => 13,
         }
     }
 
@@ -109,6 +114,7 @@ impl StorageErrorKind {
             10 => Some(Self::ResourceExhausted),
             11 => Some(Self::Busy),
             12 => Some(Self::CacheFillAborted),
+            13 => Some(Self::ExpiredCursor),
             _ => None,
         }
     }
@@ -235,6 +241,12 @@ impl StorageError {
         }
     }
 
+    pub fn expired_cursor(message: impl Into<String>) -> Self {
+        Self::ExpiredCursor {
+            message: message.into(),
+        }
+    }
+
     pub fn kind(&self) -> StorageErrorKind {
         match self {
             Self::InvalidPath { .. } => StorageErrorKind::InvalidPath,
@@ -249,6 +261,7 @@ impl StorageError {
             Self::ResourceExhausted { .. } => StorageErrorKind::ResourceExhausted,
             Self::Busy { .. } => StorageErrorKind::Busy,
             Self::CacheFillAborted { .. } => StorageErrorKind::CacheFillAborted,
+            Self::ExpiredCursor { .. } => StorageErrorKind::ExpiredCursor,
         }
     }
 
@@ -267,7 +280,8 @@ impl StorageError {
             Self::Configuration { message } => message.clone(),
             Self::ResourceExhausted { message }
             | Self::Busy { message }
-            | Self::CacheFillAborted { message } => message.clone(),
+            | Self::CacheFillAborted { message }
+            | Self::ExpiredCursor { message } => message.clone(),
         }
     }
 
@@ -294,6 +308,7 @@ impl StorageError {
             StorageErrorKind::ResourceExhausted => Self::resource_exhausted(message),
             StorageErrorKind::Busy => Self::busy(message),
             StorageErrorKind::CacheFillAborted => Self::CacheFillAborted { message },
+            StorageErrorKind::ExpiredCursor => Self::expired_cursor(message),
         }
     }
 }
@@ -354,5 +369,13 @@ mod tests {
         let decoded = StorageError::from_wire(error.kind(), error.wire_message());
 
         assert_eq!(decoded.to_string(), "invalid path: missing bucket");
+
+        let error = StorageError::expired_cursor("unknown or expired list cursor");
+        let decoded = StorageError::from_wire(error.kind(), error.wire_message());
+
+        assert_eq!(
+            decoded.to_string(),
+            "expired cursor: unknown or expired list cursor"
+        );
     }
 }

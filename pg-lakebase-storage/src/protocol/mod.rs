@@ -14,7 +14,10 @@ pub(crate) use codec::{
     encode_read_response_prefix,
 };
 pub use codec::{decode_request, decode_response, encode_request, encode_response};
-pub use limits::{MAX_FRAME_BYTES, MAX_READ_RESPONSE_DATA_BYTES};
+pub use limits::{
+    MAX_BULK_DELETE_OBJECT_KEYS, MAX_FRAME_BYTES, MAX_LIST_PAGE_SIZE,
+    MAX_READ_RESPONSE_DATA_BYTES,
+};
 pub use model::{
     ListCursor, WireListEntry, WireRequest, WireRequestPayload, WireResponse,
     WireResponsePayload,

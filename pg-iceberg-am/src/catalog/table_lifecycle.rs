@@ -3,12 +3,12 @@ use super::schema_builder::tuple_desc_to_schema;
 use crate::error::{IcebergError, IcebergResult};
 use crate::options::ResolvedIcebergOptions;
 use crate::storage::StorageContext;
-use crate::storage::transactional_artifacts::{
-    register_table_dir_created, register_table_dir_dropped,
-};
+use crate::storage::transactional_artifacts::register_table_dir_created;
 use iceberg_lite::catalog::TableCreation;
 use iceberg_lite::spec::{SortOrder, UnboundPartitionSpec};
 use pg_lakebase_core::handles::RelationHandle;
+use pg_lakebase_core::maintenance::{MaintenanceQueue, ObjectTreeTarget};
+use pg_lakebase_core::options::get_tablespace;
 use pgrx::pg_sys;
 use std::sync::OnceLock;
 
@@ -21,8 +21,9 @@ use std::sync::OnceLock;
 ///
 /// * `init()` writes the initial metadata file and registers abort cleanup
 ///   (CREATE TABLE).
-/// * `register_drop_cleanup()` registers post-commit directory removal
-///   (DROP TABLE).
+///
+/// DROP TABLE is owned separately by `IcebergTableDrop`, because remote DROP
+/// stages durable maintenance instead of constructing a live `StorageContext`.
 ///
 /// Callers in the hook layer never see `FileIO` or the underlying
 /// transactional artifact registry: this type owns those bindings so
@@ -40,10 +41,25 @@ pub(crate) struct IcebergTableLifecycle<'a> {
 impl<'a> IcebergTableLifecycle<'a> {
     /// Resolve storage context and compute the table location for `rel`.
     ///
-    /// The storage context honors `RelationNeedsWAL`, so this constructor
-    /// is safe to use from both write paths (CREATE TABLE) and lifecycle
-    /// paths (DROP TABLE).
+    /// The storage context honors `RelationNeedsWAL`. DROP does not use this
+    /// constructor: remote DROP must remain independent of storage-service
+    /// availability and is owned by `IcebergTableDrop`.
     pub(crate) fn new(rel: &'a RelationHandle<'a>) -> IcebergResult<Self> {
+        if let Some(opts) = get_tablespace(rel.tablespace_oid())? {
+            let base = opts.base_url();
+            let location = compute_table_location(rel, &base, true);
+            let key = location
+                .strip_prefix(&base)
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                .ok_or(IcebergError::InvariantViolated(
+                    "remote table location escaped its tablespace base URL",
+                ))?;
+            let target =
+                ObjectTreeTarget::new(opts.store_id(), opts.object_namespace(), key)?;
+            if MaintenanceQueue::has_tree_target(&target)? {
+                return Err(IcebergError::ActiveMaintenanceTarget);
+            }
+        }
         let ctx = StorageContext::for_tablespace_with_wal(
             rel.tablespace_oid(),
             rel.needs_wal(),
@@ -51,15 +67,6 @@ impl<'a> IcebergTableLifecycle<'a> {
         let location =
             compute_table_location(rel, ctx.base_path(), ctx.is_distributed());
         Ok(Self { rel, ctx, location })
-    }
-
-    /// Register the table directory for post-commit removal as part of
-    /// DROP TABLE. Mirrors the abort-cleanup registration that [`Self::init`]
-    /// performs internally for CREATE TABLE, so the hook layer never has to
-    /// touch the storage artifact registry directly.
-    pub(crate) fn register_drop_cleanup(self) {
-        let Self { ctx, location, .. } = self;
-        register_table_dir_dropped(location, ctx.into_file_io());
     }
 
     /// Bootstrap Iceberg metadata for this relation.
@@ -122,7 +129,7 @@ impl<'a> IcebergTableLifecycle<'a> {
 ///
 /// For distributed storage we keep a flatter `{base}/{spcOid}/{dbOid}/{rel}_iceberg`
 /// hierarchy that is collision-free across databases and tablespaces.
-fn compute_table_location(
+pub(super) fn compute_table_location(
     rel: &RelationHandle<'_>,
     base_path: &str,
     is_distributed: bool,
