@@ -1,0 +1,239 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+OBJECT_STORAGE_ENV=${OBJECT_STORAGE_ENV:-${SCRIPT_DIR}/../config/object_storage.defaults.env}
+
+if [ ! -f "$OBJECT_STORAGE_ENV" ]; then
+    echo "object-storage fixture config not found: ${OBJECT_STORAGE_ENV}" >&2
+    exit 2
+fi
+
+# shellcheck disable=SC1090
+. "$OBJECT_STORAGE_ENV"
+
+MINIO_IMAGE=${MINIO_IMAGE:-${DEFAULT_MINIO_IMAGE:?DEFAULT_MINIO_IMAGE is required in ${OBJECT_STORAGE_ENV}}}
+MINIO_USER=${MINIO_USER:-${DEFAULT_MINIO_USER:?DEFAULT_MINIO_USER is required in ${OBJECT_STORAGE_ENV}}}
+MINIO_PASSWORD=${MINIO_PASSWORD:-${DEFAULT_MINIO_PASSWORD:?DEFAULT_MINIO_PASSWORD is required in ${OBJECT_STORAGE_ENV}}}
+MINIO_REGION=${MINIO_REGION:-${DEFAULT_MINIO_REGION:?DEFAULT_MINIO_REGION is required in ${OBJECT_STORAGE_ENV}}}
+REGRESS_BUCKET=${LAKEBASE_REGRESS_BUCKET:-lakebase-regress}
+REGRESS_REGION=${LAKEBASE_REGRESS_REGION:-$MINIO_REGION}
+READY_TIMEOUT_SECONDS=${LAKEBASE_REGRESS_READY_TIMEOUT_SECONDS:-30}
+FIXTURE_LABEL_KEY=pg-lakebase.fixture
+FIXTURE_LABEL_VALUE=pg-regress-object-storage
+PGPORT_LABEL_KEY=pg-lakebase.pgport
+STATE_DIR_LABEL_KEY=pg-lakebase.state-dir
+
+if [ "${PGPORT:-}" = "" ]; then
+    echo "PGPORT is required to isolate pg_regress object-storage fixture state" >&2
+    exit 2
+fi
+
+STATE_DIR="/tmp/pg_lakebase_object_regress_${PGPORT}"
+STATE_ENV="${STATE_DIR}/state.env"
+SETUP_CONTAINER_STARTED=0
+
+docker_program() {
+    if [ "${DOCKER:-}" != "" ]; then
+        printf '%s\n' "$DOCKER"
+        return
+    fi
+
+    for candidate in \
+        /Applications/Docker.app/Contents/Resources/bin/docker \
+        /opt/homebrew/bin/docker \
+        /usr/local/bin/docker
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+
+    printf '%s\n' docker
+}
+
+state_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+container_name() {
+    printf 'pg-lakebase-regress-minio-%s-%s\n' "$PGPORT" "$$"
+}
+
+teardown_container() {
+    if [ -f "$STATE_ENV" ]; then
+        # shellcheck disable=SC1090
+        . "$STATE_ENV"
+        docker=${DOCKER_PATH:-$(docker_program)}
+        if [ "${CONTAINER_ID:-}" != "" ]; then
+            "$docker" rm --force "$CONTAINER_ID" >/dev/null 2>&1 || true
+        fi
+    fi
+    rm -rf "$STATE_DIR"
+}
+
+cleanup_stale_containers() {
+    docker=$1
+    container_ids=$("$docker" ps -aq \
+        --filter "label=${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VALUE}" \
+        2>/dev/null || true)
+
+    for container_id in $container_ids; do
+        container_pgport=$("$docker" inspect \
+            --format "{{ index .Config.Labels \"${PGPORT_LABEL_KEY}\" }}" \
+            "$container_id" 2>/dev/null || true)
+        container_state_dir=$("$docker" inspect \
+            --format "{{ index .Config.Labels \"${STATE_DIR_LABEL_KEY}\" }}" \
+            "$container_id" 2>/dev/null || true)
+
+        if [ "$container_pgport" = "$PGPORT" ]; then
+            "$docker" rm --force "$container_id" >/dev/null 2>&1 || true
+        elif [ "$container_state_dir" != "" ] \
+            && [ "$container_state_dir" != "<no value>" ] \
+            && [ ! -d "$container_state_dir" ]; then
+            "$docker" rm --force "$container_id" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
+cleanup_failed_setup() {
+    if [ "$SETUP_CONTAINER_STARTED" = "1" ]; then
+        teardown_container
+    fi
+}
+
+mapped_port() {
+    docker=$1
+    container_id=$2
+    "$docker" port "$container_id" 9000/tcp \
+        | sed -n 's/.*://p' \
+        | head -n 1
+}
+
+wait_until_ready() {
+    endpoint=$1
+    deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+    last_error=""
+
+    while :; do
+        if output=$(curl -fsS --max-time 1 "${endpoint}/minio/health/ready" 2>&1); then
+            return 0
+        fi
+        last_error=$output
+
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "MinIO did not become ready within ${READY_TIMEOUT_SECONDS} seconds: ${last_error}" >&2
+            return 1
+        fi
+
+        sleep 0.1
+    done
+}
+
+setup() {
+    teardown_container
+    mkdir -p "$STATE_DIR"
+    trap cleanup_failed_setup EXIT HUP INT TERM
+
+    docker=$(docker_program)
+    name=$(container_name)
+    cleanup_stale_containers "$docker"
+
+    if ! "$docker" image inspect "$MINIO_IMAGE" >/dev/null 2>&1; then
+        if ! pull_output=$("$docker" pull "$MINIO_IMAGE" 2>&1 >/dev/null); then
+            echo "failed to pull MinIO image ${MINIO_IMAGE}" >&2
+            echo "$pull_output" >&2
+            exit 1
+        fi
+    fi
+
+    container_id=$("$docker" run \
+        --rm \
+        --detach \
+        --publish 127.0.0.1::9000 \
+        --env "MINIO_ROOT_USER=${MINIO_USER}" \
+        --env "MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}" \
+        --env "REGRESS_BUCKET=${REGRESS_BUCKET}" \
+        --name "$name" \
+        --label "${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VALUE}" \
+        --label "${PGPORT_LABEL_KEY}=${PGPORT}" \
+        --label "${STATE_DIR_LABEL_KEY}=${STATE_DIR}" \
+        --entrypoint /bin/sh \
+        "$MINIO_IMAGE" \
+        -c 'mkdir -p "/data/${REGRESS_BUCKET}" && /usr/bin/minio server /data')
+
+    {
+        printf 'DOCKER_PATH=%s\n' "$(state_quote "$docker")"
+        printf 'CONTAINER_ID=%s\n' "$(state_quote "$container_id")"
+    } > "$STATE_ENV"
+    SETUP_CONTAINER_STARTED=1
+
+    port=$(mapped_port "$docker" "$container_id")
+    if [ "$port" = "" ]; then
+        "$docker" logs --tail 80 "$container_id" >&2 || true
+        teardown_container
+        echo "Docker did not report a MinIO port mapping" >&2
+        exit 1
+    fi
+
+    endpoint="http://127.0.0.1:${port}"
+
+    if ! wait_until_ready "$endpoint"; then
+        "$docker" logs --tail 80 "$container_id" >&2 || true
+        teardown_container
+        exit 1
+    fi
+
+    psql -X -v ON_ERROR_STOP=1 \
+        --set=endpoint="$endpoint" \
+        --set=bucket="$REGRESS_BUCKET" \
+        --set=region="$REGRESS_REGION" \
+        --set=access_key_id="$MINIO_USER" \
+        --set=secret_access_key="$MINIO_PASSWORD" >/dev/null <<'SQL'
+SET client_min_messages = warning;
+CREATE SCHEMA IF NOT EXISTS lakebase_regress;
+DROP TABLE IF EXISTS lakebase_regress.object_storage_fixture;
+RESET client_min_messages;
+CREATE TABLE lakebase_regress.object_storage_fixture (
+    endpoint text NOT NULL,
+    bucket text NOT NULL,
+    region text NOT NULL,
+    access_key_id text NOT NULL,
+    secret_access_key text NOT NULL
+);
+INSERT INTO lakebase_regress.object_storage_fixture
+VALUES (:'endpoint', :'bucket', :'region', :'access_key_id', :'secret_access_key');
+SQL
+
+    SETUP_CONTAINER_STARTED=0
+    trap - EXIT HUP INT TERM
+    echo "object_storage_setup: true"
+}
+
+teardown() {
+    teardown_container
+    cleanup_stale_containers "$(docker_program)"
+    echo "object_storage_teardown: true"
+}
+
+case "${1:-}" in
+    setup)
+        if [ "$#" -ne 1 ]; then
+            echo "usage: object_storage_fixture setup|teardown" >&2
+            exit 2
+        fi
+        setup
+        ;;
+    teardown)
+        if [ "$#" -ne 1 ]; then
+            echo "usage: object_storage_fixture setup|teardown" >&2
+            exit 2
+        fi
+        teardown
+        ;;
+    *)
+        echo "usage: object_storage_fixture setup|teardown" >&2
+        exit 2
+        ;;
+esac

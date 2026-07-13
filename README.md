@@ -175,11 +175,21 @@ After modifying code, run the standard test suite:
 cargo xtask test-all pg17
 ```
 
-This runs unit tests, pgrx tests, SQL regression, and isolation tests.
+This runs unit tests, pgrx tests, SQL regression, isolation tests, and
+storage E2E tests. Docker must be available because pg_regress provisions a
+MinIO fixture for object-storage coverage.
 
 Regression SQL lives in [pg-iceberg-am/tests/pg_regress/sql](./pg-iceberg-am/tests/pg_regress/sql),
 isolation specs in [pg-iceberg-am/tests/isolation/specs](./pg-iceberg-am/tests/isolation/specs),
 and isolation results are written to `target/isolation/pg17/output_iso/`.
+The pg_regress suite includes object-storage setup/teardown SQL, so direct
+`cargo pgrx regress` runs also require Docker.
+Docker-backed object-storage tests read MinIO defaults from their local test
+config files: `pg-iceberg-am/tests/pg_regress/config/object_storage.defaults.env`
+and `pg-lakebase-storage/tests/e2e/config/object_storage.defaults.env`. Set
+`OBJECT_STORAGE_ENV` to point a test entry at another defaults file, or set
+`MINIO_IMAGE`, `MINIO_USER`, `MINIO_PASSWORD`, or `MINIO_REGION` to override
+individual values locally.
 
 ## Package
 

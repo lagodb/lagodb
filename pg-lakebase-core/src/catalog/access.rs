@@ -66,6 +66,31 @@ impl CatalogScanKey {
         Self { data }
     }
 
+    /// # Safety
+    ///
+    /// `procedure` must identify a valid PostgreSQL comparison function for
+    /// the supplied scan key argument, strategy, and collation.
+    unsafe fn new_with_collation(
+        attribute_number: pg_sys::AttrNumber,
+        strategy: u16,
+        procedure: pg_sys::RegProcedure,
+        collation: pg_sys::Oid,
+        argument: pg_sys::Datum,
+    ) -> Self {
+        let mut data = unsafe { std::mem::zeroed() };
+        unsafe {
+            PgWrapper::scan_key_init_with_collation(
+                &mut data,
+                attribute_number,
+                strategy,
+                procedure,
+                collation,
+                argument,
+            );
+        }
+        Self { data }
+    }
+
     pub fn oid_eq(attribute_number: pg_sys::AttrNumber, oid: pg_sys::Oid) -> Self {
         unsafe {
             Self::new(
@@ -111,11 +136,24 @@ impl CatalogScanKey {
     }
 
     pub fn text_eq(attribute_number: pg_sys::AttrNumber, value: &str) -> Self {
+        Self::text_eq_with_collation(
+            attribute_number,
+            value,
+            pg_sys::DEFAULT_COLLATION_OID,
+        )
+    }
+
+    pub fn text_eq_with_collation(
+        attribute_number: pg_sys::AttrNumber,
+        value: &str,
+        collation: pg_sys::Oid,
+    ) -> Self {
         unsafe {
-            Self::new(
+            Self::new_with_collation(
                 attribute_number,
                 pg_sys::BTEqualStrategyNumber as _,
                 pg_sys::Oid::from(pg_sys::F_TEXTEQ),
+                collation,
                 value.into_datum().expect("str should convert to Datum"),
             )
         }

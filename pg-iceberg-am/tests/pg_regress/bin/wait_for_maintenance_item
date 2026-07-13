@@ -1,34 +1,58 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ "$#" -ne 4 ]; then
-    echo "usage: wait_for_maintenance_item STORE NAMESPACE PATH TIMEOUT_SECONDS" >&2
+if [ "$#" -ne 1 ]; then
+    echo "usage: wait_for_maintenance_item TIMEOUT_SECONDS" >&2
     exit 2
 fi
 
-store_id=$1
-namespace=$2
-object_path=$3
-timeout_seconds=$4
+store_id=${LAKEBASE_REGRESS_STORE_ID:?LAKEBASE_REGRESS_STORE_ID is required}
+namespace=${LAKEBASE_REGRESS_OBJECT_NAMESPACE:?LAKEBASE_REGRESS_OBJECT_NAMESPACE is required}
+object_path=${LAKEBASE_REGRESS_OBJECT_PATH:?LAKEBASE_REGRESS_OBJECT_PATH is required}
+timeout_seconds=$1
 deadline=$(( $(date +%s) + timeout_seconds ))
+last_error=""
 
 while :; do
-    complete=$(psql -XAtq -v ON_ERROR_STOP=1 \
+    if complete=$(psql -XAtq -v ON_ERROR_STOP=1 \
         --set=store_id="$store_id" \
         --set=namespace="$namespace" \
-        --set=object_path="$object_path" \
-        -c "SELECT NOT EXISTS (SELECT 1 FROM lakebase.maintenance_queue WHERE operation = 2 AND store_id = :'store_id' AND object_namespace = :'namespace' AND object_path = :'object_path')")
-    if [ "$complete" = "t" ]; then
-        echo "maintenance_complete: true"
-        exit 0
+        --set=object_path="$object_path" 2>&1 <<'SQL'
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM lakebase.maintenance_queue
+    WHERE operation = 2
+      AND store_id = :'store_id'
+      AND object_namespace = :'namespace'
+      AND object_path = :'object_path'
+);
+SQL
+    ); then
+        if [ "$complete" = "t" ]; then
+            echo "maintenance_complete: true"
+            exit 0
+        fi
+        last_error="unexpected maintenance result: $complete"
+    else
+        last_error=$complete
     fi
+
     if [ "$(date +%s)" -ge "$deadline" ]; then
         psql -X -v ON_ERROR_STOP=1 \
             --set=store_id="$store_id" \
             --set=namespace="$namespace" \
-            --set=object_path="$object_path" \
-            -c "SELECT item_id, state, attempt_count, last_error FROM lakebase.maintenance_status WHERE operation = 'delete_tree' AND store_id = :'store_id' AND object_namespace = :'namespace' AND object_path = :'object_path'" >&2
+            --set=object_path="$object_path" >&2 <<'SQL' || true
+SELECT item_id, state, attempt_count, last_error
+FROM lakebase.maintenance_status
+WHERE operation = 'delete_tree'
+  AND store_id = :'store_id'
+  AND object_namespace = :'namespace'
+  AND object_path = :'object_path';
+SQL
         echo "maintenance_complete: false" >&2
+        if [ -n "$last_error" ]; then
+            echo "$last_error" >&2
+        fi
         exit 1
     fi
     sleep 0.05

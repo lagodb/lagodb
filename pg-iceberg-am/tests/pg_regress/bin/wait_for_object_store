@@ -1,0 +1,42 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: wait_for_object_store TIMEOUT_SECONDS" >&2
+    exit 2
+fi
+
+store_id=${LAKEBASE_REGRESS_STORE_ID:?LAKEBASE_REGRESS_STORE_ID is required}
+namespace=${LAKEBASE_REGRESS_OBJECT_NAMESPACE:?LAKEBASE_REGRESS_OBJECT_NAMESPACE is required}
+timeout_seconds=$1
+deadline=$(( $(date +%s) + timeout_seconds ))
+last_error=""
+
+while :; do
+    if output=$(psql -XAtq -v ON_ERROR_STOP=1 \
+        --set=store_id="$store_id" \
+        --set=namespace="$namespace" 2>&1 <<'SQL'
+SELECT lakebase.object_tree_is_empty(
+    :'store_id', :'namespace', '__lakebase_regress_probe__'
+);
+SQL
+    ); then
+        if [ "$output" = "t" ]; then
+            echo "object_store_ready: true"
+            exit 0
+        fi
+        last_error="unexpected readiness result: $output"
+    else
+        last_error=$output
+    fi
+
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "object_store_ready: false" >&2
+        if [ -n "$last_error" ]; then
+            echo "$last_error" >&2
+        fi
+        exit 1
+    fi
+
+    sleep 0.05
+done

@@ -17,7 +17,6 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
-  MINIO_IMAGE: minio/minio:RELEASE.2024-01-16T16-07-38Z
   PGRX_POSTGRES_CACHE_VERSION: "v2"
   PGRX_VERSION: "0.18.1"
   RUST_BACKTRACE: "1"
@@ -138,6 +137,8 @@ jobs:
       - name: Verify Docker
         run: |
           set -euo pipefail
+          . pg-iceberg-am/tests/pg_regress/config/object_storage.defaults.env
+          MINIO_IMAGE="${MINIO_IMAGE:-${DEFAULT_MINIO_IMAGE}}"
           docker version
           docker info
           docker pull "${MINIO_IMAGE}"

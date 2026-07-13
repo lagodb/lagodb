@@ -12,6 +12,7 @@
 //! [`CacheIndexKind::InMemory`], while production-wiring tests use [`CacheIndexKind::Redb`] for
 //! read, staging/upload, delete, concurrent access, and restart recovery.
 
+use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -28,10 +29,111 @@ use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
-pub const MINIO_USER: &str = "minioadmin";
-pub const MINIO_PASSWORD: &str = "minioadmin";
+const OBJECT_STORAGE_DEFAULTS_ENV: &str =
+    include_str!("config/object_storage.defaults.env");
+const OBJECT_STORAGE_DEFAULTS_PATH: &str =
+    "tests/e2e/config/object_storage.defaults.env";
+
 pub const TEST_BUCKET: &str = "test-bucket";
 pub const STORE_ID: &str = "minio";
+
+#[derive(Clone, Debug)]
+struct MinioDockerConfig {
+    image_repository: String,
+    image_tag: String,
+    user: String,
+    password: String,
+    region: String,
+}
+
+impl MinioDockerConfig {
+    fn load() -> Self {
+        let defaults = ObjectStorageDefaults::load();
+        let image = env::var("MINIO_IMAGE")
+            .unwrap_or_else(|_| defaults.minio_image.clone());
+        let (image_repository, image_tag) = Self::parse_image(&image);
+
+        Self {
+            image_repository,
+            image_tag,
+            user: Self::env_or_default("MINIO_USER", &defaults.minio_user),
+            password: Self::env_or_default(
+                "MINIO_PASSWORD",
+                &defaults.minio_password,
+            ),
+            region: Self::env_or_default("MINIO_REGION", &defaults.minio_region),
+        }
+    }
+
+    fn env_or_default(name: &str, default: &str) -> String {
+        env::var(name).unwrap_or_else(|_| default.to_owned())
+    }
+
+    fn parse_image(image: &str) -> (String, String) {
+        let Some((repository, tag)) = image.rsplit_once(':') else {
+            panic!("MINIO_IMAGE must include an explicit tag, got {image:?}");
+        };
+
+        if repository.is_empty() || tag.is_empty() || tag.contains('/') {
+            panic!(
+                "MINIO_IMAGE must be an image reference with an explicit tag, got {image:?}"
+            );
+        }
+
+        (repository.to_owned(), tag.to_owned())
+    }
+}
+
+#[derive(Debug)]
+struct ObjectStorageDefaults {
+    minio_image: String,
+    minio_user: String,
+    minio_password: String,
+    minio_region: String,
+}
+
+impl ObjectStorageDefaults {
+    fn load() -> Self {
+        let override_path = env::var("OBJECT_STORAGE_ENV").ok();
+        let override_contents = override_path.as_ref().map(|path| {
+            std::fs::read_to_string(path).unwrap_or_else(|error| {
+                panic!("failed to read OBJECT_STORAGE_ENV {path:?}: {error}")
+            })
+        });
+        let source = override_path
+            .as_deref()
+            .unwrap_or(OBJECT_STORAGE_DEFAULTS_PATH);
+        let contents = override_contents
+            .as_deref()
+            .unwrap_or(OBJECT_STORAGE_DEFAULTS_ENV);
+
+        Self {
+            minio_image: Self::required(contents, source, "DEFAULT_MINIO_IMAGE"),
+            minio_user: Self::required(contents, source, "DEFAULT_MINIO_USER"),
+            minio_password: Self::required(contents, source, "DEFAULT_MINIO_PASSWORD"),
+            minio_region: Self::required(contents, source, "DEFAULT_MINIO_REGION"),
+        }
+    }
+
+    fn required(contents: &str, source: &str, key: &str) -> String {
+        for raw_line in contents.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((candidate_key, value)) = line.split_once('=') else {
+                continue;
+            };
+
+            if candidate_key.trim() == key {
+                return value.trim().to_owned();
+            }
+        }
+
+        panic!("missing {key} in {source}");
+    }
+}
 
 /// Cache index implementation used by an E2E server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +151,7 @@ pub enum CacheIndexKind {
 /// Running MinIO container, bucket lifecycle, and data seeding.
 pub struct MinioFixture {
     endpoint: String,
+    config: MinioDockerConfig,
     _container: ContainerAsync<GenericImage>,
 }
 
@@ -59,16 +162,19 @@ impl MinioFixture {
     /// because the upstream module waits on stderr while this MinIO release
     /// emits the ready marker on stdout.
     pub async fn start() -> Self {
-        let container =
-            GenericImage::new("minio/minio", "RELEASE.2024-01-16T16-07-38Z")
-                .with_exposed_port(ContainerPort::Tcp(9000))
-                .with_wait_for(WaitFor::message_on_stdout("S3-API:"))
-                .with_env_var("MINIO_ROOT_USER", MINIO_USER)
-                .with_env_var("MINIO_ROOT_PASSWORD", MINIO_PASSWORD)
-                .with_cmd(["server".to_string(), "/data".to_string()])
-                .start()
-                .await
-                .expect("failed to start MinIO container — is Docker running?");
+        let config = MinioDockerConfig::load();
+        let container = GenericImage::new(
+            config.image_repository.clone(),
+            config.image_tag.clone(),
+        )
+        .with_exposed_port(ContainerPort::Tcp(9000))
+        .with_wait_for(WaitFor::message_on_stdout("S3-API:"))
+        .with_env_var("MINIO_ROOT_USER", config.user.clone())
+        .with_env_var("MINIO_ROOT_PASSWORD", config.password.clone())
+        .with_cmd(["server".to_string(), "/data".to_string()])
+        .start()
+        .await
+        .expect("failed to start MinIO container — is Docker running?");
 
         let host = container.get_host().await.expect("MinIO host");
         let port = container
@@ -79,6 +185,7 @@ impl MinioFixture {
 
         Self {
             endpoint,
+            config,
             _container: container,
         }
     }
@@ -114,9 +221,9 @@ impl MinioFixture {
     pub fn store_config(&self) -> StoreConfig {
         StoreConfig::S3Compatible(S3CompatibleStoreConfig {
             endpoint: self.endpoint.clone(),
-            region: Some("us-east-1".to_string()),
-            access_key_id: Some(SecretString::new(MINIO_USER)),
-            secret_access_key: Some(SecretString::new(MINIO_PASSWORD)),
+            region: Some(self.config.region.clone()),
+            access_key_id: Some(SecretString::new(self.config.user.clone())),
+            secret_access_key: Some(SecretString::new(self.config.password.clone())),
             token: None,
             allow_http: true,
             virtual_hosted_style_request: false,
@@ -129,9 +236,9 @@ impl MinioFixture {
             AmazonS3Builder::new()
                 .with_bucket_name(TEST_BUCKET)
                 .with_endpoint(&self.endpoint)
-                .with_region("us-east-1")
-                .with_access_key_id(MINIO_USER)
-                .with_secret_access_key(MINIO_PASSWORD)
+                .with_region(self.config.region.clone())
+                .with_access_key_id(self.config.user.clone())
+                .with_secret_access_key(self.config.password.clone())
                 .with_allow_http(true)
                 .build()
                 .expect("failed to build object_store S3 client"),
@@ -141,10 +248,10 @@ impl MinioFixture {
     fn s3_client(&self) -> AwsS3Client {
         let config = aws_sdk_s3::config::Builder::default()
             .behavior_version(BehaviorVersion::latest())
-            .region(Region::new("us-east-1"))
+            .region(Region::new(self.config.region.clone()))
             .credentials_provider(Credentials::new(
-                MINIO_USER,
-                MINIO_PASSWORD,
+                self.config.user.clone(),
+                self.config.password.clone(),
                 None,
                 None,
                 "minio-e2e",

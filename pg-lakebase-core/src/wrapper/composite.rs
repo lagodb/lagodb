@@ -81,11 +81,36 @@ impl PgWrapper {
         argument: pg_sys::Datum,
     ) {
         unsafe {
+            Self::scan_key_init_with_collation(
+                entry,
+                attribute_number,
+                strategy,
+                procedure,
+                pg_sys::InvalidOid,
+                argument,
+            );
+        }
+    }
+
+    /// Rust wrapper for the C macro `ScanKeyInit`, with an explicit collation.
+    ///
+    /// # Safety
+    ///
+    /// `entry` must point to a valid `ScanKeyData`.
+    pub(crate) unsafe fn scan_key_init_with_collation(
+        entry: *mut pg_sys::ScanKeyData,
+        attribute_number: pg_sys::AttrNumber,
+        strategy: u16,
+        procedure: pg_sys::RegProcedure,
+        collation: pg_sys::Oid,
+        argument: pg_sys::Datum,
+    ) {
+        unsafe {
             (*entry).sk_flags = 0;
             (*entry).sk_attno = attribute_number;
             (*entry).sk_strategy = strategy;
             (*entry).sk_subtype = pg_sys::InvalidOid;
-            (*entry).sk_collation = pg_sys::InvalidOid;
+            (*entry).sk_collation = collation;
             (*entry).sk_argument = argument;
             pg_sys::fmgr_info(procedure, &mut (*entry).sk_func);
         }
