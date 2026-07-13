@@ -12,7 +12,7 @@ use crate::error::IcebergResult;
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::{CachedTablespaceOpts, get_tablespace};
-use pg_lakebase_core::worker::storage as storage_worker;
+use pg_lakebase_core::storage_service::StorageEndpoint;
 use pg_lakebase_storage::{StagingPathResolver, StorageClient};
 use pgrx::pg_sys;
 use std::ffi::CStr;
@@ -72,10 +72,9 @@ impl StorageContext {
             return Self::local(relation_needs_wal);
         };
 
-        let socket_path = storage_worker::resolved_socket_path();
-        let cache_dir = storage_worker::resolved_cache_dir();
-        let client = StorageClient::connect(&socket_path)?;
-        let resolver = StagingPathResolver::new(cache_dir);
+        let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
+        let client = StorageClient::connect(endpoint.socket_path())?;
+        let resolver = StagingPathResolver::new(endpoint.cache_dir());
         Self::distributed(&opts, client, resolver)
     }
 

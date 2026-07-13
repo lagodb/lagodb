@@ -5,10 +5,10 @@ step s1_begin: BEGIN;
 step s1_add_local: ALTER TABLE schema_evolution_iso.concurrent_t ADD COLUMN local_col int;
 step s1_insert_local: INSERT INTO schema_evolution_iso.concurrent_t (id, local_col) VALUES (1, 10);
 step s2_swap_metadata: 
-  UPDATE lakebase.iceberg_metadata AS target
+  UPDATE iceberg.iceberg_metadata AS target
   SET metadata_location = shadow.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM lakebase.iceberg_metadata AS shadow
+  FROM iceberg.iceberg_metadata AS shadow
   WHERE target.relid = 'schema_evolution_iso.concurrent_t'::regclass
     AND shadow.relid = 'schema_evolution_iso.shadow_t'::regclass;
 
@@ -37,10 +37,10 @@ starting permutation: s1_begin_rebase s1_add_rebase s2_swap_data_metadata s1_com
 step s1_begin_rebase: BEGIN;
 step s1_add_rebase: ALTER TABLE schema_evolution_iso.data_rebase_t ADD COLUMN added_col int;
 step s2_swap_data_metadata: 
-  UPDATE lakebase.iceberg_metadata AS target
+  UPDATE iceberg.iceberg_metadata AS target
   SET metadata_location = shadow.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM lakebase.iceberg_metadata AS shadow
+  FROM iceberg.iceberg_metadata AS shadow
   WHERE target.relid = 'schema_evolution_iso.data_rebase_t'::regclass
     AND shadow.relid = 'schema_evolution_iso.data_shadow_t'::regclass;
 

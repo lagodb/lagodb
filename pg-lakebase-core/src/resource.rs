@@ -193,7 +193,7 @@ unsafe extern "C-unwind" fn release_resource_callback(
         if is_commit {
             // Log warning as per C++ implementation ("pax resource leaks")
             // This is useful to detect resources that weren't explicitly handled/forgotten on success.
-            crate::diag::report_warning(&format!(
+            crate::diag::report_warning(format_args!(
                 "resource leak detected for resource handle {:?} (owner={:?})",
                 id, current_owner
             ));
@@ -203,7 +203,7 @@ unsafe extern "C-unwind" fn release_resource_callback(
             callback();
         }))
         .catch_others(|err| {
-            crate::diag::report_warning(&format!(
+            crate::diag::report_warning(format_args!(
                 "error during resource cleanup for handle {:?}: {}",
                 id,
                 crate::diag::PgErrorReport::from_caught(err)

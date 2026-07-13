@@ -79,8 +79,14 @@ mod wrapper;
 /// Catalog access and caching
 pub mod catalog;
 
-/// PostgreSQL background worker modules.
-pub mod worker;
+/// PostgreSQL bgworker/backend process primitives.
+pub mod bgworker;
+
+/// Database-local extension worker protocol.
+pub mod extension_worker;
+
+/// Consumer API for the runtime-owned storage service.
+pub mod storage_service;
 
 /// The prelude includes all necessary imports to make pg_lakebase_core work
 pub mod prelude {

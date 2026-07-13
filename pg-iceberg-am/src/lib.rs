@@ -19,8 +19,6 @@ use access::index::IcebergIndexFetch;
 use access::mutation::{IcebergModifyQueryState, IcebergModifyState};
 use access::scan::IcebergScan;
 use customscan::IcebergCustomScanProvider;
-use pg_lakebase_core::maintenance as core_maintenance;
-use pg_lakebase_core::worker::storage as storage_worker;
 
 /// Get the cached Iceberg TableAmRoutine pointer.
 /// This will initialize the routine if it hasn't been initialized yet.
@@ -53,8 +51,6 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 extern "C-unwind" fn _PG_init() {
     setup_rustls_default_crypto_provider();
     gucs::init();
-    storage_worker::init_for_extension("pg_iceberg_am");
-    core_maintenance::init_worker_host("pg_iceberg_am");
     hooks::init_hooks();
     wal::init_wal_rmgr();
     // Register the Iceberg CustomScan provider, then install the
@@ -100,6 +96,6 @@ pub mod pg_test {
     }
 
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["shared_preload_libraries = 'pg_iceberg_am'"]
+        vec!["shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'"]
     }
 }

@@ -69,7 +69,7 @@ impl WalResourceManager for IcebergRmgr {
             ))
         })?;
 
-        diag::log_debug1(&format!(
+        diag::log_debug1(format_args!(
             "Iceberg WAL redo: {} at LSN {}",
             op.name(),
             record.lsn()
@@ -188,18 +188,21 @@ impl IcebergRmgr {
             WalRmgrError::InvalidRecord("Failed to extract directory path".into())
         })?;
 
-        diag::log_debug1(&format!("Iceberg DELETE_DIRECTORY redo: path={}", path));
+        diag::log_debug1(format_args!(
+            "Iceberg DELETE_DIRECTORY redo: path={}",
+            path
+        ));
 
         let path_ref = Path::new(&path);
         let delete_result = match fs::metadata(path_ref) {
             Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path_ref),
             Ok(_) => fs::remove_file(path_ref),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                diag::log_debug1(&format!("Directory does not exist: {}", path));
+                diag::log_debug1(format_args!("Directory does not exist: {}", path));
                 return Ok(());
             }
             Err(e) => {
-                diag::report_warning(&format!(
+                diag::report_warning(format_args!(
                     "Failed to stat directory during redo: {} - {}",
                     path, e
                 ));
@@ -209,16 +212,16 @@ impl IcebergRmgr {
 
         match delete_result {
             Ok(()) => {
-                diag::log_debug1(&format!("Deleted path during redo: {}", path))
+                diag::log_debug1(format_args!("Deleted path during redo: {}", path))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                diag::log_debug1(&format!(
+                diag::log_debug1(format_args!(
                     "Directory disappeared during redo: {}",
                     path
                 ));
             }
             Err(e) => {
-                diag::report_warning(&format!(
+                diag::report_warning(format_args!(
                     "Failed to delete directory during lossy redo: {} - {}",
                     path, e
                 ));
@@ -243,14 +246,14 @@ impl IcebergRmgr {
             Self::unmark_lossy_skipped_write_path(&path);
             match fs::remove_file(&path) {
                 Ok(()) => {
-                    diag::log_debug1(&format!(
+                    diag::log_debug1(format_args!(
                         "Deleted canceled Iceberg file during redo: {}",
                         path
                     ));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    diag::report_warning(&format!(
+                    diag::report_warning(format_args!(
                         "Failed to delete canceled Iceberg file during lossy redo: {} - {}",
                         path, error
                     ));
@@ -298,7 +301,7 @@ impl IcebergRmgr {
         // data_len is the length of file_data
         let file_data = &data[data.len() - data_len..];
 
-        diag::log_debug1(&format!(
+        diag::log_debug1(format_args!(
             "Iceberg WRITE_FILE redo: path={}, offset={}, data_len={}",
             path,
             offset,
@@ -306,7 +309,7 @@ impl IcebergRmgr {
         ));
 
         if offset > 0 && Self::is_lossy_skipped_write_path(&path) {
-            diag::log_debug1(&format!(
+            diag::log_debug1(format_args!(
                 "Skipping WRITE_FILE chunk during lossy redo: path={}, offset={}",
                 path, offset
             ));
@@ -317,7 +320,7 @@ impl IcebergRmgr {
         if let Some(parent) = file_path.parent()
             && !parent.exists()
         {
-            diag::log_debug1(&format!(
+            diag::log_debug1(format_args!(
                 "Creating parent directories: {}",
                 parent.display()
             ));
@@ -345,13 +348,13 @@ impl IcebergRmgr {
             if offset > 0 && err.kind() == std::io::ErrorKind::NotFound {
                 let first_skip = Self::mark_lossy_skipped_write_path(&path);
                 if first_skip {
-                    diag::report_warning(&format!(
+                    diag::report_warning(format_args!(
                         "Skipping local Iceberg file during lossy WAL replay because \
                          base file is missing: path={}, offset={}",
                         path, offset
                     ));
                 } else {
-                    diag::log_debug1(&format!(
+                    diag::log_debug1(format_args!(
                         "Skipping WRITE_FILE chunk for missing local Iceberg file: \
                          path={}, offset={}",
                         path, offset
@@ -401,7 +404,7 @@ impl IcebergRmgr {
             }
         }
 
-        diag::log_debug1(&format!(
+        diag::log_debug1(format_args!(
             "Wrote {} bytes to file: {} at offset {}",
             file_data.len(),
             path,

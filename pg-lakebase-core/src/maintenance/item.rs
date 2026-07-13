@@ -95,7 +95,6 @@ impl MaintenanceItemRef<'_> {
 pub(crate) struct MaintenanceItem {
     pub(crate) id: MaintenanceItemId,
     pub(crate) target: MaintenanceTarget,
-    pub(crate) producer: String,
     pub(crate) attempt_count: i32,
 }
 
@@ -111,13 +110,4 @@ pub(crate) enum MaintenanceTarget {
         namespace: String,
         prefix: String,
     },
-}
-
-impl MaintenanceTarget {
-    pub(crate) fn operation(&self) -> MaintenanceOperation {
-        match self {
-            Self::Object { .. } => MaintenanceOperation::DeleteObject,
-            Self::Tree { .. } => MaintenanceOperation::DeleteTree,
-        }
-    }
 }

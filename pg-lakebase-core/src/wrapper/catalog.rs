@@ -135,6 +135,13 @@ impl PgWrapper {
         }
     }
 
+    /// Update one catalog tuple while keeping catalog indexes current.
+    ///
+    /// This uses `CatalogTupleUpdateWithInfo` with caller-owned index state.
+    /// PostgreSQL can report tuple-version conflicts from `simple_heap_update`
+    /// as `ERROR`; keeping index state in `CatalogIndexGuard` ensures that a
+    /// caught `ERROR` cannot skip `CatalogCloseIndexes`.
+    ///
     /// # Safety
     ///
     /// `relation`, `otid`, and `tuple` must be valid PostgreSQL objects. `otid`
@@ -144,30 +151,35 @@ impl PgWrapper {
         otid: *mut pg_sys::ItemPointerData,
         tuple: pg_sys::HeapTuple,
     ) -> Result<(), PgError> {
+        let index_guard = unsafe { CatalogIndexGuard::open(relation)? };
+        let index_state = AssertUnwindSafe(index_guard.as_raw());
         let relation = AssertUnwindSafe(relation);
         let otid = AssertUnwindSafe(otid);
         let tuple = AssertUnwindSafe(tuple);
-        unsafe {
+        let result = unsafe {
             PgTryBuilder::new(move || {
-                pg_sys::CatalogTupleUpdate(*relation, *otid, *tuple);
+                pg_sys::CatalogTupleUpdateWithInfo(
+                    *relation,
+                    *otid,
+                    *tuple,
+                    *index_state,
+                );
                 Ok(())
             })
             .catch_others(|err| Err(PgError::from_caught(err)))
             .execute()
-        }
+        };
+
+        drop(index_guard);
+        result
     }
 
     /// Catalog update variant that maps PostgreSQL tuple version conflicts to
     /// `Ok(false)`.
     ///
-    /// This uses `CatalogTupleUpdateWithInfo`, not `CatalogTupleUpdate`.
-    /// PostgreSQL exposes `simple_heap_update` tuple-version conflicts from
-    /// this catalog path as an ERROR. Calling `CatalogTupleUpdate` directly
-    /// would let that ERROR skip its internal `CatalogCloseIndexes` call,
-    /// leaking the opened index relation. By opening indexes in
-    /// `CatalogIndexGuard` and passing the state to PostgreSQL, index insertion
-    /// remains PostgreSQL-owned while cleanup remains under this wrapper's
-    /// control after the caught conflict.
+    /// Like `catalog_tuple_update_raw`, this uses `CatalogTupleUpdateWithInfo`
+    /// with index state owned by `CatalogIndexGuard`, so cleanup remains under
+    /// this wrapper's control after a caught conflict.
     ///
     /// # Safety
     ///

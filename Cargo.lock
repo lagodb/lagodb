@@ -4129,10 +4129,6 @@ dependencies = [
  "pgrx-tests",
  "proptest",
  "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -4143,6 +4139,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "pg-lakebase-runtime"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pg-lakebase-core",
+ "pg-lakebase-storage",
+ "pgrx",
+ "pgrx-tests",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

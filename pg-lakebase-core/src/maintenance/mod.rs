@@ -13,4 +13,4 @@ pub use error::{MaintenanceCatalogOperation, MaintenanceError};
 pub use item::{MaintenanceContext, MaintenanceItemId, MaintenanceItemRef};
 pub use repository::MaintenanceQueue;
 pub use target::{ObjectTarget, ObjectTreeTarget};
-pub use worker::init_worker_host;
+pub use worker::{init_gucs, run_database_worker};

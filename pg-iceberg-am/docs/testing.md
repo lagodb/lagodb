@@ -234,13 +234,13 @@ backend state.
 
 ## `shared_preload_libraries`
 
-`pg-iceberg-am` registers postmaster-level functionality in `_PG_init`,
-including storage worker setup and custom WAL resource manager setup.
+`pg_lakebase_runtime` registers the shared launcher and storage worker, while
+`pg-iceberg-am` registers its custom WAL resource manager.
 
 For pgrx tests, PostgreSQL must load the extension at postmaster start:
 
 ```rust
-vec!["shared_preload_libraries = 'pg_iceberg_am'"]
+vec!["shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'"]
 ```
 
 Without this, PostgreSQL may reject initialization that must happen before

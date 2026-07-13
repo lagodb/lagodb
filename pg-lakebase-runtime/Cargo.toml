@@ -1,0 +1,39 @@
+[package]
+name = "pg-lakebase-runtime"
+version = { workspace = true }
+publish = false
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [] }
+
+[features]
+default = ["pg17"]
+pg13 = []
+pg14 = []
+pg15 = []
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakebase-core/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakebase-core/pg17"]
+pg18 = []
+pg_test = []
+
+[dependencies]
+pgrx = { workspace = true }
+pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
+pg-lakebase-storage = { path = "../pg-lakebase-storage" }
+libc = "0.2"
+thiserror = "1.0.63"
+tokio = { version = "1", features = ["rt-multi-thread", "time"], default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
+
+[dev-dependencies]
+pgrx-tests = { workspace = true }

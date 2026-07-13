@@ -78,7 +78,7 @@ impl CachedTablespaceOpts {
     ///
     /// Provided so callers that need to pass the id into
     /// [`pg_lakebase_storage`] APIs do not have to revalidate the string.
-    pub(crate) fn store_id_owned(&self) -> StoreId {
+    pub fn store_id_owned(&self) -> StoreId {
         self.store_id.clone()
     }
 
@@ -110,6 +110,21 @@ impl CachedTablespaceOpts {
     /// Returns the storage-service configuration represented by this tablespace.
     pub fn store_config(&self) -> StoreConfig {
         self.storage.store_config()
+    }
+
+    /// Parse raw `pg_tablespace.spcoptions` strings into typed Lakebase storage
+    /// options.
+    ///
+    /// Returns `Ok(None)` for native PostgreSQL tablespaces whose options do not
+    /// contain any Lakebase storage option. This is the shared parser used by
+    /// backend-local tablespace lookups and the runtime-owned storage worker's
+    /// catalog reconciler, so both paths apply the same validation and store-id
+    /// rules.
+    pub fn from_catalog_options(
+        tablespace_name: String,
+        options_vec: Vec<String>,
+    ) -> Result<Option<Self>, TablespaceCacheError> {
+        parse_options_to_cached(tablespace_name, options_vec)
     }
 }
 

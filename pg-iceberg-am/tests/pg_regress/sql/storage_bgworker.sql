@@ -20,7 +20,19 @@ WHERE backend_type = 'pg-lakebase-storage';
 
 SELECT count(*) AS maintenance_worker_running
 FROM pg_stat_activity
-WHERE backend_type = 'pg-lakebase-maintenance';
+WHERE backend_type = 'pg-lakebase-runtime extension worker';
+
+SELECT state AS maintenance_worker_state
+FROM lakebase.worker_runtime_status
+WHERE extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
+\gset
+\echo maintenance_worker_state: :maintenance_worker_state
+
+SELECT count(*) AS launcher_running
+FROM lakebase.process_runtime_status
+WHERE process_kind = 'launcher' AND state = 'running'
+\gset
+\echo launcher_running: :launcher_running
 
 -- A2. Socket file exists at default path ($PGDATA/pg_lakebase/storage.sock)
 COPY (SELECT current_setting('data_directory') || '/pg_lakebase/storage.sock') TO '/tmp/_regress_socket_path.txt';
@@ -187,3 +199,4 @@ DROP TABLESPACE regress_bgw_native2;
 SELECT count(*) AS bgworker_final
 FROM pg_stat_activity
 WHERE backend_type = 'pg-lakebase-storage';
+-- End storage background worker test.

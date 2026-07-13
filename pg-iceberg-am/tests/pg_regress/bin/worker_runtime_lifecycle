@@ -1,0 +1,262 @@
+#!/usr/bin/env sh
+set -eu
+
+database=${PGDATABASE:?PGDATABASE is required}
+source_db=lakebase_runtime_source
+copy_db=lakebase_runtime_copy
+test_role=lakebase_runtime_non_superuser
+
+cleanup() {
+    psql -XAtq -v ON_ERROR_STOP=0 -d "$database" <<SQL >/dev/null 2>&1 || true
+DROP DATABASE IF EXISTS $copy_db WITH (FORCE);
+DROP DATABASE IF EXISTS $source_db WITH (FORCE);
+DROP ROLE IF EXISTS $test_role;
+SQL
+}
+trap cleanup EXIT HUP INT TERM
+cleanup
+
+psql -XAtq -v ON_ERROR_STOP=1 -d "$database" <<SQL >/dev/null
+CREATE DATABASE $source_db;
+CREATE ROLE $test_role;
+SQL
+
+psql -XAtq -v ON_ERROR_STOP=1 -d "$source_db" <<SQL >/dev/null
+DO \$\$
+DECLARE
+    denied boolean := false;
+BEGIN
+    SET LOCAL ROLE $test_role;
+    BEGIN
+        EXECUTE 'CREATE EXTENSION pg_lakebase_runtime';
+    EXCEPTION WHEN insufficient_privilege THEN
+        denied := true;
+    END;
+    IF NOT denied OR EXISTS (
+        SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime'
+    ) THEN
+        RAISE EXCEPTION 'non-superuser runtime installation was allowed';
+    END IF;
+END
+\$\$;
+SQL
+
+psql -XAtq -v ON_ERROR_STOP=1 -d "$source_db" <<'SQL' >/dev/null
+BEGIN;
+CREATE EXTENSION pg_lakebase_runtime;
+ROLLBACK;
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime') THEN
+        RAISE EXCEPTION 'CREATE EXTENSION rollback leaked the extension';
+    END IF;
+END
+$$;
+
+BEGIN;
+SAVEPOINT before_runtime;
+CREATE EXTENSION pg_lakebase_runtime;
+ROLLBACK TO SAVEPOINT before_runtime;
+COMMIT;
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime') THEN
+        RAISE EXCEPTION 'savepoint rollback leaked the extension';
+    END IF;
+END
+$$;
+
+CREATE EXTENSION pg_lakebase_runtime;
+DO $$
+DECLARE
+    observed boolean := false;
+BEGIN
+    FOR attempt IN 1..200 LOOP
+        SELECT EXISTS (
+            SELECT FROM lakebase.worker_runtime_status
+            WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND extension_name = 'pg_lakebase_runtime'
+              AND worker_name = 'maintenance'
+              AND state = 'dormant'
+        ) INTO observed;
+        EXIT WHEN observed;
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    IF NOT observed THEN
+        RAISE EXCEPTION 'committed registration did not become dormant';
+    END IF;
+END
+$$;
+
+BEGIN;
+DROP EXTENSION pg_lakebase_runtime;
+ROLLBACK;
+DO $$
+BEGIN
+    FOR attempt IN 1..200 LOOP
+        EXIT WHEN EXISTS (
+            SELECT FROM lakebase.worker_runtime_status
+            WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND worker_name = 'maintenance' AND state = 'dormant'
+        );
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    IF NOT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime') THEN
+        RAISE EXCEPTION 'DROP EXTENSION rollback lost the extension';
+    END IF;
+END
+$$;
+
+INSERT INTO lakebase.maintenance_queue (
+    item_id, operation, store_id, object_namespace, object_path, producer,
+    attempt_count, not_before, failed, created_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000001', 1, 'test', 'test', 'test',
+    'runtime-lifecycle-test', 0, clock_timestamp(), true, clock_timestamp()
+);
+DO $$
+DECLARE
+    rejected boolean := false;
+BEGIN
+    IF NOT EXISTS (SELECT FROM lakebase.maintenance_queue) THEN
+        RAISE EXCEPTION 'maintenance guard fixture disappeared';
+    END IF;
+    BEGIN
+        EXECUTE 'DROP EXTENSION pg_lakebase_runtime';
+    EXCEPTION WHEN OTHERS THEN
+        rejected := true;
+    END;
+    IF NOT rejected OR NOT EXISTS (
+        SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime'
+    ) THEN
+        RAISE EXCEPTION 'non-empty maintenance queue did not protect pg_lakebase_runtime';
+    END IF;
+END
+$$;
+DELETE FROM lakebase.maintenance_queue
+WHERE item_id = '00000000-0000-0000-0000-000000000001';
+SQL
+
+psql -XAtq -v ON_ERROR_STOP=1 -d "$source_db" <<SQL >/dev/null
+DO \$\$
+DECLARE
+    denied boolean := false;
+BEGIN
+    SET LOCAL ROLE $test_role;
+    BEGIN
+        PERFORM lakebase.deregister_worker('maintenance');
+    EXCEPTION WHEN insufficient_privilege THEN
+        denied := true;
+    END;
+    IF NOT denied THEN
+        RAISE EXCEPTION 'non-superuser worker deregistration was allowed';
+    END IF;
+END
+\$\$;
+
+INSERT INTO lakebase.maintenance_queue (
+    item_id, operation, store_id, object_namespace, object_path, producer,
+    attempt_count, not_before, failed, created_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000002', 1, 'test', 'test', 'future',
+    'runtime-lifecycle-test', 0, clock_timestamp() + interval '1 hour', false,
+    clock_timestamp()
+);
+SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+DO \$\$
+DECLARE
+    observed boolean := false;
+BEGIN
+    FOR attempt IN 1..200 LOOP
+        SELECT EXISTS (
+            SELECT FROM lakebase.worker_runtime_status
+            WHERE database_oid = (SELECT oid FROM pg_database
+                                    WHERE datname = current_database())
+              AND worker_name = 'maintenance' AND state = 'scheduled'
+        ) INTO observed;
+        EXIT WHEN observed;
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    IF NOT observed THEN
+        RAISE EXCEPTION 'maintenance worker did not publish its future schedule';
+    END IF;
+END
+\$\$;
+
+INSERT INTO lakebase.maintenance_queue (
+    item_id, operation, store_id, object_namespace, object_path, producer,
+    attempt_count, not_before, failed, created_at
+) VALUES (
+    '00000000-0000-0000-0000-000000000003', 999, 'test', 'test', 'ready',
+    'runtime-lifecycle-test', 0, clock_timestamp(), false, clock_timestamp()
+);
+SET ROLE $test_role;
+SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+RESET ROLE;
+DO \$\$
+BEGIN
+    FOR attempt IN 1..200 LOOP
+        EXIT WHEN EXISTS (
+            SELECT FROM lakebase.maintenance_queue
+            WHERE item_id = '00000000-0000-0000-0000-000000000003'
+              AND failed
+        );
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    IF NOT EXISTS (
+        SELECT FROM lakebase.maintenance_queue
+        WHERE item_id = '00000000-0000-0000-0000-000000000003'
+          AND failed
+    ) THEN
+        RAISE EXCEPTION 'committed wakeup did not advance scheduled worker';
+    END IF;
+END
+\$\$;
+DELETE FROM lakebase.maintenance_queue
+WHERE item_id IN (
+    '00000000-0000-0000-0000-000000000002',
+    '00000000-0000-0000-0000-000000000003'
+);
+SQL
+
+psql -XAtq -v ON_ERROR_STOP=1 -d "$database" <<SQL >/dev/null
+CREATE DATABASE $copy_db TEMPLATE $source_db;
+SQL
+
+psql -XAtq -v ON_ERROR_STOP=1 -d "$copy_db" <<'SQL' >/dev/null
+DO $$
+DECLARE
+    observed boolean := false;
+BEGIN
+    FOR attempt IN 1..200 LOOP
+        SELECT EXISTS (
+            SELECT FROM lakebase.worker_runtime_status
+            WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND worker_name = 'maintenance' AND state = 'dormant'
+        ) INTO observed;
+        EXIT WHEN observed;
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    IF NOT observed THEN
+        RAISE EXCEPTION 'template database registration was not discovered';
+    END IF;
+END
+$$;
+SQL
+
+psql -XAtq -v ON_ERROR_STOP=1 -d "$database" <<SQL >/dev/null
+DROP DATABASE $copy_db;
+DROP DATABASE $source_db;
+DROP ROLE $test_role;
+SQL
+
+trap - EXIT HUP INT TERM
+echo "worker_create_rollback: true"
+echo "worker_savepoint_rollback: true"
+echo "worker_drop_rollback: true"
+echo "worker_drop_pending_guard: true"
+echo "worker_non_superuser_guard: true"
+echo "worker_non_superuser_wakeup: true"
+echo "worker_scheduled_wakeup: true"
+echo "worker_template_database: true"
+echo "worker_drop_database: true"

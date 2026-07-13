@@ -236,11 +236,11 @@ step s2_insert_batch:
   SELECT i, 2, 'session2_row_' || i 
   FROM generate_series(1001, 1100) i; 
 
-step s1_lock_share: LOCK TABLE lakebase.iceberg_metadata IN SHARE MODE;
+step s1_lock_share: LOCK TABLE iceberg.iceberg_metadata IN SHARE MODE;
 step s2_commit: COMMIT; <waiting ...>
 step s1_commit: COMMIT;
 s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
-DETAIL:  pg_lakebase_core
+DETAIL:  pg-lakebase
 step s2_commit: <... completed>
 step s5_final_verify: 
   SELECT 
@@ -259,7 +259,7 @@ total_rows|unique_sessions|min_id|max_id
 starting permutation: s1_begin s1_update_touched s2_begin s2_insert_batch s2_commit s1_commit s5_final_verify
 step s1_begin: BEGIN;
 step s1_update_touched: 
-  UPDATE lakebase.iceberg_metadata
+  UPDATE iceberg.iceberg_metadata
   SET previous_metadata_location = previous_metadata_location
   WHERE relid = 'iceberg_test.txn_test'::regclass;
 
@@ -272,7 +272,7 @@ step s2_insert_batch:
 step s2_commit: COMMIT; <waiting ...>
 step s1_commit: COMMIT;
 s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
-DETAIL:  pg_lakebase_core
+DETAIL:  pg-lakebase
 step s2_commit: <... completed>
 step s5_final_verify: 
   SELECT 

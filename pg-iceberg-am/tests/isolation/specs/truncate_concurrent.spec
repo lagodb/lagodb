@@ -26,7 +26,7 @@ setup
 {
   CREATE TABLE truncate_iso.locations AS
   SELECT relid, metadata_location
-  FROM lakebase.iceberg_metadata
+  FROM iceberg.iceberg_metadata
   WHERE relid IN (
     'truncate_iso.target_t'::regclass,
     'truncate_iso.abort_t'::regclass,
@@ -56,37 +56,37 @@ step s1_commit_multi { COMMIT; }
 session s2
 step s2_location_unchanged {
   SELECT current.metadata_location = original.metadata_location AS unchanged
-  FROM lakebase.iceberg_metadata AS current
+  FROM iceberg.iceberg_metadata AS current
   JOIN truncate_iso.locations AS original USING (relid)
   WHERE current.relid = 'truncate_iso.target_t'::regclass;
 }
 step s2_swap_metadata {
-  UPDATE lakebase.iceberg_metadata AS target
+  UPDATE iceberg.iceberg_metadata AS target
   SET metadata_location = shadow.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM lakebase.iceberg_metadata AS shadow
+  FROM iceberg.iceberg_metadata AS shadow
   WHERE target.relid = 'truncate_iso.target_t'::regclass
     AND shadow.relid = 'truncate_iso.shadow_t'::regclass;
 }
 step s2_target_rows { SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.target_t; }
 step s2_abort_location_unchanged {
   SELECT current.metadata_location = original.metadata_location AS unchanged
-  FROM lakebase.iceberg_metadata AS current
+  FROM iceberg.iceberg_metadata AS current
   JOIN truncate_iso.locations AS original USING (relid)
   WHERE current.relid = 'truncate_iso.abort_t'::regclass;
 }
 step s2_abort_rows { SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.abort_t; }
 step s2_swap_multi_metadata {
-  UPDATE lakebase.iceberg_metadata AS target
+  UPDATE iceberg.iceberg_metadata AS target
   SET metadata_location = shadow.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM lakebase.iceberg_metadata AS shadow
+  FROM iceberg.iceberg_metadata AS shadow
   WHERE target.relid = 'truncate_iso.multi_conflict_t'::regclass
     AND shadow.relid = 'truncate_iso.multi_shadow_t'::regclass;
 }
 step s2_multi_first_location_unchanged {
   SELECT current.metadata_location = original.metadata_location AS unchanged
-  FROM lakebase.iceberg_metadata AS current
+  FROM iceberg.iceberg_metadata AS current
   JOIN truncate_iso.locations AS original USING (relid)
   WHERE current.relid = 'truncate_iso.multi_first_t'::regclass;
 }

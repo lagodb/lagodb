@@ -95,7 +95,7 @@ impl PendingDelete for CanceledFilesDelete {
         }
         for path in &self.paths {
             if let Err(error) = self.file_io.delete(path) {
-                pg_lakebase_core::diag::report_warning(&format!(
+                pg_lakebase_core::diag::report_warning(format_args!(
                     "failed to delete transaction-created file canceled by truncate '{}': {}",
                     path, error
                 ));
@@ -455,7 +455,7 @@ impl ArtifactRegistry {
                     flush_wal(lsn);
                 }
                 if let Err(e) = file_io.remove_dir_all(location) {
-                    pg_lakebase_core::diag::report_warning(&format!(
+                    pg_lakebase_core::diag::report_warning(format_args!(
                         "failed to delete table directory '{}': {}",
                         location, e
                     ));
@@ -474,7 +474,7 @@ impl ArtifactRegistry {
                 state: ObjectFileState::Staged,
                 ..
             } => {
-                pg_lakebase_core::diag::report_warning(&format!(
+                pg_lakebase_core::diag::report_warning(format_args!(
                     "committing staged object file '{}' before upload completed; removing staging file '{}'",
                     location,
                     staging_path.display()
@@ -492,7 +492,7 @@ impl ArtifactRegistry {
                 match file_io.remove_dir_all(location) {
                     Ok(()) => true,
                     Err(e) => {
-                        pg_lakebase_core::diag::report_warning(&format!(
+                        pg_lakebase_core::diag::report_warning(format_args!(
                             "failed to delete table directory '{}': {}",
                             location, e
                         ));
@@ -515,7 +515,7 @@ impl ArtifactRegistry {
                         Ok(()) => true,
                         Err(e) if e.kind() == StorageErrorKind::NotFound => true,
                         Err(e) => {
-                            pg_lakebase_core::diag::report_warning(&format!(
+                            pg_lakebase_core::diag::report_warning(format_args!(
                                 "failed to delete uploaded object '{}': {}",
                                 location, e
                             ));
@@ -548,7 +548,7 @@ fn best_effort_unlink(path: &Path) -> bool {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
         Err(e) => {
-            pg_lakebase_core::diag::report_warning(&format!(
+            pg_lakebase_core::diag::report_warning(format_args!(
                 "failed to unlink '{}': {}",
                 path.display(),
                 e
@@ -742,7 +742,7 @@ impl Drop for MetadataAttempt {
             return;
         }
         if let Err(error) = self.resource.discard_metadata_attempt(self.id) {
-            pg_lakebase_core::diag::report_warning(&format!(
+            pg_lakebase_core::diag::report_warning(format_args!(
                 "failed to discard unresolved metadata artifact attempt: {}",
                 error
             ));

@@ -45,7 +45,7 @@ impl RelationStats {
         match Self::try_load(rel) {
             Ok(stats) => stats,
             Err(err) => {
-                report_warning(&format!(
+                report_warning(format_args!(
                     "pg_iceberg_am: failed to load Iceberg statistics for relation {}: {err}; planner will use default estimates",
                     rel.oid(),
                 ));

@@ -49,8 +49,8 @@ struct MinioDockerConfig {
 impl MinioDockerConfig {
     fn load() -> Self {
         let defaults = ObjectStorageDefaults::load();
-        let image = env::var("MINIO_IMAGE")
-            .unwrap_or_else(|_| defaults.minio_image.clone());
+        let image =
+            env::var("MINIO_IMAGE").unwrap_or_else(|_| defaults.minio_image.clone());
         let (image_repository, image_tag) = Self::parse_image(&image);
 
         Self {
@@ -110,7 +110,11 @@ impl ObjectStorageDefaults {
         Self {
             minio_image: Self::required(contents, source, "DEFAULT_MINIO_IMAGE"),
             minio_user: Self::required(contents, source, "DEFAULT_MINIO_USER"),
-            minio_password: Self::required(contents, source, "DEFAULT_MINIO_PASSWORD"),
+            minio_password: Self::required(
+                contents,
+                source,
+                "DEFAULT_MINIO_PASSWORD",
+            ),
             minio_region: Self::required(contents, source, "DEFAULT_MINIO_REGION"),
         }
     }

@@ -12,13 +12,13 @@ CREATE TABLE schema_evolution_t (
 INSERT INTO schema_evolution_t VALUES (1, 'one'), (2, 'two');
 
 SELECT metadata_location AS loc0
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass \gset
 
 ALTER TABLE schema_evolution_t ADD COLUMN extra bigint;
 
 SELECT metadata_location <> :'loc0' AS changed
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass;
 
 INSERT INTO schema_evolution_t (id, payload, extra)
@@ -28,13 +28,13 @@ SELECT count(*) AS rows, count(extra) AS extra_values, sum(extra) AS extra_sum
 FROM schema_evolution_t;
 
 SELECT metadata_location AS loc_after_add
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass \gset
 
 ALTER TABLE schema_evolution_t ALTER COLUMN payload DROP NOT NULL;
 
 SELECT metadata_location <> :'loc_after_add' AS changed
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass;
 
 INSERT INTO schema_evolution_t (id, payload, extra)
@@ -44,13 +44,13 @@ SELECT count(*) FILTER (WHERE payload IS NULL) AS null_payloads
 FROM schema_evolution_t;
 
 SELECT metadata_location AS loc_after_drop_not_null
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass \gset
 
 ALTER TABLE schema_evolution_t RENAME COLUMN payload TO body;
 
 SELECT metadata_location <> :'loc_after_drop_not_null' AS changed
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass;
 
 INSERT INTO schema_evolution_t (id, body, extra)
@@ -60,13 +60,13 @@ SELECT count(*) FILTER (WHERE body = 'five') AS renamed_reads
 FROM schema_evolution_t;
 
 SELECT metadata_location AS loc_after_rename
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass \gset
 
 ALTER TABLE schema_evolution_t DROP COLUMN extra;
 
 SELECT metadata_location <> :'loc_after_rename' AS changed
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'schema_evolution_t'::regclass;
 
 INSERT INTO schema_evolution_t (id, body)
@@ -223,7 +223,7 @@ COPY (
             ('schema_evolution_part_root_t_p0'::regclass),
             ('schema_evolution_part_root_t_p1'::regclass)
     ) AS relations(rel)
-    LEFT JOIN lakebase.iceberg_metadata AS metadata ON metadata.relid = relations.rel
+    LEFT JOIN iceberg.iceberg_metadata AS metadata ON metadata.relid = relations.rel
     ORDER BY rel
 ) TO STDOUT WITH (FORMAT csv, HEADER true);
 

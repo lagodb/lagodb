@@ -44,18 +44,18 @@ step s1_commit_rebase { COMMIT; }
 
 session s2
 step s2_swap_metadata {
-  UPDATE lakebase.iceberg_metadata AS target
+  UPDATE iceberg.iceberg_metadata AS target
   SET metadata_location = shadow.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM lakebase.iceberg_metadata AS shadow
+  FROM iceberg.iceberg_metadata AS shadow
   WHERE target.relid = 'schema_evolution_iso.concurrent_t'::regclass
     AND shadow.relid = 'schema_evolution_iso.shadow_t'::regclass;
 }
 step s2_swap_data_metadata {
-  UPDATE lakebase.iceberg_metadata AS target
+  UPDATE iceberg.iceberg_metadata AS target
   SET metadata_location = shadow.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM lakebase.iceberg_metadata AS shadow
+  FROM iceberg.iceberg_metadata AS shadow
   WHERE target.relid = 'schema_evolution_iso.data_rebase_t'::regclass
     AND shadow.relid = 'schema_evolution_iso.data_shadow_t'::regclass;
 }

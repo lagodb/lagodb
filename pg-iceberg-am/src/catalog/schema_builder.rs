@@ -166,7 +166,7 @@ impl PgType {
             return;
         }
 
-        diag::report_warning(&format!(
+        diag::report_warning(format_args!(
             "numeric column \"{column_name}\" has no precision/scale; defaulting to \
              decimal({DEFAULT_NUMERIC_PRECISION}, {DEFAULT_NUMERIC_SCALE}). \
              Use numeric(p, s) explicitly to avoid runtime overflow on values \

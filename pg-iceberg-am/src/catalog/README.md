@@ -111,7 +111,7 @@ on_pre_commit
 `StagedCatalog` is a storage-only catalog wrapper. It writes standard Iceberg
 manifest, manifest-list, snapshot, and table metadata files, but it does not
 update the PostgreSQL catalog row. The catalog-visible update happens only when
-`IcebergMetadata::cas_update` swaps `lakebase.iceberg_metadata.metadata_location`
+`IcebergMetadata::cas_update` swaps `iceberg.iceberg_metadata.metadata_location`
 from the base location to the newly written metadata location.
 
 This design deliberately uses one materialization path for append-only and mixed

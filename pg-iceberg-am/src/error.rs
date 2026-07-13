@@ -55,7 +55,7 @@ impl Display for MetadataCatalogOperation {
 
 #[derive(Error, Debug)]
 pub enum IcebergError {
-    #[error("failed to {operation} lakebase.iceberg_metadata catalog: {source}")]
+    #[error("failed to {operation} iceberg.iceberg_metadata catalog: {source}")]
     MetadataCatalog {
         operation: MetadataCatalogOperation,
         #[source]
@@ -185,12 +185,12 @@ pub enum IcebergError {
     /// AM-internal invariant violation. Used for "cannot happen" branches
     /// where a runtime guard remains because the type system does not yet
     /// encode the invariant. Surfacing one of these in production is a bug
-    /// in `pg_iceberg_am`, not a user error.
+    /// in `iceberg`, not a user error.
     ///
     /// Prefer expressing invariants directly in the type system (for
     /// example, an enum-based state machine) over guarding with this
     /// variant when the unreachable case can be made unrepresentable.
-    #[error("invariant violation in pg_iceberg_am: {0}")]
+    #[error("invariant violation in iceberg: {0}")]
     InvariantViolated(&'static str),
 
     #[error("feature not yet implemented: {0}")]

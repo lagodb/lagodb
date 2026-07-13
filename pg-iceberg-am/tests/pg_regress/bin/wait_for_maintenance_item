@@ -25,6 +25,12 @@ SELECT NOT EXISTS (
       AND store_id = :'store_id'
       AND object_namespace = :'namespace'
       AND object_path = :'object_path'
+) AND EXISTS (
+    SELECT 1
+    FROM lakebase.worker_runtime_status
+    WHERE extension_name = 'pg_lakebase_runtime'
+      AND worker_name = 'maintenance'
+      AND state = 'dormant'
 );
 SQL
     ); then

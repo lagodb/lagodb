@@ -20,11 +20,29 @@ use std::sync::Once;
 use pgrx::FromDatum;
 use pgrx::pg_sys;
 
+use pg_lakebase_core::catalog::{CatalogRelation, CatalogSnapshot};
+use pg_lakebase_core::diag::PgError;
+use pg_lakebase_core::options::tablespace::{
+    CachedTablespaceOpts, TablespaceCacheError,
+};
+
 use super::reconciler::{StoreCatalogSource, TablespaceStoreSpec};
-use crate::catalog::{CatalogRelation, CatalogSnapshot};
-use crate::diag::PgError;
-use crate::options::tablespace::{TablespaceCacheError, parse_options_to_cached};
-use crate::wrapper::CacheRegisterSyscacheCallback;
+
+// Manually declare CacheRegisterSyscacheCallback because pgrx-pg-sys does not
+// expose it. This declaration stays local to the runtime-owned storage host.
+unsafe extern "C" {
+    fn CacheRegisterSyscacheCallback(
+        cacheid: std::os::raw::c_int,
+        func: Option<
+            unsafe extern "C" fn(
+                arg: pg_sys::Datum,
+                cacheid: std::os::raw::c_int,
+                hashvalue: u32,
+            ),
+        >,
+        arg: pg_sys::Datum,
+    );
+}
 
 // ---------------------------------------------------------------------------
 //  Dirty flag
@@ -148,22 +166,24 @@ fn scan_pg_tablespace() -> Result<Vec<TablespaceStoreSpec>, CatalogLoadError> {
         let tablespace_name = read_spcname(tuple.as_raw(), tup_desc);
         let options_vec = read_spcoptions(tuple.as_raw(), tup_desc);
 
-        // `parse_options_to_cached` takes the name by value so the parser
-        // and reconciler-facing struct can keep their own copies. We pass
-        // `tablespace_name.clone()` and move the original into either the
-        // error variant or the resulting spec, eliminating the redundant
-        // `.to_string()` we used to do via `cached.tablespace_name()`.
-        let cached =
-            match parse_options_to_cached(tablespace_name.clone(), options_vec) {
-                Ok(Some(cached)) => cached,
-                Ok(None) => continue,
-                Err(source) => {
-                    return Err(CatalogLoadError::InvalidTablespace {
-                        tablespace: tablespace_name,
-                        source,
-                    });
-                }
-            };
+        // The parser takes the name by value so the parsed options and
+        // reconciler-facing spec can keep their own copies. We pass
+        // `tablespace_name.clone()` and move the original into either the error
+        // variant or the resulting spec, avoiding re-parsing or revalidating the
+        // store id.
+        let cached = match CachedTablespaceOpts::from_catalog_options(
+            tablespace_name.clone(),
+            options_vec,
+        ) {
+            Ok(Some(cached)) => cached,
+            Ok(None) => continue,
+            Err(source) => {
+                return Err(CatalogLoadError::InvalidTablespace {
+                    tablespace: tablespace_name,
+                    source,
+                });
+            }
+        };
 
         specs.push(TablespaceStoreSpec {
             store_id: cached.store_id_owned(),

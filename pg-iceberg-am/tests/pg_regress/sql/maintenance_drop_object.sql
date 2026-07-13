@@ -14,8 +14,8 @@ SELECT endpoint AS lakebase_regress_endpoint,
 FROM lakebase_regress.object_storage_fixture
 \gset
 
-\! mkdir -p /tmp/pg_iceberg_am_regress_object
-\! rm -rf /tmp/pg_iceberg_am_regress_object/*
+\! mkdir -p /tmp/iceberg_regress_object
+\! rm -rf /tmp/iceberg_regress_object/*
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
@@ -26,7 +26,7 @@ DROP TABLESPACE IF EXISTS regress_object;
 RESET client_min_messages;
 
 CREATE TABLESPACE regress_object
-LOCATION '/tmp/pg_iceberg_am_regress_object'
+LOCATION '/tmp/iceberg_regress_object'
 WITH (
     protocol = 's3',
     bucket = :'lakebase_regress_bucket',
@@ -57,7 +57,7 @@ SELECT 'regress_object' AS store_id,
 \setenv LAKEBASE_REGRESS_STORE_ID :store_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
-SELECT NOT lakebase.object_tree_is_empty(
+SELECT NOT iceberg.object_tree_is_empty(
     :'store_id', :'object_namespace', :'object_path'
 ) AS tree_exists_before_drop;
 
@@ -65,13 +65,16 @@ DROP TABLE maintenance_remote_drop;
 
 \! bin/wait_for_maintenance_item 30
 
-SELECT lakebase.object_tree_is_empty(
+SELECT iceberg.object_tree_is_empty(
     :'store_id', :'object_namespace', :'object_path'
 ) AS tree_empty_after_drop;
 SELECT count(*) AS relation_gone
 FROM pg_class WHERE relname = 'maintenance_remote_drop';
-SELECT count(*) AS maintenance_worker_running
-FROM pg_stat_activity WHERE backend_type = 'pg-lakebase-maintenance';
+SELECT state AS maintenance_worker_state
+FROM lakebase.worker_runtime_status
+WHERE extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
+\gset
+\echo maintenance_worker_state: :maintenance_worker_state
 
 CREATE TABLE maintenance_remote_rollback (id integer)
 USING iceberg TABLESPACE regress_object;
@@ -96,9 +99,9 @@ DROP TABLE maintenance_remote_rollback;
 
 \! bin/wait_for_maintenance_item 30
 
-SELECT lakebase.object_tree_is_empty(
+SELECT iceberg.object_tree_is_empty(
     :'store_id', :'object_namespace', :'object_path'
 ) AS rollback_tree_empty_after_cleanup;
 
 DROP TABLESPACE regress_object;
-\! rm -rf /tmp/pg_iceberg_am_regress_object/*
+\! rm -rf /tmp/iceberg_regress_object/*

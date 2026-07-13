@@ -1,10 +1,10 @@
-//! IcebergMetadata - CRUD operations for the lakebase.iceberg_metadata table.
+//! IcebergMetadata - CRUD operations for the iceberg.iceberg_metadata table.
 //!
 //! This module reads and writes the PostgreSQL catalog row that tracks the
 //! current Iceberg metadata file location for each Iceberg-AM relation:
 //!
 //! ```sql
-//! CREATE TABLE lakebase.iceberg_metadata (
+//! CREATE TABLE iceberg.iceberg_metadata (
 //!     relid regclass NOT NULL,
 //!     metadata_location text,
 //!     previous_metadata_location text,
@@ -14,11 +14,10 @@
 //! ```
 
 use std::ffi::CStr;
-use std::sync::OnceLock;
 
 use pg_lakebase_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, CatalogUpdateResult,
-    LAKEBASE_SCHEMA, get_namespace_oid, get_relation_oid,
+    get_namespace_oid, get_relation_oid,
 };
 use pg_lakebase_core::diag::PgError;
 use pg_lakebase_core::handles::HeapTupleGuard;
@@ -32,10 +31,11 @@ use crate::error::{
 // Internal constants
 // ---------------------------------------------------------------------------
 
+const ICEBERG_SCHEMA: &CStr = c"iceberg";
 const ICEBERG_METADATA_TABLE: &CStr = c"iceberg_metadata";
 const ICEBERG_METADATA_PKEY: &CStr = c"iceberg_metadata_pkey";
 
-/// Column numbers in `lakebase.iceberg_metadata` (1-based, as required by
+/// Column numbers in `iceberg.iceberg_metadata` (1-based, as required by
 /// `heap_getattr`/`heap_modify_tuple`).
 mod column {
     pub const RELID: i16 = 1;
@@ -67,27 +67,17 @@ impl<T> CatalogResultExt<T> for Result<T, PgError> {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog OID resolution (cached behind PG syscache invariants)
+// Catalog OID resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a relation OID under `lakebase` schema and cache it for the rest of
-/// the backend's lifetime.
+/// Resolve a relation OID under the Iceberg AM schema.
 ///
-/// The catalog rows for `lakebase.iceberg_metadata` and its primary-key index
-/// are created once by the extension's install script and never recreated;
-/// caching their OIDs is safe and avoids a syscache lookup per CRUD call.
-fn cached_lakebase_relation_oid(
-    cache: &OnceLock<pg_sys::Oid>,
-    name: &CStr,
-) -> IcebergResult<pg_sys::Oid> {
-    if let Some(&oid) = cache.get() {
-        return Ok(oid);
-    }
-    let schema = get_namespace_oid(LAKEBASE_SCHEMA, false)
+/// Deliberately avoid a backend-lifetime cache so a long-lived backend recovers
+/// after `DROP EXTENSION pg_iceberg_am; CREATE EXTENSION pg_iceberg_am`.
+fn iceberg_relation_oid(name: &CStr) -> IcebergResult<pg_sys::Oid> {
+    let schema = get_namespace_oid(ICEBERG_SCHEMA, false)
         .map_catalog_err(CatalogOp::Access)?;
-    let oid = get_relation_oid(name, schema).map_catalog_err(CatalogOp::Access)?;
-    let _ = cache.set(oid);
-    Ok(oid)
+    get_relation_oid(name, schema).map_catalog_err(CatalogOp::Access)
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +241,7 @@ pub struct CasUpdate<'a> {
 // IcebergMetadata
 // ---------------------------------------------------------------------------
 
-/// One row of `lakebase.iceberg_metadata`.
+/// One row of `iceberg.iceberg_metadata`.
 #[derive(Debug, Clone, Default)]
 pub struct IcebergMetadata {
     pub relid: pg_sys::Oid,
@@ -289,13 +279,11 @@ impl IcebergMetadata {
     // -- catalog OID accessors ------------------------------------------------
 
     fn table_oid() -> IcebergResult<pg_sys::Oid> {
-        static CACHE: OnceLock<pg_sys::Oid> = OnceLock::new();
-        cached_lakebase_relation_oid(&CACHE, ICEBERG_METADATA_TABLE)
+        iceberg_relation_oid(ICEBERG_METADATA_TABLE)
     }
 
     fn pkey_oid() -> IcebergResult<pg_sys::Oid> {
-        static CACHE: OnceLock<pg_sys::Oid> = OnceLock::new();
-        cached_lakebase_relation_oid(&CACHE, ICEBERG_METADATA_PKEY)
+        iceberg_relation_oid(ICEBERG_METADATA_PKEY)
     }
 
     // -- CRUD: Insert ---------------------------------------------------------
@@ -505,7 +493,7 @@ impl IcebergMetadata {
 
     // -- Tuple decoding -------------------------------------------------------
 
-    /// Decode a tuple from `lakebase.iceberg_metadata` into [`Self`].
+    /// Decode a tuple from `iceberg.iceberg_metadata` into [`Self`].
     ///
     /// # Safety
     ///

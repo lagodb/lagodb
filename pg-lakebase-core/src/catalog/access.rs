@@ -268,19 +268,14 @@ impl CatalogRelation {
         &'scan self,
         index_id: pg_sys::Oid,
         index_ok: bool,
-        snapshot: CatalogSnapshot<'_>,
+        snapshot: CatalogSnapshot<'scan>,
         keys: I,
     ) -> Result<CatalogScan<'scan>, PgError>
     where
         I: IntoIterator<Item = CatalogScanKey>,
     {
-        let mut keys: Vec<pg_sys::ScanKeyData> =
-            keys.into_iter().map(|key| key.into_data()).collect();
-        let key_ptr = if keys.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            keys.as_mut_ptr()
-        };
+        let mut keys = Self::collect_scan_keys(keys);
+        let key_ptr = Self::scan_key_ptr(&mut keys);
         let scan = unsafe {
             PgWrapper::systable_beginscan_raw(
                 self.as_raw(),
@@ -302,7 +297,7 @@ impl CatalogRelation {
     pub fn begin_ordered_scan<'scan, I>(
         &'scan self,
         index_id: pg_sys::Oid,
-        snapshot: CatalogSnapshot<'_>,
+        snapshot: CatalogSnapshot<'scan>,
         keys: I,
     ) -> Result<CatalogOrderedScan<'scan>, PgError>
     where
@@ -311,13 +306,8 @@ impl CatalogRelation {
         let index_relation = unsafe {
             PgWrapper::index_open_raw(index_id, pg_sys::AccessShareLock as _)?
         };
-        let mut keys: Vec<pg_sys::ScanKeyData> =
-            keys.into_iter().map(|key| key.into_data()).collect();
-        let key_ptr = if keys.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            keys.as_mut_ptr()
-        };
+        let mut keys = Self::collect_scan_keys(keys);
+        let key_ptr = Self::scan_key_ptr(&mut keys);
         let scan = unsafe {
             PgWrapper::systable_beginscan_ordered_raw(
                 self.as_raw(),
@@ -342,6 +332,23 @@ impl CatalogRelation {
                 };
                 Err(error)
             }
+        }
+    }
+
+    #[inline]
+    fn collect_scan_keys<I>(keys: I) -> Vec<pg_sys::ScanKeyData>
+    where
+        I: IntoIterator<Item = CatalogScanKey>,
+    {
+        keys.into_iter().map(CatalogScanKey::into_data).collect()
+    }
+
+    #[inline]
+    fn scan_key_ptr(keys: &mut [pg_sys::ScanKeyData]) -> pg_sys::ScanKey {
+        if keys.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            keys.as_mut_ptr()
         }
     }
 }

@@ -16,7 +16,7 @@ while :; do
     if output=$(psql -XAtq -v ON_ERROR_STOP=1 \
         --set=store_id="$store_id" \
         --set=namespace="$namespace" 2>&1 <<'SQL'
-SELECT lakebase.object_tree_is_empty(
+SELECT iceberg.object_tree_is_empty(
     :'store_id', :'namespace', '__lakebase_regress_probe__'
 );
 SQL

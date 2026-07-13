@@ -587,11 +587,11 @@ pub(crate) unsafe extern "C-unwind" fn end_custom_scan_trampoline<
         );
         if let Err(err) = P::end(end_ctx) {
             // Log only — raising during End would skip framework teardown.
-            pgrx::log!(
+            crate::diag::report_warning(format_args!(
                 "customscan {:?} provider.end failed during teardown: {}",
                 P::NAME,
                 err,
-            );
+            ));
         }
         wrapper.provider_began = false;
     }

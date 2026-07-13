@@ -315,7 +315,7 @@ impl WalRmgrRegistry {
             if record_rmgr_id != rmgr_id {
                 diag::report_error(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    &format!(
+                    format_args!(
                         "WAL record manager ID {} reached trampoline for ID {}",
                         record_rmgr_id, rmgr_id
                     ),
@@ -329,7 +329,10 @@ impl WalRmgrRegistry {
             } else {
                 diag::report_error(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    &format!("No WAL resource manager registered for ID {}", rmgr_id),
+                    format_args!(
+                        "No WAL resource manager registered for ID {}",
+                        rmgr_id
+                    ),
                 );
             }
         }
@@ -462,7 +465,7 @@ pub fn register_wal_rmgr<const RMGR_ID: u8>(manager: Box<dyn WalResourceManager>
     if manager_rmgr_id != rmgr_id {
         diag::report_error(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            &format!(
+            format_args!(
                 "WAL resource manager '{}' declared ID {} but was registered for ID {}",
                 manager.name(),
                 manager_rmgr_id,
@@ -475,7 +478,7 @@ pub fn register_wal_rmgr<const RMGR_ID: u8>(manager: Box<dyn WalResourceManager>
     if registered_rmgr(rmgr_id).is_some() {
         diag::report_error(
             PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
-            &format!("WAL resource manager ID {} is already registered", rmgr_id),
+            format_args!("WAL resource manager ID {} is already registered", rmgr_id),
         );
         return;
     }
@@ -487,7 +490,7 @@ pub fn register_wal_rmgr<const RMGR_ID: u8>(manager: Box<dyn WalResourceManager>
     let Ok(registered) = RMGR_REGISTRY.register(registered) else {
         diag::report_error(
             PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
-            &format!("WAL resource manager ID {} is already registered", rmgr_id),
+            format_args!("WAL resource manager ID {} is already registered", rmgr_id),
         );
         return;
     };
@@ -499,7 +502,7 @@ pub fn register_wal_rmgr<const RMGR_ID: u8>(manager: Box<dyn WalResourceManager>
         );
     }
 
-    diag::log_debug1(&format!(
+    diag::log_debug1(format_args!(
         "Registered WAL resource manager '{}' with ID {}",
         name, rmgr_id
     ));

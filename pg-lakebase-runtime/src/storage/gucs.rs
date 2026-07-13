@@ -58,9 +58,6 @@ static CACHE_CLEANUP_BATCH_MB: GucSetting<i32> = GucSetting::<i32>::new(
     (DEFAULT_CACHE_CLEANUP_BATCH_BYTES / (1024 * 1024)) as i32,
 );
 
-static WORKER_DATABASE: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
-
 pub fn init() {
     GucRegistry::define_bool_guc(
         c"pg_lakebase.storage_server_enabled",
@@ -85,15 +82,6 @@ pub fn init() {
         c"Cache directory for pg-lakebase-storage",
         c"Absolute path to the local cache directory. Empty or unset means derive from DataDir.",
         &CACHE_DIR,
-        GucContext::Postmaster,
-        GucFlags::default(),
-    );
-
-    GucRegistry::define_string_guc(
-        c"pg_lakebase.storage_server_database",
-        c"Database for the storage background worker SPI connection",
-        c"The database the background worker connects to for catalog access. Defaults to 'postgres'.",
-        &WORKER_DATABASE,
         GucContext::Postmaster,
         GucFlags::default(),
     );
@@ -254,15 +242,6 @@ pub fn socket_path() -> Option<String> {
 
 pub fn cache_dir() -> Option<String> {
     CACHE_DIR.get().and_then(non_empty_lossy_string)
-}
-
-/// Database name for the storage background worker's SPI connection.
-/// Defaults to `"postgres"` when unset.
-pub fn worker_database() -> String {
-    WORKER_DATABASE
-        .get()
-        .and_then(non_empty_lossy_string)
-        .unwrap_or_else(|| "postgres".to_owned())
 }
 
 /// Convert a GUC `CString` into an owned `String`, returning `None` for

@@ -53,6 +53,7 @@ impl MaintenanceQueue {
         catalog.relation.catalog_insert(&tuple).map_err(|source| {
             MaintenanceError::catalog(MaintenanceCatalogOperation::Insert, source)
         })?;
+        notify_worker()?;
         Ok(row.id)
     }
 
@@ -82,6 +83,7 @@ impl MaintenanceQueue {
                 MaintenanceError::catalog(MaintenanceCatalogOperation::Insert, source)
             })?;
         }
+        notify_worker()?;
         Ok(items.len())
     }
 
@@ -202,6 +204,40 @@ impl MaintenanceRepository {
         Ok(QueuePoll::Ready(batch))
     }
 
+    pub(crate) fn next_pending_at()
+    -> Result<Option<pg_sys::TimestampTz>, MaintenanceError> {
+        let Some(catalog) =
+            MaintenanceQueueCatalog::open_if_available(pg_sys::AccessShareLock as _)?
+        else {
+            return Ok(None);
+        };
+        let mut scan = catalog
+            .relation
+            .begin_ordered_scan(
+                catalog.ids.ready_index,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::bool_eq(column::FAILED as _, false)],
+            )
+            .map_err(|source| {
+                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            })?;
+        let Some(tuple) = scan.get_next().map_err(|source| {
+            MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+        })?
+        else {
+            return Ok(None);
+        };
+        let timestamp = unsafe {
+            required_attr(
+                tuple.as_raw(),
+                catalog.relation.as_handle().tuple_desc(),
+                column::NOT_BEFORE,
+                "not_before",
+            )?
+        };
+        Ok(Some(timestamp))
+    }
+
     pub(crate) fn complete(item: &MaintenanceItem) -> Result<(), MaintenanceError> {
         let catalog =
             MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
@@ -273,6 +309,9 @@ impl MaintenanceRepository {
         else {
             return Ok(false);
         };
+        if updated {
+            notify_worker()?;
+        }
         Ok(updated)
     }
 
@@ -294,6 +333,21 @@ impl MaintenanceRepository {
         debug_assert!(updated);
         Ok(())
     }
+}
+
+fn notify_worker() -> Result<(), MaintenanceError> {
+    const NOTIFIER: crate::extension_worker::WorkerNotifier =
+        crate::extension_worker::WorkerNotifier::new(
+            crate::extension_worker::WorkerIdentity::new(
+                "pg_lakebase_runtime",
+                "maintenance",
+            ),
+        );
+    NOTIFIER.notify_after_commit().map_err(|error| {
+        MaintenanceError::InvalidRecord(format!(
+            "failed to notify maintenance worker: {error}"
+        ))
+    })
 }
 
 struct MaintenanceQueueCatalog {
@@ -567,7 +621,6 @@ impl QueueRow {
         Ok(MaintenanceItem {
             id: self.id,
             target,
-            producer: self.producer,
             attempt_count: self.attempt_count,
         })
     }

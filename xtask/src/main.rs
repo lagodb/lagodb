@@ -6,6 +6,8 @@ use std::process::{Command, ExitCode, Stdio};
 
 const EXTENSION_PACKAGE: &str = "pg-iceberg-am";
 const EXTENSION_NAME: &str = "pg_iceberg_am";
+const RUNTIME_PACKAGE: &str = "pg-lakebase-runtime";
+const RUNTIME_NAME: &str = "pg_lakebase_runtime";
 
 fn main() -> ExitCode {
     match run() {
@@ -100,6 +102,15 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     )?;
 
     println!("\n=== Phase 3: pg-iceberg-am Rust tests (host + pg_test) ===\n");
+    install_runtime(pg_version)?;
+    run_command(
+        Command::new("cargo")
+            .arg("pgrx")
+            .arg("test")
+            .arg(pg_version)
+            .arg("--package")
+            .arg(RUNTIME_PACKAGE),
+    )?;
     run_command(
         Command::new("cargo")
             .arg("pgrx")
@@ -154,6 +165,7 @@ fn pg_major(pg_version: &OsStr) -> Result<String, String> {
 // ============================================================================
 
 fn run_regress(pg_version: &OsStr) -> Result<(), String> {
+    install_runtime(pg_version)?;
     run_command(
         Command::new("cargo")
             .arg("pgrx")
@@ -163,7 +175,22 @@ fn run_regress(pg_version: &OsStr) -> Result<(), String> {
             .arg(EXTENSION_PACKAGE)
             .arg("--resetdb")
             .arg("--postgresql-conf")
-            .arg(format!("shared_preload_libraries='{EXTENSION_NAME}'")),
+            .arg(format!(
+                "shared_preload_libraries='{RUNTIME_NAME},{EXTENSION_NAME}'"
+            )),
+    )
+}
+
+fn install_runtime(pg_version: &OsStr) -> Result<(), String> {
+    let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
+    run_command(
+        Command::new("cargo")
+            .arg("pgrx")
+            .arg("install")
+            .arg("--package")
+            .arg(RUNTIME_PACKAGE)
+            .arg("--pg-config")
+            .arg(pg_config),
     )
 }
 
@@ -206,6 +233,15 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
             .arg("pgrx")
             .arg("install")
             .arg("--package")
+            .arg(RUNTIME_PACKAGE)
+            .arg("--pg-config")
+            .arg(&pg_config),
+    )?;
+    run_command(
+        Command::new("cargo")
+            .arg("pgrx")
+            .arg("install")
+            .arg("--package")
             .arg(EXTENSION_PACKAGE)
             .arg("--pg-config")
             .arg(&pg_config),
@@ -218,7 +254,7 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
     })?;
     fs::write(
         &temp_config,
-        format!("shared_preload_libraries = '{EXTENSION_NAME}'\n"),
+        format!("shared_preload_libraries = '{RUNTIME_NAME},{EXTENSION_NAME}'\n"),
     )
     .map_err(|error| format!("failed to write {}: {error}", temp_config.display()))?;
 
@@ -243,6 +279,7 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
         .arg(format!("--outputdir={}", output_dir.display()))
         .arg(format!("--temp-instance={}", temp_instance_dir.display()))
         .arg(format!("--temp-config={}", temp_config.display()))
+        .arg(format!("--load-extension={RUNTIME_NAME}"))
         .args(&specs);
 
     run_command(&mut command).map_err(|error| {

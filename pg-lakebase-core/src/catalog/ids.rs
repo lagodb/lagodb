@@ -1,7 +1,6 @@
 use crate::diag::PgError;
 use pgrx::pg_sys;
 use std::ffi::CStr;
-use std::sync::OnceLock;
 
 /// The schema name where lakebase objects are stored.
 pub const LAKEBASE_SCHEMA: &CStr = c"lakebase";
@@ -14,11 +13,6 @@ const MAINTENANCE_QUEUE_PKEY: &CStr = c"maintenance_queue_pkey";
 const MAINTENANCE_QUEUE_READY_INDEX: &CStr = c"maintenance_queue_ready_idx";
 const MAINTENANCE_QUEUE_TARGET_INDEX: &CStr = c"maintenance_queue_target_idx";
 
-static LAKEBASE_NAMESPACE_OID: OnceLock<pg_sys::Oid> = OnceLock::new();
-static TABLE_OPTIONS_OID: OnceLock<pg_sys::Oid> = OnceLock::new();
-static TABLE_OPTIONS_PKEY_OID: OnceLock<pg_sys::Oid> = OnceLock::new();
-static MAINTENANCE_CATALOG_IDS: OnceLock<MaintenanceCatalogIds> = OnceLock::new();
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MaintenanceCatalogIds {
     pub(crate) table: pg_sys::Oid,
@@ -28,51 +22,26 @@ pub(crate) struct MaintenanceCatalogIds {
 }
 
 pub fn get_lakebase_namespace_oid() -> Result<pg_sys::Oid, PgError> {
-    if let Some(&oid) = LAKEBASE_NAMESPACE_OID.get() {
-        return Ok(oid);
-    }
-
-    let oid = super::get_namespace_oid(LAKEBASE_SCHEMA, false)?;
-    let _ = LAKEBASE_NAMESPACE_OID.set(oid);
-
-    Ok(oid)
+    super::get_namespace_oid(LAKEBASE_SCHEMA, false)
 }
 
 pub fn get_table_options_oid() -> Result<pg_sys::Oid, PgError> {
-    if let Some(&oid) = TABLE_OPTIONS_OID.get() {
-        return Ok(oid);
-    }
-
     let schema_oid = get_lakebase_namespace_oid()?;
-    let oid = super::get_relation_oid(TABLE_OPTIONS_TABLE, schema_oid)?;
-
-    let _ = TABLE_OPTIONS_OID.set(oid);
-
-    Ok(oid)
+    super::get_relation_oid(TABLE_OPTIONS_TABLE, schema_oid)
 }
 
 pub fn get_table_options_pkey_oid() -> Result<pg_sys::Oid, PgError> {
-    if let Some(&oid) = TABLE_OPTIONS_PKEY_OID.get() {
-        return Ok(oid);
-    }
-
     let schema_oid = get_lakebase_namespace_oid()?;
-    let oid = super::get_relation_oid(TABLE_OPTIONS_PKEY, schema_oid)?;
-
-    let _ = TABLE_OPTIONS_PKEY_OID.set(oid);
-
-    Ok(oid)
+    super::get_relation_oid(TABLE_OPTIONS_PKEY, schema_oid)
 }
 
 /// Resolve the maintenance catalog only after its extension SQL is installed.
-/// Missing results are deliberately not cached so a preload worker can recover
-/// after `CREATE EXTENSION` in the configured database.
+/// Results are deliberately not cached so a long-lived backend can recover
+/// after `DROP EXTENSION pg_lakebase_runtime;
+/// CREATE EXTENSION pg_lakebase_runtime` installs replacement catalog objects
+/// with new OIDs.
 pub(crate) fn get_maintenance_catalog_ids()
 -> Result<Option<MaintenanceCatalogIds>, PgError> {
-    if let Some(ids) = MAINTENANCE_CATALOG_IDS.get() {
-        return Ok(Some(*ids));
-    }
-
     let schema = super::get_namespace_oid(LAKEBASE_SCHEMA, true)?;
     if schema == pg_sys::InvalidOid {
         return Ok(None);
@@ -96,6 +65,5 @@ pub(crate) fn get_maintenance_catalog_ids()
         ready_index,
         target_index,
     };
-    let _ = MAINTENANCE_CATALOG_IDS.set(ids);
     Ok(Some(ids))
 }

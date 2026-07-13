@@ -105,7 +105,7 @@ mod tests {
 
         let Some(nd_oid_raw) = nd_oid_raw else {
             // ICU unavailable: assert built-in determinism semantics only.
-            pgrx::log!(
+            pg_lakebase_core::diag::log_info(
                 "cap_pg_text_eq_non_deterministic_collation_is_unsupported: could not \
              create a non-deterministic collation (no ICU support or incompatible \
              encoding); asserting built-in determinism semantics only",

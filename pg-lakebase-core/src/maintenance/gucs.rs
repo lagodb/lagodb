@@ -1,6 +1,5 @@
 //! GUCs for the independent Lakebase maintenance worker.
 
-use std::ffi::CString;
 use std::time::Duration;
 
 use pg_lakebase_storage::protocol::{
@@ -12,10 +11,7 @@ use pg_lakebase_storage::{
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
 static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
-static DATABASE: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
-static ACTOR_THREADS: GucSetting<i32> = GucSetting::<i32>::new(4);
-static NAPTIME_MS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
+static ACTOR_THREADS: GucSetting<i32> = GucSetting::<i32>::new(1);
 static BATCH_ITEMS: GucSetting<i32> = GucSetting::<i32>::new(128);
 static RETRY_BASE_MS: GucSetting<i32> =
     GucSetting::<i32>::new(MIN_MAINTENANCE_RETRY_DELAY_MS);
@@ -48,14 +44,6 @@ pub(crate) fn init() {
         GucContext::Postmaster,
         GucFlags::default(),
     );
-    GucRegistry::define_string_guc(
-        c"pg_lakebase.maintenance_database",
-        c"Database containing the Lakebase maintenance queue",
-        c"Defaults to postgres when unset.",
-        &DATABASE,
-        GucContext::Postmaster,
-        GucFlags::default(),
-    );
     GucRegistry::define_int_guc(
         c"pg_lakebase.maintenance_actor_threads",
         c"Number of maintenance storage actors",
@@ -65,13 +53,6 @@ pub(crate) fn init() {
         64,
         GucContext::Postmaster,
         GucFlags::default(),
-    );
-    define_ms(
-        c"pg_lakebase.maintenance_naptime_ms",
-        c"Maintenance worker idle polling interval",
-        &NAPTIME_MS,
-        10,
-        3_600_000,
     );
     GucRegistry::define_int_guc(
         c"pg_lakebase.maintenance_batch_items",
@@ -144,18 +125,6 @@ fn define_ms(
 
 pub(crate) fn enabled() -> bool {
     ENABLED.get()
-}
-
-pub(crate) fn database() -> String {
-    DATABASE
-        .get()
-        .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "postgres".to_owned())
-}
-
-pub(crate) fn naptime() -> Duration {
-    Duration::from_millis(NAPTIME_MS.get() as u64)
 }
 
 pub(crate) fn actor_threads() -> usize {

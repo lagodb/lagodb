@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use pg_lakebase_core::worker::storage as storage_worker;
+use pg_lakebase_core::storage_service::StorageEndpoint;
 use pg_lakebase_storage::{StorageClient, StorageResult};
 
 pub(crate) struct ObjectTreeObserver {
@@ -9,10 +9,9 @@ pub(crate) struct ObjectTreeObserver {
 
 impl ObjectTreeObserver {
     pub(crate) fn connect(timeout: Duration) -> StorageResult<Self> {
-        let client = StorageClient::connect_with_timeout(
-            storage_worker::resolved_socket_path(),
-            timeout,
-        )?;
+        let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
+        let client =
+            StorageClient::connect_with_timeout(endpoint.socket_path(), timeout)?;
         Ok(Self { client })
     }
 

@@ -1,11 +1,13 @@
-//! PostgreSQL-facing supervisor for the bounded maintenance actor pool.
+//! Database-local, on-demand maintenance worker supervisor.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
+use pg_lakebase_storage::{StorageClient, StorageError};
+use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
 use super::actor::{ActorResult, ActorRuntimeConfig, MaintenanceActorPool};
@@ -13,106 +15,210 @@ use super::gucs;
 use super::item::{MaintenanceItem, MaintenanceItemId};
 use super::repository::{MaintenanceRepository, QueuePoll};
 use super::runner::MaintenanceExecutionOutcome;
-use crate::worker::storage;
+use crate::bgworker::BackendLatch;
+use crate::extension_worker::WorkerExit;
+use crate::storage_service::StorageEndpoint;
 
-/// Initialize GUCs and register the single designated maintenance process.
-pub fn init_worker_host(library_name: &str) {
+pub fn init_gucs() {
     gucs::init();
-    if !gucs::enabled() {
-        return;
-    }
-
-    let _keep =
-        pg_lakebase_maintenance_bgworker_main as extern "C-unwind" fn(pg_sys::Datum);
-    BackgroundWorkerBuilder::new("pg-lakebase-maintenance")
-        .set_type("pg-lakebase-maintenance")
-        .set_library(library_name)
-        .set_function("pg_lakebase_maintenance_bgworker_main")
-        .enable_spi_access()
-        .set_restart_time(Some(Duration::from_secs(5)))
-        .load();
 }
 
-#[pg_guard]
-#[unsafe(no_mangle)]
-pub extern "C-unwind" fn pg_lakebase_maintenance_bgworker_main(_arg: pg_sys::Datum) {
-    BackgroundWorker::attach_signal_handlers(
-        SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM,
-    );
-    MaintenanceWorkerSupervisor::from_gucs().run();
+/// Drain maintenance work in the worker's already-connected database.
+pub fn run_database_worker() -> WorkerExit {
+    if !gucs::enabled() {
+        return WorkerExit::Dormant;
+    }
+
+    match current_schedule() {
+        Schedule::Dormant => return WorkerExit::Dormant,
+        Schedule::RestartAfter(delay) => {
+            return WorkerExit::RestartAfter(delay);
+        }
+        Schedule::Ready => {}
+    }
+
+    let mut supervisor = match MaintenanceWorkerSupervisor::from_gucs() {
+        Ok(supervisor) => supervisor,
+        Err(error) => {
+            return error.worker_exit();
+        }
+    };
+    crate::diag::report_info("database-local maintenance worker started");
+    let directive = supervisor.run_until_idle();
+    supervisor.shutdown();
+    crate::diag::report_info("database-local maintenance worker stopped");
+    directive
+}
+
+enum Schedule {
+    Ready,
+    Dormant,
+    RestartAfter(Duration),
+}
+
+fn current_schedule() -> Schedule {
+    let poll = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        MaintenanceRepository::fetch_ready_batch(1, &HashSet::new())
+    }));
+    match poll {
+        Ok(QueuePoll::Ready(batch))
+            if !batch.tasks.is_empty() || !batch.invalid.is_empty() =>
+        {
+            Schedule::Ready
+        }
+        Ok(QueuePoll::Ready(_)) => next_schedule(),
+        Ok(QueuePoll::Unavailable) => Schedule::Dormant,
+        Err(error) => {
+            crate::diag::report_warning(format_args!(
+                "failed to inspect maintenance queue: {error}"
+            ));
+            Schedule::RestartAfter(Duration::from_secs(5))
+        }
+    }
+}
+
+fn next_schedule() -> Schedule {
+    let next = BackgroundWorker::transaction(AssertUnwindSafe(
+        MaintenanceRepository::next_pending_at,
+    ));
+    match next {
+        Ok(Some(timestamp)) => {
+            let now = unsafe { pg_sys::GetCurrentTimestamp() };
+            if timestamp <= now {
+                Schedule::Ready
+            } else {
+                let micros =
+                    u64::try_from(timestamp.saturating_sub(now)).unwrap_or(u64::MAX);
+                Schedule::RestartAfter(Duration::from_micros(micros))
+            }
+        }
+        Ok(None) => Schedule::Dormant,
+        Err(error) => {
+            crate::diag::report_warning(format_args!(
+                "failed to schedule maintenance queue: {error}"
+            ));
+            Schedule::RestartAfter(Duration::from_secs(5))
+        }
+    }
 }
 
 struct MaintenanceWorkerSupervisor {
     actors: MaintenanceActorPool,
     in_flight: HashMap<MaintenanceItemId, Arc<MaintenanceItem>>,
     pending_results: VecDeque<ActorResult>,
-    catalog_warning_emitted: bool,
     update_warning_emitted: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum MaintenanceWorkerStartupError {
+    #[error("failed to start maintenance actor pool: {0}")]
+    ActorPool(#[source] std::io::Error),
+
+    #[error("storage server is disabled")]
+    StorageDisabled,
+
+    #[error("failed to resolve storage endpoint: {0}")]
+    StorageConfig(#[source] StorageError),
+
+    #[error("storage server is unavailable at {}: {source}", socket_path.display())]
+    StorageUnavailable {
+        socket_path: PathBuf,
+        #[source]
+        source: StorageError,
+    },
+}
+
+impl MaintenanceWorkerStartupError {
+    fn worker_exit(&self) -> WorkerExit {
+        match self {
+            Self::StorageDisabled => {
+                crate::diag::report_warning(
+                    "database-local maintenance worker skipped: storage server is disabled",
+                );
+                WorkerExit::Dormant
+            }
+            Self::StorageConfig(_) | Self::StorageUnavailable { .. } => {
+                crate::diag::report_warning(format_args!(
+                    "database-local maintenance worker waiting for storage: {self}"
+                ));
+                WorkerExit::RestartAfter(Duration::from_secs(5))
+            }
+            Self::ActorPool(_) => {
+                crate::diag::report_warning(format_args!(
+                    "database-local maintenance worker startup failed: {self}"
+                ));
+                WorkerExit::RestartAfter(Duration::from_secs(5))
+            }
+        }
+    }
+}
+
 impl MaintenanceWorkerSupervisor {
-    fn from_gucs() -> Self {
+    fn from_gucs() -> Result<Self, MaintenanceWorkerStartupError> {
+        let endpoint = StorageEndpoint::from_pg_gucs()
+            .map_err(MaintenanceWorkerStartupError::StorageConfig)?;
+        if !endpoint.is_enabled() {
+            return Err(MaintenanceWorkerStartupError::StorageDisabled);
+        }
+
+        let runtime_config = actor_runtime_config();
+        StorageClient::connect_with_timeout(
+            endpoint.socket_path(),
+            runtime_config.request_timeout,
+        )
+        .map_err(|source| {
+            MaintenanceWorkerStartupError::StorageUnavailable {
+                socket_path: endpoint.socket_path().to_path_buf(),
+                source,
+            }
+        })?;
+
         let actors = MaintenanceActorPool::start(
             gucs::actor_threads(),
-            storage::resolved_socket_path(),
-            actor_runtime_config(),
+            endpoint.socket_path().to_path_buf(),
+            runtime_config,
         )
-        .unwrap_or_else(|error| {
-            crate::diag::report_warning(&format!(
-                "failed to start maintenance actor pool: {error}"
-            ));
-            exit_for_postmaster_restart()
-        });
-        Self {
+        .map_err(MaintenanceWorkerStartupError::ActorPool)?;
+        Ok(Self {
             actors,
             in_flight: HashMap::new(),
             pending_results: VecDeque::new(),
-            catalog_warning_emitted: false,
             update_warning_emitted: false,
-        }
+        })
     }
 
-    fn run(mut self) {
-        let database = gucs::database();
-        BackgroundWorker::connect_worker_to_spi(Some(&database), None);
-        crate::diag::report_info("maintenance background worker started");
-        let mut restart_after_shutdown = false;
-
+    fn run_until_idle(&mut self) -> WorkerExit {
         loop {
             self.collect_actor_results();
             let database_healthy = self.apply_pending_results();
 
             if self.actors.has_finished_actor() {
-                crate::diag::report_warning(
-                    "maintenance actor exited unexpectedly; restarting maintenance worker",
-                );
-                restart_after_shutdown = true;
-                break;
+                crate::diag::report_warning("maintenance actor exited unexpectedly");
+                return WorkerExit::RestartAfter(Duration::from_secs(5));
             }
 
             if database_healthy {
                 self.dispatch_ready_tasks();
             }
 
-            let should_continue =
-                BackgroundWorker::wait_latch(Some(self.wait_timeout()));
+            if self.in_flight.is_empty() && self.pending_results.is_empty() {
+                match next_schedule() {
+                    Schedule::Ready => continue,
+                    Schedule::Dormant => return WorkerExit::Dormant,
+                    Schedule::RestartAfter(delay) => {
+                        return WorkerExit::RestartAfter(delay);
+                    }
+                }
+            }
+
+            if !BackgroundWorker::wait_latch(Some(Duration::from_millis(50))) {
+                return WorkerExit::Dormant;
+            }
             if BackgroundWorker::sighup_received() {
                 unsafe { process_config_reload() };
                 self.actors.reload(actor_runtime_config());
             }
-            if !should_continue {
-                break;
-            }
         }
-
-        self.shutdown();
-        if restart_after_shutdown {
-            crate::diag::report_warning(
-                "maintenance background worker exiting with failure status for postmaster restart",
-            );
-            exit_for_postmaster_restart();
-        }
-        crate::diag::report_info("maintenance background worker stopped");
     }
 
     fn collect_actor_results(&mut self) {
@@ -124,14 +230,9 @@ impl MaintenanceWorkerSupervisor {
     fn apply_pending_results(&mut self) -> bool {
         while let Some(result) = self.pending_results.front() {
             let Some(item) = self.in_flight.get(&result.item_id) else {
-                crate::diag::report_warning(&format!(
-                    "maintenance actor returned unknown item {}",
-                    result.item_id
-                ));
                 self.pending_results.pop_front();
                 continue;
             };
-
             if matches!(&result.outcome, MaintenanceExecutionOutcome::Cancelled) {
                 let item_id = result.item_id;
                 self.pending_results.pop_front();
@@ -156,32 +257,19 @@ impl MaintenanceWorkerSupervisor {
                     MaintenanceExecutionOutcome::Cancelled => unreachable!(),
                 }
             }));
-
             if let Err(error) = update {
                 if !self.update_warning_emitted {
-                    crate::diag::report_warning(&format!(
+                    crate::diag::report_warning(format_args!(
                         "failed to persist maintenance result: {error}"
                     ));
                     self.update_warning_emitted = true;
                 }
                 return false;
             }
-
             self.update_warning_emitted = false;
-            let completed =
-                matches!(&result.outcome, MaintenanceExecutionOutcome::Complete);
             let item_id = result.item_id;
             self.pending_results.pop_front();
-            if let Some(item) = self.in_flight.remove(&item_id)
-                && completed
-            {
-                crate::diag::log_debug1(&format!(
-                    "maintenance item completed: item_id={} operation={:?} producer={}",
-                    item.id,
-                    item.target.operation(),
-                    item.producer,
-                ));
-            }
+            self.in_flight.remove(&item_id);
         }
         true
     }
@@ -195,37 +283,17 @@ impl MaintenanceWorkerSupervisor {
         let poll = BackgroundWorker::transaction(AssertUnwindSafe(|| {
             MaintenanceRepository::fetch_ready_batch(capacity, &in_flight)
         }));
-        let batch = match poll {
-            Ok(QueuePoll::Ready(batch)) => {
-                self.catalog_warning_emitted = false;
-                batch
-            }
-            Ok(QueuePoll::Unavailable) => {
-                if !self.catalog_warning_emitted {
-                    crate::diag::report_warning(
-                        "maintenance queue is not installed in the configured database",
-                    );
-                    self.catalog_warning_emitted = true;
-                }
-                return;
-            }
-            Err(error) => {
-                if !self.catalog_warning_emitted {
-                    crate::diag::report_warning(&format!(
-                        "maintenance queue unavailable: {error}"
-                    ));
-                    self.catalog_warning_emitted = true;
-                }
-                return;
-            }
+        let Ok(QueuePoll::Ready(batch)) = poll else {
+            return;
         };
 
         for invalid in batch.invalid {
-            let result = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                MaintenanceRepository::fail_invalid(invalid.id, &invalid.error)
-            }));
-            if let Err(error) = result {
-                crate::diag::report_warning(&format!(
+            if let Err(error) =
+                BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                    MaintenanceRepository::fail_invalid(invalid.id, &invalid.error)
+                }))
+            {
+                crate::diag::report_warning(format_args!(
                     "failed to quarantine invalid maintenance item {}: {error}",
                     invalid.id
                 ));
@@ -245,14 +313,6 @@ impl MaintenanceWorkerSupervisor {
         }
     }
 
-    fn wait_timeout(&self) -> Duration {
-        if self.in_flight.is_empty() && self.pending_results.is_empty() {
-            gucs::naptime()
-        } else {
-            Duration::from_millis(50)
-        }
-    }
-
     fn shutdown(&mut self) {
         self.actors.request_shutdown();
         let deadline = Instant::now() + gucs::shutdown_timeout();
@@ -260,7 +320,8 @@ impl MaintenanceWorkerSupervisor {
             self.collect_actor_results();
             let _ = self.apply_pending_results();
             self.actors.join_finished();
-            std::thread::sleep(Duration::from_millis(20));
+            BackendLatch::teardown_tick(Duration::from_millis(20))
+                .exit_on_postmaster_death();
         }
         self.collect_actor_results();
         let _ = self.apply_pending_results();
@@ -278,14 +339,6 @@ fn actor_runtime_config() -> ActorRuntimeConfig {
         page_size: gucs::batch_items(),
         request_timeout: gucs::request_timeout(),
     }
-}
-
-fn exit_for_postmaster_restart() -> ! {
-    // SAFETY: this is a PostgreSQL background worker process. A non-zero
-    // proc_exit status is the documented signal that the postmaster should use
-    // the registered bgw_restart_time instead of treating the worker as
-    // intentionally terminated.
-    unsafe { pg_sys::proc_exit(1) }
 }
 
 unsafe fn process_config_reload() {

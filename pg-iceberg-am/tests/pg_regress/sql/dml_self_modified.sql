@@ -59,7 +59,7 @@ $$;
 -- Force the first MERGE UPDATE action through the Arrow/Parquet flush path
 -- before the duplicate target identity raises an error. The failed statement
 -- must publish neither its appended data nor its position delete.
-SET pg_iceberg_am.mutation_buffer_flush_mb = 1;
+SET iceberg.mutation_buffer_flush_mb = 1;
 
 -- Run the complete matrix through the provider CustomScan target path.
 SET pg_lakebase.customscan_mode = 'force';
@@ -76,7 +76,7 @@ INSERT INTO dml_self_modified.force_target VALUES
     (4, 'ordinary_delete');
 
 SELECT metadata_location AS force_before_error
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'dml_self_modified.force_target'::regclass \gset
 
 \set VERBOSITY sqlstate
@@ -98,7 +98,7 @@ COPY (
 
 COPY (
     SELECT metadata_location = :'force_before_error'
-    FROM lakebase.iceberg_metadata
+    FROM iceberg.iceberg_metadata
     WHERE relid = 'dml_self_modified.force_target'::regclass
 ) TO STDOUT WITH (FORMAT csv);
 
@@ -118,7 +118,7 @@ COPY (
 
 COPY (
     SELECT metadata_location = :'force_before_error'
-    FROM lakebase.iceberg_metadata
+    FROM iceberg.iceberg_metadata
     WHERE relid = 'dml_self_modified.force_target'::regclass
 ) TO STDOUT WITH (FORMAT csv);
 
@@ -148,7 +148,7 @@ INSERT INTO dml_self_modified.force_target VALUES
     (10, 'different_nested_original');
 
 SELECT metadata_location AS force_before_trigger
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'dml_self_modified.force_target'::regclass \gset
 
 CREATE TRIGGER force_self_update
@@ -183,7 +183,7 @@ COPY (
 
 COPY (
     SELECT metadata_location = :'force_before_trigger'
-    FROM lakebase.iceberg_metadata
+    FROM iceberg.iceberg_metadata
     WHERE relid = 'dml_self_modified.force_target'::regclass
 ) TO STDOUT WITH (FORMAT csv);
 
@@ -261,7 +261,7 @@ INSERT INTO dml_self_modified.seqscan_target VALUES
     (4, 'ordinary_delete');
 
 SELECT metadata_location AS seqscan_before_error
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'dml_self_modified.seqscan_target'::regclass \gset
 
 \set VERBOSITY sqlstate
@@ -283,7 +283,7 @@ COPY (
 
 COPY (
     SELECT metadata_location = :'seqscan_before_error'
-    FROM lakebase.iceberg_metadata
+    FROM iceberg.iceberg_metadata
     WHERE relid = 'dml_self_modified.seqscan_target'::regclass
 ) TO STDOUT WITH (FORMAT csv);
 
@@ -303,7 +303,7 @@ COPY (
 
 COPY (
     SELECT metadata_location = :'seqscan_before_error'
-    FROM lakebase.iceberg_metadata
+    FROM iceberg.iceberg_metadata
     WHERE relid = 'dml_self_modified.seqscan_target'::regclass
 ) TO STDOUT WITH (FORMAT csv);
 
@@ -332,7 +332,7 @@ INSERT INTO dml_self_modified.seqscan_target VALUES
     (9, 'different_nested_original');
 
 SELECT metadata_location AS seqscan_before_trigger
-FROM lakebase.iceberg_metadata
+FROM iceberg.iceberg_metadata
 WHERE relid = 'dml_self_modified.seqscan_target'::regclass \gset
 
 CREATE TRIGGER seqscan_self_update
@@ -367,7 +367,7 @@ COPY (
 
 COPY (
     SELECT metadata_location = :'seqscan_before_trigger'
-    FROM lakebase.iceberg_metadata
+    FROM iceberg.iceberg_metadata
     WHERE relid = 'dml_self_modified.seqscan_target'::regclass
 ) TO STDOUT WITH (FORMAT csv);
 
@@ -383,7 +383,7 @@ COPY (
 ) TO STDOUT WITH (FORMAT csv);
 
 RESET pg_lakebase.customscan_mode;
-RESET pg_iceberg_am.mutation_buffer_flush_mb;
+RESET iceberg.mutation_buffer_flush_mb;
 
 SET client_min_messages = warning;
 DROP SCHEMA dml_self_modified CASCADE;

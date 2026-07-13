@@ -11,8 +11,8 @@ SELECT endpoint AS lakebase_regress_endpoint,
        secret_access_key AS lakebase_regress_secret_access_key
 FROM lakebase_regress.object_storage_fixture
 \gset
-\! mkdir -p /tmp/pg_iceberg_am_regress_object
-\! rm -rf /tmp/pg_iceberg_am_regress_object/*
+\! mkdir -p /tmp/iceberg_regress_object
+\! rm -rf /tmp/iceberg_regress_object/*
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
@@ -21,7 +21,7 @@ DROP TABLE IF EXISTS maintenance_remote_rollback;
 DROP TABLESPACE IF EXISTS regress_object;
 RESET client_min_messages;
 CREATE TABLESPACE regress_object
-LOCATION '/tmp/pg_iceberg_am_regress_object'
+LOCATION '/tmp/iceberg_regress_object'
 WITH (
     protocol = 's3',
     bucket = :'lakebase_regress_bucket',
@@ -39,7 +39,6 @@ CREATE TABLE maintenance_remote_drop (id integer)
 USING iceberg TABLESPACE regress_object;
 INSERT INTO maintenance_remote_drop
 SELECT generate_series(1, 1000);
-INSERT 0 1000
 SELECT 'regress_object' AS store_id,
        :'lakebase_regress_bucket' AS object_namespace,
        (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
@@ -50,7 +49,7 @@ SELECT 'regress_object' AS store_id,
 \setenv LAKEBASE_REGRESS_STORE_ID :store_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
-SELECT NOT lakebase.object_tree_is_empty(
+SELECT NOT iceberg.object_tree_is_empty(
     :'store_id', :'object_namespace', :'object_path'
 ) AS tree_exists_before_drop;
  tree_exists_before_drop 
@@ -61,7 +60,7 @@ SELECT NOT lakebase.object_tree_is_empty(
 DROP TABLE maintenance_remote_drop;
 \! bin/wait_for_maintenance_item 30
 maintenance_complete: true
-SELECT lakebase.object_tree_is_empty(
+SELECT iceberg.object_tree_is_empty(
     :'store_id', :'object_namespace', :'object_path'
 ) AS tree_empty_after_drop;
  tree_empty_after_drop 
@@ -76,17 +75,15 @@ FROM pg_class WHERE relname = 'maintenance_remote_drop';
              0
 (1 row)
 
-SELECT count(*) AS maintenance_worker_running
-FROM pg_stat_activity WHERE backend_type = 'pg-lakebase-maintenance';
- maintenance_worker_running 
-----------------------------
-                          1
-(1 row)
-
+SELECT state AS maintenance_worker_state
+FROM lakebase.worker_runtime_status
+WHERE extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
+\gset
+\echo maintenance_worker_state: :maintenance_worker_state
+maintenance_worker_state: dormant
 CREATE TABLE maintenance_remote_rollback (id integer)
 USING iceberg TABLESPACE regress_object;
 INSERT INTO maintenance_remote_rollback VALUES (1), (2);
-INSERT 0 2
 BEGIN;
 DROP TABLE maintenance_remote_rollback;
 ROLLBACK;
@@ -110,7 +107,7 @@ SELECT 'regress_object' AS store_id,
 DROP TABLE maintenance_remote_rollback;
 \! bin/wait_for_maintenance_item 30
 maintenance_complete: true
-SELECT lakebase.object_tree_is_empty(
+SELECT iceberg.object_tree_is_empty(
     :'store_id', :'object_namespace', :'object_path'
 ) AS rollback_tree_empty_after_cleanup;
  rollback_tree_empty_after_cleanup 
@@ -119,4 +116,4 @@ SELECT lakebase.object_tree_is_empty(
 (1 row)
 
 DROP TABLESPACE regress_object;
-\! rm -rf /tmp/pg_iceberg_am_regress_object/*
+\! rm -rf /tmp/iceberg_regress_object/*

@@ -93,23 +93,23 @@ free to the planner.
 
 ### Required server configuration
 
-`pg-iceberg-am` registers a custom WAL resource manager and a static
-`pg-lakebase-storage` background worker during `_PG_init`. Both must be loaded
-at postmaster start, so the extension **must be listed in
+`pg_lakebase_runtime` owns the shared worker runtime and cluster-wide storage server;
+`pg-iceberg-am` registers the Iceberg custom WAL resource manager. Both must be
+loaded at postmaster start, so both extensions **must be listed in
 `shared_preload_libraries`** in `postgresql.conf`:
 
 ```
-shared_preload_libraries = 'pg_iceberg_am'
+shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'
 ```
 
-`LOAD 'pg_iceberg_am'` and bare `CREATE EXTENSION pg_iceberg_am` after server
-start are not sufficient: the storage background worker is a static bgworker
-and the WAL resource manager registration only takes effect at postmaster
-startup.
+`LOAD` and bare `CREATE EXTENSION` after server start are not sufficient: the
+runtime launcher and storage server are static background workers, and the WAL
+resource manager registration only takes effect at postmaster startup.
 
 After updating `postgresql.conf`, restart PostgreSQL and then run
+`CREATE EXTENSION pg_lakebase_runtime;` followed by
 `CREATE EXTENSION pg_iceberg_am;` once per database that needs the access
-method.
+method. The Iceberg control file also declares the runtime dependency.
 
 > Note: `cargo pgrx run pg17` is convenient for ad-hoc development of pgrx
 > functions, but it does not configure `shared_preload_libraries`, so the

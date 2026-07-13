@@ -100,6 +100,7 @@ once that integration exists.
 
 | Crate | Purpose |
 |-------|---------|
+| [pg-lakebase-runtime](./pg-lakebase-runtime) | PostgreSQL runtime extension owning shared worker lifecycle, maintenance, and storage services. |
 | [pg-iceberg-am](./pg-iceberg-am) | PostgreSQL extension implementing the Iceberg table access method. |
 | [pg-lakebase-core](./pg-lakebase-core) | Framework crate for PostgreSQL TAM implementations and CustomScan predicate pushdown. |
 | [pg-arrow-conv](./pg-arrow-conv) | Format-neutral Arrow⇆PostgreSQL value conversion layer shared by Arrow-backed access methods. |
@@ -129,10 +130,10 @@ cargo pgrx init --pg17=download
 
 ## Build
 
-Build the Iceberg extension crate:
+Build the runtime and Iceberg extension crates:
 
 ```bash
-cargo build --package pg-iceberg-am
+cargo build --package pg-lakebase-runtime --package pg-iceberg-am
 ```
 
 ## Install and Run
@@ -142,16 +143,18 @@ target PostgreSQL 17 `pg_config`, whether it comes from pgrx-managed PostgreSQL
 or an existing PostgreSQL installation:
 
 ```bash
+cargo pgrx install --package pg-lakebase-runtime --pg-config /path/to/pg_config
 cargo pgrx install --package pg-iceberg-am --pg-config /path/to/pg_config
 ```
 
-Then start or restart PostgreSQL with `shared_preload_libraries='pg_iceberg_am'`.
+Then start or restart PostgreSQL with
+`shared_preload_libraries='pg_lakebase_runtime,pg_iceberg_am'`.
 For a pgrx-managed PostgreSQL 17:
 
 ```bash
 cargo pgrx start pg17 \
   --package pg-iceberg-am \
-  --postgresql-conf "shared_preload_libraries='pg_iceberg_am'"
+  --postgresql-conf "shared_preload_libraries='pg_lakebase_runtime,pg_iceberg_am'"
 
 cargo pgrx connect pg17 --package pg-iceberg-am
 ```
@@ -162,10 +165,16 @@ starting it again so `shared_preload_libraries` is applied.
 For an existing PostgreSQL 17, update `postgresql.conf`:
 
 ```conf
-shared_preload_libraries = 'pg_iceberg_am'
+shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'
 ```
 
-Then restart PostgreSQL and connect to the target database.
+Then restart PostgreSQL, connect to the target database, and create the runtime
+before the AM extension:
+
+```sql
+CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION pg_iceberg_am;
+```
 
 ## Testing
 

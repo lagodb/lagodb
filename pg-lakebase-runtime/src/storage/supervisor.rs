@@ -14,12 +14,14 @@ use pgrx::bgworkers::BackgroundWorker;
 use pgrx::pg_sys;
 use tokio_util::sync::CancellationToken;
 
+use pg_lakebase_core::bgworker::BackendLatch;
 use pg_lakebase_storage::{StorageRuntime, StorageRuntimeConfig, StoreRegistry};
 
 use super::catalog::{self, PgTablespaceStoreCatalog};
 use super::config::{StorageWorkerConfig, StorageWorkerRuntimeConfig};
 use super::logging::{self, PgLogBridge};
 use super::reconciler::{ReconcileReport, StoreCatalogReconciler};
+use super::state::StorageStatusStore;
 
 type ServerTask = tokio::task::JoinHandle<pg_lakebase_storage::StorageResult<()>>;
 type StorageReconciler = StoreCatalogReconciler<PgTablespaceStoreCatalog>;
@@ -61,8 +63,12 @@ impl StorageWorkerSupervisor {
     ///
     /// This method does not return until the bgworker is ready to exit.
     pub fn run(mut self) {
-        let db = super::gucs::worker_database();
-        BackgroundWorker::connect_worker_to_spi(Some(&db), None);
+        // PostgreSQL 17 cannot open pg_tablespace through the relcache without
+        // a selected database (it raises "cannot read pg_class"). Do not use
+        // template1: a persistent session there blocks CREATE DATABASE. The
+        // conventional postgres administration database is used solely to
+        // provide transaction/relcache state for the shared catalog scan.
+        BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
 
         let runtime = self.build_runtime();
         let registry = StoreRegistry::new();
@@ -73,13 +79,6 @@ impl StorageWorkerSupervisor {
         // reconcile so the first main-loop iteration does not redundantly
         // re-scan the catalog we just read.
         let _ = catalog::take_dirty();
-
-        // Remove leftover staging files from a previous crash or unclean
-        // shutdown. The staging directory is owned by the database side
-        // (not the storage server), so cleanup happens here before the
-        // server starts accepting requests. There are no active
-        // transactions at this point, so no staging file is in use.
-        Self::cleanup_staging_dir(&self.config.startup.cache_dir);
 
         let storage_runtime = self.storage_runtime_or_exit();
         let storage_runtime_control = storage_runtime.clone();
@@ -93,6 +92,7 @@ impl StorageWorkerSupervisor {
 
         let mut runtime_state =
             SupervisorRuntimeState::new(self.config.runtime.clone());
+        StorageStatusStore::new().mark_running();
         self.run_supervisor_loop(
             &runtime,
             &mut server_handle,
@@ -105,35 +105,6 @@ impl StorageWorkerSupervisor {
             &mut server_handle,
             runtime_state.config.shutdown_timeout,
         );
-    }
-
-    fn cleanup_staging_dir(cache_dir: &std::path::Path) {
-        let staging_dir =
-            pg_lakebase_storage::StagingPathResolver::new(cache_dir.to_path_buf())
-                .staging_dir();
-        if staging_dir.exists() {
-            match std::fs::remove_dir_all(&staging_dir) {
-                Ok(()) => {
-                    logging::emit_pg_log(
-                        pg_sys::INFO as i32,
-                        &format!(
-                            "cleaned up staging directory: {}",
-                            staging_dir.display()
-                        ),
-                    );
-                }
-                Err(e) => {
-                    logging::emit_pg_log(
-                        pg_sys::WARNING as i32,
-                        &format!(
-                            "failed to clean staging directory {}: {}",
-                            staging_dir.display(),
-                            e
-                        ),
-                    );
-                }
-            }
-        }
     }
 
     fn build_runtime(&self) -> tokio::runtime::Runtime {
@@ -149,13 +120,16 @@ impl StorageWorkerSupervisor {
     }
 
     fn initial_reconcile_or_exit(&mut self, reconciler: &mut StorageReconciler) {
-        if let Err(error) = run_reconcile(reconciler, "startup") {
-            logging::emit_pg_log(
-                pg_sys::PGERROR as i32,
-                &format!("storage worker startup reconcile failed: {error}"),
-            );
-            self.log_bridge.drain_to_pg_log();
-            unsafe { pg_sys::proc_exit(1) };
+        match run_reconcile(reconciler, "startup") {
+            Ok(report) => StorageStatusStore::new().mark_reconcile(&report),
+            Err(error) => {
+                let message =
+                    format!("storage worker startup reconcile failed: {error}");
+                StorageStatusStore::new().mark_failed(&message);
+                logging::emit_pg_log(pg_sys::PGERROR as i32, &message);
+                self.log_bridge.drain_to_pg_log();
+                unsafe { pg_sys::proc_exit(1) };
+            }
         }
     }
 
@@ -163,12 +137,11 @@ impl StorageWorkerSupervisor {
         match StorageRuntime::new(self.config.runtime.storage.clone()) {
             Ok(rt) => rt,
             Err(error) => {
-                logging::emit_pg_log(
-                    pg_sys::WARNING as i32,
-                    &format!(
-                        "storage runtime config invalid, worker cannot start: {error}",
-                    ),
+                let message = format!(
+                    "storage runtime config invalid, worker cannot start: {error}",
                 );
+                StorageStatusStore::new().mark_failed(&message);
+                logging::emit_pg_log(pg_sys::WARNING as i32, &message);
                 self.log_bridge.drain_to_pg_log();
                 unsafe { pg_sys::proc_exit(1) };
             }
@@ -223,14 +196,19 @@ impl StorageWorkerSupervisor {
             if catalog::take_dirty()
                 || runtime_state.periodic_reconcile_due(Instant::now())
             {
-                if let Err(error) = run_reconcile(reconciler, "runtime") {
-                    // Runtime reconcile failures are non-fatal: we keep the
-                    // last good registry state and try again the next time
-                    // the syscache fires or the periodic timer expires.
-                    logging::emit_pg_log(
-                        pg_sys::WARNING as i32,
-                        &format!("storage worker reconcile failed: {error}"),
-                    );
+                match run_reconcile(reconciler, "runtime") {
+                    Ok(report) => {
+                        StorageStatusStore::new().mark_reconcile(&report);
+                    }
+                    Err(error) => {
+                        // Runtime reconcile failures are non-fatal: we keep the
+                        // last good registry state and try again the next time
+                        // the syscache fires or the periodic timer expires.
+                        let message =
+                            format!("storage worker reconcile failed: {error}");
+                        StorageStatusStore::new().record_error(&message);
+                        logging::emit_pg_log(pg_sys::WARNING as i32, &message);
+                    }
                 }
 
                 runtime_state.schedule_next_reconcile(Instant::now());
@@ -249,6 +227,7 @@ impl StorageWorkerSupervisor {
                     pg_sys::INFO as i32,
                     "storage background worker shutdown requested",
                 );
+                StorageStatusStore::new().mark_stopping();
                 self.shutdown.cancel();
                 break;
             }
@@ -269,16 +248,20 @@ impl StorageWorkerSupervisor {
 
         match runtime.block_on(handle) {
             Ok(Ok(())) => {
+                StorageStatusStore::new()
+                    .mark_failed("storage server exited unexpectedly");
                 logging::emit_pg_log(pg_sys::INFO as i32, "storage server exited")
             }
-            Ok(Err(e)) => logging::emit_pg_log(
-                pg_sys::PGERROR as i32,
-                &format!("storage server failed: {e}"),
-            ),
-            Err(e) => logging::emit_pg_log(
-                pg_sys::PGERROR as i32,
-                &format!("storage server task panicked: {e}"),
-            ),
+            Ok(Err(e)) => {
+                let message = format!("storage server failed: {e}");
+                StorageStatusStore::new().mark_failed(&message);
+                logging::emit_pg_log(pg_sys::PGERROR as i32, &message);
+            }
+            Err(e) => {
+                let message = format!("storage server task panicked: {e}");
+                StorageStatusStore::new().mark_failed(&message);
+                logging::emit_pg_log(pg_sys::PGERROR as i32, &message);
+            }
         }
 
         self.log_bridge.drain_to_pg_log();
@@ -303,6 +286,7 @@ impl StorageWorkerSupervisor {
             pg_sys::INFO as i32,
             "storage background worker stopped",
         );
+        StorageStatusStore::new().mark_stopped();
     }
 
     fn wait_for_server_shutdown(
@@ -323,24 +307,37 @@ impl StorageWorkerSupervisor {
                     ),
                     Ok(Err(e)) => logging::emit_pg_log(
                         pg_sys::PGERROR as i32,
-                        &format!("storage server failed during shutdown: {e}"),
+                        &record_storage_error(format_args!(
+                            "storage server failed during shutdown: {e}"
+                        )),
                     ),
                     Err(e) => logging::emit_pg_log(
                         pg_sys::PGERROR as i32,
-                        &format!("storage server task panicked during shutdown: {e}"),
+                        &record_storage_error(format_args!(
+                            "storage server task panicked during shutdown: {e}"
+                        )),
                     ),
                 }
                 return;
             }
 
-            std::thread::sleep(Duration::from_millis(50));
+            BackendLatch::teardown_tick(Duration::from_millis(50))
+                .exit_on_postmaster_death();
         }
 
         logging::emit_pg_log(
             pg_sys::WARNING as i32,
-            "storage server did not stop before shutdown timeout; forcing runtime shutdown",
+            &record_storage_error(format_args!(
+                "storage server did not stop before shutdown timeout; forcing runtime shutdown"
+            )),
         );
     }
+}
+
+fn record_storage_error(args: std::fmt::Arguments<'_>) -> String {
+    let message = args.to_string();
+    StorageStatusStore::new().record_error(&message);
+    message
 }
 
 struct SupervisorRuntimeState {

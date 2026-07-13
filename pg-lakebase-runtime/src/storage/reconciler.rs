@@ -262,7 +262,7 @@ where
         // deletes them manually. Adding a cleanup hook here would close that
         // loop, but it is intentionally deferred — see "Distributed
         // tablespace reconciliation" / "Failure modes" in
-        // pg-lakebase-core/src/worker/storage/README.md.
+        // pg-lakebase-runtime/src/storage/README.md.
         for id in &to_unregister {
             self.registry.unregister(id);
         }

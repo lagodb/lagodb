@@ -186,7 +186,7 @@ pub fn log_delete_files(paths: &[String]) -> Option<XLogRecPtr> {
             continue;
         }
         let Ok(path_len) = u32::try_from(path.len()) else {
-            diag::report_warning(&format!(
+            diag::report_warning(format_args!(
                 "skipping DELETE_FILES WAL for path longer than u32: {} bytes",
                 path.len()
             ));
@@ -194,7 +194,7 @@ pub fn log_delete_files(paths: &[String]) -> Option<XLogRecPtr> {
         };
         let encoded_len = std::mem::size_of::<u32>() + path.len();
         if encoded_len > MAX_DELETE_FILES_PAYLOAD_BYTES {
-            diag::report_warning(&format!(
+            diag::report_warning(format_args!(
                 "skipping DELETE_FILES WAL for path exceeding bounded payload: {} bytes",
                 path.len()
             ));
