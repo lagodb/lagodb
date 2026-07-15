@@ -9,7 +9,7 @@ use crate::registry;
 use pg_lakebase_core::extension_worker::{WorkerContext, WorkerExit};
 
 use super::CRASH_BACKOFF;
-use super::bgworker::{SlotToken, install_terminating_sigterm_handler};
+use super::bgworker::{WorkerToken, install_terminating_sigterm_handler};
 use super::store::{RuntimeStore, WorkerStart};
 
 pub(super) struct ExtensionWorker;
@@ -20,7 +20,9 @@ impl ExtensionWorker {
             SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM,
         );
         install_terminating_sigterm_handler();
-        let token = SlotToken::from_datum(arg);
+        let token = WorkerToken::from_datum(arg);
+        // SAFETY: worker_exit_callback has PostgreSQL's before_shmem_exit ABI,
+        // and arg is the scalar worker token supplied to this process.
         unsafe { pg_sys::before_shmem_exit(Some(worker_exit_callback), arg) };
 
         let store = RuntimeStore::new();
@@ -32,7 +34,7 @@ impl ExtensionWorker {
 
     fn run_worker_entrypoint(
         store: &RuntimeStore,
-        token: SlotToken,
+        token: WorkerToken,
         start: WorkerStart,
     ) {
         let database_oid = start.database_oid;
@@ -63,7 +65,9 @@ impl ExtensionWorker {
             Spi::run("SELECT set_config('search_path', '', false)").map_err(
                 |source| LakebaseError::WorkerEntrypointPreparation { source },
             )?;
-            // SAFETY: fmgr_info_cxt initialized every FmgrInfo field.
+            // SAFETY: get_database_name returns either null or a palloc'd,
+            // NUL-terminated name valid in the current transaction context. The
+            // pointer is read immediately and copied into an owned String.
             let database_name = unsafe {
                 let name = pg_sys::get_database_name(pg_sys::Oid::from(database_oid));
                 if name.is_null() {
@@ -72,8 +76,11 @@ impl ExtensionWorker {
                     CStr::from_ptr(name).to_string_lossy().into_owned()
                 }
             };
+            // SAFETY: returning normally from fmgr_info_cxt above means it
+            // initialized every field of FmgrInfo.
+            let function = unsafe { function.assume_init() };
             Ok(Some((
-                unsafe { function.assume_init() },
+                function,
                 registration.extension_oid.to_u32(),
                 registration.worker_name,
                 database_name,
@@ -118,6 +125,9 @@ impl ExtensionWorker {
                 pg_sys::Datum::from((&raw const worker_context) as usize),
             )
         };
+        // SAFETY: the registered entry point was revalidated as returning
+        // bigint, so result is a valid i64 Datum. FunctionCall1Coll cannot
+        // represent a SQL NULL result, hence is_null is false.
         let code = unsafe { i64::from_datum(result, false) }.unwrap_or(0);
         let directive = WorkerExit::decode(code).unwrap_or_else(|error| {
             crate::diag::warning(format_args!(
@@ -132,7 +142,7 @@ impl ExtensionWorker {
 
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn worker_exit_callback(code: i32, arg: pg_sys::Datum) {
-    let token = SlotToken::from_datum(arg);
+    let token = WorkerToken::from_datum(arg);
     let store = RuntimeStore::new();
     if store.worker_exit(token, code) {
         store.signal_launcher();

@@ -4,34 +4,30 @@ use std::time::Duration;
 use pgrx::bgworkers::{BackgroundWorkerBuilder, BackgroundWorkerStatus};
 use pgrx::prelude::*;
 
-use crate::state::MAX_DATABASES;
-
 use super::LIBRARY_NAME;
 
+const _: () = assert!(usize::BITS >= 64, "worker tokens require a 64-bit Datum");
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct SlotToken {
+struct PackedSlotToken {
     index: usize,
     generation: u32,
 }
 
-impl SlotToken {
-    pub(super) const fn new(index: usize, generation: u32) -> Self {
+impl PackedSlotToken {
+    const fn new(index: usize, generation: u32) -> Self {
         Self { index, generation }
     }
 
-    pub(super) const fn index(self) -> usize {
+    const fn index(self) -> usize {
         self.index
     }
 
-    pub(super) const fn generation(self) -> u32 {
+    const fn generation(self) -> u32 {
         self.generation
     }
 
-    pub(super) const fn has_database_index(self) -> bool {
-        self.index < MAX_DATABASES
-    }
-
-    pub(super) fn from_datum(argument: pg_sys::Datum) -> Self {
+    fn from_datum(argument: pg_sys::Datum) -> Self {
         Self::unpack(argument.value())
     }
 
@@ -48,6 +44,56 @@ impl SlotToken {
             index: argument as u32 as usize,
             generation: (argument as u64 >> 32) as u32,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReconcilerToken(PackedSlotToken);
+
+impl ReconcilerToken {
+    pub(super) const fn new(index: usize, generation: u32) -> Self {
+        Self(PackedSlotToken::new(index, generation))
+    }
+
+    pub(super) const fn index(self) -> usize {
+        self.0.index()
+    }
+
+    pub(super) const fn generation(self) -> u32 {
+        self.0.generation()
+    }
+
+    pub(super) fn from_datum(argument: pg_sys::Datum) -> Self {
+        Self(PackedSlotToken::from_datum(argument))
+    }
+
+    fn into_datum(self) -> pg_sys::Datum {
+        self.0.into_datum()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WorkerToken(PackedSlotToken);
+
+impl WorkerToken {
+    pub(super) const fn new(index: usize, generation: u32) -> Self {
+        Self(PackedSlotToken::new(index, generation))
+    }
+
+    pub(super) const fn index(self) -> usize {
+        self.0.index()
+    }
+
+    pub(super) const fn generation(self) -> u32 {
+        self.0.generation()
+    }
+
+    pub(super) fn from_datum(argument: pg_sys::Datum) -> Self {
+        Self(PackedSlotToken::from_datum(argument))
+    }
+
+    fn into_datum(self) -> pg_sys::Datum {
+        self.0.into_datum()
     }
 }
 
@@ -73,16 +119,32 @@ impl fmt::Display for DynamicWorkerStartError {
 pub(super) struct DynamicWorkerSpawner;
 
 impl DynamicWorkerSpawner {
-    pub(super) fn start(
+    pub(super) fn start_reconciler(
         function: &str,
         name: &str,
-        token: SlotToken,
+        token: ReconcilerToken,
+    ) -> Result<(), DynamicWorkerStartError> {
+        Self::start(function, name, token.into_datum())
+    }
+
+    pub(super) fn start_worker(
+        function: &str,
+        name: &str,
+        token: WorkerToken,
+    ) -> Result<(), DynamicWorkerStartError> {
+        Self::start(function, name, token.into_datum())
+    }
+
+    fn start(
+        function: &str,
+        name: &str,
+        argument: pg_sys::Datum,
     ) -> Result<(), DynamicWorkerStartError> {
         let worker = BackgroundWorkerBuilder::new(name)
             .set_type(name)
             .set_library(LIBRARY_NAME)
             .set_function(function)
-            .set_argument(Some(token.into_datum()))
+            .set_argument(Some(argument))
             .set_notify_pid(unsafe { pg_sys::MyProcPid })
             .enable_spi_access()
             .set_restart_time(None)

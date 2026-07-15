@@ -1,8 +1,6 @@
 use std::fmt;
 
-use pg_lakebase_core::diag::{
-    PgError, PgReportError, SqlStateError, domain_error_report,
-};
+use pg_lakebase_core::diag::{PgError, PgReportError, SqlStateError};
 use pg_lakebase_core::extension_worker::WorkerContextError;
 use pg_lakebase_core::maintenance::MaintenanceError;
 use pgrx::pg_sys::panic::ErrorReport;
@@ -56,20 +54,22 @@ pub(crate) enum LakebaseError {
     #[error("pg_lakebase.max_worker_registrations is exhausted")]
     MaxWorkerRegistrationsExhausted,
 
-    #[error("Lakebase database runtime state is exhausted")]
-    DatabaseRuntimeStateExhausted,
-
     #[error("Lakebase worker registration state is exhausted")]
     WorkerRegistrationStateExhausted,
+
+    #[error(
+        "an existing Lakebase worker must be stopped before its registration can be replaced"
+    )]
+    WorkerReplacementNotQuiescent,
+
+    #[error("cannot PREPARE a transaction with pending Lakebase runtime actions")]
+    PreparedTransactionWithRuntimeActions,
 
     #[error("timed out waiting for Lakebase workers to stop")]
     StopDatabaseTimeout,
 
     #[error("timed out waiting for extension workers to stop")]
     StopExtensionTimeout,
-
-    #[error("timed out waiting for Lakebase reconciler to stop")]
-    StopReconcilerTimeout,
 
     #[error("timed out waiting for Lakebase worker to stop")]
     StopWorkerTimeout,
@@ -98,7 +98,9 @@ pub(crate) enum LakebaseError {
     #[error("worker entry point does not exist")]
     EntryPointMissing,
 
-    #[error("worker entry point must have signature (internal) RETURNS bigint")]
+    #[error(
+        "worker entry point must be a non-set-returning function with signature (internal) RETURNS bigint"
+    )]
     InvalidEntryPointSignature,
 
     #[error("worker entry point schema does not exist")]
@@ -126,19 +128,30 @@ pub(crate) enum LakebaseError {
         source: pgrx::spi::Error,
     },
 
+    #[error("failed to inspect pg_lakebase_runtime dependencies: {source}")]
+    RuntimeDependencyInspection {
+        #[source]
+        source: PgError,
+    },
+
+    #[error("pg_lakebase_runtime dependency catalog objects are missing")]
+    RuntimeDependencyCatalogMissing,
+
+    #[error(
+        "cannot drop pg_lakebase_runtime while dependent extension \"{extension_name}\" is installed"
+    )]
+    RuntimeHasDependentExtension { extension_name: String },
+
     #[error("failed to inspect maintenance queue before DROP EXTENSION: {source}")]
     MaintenanceQueueInspection {
         #[source]
-        source: pgrx::spi::Error,
+        source: MaintenanceError,
     },
 
-    #[error("maintenance queue count returned no row before DROP EXTENSION")]
-    MaintenanceQueueCountMissing,
-
     #[error(
-        "cannot drop pg_lakebase_runtime while {pending} maintenance items are pending"
+        "cannot drop pg_lakebase_runtime while the maintenance queue contains unresolved work"
     )]
-    MaintenanceQueueNotEmpty { pending: i64 },
+    MaintenanceQueueNotEmpty,
 
     #[error("Lakebase worker context error: {source}")]
     WorkerContext {
@@ -154,8 +167,41 @@ pub(crate) enum LakebaseError {
 }
 
 impl LakebaseError {
+    fn into_report(self) -> PgReportError {
+        let sql_error_code = self.sql_error_code();
+        match self {
+            error @ Self::RuntimeHasDependentExtension { .. } => {
+                PgReportError::from_parts(
+                    sql_error_code,
+                    error.to_string(),
+                    Some(
+                        "PostgreSQL has not removed any extension when this pre-drop check runs, so a dependent extension listed in the same DROP EXTENSION statement is still installed."
+                            .to_owned(),
+                    ),
+                    Some(
+                        "Drop the dependent extension in a separate DROP EXTENSION statement and commit it first (use CASCADE only if you intend to drop its dependent objects). Wait for lakebase.maintenance_status to contain no rows, then drop pg_lakebase_runtime."
+                            .to_owned(),
+                    ),
+                )
+            }
+            error @ Self::MaintenanceQueueNotEmpty => PgReportError::from_parts(
+                sql_error_code,
+                error.to_string(),
+                Some(
+                    "Ready, retry-wait, and failed queue rows are unresolved external cleanup obligations. Dropping the runtime would remove the durable queue and its worker before those obligations are resolved."
+                        .to_owned(),
+                ),
+                Some(
+                    "Inspect lakebase.maintenance_status. Let ready or retry-wait items finish. For failed items, repair the underlying cause and call lakebase.retry_maintenance_item(item_id). Manually delete a row only if you accept that its external objects may remain."
+                        .to_owned(),
+                ),
+            ),
+            error => PgReportError::from_domain_error(error),
+        }
+    }
+
     pub(crate) fn report(self) -> ! {
-        PgReportError::from_domain_error(self).report()
+        self.into_report().report()
     }
 }
 
@@ -165,6 +211,7 @@ impl SqlStateError for LakebaseError {
             Self::RuntimeNotPreloaded
             | Self::WorkerRegistrationRequiresExtensionScript
             | Self::WorkerDeregistrationRequiresExtensionScript
+            | Self::WorkerReplacementNotQuiescent
             | Self::EntryPointNotOwnedByExtension
             | Self::RegisteringExtensionMissing => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
@@ -172,17 +219,22 @@ impl SqlStateError for LakebaseError {
 
             Self::SharedMemoryLayoutMismatch
             | Self::RuntimeStateTransition { .. }
-            | Self::WorkerContext { .. } => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            | Self::WorkerContext { .. }
+            | Self::RuntimeDependencyCatalogMissing => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
 
             Self::MaxWorkerRegistrationsExhausted
-            | Self::DatabaseRuntimeStateExhausted
             | Self::WorkerRegistrationStateExhausted => {
                 PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
             }
 
+            Self::PreparedTransactionWithRuntimeActions => {
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+            }
+
             Self::StopDatabaseTimeout
             | Self::StopExtensionTimeout
-            | Self::StopReconcilerTimeout
             | Self::StopWorkerTimeout => PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
 
             Self::WorkerRegistrationRequiresSuperuser
@@ -204,31 +256,30 @@ impl SqlStateError for LakebaseError {
                 PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
             }
 
-            Self::MaintenanceQueueCountMissing => {
-                PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
-            }
-
             Self::WorkersTableMissing => PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
 
-            Self::WorkerCatalog { source, .. } => source.sql_error_code(),
+            Self::WorkerCatalog { source, .. }
+            | Self::RuntimeDependencyInspection { source } => source.sql_error_code(),
 
-            Self::WorkerEntrypointPreparation { .. }
-            | Self::MaintenanceQueueInspection { .. } => {
+            Self::WorkerEntrypointPreparation { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
 
-            Self::MaintenanceQueueNotEmpty { .. } => {
-                PgSqlErrorCode::ERRCODE_OBJECT_IN_USE
+            Self::RuntimeHasDependentExtension { .. } => {
+                PgSqlErrorCode::ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST
             }
 
-            Self::RetryMaintenanceItem { source } => source.sql_error_code(),
+            Self::MaintenanceQueueNotEmpty => PgSqlErrorCode::ERRCODE_OBJECT_IN_USE,
+
+            Self::MaintenanceQueueInspection { source }
+            | Self::RetryMaintenanceItem { source } => source.sql_error_code(),
         }
     }
 }
 
 impl From<LakebaseError> for ErrorReport {
     fn from(value: LakebaseError) -> Self {
-        domain_error_report(value)
+        value.into_report().into_report()
     }
 }
 

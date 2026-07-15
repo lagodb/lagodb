@@ -126,6 +126,18 @@ impl<I: CacheIndex> CacheManager<I> {
     }
 
     /// Placeholder for future per-store cache eviction; today it validates the API shape and leaves cache data intact.
+    ///
+    /// TODO(per-store cache lifecycle): implement this as a coordinated cache
+    /// state transition, not as `remove_dir_all(objects/<store_id>)`. A complete
+    /// purge must remove matching metadata, LRU/accounting state, embedded
+    /// small-object payloads, complete files, partial files, and process-local
+    /// object/fill state and serialize with their active leases. The caller's
+    /// store-lifecycle coordinator must fence and quiesce the registry
+    /// generation before invoking the purge so a retired `RegisteredStore`
+    /// cannot admit data afterward; otherwise replacing a backend under the
+    /// same `(store_id, bucket, key)` can expose stale cached bytes. Staging
+    /// files are transaction-owned and follow the separate postmaster-startup
+    /// cleanup policy.
     pub async fn purge_store_cache(
         &self,
         _store_id: &StoreId,

@@ -22,9 +22,9 @@ impl WorkerActionKey {
 
 #[derive(Clone, Debug)]
 enum PendingActionKind {
-    ReserveRegistration(WorkerActionKey),
+    ReserveRegistration(runtime::RegistrationReservation),
     Wake(WorkerActionKey),
-    DirtyDatabase,
+    ReconcileDatabase,
     DropDatabase,
     RescanAll,
 }
@@ -54,13 +54,11 @@ pub(crate) fn reserve_registration(
     worker_name: &str,
 ) -> LakebaseResult<()> {
     let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
-    runtime::reserve_registration(database_oid, extension_oid, worker_name)?;
+    let reservation =
+        runtime::reserve_registration(database_oid, extension_oid, worker_name)?;
     push(
         database_oid,
-        PendingActionKind::ReserveRegistration(WorkerActionKey::new(
-            extension_oid,
-            worker_name,
-        )),
+        PendingActionKind::ReserveRegistration(reservation),
     );
     Ok(())
 }
@@ -75,7 +73,7 @@ pub(crate) fn request_wakeup(extension_oid: u32, worker_name: &str) {
 
 pub(crate) fn request_database_reconcile() {
     let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
-    push(database_oid, PendingActionKind::DirtyDatabase);
+    push(database_oid, PendingActionKind::ReconcileDatabase);
 }
 
 pub(crate) fn request_database_drop(database_oid: u32) {
@@ -133,27 +131,30 @@ impl PendingActions {
         needs_signal
     }
 
-    fn abort_subtransaction(&mut self, level: i32) {
+    fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+
+    fn abort_subtransaction(&mut self, level: i32) -> bool {
         let aborted: Vec<_> = self
             .actions
             .extract_if(.., |action| action.nest_level >= level)
             .collect();
         let parent_level = level.saturating_sub(1);
+        let mut needs_signal = false;
         for action in aborted {
             match action.kind {
-                PendingActionKind::ReserveRegistration(worker) => {
-                    runtime::finish_registration(
-                        action.database_oid,
-                        worker.extension_oid,
-                        &worker.worker_name,
-                        false,
+                PendingActionKind::ReserveRegistration(reservation) => {
+                    needs_signal |= runtime::finish_registration(
+                        reservation,
+                        runtime::RegistrationCompletion::Abort,
                     );
                 }
-                PendingActionKind::DirtyDatabase => {
+                PendingActionKind::ReconcileDatabase => {
                     self.record(
                         action.database_oid,
                         parent_level,
-                        PendingActionKind::DirtyDatabase,
+                        PendingActionKind::ReconcileDatabase,
                     );
                 }
                 PendingActionKind::RescanAll => {
@@ -167,13 +168,14 @@ impl PendingActions {
                     self.record(
                         action.database_oid,
                         parent_level,
-                        PendingActionKind::DirtyDatabase,
+                        PendingActionKind::ReconcileDatabase,
                     );
                     self.record(0, parent_level, PendingActionKind::RescanAll);
                 }
                 PendingActionKind::Wake(_) => {}
             }
         }
+        needs_signal
     }
 
     fn commit_subtransaction(&mut self, level: i32) {
@@ -191,12 +193,14 @@ impl PendingActions {
 impl PendingAction {
     fn apply(self, committed: bool) -> bool {
         match self.kind {
-            PendingActionKind::ReserveRegistration(worker) => {
+            PendingActionKind::ReserveRegistration(reservation) => {
                 runtime::finish_registration(
-                    self.database_oid,
-                    worker.extension_oid,
-                    &worker.worker_name,
-                    committed,
+                    reservation,
+                    if committed {
+                        runtime::RegistrationCompletion::Commit
+                    } else {
+                        runtime::RegistrationCompletion::Abort
+                    },
                 )
             }
             PendingActionKind::Wake(worker) if committed => runtime::wake_worker(
@@ -204,14 +208,14 @@ impl PendingAction {
                 worker.extension_oid,
                 &worker.worker_name,
             ),
-            PendingActionKind::DirtyDatabase => {
-                runtime::mark_database_dirty(self.database_oid)
+            PendingActionKind::ReconcileDatabase => {
+                runtime::request_database_reconcile(self.database_oid)
             }
             PendingActionKind::DropDatabase if committed => {
                 runtime::request_full_rescan()
             }
             PendingActionKind::DropDatabase => {
-                runtime::mark_database_dirty(self.database_oid)
+                runtime::request_database_reconcile(self.database_oid)
                     | runtime::request_full_rescan()
             }
             PendingActionKind::RescanAll => runtime::request_full_rescan(),
@@ -222,12 +226,11 @@ impl PendingAction {
 
 fn same_action(left: &PendingActionKind, right: &PendingActionKind) -> bool {
     match (left, right) {
+        (PendingActionKind::Wake(a), PendingActionKind::Wake(b)) => a == b,
         (
-            PendingActionKind::ReserveRegistration(a),
-            PendingActionKind::ReserveRegistration(b),
+            PendingActionKind::ReconcileDatabase,
+            PendingActionKind::ReconcileDatabase,
         )
-        | (PendingActionKind::Wake(a), PendingActionKind::Wake(b)) => a == b,
-        (PendingActionKind::DirtyDatabase, PendingActionKind::DirtyDatabase)
         | (PendingActionKind::DropDatabase, PendingActionKind::DropDatabase)
         | (PendingActionKind::RescanAll, PendingActionKind::RescanAll) => true,
         _ => false,
@@ -244,6 +247,12 @@ unsafe extern "C-unwind" fn xact_callback(
     match event {
         XACT_EVENT_COMMIT | XACT_EVENT_PARALLEL_COMMIT => apply(true),
         XACT_EVENT_ABORT | XACT_EVENT_PARALLEL_ABORT => apply(false),
+        XACT_EVENT_PRE_PREPARE
+            if !ACTIONS.with(|actions| actions.borrow().is_empty()) =>
+        {
+            crate::error::LakebaseError::PreparedTransactionWithRuntimeActions
+                .report();
+        }
         _ => {}
     }
 }
@@ -266,7 +275,9 @@ unsafe extern "C-unwind" fn subxact_callback(
     let level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
     ACTIONS.with(|actions| match event {
         SUBXACT_EVENT_ABORT_SUB => {
-            actions.borrow_mut().abort_subtransaction(level);
+            if actions.borrow_mut().abort_subtransaction(level) {
+                runtime::signal_launcher();
+            }
         }
         SUBXACT_EVENT_COMMIT_SUB => {
             actions.borrow_mut().commit_subtransaction(level);

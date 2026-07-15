@@ -117,6 +117,9 @@ INSERT INTO lakebase.maintenance_queue (
 DO $$
 DECLARE
     rejected boolean := false;
+    error_message text;
+    error_detail text;
+    error_hint text;
 BEGIN
     IF NOT EXISTS (SELECT FROM lakebase.maintenance_queue) THEN
         RAISE EXCEPTION 'maintenance guard fixture disappeared';
@@ -125,16 +128,57 @@ BEGIN
         EXECUTE 'DROP EXTENSION pg_lakebase_runtime';
     EXCEPTION WHEN OTHERS THEN
         rejected := true;
+        GET STACKED DIAGNOSTICS
+            error_message = MESSAGE_TEXT,
+            error_detail = PG_EXCEPTION_DETAIL,
+            error_hint = PG_EXCEPTION_HINT;
     END;
     IF NOT rejected OR NOT EXISTS (
         SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime'
     ) THEN
         RAISE EXCEPTION 'non-empty maintenance queue did not protect pg_lakebase_runtime';
     END IF;
+    IF error_message <> 'cannot drop pg_lakebase_runtime while the maintenance queue contains unresolved work'
+       OR error_detail IS NULL
+       OR position('failed queue rows are unresolved' in error_detail) = 0
+       OR error_hint IS NULL
+       OR position('lakebase.retry_maintenance_item(item_id)' in error_hint) = 0 THEN
+        RAISE EXCEPTION 'maintenance queue guard did not explain operator recovery';
+    END IF;
 END
 $$;
 DELETE FROM lakebase.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000001';
+
+CREATE EXTENSION pg_iceberg_am;
+DO $$
+DECLARE
+    rejected boolean := false;
+    error_detail text;
+    error_hint text;
+BEGIN
+    BEGIN
+        EXECUTE 'DROP EXTENSION pg_lakebase_runtime, pg_iceberg_am';
+    EXCEPTION WHEN dependent_objects_still_exist THEN
+        rejected := true;
+        GET STACKED DIAGNOSTICS
+            error_detail = PG_EXCEPTION_DETAIL,
+            error_hint = PG_EXCEPTION_HINT;
+    END;
+    IF NOT rejected
+       OR NOT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime')
+       OR NOT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_iceberg_am') THEN
+        RAISE EXCEPTION 'combined extension drop bypassed the runtime dependency guard';
+    END IF;
+    IF error_detail IS NULL
+       OR position('same DROP EXTENSION statement' in error_detail) = 0
+       OR error_hint IS NULL
+       OR position('separate DROP EXTENSION statement and commit it first' in error_hint) = 0 THEN
+        RAISE EXCEPTION 'runtime dependency guard did not explain the required drop order';
+    END IF;
+END
+$$;
+DROP EXTENSION pg_iceberg_am;
 SQL
 
 psql -XAtq -v ON_ERROR_STOP=1 -d "$source_db" <<SQL >/dev/null

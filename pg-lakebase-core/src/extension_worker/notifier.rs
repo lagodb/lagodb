@@ -2,7 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 
-use crate::transaction::{self, TransactionResource};
+use crate::diag::PgReportError;
+use crate::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::{pg_sys, prelude::*};
 
 /// Stable catalog identity of a worker owned by an extension.
@@ -122,6 +123,16 @@ impl NotificationDeduper {
 }
 
 impl TransactionResource for NotificationDeduper {
+    fn on_pre_prepare(&self) -> TransactionResult<()> {
+        if self.notifications.borrow().is_empty() {
+            return Ok(());
+        }
+        Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "cannot PREPARE a transaction with pending Lakebase worker notifications",
+        ))
+    }
+
     fn on_commit(&self) {
         Self::clear_current();
     }

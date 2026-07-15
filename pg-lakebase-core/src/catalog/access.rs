@@ -124,6 +124,17 @@ impl CatalogScanKey {
         }
     }
 
+    pub fn i32_eq(attribute_number: pg_sys::AttrNumber, value: i32) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_INT4EQ),
+                value.into_datum().expect("i32 should convert to Datum"),
+            )
+        }
+    }
+
     pub fn bool_eq(attribute_number: pg_sys::AttrNumber, value: bool) -> Self {
         unsafe {
             Self::new(

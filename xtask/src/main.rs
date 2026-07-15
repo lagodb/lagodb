@@ -166,19 +166,25 @@ fn pg_major(pg_version: &OsStr) -> Result<String, String> {
 
 fn run_regress(pg_version: &OsStr) -> Result<(), String> {
     install_runtime(pg_version)?;
-    run_command(
-        Command::new("cargo")
-            .arg("pgrx")
-            .arg("regress")
-            .arg(pg_version)
-            .arg("--package")
-            .arg(EXTENSION_PACKAGE)
-            .arg("--resetdb")
-            .arg("--postgresql-conf")
-            .arg(format!(
-                "shared_preload_libraries='{RUNTIME_NAME},{EXTENSION_NAME}'"
-            )),
-    )
+
+    let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
+    let bindir = pg_config_value(&pg_config, "--bindir")?;
+
+    let mut command = Command::new("cargo");
+    command
+        .arg("pgrx")
+        .arg("regress")
+        .arg(pg_version)
+        .arg("--package")
+        .arg(EXTENSION_PACKAGE)
+        .arg("--resetdb")
+        .arg("--postgresql-conf")
+        .arg(format!(
+            "shared_preload_libraries='{RUNTIME_NAME},{EXTENSION_NAME}'"
+        ));
+    prepend_path_env(&mut command, &bindir)?;
+
+    run_command(&mut command)
 }
 
 fn install_runtime(pg_version: &OsStr) -> Result<(), String> {
@@ -369,6 +375,25 @@ fn pg_config_value(pg_config: &Path, arg: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(
         String::from_utf8_lossy(&output.stdout).trim(),
     ))
+}
+
+fn prepend_path_env(command: &mut Command, directory: &Path) -> Result<(), String> {
+    let mut paths = Vec::new();
+    paths.push(directory.to_path_buf());
+
+    if let Some(current_path) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&current_path));
+    }
+
+    let joined_path = env::join_paths(paths).map_err(|error| {
+        format!(
+            "failed to build PATH with {} prepended: {error}",
+            directory.display()
+        )
+    })?;
+    command.env("PATH", joined_path);
+
+    Ok(())
 }
 
 fn reset_dir(path: &Path) -> Result<(), String> {

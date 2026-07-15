@@ -14,6 +14,8 @@ use pgrx::pg_sys;
 const ENABLED_GUC: &CStr = c"pg_lakebase.storage_server_enabled";
 const SOCKET_PATH_GUC: &CStr = c"pg_lakebase.storage_server_socket_path";
 const CACHE_DIR_GUC: &CStr = c"pg_lakebase.storage_server_cache_dir";
+const DEFAULT_SOCKET_FILE: &str = "storage.sock";
+const DEFAULT_CACHE_DIR: &str = "storage-cache";
 
 /// Resolved endpoint for the cluster-local Lakebase storage service.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,12 +34,38 @@ impl StorageEndpoint {
     /// register the storage GUCs or when PostgreSQL returns an unexpected GUC
     /// value.
     pub fn from_pg_gucs() -> StorageResult<Self> {
-        let enabled = read_bool_guc(ENABLED_GUC)?;
-        let base = data_dir_base()?;
-        let socket_path = read_optional_path_guc(SOCKET_PATH_GUC)?
-            .unwrap_or_else(|| base.join("storage.sock"));
-        let cache_dir = read_optional_path_guc(CACHE_DIR_GUC)?
-            .unwrap_or_else(|| base.join("storage-cache"));
+        Self::from_config(
+            read_bool_guc(ENABLED_GUC)?,
+            read_optional_path_guc(SOCKET_PATH_GUC)?,
+            read_optional_path_guc(CACHE_DIR_GUC)?,
+        )
+    }
+
+    /// Resolve an endpoint from already-read storage service settings.
+    ///
+    /// Callers that own the GUC backing statics can use this path to avoid
+    /// re-reading PostgreSQL's global GUC registry while still sharing the
+    /// runtime default path rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when PostgreSQL's `DataDir` has not been
+    /// initialized and a default path is required.
+    pub fn from_config(
+        enabled: bool,
+        socket_path: Option<PathBuf>,
+        cache_dir: Option<PathBuf>,
+    ) -> StorageResult<Self> {
+        let (socket_path, cache_dir) = match (socket_path, cache_dir) {
+            (Some(socket_path), Some(cache_dir)) => (socket_path, cache_dir),
+            (socket_path, cache_dir) => {
+                let base = data_dir_base()?;
+                (
+                    socket_path.unwrap_or_else(|| base.join(DEFAULT_SOCKET_FILE)),
+                    cache_dir.unwrap_or_else(|| base.join(DEFAULT_CACHE_DIR)),
+                )
+            }
+        };
 
         Ok(Self {
             enabled,

@@ -286,7 +286,6 @@ impl StorageWorkerSupervisor {
             pg_sys::INFO as i32,
             "storage background worker stopped",
         );
-        StorageStatusStore::new().mark_stopped();
     }
 
     fn wait_for_server_shutdown(

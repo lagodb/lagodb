@@ -193,6 +193,10 @@ isolation specs in [pg-iceberg-am/tests/isolation/specs](./pg-iceberg-am/tests/i
 and isolation results are written to `target/isolation/pg17/output_iso/`.
 The pg_regress suite includes object-storage setup/teardown SQL, so direct
 `cargo pgrx regress` runs also require Docker.
+`cargo xtask test-all pg17` resolves the PostgreSQL `bin` directory from the
+pgrx-registered `pg_config` and exposes it to pg_regress helper scripts. If you
+run `cargo pgrx regress` directly, make sure that same PostgreSQL `bin`
+directory is on `PATH`; several `\!` helpers call `psql`.
 Docker-backed object-storage tests read MinIO defaults from their local test
 config files: `pg-iceberg-am/tests/pg_regress/config/object_storage.defaults.env`
 and `pg-lakebase-storage/tests/e2e/config/object_storage.defaults.env`. Set

@@ -230,6 +230,24 @@ where
                 })?;
         }
 
+        // TODO(per-store cache lifecycle): removals currently only unregister
+        // the backend, and replacements only swap the registry entry. Neither
+        // transition purges cache residency for the store. Cache state is not
+        // one `<cache_dir>/<store_id>` tree: complete/partial files live under
+        // `objects/<store_id>/...`, while metadata, LRU state, and small-object
+        // payloads live in the shared redb index. Reusing the same
+        // `(store_id, namespace, path)` for a different backend can therefore
+        // return old bytes because cache hits deliberately do not HEAD the
+        // backend.
+        //
+        // A future implementation must coordinate registry removal/replacement
+        // with `CacheManager::purge_store_cache`, including active open leases
+        // and large-fill sessions, so an old `Arc<RegisteredStore>` cannot
+        // repopulate the retired identity after the purge. Staging is separate:
+        // the whole staging tree is cleared at postmaster startup and must not
+        // be deleted here while transactions may still own files in it. See
+        // `pg-lakebase-storage/src/cache/manager.rs` for the purge contract.
+
         // Third pass: mutate the registry. After up-front validation the
         // per-spec `register_config` should never fail; if it does (e.g. an
         // unexpected internal error in the registry), we abort and report.
@@ -255,14 +273,6 @@ where
             registered.push(spec);
         }
 
-        // TODO(per-store cache purge): when a tablespace disappears from the
-        // catalog (DROP TABLESPACE) we currently only unregister the store.
-        // The matching cache + staging directories under
-        // `<cache_dir>/<store_id>` keep their data on disk until the operator
-        // deletes them manually. Adding a cleanup hook here would close that
-        // loop, but it is intentionally deferred — see "Distributed
-        // tablespace reconciliation" / "Failure modes" in
-        // pg-lakebase-runtime/src/storage/README.md.
         for id in &to_unregister {
             self.registry.unregister(id);
         }

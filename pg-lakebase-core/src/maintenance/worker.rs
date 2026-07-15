@@ -19,6 +19,8 @@ use crate::bgworker::BackendLatch;
 use crate::extension_worker::WorkerExit;
 use crate::storage_service::StorageEndpoint;
 
+const RESULT_PERSISTENCE_RETRY: Duration = Duration::from_secs(5);
+
 pub fn init_gucs() {
     gucs::init();
 }
@@ -106,7 +108,13 @@ struct MaintenanceWorkerSupervisor {
     actors: MaintenanceActorPool,
     in_flight: HashMap<MaintenanceItemId, Arc<MaintenanceItem>>,
     pending_results: VecDeque<ActorResult>,
-    update_warning_emitted: bool,
+    persistence_warning_emitted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PersistenceStatus {
+    Complete,
+    PersistenceFailed,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -183,22 +191,24 @@ impl MaintenanceWorkerSupervisor {
             actors,
             in_flight: HashMap::new(),
             pending_results: VecDeque::new(),
-            update_warning_emitted: false,
+            persistence_warning_emitted: false,
         })
     }
 
     fn run_until_idle(&mut self) -> WorkerExit {
         loop {
             self.collect_actor_results();
-            let database_healthy = self.apply_pending_results();
+            if self.apply_pending_results() == PersistenceStatus::PersistenceFailed {
+                return WorkerExit::RestartAfter(RESULT_PERSISTENCE_RETRY);
+            }
 
             if self.actors.has_finished_actor() {
                 crate::diag::report_warning("maintenance actor exited unexpectedly");
                 return WorkerExit::RestartAfter(Duration::from_secs(5));
             }
 
-            if database_healthy {
-                self.dispatch_ready_tasks();
+            if self.dispatch_ready_tasks() == PersistenceStatus::PersistenceFailed {
+                return WorkerExit::RestartAfter(RESULT_PERSISTENCE_RETRY);
             }
 
             if self.in_flight.is_empty() && self.pending_results.is_empty() {
@@ -227,7 +237,7 @@ impl MaintenanceWorkerSupervisor {
         }
     }
 
-    fn apply_pending_results(&mut self) -> bool {
+    fn apply_pending_results(&mut self) -> PersistenceStatus {
         while let Some(result) = self.pending_results.front() {
             let Some(item) = self.in_flight.get(&result.item_id) else {
                 self.pending_results.pop_front();
@@ -258,33 +268,33 @@ impl MaintenanceWorkerSupervisor {
                 }
             }));
             if let Err(error) = update {
-                if !self.update_warning_emitted {
+                if !self.persistence_warning_emitted {
                     crate::diag::report_warning(format_args!(
                         "failed to persist maintenance result: {error}"
                     ));
-                    self.update_warning_emitted = true;
+                    self.persistence_warning_emitted = true;
                 }
-                return false;
+                return PersistenceStatus::PersistenceFailed;
             }
-            self.update_warning_emitted = false;
+            self.persistence_warning_emitted = false;
             let item_id = result.item_id;
             self.pending_results.pop_front();
             self.in_flight.remove(&item_id);
         }
-        true
+        PersistenceStatus::Complete
     }
 
-    fn dispatch_ready_tasks(&mut self) {
+    fn dispatch_ready_tasks(&mut self) -> PersistenceStatus {
         let capacity = self.actors.capacity();
         if capacity == 0 {
-            return;
+            return PersistenceStatus::Complete;
         }
         let in_flight: HashSet<_> = self.in_flight.keys().copied().collect();
         let poll = BackgroundWorker::transaction(AssertUnwindSafe(|| {
             MaintenanceRepository::fetch_ready_batch(capacity, &in_flight)
         }));
         let Ok(QueuePoll::Ready(batch)) = poll else {
-            return;
+            return PersistenceStatus::Complete;
         };
 
         for invalid in batch.invalid {
@@ -293,12 +303,16 @@ impl MaintenanceWorkerSupervisor {
                     MaintenanceRepository::fail_invalid(invalid.id, &invalid.error)
                 }))
             {
-                crate::diag::report_warning(format_args!(
-                    "failed to quarantine invalid maintenance item {}: {error}",
-                    invalid.id
-                ));
-                return;
+                if !self.persistence_warning_emitted {
+                    crate::diag::report_warning(format_args!(
+                        "failed to quarantine invalid maintenance item {}: {error}",
+                        invalid.id
+                    ));
+                    self.persistence_warning_emitted = true;
+                }
+                return PersistenceStatus::PersistenceFailed;
             }
+            self.persistence_warning_emitted = false;
         }
 
         for item in batch.tasks {
@@ -311,14 +325,21 @@ impl MaintenanceWorkerSupervisor {
                 Err(_) => break,
             }
         }
+        PersistenceStatus::Complete
     }
 
     fn shutdown(&mut self) {
         self.actors.request_shutdown();
         let deadline = Instant::now() + gucs::shutdown_timeout();
+        let mut persistence_failed = false;
         while Instant::now() < deadline && !self.actors.all_finished() {
             self.collect_actor_results();
-            let _ = self.apply_pending_results();
+            if !persistence_failed
+                && self.apply_pending_results()
+                    == PersistenceStatus::PersistenceFailed
+            {
+                persistence_failed = true;
+            }
             self.actors.join_finished();
             BackendLatch::teardown_tick(Duration::from_millis(20))
                 .exit_on_postmaster_death();

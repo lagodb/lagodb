@@ -13,9 +13,9 @@ mod reconciler;
 mod state;
 mod supervisor;
 
-use std::ffi::CStr;
 use std::path::PathBuf;
 
+use pg_lakebase_core::storage_service::StorageEndpoint;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 
@@ -63,17 +63,14 @@ pub(crate) fn init() {
 }
 
 pub(crate) fn runtime_status() -> StorageRuntimeStatus {
-    state::snapshot(
-        gucs::enabled(),
-        resolved_socket_path(),
-        resolved_cache_dir(),
-    )
+    let (enabled, socket_path, cache_dir) = resolved_endpoint().into_parts();
+    state::snapshot(enabled, socket_path, cache_dir)
 }
 
 fn cleanup_staging_dir() {
+    let (_, _, cache_dir) = resolved_endpoint().into_parts();
     let staging_dir =
-        pg_lakebase_storage::StagingPathResolver::new(resolved_cache_dir())
-            .staging_dir();
+        pg_lakebase_storage::StagingPathResolver::new(cache_dir).staging_dir();
     if !staging_dir.exists() {
         return;
     }
@@ -89,27 +86,13 @@ fn cleanup_staging_dir() {
     }
 }
 
-fn resolved_socket_path() -> PathBuf {
-    if let Some(p) = gucs::socket_path() {
-        return PathBuf::from(p);
-    }
-    data_dir_base().join("storage.sock")
-}
-
-fn resolved_cache_dir() -> PathBuf {
-    if let Some(p) = gucs::cache_dir() {
-        return PathBuf::from(p);
-    }
-    data_dir_base().join("storage-cache")
-}
-
-fn data_dir_base() -> PathBuf {
-    let data_dir = unsafe {
-        CStr::from_ptr(pg_sys::DataDir)
-            .to_string_lossy()
-            .into_owned()
-    };
-    PathBuf::from(data_dir).join("pg_lakebase")
+fn resolved_endpoint() -> StorageEndpoint {
+    StorageEndpoint::from_config(
+        gucs::enabled(),
+        gucs::socket_path().map(PathBuf::from),
+        gucs::cache_dir().map(PathBuf::from),
+    )
+    .expect("PostgreSQL DataDir must be initialized before resolving storage paths")
 }
 
 /// Background worker entry point called by PostgreSQL after forking.
@@ -127,6 +110,32 @@ pub extern "C-unwind" fn pg_lakebase_runtime_storage_bgworker_main(
         SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM,
     );
 
-    state::StorageStatusStore::new().mark_starting(unsafe { pg_sys::MyProcPid });
+    let pid = unsafe { pg_sys::MyProcPid };
+    let callback_arg = usize::try_from(pid)
+        .expect("PostgreSQL background worker PID must be non-negative");
+    // SAFETY: storage_exit_callback has PostgreSQL's before_shmem_exit ABI,
+    // and callback_arg is this process's PID encoded as a scalar Datum.
+    unsafe {
+        pg_sys::before_shmem_exit(
+            Some(storage_exit_callback),
+            pg_sys::Datum::from(callback_arg),
+        );
+    }
+
+    state::StorageStatusStore::new().mark_starting(pid);
     supervisor::StorageWorkerSupervisor::from_gucs().run();
+}
+
+/// Final shared-state cleanup for the storage background worker.
+///
+/// # Safety
+///
+/// PostgreSQL invokes this function through the `before_shmem_exit` callback
+/// ABI with the scalar PID registered by the worker entry point above.
+#[pg_guard]
+unsafe extern "C-unwind" fn storage_exit_callback(code: i32, arg: pg_sys::Datum) {
+    let Ok(pid) = i32::try_from(arg.value()) else {
+        return;
+    };
+    state::StorageStatusStore::new().finish_process(pid, code);
 }

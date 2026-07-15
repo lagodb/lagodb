@@ -11,15 +11,14 @@
 //! (the only Postgres-facing thread).  After construction the structs contain no
 //! references to Postgres internals and are safe to move across thread boundaries.
 
-use std::ffi::CStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use pg_lakebase_core::storage_service::StorageEndpoint;
 use pg_lakebase_storage::{
     CacheCleanupConfig, CacheRuntimeConfig, StorageRuntimeConfig,
     StorageServerConfig, StorageServiceConfig,
 };
-use pgrx::pg_sys;
 
 use super::gucs;
 
@@ -59,22 +58,20 @@ impl StorageWorkerConfig {
     ///
     /// Must be called from the bgworker main thread where `pg_sys::DataDir` is valid.
     pub fn from_gucs() -> Self {
-        let data_dir = unsafe {
-            CStr::from_ptr(pg_sys::DataDir)
-                .to_string_lossy()
-                .into_owned()
-        };
-
-        let base = PathBuf::from(&data_dir).join("pg_lakebase");
+        let endpoint = StorageEndpoint::from_config(
+            gucs::enabled(),
+            gucs::socket_path().map(PathBuf::from),
+            gucs::cache_dir().map(PathBuf::from),
+        )
+        .expect(
+            "PostgreSQL DataDir must be initialized before resolving storage paths",
+        );
+        let (_, socket_path, cache_dir) = endpoint.into_parts();
 
         Self {
             startup: StorageWorkerStartupConfig {
-                socket_path: gucs::socket_path()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| base.join("storage.sock")),
-                cache_dir: gucs::cache_dir()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| base.join("storage-cache")),
+                socket_path,
+                cache_dir,
                 server_config: StorageServerConfig::default()
                     .with_max_connections(gucs::max_connections()),
                 service_config: StorageServiceConfig::default()

@@ -6,7 +6,7 @@ use crate::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, CatalogUpdateResult,
     MaintenanceCatalogIds, get_maintenance_catalog_ids,
 };
-use crate::handles::HeapTupleGuard;
+use crate::handles::{HeapTupleGuard, HeapTupleRef};
 use pgrx::prelude::TimestampWithTimeZone;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
@@ -42,6 +42,33 @@ mod column {
 pub struct MaintenanceQueue;
 
 impl MaintenanceQueue {
+    /// Return whether the queue contains any unresolved cleanup obligation.
+    ///
+    /// This deliberately includes permanently failed items: they are no longer
+    /// runnable by the worker, but still require operator resolution or an
+    /// explicit decision to discard the cleanup obligation.
+    pub fn has_unresolved_items() -> Result<bool, MaintenanceError> {
+        let catalog =
+            MaintenanceQueueCatalog::open_required(pg_sys::AccessShareLock as _)?;
+        let mut scan = catalog
+            .relation
+            .begin_scan(
+                catalog.ids.pkey,
+                true,
+                CatalogSnapshot::Default,
+                std::iter::empty(),
+            )
+            .map_err(|source| {
+                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            })?;
+        Ok(scan
+            .get_next()
+            .map_err(|source| {
+                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            })?
+            .is_some())
+    }
+
     pub fn enqueue(
         item: MaintenanceItemRef<'_>,
     ) -> Result<MaintenanceItemId, MaintenanceError> {
@@ -277,7 +304,15 @@ impl MaintenanceRepository {
         item_id: MaintenanceItemId,
         error: &str,
     ) -> Result<(), MaintenanceError> {
-        Self::fail_with_attempt(item_id, 0, error)
+        let catalog =
+            MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
+        if catalog.quarantine_invalid(item_id, bounded_error(error))? {
+            Ok(())
+        } else {
+            Err(MaintenanceError::InvalidRecord(format!(
+                "maintenance item {item_id} disappeared"
+            )))
+        }
     }
 
     fn fail_with_attempt(
@@ -408,6 +443,58 @@ impl MaintenanceQueueCatalog {
         if !mutate(&mut row) {
             return Ok(Some(false));
         }
+        self.replace_row(old_tuple, &row)?;
+        Ok(Some(true))
+    }
+
+    fn quarantine_invalid(
+        &self,
+        item_id: MaintenanceItemId,
+        error: String,
+    ) -> Result<bool, MaintenanceError> {
+        let mut scan = self
+            .relation
+            .begin_scan(
+                self.ids.pkey,
+                true,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::uuid_eq(column::ITEM_ID as _, item_id.0)],
+            )
+            .map_err(|source| {
+                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            })?;
+        let Some(old_tuple) = scan.get_next().map_err(|source| {
+            MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+        })?
+        else {
+            return Ok(false);
+        };
+        let tuple_desc = self.relation.as_handle().tuple_desc();
+        // SAFETY: old_tuple belongs to this live primary-key scan and tuple_desc
+        // belongs to the same open maintenance queue relation.
+        let row = match unsafe {
+            QueueRow::decode(old_tuple.as_raw(), tuple_desc, item_id)
+        } {
+            Ok(mut row) => {
+                row.attempt_count = 0;
+                row.failed = true;
+                row.last_error = Some(error);
+                row
+            }
+            // A decode-level poison row cannot be patched by preserving its
+            // damaged fields. Replace it with a valid failed tuple that retains
+            // only the independently decoded primary identity and diagnostic.
+            Err(_) => QueueRow::quarantined(item_id, error),
+        };
+        self.replace_row(old_tuple, &row)?;
+        Ok(true)
+    }
+
+    fn replace_row(
+        &self,
+        old_tuple: HeapTupleRef<'_>,
+        row: &QueueRow,
+    ) -> Result<(), MaintenanceError> {
         let new_tuple = row.encode(self.relation.as_handle().tuple_desc());
         match self
             .relation
@@ -415,7 +502,7 @@ impl MaintenanceQueueCatalog {
             .map_err(|source| {
                 MaintenanceError::catalog(MaintenanceCatalogOperation::Update, source)
             })? {
-            CatalogUpdateResult::Success => Ok(Some(true)),
+            CatalogUpdateResult::Success => Ok(()),
             CatalogUpdateResult::Conflict => {
                 Err(MaintenanceError::ConcurrentUpdate(row.id))
             }
@@ -482,6 +569,31 @@ impl QueueRow {
             not_before: now,
             failed: false,
             last_error: None,
+            created_at: now,
+        }
+    }
+
+    fn quarantined(id: MaintenanceItemId, error: String) -> Self {
+        const QUARANTINED_VALUE: &str = "<quarantined>";
+        const QUARANTINED_PRODUCER: &str = "runtime-quarantine";
+        const INVALID_OPERATION: i16 = 0;
+
+        let now = current_timestamp();
+        Self {
+            id,
+            // Keep the replacement permanently invalid even if an operator
+            // retries it without first repairing the damaged catalog fields.
+            operation: INVALID_OPERATION,
+            store_id: QUARANTINED_VALUE.to_owned(),
+            namespace: QUARANTINED_VALUE.to_owned(),
+            path: QUARANTINED_VALUE.to_owned(),
+            producer: QUARANTINED_PRODUCER.to_owned(),
+            source_relid: None,
+            source_name: None,
+            attempt_count: 0,
+            not_before: now,
+            failed: true,
+            last_error: Some(error),
             created_at: now,
         }
     }

@@ -22,7 +22,10 @@ ALTER FUNCTION lakebase.request_worker_wakeup(text, text) SECURITY DEFINER;
 ALTER FUNCTION lakebase.request_worker_wakeup(text, text)
     SET search_path = pg_catalog;
 
-CREATE VIEW lakebase.worker_runtime_status AS
+-- Keep these views security-invoker so a future SELECT grant cannot bypass the
+-- underlying status functions' EXECUTE revokes.
+CREATE VIEW lakebase.worker_runtime_status
+WITH (security_invoker = true) AS
 SELECT e.extname AS extension_name,
        s.worker_name,
        s.database_oid,
@@ -35,12 +38,17 @@ LEFT JOIN pg_catalog.pg_extension AS e
   ON e.oid = s.extension_oid
  AND s.database_oid = (SELECT oid FROM pg_catalog.pg_database
                        WHERE datname = pg_catalog.current_database());
+REVOKE ALL ON TABLE lakebase.worker_runtime_status FROM PUBLIC;
 
-CREATE VIEW lakebase.process_runtime_status AS
+CREATE VIEW lakebase.process_runtime_status
+WITH (security_invoker = true) AS
 SELECT * FROM lakebase.process_runtime_status();
+REVOKE ALL ON TABLE lakebase.process_runtime_status FROM PUBLIC;
 
-CREATE VIEW lakebase.storage_runtime_status AS
+CREATE VIEW lakebase.storage_runtime_status
+WITH (security_invoker = true) AS
 SELECT * FROM lakebase.storage_runtime_status();
+REVOKE ALL ON TABLE lakebase.storage_runtime_status FROM PUBLIC;
 
 SELECT lakebase.register_worker(
     'maintenance',

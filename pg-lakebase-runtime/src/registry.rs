@@ -12,6 +12,21 @@ use crate::error::{
 
 const WORKERS_TABLE: &CStr = c"workers";
 
+struct WorkerEntrypointContract;
+
+impl WorkerEntrypointContract {
+    fn accepts(procedure: &pg_sys::FormData_pg_proc) -> bool {
+        procedure.prokind == pg_sys::PROKIND_FUNCTION as std::ffi::c_char
+            && !procedure.proretset
+            && procedure.pronargs == 1
+            // SAFETY: pronargs == 1 guarantees that the first oidvector element
+            // belongs to this live pg_proc tuple.
+            && unsafe { procedure.proargtypes.values.as_slice(1)[0] }
+                == pg_sys::INTERNALOID
+            && procedure.prorettype == pg_sys::INT8OID
+    }
+}
+
 mod column {
     pub const EXTENSION_NAME: i16 = 1;
     pub const WORKER_NAME: i16 = 2;
@@ -453,21 +468,18 @@ fn resolve_entrypoint(
             })?
     {
         let procedure =
-            unsafe { pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_proc };
+            unsafe { &*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_proc) };
         let matches = unsafe {
-            let proname = CStr::from_ptr((*procedure).proname.data.as_ptr());
+            let proname = CStr::from_ptr(procedure.proname.data.as_ptr());
             proname.to_bytes() == function_name.as_bytes()
-                && (*procedure).pronargs == 1
-                && (*procedure).proargtypes.values.as_slice(1)[0]
-                    == pg_sys::INTERNALOID
-                && (*procedure).prorettype == pg_sys::INT8OID
+                && WorkerEntrypointContract::accepts(procedure)
                 && pg_sys::getExtensionOfObject(
                     pg_sys::ProcedureRelationId,
-                    (*procedure).oid,
+                    procedure.oid,
                 ) == extension_oid
         };
         if matches {
-            return Ok(Some(unsafe { (*procedure).oid }));
+            return Ok(Some(procedure.oid));
         }
     }
     Ok(None)
@@ -514,21 +526,18 @@ fn validate_entrypoint(
         return Err(LakebaseError::EntryPointMissing);
     }
     let result = unsafe {
-        let procedure = pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc;
-        let valid_signature = (*procedure).pronargs == 1
-            && (*procedure).proargtypes.values.as_slice(1)[0] == pg_sys::INTERNALOID
-            && (*procedure).prorettype == pg_sys::INT8OID;
-        if !valid_signature {
+        let procedure = &*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc);
+        if !WorkerEntrypointContract::accepts(procedure) {
             pg_sys::ReleaseSysCache(tuple);
             return Err(LakebaseError::InvalidEntryPointSignature);
         }
-        let namespace = pg_sys::get_namespace_name((*procedure).pronamespace);
+        let namespace = pg_sys::get_namespace_name(procedure.pronamespace);
         if namespace.is_null() {
             pg_sys::ReleaseSysCache(tuple);
             return Err(LakebaseError::EntryPointSchemaMissing);
         }
         let schema_name = CStr::from_ptr(namespace).to_string_lossy().into_owned();
-        let function_name = CStr::from_ptr((*procedure).proname.data.as_ptr())
+        let function_name = CStr::from_ptr(procedure.proname.data.as_ptr())
             .to_string_lossy()
             .into_owned();
         pg_sys::ReleaseSysCache(tuple);

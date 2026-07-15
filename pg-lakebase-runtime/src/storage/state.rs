@@ -102,13 +102,44 @@ impl StorageSharedState {
     }
 
     fn set_error(&mut self, message: &str) {
+        self.set_error_at(message, timestamp_ms());
+    }
+
+    fn set_error_at(&mut self, message: &str, error_at_ms: i64) {
         self.last_error = [0; MAX_ERROR_BYTES];
+        let message = truncate_to_char_boundary(message, MAX_ERROR_BYTES);
         let bytes = message.as_bytes();
-        let len = bytes.len().min(MAX_ERROR_BYTES);
+        let len = bytes.len();
         self.last_error[..len].copy_from_slice(&bytes[..len]);
         self.last_error_len =
             u16::try_from(len).expect("MAX_ERROR_BYTES fits in u16");
-        self.last_error_at_ms = timestamp_ms();
+        self.last_error_at_ms = error_at_ms;
+    }
+
+    fn finish_process(&mut self, pid: i32, code: i32, exited_at_ms: i64) {
+        if pid <= 0 || self.pid != pid {
+            return;
+        }
+
+        let previous = StorageProcessState::from_raw(self.state);
+        self.pid = 0;
+        match previous {
+            StorageProcessState::Failed => {}
+            StorageProcessState::Stopping if code == 0 => {
+                self.last_stop_ms = exited_at_ms;
+                self.set_state(StorageProcessState::Stopped);
+            }
+            _ => {
+                self.set_state(StorageProcessState::Failed);
+                self.set_error_at(
+                    &format!(
+                        "storage worker exited unexpectedly from {} state with code {code}",
+                        previous.as_str()
+                    ),
+                    exited_at_ms,
+                );
+            }
+        }
     }
 }
 
@@ -171,12 +202,10 @@ impl StorageStatusStore {
         state.set_state(StorageProcessState::Stopping);
     }
 
-    pub(super) fn mark_stopped(&self) {
+    pub(super) fn finish_process(&self, pid: i32, code: i32) {
         let mut state = STORAGE_STATE.exclusive();
         state.reset_if_invalid();
-        state.pid = 0;
-        state.last_stop_ms = timestamp_ms();
-        state.set_state(StorageProcessState::Stopped);
+        state.finish_process(pid, code, timestamp_ms());
     }
 }
 
@@ -240,6 +269,17 @@ fn last_error(state: &StorageSharedState) -> Option<String> {
     Some(String::from_utf8_lossy(&state.last_error[..len]).into_owned())
 }
 
+fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 fn positive_timestamp(timestamp: i64) -> Option<i64> {
     (timestamp > 0).then_some(timestamp)
 }
@@ -250,4 +290,105 @@ fn count_to_u32(value: usize) -> u32 {
 
 fn timestamp_ms() -> i64 {
     unsafe { pgrx::pg_sys::GetCurrentTimestamp() / 1_000 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_truncation_preserves_utf8_boundaries() {
+        let value = format!("{}é", "a".repeat(MAX_ERROR_BYTES - 1));
+        let truncated = truncate_to_char_boundary(&value, MAX_ERROR_BYTES);
+
+        assert_eq!(truncated.len(), MAX_ERROR_BYTES - 1);
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn process_exit_preserves_recorded_failure_and_clears_pid() {
+        let mut state = StorageSharedState {
+            pid: 42,
+            state: StorageProcessState::Failed as u8,
+            ..StorageSharedState::default()
+        };
+        state.set_error_at("specific startup failure", 10);
+
+        state.finish_process(42, 1, 20);
+
+        assert_eq!(state.pid, 0);
+        assert_eq!(
+            StorageProcessState::from_raw(state.state),
+            StorageProcessState::Failed
+        );
+        assert_eq!(
+            last_error(&state).as_deref(),
+            Some("specific startup failure")
+        );
+        assert_eq!(state.last_error_at_ms, 10);
+        assert_eq!(state.last_stop_ms, 0);
+    }
+
+    #[test]
+    fn process_exit_records_unexpected_starting_failure() {
+        let mut state = StorageSharedState {
+            pid: 42,
+            state: StorageProcessState::Starting as u8,
+            ..StorageSharedState::default()
+        };
+
+        state.finish_process(42, 1, 20);
+
+        assert_eq!(state.pid, 0);
+        assert_eq!(
+            StorageProcessState::from_raw(state.state),
+            StorageProcessState::Failed
+        );
+        assert_eq!(
+            last_error(&state).as_deref(),
+            Some(
+                "storage worker exited unexpectedly from starting state with code 1"
+            )
+        );
+        assert_eq!(state.last_error_at_ms, 20);
+        assert_eq!(state.last_stop_ms, 0);
+    }
+
+    #[test]
+    fn process_exit_marks_cooperative_shutdown_stopped() {
+        let mut state = StorageSharedState {
+            pid: 42,
+            state: StorageProcessState::Stopping as u8,
+            ..StorageSharedState::default()
+        };
+
+        state.finish_process(42, 0, 20);
+
+        assert_eq!(state.pid, 0);
+        assert_eq!(
+            StorageProcessState::from_raw(state.state),
+            StorageProcessState::Stopped
+        );
+        assert_eq!(state.last_stop_ms, 20);
+        assert_eq!(last_error(&state), None);
+    }
+
+    #[test]
+    fn process_exit_rejects_stale_pid() {
+        let mut state = StorageSharedState {
+            pid: 84,
+            state: StorageProcessState::Running as u8,
+            ..StorageSharedState::default()
+        };
+
+        state.finish_process(42, 1, 20);
+
+        assert_eq!(state.pid, 84);
+        assert_eq!(
+            StorageProcessState::from_raw(state.state),
+            StorageProcessState::Running
+        );
+        assert_eq!(state.last_error_at_ms, 0);
+        assert_eq!(state.last_stop_ms, 0);
+    }
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
-use crate::state::MAX_WORKERS;
+use crate::state::{MAX_RECONCILERS, MAX_WORKERS};
 
 static MAX_REGISTRATIONS: GucSetting<i32> = GucSetting::<i32>::new(256);
 static LAUNCHER_NAPTIME_MS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
@@ -27,7 +27,7 @@ pub(crate) fn init() {
         c"Bounds transient worker usage while databases are discovered.",
         &MAX_DATABASE_RECONCILERS,
         1,
-        64,
+        MAX_RECONCILERS as i32,
         GucContext::Sighup,
         GucFlags::default(),
     );

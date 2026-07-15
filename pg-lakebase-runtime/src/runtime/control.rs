@@ -22,6 +22,15 @@ impl StopController {
         loop {
             let pids = self.store.stop_database_step(database_oid)?;
             for pid in pids {
+                // PostgreSQL 17's pg_signal_backend() likewise validates shared
+                // process state and calls kill(2) directly, explicitly accepting
+                // the same tiny PID-reuse window. ProcSendSignal(ProcNumber) only
+                // sets a latch; postmaster mediation requires a retained
+                // BackgroundWorkerHandle.
+                // Generation fencing protects our slots, not this OS-level race.
+                // SAFETY: libc::kill accepts any pid_t value; this positive PID
+                // was read from a generation-fenced live runtime slot. ESRCH is
+                // harmless because the stop loop observes slot cleanup.
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
             if !self.store.database_has_running_processes(database_oid) {
@@ -46,6 +55,15 @@ impl StopController {
                 .store
                 .stop_extension_step(database_oid, extension_oid)?;
             for pid in pids {
+                // PostgreSQL 17's pg_signal_backend() likewise validates shared
+                // process state and calls kill(2) directly, explicitly accepting
+                // the same tiny PID-reuse window. ProcSendSignal(ProcNumber) only
+                // sets a latch; postmaster mediation requires a retained
+                // BackgroundWorkerHandle.
+                // Generation fencing protects our slots, not this OS-level race.
+                // SAFETY: libc::kill accepts any pid_t value; this positive PID
+                // was read from a generation-fenced live worker slot. ESRCH is
+                // harmless because the stop loop observes slot cleanup.
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
             if !self
@@ -56,26 +74,6 @@ impl StopController {
             }
             if Instant::now() >= deadline {
                 return Err(LakebaseError::StopExtensionTimeout);
-            }
-            check_for_interrupts();
-            interruptible_sleep(Duration::from_millis(10));
-        }
-    }
-
-    pub(super) fn pause_reconciliation(
-        &self,
-        database_oid: u32,
-    ) -> LakebaseResult<()> {
-        let deadline = Instant::now() + gucs::stop_timeout();
-        loop {
-            let Some(pid) = self.store.pause_reconciliation_step(database_oid)?
-            else {
-                return Ok(());
-            };
-            // SAFETY: PID is published by the generation-fenced reconciler slot.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-            if Instant::now() >= deadline {
-                return Err(LakebaseError::StopReconcilerTimeout);
             }
             check_for_interrupts();
             interruptible_sleep(Duration::from_millis(10));
@@ -98,6 +96,12 @@ impl StopController {
             else {
                 return Ok(());
             };
+            // PostgreSQL 17's pg_signal_backend() likewise validates shared
+            // process state and calls kill(2) directly, explicitly accepting
+            // the same tiny PID-reuse window. ProcSendSignal(ProcNumber) only
+            // sets a latch; postmaster mediation requires a retained
+            // BackgroundWorkerHandle.
+            // Generation fencing protects our slots, not this OS-level race.
             // SAFETY: the PID was read from a generation-fenced live worker slot.
             // ESRCH is harmless because the exit callback will clear the slot.
             unsafe { libc::kill(pid, libc::SIGTERM) };

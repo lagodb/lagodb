@@ -45,6 +45,8 @@ mod lakebase {
     #[pg_extern]
     fn register_worker_impl(worker_name: &str, entrypoint: pg_sys::Oid) {
         ensure_runtime_preloaded();
+        let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+        runtime::DatabaseLifecycleLock::new(database_oid).acquire_shared();
         let worker = registry::register(worker_name, entrypoint)
             .unwrap_or_else(|error| error.report());
         lifecycle::reserve_registration(
@@ -58,9 +60,8 @@ mod lakebase {
     fn deregister_worker(worker_name: &str) {
         ensure_runtime_preloaded();
         let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+        runtime::DatabaseLifecycleLock::new(database_oid).acquire_shared();
         lifecycle::request_database_reconcile();
-        runtime::pause_database_reconciliation(database_oid)
-            .unwrap_or_else(|error| error.report());
         let extension_oid = unsafe { pg_sys::CurrentExtensionObject }.to_u32();
         if registry::deregister(worker_name).unwrap_or_else(|error| error.report()) {
             runtime::stop_worker(database_oid, extension_oid, worker_name)

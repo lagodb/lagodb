@@ -9,13 +9,17 @@ use crate::error::{LakebaseError, LakebaseResult};
 mod bgworker;
 mod control;
 mod launcher;
+mod locks;
 mod reconciler;
 mod status;
 mod store;
 mod worker;
 
+pub(crate) use locks::DatabaseLifecycleLock;
 pub(crate) use status::{ProcessStatus, WorkerStatus};
-pub(crate) use store::RUNTIME_STATE;
+pub(crate) use store::{
+    RUNTIME_STATE, RegistrationCompletion, RegistrationReservation,
+};
 
 const LAUNCHER_FUNCTION: &str = "pg_lakebase_runtime_launcher_main";
 pub(super) const RECONCILER_FUNCTION: &str =
@@ -23,6 +27,9 @@ pub(super) const RECONCILER_FUNCTION: &str =
 pub(super) const WORKER_FUNCTION: &str = "pg_lakebase_runtime_extension_worker_main";
 pub(super) const LIBRARY_NAME: &str = "pg_lakebase_runtime";
 pub(super) const CRASH_BACKOFF: Duration = Duration::from_secs(5);
+// Measured from reservation to the runtime entrypoint handshake, not merely
+// fork latency. Keep this generous because worker starts are awaited serially.
+pub(super) const BGWORKER_START_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const CAPACITY_WARNING_INTERVAL: Duration = Duration::from_secs(60);
 
 static RUNTIME_PRELOADED: AtomicBool = AtomicBool::new(false);
@@ -62,7 +69,7 @@ pub(crate) fn reserve_registration(
     database_oid: u32,
     extension_oid: u32,
     worker_name: &str,
-) -> LakebaseResult<()> {
+) -> LakebaseResult<RegistrationReservation> {
     store::RuntimeStore::new().reserve_registration(
         database_oid,
         extension_oid,
@@ -71,17 +78,10 @@ pub(crate) fn reserve_registration(
 }
 
 pub(crate) fn finish_registration(
-    database_oid: u32,
-    extension_oid: u32,
-    worker_name: &str,
-    committed: bool,
+    reservation: RegistrationReservation,
+    completion: RegistrationCompletion,
 ) -> bool {
-    store::RuntimeStore::new().finish_registration(
-        database_oid,
-        extension_oid,
-        worker_name,
-        committed,
-    )
+    store::RuntimeStore::new().finish_registration(reservation, completion)
 }
 
 pub(crate) fn wake_worker(
@@ -92,8 +92,8 @@ pub(crate) fn wake_worker(
     store::RuntimeStore::new().wake_worker(database_oid, extension_oid, worker_name)
 }
 
-pub(crate) fn mark_database_dirty(database_oid: u32) -> bool {
-    store::RuntimeStore::new().mark_database_dirty(database_oid)
+pub(crate) fn request_database_reconcile(database_oid: u32) -> bool {
+    store::RuntimeStore::new().request_database_reconcile(database_oid)
 }
 
 pub(crate) fn request_full_rescan() -> bool {
@@ -121,10 +121,6 @@ pub(crate) fn stop_extension(
     extension_oid: u32,
 ) -> LakebaseResult<()> {
     control::StopController::new().stop_extension(database_oid, extension_oid)
-}
-
-pub(crate) fn pause_database_reconciliation(database_oid: u32) -> LakebaseResult<()> {
-    control::StopController::new().pause_reconciliation(database_oid)
 }
 
 pub(crate) fn stop_worker(
