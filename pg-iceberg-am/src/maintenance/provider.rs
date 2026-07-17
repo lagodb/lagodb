@@ -14,6 +14,7 @@ use parquet::file::properties::WriterProperties;
 use crate::catalog::bridge::IcebergTableId;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::catalog::{IcebergAccessMethod, IcebergMetadata};
+use crate::constants::ICEBERG_AM_NAME;
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
 use crate::storage::StorageContext;
 use crate::options::IcebergTableOptions;
@@ -353,6 +354,7 @@ impl IcebergTableMaintenanceProvider {
 
 impl LakebaseTableMaintenanceProvider for IcebergTableMaintenanceProvider {
     const NAME: &'static CStr = c"iceberg";
+    const ACCESS_METHOD_NAME: &'static CStr = ICEBERG_AM_NAME;
 
     fn access_method_oid() -> Option<pg_sys::Oid> {
         IcebergAccessMethod::oid()

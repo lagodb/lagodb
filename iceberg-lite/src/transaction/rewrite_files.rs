@@ -167,8 +167,8 @@ impl RewriteFilesAction {
     fn validate_current_table(
         &self,
         table: &Table,
-        inventory: &CurrentSnapshotInventory,
-    ) -> Result<()> {
+        removals: &crate::overlay::SnapshotDeltaRemovals,
+    ) -> Result<CurrentSnapshotInventory> {
         let metadata = table.metadata();
         let starting_snapshot = metadata
             .snapshot_by_id(self.starting_snapshot_id)
@@ -209,7 +209,10 @@ impl RewriteFilesAction {
             .cloned()
             .collect();
         let mut live_inputs = HashSet::new();
-        for (manifest_file, manifest) in inventory.manifests() {
+        let inventory = CurrentSnapshotInventory::load_for_rewrite(
+            table,
+            removals,
+            |manifest_file, manifest| {
             for entry in manifest.entries().iter().filter(|entry| entry.is_alive()) {
                 // File paths are table-wide identities, not content-local
                 // identities. Preserve SnapshotDelta's duplicate check across
@@ -225,8 +228,8 @@ impl RewriteFilesAction {
                 }
                 match manifest_file.content {
                     ManifestContentType::Data => {
-                        if input_paths.contains(entry.file_path()) {
-                            live_inputs.insert(entry.file_path());
+                        if let Some(input_path) = input_paths.get(entry.file_path()) {
+                            live_inputs.insert(*input_path);
                         }
                     }
                     ManifestContentType::Deletes => {
@@ -274,7 +277,9 @@ impl RewriteFilesAction {
                     }
                 }
             }
-        }
+            Ok(())
+        },
+        )?;
 
         if live_inputs.len() != input_paths.len() {
             let mut missing: Vec<&str> = input_paths
@@ -290,7 +295,7 @@ impl RewriteFilesAction {
                 ),
             ));
         }
-        Ok(())
+        Ok(inventory)
     }
 
     fn delete_may_apply(
@@ -330,9 +335,8 @@ impl RewriteFilesAction {
 impl TransactionAction for RewriteFilesAction {
     fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
         self.validate_definition()?;
-        let inventory = CurrentSnapshotInventory::load(table)?;
-        self.validate_current_table(table, &inventory)?;
         let plan = self.delta_plan()?;
+        let inventory = self.validate_current_table(table, &plan.removals)?;
         let producer = DeltaSnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),

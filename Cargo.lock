@@ -4158,6 +4158,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg-delta-am"
+version = "0.1.0"
+dependencies = [
+ "pg-lakebase-core",
+ "pgrx",
+]
+
+[[package]]
 name = "pg-lakebase-storage"
 version = "0.1.0"
 dependencies = [

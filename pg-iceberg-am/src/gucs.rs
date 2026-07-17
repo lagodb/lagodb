@@ -14,6 +14,10 @@ static VACUUM_ORPHAN_RETENTION_S: GucSetting<i32> = GucSetting::<i32>::new(259_2
 static AUTO_MAINTENANCE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
 static AUTO_MAINTENANCE_INTERVAL_S: GucSetting<i32> = GucSetting::<i32>::new(300);
 static AUTO_MAINTENANCE_MAX_TABLES: GucSetting<i32> = GucSetting::<i32>::new(32);
+static AUTO_MAINTENANCE_JITTER_PERCENT: GucSetting<i32> =
+    GucSetting::<i32>::new(20);
+static AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S: GucSetting<i32> =
+    GucSetting::<i32>::new(3_600);
 
 /// Injection point for testing purposes.
 static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
@@ -86,6 +90,26 @@ pub fn init() {
         &AUTO_MAINTENANCE_MAX_TABLES,
         1,
         10_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_iceberg_am.auto_maintenance_jitter_percent",
+        c"Jitter applied to automatic maintenance scheduling",
+        c"Jitter avoids synchronized maintenance rounds and retry storms.",
+        &AUTO_MAINTENANCE_JITTER_PERCENT,
+        0,
+        100,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_iceberg_am.auto_maintenance_failure_backoff_max_s",
+        c"Maximum per-relation automatic maintenance failure backoff",
+        c"Repeated failures back off independently without starving other relations.",
+        &AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S,
+        10,
+        86_400,
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -174,6 +198,16 @@ pub(crate) fn auto_maintenance_interval() -> std::time::Duration {
 
 pub(crate) fn auto_maintenance_max_tables() -> usize {
     AUTO_MAINTENANCE_MAX_TABLES.get() as usize
+}
+
+pub(crate) fn auto_maintenance_jitter_percent() -> u32 {
+    AUTO_MAINTENANCE_JITTER_PERCENT.get() as u32
+}
+
+pub(crate) fn auto_maintenance_failure_backoff_max() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S.get() as u64,
+    )
 }
 
 pub fn vacuum_compact_data_files() -> bool {

@@ -1,0 +1,25 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_touch_metadata s2_vacuum s1_commit s2_verify
+step s1_begin: BEGIN;
+step s1_touch_metadata: 
+  UPDATE iceberg.iceberg_metadata
+  SET previous_metadata_location = previous_metadata_location
+  WHERE relid = 'vacuum_cas_iso.t'::regclass;
+
+step s2_vacuum: VACUUM vacuum_cas_iso.t; <waiting ...>
+step s1_commit: COMMIT;
+s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
+DETAIL:  pg-lakebase
+step s2_vacuum: <... completed>
+step s2_verify: 
+  SELECT (SELECT current_data_objects
+          FROM lakebase.table_maintenance_stats('vacuum_cas_iso.t')) = 1
+           AS compacted,
+         (SELECT array_agg(id ORDER BY id) FROM vacuum_cas_iso.t)
+           = ARRAY[1, 2, 3, 4, 5, 6] AS rows_preserved;
+compacted|rows_preserved
+---------+--------------
+t        |t             
+(1 row)
+

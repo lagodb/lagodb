@@ -1,0 +1,48 @@
+\set ECHO none
+WITH after AS (
+    SELECT format, count(*) AS row_count,
+           md5(string_agg(id::text || ':' || payload, ',' ORDER BY id)) AS digest
+    FROM (
+        SELECT 'v1-ordinary' AS format, * FROM object_v1_ordinary
+        UNION ALL SELECT 'v2-ordinary', * FROM object_v2_ordinary
+        UNION ALL SELECT 'v3-ordinary', * FROM object_v3_ordinary
+        UNION ALL SELECT 'v1-full', * FROM object_v1_full
+        UNION ALL SELECT 'v2-full', * FROM object_v2_full
+        UNION ALL SELECT 'v3-full', * FROM object_v3_full
+    ) AS visible_rows
+    GROUP BY format
+)
+SELECT count(*) = 6 AS all_cases_present,
+       bool_and(before.row_count = after.row_count) AS row_count_preserved,
+       bool_and(before.digest = after.digest) AS content_preserved
+FROM object_matrix_before AS before
+JOIN after USING (format);
+ all_cases_present | row_count_preserved | content_preserved 
+-------------------+---------------------+-------------------
+ t                 | t                   | t
+(1 row)
+
+SELECT count(*) = 6 AS all_cases_inspected,
+       bool_and(stats.current_data_objects = 1) AS one_current_data_file
+FROM object_matrix_roots AS roots
+CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats;
+ all_cases_inspected | one_current_data_file 
+---------------------+-----------------------
+ t                   | t
+(1 row)
+
+SELECT count(*) = 6 AS all_cases_observed,
+       bool_and(observed.objects < roots.objects_before)
+           AS physical_objects_reclaimed
+FROM object_matrix_roots AS roots
+CROSS JOIN LATERAL lakebase.observe_object_tree(
+    'regress_vacuum_object_matrix',
+    :'lakebase_regress_bucket',
+    roots.prefix
+) AS observed;
+ all_cases_observed | physical_objects_reclaimed 
+--------------------+----------------------------
+ t                  | t
+(1 row)
+
+\set ECHO none

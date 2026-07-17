@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use iceberg_lite::spec::{
-    Manifest, ManifestContentType, ManifestFile, ManifestList, Snapshot,
-    TableMetadata,
+    ManifestContentType, Snapshot, TableMetadata,
 };
 use iceberg_lite::table::Table;
 
@@ -15,8 +13,8 @@ use super::types::ManagedTableRoot;
 /// Java-compatible incremental reachable-file cleanup.
 #[derive(Default)]
 pub(crate) struct IcebergReachabilityPlanner {
-    manifest_lists: HashMap<String, Arc<ManifestList>>,
-    manifests: HashMap<String, Arc<Manifest>>,
+    seeded_manifest_lists: HashSet<String>,
+    seeded_manifests: HashSet<String>,
     visited_manifest_lists: HashSet<String>,
     visited_manifests: HashSet<String>,
 }
@@ -132,10 +130,10 @@ impl IcebergReachabilityPlanner {
             .count();
 
         // Subtract both expiration-derived and age-gated orphan candidates in
-        // one retained-history traversal. Only manifests loaded while seeding
-        // expired snapshots are cached; other retained manifests are streamed
-        // and dropped so memory remains bounded by the candidate-producing
-        // history rather than the complete retained table.
+        // one retained-history traversal. Parsed manifest lists and manifests
+        // are always dropped after one visit; only their identities remain for
+        // de-duplication, so memory is bounded by candidates and path identity
+        // sets rather than parsed history.
         for snapshot in after.metadata().snapshots() {
             if snapshot_candidate_count == 0
                 && statistics_candidate_count == 0
@@ -247,32 +245,33 @@ impl IcebergReachabilityPlanner {
         snapshot: &Snapshot,
         candidates: &mut HashMap<String, CandidateKind>,
     ) -> IcebergResult<()> {
-        let first_manifest_list_visit = !self
-            .manifest_lists
-            .contains_key(snapshot.manifest_list());
         candidates
             .entry(snapshot.manifest_list().to_owned())
             .or_insert(CandidateKind::ManifestList);
-        if !first_manifest_list_visit {
+        if !self
+            .seeded_manifest_lists
+            .insert(snapshot.manifest_list().to_owned())
+        {
             return Ok(());
         }
-        let manifest_list = self.manifest_list(table, snapshot, true)?;
+        let manifest_list =
+            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
         for manifest_file in manifest_list.entries() {
             pgrx::pg_sys::check_for_interrupts!();
-            let first_manifest_visit = !self
-                .manifests
-                .contains_key(&manifest_file.manifest_path);
             candidates
                 .entry(manifest_file.manifest_path.clone())
                 .or_insert(CandidateKind::Manifest);
-            if !first_manifest_visit {
+            if !self
+                .seeded_manifests
+                .insert(manifest_file.manifest_path.clone())
+            {
                 continue;
             }
             let content_kind = match manifest_file.content {
                 ManifestContentType::Data => CandidateKind::Data,
                 ManifestContentType::Deletes => CandidateKind::Delete,
             };
-            let manifest = self.manifest(table, manifest_file, true)?;
+            let manifest = manifest_file.load_manifest(table.file_io())?;
             for entry in manifest.entries() {
                 if entry.is_alive() {
                     candidates
@@ -297,7 +296,8 @@ impl IcebergReachabilityPlanner {
         {
             return Ok(());
         }
-        let manifest_list = self.manifest_list(table, snapshot, false)?;
+        let manifest_list =
+            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
         for manifest_file in manifest_list.entries() {
             pgrx::pg_sys::check_for_interrupts!();
             visit(&manifest_file.manifest_path);
@@ -307,7 +307,7 @@ impl IcebergReachabilityPlanner {
             {
                 continue;
             }
-            let manifest = self.manifest(table, manifest_file, false)?;
+            let manifest = manifest_file.load_manifest(table.file_io())?;
             for entry in manifest.entries() {
                 if entry.is_alive() {
                     visit(entry.file_path());
@@ -315,46 +315,6 @@ impl IcebergReachabilityPlanner {
             }
         }
         Ok(())
-    }
-
-    fn manifest_list(
-        &mut self,
-        table: &Table,
-        snapshot: &Snapshot,
-        cache: bool,
-    ) -> IcebergResult<Arc<ManifestList>> {
-        if let Some(manifest_list) = self.manifest_lists.get(snapshot.manifest_list()) {
-            return Ok(Arc::clone(manifest_list));
-        }
-        let manifest_list = Arc::new(
-            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?,
-        );
-        if cache {
-            self.manifest_lists.insert(
-                snapshot.manifest_list().to_owned(),
-                Arc::clone(&manifest_list),
-            );
-        }
-        Ok(manifest_list)
-    }
-
-    fn manifest(
-        &mut self,
-        table: &Table,
-        manifest_file: &ManifestFile,
-        cache: bool,
-    ) -> IcebergResult<Arc<Manifest>> {
-        if let Some(manifest) = self.manifests.get(&manifest_file.manifest_path) {
-            return Ok(Arc::clone(manifest));
-        }
-        let manifest = Arc::new(manifest_file.load_manifest(table.file_io())?);
-        if cache {
-            self.manifests.insert(
-                manifest_file.manifest_path.clone(),
-                Arc::clone(&manifest),
-            );
-        }
-        Ok(manifest)
     }
 
     fn visit_statistics(

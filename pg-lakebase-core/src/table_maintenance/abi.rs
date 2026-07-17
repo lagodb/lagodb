@@ -12,7 +12,9 @@ use super::{
 
 pub const RUNTIME_API_VERSION: u32 = 1;
 pub const RUNTIME_API_RENDEZVOUS: &CStr = c"pg_lakebase.runtime_api.v1";
-pub const MAINTENANCE_PROVIDER_VERSION: u32 = 1;
+// Version 2 adds the stable access-method catalog name used to reject
+// duplicate ownership before a database-local AM OID can be resolved.
+pub const MAINTENANCE_PROVIDER_VERSION: u32 = 2;
 pub const FORMAT_NAME_CAPACITY: usize = 32;
 
 pub const REGISTER_OK: u32 = 0;
@@ -234,10 +236,15 @@ pub type InspectCallback = unsafe extern "C-unwind" fn(
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct MaintenanceProviderV1 {
+pub struct MaintenanceProviderV2 {
     pub abi_version: u32,
     pub struct_size: u32,
     pub name: *const c_char,
+    /// Stable catalog name of the table access method owned by this provider.
+    ///
+    /// Runtime registration uses this identity because access-method OIDs are
+    /// database-local and may not be resolvable while extensions are preloaded.
+    pub access_method_name: *const c_char,
     pub access_method_oid: AccessMethodOidCallback,
     pub execute: ExecuteCallback,
     pub inspect: InspectCallback,
@@ -247,10 +254,10 @@ pub struct MaintenanceProviderV1 {
 pub struct RuntimeApiV1 {
     pub abi_version: u32,
     pub struct_size: u32,
-    pub register_provider: unsafe extern "C-unwind" fn(*const MaintenanceProviderV1) -> u32,
+    pub register_provider: unsafe extern "C-unwind" fn(*const MaintenanceProviderV2) -> u32,
     pub has_providers: unsafe extern "C-unwind" fn() -> u8,
     pub provider_for_am:
-        unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const MaintenanceProviderV1,
+        unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const MaintenanceProviderV2,
     pub customscan_mode: unsafe extern "C-unwind" fn() -> u32,
     pub maintenance_config:
         unsafe extern "C-unwind" fn(*mut RuntimeMaintenanceConfigV1),
@@ -284,6 +291,13 @@ pub fn runtime_api() -> Option<&'static RuntimeApiV1> {
     Some(api)
 }
 
-pub fn provider_name(provider: &MaintenanceProviderV1) -> Option<&CStr> {
+pub fn provider_name(provider: &MaintenanceProviderV2) -> Option<&CStr> {
     (!provider.name.is_null()).then(|| unsafe { CStr::from_ptr(provider.name) })
+}
+
+pub fn provider_access_method_name(
+    provider: &MaintenanceProviderV2,
+) -> Option<&CStr> {
+    (!provider.access_method_name.is_null())
+        .then(|| unsafe { CStr::from_ptr(provider.access_method_name) })
 }

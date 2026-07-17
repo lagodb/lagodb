@@ -8,6 +8,7 @@ const EXTENSION_PACKAGE: &str = "pg-iceberg-am";
 const EXTENSION_NAME: &str = "pg_iceberg_am";
 const RUNTIME_PACKAGE: &str = "pg-lakebase-runtime";
 const RUNTIME_NAME: &str = "pg_lakebase_runtime";
+const DELTA_AM_PACKAGE: &str = "pg-delta-am";
 
 fn main() -> ExitCode {
     match run() {
@@ -86,6 +87,8 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg("pg-backend-tests")
             .arg("--exclude")
             .arg(EXTENSION_PACKAGE)
+            .arg("--exclude")
+            .arg(DELTA_AM_PACKAGE)
             .arg("--no-default-features")
             .arg("--features")
             .arg(&pg_feature),
@@ -169,6 +172,17 @@ fn run_regress(pg_version: &OsStr) -> Result<(), String> {
 
     let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
     let bindir = pg_config_value(&pg_config, "--bindir")?;
+    run_command(
+        Command::new("cargo")
+            .arg("pgrx")
+            .arg("install")
+            .arg("--package")
+            .arg(DELTA_AM_PACKAGE)
+            .arg("--features")
+            .arg("pg_test")
+            .arg("--pg-config")
+            .arg(&pg_config),
+    )?;
 
     let mut command = Command::new("cargo");
     command

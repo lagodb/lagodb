@@ -1,0 +1,27 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_touch_metadata s2_vacuum_full s1_commit s2_verify
+step s1_begin: BEGIN;
+step s1_touch_metadata: 
+  UPDATE iceberg.iceberg_metadata
+  SET previous_metadata_location = previous_metadata_location
+  WHERE relid = 'vacuum_orphan_iso.t'::regclass;
+
+step s2_vacuum_full: VACUUM (FULL) vacuum_orphan_iso.t; <waiting ...>
+step s1_commit: COMMIT;
+s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
+DETAIL:  pg-lakebase
+step s2_vacuum_full: <... completed>
+step s2_verify: 
+  SELECT (SELECT array_agg(id ORDER BY id) FROM vacuum_orphan_iso.t)
+           = ARRAY[1] AS rows_preserved,
+         pg_stat_file(
+           pg_relation_filepath('vacuum_orphan_iso.t') ||
+           '_iceberg/data/orphan.parquet',
+           true
+         ) IS NULL AS orphan_deleted;
+rows_preserved|orphan_deleted
+--------------+--------------
+t             |t             
+(1 row)
+

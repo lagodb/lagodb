@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "pg-lakebase-runtime",
+    "pg-delta-am",
     "pg-lakebase-core",
     "pg-lakebase-macros",
     "pg-iceberg-am",

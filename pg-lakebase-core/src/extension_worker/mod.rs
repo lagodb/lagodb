@@ -3,7 +3,9 @@
 mod context;
 mod exit;
 mod notifier;
+mod transaction;
 
 pub use context::{WorkerContext, WorkerContextError};
 pub use exit::{WorkerExit, WorkerExitCodeError};
 pub use notifier::{WorkerIdentity, WorkerNotifier};
+pub use transaction::WorkerTransaction;

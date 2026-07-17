@@ -1,0 +1,23 @@
+[package]
+name = "pg-delta-am"
+version = { workspace = true }
+publish = false
+license = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [] }
+
+[features]
+default = ["pg17"]
+pg16 = ["pgrx/pg16", "pg-lakebase-core/pg16"]
+pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17"]
+pg_test = []
+
+[dependencies]
+pgrx = { workspace = true }
+pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }

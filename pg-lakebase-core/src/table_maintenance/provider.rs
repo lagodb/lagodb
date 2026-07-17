@@ -6,7 +6,7 @@ use crate::diag::PgReportError;
 use crate::handles::RelationHandle;
 
 use super::abi::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV1, MaintenanceReportV1,
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV2, MaintenanceReportV1,
     MaintenanceRequestV1, MaintenanceStatsV1, REGISTER_DUPLICATE_ACCESS_METHOD,
     REGISTER_DUPLICATE_NAME, REGISTER_INVALID_DESCRIPTOR, REGISTER_OK,
     provider_name, runtime_api,
@@ -27,6 +27,7 @@ pub struct TableMaintenanceRequest<'a> {
 
 pub trait LakebaseTableMaintenanceProvider: 'static {
     const NAME: &'static CStr;
+    const ACCESS_METHOD_NAME: &'static CStr;
 
     fn access_method_oid() -> Option<pg_sys::Oid>;
 
@@ -120,11 +121,12 @@ where
     let api = runtime_api().unwrap_or_else(|| {
         panic!("pg_lakebase runtime API is unavailable; preload pg_lakebase_runtime before provider extensions")
     });
-    let descriptor = MaintenanceProviderV1 {
+    let descriptor = MaintenanceProviderV2 {
         abi_version: MAINTENANCE_PROVIDER_VERSION,
-        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV1>())
+        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV2>())
             .expect("maintenance provider descriptor size exceeds u32"),
         name: P::NAME.as_ptr(),
+        access_method_name: P::ACCESS_METHOD_NAME.as_ptr(),
         access_method_oid: provider_access_method_oid::<P>,
         execute: provider_execute::<P>,
         inspect: provider_inspect::<P>,
@@ -134,7 +136,10 @@ where
         REGISTER_OK => {}
         REGISTER_INVALID_DESCRIPTOR => panic!("runtime rejected an invalid maintenance provider descriptor"),
         REGISTER_DUPLICATE_NAME => panic!("runtime already has a different maintenance provider named {:?}", P::NAME),
-        REGISTER_DUPLICATE_ACCESS_METHOD => panic!("runtime already has a maintenance provider for this access method"),
+        REGISTER_DUPLICATE_ACCESS_METHOD => panic!(
+            "runtime already has a maintenance provider for access method {:?}",
+            P::ACCESS_METHOD_NAME
+        ),
         other => panic!("runtime returned unknown maintenance registration status {other}"),
     }
 }
@@ -148,7 +153,7 @@ impl TableMaintenanceRouter {
 
     fn provider_for_am(
         access_method_oid: pg_sys::Oid,
-    ) -> Result<&'static MaintenanceProviderV1, TableMaintenanceError> {
+    ) -> Result<&'static MaintenanceProviderV2, TableMaintenanceError> {
         let api = runtime_api().ok_or_else(|| {
             TableMaintenanceError::framework("pg_lakebase runtime API is unavailable")
         })?;
