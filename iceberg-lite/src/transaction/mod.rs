@@ -55,9 +55,9 @@ pub use action::*;
 mod append;
 mod expire_snapshots;
 mod manifest_rewrite;
-mod row_delta;
 mod rewrite_files;
 mod rewrite_manifests;
+mod row_delta;
 mod snapshot;
 mod snapshot_delta;
 mod sort_order;
@@ -81,11 +81,11 @@ use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
 use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
+pub use crate::transaction::rewrite_files::RewriteFilesAction;
+pub use crate::transaction::rewrite_manifests::RewriteManifestsAction;
 pub use crate::transaction::row_delta::{
     RowDeltaAction, RowDeltaValidation, RowLevelCommand,
 };
-pub use crate::transaction::rewrite_files::RewriteFilesAction;
-pub use crate::transaction::rewrite_manifests::RewriteManifestsAction;
 use crate::transaction::snapshot_delta::SnapshotDeltaAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;

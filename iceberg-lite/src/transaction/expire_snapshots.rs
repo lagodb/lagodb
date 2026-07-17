@@ -106,12 +106,10 @@ impl ExpireSnapshotsAction {
 
         let metadata = table.metadata();
         let now = self.as_of_ms;
-        let default_cutoff = self
-            .older_than_ms
-            .map_or_else(
-                || Self::age_cutoff(now, properties.max_snapshot_age_ms),
-                |value| Ok(value),
-            )?;
+        let default_cutoff = self.older_than_ms.map_or_else(
+            || Self::age_cutoff(now, properties.max_snapshot_age_ms),
+            |value| Ok(value),
+        )?;
         let default_min_to_keep =
             self.retain_last.unwrap_or(properties.min_snapshots_to_keep);
 
@@ -255,9 +253,9 @@ impl ExpireSnapshotsAction {
         }
         .unwrap_or(default_max_ref_age_ms);
         match metadata.snapshot_by_id(snapshot_ref.snapshot_id) {
-            Some(snapshot) => Ok(
-                snapshot.timestamp_ms() < Self::age_cutoff(now, max_ref_age_ms)?,
-            ),
+            Some(snapshot) => {
+                Ok(snapshot.timestamp_ms() < Self::age_cutoff(now, max_ref_age_ms)?)
+            }
             None => Ok(false),
         }
     }
@@ -300,7 +298,9 @@ impl ExpireSnapshotsAction {
         {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
-                format!("snapshot reference {ref_name:?} has invalid retention values"),
+                format!(
+                    "snapshot reference {ref_name:?} has invalid retention values"
+                ),
             ));
         }
         Ok(())

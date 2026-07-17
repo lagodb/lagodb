@@ -17,9 +17,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::overlay::{
-    ResolvedSnapshotDelta, SnapshotDelta, SnapshotDeltaRemovals,
-};
+use crate::overlay::{ResolvedSnapshotDelta, SnapshotDelta, SnapshotDeltaRemovals};
 use crate::spec::{DataFile, Operation};
 
 #[derive(Default)]

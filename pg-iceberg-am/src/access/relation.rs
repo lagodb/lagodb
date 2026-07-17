@@ -2,12 +2,12 @@ use crate::IcebergTableAm;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::IcebergResult;
 use crate::storage::StorageContext;
-use pg_lakebase_core::diag::report_warning;
 use pg_lakebase_core::diag::PgReportError;
+use pg_lakebase_core::diag::report_warning;
 use pg_lakebase_core::prelude::*;
 use pg_lakebase_core::table_maintenance::{
-    TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
-    LakebaseTableMaintenanceProvider, TableMaintenanceOptions,
+    LakebaseTableMaintenanceProvider, TableMaintenanceBudget,
+    TableMaintenanceCommandTime, TableMaintenanceMode, TableMaintenanceOptions,
     TableMaintenanceRequest,
 };
 use pgrx::pg_sys;

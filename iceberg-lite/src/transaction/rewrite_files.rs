@@ -14,8 +14,7 @@ use crate::overlay::{DeleteFileIdentity, SnapshotDelta};
 use crate::spec::{DataContentType, DataFile, ManifestContentType, Operation};
 use crate::table::Table;
 use crate::transaction::snapshot_delta::{
-    CurrentSnapshotInventory, DeltaCommitSemantics, DeltaPlan,
-    DeltaSnapshotProducer,
+    CurrentSnapshotInventory, DeltaCommitSemantics, DeltaPlan, DeltaSnapshotProducer,
 };
 use crate::transaction::{ActionCommit, TransactionAction};
 use crate::{Error, ErrorKind, Result};
@@ -203,37 +202,38 @@ impl RewriteFilesAction {
             .iter()
             .map(DataFile::file_path)
             .collect();
-        let rewritten_delete_files: HashSet<DeleteFileIdentity> = self
-            .rewritten_delete_files
-            .iter()
-            .cloned()
-            .collect();
+        let rewritten_delete_files: HashSet<DeleteFileIdentity> =
+            self.rewritten_delete_files.iter().cloned().collect();
         let mut live_inputs = HashSet::new();
         let inventory = CurrentSnapshotInventory::load_for_rewrite(
             table,
             removals,
             |manifest_file, manifest| {
-            for entry in manifest.entries().iter().filter(|entry| entry.is_alive()) {
-                // File paths are table-wide identities, not content-local
-                // identities. Preserve SnapshotDelta's duplicate check across
-                // both data and delete manifests while reusing this inventory.
-                if replacement_paths.contains(entry.file_path()) {
-                    return Err(Error::new(
-                        ErrorKind::DataInvalid,
-                        format!(
-                            "RewriteFiles replacement is already referenced by the current table: {}",
-                            entry.file_path()
-                        ),
-                    ));
-                }
-                match manifest_file.content {
-                    ManifestContentType::Data => {
-                        if let Some(input_path) = input_paths.get(entry.file_path()) {
-                            live_inputs.insert(*input_path);
-                        }
+                for entry in
+                    manifest.entries().iter().filter(|entry| entry.is_alive())
+                {
+                    // File paths are table-wide identities, not content-local
+                    // identities. Preserve SnapshotDelta's duplicate check across
+                    // both data and delete manifests while reusing this inventory.
+                    if replacement_paths.contains(entry.file_path()) {
+                        return Err(Error::new(
+                            ErrorKind::DataInvalid,
+                            format!(
+                                "RewriteFiles replacement is already referenced by the current table: {}",
+                                entry.file_path()
+                            ),
+                        ));
                     }
-                    ManifestContentType::Deletes => {
-                        let sequence_number = entry.sequence_number().ok_or_else(|| {
+                    match manifest_file.content {
+                        ManifestContentType::Data => {
+                            if let Some(input_path) =
+                                input_paths.get(entry.file_path())
+                            {
+                                live_inputs.insert(*input_path);
+                            }
+                        }
+                        ManifestContentType::Deletes => {
+                            let sequence_number = entry.sequence_number().ok_or_else(|| {
                             Error::new(
                                 ErrorKind::DataInvalid,
                                 format!(
@@ -242,43 +242,45 @@ impl RewriteFilesAction {
                                 ),
                             )
                         })?;
-                        if sequence_number > self.starting_sequence_number
-                            && Self::delete_may_apply(
-                                entry.data_file(),
-                                &input_paths,
-                                &self.rewritten_data_files,
-                            )
-                        {
-                            return Err(Error::new(
-                                ErrorKind::DataConflict,
-                                format!(
-                                    "a row-level delete added after snapshot {} may apply to a rewritten input",
-                                    self.starting_snapshot_id
-                                ),
-                            ));
-                        }
-                        if entry.data_file().is_deletion_vector()
-                            && entry
-                                .data_file()
-                                .referenced_data_file_path()
-                                .is_some_and(|path| input_paths.contains(path))
-                            && !rewritten_delete_files.contains(
-                                &DeleteFileIdentity::from_data_file(entry.data_file()),
-                            )
-                        {
-                            return Err(Error::new(
-                                ErrorKind::DataInvalid,
-                                format!(
-                                    "RewriteFiles must remove deletion vector {} whose rows were materialized",
-                                    entry.file_path()
-                                ),
-                            ));
+                            if sequence_number > self.starting_sequence_number
+                                && Self::delete_may_apply(
+                                    entry.data_file(),
+                                    &input_paths,
+                                    &self.rewritten_data_files,
+                                )
+                            {
+                                return Err(Error::new(
+                                    ErrorKind::DataConflict,
+                                    format!(
+                                        "a row-level delete added after snapshot {} may apply to a rewritten input",
+                                        self.starting_snapshot_id
+                                    ),
+                                ));
+                            }
+                            if entry.data_file().is_deletion_vector()
+                                && entry
+                                    .data_file()
+                                    .referenced_data_file_path()
+                                    .is_some_and(|path| input_paths.contains(path))
+                                && !rewritten_delete_files.contains(
+                                    &DeleteFileIdentity::from_data_file(
+                                        entry.data_file(),
+                                    ),
+                                )
+                            {
+                                return Err(Error::new(
+                                    ErrorKind::DataInvalid,
+                                    format!(
+                                        "RewriteFiles must remove deletion vector {} whose rows were materialized",
+                                        entry.file_path()
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
-            }
-            Ok(())
-        },
+                Ok(())
+            },
         )?;
 
         if live_inputs.len() != input_paths.len() {

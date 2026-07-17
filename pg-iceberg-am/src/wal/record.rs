@@ -226,8 +226,7 @@ pub(crate) fn delete_file_fits_wal(path: &str) -> bool {
     !path.is_empty()
         && !path.as_bytes().contains(&0)
         && u32::try_from(path.len()).is_ok()
-        && std::mem::size_of::<u32>() + path.len()
-            <= MAX_DELETE_FILES_PAYLOAD_BYTES
+        && std::mem::size_of::<u32>() + path.len() <= MAX_DELETE_FILES_PAYLOAD_BYTES
 }
 
 fn insert_delete_files_record(path_count: u32, payload: &[u8]) -> XLogRecPtr {

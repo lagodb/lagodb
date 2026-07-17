@@ -124,7 +124,9 @@ pub fn find_matching_provider(
             return Ok(None);
         };
         if matches.next().is_some() {
-            return Err(CustomScanError::multi_provider_match(ctx.rel_oid().to_u32()));
+            return Err(CustomScanError::multi_provider_match(
+                ctx.rel_oid().to_u32(),
+            ));
         }
         Ok(Some(first))
     })

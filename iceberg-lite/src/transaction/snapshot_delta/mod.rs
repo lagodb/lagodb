@@ -351,8 +351,11 @@ impl<'a> DeltaSnapshotProducer<'a> {
             return Ok(ActionCommit::new(Vec::new(), Vec::new()));
         }
 
-        let summary =
-            self.summary(semantics.operation, summary_collector, truncate_full_table)?;
+        let summary = self.summary(
+            semantics.operation,
+            summary_collector,
+            truncate_full_table,
+        )?;
         let (manifest_list_path, writer_next_row_id) =
             self.write_manifest_list(manifests)?;
         let new_snapshot =
@@ -446,7 +449,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
         removals: &SnapshotDeltaRemovals,
         summary_collector: &mut SnapshotSummaryCollector,
     ) -> Result<Vec<ManifestFile>> {
-
         let mut manifests = Vec::new();
         let mut found_removed_paths = HashSet::new();
         let mut found_removed_delete_files = HashSet::new();
@@ -508,7 +510,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
 
         Ok(manifests)
     }
-
 
     fn rewrite_manifest(
         &mut self,

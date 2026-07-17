@@ -102,17 +102,17 @@ impl VacuumCleanup {
                     ),
                 })?;
             if batch_paths > 0
-                && (batch_paths
-                    >= crate::wal::record::MAX_DELETE_FILES_PER_RECORD
+                && (batch_paths >= crate::wal::record::MAX_DELETE_FILES_PER_RECORD
                     || payload_bytes.checked_add(encoded).is_none_or(|value| {
                         value > crate::wal::record::MAX_DELETE_FILES_PAYLOAD_BYTES
                     }))
             {
-                batches = batches.checked_add(1).ok_or_else(|| IcebergError::Vacuum {
-                    source: IcebergVacuumError::ResourceLimit(
-                        "DELETE_FILES WAL batch count overflow".to_owned(),
-                    ),
-                })?;
+                batches =
+                    batches.checked_add(1).ok_or_else(|| IcebergError::Vacuum {
+                        source: IcebergVacuumError::ResourceLimit(
+                            "DELETE_FILES WAL batch count overflow".to_owned(),
+                        ),
+                    })?;
                 batch_paths = 0;
                 payload_bytes = 0;
             }
@@ -143,12 +143,14 @@ impl VacuumCleanup {
         if candidates.is_empty() {
             return Ok(VacuumCleanupRegistration::default());
         }
-        let count = u64::try_from(candidates.len()).map_err(|_| IcebergError::Vacuum {
-            source: IcebergVacuumError::ResourceLimit(
-                "cleanup candidate count does not fit u64".to_owned(),
-            ),
-        })?;
-        if let Some(local) = file_io.storage().as_any().downcast_ref::<LocalStorage>() {
+        let count =
+            u64::try_from(candidates.len()).map_err(|_| IcebergError::Vacuum {
+                source: IcebergVacuumError::ResourceLimit(
+                    "cleanup candidate count does not fit u64".to_owned(),
+                ),
+            })?;
+        if let Some(local) = file_io.storage().as_any().downcast_ref::<LocalStorage>()
+        {
             let mut paths: Vec<String> = candidates.into_iter().collect();
             paths.sort_unstable();
             let local_wal_batches = if local.needs_wal() {
@@ -168,7 +170,9 @@ impl VacuumCleanup {
                 remote_queue_rows: 0,
             });
         }
-        if let Some(object) = file_io.storage().as_any().downcast_ref::<ObjectStorage>() {
+        if let Some(object) =
+            file_io.storage().as_any().downcast_ref::<ObjectStorage>()
+        {
             let batch_size = pg_lakebase_core::maintenance::producer_batch_items();
             let mut targets = Vec::with_capacity(batch_size);
             for path in candidates {

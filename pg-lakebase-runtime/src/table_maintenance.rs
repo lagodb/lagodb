@@ -125,8 +125,7 @@ unsafe extern "C-unwind" fn register_provider(
         return REGISTER_INVALID_DESCRIPTOR;
     }
     let name = unsafe { CStr::from_ptr(descriptor.name) };
-    let access_method_name =
-        unsafe { CStr::from_ptr(descriptor.access_method_name) };
+    let access_method_name = unsafe { CStr::from_ptr(descriptor.access_method_name) };
     if name.is_empty()
         || access_method_name.is_empty()
         || access_method_name.to_bytes().len()
@@ -211,7 +210,10 @@ static RUNTIME_API: RuntimeApiV1 = RuntimeApiV1 {
 
 pub(crate) fn init() {
     let slot = unsafe { rendezvous_slot() };
-    assert!(!slot.is_null(), "PostgreSQL returned a null rendezvous slot");
+    assert!(
+        !slot.is_null(),
+        "PostgreSQL returned a null rendezvous slot"
+    );
     let published = unsafe { *slot };
     if !published.is_null()
         && published
@@ -222,7 +224,9 @@ pub(crate) fn init() {
         panic!("a different pg_lakebase runtime API is already published");
     }
     unsafe {
-        *slot = (&RUNTIME_API as *const RuntimeApiV1).cast_mut().cast::<c_void>();
+        *slot = (&RUNTIME_API as *const RuntimeApiV1)
+            .cast_mut()
+            .cast::<c_void>();
     }
     pg_lakebase_core::table_maintenance::install_runtime_router();
 }

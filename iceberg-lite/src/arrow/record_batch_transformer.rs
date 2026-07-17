@@ -269,9 +269,7 @@ impl RecordBatchTransformerBuilder {
     ) -> Self {
         self.generated_metadata_fields.insert(
             RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER,
-            GeneratedMetadataColumn::LastUpdatedSequenceNumber {
-                sequence_number,
-            },
+            GeneratedMetadataColumn::LastUpdatedSequenceNumber { sequence_number },
         );
         self
     }
@@ -547,8 +545,7 @@ impl RecordBatchTransformer {
                     if *field_id == RESERVED_FIELD_ID_POS
                         || *field_id == RESERVED_FIELD_ID_ROW_ID
             )
-        })
-        {
+        }) {
             return Ok(None);
         }
 
@@ -647,11 +644,9 @@ impl RecordBatchTransformer {
                         ColumnSource::Generated {
                             field_id: *field_id,
                         },
-                        |(_, source_index)| {
-                            ColumnSource::CoalesceGenerated {
-                                source_index: *source_index,
-                                field_id: *field_id,
-                            }
+                        |(_, source_index)| ColumnSource::CoalesceGenerated {
+                            source_index: *source_index,
+                            field_id: *field_id,
                         },
                     ));
                 }
@@ -909,10 +904,7 @@ impl RecordBatchTransformer {
             }
             GeneratedMetadataColumn::LastUpdatedSequenceNumber {
                 sequence_number,
-            } => Ok(Arc::new(Int64Array::from_value(
-                *sequence_number,
-                num_rows,
-            ))),
+            } => Ok(Arc::new(Int64Array::from_value(*sequence_number, num_rows))),
         }
     }
 
@@ -923,25 +915,28 @@ impl RecordBatchTransformer {
         positions: Option<&[i64]>,
         num_rows: usize,
     ) -> Result<ArrayRef> {
-        let source = source.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                "Iceberg row-lineage column has unexpected Arrow type",
-            )
-        })?;
+        let source =
+            source
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        "Iceberg row-lineage column has unexpected Arrow type",
+                    )
+                })?;
         if source.null_count() == 0 {
             return Ok(Arc::new(source.clone()));
         }
         let fallback = self.create_generated_column(field_id, positions, num_rows)?;
-        let fallback = fallback
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| {
+        let fallback = fallback.as_any().downcast_ref::<Int64Array>().ok_or_else(
+            || {
                 Error::new(
                     ErrorKind::Unexpected,
                     "generated Iceberg row-lineage column has unexpected Arrow type",
                 )
-            })?;
+            },
+        )?;
         if source.len() != fallback.len() {
             return Err(Error::new(
                 ErrorKind::Unexpected,
@@ -1083,17 +1078,12 @@ mod test {
 
     #[test]
     fn row_lineage_keeps_stored_ids_and_inherits_nulls() {
-        let transformer = RecordBatchTransformerBuilder::new(
-            Arc::new(iceberg_table_schema()),
-            &[],
-        )
-        .with_row_id_column(100)
-        .build();
-        let source: arrow_array::ArrayRef = Arc::new(Int64Array::from(vec![
-            Some(7),
-            None,
-            Some(9),
-        ]));
+        let transformer =
+            RecordBatchTransformerBuilder::new(Arc::new(iceberg_table_schema()), &[])
+                .with_row_id_column(100)
+                .build();
+        let source: arrow_array::ArrayRef =
+            Arc::new(Int64Array::from(vec![Some(7), None, Some(9)]));
         let result = transformer
             .coalesce_generated_column(
                 &source,
@@ -1108,16 +1098,12 @@ mod test {
 
     #[test]
     fn last_updated_sequence_keeps_stored_values_and_inherits_nulls() {
-        let transformer = RecordBatchTransformerBuilder::new(
-            Arc::new(iceberg_table_schema()),
-            &[],
-        )
-        .with_last_updated_sequence_number_column(23)
-        .build();
-        let source: arrow_array::ArrayRef = Arc::new(Int64Array::from(vec![
-            None,
-            Some(11),
-        ]));
+        let transformer =
+            RecordBatchTransformerBuilder::new(Arc::new(iceberg_table_schema()), &[])
+                .with_last_updated_sequence_number_column(23)
+                .build();
+        let source: arrow_array::ArrayRef =
+            Arc::new(Int64Array::from(vec![None, Some(11)]));
         let result = transformer
             .coalesce_generated_column(
                 &source,

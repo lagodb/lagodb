@@ -69,10 +69,11 @@ mod lakebase {
             pg_sys::AccessShareLock as _,
         )
         .report_unwrap();
-        let stats = pg_lakebase_core::table_maintenance::TableMaintenanceRouter::inspect(
-            &relation.as_handle(),
-        )
-        .report_unwrap();
+        let stats =
+            pg_lakebase_core::table_maintenance::TableMaintenanceRouter::inspect(
+                &relation.as_handle(),
+            )
+            .report_unwrap();
         let sql_i64 = |value: u64, metric: &'static str| {
             i64::try_from(value).unwrap_or_else(|_| {
                 pg_lakebase_core::table_maintenance::TableMaintenanceError::framework(
@@ -85,9 +86,15 @@ mod lakebase {
             stats.provider,
             stats.format,
             sql_i64(stats.history_points, "history-point count"),
-            sql_i64(stats.current_content_objects, "current content object count"),
+            sql_i64(
+                stats.current_content_objects,
+                "current content object count",
+            ),
             sql_i64(stats.current_content_bytes, "current content byte count"),
-            sql_i64(stats.retained_content_objects, "retained content object count"),
+            sql_i64(
+                stats.retained_content_objects,
+                "retained content object count",
+            ),
             sql_i64(stats.retained_content_bytes, "retained content byte count"),
             sql_i64(stats.current_data_objects, "current data object count"),
             sql_i64(stats.current_data_bytes, "current data byte count"),

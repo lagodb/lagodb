@@ -20,7 +20,8 @@ impl RuntimeSettings {
     }
 }
 
-pub(crate) fn table_maintenance_budget() -> crate::table_maintenance::TableMaintenanceBudget {
+pub(crate) fn table_maintenance_budget()
+-> crate::table_maintenance::TableMaintenanceBudget {
     const MIB: u64 = 1_048_576;
     let config = RuntimeSettings::get();
     let positive = |value| {

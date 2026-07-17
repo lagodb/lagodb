@@ -91,8 +91,7 @@ impl SchedulerPolicy {
     fn configured() -> Self {
         Self {
             interval: crate::gucs::auto_maintenance_interval(),
-            failure_backoff_max:
-                crate::gucs::auto_maintenance_failure_backoff_max(),
+            failure_backoff_max: crate::gucs::auto_maintenance_failure_backoff_max(),
             jitter_percent: crate::gucs::auto_maintenance_jitter_percent(),
         }
     }
@@ -190,9 +189,7 @@ fn record_failure(
         &[DatumWithOid::from(relid)],
     )?
     .unwrap_or(0);
-    let failures = u32::try_from(previous)
-        .unwrap_or(0)
-        .saturating_add(1);
+    let failures = u32::try_from(previous).unwrap_or(0).saturating_add(1);
     let delay_ms = duration_millis(policy.failure_delay(relid, failures));
     Spi::run_with_args(
         "INSERT INTO iceberg.automatic_maintenance_state \
@@ -216,9 +213,7 @@ fn record_failure(
     )
 }
 
-fn maintain_relation(
-    relid: pg_sys::Oid,
-) -> Result<RelationOutcome, PgReportError> {
+fn maintain_relation(relid: pg_sys::Oid) -> Result<RelationOutcome, PgReportError> {
     let locked = unsafe {
         pg_sys::ConditionalLockRelationOid(
             relid,
@@ -292,9 +287,8 @@ mod iceberg {
             pgrx::pg_sys::check_for_interrupts!();
             match WorkerTransaction::run(|| maintain_relation(relid)) {
                 Ok(outcome) => {
-                    if let Err(error) =
-                        WorkerTransaction::run(|| {
-                            record_success(relid, outcome, policy).map_err(|source| {
+                    if let Err(error) = WorkerTransaction::run(|| {
+                        record_success(relid, outcome, policy).map_err(|source| {
                                 PgReportError::from_message(
                                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                                     format!(
@@ -302,8 +296,7 @@ mod iceberg {
                                     ),
                                 )
                             })
-                        })
-                    {
+                    }) {
                         report_warning(format_args!(
                             "automatic Iceberg maintenance could not persist state for relation {}: {}",
                             relid.to_u32(),
@@ -313,9 +306,8 @@ mod iceberg {
                 }
                 Err(error) => {
                     let message = error.to_string();
-                    if let Err(state_error) =
-                        WorkerTransaction::run(|| {
-                            record_failure(relid, &message, policy).map_err(|source| {
+                    if let Err(state_error) = WorkerTransaction::run(|| {
+                        record_failure(relid, &message, policy).map_err(|source| {
                                 PgReportError::from_message(
                                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                                     format!(
@@ -323,8 +315,7 @@ mod iceberg {
                                     ),
                                 )
                             })
-                        })
-                    {
+                    }) {
                         report_warning(format_args!(
                             "automatic Iceberg maintenance could not persist failure state for relation {}: {}",
                             relid.to_u32(),
@@ -363,7 +354,10 @@ mod tests {
         assert_eq!(policy().failure_delay(relid, 1), Duration::from_secs(100));
         assert_eq!(policy().failure_delay(relid, 2), Duration::from_secs(200));
         assert_eq!(policy().failure_delay(relid, 5), Duration::from_secs(1_000));
-        assert_eq!(policy().failure_delay(relid, 32), Duration::from_secs(1_000));
+        assert_eq!(
+            policy().failure_delay(relid, 32),
+            Duration::from_secs(1_000)
+        );
     }
 
     #[test]

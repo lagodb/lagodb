@@ -1,7 +1,11 @@
 use std::time::Duration;
 
-use pg_lakebase_storage::protocol::{MAX_BULK_DELETE_OBJECT_KEYS, MAX_LIST_PAGE_SIZE};
-use pg_lakebase_storage::{DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS, LIST_CURSOR_IDLE_TTL_MS};
+use pg_lakebase_storage::protocol::{
+    MAX_BULK_DELETE_OBJECT_KEYS, MAX_LIST_PAGE_SIZE,
+};
+use pg_lakebase_storage::{
+    DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS, LIST_CURSOR_IDLE_TTL_MS,
+};
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
 
 use crate::state::{MAX_RECONCILERS, MAX_WORKERS};
@@ -14,13 +18,14 @@ static MAX_DATABASE_RECONCILERS: GucSetting<i32> = GucSetting::<i32>::new(4);
 static MAINTENANCE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 static MAINTENANCE_ACTOR_THREADS: GucSetting<i32> = GucSetting::<i32>::new(1);
 static MAINTENANCE_BATCH_ITEMS: GucSetting<i32> = GucSetting::<i32>::new(128);
-static MAINTENANCE_RETRY_BASE_MS: GucSetting<i32> = GucSetting::<i32>::new(
-    DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS + 1_000,
-);
+static MAINTENANCE_RETRY_BASE_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS + 1_000);
 static MAINTENANCE_RETRY_MAX_MS: GucSetting<i32> = GucSetting::<i32>::new(300_000);
 static MAINTENANCE_RETRY_MAX_ATTEMPTS: GucSetting<i32> = GucSetting::<i32>::new(32);
-static MAINTENANCE_REQUEST_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
-static MAINTENANCE_SHUTDOWN_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
+static MAINTENANCE_REQUEST_TIMEOUT_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(30_000);
+static MAINTENANCE_SHUTDOWN_TIMEOUT_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(30_000);
 static VACUUM_MAX_INPUT_OBJECTS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
 static VACUUM_MAX_INPUT_MB: GucSetting<i32> = GucSetting::<i32>::new(4_096);
 static VACUUM_MAX_GROUP_OBJECTS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
@@ -43,8 +48,8 @@ pub(crate) fn customscan_mode_code() -> u32 {
     }
 }
 
-pub(crate) fn maintenance_config(
-) -> pg_lakebase_core::table_maintenance::abi::RuntimeMaintenanceConfigV1 {
+pub(crate) fn maintenance_config()
+-> pg_lakebase_core::table_maintenance::abi::RuntimeMaintenanceConfigV1 {
     pg_lakebase_core::table_maintenance::abi::RuntimeMaintenanceConfigV1 {
         enabled: u8::from(MAINTENANCE_ENABLED.get()),
         _padding: [0; 3],
@@ -111,11 +116,12 @@ pub(crate) fn init() {
 }
 
 fn init_shared_framework_gucs() {
-    const MAX_BATCH_ITEMS: i32 = if MAX_BULK_DELETE_OBJECT_KEYS < MAX_LIST_PAGE_SIZE as usize {
-        MAX_BULK_DELETE_OBJECT_KEYS as i32
-    } else {
-        MAX_LIST_PAGE_SIZE as i32
-    };
+    const MAX_BATCH_ITEMS: i32 =
+        if MAX_BULK_DELETE_OBJECT_KEYS < MAX_LIST_PAGE_SIZE as usize {
+            MAX_BULK_DELETE_OBJECT_KEYS as i32
+        } else {
+            MAX_LIST_PAGE_SIZE as i32
+        };
     const MIN_RETRY_MS: i32 = DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS + 1_000;
     const MAX_REQUEST_TIMEOUT_MS: i32 = LIST_CURSOR_IDLE_TTL_MS * 4 / 5;
 
@@ -155,8 +161,22 @@ fn init_shared_framework_gucs() {
         GucContext::Sighup,
         GucFlags::default(),
     );
-    define_ms(c"pg_lakebase.maintenance_retry_base_ms", c"Initial maintenance retry delay", &MAINTENANCE_RETRY_BASE_MS, MIN_RETRY_MS, 3_600_000, GucContext::Sighup);
-    define_ms(c"pg_lakebase.maintenance_retry_max_ms", c"Maximum maintenance retry delay", &MAINTENANCE_RETRY_MAX_MS, MIN_RETRY_MS, 86_400_000, GucContext::Sighup);
+    define_ms(
+        c"pg_lakebase.maintenance_retry_base_ms",
+        c"Initial maintenance retry delay",
+        &MAINTENANCE_RETRY_BASE_MS,
+        MIN_RETRY_MS,
+        3_600_000,
+        GucContext::Sighup,
+    );
+    define_ms(
+        c"pg_lakebase.maintenance_retry_max_ms",
+        c"Maximum maintenance retry delay",
+        &MAINTENANCE_RETRY_MAX_MS,
+        MIN_RETRY_MS,
+        86_400_000,
+        GucContext::Sighup,
+    );
     GucRegistry::define_int_guc(
         c"pg_lakebase.maintenance_retry_max_attempts",
         c"Maximum attempts before a maintenance item is failed",
@@ -167,12 +187,42 @@ fn init_shared_framework_gucs() {
         GucContext::Sighup,
         GucFlags::default(),
     );
-    define_ms(c"pg_lakebase.maintenance_request_timeout_ms", c"Storage RPC timeout for maintenance work", &MAINTENANCE_REQUEST_TIMEOUT_MS, 100, MAX_REQUEST_TIMEOUT_MS, GucContext::Sighup);
-    define_ms(c"pg_lakebase.maintenance_shutdown_timeout_ms", c"Graceful maintenance actor shutdown deadline", &MAINTENANCE_SHUTDOWN_TIMEOUT_MS, 100, 3_600_000, GucContext::Sighup);
-    define_budget(c"pg_lakebase.vacuum_max_input_objects", c"Maximum selected input objects for ordinary provider VACUUM", &VACUUM_MAX_INPUT_OBJECTS);
-    define_budget(c"pg_lakebase.vacuum_max_input_mb", c"Maximum selected input MiB for ordinary provider VACUUM", &VACUUM_MAX_INPUT_MB);
-    define_budget(c"pg_lakebase.vacuum_max_group_objects", c"Maximum input objects in one provider maintenance group", &VACUUM_MAX_GROUP_OBJECTS);
-    define_budget(c"pg_lakebase.vacuum_max_group_mb", c"Maximum input MiB in one provider maintenance group", &VACUUM_MAX_GROUP_MB);
+    define_ms(
+        c"pg_lakebase.maintenance_request_timeout_ms",
+        c"Storage RPC timeout for maintenance work",
+        &MAINTENANCE_REQUEST_TIMEOUT_MS,
+        100,
+        MAX_REQUEST_TIMEOUT_MS,
+        GucContext::Sighup,
+    );
+    define_ms(
+        c"pg_lakebase.maintenance_shutdown_timeout_ms",
+        c"Graceful maintenance actor shutdown deadline",
+        &MAINTENANCE_SHUTDOWN_TIMEOUT_MS,
+        100,
+        3_600_000,
+        GucContext::Sighup,
+    );
+    define_budget(
+        c"pg_lakebase.vacuum_max_input_objects",
+        c"Maximum selected input objects for ordinary provider VACUUM",
+        &VACUUM_MAX_INPUT_OBJECTS,
+    );
+    define_budget(
+        c"pg_lakebase.vacuum_max_input_mb",
+        c"Maximum selected input MiB for ordinary provider VACUUM",
+        &VACUUM_MAX_INPUT_MB,
+    );
+    define_budget(
+        c"pg_lakebase.vacuum_max_group_objects",
+        c"Maximum input objects in one provider maintenance group",
+        &VACUUM_MAX_GROUP_OBJECTS,
+    );
+    define_budget(
+        c"pg_lakebase.vacuum_max_group_mb",
+        c"Maximum input MiB in one provider maintenance group",
+        &VACUUM_MAX_GROUP_MB,
+    );
 }
 
 fn define_budget(

@@ -205,9 +205,8 @@ impl MaintenanceStatsV1 {
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or(FORMAT_NAME_CAPACITY);
-        let format = (length != 0).then(|| {
-            String::from_utf8_lossy(&self.format[..length]).into_owned()
-        });
+        let format = (length != 0)
+            .then(|| String::from_utf8_lossy(&self.format[..length]).into_owned());
         TableMaintenanceStats {
             provider,
             format,
@@ -254,7 +253,8 @@ pub struct MaintenanceProviderV2 {
 pub struct RuntimeApiV1 {
     pub abi_version: u32,
     pub struct_size: u32,
-    pub register_provider: unsafe extern "C-unwind" fn(*const MaintenanceProviderV2) -> u32,
+    pub register_provider:
+        unsafe extern "C-unwind" fn(*const MaintenanceProviderV2) -> u32,
     pub has_providers: unsafe extern "C-unwind" fn() -> u8,
     pub provider_for_am:
         unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const MaintenanceProviderV2,

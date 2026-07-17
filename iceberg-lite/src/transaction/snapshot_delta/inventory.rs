@@ -54,10 +54,7 @@ impl CurrentSnapshotInventory {
             inspect(manifest_file, &manifest)?;
             let affected = manifest.entries().iter().any(|entry| {
                 entry.is_alive()
-                    && removals.removes_manifest_entry(
-                        manifest_file.content,
-                        entry,
-                    )
+                    && removals.removes_manifest_entry(manifest_file.content, entry)
             });
             manifests.push(CurrentSnapshotManifest {
                 manifest_file: manifest_file.clone(),

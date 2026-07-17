@@ -21,7 +21,10 @@ impl ObjectTreeObserver {
     pub fn connect(timeout: Duration) -> StorageResult<Self> {
         let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
         Ok(Self {
-            client: StorageClient::connect_with_timeout(endpoint.socket_path(), timeout)?,
+            client: StorageClient::connect_with_timeout(
+                endpoint.socket_path(),
+                timeout,
+            )?,
         })
     }
 

@@ -41,11 +41,9 @@ impl<'a> DeltaSnapshotProducer<'a> {
         let mut by_group: Vec<_> = by_group.into_iter().collect();
         by_group.sort_unstable_by(
             |((left_spec, left_content), _), ((right_spec, right_content), _)| {
-                left_spec
-                    .cmp(right_spec)
-                    .then_with(|| {
-                        (*left_content as i32).cmp(&(*right_content as i32))
-                    })
+                left_spec.cmp(right_spec).then_with(|| {
+                    (*left_content as i32).cmp(&(*right_content as i32))
+                })
             },
         );
 
@@ -53,9 +51,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
         for ((spec_id, content), manifests) in by_group {
             let selected_group: Vec<&ManifestFile> = manifests
                 .iter()
-                .filter(|manifest| {
-                    selected.contains(manifest.manifest_path.as_str())
-                })
+                .filter(|manifest| selected.contains(manifest.manifest_path.as_str()))
                 .collect();
             if selected_group.is_empty() {
                 output.extend(manifests);
@@ -82,30 +78,28 @@ impl<'a> DeltaSnapshotProducer<'a> {
                             )
                         })
                 })?;
-            let output_count = usize::try_from(
-                total_bytes.div_ceil(target_size_bytes).max(1),
-            )
-            .map_err(|_| {
-                Error::new(ErrorKind::DataInvalid, "manifest count overflow")
-            })?;
+            let output_count =
+                usize::try_from(total_bytes.div_ceil(target_size_bytes).max(1))
+                    .map_err(|_| {
+                        Error::new(ErrorKind::DataInvalid, "manifest count overflow")
+                    })?;
             let total_live_entries = selected_group.iter().try_fold(
                 Some(0_usize),
                 |total, manifest| {
                     let Some(total) = total else {
                         return Ok::<Option<usize>, Error>(None);
                     };
-                    let (Some(added), Some(existing)) = (
-                        manifest.added_files_count,
-                        manifest.existing_files_count,
-                    ) else {
+                    let (Some(added), Some(existing)) =
+                        (manifest.added_files_count, manifest.existing_files_count)
+                    else {
                         return Ok(None);
                     };
                     let live = usize::try_from(added)
                         .ok()
                         .and_then(|added| {
-                            usize::try_from(existing).ok().and_then(|existing| {
-                                added.checked_add(existing)
-                            })
+                            usize::try_from(existing)
+                                .ok()
+                                .and_then(|existing| added.checked_add(existing))
                         })
                         .ok_or_else(|| {
                             Error::new(
@@ -121,8 +115,8 @@ impl<'a> DeltaSnapshotProducer<'a> {
                     })
                 },
             )?;
-            let entries_per_output = total_live_entries
-                .map(|count| count.div_ceil(output_count).max(1));
+            let entries_per_output =
+                total_live_entries.map(|count| count.div_ceil(output_count).max(1));
             let source_manifests_per_output =
                 selected_group.len().div_ceil(output_count).max(1);
             let mut writer: Option<ManifestWriter> = None;
@@ -130,8 +124,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
             let mut writer_source_manifests = 0_usize;
             let mut written_outputs = 0_usize;
             for manifest_file in selected_group {
-                let manifest =
-                    manifest_file.load_manifest(self.table.file_io())?;
+                let manifest = manifest_file.load_manifest(self.table.file_io())?;
                 let mut row_ids =
                     FirstRowIdInheritance::new(manifest_file.first_row_id);
                 for entry in manifest.entries() {
@@ -140,8 +133,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
                         continue;
                     }
                     let mut file = entry.data_file().clone();
-                    if self.table.metadata().format_version()
-                        == FormatVersion::V3
+                    if self.table.metadata().format_version() == FormatVersion::V3
                         && file.content_type() == DataContentType::Data
                     {
                         file.first_row_id = effective_first_row_id
@@ -176,8 +168,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
                             )
                         })?;
                     if writer.is_none() {
-                        writer =
-                            Some(self.new_manifest_writer(content, spec_id)?);
+                        writer = Some(self.new_manifest_writer(content, spec_id)?);
                     }
                     writer
                         .as_mut()
@@ -197,9 +188,9 @@ impl<'a> DeltaSnapshotProducer<'a> {
                         })?;
                     if entries_per_output.is_some_and(|target| {
                         writer_entries >= target
-                            && written_outputs.checked_add(1).is_some_and(
-                                |written| written < output_count,
-                            )
+                            && written_outputs
+                                .checked_add(1)
+                                .is_some_and(|written| written < output_count)
                     }) {
                         output.push(
                             writer
@@ -207,10 +198,9 @@ impl<'a> DeltaSnapshotProducer<'a> {
                                 .expect("manifest writer was initialized")
                                 .write_manifest_file()?,
                         );
-                        written_outputs =
-                            written_outputs.checked_add(1).expect(
-                                "written output count is bounded by output_count",
-                            );
+                        written_outputs = written_outputs.checked_add(1).expect(
+                            "written output count is bounded by output_count",
+                        );
                         writer_entries = 0;
                         writer_source_manifests = 0;
                     }
@@ -224,8 +214,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
                     })?;
                 if entries_per_output.is_none()
                     && writer.is_some()
-                    && writer_source_manifests
-                        >= source_manifests_per_output
+                    && writer_source_manifests >= source_manifests_per_output
                     && written_outputs
                         .checked_add(1)
                         .is_some_and(|written| written < output_count)
@@ -236,9 +225,9 @@ impl<'a> DeltaSnapshotProducer<'a> {
                             .expect("manifest writer was initialized")
                             .write_manifest_file()?,
                     );
-                    written_outputs = written_outputs.checked_add(1).expect(
-                        "written output count is bounded by output_count",
-                    );
+                    written_outputs = written_outputs
+                        .checked_add(1)
+                        .expect("written output count is bounded by output_count");
                     writer_entries = 0;
                     writer_source_manifests = 0;
                 }

@@ -602,7 +602,8 @@ impl TableScan {
                         partition_spec_id,
                         Some(delete_file_index.clone()),
                     )?;
-                if let Some(entry) = Self::process_data_manifest_entry(entry_context)? {
+                if let Some(entry) = Self::process_data_manifest_entry(entry_context)?
+                {
                     file_scan_tasks.push(entry)?;
                 }
             }

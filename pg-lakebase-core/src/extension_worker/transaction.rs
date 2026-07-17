@@ -56,8 +56,7 @@ impl WorkerTransaction {
                 unsafe { pg_sys::AbortCurrentTransaction() };
                 caught.rethrow()
             }
-            CaughtError::PostgresError(report)
-            | CaughtError::ErrorReport(report) => {
+            CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
                 let error = PgReportError::from_parts(
                     report.sql_error_code(),
                     report.message(),

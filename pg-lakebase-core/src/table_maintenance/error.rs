@@ -136,10 +136,8 @@ impl From<TableMaintenanceError> for ErrorReport {
             } => (message.clone(), detail.clone(), hint.clone()),
             _ => (error.to_string(), None, None),
         };
-        let detail = join_error_details([
-            postgres_detail,
-            error_source_chain_detail(&error),
-        ]);
+        let detail =
+            join_error_details([postgres_detail, error_source_chain_detail(&error)]);
         let mut report = ErrorReport::new(sqlerrcode, message, "");
         if let Some(detail) = detail {
             report = report.set_detail(detail);

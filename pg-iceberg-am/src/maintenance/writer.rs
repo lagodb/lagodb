@@ -63,7 +63,9 @@ impl RewriteGroupWriter {
         Ok(writer.close()?)
     }
 
-    fn rewrite_projection(metadata: &TableMetadata) -> IcebergResult<(SchemaRef, Vec<i32>)> {
+    fn rewrite_projection(
+        metadata: &TableMetadata,
+    ) -> IcebergResult<(SchemaRef, Vec<i32>)> {
         let current = metadata.current_schema();
         let mut fields = current.as_struct().fields().to_vec();
         let mut projection: Vec<i32> = fields.iter().map(|field| field.id).collect();
@@ -94,11 +96,11 @@ impl RewriteGroupWriter {
             .metadata()
             .partition_spec_by_id(first.file.partition_spec_id)
             .cloned()
-            .ok_or_else(|| {
-                IcebergError::Vacuum { source: IcebergVacuumError::ResourceLimit(format!(
+            .ok_or_else(|| IcebergError::Vacuum {
+                source: IcebergVacuumError::ResourceLimit(format!(
                     "partition spec {} no longer exists",
                     first.file.partition_spec_id
-                ))}
+                )),
             })?;
         let partition_key = (!spec.is_unpartitioned()).then(|| {
             PartitionKey::new(
@@ -107,17 +109,18 @@ impl RewriteGroupWriter {
                 first.file.partition().clone(),
             )
         });
-        let target_size = table.metadata().table_properties()?.write_target_file_size_bytes;
+        let target_size = table
+            .metadata()
+            .table_properties()?
+            .write_target_file_size_bytes;
         let location_generator = DefaultLocationGenerator::new(table.metadata())?;
         let file_name_generator = DefaultFileNameGenerator::new(
             format!("vacuum-{}", uuid::Uuid::now_v7()),
             None,
             DataFileFormat::Parquet,
         );
-        let parquet_writer = ParquetWriterBuilder::new(
-            writer_properties.clone(),
-            schema,
-        );
+        let parquet_writer =
+            ParquetWriterBuilder::new(writer_properties.clone(), schema);
         let rolling_writer = RollingFileWriterBuilder::new(
             parquet_writer,
             target_size,

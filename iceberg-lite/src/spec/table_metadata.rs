@@ -302,7 +302,9 @@ impl TableMetadata {
     pub fn snapshot_references(
         &self,
     ) -> impl ExactSizeIterator<Item = (&str, &SnapshotReference)> {
-        self.refs.iter().map(|(name, reference)| (name.as_str(), reference))
+        self.refs
+            .iter()
+            .map(|(name, reference)| (name.as_str(), reference))
     }
 
     #[inline]

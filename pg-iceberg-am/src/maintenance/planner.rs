@@ -58,7 +58,9 @@ impl VacuumPlanner {
         Self::validate_budget(policy)?;
         let properties = table.metadata().table_properties()?;
         if !properties.gc_enabled {
-            return Err(IcebergError::Vacuum { source: IcebergVacuumError::GcDisabled });
+            return Err(IcebergError::Vacuum {
+                source: IcebergVacuumError::GcDisabled,
+            });
         }
         Self::validate_properties(&properties)?;
         for property in [
@@ -98,9 +100,11 @@ impl VacuumPlanner {
         }
 
         let target_bytes = u64::try_from(properties.write_target_file_size_bytes)
-            .map_err(|_| IcebergError::Vacuum { source: IcebergVacuumError::ResourceLimit(
-                "write.target-file-size-bytes does not fit u64".to_owned(),
-            )})?;
+            .map_err(|_| IcebergError::Vacuum {
+                source: IcebergVacuumError::ResourceLimit(
+                    "write.target-file-size-bytes does not fit u64".to_owned(),
+                ),
+            })?;
         let scan_plan = table
             .scan()
             .select_empty()
@@ -130,7 +134,8 @@ impl VacuumPlanner {
         if target_bytes == 0 {
             return Err(IcebergError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
-                    "write.target-file-size-bytes must be greater than zero".to_owned(),
+                    "write.target-file-size-bytes must be greater than zero"
+                        .to_owned(),
                 ),
             });
         }
@@ -160,19 +165,23 @@ impl VacuumPlanner {
             }
         }
 
-        metrics.eligible_files = Self::count(candidates.len(), "eligible file count")?;
-        metrics.eligible_bytes = candidates.iter().try_fold(
-            0_u64,
-            |total, (file, _, _)| total.checked_add(file.file_size_in_bytes()),
-        ).ok_or_else(|| IcebergError::Vacuum {
-            source: IcebergVacuumError::ResourceLimit(
-                "eligible input byte count overflow".to_owned(),
-            ),
-        })?;
+        metrics.eligible_files =
+            Self::count(candidates.len(), "eligible file count")?;
+        metrics.eligible_bytes = candidates
+            .iter()
+            .try_fold(0_u64, |total, (file, _, _)| {
+                total.checked_add(file.file_size_in_bytes())
+            })
+            .ok_or_else(|| IcebergError::Vacuum {
+                source: IcebergVacuumError::ResourceLimit(
+                    "eligible input byte count overflow".to_owned(),
+                ),
+            })?;
 
         let mut groups = Self::bin_pack(candidates, target_bytes, policy)?;
         groups.sort_by(|left, right| {
-            right.delete_heavy
+            right
+                .delete_heavy
                 .cmp(&left.delete_heavy)
                 .then_with(|| {
                     right
@@ -191,7 +200,8 @@ impl VacuumPlanner {
         Self::apply_command_budget(&mut groups, policy)?;
         metrics.selected_groups = Self::count(groups.len(), "selected group count")?;
         metrics.selected_files = groups.iter().try_fold(0_u64, |total, group| {
-            total.checked_add(Self::count(group.inputs.len(), "selected file count")?)
+            total
+                .checked_add(Self::count(group.inputs.len(), "selected file count")?)
                 .ok_or_else(|| IcebergError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "selected file count overflow".to_owned(),
@@ -199,11 +209,13 @@ impl VacuumPlanner {
                 })
         })?;
         metrics.selected_bytes = groups.iter().try_fold(0_u64, |total, group| {
-            total.checked_add(group.input_bytes).ok_or_else(|| IcebergError::Vacuum {
-                source: IcebergVacuumError::ResourceLimit(
-                    "selected input byte count overflow".to_owned(),
-                ),
-            })
+            total
+                .checked_add(group.input_bytes)
+                .ok_or_else(|| IcebergError::Vacuum {
+                    source: IcebergVacuumError::ResourceLimit(
+                        "selected input byte count overflow".to_owned(),
+                    ),
+                })
         })?;
 
         let materialized_delete_identities =
@@ -225,25 +237,39 @@ impl VacuumPlanner {
             source: IcebergVacuumError::InvalidPolicy(message.to_owned()),
         };
         if properties.write_target_file_size_bytes == 0 {
-            return Err(invalid("write.target-file-size-bytes must be greater than zero"));
+            return Err(invalid(
+                "write.target-file-size-bytes must be greater than zero",
+            ));
         }
         if properties.max_snapshot_age_ms < 0 {
-            return Err(invalid("history.expire.max-snapshot-age-ms must not be negative"));
+            return Err(invalid(
+                "history.expire.max-snapshot-age-ms must not be negative",
+            ));
         }
         if properties.min_snapshots_to_keep == 0 {
-            return Err(invalid("history.expire.min-snapshots-to-keep must be greater than zero"));
+            return Err(invalid(
+                "history.expire.min-snapshots-to-keep must be greater than zero",
+            ));
         }
         if properties.max_ref_age_ms < 0 {
-            return Err(invalid("history.expire.max-ref-age-ms must not be negative"));
+            return Err(invalid(
+                "history.expire.max-ref-age-ms must not be negative",
+            ));
         }
         if properties.metadata_previous_versions_max == 0 {
-            return Err(invalid("write.metadata.previous-versions-max must be greater than zero"));
+            return Err(invalid(
+                "write.metadata.previous-versions-max must be greater than zero",
+            ));
         }
         if properties.manifest_min_count_to_merge == 0 {
-            return Err(invalid("commit.manifest.min-count-to-merge must be greater than zero"));
+            return Err(invalid(
+                "commit.manifest.min-count-to-merge must be greater than zero",
+            ));
         }
         if properties.manifest_target_size_bytes == 0 {
-            return Err(invalid("commit.manifest.target-size-bytes must be greater than zero"));
+            return Err(invalid(
+                "commit.manifest.target-size-bytes must be greater than zero",
+            ));
         }
         Ok(())
     }
@@ -307,44 +333,46 @@ impl VacuumPlanner {
         for candidate in candidates {
             let file = &candidate.0;
             partitions
-                .entry((
-                    file.partition_spec_id,
-                    file.partition().clone(),
-                ))
+                .entry((file.partition_spec_id, file.partition().clone()))
                 .or_default()
                 .push(candidate);
         }
 
         let mut accepted = Vec::new();
         let max_group_objects = usize::try_from(policy.budget.max_group_objects)
-            .map_err(|_| {
-                IcebergError::Vacuum { source: IcebergVacuumError::ResourceLimit(
+            .map_err(|_| IcebergError::Vacuum {
+                source: IcebergVacuumError::ResourceLimit(
                     "vacuum_max_group_objects does not fit backend usize".to_owned(),
-                )}
+                ),
             })?;
         for (_, files) in partitions {
             let mut bins: Vec<RewriteGroup> = Vec::new();
             for (file, task, delete_heavy) in files {
                 let file_bytes = file.file_size_in_bytes();
                 if file_bytes > policy.budget.max_group_bytes {
-                    return Err(IcebergError::Vacuum { source: IcebergVacuumError::ResourceLimit(format!(
-                        "eligible input {} is {} bytes, above vacuum_max_group_mb",
-                        file.file_path(), file_bytes
-                    ))});
+                    return Err(IcebergError::Vacuum {
+                        source: IcebergVacuumError::ResourceLimit(format!(
+                            "eligible input {} is {} bytes, above vacuum_max_group_mb",
+                            file.file_path(),
+                            file_bytes
+                        )),
+                    });
                 }
                 let destination = bins.iter_mut().find(|group| {
                     group.inputs.len() < max_group_objects
-                        && group
-                            .input_bytes
-                            .checked_add(file_bytes)
-                            .is_some_and(|bytes| bytes <= policy.budget.max_group_bytes)
+                        && group.input_bytes.checked_add(file_bytes).is_some_and(
+                            |bytes| bytes <= policy.budget.max_group_bytes,
+                        )
                 });
                 if let Some(group) = destination {
-                    group.input_bytes = group.input_bytes.checked_add(file_bytes).ok_or_else(|| {
-                        IcebergError::Vacuum { source: IcebergVacuumError::ResourceLimit(
-                            "rewrite group byte count overflow".to_owned(),
-                        )}
-                    })?;
+                    group.input_bytes = group
+                        .input_bytes
+                        .checked_add(file_bytes)
+                        .ok_or_else(|| IcebergError::Vacuum {
+                            source: IcebergVacuumError::ResourceLimit(
+                                "rewrite group byte count overflow".to_owned(),
+                            ),
+                        })?;
                     group.delete_heavy |= delete_heavy;
                     group.inputs.push(RewriteInput { file, task });
                 } else {
@@ -358,23 +386,25 @@ impl VacuumPlanner {
             }
 
             for mut group in bins {
-                let expected_outputs = group.input_bytes.div_ceil(target_bytes).max(1);
-                let input_count = u64::try_from(group.inputs.len()).map_err(|_| {
-                    IcebergError::Vacuum {
-                        source: IcebergVacuumError::ResourceLimit(
-                            "rewrite group input count does not fit u64".to_owned(),
-                        ),
-                    }
-                })?;
+                let expected_outputs =
+                    group.input_bytes.div_ceil(target_bytes).max(1);
+                let input_count =
+                    u64::try_from(group.inputs.len()).map_err(|_| {
+                        IcebergError::Vacuum {
+                            source: IcebergVacuumError::ResourceLimit(
+                                "rewrite group input count does not fit u64"
+                                    .to_owned(),
+                            ),
+                        }
+                    })?;
                 let reduces_files = expected_outputs < input_count;
                 let repairs_oversize = group.inputs.iter().any(|input| {
                     u128::from(input.file.file_size_in_bytes())
                         * u128::from(PERCENT_SCALE)
                         > u128::from(target_bytes) * u128::from(OVERSIZED_PERCENT)
                 });
-                group.expected_file_reduction = input_count
-                    .checked_sub(expected_outputs)
-                    .unwrap_or(0);
+                group.expected_file_reduction =
+                    input_count.checked_sub(expected_outputs).unwrap_or(0);
                 if (group.inputs.len() >= MIN_INPUT_FILES
                     || repairs_oversize
                     || group.delete_heavy)
@@ -391,7 +421,9 @@ impl VacuumPlanner {
         groups: &mut Vec<RewriteGroup>,
         policy: VacuumPolicy,
     ) -> IcebergResult<()> {
-        if policy.mode == pg_lakebase_core::table_maintenance::TableMaintenanceMode::Full {
+        if policy.mode
+            == pg_lakebase_core::table_maintenance::TableMaintenanceMode::Full
+        {
             return Ok(());
         }
         let mut selected_objects = 0_u64;
@@ -409,7 +441,8 @@ impl VacuumPlanner {
             let next_bytes = selected_bytes.checked_add(group.input_bytes);
             let would_exceed = next_objects
                 .is_none_or(|value| value > policy.budget.max_input_objects)
-                || next_bytes.is_none_or(|value| value > policy.budget.max_input_bytes);
+                || next_bytes
+                    .is_none_or(|value| value > policy.budget.max_input_bytes);
             if would_exceed && keep > 0 {
                 break;
             }

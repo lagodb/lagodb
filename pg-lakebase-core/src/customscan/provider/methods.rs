@@ -45,7 +45,8 @@ thread_local! {
 pub fn method_tables_for<P: LakebaseCustomScanProvider>()
 -> &'static ProviderMethodTables {
     let key = TypeId::of::<P>();
-    if let Some(tables) = METHOD_TABLES.with_borrow(|cache| cache.get(&key).copied()) {
+    if let Some(tables) = METHOD_TABLES.with_borrow(|cache| cache.get(&key).copied())
+    {
         return tables.0;
     }
 

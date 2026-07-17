@@ -1,9 +1,9 @@
-use iceberg_lite::scan::FileScanTask;
 use iceberg_lite::overlay::DeleteFileIdentity;
+use iceberg_lite::scan::FileScanTask;
 use iceberg_lite::spec::DataFile;
 use pg_lakebase_core::table_maintenance::{
-    TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
-    TableMaintenanceMetric, TableMaintenanceReport,
+    TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMetric,
+    TableMaintenanceMode, TableMaintenanceReport,
 };
 use std::ffi::CStr;
 

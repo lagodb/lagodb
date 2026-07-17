@@ -214,10 +214,7 @@ impl ProcessUtilityArgs {
         }
     }
 
-    pub(crate) unsafe fn call_parent_with_node(
-        self,
-        node: *mut pg_sys::Node,
-    ) {
+    pub(crate) unsafe fn call_parent_with_node(self, node: *mut pg_sys::Node) {
         let original_node = unsafe { (*self.pstmt).utilityStmt };
         unsafe { (*self.pstmt).utilityStmt = node };
         let mut completion = pg_sys::QueryCompletion::default();

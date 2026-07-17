@@ -8,8 +8,8 @@ use crate::handles::RelationHandle;
 use super::abi::{
     MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV2, MaintenanceReportV1,
     MaintenanceRequestV1, MaintenanceStatsV1, REGISTER_DUPLICATE_ACCESS_METHOD,
-    REGISTER_DUPLICATE_NAME, REGISTER_INVALID_DESCRIPTOR, REGISTER_OK,
-    provider_name, runtime_api,
+    REGISTER_DUPLICATE_NAME, REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, provider_name,
+    runtime_api,
 };
 use super::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceError,
@@ -105,12 +105,13 @@ unsafe extern "C-unwind" fn provider_inspect<P>(
     let inspected = P::inspect(&relation)
         .map_err(|error| error.with_provider(P::NAME))
         .unwrap_or_else(|error| PgReportError::from_domain_error(error).report());
-    let inspected = MaintenanceStatsV1::try_from_stats(inspected).unwrap_or_else(|| {
-        PgReportError::from_domain_error(TableMaintenanceError::framework(
-            "provider format name exceeds the maintenance ABI bound",
-        ))
-        .report()
-    });
+    let inspected =
+        MaintenanceStatsV1::try_from_stats(inspected).unwrap_or_else(|| {
+            PgReportError::from_domain_error(TableMaintenanceError::framework(
+                "provider format name exceeds the maintenance ABI bound",
+            ))
+            .report()
+        });
     unsafe { stats.write(inspected) };
 }
 
@@ -134,13 +135,20 @@ where
     let status = unsafe { (api.register_provider)(&descriptor) };
     match status {
         REGISTER_OK => {}
-        REGISTER_INVALID_DESCRIPTOR => panic!("runtime rejected an invalid maintenance provider descriptor"),
-        REGISTER_DUPLICATE_NAME => panic!("runtime already has a different maintenance provider named {:?}", P::NAME),
+        REGISTER_INVALID_DESCRIPTOR => {
+            panic!("runtime rejected an invalid maintenance provider descriptor")
+        }
+        REGISTER_DUPLICATE_NAME => panic!(
+            "runtime already has a different maintenance provider named {:?}",
+            P::NAME
+        ),
         REGISTER_DUPLICATE_ACCESS_METHOD => panic!(
             "runtime already has a maintenance provider for access method {:?}",
             P::ACCESS_METHOD_NAME
         ),
-        other => panic!("runtime returned unknown maintenance registration status {other}"),
+        other => {
+            panic!("runtime returned unknown maintenance registration status {other}")
+        }
     }
 }
 

@@ -57,7 +57,9 @@ impl Display for MetadataCatalogOperation {
 pub enum IcebergVacuumError {
     #[error("gc.enabled must be true")]
     GcDisabled,
-    #[error("VACUUM cannot be combined with DML, DDL, TRUNCATE, or DROP for the same relation")]
+    #[error(
+        "VACUUM cannot be combined with DML, DDL, TRUNCATE, or DROP for the same relation"
+    )]
     ActionConflict,
     #[error("invalid Iceberg VACUUM policy: {0}")]
     InvalidPolicy(String),

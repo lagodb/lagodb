@@ -312,7 +312,9 @@ impl TxTableActionLog {
 
     fn stage_vacuum(&mut self, vacuum: PreparedVacuum) -> IcebergResult<()> {
         if !self.actions.is_empty() {
-            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
+            return Err(IcebergError::Vacuum {
+                source: crate::error::IcebergVacuumError::ActionConflict,
+            });
         }
         self.invalidate_combined_delta();
         self.actions.push(TxTableAction::Vacuum(Box::new(vacuum)));
@@ -473,7 +475,9 @@ impl TableState {
         F: FnOnce(&mut TxTableActionLog) -> IcebergResult<()>,
     {
         if self.actions.has_vacuum() {
-            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
+            return Err(IcebergError::Vacuum {
+                source: crate::error::IcebergVacuumError::ActionConflict,
+            });
         }
         let (marker, should_record_history) = self.record_history(nest_level);
         if let Err(err) = mutation(Rc::make_mut(&mut self.actions)) {
@@ -493,7 +497,9 @@ impl TableState {
         validation: RowDeltaValidation,
     ) -> IcebergResult<()> {
         if self.actions.has_vacuum() {
-            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
+            return Err(IcebergError::Vacuum {
+                source: crate::error::IcebergVacuumError::ActionConflict,
+            });
         }
         self.record_history(nest_level);
         Rc::make_mut(&mut self.actions).record_validation(validation);
@@ -510,7 +516,9 @@ impl TableState {
         }
 
         if self.actions.has_vacuum() {
-            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
+            return Err(IcebergError::Vacuum {
+                source: crate::error::IcebergVacuumError::ActionConflict,
+            });
         }
 
         self.record_history(nest_level);

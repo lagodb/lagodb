@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use iceberg_lite::spec::{
-    ManifestContentType, Snapshot, TableMetadata,
-};
+use iceberg_lite::spec::{ManifestContentType, Snapshot, TableMetadata};
 use iceberg_lite::table::Table;
 
 use crate::error::IcebergResult;
@@ -71,11 +69,15 @@ impl IcebergReachabilityPlanner {
             pgrx::pg_sys::check_for_interrupts!();
             if !retained_ids.contains(&snapshot.snapshot_id()) {
                 self.seed_snapshot_candidates(before, snapshot, &mut candidates)?;
-                Self::visit_statistics(before.metadata(), snapshot.snapshot_id(), |path| {
-                    candidates
-                        .entry(path.to_owned())
-                        .or_insert(CandidateKind::Statistics);
-                });
+                Self::visit_statistics(
+                    before.metadata(),
+                    snapshot.snapshot_id(),
+                    |path| {
+                        candidates
+                            .entry(path.to_owned())
+                            .or_insert(CandidateKind::Statistics);
+                    },
+                );
             }
         }
 
@@ -109,7 +111,8 @@ impl IcebergReachabilityPlanner {
             }
         }
 
-        let mut orphan_candidates = if let Some(older_than_ms) = orphan_older_than_ms {
+        let mut orphan_candidates = if let Some(older_than_ms) = orphan_older_than_ms
+        {
             self.list_orphan_candidates(after, older_than_ms)?
         } else {
             HashSet::new()
@@ -142,15 +145,19 @@ impl IcebergReachabilityPlanner {
                 break;
             }
             pgrx::pg_sys::check_for_interrupts!();
-            Self::visit_statistics(after.metadata(), snapshot.snapshot_id(), |path| {
-                Self::remove_candidate(
-                    &mut candidates,
-                    &mut snapshot_candidate_count,
-                    &mut statistics_candidate_count,
-                    path,
-                );
-                orphan_candidates.remove(path);
-            });
+            Self::visit_statistics(
+                after.metadata(),
+                snapshot.snapshot_id(),
+                |path| {
+                    Self::remove_candidate(
+                        &mut candidates,
+                        &mut snapshot_candidate_count,
+                        &mut statistics_candidate_count,
+                        path,
+                    );
+                    orphan_candidates.remove(path);
+                },
+            );
             if snapshot_candidate_count == 0 && orphan_candidates.is_empty() {
                 continue;
             }
@@ -220,7 +227,8 @@ impl IcebergReachabilityPlanner {
         let storage = table.file_io().storage();
         if let Some(local) = storage.as_any().downcast_ref::<LocalStorage>() {
             local.list_older_than(table.metadata().location(), older_than_ms)?
-        } else if let Some(object) = storage.as_any().downcast_ref::<ObjectStorage>() {
+        } else if let Some(object) = storage.as_any().downcast_ref::<ObjectStorage>()
+        {
             object.list_older_than(table.metadata().location(), older_than_ms)?
         } else {
             return Err(crate::error::IcebergError::InvariantViolated(
@@ -325,7 +333,9 @@ impl IcebergReachabilityPlanner {
         if let Some(statistics) = metadata.statistics_for_snapshot(snapshot_id) {
             visit(&statistics.statistics_path);
         }
-        if let Some(statistics) = metadata.partition_statistics_for_snapshot(snapshot_id) {
+        if let Some(statistics) =
+            metadata.partition_statistics_for_snapshot(snapshot_id)
+        {
             visit(&statistics.statistics_path);
         }
     }

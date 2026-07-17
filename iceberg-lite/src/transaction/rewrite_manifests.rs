@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+use crate::Result;
 use crate::table::Table;
 use crate::transaction::snapshot_delta::DeltaSnapshotProducer;
 use crate::transaction::{ActionCommit, TransactionAction};
-use crate::Result;
 
 /// Rewrites selected live manifests without changing the live content-file set.
 pub struct RewriteManifestsAction {
@@ -44,9 +44,7 @@ impl TransactionAction for RewriteManifestsAction {
             None,
             HashMap::new(),
         );
-        producer.commit_manifest_rewrite(
-            self.min_count_to_merge,
-            self.target_size_bytes,
-        )
+        producer
+            .commit_manifest_rewrite(self.min_count_to_merge, self.target_size_bytes)
     }
 }

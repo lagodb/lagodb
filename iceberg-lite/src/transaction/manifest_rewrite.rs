@@ -36,19 +36,29 @@ impl ManifestRewritePlan {
 
         let mut selected = HashSet::new();
         for manifests in groups.values() {
-            let total_bytes = manifests.iter().try_fold(0_u64, |total, manifest| {
-                let length = u64::try_from(manifest.manifest_length).map_err(|_| {
-                    Error::new(ErrorKind::DataInvalid, "negative manifest length")
+            let total_bytes =
+                manifests.iter().try_fold(0_u64, |total, manifest| {
+                    let length =
+                        u64::try_from(manifest.manifest_length).map_err(|_| {
+                            Error::new(
+                                ErrorKind::DataInvalid,
+                                "negative manifest length",
+                            )
+                        })?;
+                    total.checked_add(length).ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            "manifest byte count overflow",
+                        )
+                    })
                 })?;
-                total.checked_add(length).ok_or_else(|| {
-                    Error::new(ErrorKind::DataInvalid, "manifest byte count overflow")
-                })
-            })?;
             let estimated_outputs = total_bytes.div_ceil(target_size_bytes).max(1);
             let input_count = u64::try_from(manifests.len()).map_err(|_| {
                 Error::new(ErrorKind::DataInvalid, "manifest count does not fit u64")
             })?;
-            if manifests.len() >= min_count_to_merge && estimated_outputs < input_count {
+            if manifests.len() >= min_count_to_merge
+                && estimated_outputs < input_count
+            {
                 selected.extend(
                     manifests
                         .iter()

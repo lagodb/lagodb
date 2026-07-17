@@ -89,7 +89,8 @@ impl ObjectStorage {
         table_location: &str,
         cutoff_ms: i64,
     ) -> Result<std::collections::HashSet<String>> {
-        let relative = resolve_object_uri(&self.scheme, &self.bucket, table_location)?;
+        let relative =
+            resolve_object_uri(&self.scheme, &self.bucket, table_location)?;
         let prefix = format!("{}/", table_location[relative..].trim_end_matches('/'));
         let uses_absolute_uris = table_location.contains("://");
         let mut paths = std::collections::HashSet::new();
@@ -99,7 +100,10 @@ impl ObjectStorage {
             Some(&prefix),
         ) {
             let entry = entry.map_err(storage_err)?;
-            if entry.last_modified_ms.is_some_and(|modified| modified < cutoff_ms) {
+            if entry
+                .last_modified_ms
+                .is_some_and(|modified| modified < cutoff_ms)
+            {
                 if uses_absolute_uris {
                     paths.insert(format!(
                         "{}://{}/{}",

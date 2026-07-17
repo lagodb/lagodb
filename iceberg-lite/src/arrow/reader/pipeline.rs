@@ -47,9 +47,9 @@ use crate::error::Result;
 use crate::expr::BoundPredicate;
 use crate::io::{FileIO, FileMetadata, FileRead};
 use crate::metadata_columns::{
-    RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS,
-    RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER, RESERVED_FIELD_ID_ROW_ID,
-    is_metadata_field,
+    RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE,
+    RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER, RESERVED_FIELD_ID_POS,
+    RESERVED_FIELD_ID_ROW_ID, is_metadata_field,
 };
 use crate::scan::{ArrowRecordBatchIterator, FileScanTask};
 use crate::spec::{Datum, NameMapping, PartitionSpec, SchemaRef, Struct};
@@ -481,8 +481,8 @@ impl ArrowReader {
                     == Some(field_id)
             })
         };
-        let stored_row_id = needs_row_id_column
-            && file_has_field_id(RESERVED_FIELD_ID_ROW_ID);
+        let stored_row_id =
+            needs_row_id_column && file_has_field_id(RESERVED_FIELD_ID_ROW_ID);
         let stored_last_updated = needs_last_updated_column
             && file_has_field_id(RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER);
         // A pre-v3 file carried into a v3 table can still have no effective

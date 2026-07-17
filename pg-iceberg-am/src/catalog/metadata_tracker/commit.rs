@@ -13,21 +13,23 @@ struct TableCommitCoordinator<'a> {
 }
 
 impl<'a> TableCommitCoordinator<'a> {
-    fn new(
-        relid: pg_sys::Oid,
-        plan: TxTableCommitPlan<'a>,
-        file_io: FileIO,
-    ) -> Self {
-        Self { relid, plan, file_io }
+    fn new(relid: pg_sys::Oid, plan: TxTableCommitPlan<'a>, file_io: FileIO) -> Self {
+        Self {
+            relid,
+            plan,
+            file_io,
+        }
     }
 
     fn commit(self) -> IcebergResult<()> {
-        let Self { relid, plan, file_io } = self;
+        let Self {
+            relid,
+            plan,
+            file_io,
+        } = self;
         let mut retries = 0;
         let max_retries = gucs::max_commit_retries();
-        let vacuum_commit_started = plan
-            .vacuum
-            .map(|_| std::time::Instant::now());
+        let vacuum_commit_started = plan.vacuum.map(|_| std::time::Instant::now());
 
         loop {
             if retries > max_retries {
@@ -41,9 +43,10 @@ impl<'a> TableCommitCoordinator<'a> {
             let latest_global_location = IcebergMetadata::get(relid)?
                 .metadata_location
                 .ok_or(IcebergError::MetadataLocationNull)?;
-            if plan.expected_metadata_location.is_some_and(|expected| {
-                expected != latest_global_location.as_str()
-            }) {
+            if plan
+                .expected_metadata_location
+                .is_some_and(|expected| expected != latest_global_location.as_str())
+            {
                 return Err(IcebergError::TruncateCommitConflict { relid });
             }
             let metadata =
@@ -51,9 +54,7 @@ impl<'a> TableCommitCoordinator<'a> {
             let base_table = Table::builder()
                 .metadata_location(latest_global_location.clone())
                 .metadata(metadata)
-                .identifier(
-                    IcebergTableId::for_relation(relid).into_table_ident(),
-                )
+                .identifier(IcebergTableId::for_relation(relid).into_table_ident())
                 .file_io(file_io.clone())
                 .build()?;
 
@@ -129,9 +130,8 @@ impl<'a> TableCommitCoordinator<'a> {
                     new_metadata_location != latest_global_location
                 );
             }
-            let mut vacuum_result = vacuum_outcome.map(
-                crate::maintenance::VacuumAttemptOutcome::into_result,
-            );
+            let mut vacuum_result = vacuum_outcome
+                .map(crate::maintenance::VacuumAttemptOutcome::into_result);
             if new_metadata_location == latest_global_location {
                 metadata_attempt.discard()?;
                 if vacuum_result
@@ -185,7 +185,8 @@ impl<'a> TableCommitCoordinator<'a> {
                     if let (Some(vacuum), Some(result)) =
                         (plan.vacuum, vacuum_result.take())
                     {
-                        result.report_success(vacuum, vacuum_commit_started.as_ref())?;
+                        result
+                            .report_success(vacuum, vacuum_commit_started.as_ref())?;
                     }
                     crate::storage::transactional_artifacts::register_canceled_files_for_commit(
                         file_io.clone(),

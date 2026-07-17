@@ -178,22 +178,19 @@ impl<'a> VacuumCommitAttempt<'a> {
             .vacuum
             .orphan_cleanup
             .map(|orphan| orphan.older_than_ms);
-        let (expiration_candidates, orphan_candidates) =
-            if new_metadata_location != self.latest_metadata_location
-                || orphan_cutoff.is_some()
-            {
-                IcebergReachabilityPlanner::default().cleanup_candidates(
-                    self.base_table,
-                    updated_table,
-                    orphan_cutoff,
-                    &self.vacuum.owned_table_root,
-                )?
-            } else {
-                (
-                    ReachabilityDeletionCandidates::default(),
-                    HashSet::new(),
-                )
-            };
+        let (expiration_candidates, orphan_candidates) = if new_metadata_location
+            != self.latest_metadata_location
+            || orphan_cutoff.is_some()
+        {
+            IcebergReachabilityPlanner::default().cleanup_candidates(
+                self.base_table,
+                updated_table,
+                orphan_cutoff,
+                &self.vacuum.owned_table_root,
+            )?
+        } else {
+            (ReachabilityDeletionCandidates::default(), HashSet::new())
+        };
         self.record_cleanup_report(
             &mut report,
             &expiration_candidates,

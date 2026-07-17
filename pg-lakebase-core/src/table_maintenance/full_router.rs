@@ -11,8 +11,8 @@ use pgrx::pg_sys;
 
 use crate::diag::ReportableError;
 use crate::handles::{RelationHandle, VacuumParamsHandle};
-use crate::hooks::utility_hook::ProcessUtilityArgs;
 use crate::hooks::error::{HookError, UtilityHookPhase};
+use crate::hooks::utility_hook::ProcessUtilityArgs;
 
 use super::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
@@ -72,7 +72,9 @@ unsafe extern "C-unwind" fn execute_provider(
             relation: &relation,
             mode: TableMaintenanceMode::Full,
             options,
-            budget: context.budget.without_soft_limit(TableMaintenanceMode::Full),
+            budget: context
+                .budget
+                .without_soft_limit(TableMaintenanceMode::Full),
             command_time: context.command_time,
         })
         .map_err(HookError::from)
@@ -125,7 +127,9 @@ unsafe fn set_boolean_option(
     }
 }
 
-unsafe fn copy_stmt_in_portal(stmt: *mut pg_sys::VacuumStmt) -> *mut pg_sys::VacuumStmt {
+unsafe fn copy_stmt_in_portal(
+    stmt: *mut pg_sys::VacuumStmt,
+) -> *mut pg_sys::VacuumStmt {
     unsafe {
         lakebase_copy_node_to_context(stmt.cast(), pg_sys::PortalContext)
             .cast::<pg_sys::VacuumStmt>()
@@ -140,11 +144,8 @@ unsafe fn delegate_native_run(
     unsafe {
         let stmt = copy_stmt_in_portal(original);
         (*stmt).rels = relations;
-        (*stmt).options = set_boolean_option(
-            (*stmt).options,
-            c"skip_database_stats",
-            true,
-        );
+        (*stmt).options =
+            set_boolean_option((*stmt).options, c"skip_database_stats", true);
         args.call_parent_with_node(stmt.cast());
     }
 }
@@ -157,26 +158,27 @@ unsafe fn delegate_provider_analyze(
 ) {
     unsafe {
         let stmt = copy_stmt_in_portal(original);
-        let copied_relation = lakebase_copy_node_to_context(
-            relation.cast(),
-            pg_sys::PortalContext,
-        )
-        .cast::<pg_sys::VacuumRelation>();
+        let copied_relation =
+            lakebase_copy_node_to_context(relation.cast(), pg_sys::PortalContext)
+                .cast::<pg_sys::VacuumRelation>();
         (*stmt).rels = pg_sys::lappend(ptr::null_mut(), copied_relation.cast());
         (*stmt).options = ptr::null_mut();
         (*stmt).is_vacuumcmd = false;
         if params.options & pg_sys::VACOPT_VERBOSE != 0 {
-            (*stmt).options = append_boolean_option((*stmt).options, c"verbose", true);
+            (*stmt).options =
+                append_boolean_option((*stmt).options, c"verbose", true);
         }
         if params.options & pg_sys::VACOPT_SKIP_LOCKED != 0 {
-            (*stmt).options = append_boolean_option((*stmt).options, c"skip_locked", true);
+            (*stmt).options =
+                append_boolean_option((*stmt).options, c"skip_locked", true);
         }
         let option_count = pg_sys::list_length((*original).options);
         for index in 0..option_count {
             let option = pg_sys::list_nth((*original).options, index)
                 .cast::<pg_sys::DefElem>();
             if option_name(option) == b"buffer_usage_limit" {
-                let copied = pg_sys::copyObjectImpl(option.cast()) as *mut pg_sys::DefElem;
+                let copied =
+                    pg_sys::copyObjectImpl(option.cast()) as *mut pg_sys::DefElem;
                 (*stmt).options = pg_sys::lappend((*stmt).options, copied.cast());
             }
         }
@@ -217,8 +219,8 @@ pub(crate) unsafe fn try_route_vacuum_full(
         let mut native_run: *mut pg_sys::List = ptr::null_mut();
         let count = pg_sys::list_length(expanded);
         for index in 0..count {
-            let relation = pg_sys::list_nth(expanded, index)
-                .cast::<pg_sys::VacuumRelation>();
+            let relation =
+                pg_sys::list_nth(expanded, index).cast::<pg_sys::VacuumRelation>();
             let am = lakebase_relation_access_method((*relation).oid);
             let is_provider = am != pg_sys::InvalidOid
                 && TableMaintenanceRouter::is_registered_am(am).report_unwrap();
