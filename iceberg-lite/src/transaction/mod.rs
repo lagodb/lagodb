@@ -54,6 +54,7 @@ mod action;
 pub use action::*;
 mod append;
 mod expire_snapshots;
+mod manifest_rewrite;
 mod row_delta;
 mod rewrite_files;
 mod rewrite_manifests;

@@ -2,8 +2,9 @@ use super::error::{HookError, ObjectAccessHookError};
 use crate::diag::ReportableError;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
+use std::cell::RefCell;
 use std::ffi::{CStr, c_void};
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 
 #[derive(Debug)]
 pub enum ObjectAccessEvent<'a> {
@@ -232,18 +233,14 @@ type ObjectAccessStrHookList =
 // `&'static` slice keeps the hot path Copy-only and removes that hazard by
 // construction (mirrors `utility_hook.rs`).
 //
-// A PostgreSQL backend is single-threaded, so these locks are not for runtime
-// concurrency: they only provide the interior mutability/`Sync` required to
-// mutate a `static` during initialization.  They are written a handful of
-// times at startup (register/freeze) and are never touched on the hot path,
-// which reads the lock-free `FROZEN_*` snapshots instead.
-static BUILDING_REGISTRY: RwLock<Vec<Box<dyn ObjectAccessHook + Send + Sync>>> =
-    RwLock::new(Vec::new());
+// PostgreSQL backends are single-threaded, so the mutable building phase is
+// thread-local. It is written only during startup; the hot path reads the
+// lock-free `FROZEN_*` snapshots.
+thread_local! {
+    static BUILDING_REGISTRY: RefCell<Vec<Box<dyn ObjectAccessHook + Send + Sync>>> = const { RefCell::new(Vec::new()) };
+    static STR_BUILDING_REGISTRY: RefCell<Vec<Box<dyn ObjectAccessStrHook + Send + Sync>>> = const { RefCell::new(Vec::new()) };
+}
 static FROZEN_REGISTRY: OnceLock<ObjectAccessHookList> = OnceLock::new();
-
-static STR_BUILDING_REGISTRY: RwLock<
-    Vec<Box<dyn ObjectAccessStrHook + Send + Sync>>,
-> = RwLock::new(Vec::new());
 static STR_FROZEN_REGISTRY: OnceLock<ObjectAccessStrHookList> = OnceLock::new();
 
 static PREV_OBJECT_ACCESS_HOOK: OnceLock<pg_sys::object_access_hook_type> =
@@ -283,30 +280,32 @@ fn install_object_access_str_router() {
 
 pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>) {
     let hook_name = hook.name();
-    let mut entries = BUILDING_REGISTRY.write().unwrap();
     if FROZEN_REGISTRY.get().is_some() {
         panic!("register_object_access_hook called after freeze_object_access_hooks");
     }
-    if entries.iter().any(|existing| existing.name() == hook_name) {
-        return;
-    }
-    entries.push(hook);
+    BUILDING_REGISTRY.with_borrow_mut(|entries| {
+        if entries.iter().any(|existing| existing.name() == hook_name) {
+            return;
+        }
+        entries.push(hook);
+    });
 }
 
 pub fn register_object_access_str_hook(
     hook: Box<dyn ObjectAccessStrHook + Send + Sync>,
 ) {
     let hook_name = hook.name();
-    let mut entries = STR_BUILDING_REGISTRY.write().unwrap();
     if STR_FROZEN_REGISTRY.get().is_some() {
         panic!(
             "register_object_access_str_hook called after freeze_object_access_hooks"
         );
     }
-    if entries.iter().any(|existing| existing.name() == hook_name) {
-        return;
-    }
-    entries.push(hook);
+    STR_BUILDING_REGISTRY.with_borrow_mut(|entries| {
+        if entries.iter().any(|existing| existing.name() == hook_name) {
+            return;
+        }
+        entries.push(hook);
+    });
 }
 
 /// Freeze registered object-access hooks and install the routers.
@@ -329,15 +328,13 @@ fn freeze_object_access_registry() -> bool {
     if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
         return !hooks.is_empty();
     }
-    let mut entries = BUILDING_REGISTRY.write().unwrap();
-    if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
-        return !hooks.is_empty();
-    }
-    let hooks: ObjectAccessHookList = if entries.is_empty() {
-        &[]
-    } else {
-        Box::leak(std::mem::take(&mut *entries).into_boxed_slice())
-    };
+    let hooks: ObjectAccessHookList = BUILDING_REGISTRY.with_borrow_mut(|entries| {
+        if entries.is_empty() {
+            &[]
+        } else {
+            Box::leak(std::mem::take(entries).into_boxed_slice())
+        }
+    });
     if FROZEN_REGISTRY.set(hooks).is_err() {
         unreachable!("object access hook registry frozen concurrently");
     }
@@ -348,15 +345,14 @@ fn freeze_object_access_str_registry() -> bool {
     if let Some(hooks) = STR_FROZEN_REGISTRY.get().copied() {
         return !hooks.is_empty();
     }
-    let mut entries = STR_BUILDING_REGISTRY.write().unwrap();
-    if let Some(hooks) = STR_FROZEN_REGISTRY.get().copied() {
-        return !hooks.is_empty();
-    }
-    let hooks: ObjectAccessStrHookList = if entries.is_empty() {
-        &[]
-    } else {
-        Box::leak(std::mem::take(&mut *entries).into_boxed_slice())
-    };
+    let hooks: ObjectAccessStrHookList =
+        STR_BUILDING_REGISTRY.with_borrow_mut(|entries| {
+            if entries.is_empty() {
+                &[]
+            } else {
+                Box::leak(std::mem::take(entries).into_boxed_slice())
+            }
+        });
     if STR_FROZEN_REGISTRY.set(hooks).is_err() {
         unreachable!("object access str hook registry frozen concurrently");
     }

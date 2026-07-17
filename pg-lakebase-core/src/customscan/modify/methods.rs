@@ -1,8 +1,8 @@
 //! Per-provider Custom ModifyTable callback tables.
 
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 use pgrx::pg_sys;
 
@@ -20,18 +20,14 @@ unsafe impl Sync for ModifyMethodTables {}
 #[derive(Clone, Copy)]
 struct TablesRef(&'static ModifyMethodTables);
 
-unsafe impl Send for TablesRef {}
-unsafe impl Sync for TablesRef {}
-
-static TABLES: OnceLock<Mutex<HashMap<TypeId, TablesRef>>> = OnceLock::new();
+thread_local! {
+    static TABLES: RefCell<HashMap<TypeId, TablesRef>> = RefCell::new(HashMap::new());
+}
 
 pub(super) fn tables<P: LakebaseCustomModifyProvider>() -> &'static ModifyMethodTables
 {
-    let cache = TABLES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache
-        .lock()
-        .expect("custom modify method-table cache mutex poisoned");
-    if let Some(tables) = cache.get(&TypeId::of::<P>()) {
+    let key = TypeId::of::<P>();
+    if let Some(tables) = TABLES.with_borrow(|cache| cache.get(&key).copied()) {
         return tables.0;
     }
 
@@ -62,7 +58,9 @@ pub(super) fn tables<P: LakebaseCustomModifyProvider>() -> &'static ModifyMethod
             ExplainCustomScan: Some(super::modify_table::explain),
         },
     }));
-    cache.insert(TypeId::of::<P>(), TablesRef(tables));
+    TABLES.with_borrow_mut(|cache| {
+        cache.insert(key, TablesRef(tables));
+    });
     tables
 }
 

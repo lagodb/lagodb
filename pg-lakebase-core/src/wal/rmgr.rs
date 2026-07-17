@@ -8,9 +8,10 @@ use crate::wal::record::WalRecord;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 use pgrx::{pg_guard, pg_sys};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CString, c_char};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use thiserror::Error;
 
 const MIN_CUSTOM_RMGR_ID: u8 = pg_sys::RM_MIN_CUSTOM_ID as u8;
@@ -215,7 +216,6 @@ struct RegisteredRmgr {
     rmgr_id: u8,
     rmgr_data: RmgrDataWrapper,
     _name_storage: CString,
-    identify_names: Mutex<HashMap<u8, CString>>,
 }
 
 impl RegisteredRmgr {
@@ -245,7 +245,6 @@ impl RegisteredRmgr {
             rmgr_id,
             rmgr_data,
             _name_storage: name_storage,
-            identify_names: Mutex::new(HashMap::new()),
         }
     }
 
@@ -254,21 +253,25 @@ impl RegisteredRmgr {
             return std::ptr::null();
         };
 
-        let Ok(mut identify_names) = self.identify_names.lock() else {
-            return std::ptr::null();
-        };
-
-        use std::collections::hash_map::Entry;
-        match identify_names.entry(info) {
-            Entry::Occupied(e) => e.get().as_ptr(),
-            Entry::Vacant(e) => {
-                let Ok(c_name) = CString::new(name) else {
-                    return std::ptr::null();
-                };
-                e.insert(c_name).as_ptr()
+        IDENTIFY_NAMES.with_borrow_mut(|identify_names| {
+            use std::collections::hash_map::Entry;
+            match identify_names.entry((self.rmgr_id, info)) {
+                Entry::Occupied(entry) => entry.get().as_ptr(),
+                Entry::Vacant(entry) => {
+                    let Ok(c_name) = CString::new(name) else {
+                        return std::ptr::null();
+                    };
+                    entry.insert(c_name).as_ptr()
+                }
             }
-        }
+        })
     }
+}
+
+thread_local! {
+    // PostgreSQL WAL callbacks execute on one thread per backend/recovery
+    // process. CString allocations remain alive for that process lifetime.
+    static IDENTIFY_NAMES: RefCell<HashMap<(u8, u8), CString>> = RefCell::new(HashMap::new());
 }
 
 struct WalRmgrRegistry {

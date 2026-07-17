@@ -191,12 +191,11 @@ pub(crate) unsafe fn try_route_vacuum_full(
     is_top_level: bool,
 ) -> bool {
     unsafe {
-        if !TableMaintenanceRouter::has_providers() {
-            return false;
-        }
-
         let mut params = pg_sys::VacuumParams::default();
         if !lakebase_parse_vacuum_full(stmt, &mut params) {
+            return false;
+        }
+        if !TableMaintenanceRouter::has_providers() {
             return false;
         }
         if params.options & pg_sys::VACOPT_ONLY_DATABASE_STATS != 0 {

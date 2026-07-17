@@ -14,7 +14,8 @@ use crate::overlay::{DeleteFileIdentity, SnapshotDelta};
 use crate::spec::{DataContentType, DataFile, ManifestContentType, Operation};
 use crate::table::Table;
 use crate::transaction::snapshot_delta::{
-    DeltaCommitSemantics, DeltaPlan, DeltaSnapshotProducer,
+    CurrentSnapshotInventory, DeltaCommitSemantics, DeltaPlan,
+    DeltaSnapshotProducer,
 };
 use crate::transaction::{ActionCommit, TransactionAction};
 use crate::{Error, ErrorKind, Result};
@@ -25,8 +26,8 @@ pub struct RewriteFilesAction {
     starting_sequence_number: i64,
     rewritten_data_files: Vec<DataFile>,
     replacement_data_files: Vec<DataFile>,
-    rewritten_delete_files: Vec<DataFile>,
-    added_data_files_have_row_ids: bool,
+    rewritten_delete_files: Vec<DeleteFileIdentity>,
+    invalid_rewritten_delete_file: bool,
     commit_uuid: Option<Uuid>,
 }
 
@@ -41,7 +42,7 @@ impl RewriteFilesAction {
             rewritten_data_files: Vec::new(),
             replacement_data_files: Vec::new(),
             rewritten_delete_files: Vec::new(),
-            added_data_files_have_row_ids: false,
+            invalid_rewritten_delete_file: false,
             commit_uuid: None,
         }
     }
@@ -63,15 +64,22 @@ impl RewriteFilesAction {
         mut self,
         rewritten: impl IntoIterator<Item = DataFile>,
     ) -> Self {
-        self.rewritten_delete_files.extend(rewritten);
+        for file in rewritten {
+            if file.content_type() == DataContentType::Data {
+                self.invalid_rewritten_delete_file = true;
+            }
+            self.rewritten_delete_files
+                .push(DeleteFileIdentity::from_data_file(&file));
+        }
         self
     }
 
-    /// Declare that every replacement row carries a materialized, non-null
-    /// `_row_id`. This prevents a format-v3 replace snapshot from reserving a
-    /// fresh inherited range for rows whose identities were preserved.
-    pub fn with_preassigned_row_ids(mut self) -> Self {
-        self.added_data_files_have_row_ids = true;
+    /// Remove exact delete entries using their stable manifest identity.
+    pub fn rewrite_delete_file_identities(
+        mut self,
+        rewritten: impl IntoIterator<Item = DeleteFileIdentity>,
+    ) -> Self {
+        self.rewritten_delete_files.extend(rewritten);
         self
     }
 
@@ -91,6 +99,12 @@ impl RewriteFilesAction {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
                 "RewriteFiles requires at least one rewritten data file",
+            ));
+        }
+        if self.invalid_rewritten_delete_file {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "RewriteFiles delete replacements must be delete files",
             ));
         }
         let mut paths = HashSet::new();
@@ -136,24 +150,25 @@ impl RewriteFilesAction {
             }
         }
         let mut delete_identities = HashSet::new();
-        for file in &self.rewritten_delete_files {
-            if file.content_type() == DataContentType::Data {
+        for identity in &self.rewritten_delete_files {
+            if !delete_identities.insert(identity) {
                 return Err(Error::new(
                     ErrorKind::DataInvalid,
-                    "RewriteFiles delete replacements must be delete files",
-                ));
-            }
-            if !delete_identities.insert(DeleteFileIdentity::from_data_file(file)) {
-                return Err(Error::new(
-                    ErrorKind::DataInvalid,
-                    format!("duplicate RewriteFiles delete input: {}", file.file_path()),
+                    format!(
+                        "duplicate RewriteFiles delete input: {}",
+                        identity.file_path()
+                    ),
                 ));
             }
         }
         Ok(())
     }
 
-    fn validate_current_table(&self, table: &Table) -> Result<()> {
+    fn validate_current_table(
+        &self,
+        table: &Table,
+        inventory: &CurrentSnapshotInventory,
+    ) -> Result<()> {
         let metadata = table.metadata();
         let starting_snapshot = metadata
             .snapshot_by_id(self.starting_snapshot_id)
@@ -183,23 +198,31 @@ impl RewriteFilesAction {
             .iter()
             .map(DataFile::file_path)
             .collect();
+        let replacement_paths: HashSet<&str> = self
+            .replacement_data_files
+            .iter()
+            .map(DataFile::file_path)
+            .collect();
         let rewritten_delete_files: HashSet<DeleteFileIdentity> = self
             .rewritten_delete_files
             .iter()
-            .map(DeleteFileIdentity::from_data_file)
+            .cloned()
             .collect();
-        let current_snapshot = metadata.current_snapshot().ok_or_else(|| {
-            Error::new(
-                ErrorKind::DataConflict,
-                "RewriteFiles inputs are not live because the table has no current snapshot",
-            )
-        })?;
-        let manifest_list =
-            current_snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
         let mut live_inputs = HashSet::new();
-        for manifest_file in manifest_list.entries() {
-            let manifest = manifest_file.load_manifest(table.file_io())?;
+        for (manifest_file, manifest) in inventory.manifests() {
             for entry in manifest.entries().iter().filter(|entry| entry.is_alive()) {
+                // File paths are table-wide identities, not content-local
+                // identities. Preserve SnapshotDelta's duplicate check across
+                // both data and delete manifests while reusing this inventory.
+                if replacement_paths.contains(entry.file_path()) {
+                    return Err(Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "RewriteFiles replacement is already referenced by the current table: {}",
+                            entry.file_path()
+                        ),
+                    ));
+                }
                 match manifest_file.content {
                     ManifestContentType::Data => {
                         if input_paths.contains(entry.file_path()) {
@@ -297,8 +320,8 @@ impl RewriteFilesAction {
         for file in &self.rewritten_data_files {
             delta.remove_data_file(file.file_path())?;
         }
-        for file in &self.rewritten_delete_files {
-            delta.remove_delete_file(DeleteFileIdentity::from_data_file(file))?;
+        for identity in &self.rewritten_delete_files {
+            delta.remove_delete_file(identity.clone())?;
         }
         Ok(DeltaPlan::from_delta_with_truncate(&delta, false))
     }
@@ -307,22 +330,22 @@ impl RewriteFilesAction {
 impl TransactionAction for RewriteFilesAction {
     fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
         self.validate_definition()?;
-        self.validate_current_table(table)?;
+        let inventory = CurrentSnapshotInventory::load(table)?;
+        self.validate_current_table(table, &inventory)?;
         let plan = self.delta_plan()?;
         let producer = DeltaSnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
             None,
             HashMap::new(),
-        );
+        )
+        .with_current_inventory(inventory);
         producer.validate_plan(&plan)?;
-        producer.validate_duplicate_files(&plan.added_file_paths)?;
         producer.commit_with_semantics(
             plan,
             DeltaCommitSemantics {
                 operation: Operation::Replace,
                 added_sequence_number: self.starting_sequence_number,
-                added_data_files_have_row_ids: self.added_data_files_have_row_ids,
             },
         )
     }

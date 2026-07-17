@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use iceberg_lite::overlay::DeleteFileIdentity;
 use iceberg_lite::scan::FileScanTask;
 use iceberg_lite::spec::DataFile;
 use iceberg_lite::table::Table;
@@ -26,6 +27,27 @@ impl VacuumPlanner {
                 "{description} does not fit u64"
             )),
         })
+    }
+
+    fn materialized_deletion_vectors(
+        groups: &[RewriteGroup],
+    ) -> Vec<DeleteFileIdentity> {
+        let mut identities = HashSet::new();
+        for input in groups.iter().flat_map(|group| &group.inputs) {
+            for delete in &input.task.deletes {
+                if delete.is_deletion_vector()
+                    && delete.referenced_data_file_path()
+                        == Some(input.file.file_path())
+                {
+                    identities.insert(DeleteFileIdentity::new(
+                        delete.file_path.clone(),
+                        delete.content_offset,
+                        delete.content_size_in_bytes,
+                    ));
+                }
+            }
+        }
+        identities.into_iter().collect()
     }
 
     pub(crate) fn plan(
@@ -59,6 +81,7 @@ impl VacuumPlanner {
                 starting_snapshot_id: None,
                 starting_sequence_number: 0,
                 rewrite_groups: Vec::new(),
+                materialized_delete_identities: Vec::new(),
                 metrics: VacuumPlanningMetrics::default(),
             });
         };
@@ -69,6 +92,7 @@ impl VacuumPlanner {
                 starting_snapshot_id: Some(snapshot.snapshot_id()),
                 starting_sequence_number: snapshot.sequence_number(),
                 rewrite_groups: Vec::new(),
+                materialized_delete_identities: Vec::new(),
                 metrics: VacuumPlanningMetrics::default(),
             });
         }
@@ -77,32 +101,32 @@ impl VacuumPlanner {
             .map_err(|_| IcebergError::Vacuum { source: IcebergVacuumError::ResourceLimit(
                 "write.target-file-size-bytes does not fit u64".to_owned(),
             )})?;
-        let tasks = table.scan().select_empty().build()?.plan_files()?;
+        let scan_plan = table
+            .scan()
+            .select_empty()
+            .build()?
+            .plan_files_with_data_files()?;
         let mut metrics = VacuumPlanningMetrics {
-            scanned_data_files: Self::count(tasks.len(), "scanned data-file count")?,
+            scanned_manifests: Self::count(
+                scan_plan.manifest_count,
+                "scanned manifest count",
+            )?,
+            scanned_data_files: Self::count(
+                scan_plan.files.len(),
+                "scanned data-file count",
+            )?,
             ..VacuumPlanningMetrics::default()
         };
         let mut scanned_delete_paths = HashSet::new();
-        for task in &tasks {
-            owned_table_root.ensure_path(task.data_file_path())?;
-            for delete in &task.deletes {
+        for planned in &scan_plan.files {
+            owned_table_root.ensure_path(planned.task.data_file_path())?;
+            for delete in &planned.task.deletes {
                 owned_table_root.ensure_path(&delete.file_path)?;
                 scanned_delete_paths.insert(delete.file_path.as_str());
             }
         }
         metrics.scanned_delete_files =
             Self::count(scanned_delete_paths.len(), "scanned delete-file count")?;
-        let mut tasks_by_path = HashMap::with_capacity(tasks.len());
-        for task in tasks {
-            let path = task.data_file_path().to_owned();
-            if tasks_by_path.insert(path, task).is_some() {
-                return Err(IcebergError::InvariantViolated(
-                    "Iceberg scan planned duplicate live data-file paths",
-                ));
-            }
-        }
-        let (live_files, scanned_manifests) = Self::live_data_files(table)?;
-        metrics.scanned_manifests = scanned_manifests;
         if target_bytes == 0 {
             return Err(IcebergError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
@@ -111,12 +135,20 @@ impl VacuumPlanner {
             });
         }
         let mut candidates = Vec::new();
-        for file in live_files {
-            let task = tasks_by_path
-                .remove(file.file_path())
-                .ok_or_else(|| IcebergError::InvariantViolated(
-                    "live data file has no corresponding scan task",
-                ))?;
+        let mut planned_paths = HashSet::new();
+        for planned in scan_plan.files {
+            let file = planned.data_file;
+            let task = planned.task;
+            if task.data_file_path() != file.file_path() {
+                return Err(IcebergError::InvariantViolated(
+                    "Iceberg scan task path differs from its source data file",
+                ));
+            }
+            if !planned_paths.insert(file.file_path().to_owned()) {
+                return Err(IcebergError::InvariantViolated(
+                    "Iceberg scan planned duplicate live data-file paths",
+                ));
+            }
             let delete_heavy = Self::is_delete_heavy(&file, &task.deletes)?;
             let size = file.file_size_in_bytes();
             let undersized = u128::from(size) * u128::from(PERCENT_SCALE)
@@ -138,13 +170,7 @@ impl VacuumPlanner {
             ),
         })?;
 
-        let mut groups = Self::bin_pack(
-            candidates,
-            target_bytes,
-            policy,
-            table.metadata().format_version()
-                == iceberg_lite::spec::FormatVersion::V3,
-        )?;
+        let mut groups = Self::bin_pack(candidates, target_bytes, policy)?;
         groups.sort_by(|left, right| {
             right.delete_heavy
                 .cmp(&left.delete_heavy)
@@ -180,11 +206,14 @@ impl VacuumPlanner {
             })
         })?;
 
+        let materialized_delete_identities =
+            Self::materialized_deletion_vectors(&groups);
         Ok(VacuumPlan {
             policy,
             starting_snapshot_id: Some(snapshot.snapshot_id()),
             starting_sequence_number: snapshot.sequence_number(),
             rewrite_groups: groups,
+            materialized_delete_identities,
             metrics,
         })
     }
@@ -260,89 +289,27 @@ impl VacuumPlanner {
             >= u128::from(file.record_count()) * u128::from(DELETE_RATIO_PERCENT))
     }
 
-    fn live_data_files(table: &Table) -> IcebergResult<(Vec<DataFile>, u64)> {
-        let Some(snapshot) = table.metadata().current_snapshot() else {
-            return Ok((Vec::new(), 0));
-        };
-        let manifest_list =
-            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
-        let mut paths = HashSet::new();
-        let mut files = Vec::new();
-        let scanned_manifests = Self::count(
-            manifest_list.entries().len(),
-            "scanned manifest count",
-        )?;
-        for manifest_file in manifest_list.entries() {
-            pgrx::pg_sys::check_for_interrupts!();
-            if manifest_file.content != iceberg_lite::spec::ManifestContentType::Data {
-                continue;
-            }
-            let manifest = manifest_file.load_manifest(table.file_io())?;
-            for entry in manifest.entries() {
-                if entry.is_alive() && paths.insert(entry.file_path().to_owned()) {
-                    files.push(entry.data_file().clone());
-                }
-            }
-        }
-        Ok((files, scanned_manifests))
-    }
-
-    pub(crate) fn materialized_deletion_vectors(
-        table: &Table,
-        rewritten_paths: &HashSet<&str>,
-    ) -> IcebergResult<Vec<DataFile>> {
-        let Some(snapshot) = table.metadata().current_snapshot() else {
-            return Ok(Vec::new());
-        };
-        let manifest_list =
-            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
-        let mut vectors = Vec::new();
-        for manifest_file in manifest_list.entries() {
-            pgrx::pg_sys::check_for_interrupts!();
-            if manifest_file.content != iceberg_lite::spec::ManifestContentType::Deletes {
-                continue;
-            }
-            let manifest = manifest_file.load_manifest(table.file_io())?;
-            for entry in manifest.entries() {
-                let file = entry.data_file();
-                if entry.is_alive()
-                    && file.is_deletion_vector()
-                    && file
-                        .referenced_data_file_path()
-                        .is_some_and(|path| rewritten_paths.contains(path))
-                {
-                    vectors.push(file.clone());
-                }
-            }
-        }
-        Ok(vectors)
-    }
-
     fn bin_pack(
         mut candidates: Vec<(DataFile, FileScanTask, bool)>,
         target_bytes: u64,
         policy: VacuumPolicy,
-        preserve_v3_lineage_groups: bool,
     ) -> IcebergResult<Vec<RewriteGroup>> {
-        candidates.sort_by_key(|(file, _, _)| {
-            std::cmp::Reverse(file.file_size_in_bytes())
+        candidates.sort_by(|(left, _, _), (right, _, _)| {
+            right
+                .file_size_in_bytes()
+                .cmp(&left.file_size_in_bytes())
+                .then_with(|| left.file_path().cmp(right.file_path()))
         });
         let mut partitions: HashMap<
-            (i32, iceberg_lite::spec::Struct, bool),
+            (i32, iceberg_lite::spec::Struct),
             Vec<(DataFile, FileScanTask, bool)>,
         > = HashMap::new();
         for candidate in candidates {
             let file = &candidate.0;
-            // A v3 output file cannot both preserve already-assigned row IDs
-            // and reserve a fresh inherited range only for the unassigned
-            // subset. Keep those lineages in separate rewrite groups.
-            let has_assigned_row_ids =
-                preserve_v3_lineage_groups && candidate.1.first_row_id.is_some();
             partitions
                 .entry((
                     file.partition_spec_id,
                     file.partition().clone(),
-                    has_assigned_row_ids,
                 ))
                 .or_default()
                 .push(candidate);

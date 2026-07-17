@@ -1,0 +1,107 @@
+-- Cross-DSO routing/GUC authority and end-to-end row preservation.
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION pg_iceberg_am;
+CREATE SCHEMA vacuum_correctness_test;
+
+SELECT extension_name, worker_name
+FROM lakebase.workers
+WHERE extension_name = 'pg_iceberg_am'
+  AND worker_name = 'iceberg_automatic_maintenance';
+SELECT current_setting('pg_iceberg_am.auto_maintenance_enabled') AS auto_enabled,
+       current_setting('pg_iceberg_am.auto_maintenance_interval_s') AS auto_interval_s,
+       current_setting('pg_iceberg_am.auto_maintenance_max_tables') AS auto_max_tables;
+
+CREATE TABLE vacuum_correctness_test.t (
+    id integer,
+    payload text
+) USING iceberg;
+CREATE TABLE vacuum_correctness_test.t_v1 (
+    id integer,
+    payload text
+) USING iceberg WITH ("format-version" = 1);
+CREATE TABLE vacuum_correctness_test.t_v3 (
+    id integer,
+    payload text
+) USING iceberg WITH ("format-version" = 3);
+
+INSERT INTO vacuum_correctness_test.t VALUES (1, 'one');
+INSERT INTO vacuum_correctness_test.t VALUES (2, 'two');
+INSERT INTO vacuum_correctness_test.t VALUES (3, 'three');
+INSERT INTO vacuum_correctness_test.t VALUES (4, 'four');
+INSERT INTO vacuum_correctness_test.t VALUES (5, 'five');
+INSERT INTO vacuum_correctness_test.t VALUES (6, 'six');
+INSERT INTO vacuum_correctness_test.t_v1 VALUES (1, 'one');
+INSERT INTO vacuum_correctness_test.t_v1 VALUES (2, 'two');
+INSERT INTO vacuum_correctness_test.t_v1 VALUES (3, 'three');
+INSERT INTO vacuum_correctness_test.t_v1 VALUES (4, 'four');
+INSERT INTO vacuum_correctness_test.t_v1 VALUES (5, 'five');
+INSERT INTO vacuum_correctness_test.t_v1 VALUES (6, 'six');
+INSERT INTO vacuum_correctness_test.t_v3 VALUES (1, 'one');
+INSERT INTO vacuum_correctness_test.t_v3 VALUES (2, 'two');
+INSERT INTO vacuum_correctness_test.t_v3 VALUES (3, 'three');
+INSERT INTO vacuum_correctness_test.t_v3 VALUES (4, 'four');
+INSERT INTO vacuum_correctness_test.t_v3 VALUES (5, 'five');
+INSERT INTO vacuum_correctness_test.t_v3 VALUES (6, 'six');
+
+CREATE TEMP TABLE vacuum_before AS
+SELECT format, count(*) AS row_count,
+       md5(string_agg(id::text || ':' || payload, ',' ORDER BY id)) AS digest
+FROM (
+    SELECT 'v1'::text AS format, * FROM vacuum_correctness_test.t_v1
+    UNION ALL
+    SELECT 'v2'::text AS format, * FROM vacuum_correctness_test.t
+    UNION ALL
+    SELECT 'v3'::text AS format, * FROM vacuum_correctness_test.t_v3
+) AS rows
+GROUP BY format;
+
+-- This shared setting is registered/backed by runtime but consumed in the AM.
+-- A value of one prevents the minimum-five-file rewrite group from forming.
+SET pg_lakebase.vacuum_max_group_objects = 1;
+VACUUM vacuum_correctness_test.t;
+SELECT provider, format, current_data_objects
+FROM lakebase.table_maintenance_stats('vacuum_correctness_test.t');
+
+RESET pg_lakebase.vacuum_max_group_objects;
+VACUUM vacuum_correctness_test.t;
+VACUUM vacuum_correctness_test.t_v1;
+VACUUM vacuum_correctness_test.t_v3;
+
+CREATE TABLE vacuum_correctness_test.heap_t (id integer);
+INSERT INTO vacuum_correctness_test.heap_t VALUES (10), (20);
+VACUUM (FULL, ANALYZE)
+    vacuum_correctness_test.heap_t,
+    vacuum_correctness_test.t_v1,
+    vacuum_correctness_test.t,
+    vacuum_correctness_test.t_v3;
+SELECT (SELECT array_agg(id ORDER BY id) FROM vacuum_correctness_test.heap_t)
+           = ARRAY[10, 20] AS native_rows_preserved;
+
+WITH after AS (
+    SELECT format, count(*) AS row_count,
+           md5(string_agg(id::text || ':' || payload, ',' ORDER BY id)) AS digest
+    FROM (
+        SELECT 'v1'::text AS format, * FROM vacuum_correctness_test.t_v1
+        UNION ALL
+        SELECT 'v2'::text AS format, * FROM vacuum_correctness_test.t
+        UNION ALL
+        SELECT 'v3'::text AS format, * FROM vacuum_correctness_test.t_v3
+    ) AS rows
+    GROUP BY format
+)
+SELECT bool_and(before.row_count = after.row_count) AS row_count_preserved,
+       bool_and(before.digest = after.digest) AS content_preserved
+FROM vacuum_before AS before
+JOIN after USING (format);
+
+SELECT stats.provider, stats.format, stats.current_data_objects
+FROM (VALUES
+    ('vacuum_correctness_test.t_v1'::regclass),
+    ('vacuum_correctness_test.t'::regclass),
+    ('vacuum_correctness_test.t_v3'::regclass)
+) AS relations(relid)
+CROSS JOIN LATERAL lakebase.table_maintenance_stats(relations.relid) AS stats
+ORDER BY stats.format;
+
+DROP SCHEMA vacuum_correctness_test CASCADE;
+DROP EXTENSION pg_iceberg_am CASCADE;

@@ -21,10 +21,6 @@ use crate::storage_service::StorageEndpoint;
 
 const RESULT_PERSISTENCE_RETRY: Duration = Duration::from_secs(5);
 
-pub fn init_gucs() {
-    gucs::init();
-}
-
 /// Drain maintenance work in the worker's already-connected database.
 pub fn run_database_worker() -> WorkerExit {
     if !gucs::enabled() {

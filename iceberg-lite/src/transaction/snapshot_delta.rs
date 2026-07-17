@@ -26,7 +26,7 @@ use crate::overlay::{
 };
 use crate::spec::{
     DataContentType, DataFile, DataFileFormat, FirstRowIdInheritance, FormatVersion,
-    MAIN_BRANCH, ManifestContentType, ManifestFile, ManifestListWriter,
+    MAIN_BRANCH, Manifest, ManifestContentType, ManifestFile, ManifestListWriter,
     ManifestWriter, ManifestWriterBuilder, Operation, PartitionSpecRef, Snapshot,
     SnapshotReference, SnapshotRetention, SnapshotSummaryCollector, Struct,
     StructType, Summary, TableProperties, update_snapshot_summaries,
@@ -128,9 +128,38 @@ impl TransactionAction for SnapshotDeltaAction {
 pub(super) struct DeltaCommitSemantics {
     pub(super) operation: Operation,
     pub(super) added_sequence_number: i64,
-    /// The producer physically wrote effective, non-null row IDs into every
-    /// added data row. Such files do not consume a new inherited row-ID range.
-    pub(super) added_data_files_have_row_ids: bool,
+}
+
+/// Current-snapshot manifests loaded once for one transaction commit attempt.
+/// The value is owned by the snapshot producer and is never retained across a
+/// catalog retry.
+pub(super) struct CurrentSnapshotInventory {
+    manifests: Vec<(ManifestFile, Manifest)>,
+}
+
+impl CurrentSnapshotInventory {
+    pub(super) fn load(table: &Table) -> Result<Self> {
+        let current_snapshot = table.metadata().current_snapshot().ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataConflict,
+                "current snapshot inventory requires a current snapshot",
+            )
+        })?;
+        let manifest_list =
+            current_snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
+        let mut manifests = Vec::with_capacity(manifest_list.entries().len());
+        for manifest_file in manifest_list.entries() {
+            manifests.push((
+                manifest_file.clone(),
+                manifest_file.load_manifest(table.file_io())?,
+            ));
+        }
+        Ok(Self { manifests })
+    }
+
+    pub(super) fn manifests(&self) -> &[(ManifestFile, Manifest)] {
+        &self.manifests
+    }
 }
 
 #[derive(Default)]
@@ -230,6 +259,7 @@ pub(super) struct DeltaSnapshotProducer<'a> {
     key_metadata: Option<Vec<u8>>,
     snapshot_properties: HashMap<String, String>,
     manifest_counter: u64,
+    current_inventory: Option<CurrentSnapshotInventory>,
 }
 
 impl<'a> DeltaSnapshotProducer<'a> {
@@ -246,7 +276,16 @@ impl<'a> DeltaSnapshotProducer<'a> {
             key_metadata,
             snapshot_properties,
             manifest_counter: 0,
+            current_inventory: None,
         }
+    }
+
+    pub(super) fn with_current_inventory(
+        mut self,
+        inventory: CurrentSnapshotInventory,
+    ) -> Self {
+        self.current_inventory = Some(inventory);
+        self
     }
 
     pub(super) fn validate_plan(&self, plan: &DeltaPlan) -> Result<()> {
@@ -392,7 +431,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
         let semantics = DeltaCommitSemantics {
             operation: plan.operation(),
             added_sequence_number: self.table.metadata().next_sequence_number(),
-            added_data_files_have_row_ids: false,
         };
         self.commit_with_semantics(plan, semantics)
     }
@@ -411,7 +449,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
             ManifestContentType::Data,
             plan.added_data_files,
             semantics.added_sequence_number,
-            semantics.added_data_files_have_row_ids,
             &mut summary_collector,
             &mut manifests,
         )?;
@@ -420,7 +457,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
             ManifestContentType::Deletes,
             plan.position_delete_files,
             semantics.added_sequence_number,
-            false,
             &mut summary_collector,
             &mut manifests,
         )?;
@@ -467,6 +503,15 @@ impl<'a> DeltaSnapshotProducer<'a> {
         removals: &SnapshotDeltaRemovals,
         summary_collector: &mut SnapshotSummaryCollector,
     ) -> Result<Vec<ManifestFile>> {
+        if !removals.is_empty()
+            && let Some(inventory) = self.current_inventory.take()
+        {
+            return self.rewrite_loaded_manifests(
+                inventory.manifests(),
+                removals,
+                summary_collector,
+            );
+        }
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
             if removals.is_empty() || removals.truncates_base() {
                 return Ok(Vec::new());
@@ -494,11 +539,27 @@ impl<'a> DeltaSnapshotProducer<'a> {
             return Ok(manifests);
         }
 
+        let mut loaded = Vec::with_capacity(manifest_list.entries().len());
+        for manifest_file in manifest_list.entries() {
+            loaded.push((
+                manifest_file.clone(),
+                manifest_file.load_manifest(self.table.file_io())?,
+            ));
+        }
+        self.rewrite_loaded_manifests(&loaded, removals, summary_collector)
+    }
+
+    fn rewrite_loaded_manifests(
+        &mut self,
+        loaded: &[(ManifestFile, Manifest)],
+        removals: &SnapshotDeltaRemovals,
+        summary_collector: &mut SnapshotSummaryCollector,
+    ) -> Result<Vec<ManifestFile>> {
+
         let mut manifests = Vec::new();
         let mut found_removed_paths = HashSet::new();
         let mut found_removed_delete_files = HashSet::new();
-        for manifest_file in manifest_list.entries() {
-            let manifest = manifest_file.load_manifest(self.table.file_io())?;
+        for (manifest_file, manifest) in loaded {
             let is_affected = manifest.entries().iter().any(|entry| {
                 entry.is_alive()
                     && removals.removes_manifest_entry(manifest_file.content, entry)
@@ -570,80 +631,28 @@ impl<'a> DeltaSnapshotProducer<'a> {
         let Some(current_snapshot) = self.table.metadata().current_snapshot() else {
             return Ok(ActionCommit::new(Vec::new(), Vec::new()));
         };
-        if target_size_bytes == 0 {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                "manifest rewrite target size must be greater than zero",
-            ));
-        }
         let manifest_list = current_snapshot
             .load_manifest_list(self.table.file_io(), &self.table.metadata_ref())?;
-        let mut by_group: HashMap<(i32, ManifestContentType), Vec<&ManifestFile>> =
-            HashMap::new();
-        for manifest in manifest_list.entries() {
-            if manifest.has_added_files() || manifest.has_existing_files() {
-                by_group
-                    .entry((manifest.partition_spec_id, manifest.content))
-                    .or_default()
-                    .push(manifest);
-            }
-        }
-
-        let mut selected = HashSet::new();
-        for manifests in by_group.values() {
-            let total_bytes = manifests.iter().try_fold(0_u64, |total, manifest| {
-                let length = u64::try_from(manifest.manifest_length).map_err(|_| {
-                    Error::new(ErrorKind::DataInvalid, "negative manifest length")
-                })?;
-                total.checked_add(length).ok_or_else(|| {
-                    Error::new(ErrorKind::DataInvalid, "manifest byte count overflow")
-                })
-            })?;
-            let estimated_outputs = total_bytes.div_ceil(target_size_bytes).max(1);
-            let input_count = u64::try_from(manifests.len()).map_err(|_| {
-                Error::new(ErrorKind::DataInvalid, "manifest count does not fit u64")
-            })?;
-            let improves_partition_clustering = if estimated_outputs < input_count {
-                false
-            } else {
-                let mut previous_partition = None::<String>;
-                let mut inversion = false;
-                for manifest_file in manifests {
-                    let manifest = manifest_file.load_manifest(self.table.file_io())?;
-                    for entry in manifest.entries().iter().filter(|entry| entry.is_alive()) {
-                        let partition = format!("{:?}", entry.data_file().partition());
-                        if previous_partition
-                            .as_ref()
-                            .is_some_and(|previous| previous > &partition)
-                        {
-                            inversion = true;
-                            break;
-                        }
-                        previous_partition = Some(partition);
-                    }
-                    if inversion {
-                        break;
-                    }
-                }
-                inversion
-            };
-            if manifests.len() >= min_count_to_merge
-                && (estimated_outputs < input_count || improves_partition_clustering)
-            {
-                selected.extend(
-                    manifests
-                        .iter()
-                        .map(|manifest| manifest.manifest_path.as_str()),
-                );
-            }
-        }
-        if selected.is_empty() {
+        let rewrite_plan = super::manifest_rewrite::ManifestRewritePlan::build(
+            manifest_list.entries(),
+            min_count_to_merge,
+            target_size_bytes,
+        )?;
+        if rewrite_plan.is_empty() {
             return Ok(ActionCommit::new(Vec::new(), Vec::new()));
         }
+        let (by_group, selected) = rewrite_plan.into_parts();
+        let mut by_group: Vec<_> = by_group.into_iter().collect();
+        by_group.sort_unstable_by(
+            |((left_spec, left_content), _), ((right_spec, right_content), _)| {
+                left_spec
+                    .cmp(right_spec)
+                    .then_with(|| (*left_content as i32).cmp(&(*right_content as i32)))
+            },
+        );
 
         struct ExistingEntry {
             file: DataFile,
-            partition_key: String,
             snapshot_id: i64,
             sequence_number: i64,
             file_sequence_number: i64,
@@ -653,11 +662,10 @@ impl<'a> DeltaSnapshotProducer<'a> {
         for ((spec_id, content), manifests) in by_group {
             let selected_group: Vec<&ManifestFile> = manifests
                 .iter()
-                .copied()
                 .filter(|manifest| selected.contains(manifest.manifest_path.as_str()))
                 .collect();
             if selected_group.is_empty() {
-                output.extend(manifests.into_iter().cloned());
+                output.extend(manifests);
                 continue;
             }
 
@@ -701,10 +709,8 @@ impl<'a> DeltaSnapshotProducer<'a> {
                             })
                             .transpose()?;
                     }
-                    let partition_key = format!("{:?}", file.partition());
                     entries.push(ExistingEntry {
                         file,
-                        partition_key,
                         snapshot_id: entry.snapshot_id().ok_or_else(|| {
                             Error::new(ErrorKind::DataInvalid, "live manifest entry has no snapshot id")
                         })?,
@@ -718,9 +724,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
                 }
             }
             entries.sort_unstable_by(|left, right| {
-                left.partition_key
-                    .cmp(&right.partition_key)
-                    .then_with(|| left.file.file_path().cmp(right.file.file_path()))
+                left.file.file_path().cmp(right.file.file_path())
             });
             let entries_per_manifest = entries.len().div_ceil(output_count).max(1);
             for chunk in entries.chunks(entries_per_manifest) {
@@ -733,19 +737,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
                         Some(entry.file_sequence_number),
                     )?;
                 }
-                let mut manifest = writer.write_manifest_file()?;
-                if self.table.metadata().format_version() == FormatVersion::V3
-                    && content == ManifestContentType::Data
-                    && chunk
-                        .iter()
-                        .all(|entry| entry.file.first_row_id().is_some())
-                {
-                    // Every row already has a materialized ID. Mark the new
-                    // manifest as assigned so the manifest-list writer does
-                    // not reserve an unused range for these existing rows.
-                    manifest.first_row_id = Some(self.table.metadata().next_row_id());
-                }
-                output.push(manifest);
+                output.push(writer.write_manifest_file()?);
             }
         }
 
@@ -799,7 +791,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
         )?;
         let mut row_id_inheritance =
             FirstRowIdInheritance::new(manifest_file.first_row_id);
-        let mut has_live_unassigned_row_ids = false;
 
         for entry in entries {
             let effective_first_row_id = row_id_inheritance.resolve(entry)?;
@@ -877,10 +868,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
                 )?;
                 self.collect_removed_file(summary_collector, entry.data_file())?;
             } else {
-                has_live_unassigned_row_ids |= self.table.metadata().format_version()
-                    == FormatVersion::V3
-                    && manifest_file.content == ManifestContentType::Data
-                    && data_file.first_row_id().is_none();
                 writer.add_existing_file(
                     data_file,
                     snapshot_id,
@@ -890,14 +877,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
             }
         }
 
-        let mut rewritten = writer.write_manifest_file()?;
-        if self.table.metadata().format_version() == FormatVersion::V3
-            && manifest_file.content == ManifestContentType::Data
-            && !has_live_unassigned_row_ids
-        {
-            rewritten.first_row_id = Some(self.table.metadata().next_row_id());
-        }
-        Ok(rewritten)
+        writer.write_manifest_file()
     }
 
     fn write_added_manifests(
@@ -905,7 +885,6 @@ impl<'a> DeltaSnapshotProducer<'a> {
         content: ManifestContentType,
         files: Vec<DataFile>,
         added_sequence_number: i64,
-        added_data_files_have_row_ids: bool,
         summary_collector: &mut SnapshotSummaryCollector,
         manifests: &mut Vec<ManifestFile>,
     ) -> Result<()> {
@@ -927,14 +906,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
                 self.collect_added_file(summary_collector, &file)?;
                 writer.add_file(file, added_sequence_number)?;
             }
-            let mut manifest = writer.write_manifest_file()?;
-            if self.table.metadata().format_version() == FormatVersion::V3
-                && content == ManifestContentType::Data
-                && added_data_files_have_row_ids
-            {
-                manifest.first_row_id = Some(self.table.metadata().next_row_id());
-            }
-            manifests.push(manifest);
+            manifests.push(writer.write_manifest_file()?);
         }
 
         Ok(())
@@ -1548,6 +1520,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_delta_v3_suppresses_preassigned_id_on_added_file() {
+        let catalog = new_memory_catalog();
+        let table = make_v3_minimal_table_in_catalog(&catalog);
+        let mut file = data_file("test/preassigned.parquet");
+        file.first_row_id = Some(99);
+        let mut delta = SnapshotDelta::new();
+        delta.add_data_file(file).unwrap();
+
+        let updated = commit_delta(&catalog, &table, delta);
+        let manifest_list = current_manifest_list(&updated);
+        assert_eq!(manifest_list.entries()[0].first_row_id, Some(0));
+        let manifest = manifest_list.entries()[0]
+            .load_manifest(updated.file_io())
+            .unwrap();
+        let added = manifest.entries().iter().find(|entry| entry.is_alive()).unwrap();
+        assert_eq!(added.data_file().first_row_id(), None);
+        assert_eq!(updated.scan().build().unwrap().plan_files().unwrap()[0].first_row_id, Some(0));
+        assert_eq!(updated.metadata().next_row_id(), 1);
+    }
+
+    #[test]
     fn snapshot_delta_v3_rewrite_preserves_inherited_file_row_id() {
         let catalog = new_memory_catalog();
         let table = make_v3_minimal_table_in_catalog(&catalog);
@@ -1560,12 +1553,18 @@ mod tests {
         remove.remove_data_file("test/a.parquet").unwrap();
         let updated = commit_delta(&catalog, &table, remove);
 
+        let snapshot = updated.metadata().current_snapshot().unwrap();
+        assert_eq!(snapshot.first_row_id(), Some(2));
+        assert_eq!(snapshot.added_rows_count(), Some(1));
+        assert_eq!(updated.metadata().next_row_id(), 3);
+
         let tasks = updated.scan().build().unwrap().plan_files().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].data_file_path(), "test/b.parquet");
         assert_eq!(tasks[0].first_row_id, Some(1));
 
         let manifest_list = current_manifest_list(&updated);
+        assert_eq!(manifest_list.entries()[0].first_row_id, Some(2));
         let manifest = manifest_list.entries()[0]
             .load_manifest(updated.file_io())
             .unwrap();

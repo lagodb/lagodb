@@ -39,8 +39,8 @@ use crate::metadata_columns::{
 use crate::overlay::{SnapshotDelta, SnapshotDeltaRemovalLookup};
 
 use crate::spec::{
-    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, ManifestContentType, NameMapping,
-    SnapshotRef,
+    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, DataFile, ManifestContentType,
+    NameMapping, SnapshotRef,
 };
 use crate::table::Table;
 use crate::util::available_parallelism;
@@ -471,15 +471,67 @@ pub struct TableScan {
     row_selection_enabled: bool,
 }
 
+enum FilePlanAccumulator {
+    Tasks(Vec<FileScanTask>),
+    Maintenance(Vec<PlannedFileScanTask>),
+}
+
+impl FilePlanAccumulator {
+    fn new(retain_data_files: bool) -> Self {
+        if retain_data_files {
+            Self::Maintenance(Vec::new())
+        } else {
+            Self::Tasks(Vec::new())
+        }
+    }
+
+    fn push(&mut self, entry: ManifestEntryContext) -> Result<()> {
+        match self {
+            Self::Tasks(tasks) => tasks.push(entry.into_file_scan_task()?),
+            Self::Maintenance(files) => {
+                files.push(entry.into_planned_file_scan_task()?)
+            }
+        }
+        Ok(())
+    }
+}
+
 impl TableScan {
     /// Returns a list of [`FileScanTask`]s.
     pub fn plan_files(&self) -> Result<Vec<FileScanTask>> {
+        let (files, _) = self.plan_files_internal(false)?;
+        match files {
+            FilePlanAccumulator::Tasks(tasks) => Ok(tasks),
+            FilePlanAccumulator::Maintenance(_) => unreachable!(),
+        }
+    }
+
+    /// Plans the current snapshot once while retaining the exact source
+    /// [`DataFile`] values required by metadata-maintenance actions.
+    pub fn plan_files_with_data_files(&self) -> Result<FileScanPlan> {
+        let (files, manifest_count) = self.plan_files_internal(true)?;
+        let FilePlanAccumulator::Maintenance(files) = files else {
+            unreachable!()
+        };
+        Ok(FileScanPlan {
+            files,
+            manifest_count,
+        })
+    }
+
+    fn plan_files_internal(
+        &self,
+        retain_data_files: bool,
+    ) -> Result<(FilePlanAccumulator, usize)> {
         let Some(plan_context) = self.plan_context.as_ref() else {
-            return Ok(Vec::new());
+            return Ok((FilePlanAccumulator::new(retain_data_files), 0));
         };
 
         let resolved_delta = self.delta.as_ref().map(|delta| delta.resolve());
         let manifest_list = plan_context.get_manifest_list()?;
+        let manifest_count = manifest_list
+            .as_ref()
+            .map_or(0, |manifest_list| manifest_list.entries().len());
 
         // 0. Build manifest contexts
         let (mut data_manifest_contexts, delete_manifest_contexts) =
@@ -518,7 +570,7 @@ impl TableScan {
 
         // 2. Build the immutable index and distribute to data manifest contexts
         let delete_file_index = builder.build();
-        let mut file_scan_tasks = Vec::new();
+        let mut file_scan_tasks = FilePlanAccumulator::new(retain_data_files);
 
         for ctx in &mut data_manifest_contexts {
             // Clone is cheap: only increments Arc reference count
@@ -534,8 +586,8 @@ impl TableScan {
                 }) {
                     continue;
                 }
-                if let Some(task) = Self::process_data_manifest_entry(entry)? {
-                    file_scan_tasks.push(task);
+                if let Some(entry) = Self::process_data_manifest_entry(entry)? {
+                    file_scan_tasks.push(entry)?;
                 }
             }
         }
@@ -550,14 +602,13 @@ impl TableScan {
                         partition_spec_id,
                         Some(delete_file_index.clone()),
                     )?;
-                if let Some(task) = Self::process_data_manifest_entry(entry_context)?
-                {
-                    file_scan_tasks.push(task);
+                if let Some(entry) = Self::process_data_manifest_entry(entry_context)? {
+                    file_scan_tasks.push(entry)?;
                 }
             }
         }
 
-        Ok(file_scan_tasks)
+        Ok((file_scan_tasks, manifest_count))
     }
 
     /// Returns an [`ArrowRecordBatchIterator`].
@@ -653,7 +704,7 @@ impl TableScan {
 
     fn process_data_manifest_entry(
         manifest_entry_context: ManifestEntryContext,
-    ) -> Result<Option<FileScanTask>> {
+    ) -> Result<Option<ManifestEntryContext>> {
         // skip processing this manifest entry if it has been marked as deleted
         if !manifest_entry_context.manifest_entry.is_alive() {
             return Ok(None);
@@ -701,10 +752,7 @@ impl TableScan {
             }
         }
 
-        // congratulations! the manifest entry has made its way through the
-        // entire plan without getting filtered out. Create a corresponding
-        // FileScanTask and push it to the result stream
-        Ok(Some(manifest_entry_context.into_file_scan_task()?))
+        Ok(Some(manifest_entry_context))
     }
 
     fn process_delete_manifest_entry(

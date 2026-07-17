@@ -15,7 +15,7 @@ pub use item::{MaintenanceContext, MaintenanceItemId, MaintenanceItemRef};
 pub use object_tree::{ObjectTreeObserver, ObjectTreeStats};
 pub use repository::MaintenanceQueue;
 pub use target::{ObjectTarget, ObjectTreeTarget};
-pub use worker::{init_gucs, run_database_worker};
+pub use worker::run_database_worker;
 
 pub(crate) use gucs::table_maintenance_budget;
 

@@ -5,6 +5,7 @@
 //! logical work behind PostgreSQL `VACUUM`; a provider may subsequently publish
 //! exact-object work to the physical queue.
 
+pub mod abi;
 mod error;
 #[cfg(feature = "pg17")]
 mod full_router;
@@ -19,6 +20,14 @@ pub use provider::{
     LakebaseTableMaintenanceProvider, TableMaintenanceRequest,
     TableMaintenanceRouter, register_provider,
 };
+
+#[cfg(feature = "pg17")]
+pub fn install_runtime_router() {
+    crate::hooks::utility_hook::install_table_maintenance_router();
+}
+
+#[cfg(not(feature = "pg17"))]
+pub fn install_runtime_router() {}
 pub use types::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMetric,
     TableMaintenanceMode, TableMaintenanceOptions, TableMaintenanceReport,

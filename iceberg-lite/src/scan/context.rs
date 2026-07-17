@@ -99,6 +99,14 @@ impl ManifestFileContext {
 }
 
 impl ManifestEntryContext {
+    pub(crate) fn into_planned_file_scan_task(
+        self,
+    ) -> Result<crate::scan::PlannedFileScanTask> {
+        let data_file = self.manifest_entry.data_file().clone();
+        let task = self.into_file_scan_task()?;
+        Ok(crate::scan::PlannedFileScanTask { task, data_file })
+    }
+
     /// Consume this `ManifestEntryContext`, returning a `FileScanTask`
     /// created from it. This is a synchronous operation.
     pub(crate) fn into_file_scan_task(self) -> Result<FileScanTask> {

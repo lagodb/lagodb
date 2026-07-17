@@ -1,4 +1,5 @@
 use iceberg_lite::scan::FileScanTask;
+use iceberg_lite::overlay::DeleteFileIdentity;
 use iceberg_lite::spec::DataFile;
 use pg_lakebase_core::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
@@ -96,6 +97,7 @@ pub(crate) struct VacuumPlan {
     pub(crate) starting_snapshot_id: Option<i64>,
     pub(crate) starting_sequence_number: i64,
     pub(crate) rewrite_groups: Vec<RewriteGroup>,
+    pub(crate) materialized_delete_identities: Vec<DeleteFileIdentity>,
     pub(crate) metrics: VacuumPlanningMetrics,
 }
 
@@ -132,8 +134,7 @@ pub(crate) struct PreparedRewrite {
     pub(crate) starting_sequence_number: i64,
     pub(crate) input_files: Vec<DataFile>,
     pub(crate) output_files: Vec<DataFile>,
-    pub(crate) materialized_delete_files: Vec<DataFile>,
-    pub(crate) added_data_files_have_row_ids: bool,
+    pub(crate) materialized_delete_identities: Vec<DeleteFileIdentity>,
 }
 
 #[derive(Clone, Copy, Debug)]

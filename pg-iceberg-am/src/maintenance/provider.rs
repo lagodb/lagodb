@@ -88,6 +88,7 @@ impl IcebergTableMaintenanceProvider {
         let policy = plan.policy;
         let starting_snapshot_id = plan.starting_snapshot_id;
         let starting_sequence_number = plan.starting_sequence_number;
+        let materialized_delete_identities = plan.materialized_delete_identities;
         let planning_metrics = plan.metrics;
         let writer_properties = WriterProperties::builder()
             .set_compression(
@@ -114,14 +115,8 @@ impl IcebergTableMaintenanceProvider {
         let mut output_files = Vec::new();
         let mut rewritten_rows = 0_u64;
         let rewrite_started = std::time::Instant::now();
-        let mut added_data_files_have_row_ids =
-            table.metadata().format_version() == iceberg_lite::spec::FormatVersion::V3;
         if policy.compact_data_files {
             for group in plan.rewrite_groups {
-                added_data_files_have_row_ids &= group
-                    .inputs
-                    .iter()
-                    .all(|input| input.task.first_row_id.is_some());
                 let outputs = RewriteGroupWriter::rewrite(
                     &table,
                     &group,
@@ -170,29 +165,18 @@ impl IcebergTableMaintenanceProvider {
 
         let rewrite = match starting_snapshot_id {
             Some(starting_snapshot_id) if !input_files.is_empty() => {
-                let rewritten_paths = input_files
-                    .iter()
-                    .map(iceberg_lite::spec::DataFile::file_path)
-                    .collect();
-                let materialized_delete_files =
-                    VacuumPlanner::materialized_deletion_vectors(
-                        &table,
-                        &rewritten_paths,
-                    )?;
-                drop(rewritten_paths);
                 Some(PreparedRewrite {
                     starting_snapshot_id,
                     starting_sequence_number,
                     input_files,
                     output_files,
-                    materialized_delete_files,
-                    added_data_files_have_row_ids,
+                    materialized_delete_identities,
                 })
             }
             _ => None,
         };
-        let orphan_cleanup = (request.mode == TableMaintenanceMode::Full).then(|| {
-            PreparedOrphanPolicy {
+        let orphan_cleanup = if request.mode == TableMaintenanceMode::Full {
+            Some(PreparedOrphanPolicy {
                 older_than_ms: policy
                     .command_time
                     .unix_epoch_ms()
@@ -202,8 +186,10 @@ impl IcebergTableMaintenanceProvider {
                             "orphan retention cutoff underflow".to_owned(),
                         ),
                     })?,
-            }
-        });
+            })
+        } else {
+            None
+        };
         if let Some(orphan_cleanup) = orphan_cleanup {
             record_metric(
                 &mut report,
@@ -217,15 +203,15 @@ impl IcebergTableMaintenanceProvider {
                 })?,
             )?;
         }
-        let manifest_rewrite = (request.mode == TableMaintenanceMode::Full).then(|| {
+        let manifest_rewrite = if request.mode == TableMaintenanceMode::Full {
             let properties = table.metadata().table_properties()?;
-            Ok::<_, IcebergError>(
-            PreparedManifestRewrite {
+            Some(PreparedManifestRewrite {
                 min_count_to_merge: properties.manifest_min_count_to_merge,
                 target_size_bytes: properties.manifest_target_size_bytes,
-            }
-            )
-        }).transpose()?;
+            })
+        } else {
+            None
+        };
         tracker.stage_vacuum(
             request.relation.oid(),
             PreparedVacuum {
@@ -289,9 +275,17 @@ impl IcebergTableMaintenanceProvider {
                 ),
             })?;
         let mut retained = std::collections::HashMap::new();
+        let mut visited_manifest_lists = std::collections::HashSet::new();
+        let mut visited_manifests = std::collections::HashSet::new();
         for snapshot in table.metadata().snapshots() {
+            if !visited_manifest_lists.insert(snapshot.manifest_list().to_owned()) {
+                continue;
+            }
             let manifests = snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
             for manifest_file in manifests.entries() {
+                if !visited_manifests.insert(manifest_file.manifest_path.clone()) {
+                    continue;
+                }
                 let manifest = manifest_file.load_manifest(table.file_io())?;
                 for entry in manifest.entries() {
                     if entry.is_alive() {

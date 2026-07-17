@@ -22,9 +22,24 @@ use typed_builder::TypedBuilder;
 
 use crate::expr::BoundPredicate;
 use crate::spec::{
-    DataContentType, DataFileFormat, ManifestEntryRef, NameMapping, PartitionSpec,
-    Schema, SchemaRef, Struct,
+    DataContentType, DataFile, DataFileFormat, ManifestEntryRef, NameMapping,
+    PartitionSpec, Schema, SchemaRef, Struct,
 };
+
+/// One maintenance planning result that retains the source manifest data file.
+/// Ordinary query planning does not construct this wrapper.
+#[derive(Debug)]
+pub struct PlannedFileScanTask {
+    pub task: FileScanTask,
+    pub data_file: DataFile,
+}
+
+/// Current-snapshot scan inventory produced by one manifest traversal.
+#[derive(Debug)]
+pub struct FileScanPlan {
+    pub files: Vec<PlannedFileScanTask>,
+    pub manifest_count: usize,
+}
 
 /// Serialization helper that always returns NotImplementedError.
 /// Used for fields that should not be serialized but we want to be explicit about it.

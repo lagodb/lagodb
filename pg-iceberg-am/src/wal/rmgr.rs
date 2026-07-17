@@ -9,18 +9,20 @@ use pg_lakebase_core::{diag, wal};
 
 use pgrx::pg_sys;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 // Paths whose WRITE_FILE replay has entered lossy mode because recovery saw a
 // later chunk (offset > 0) but the base file was missing. This is intentionally
 // not called "invalid": under the local Iceberg WAL contract, missing files are
 // an availability-first replay outcome that will surface later as unreadable
 // Iceberg data if committed metadata references them.
-static LOSSY_SKIPPED_WRITE_PATHS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+thread_local! {
+    static LOSSY_SKIPPED_WRITE_PATHS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
 
 /// Iceberg WAL Resource Manager ID
 ///
@@ -140,35 +142,23 @@ impl WalResourceManager for IcebergRmgr {
 }
 
 impl IcebergRmgr {
-    fn lossy_skipped_write_paths() -> &'static Mutex<HashSet<String>> {
-        LOSSY_SKIPPED_WRITE_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
-    }
-
-    fn lock_lossy_skipped_write_paths() -> MutexGuard<'static, HashSet<String>> {
-        Self::lossy_skipped_write_paths()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     fn mark_lossy_skipped_write_path(path: &str) -> bool {
-        Self::lock_lossy_skipped_write_paths().insert(path.to_string())
+        LOSSY_SKIPPED_WRITE_PATHS
+            .with_borrow_mut(|paths| paths.insert(path.to_owned()))
     }
 
     fn is_lossy_skipped_write_path(path: &str) -> bool {
-        Self::lock_lossy_skipped_write_paths().contains(path)
+        LOSSY_SKIPPED_WRITE_PATHS.with_borrow(|paths| paths.contains(path))
     }
 
     fn unmark_lossy_skipped_write_path(path: &str) {
-        Self::lock_lossy_skipped_write_paths().remove(path);
+        LOSSY_SKIPPED_WRITE_PATHS.with_borrow_mut(|paths| {
+            paths.remove(path);
+        });
     }
 
     fn clear_lossy_skipped_write_paths() {
-        if let Some(paths) = LOSSY_SKIPPED_WRITE_PATHS.get() {
-            paths
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clear();
-        }
+        LOSSY_SKIPPED_WRITE_PATHS.with_borrow_mut(HashSet::clear);
     }
 
     // ========================================================================

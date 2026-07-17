@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use iceberg_lite::spec::{ManifestContentType, Snapshot, TableMetadata};
+use iceberg_lite::spec::{
+    Manifest, ManifestContentType, ManifestFile, ManifestList, Snapshot,
+    TableMetadata,
+};
 use iceberg_lite::table::Table;
 
 use crate::error::IcebergResult;
@@ -9,7 +13,13 @@ use crate::storage::{LocalStorage, ObjectStorage};
 use super::types::ManagedTableRoot;
 
 /// Java-compatible incremental reachable-file cleanup.
-pub(crate) struct IcebergReachabilityPlanner;
+#[derive(Default)]
+pub(crate) struct IcebergReachabilityPlanner {
+    manifest_lists: HashMap<String, Arc<ManifestList>>,
+    manifests: HashMap<String, Arc<Manifest>>,
+    visited_manifest_lists: HashSet<String>,
+    visited_manifests: HashSet<String>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateKind {
@@ -19,6 +29,19 @@ enum CandidateKind {
     ManifestList,
     Statistics,
     Metadata,
+}
+
+impl CandidateKind {
+    fn is_snapshot_object(self) -> bool {
+        matches!(
+            self,
+            Self::Data | Self::Delete | Self::Manifest | Self::ManifestList
+        )
+    }
+
+    fn is_statistics(self) -> bool {
+        self == Self::Statistics
+    }
 }
 
 #[derive(Debug, Default)]
@@ -33,11 +56,13 @@ pub(crate) struct ReachabilityDeletionCandidates {
 }
 
 impl IcebergReachabilityPlanner {
-    pub(crate) fn deletion_candidates(
+    pub(crate) fn cleanup_candidates(
+        &mut self,
         before: &Table,
         after: &Table,
+        orphan_older_than_ms: Option<i64>,
         owned_table_root: &ManagedTableRoot,
-    ) -> IcebergResult<ReachabilityDeletionCandidates> {
+    ) -> IcebergResult<(ReachabilityDeletionCandidates, HashSet<String>)> {
         let retained_ids: HashSet<i64> = after
             .metadata()
             .snapshots()
@@ -47,7 +72,7 @@ impl IcebergReachabilityPlanner {
         for snapshot in before.metadata().snapshots() {
             pgrx::pg_sys::check_for_interrupts!();
             if !retained_ids.contains(&snapshot.snapshot_id()) {
-                Self::seed_snapshot_candidates(before, snapshot, &mut candidates)?;
+                self.seed_snapshot_candidates(before, snapshot, &mut candidates)?;
                 Self::visit_statistics(before.metadata(), snapshot.snapshot_id(), |path| {
                     candidates
                         .entry(path.to_owned())
@@ -86,21 +111,67 @@ impl IcebergReachabilityPlanner {
             }
         }
 
-        // Do not materialize a second table-sized live set. Every retained
-        // manifest is streamed and removes paths directly from candidates.
+        let mut orphan_candidates = if let Some(older_than_ms) = orphan_older_than_ms {
+            self.list_orphan_candidates(after, older_than_ms)?
+        } else {
+            HashSet::new()
+        };
+        if let Some(location) = after.metadata_location() {
+            orphan_candidates.remove(location);
+        }
+        for log in after.metadata().metadata_log() {
+            orphan_candidates.remove(&log.metadata_file);
+        }
+        let mut snapshot_candidate_count = candidates
+            .values()
+            .filter(|kind| kind.is_snapshot_object())
+            .count();
+        let mut statistics_candidate_count = candidates
+            .values()
+            .filter(|kind| kind.is_statistics())
+            .count();
+
+        // Subtract both expiration-derived and age-gated orphan candidates in
+        // one retained-history traversal. Only manifests loaded while seeding
+        // expired snapshots are cached; other retained manifests are streamed
+        // and dropped so memory remains bounded by the candidate-producing
+        // history rather than the complete retained table.
         for snapshot in after.metadata().snapshots() {
+            if snapshot_candidate_count == 0
+                && statistics_candidate_count == 0
+                && orphan_candidates.is_empty()
+            {
+                break;
+            }
             pgrx::pg_sys::check_for_interrupts!();
-            Self::visit_snapshot(after, snapshot, |path| {
-                candidates.remove(path);
-            })?;
             Self::visit_statistics(after.metadata(), snapshot.snapshot_id(), |path| {
-                candidates.remove(path);
+                Self::remove_candidate(
+                    &mut candidates,
+                    &mut snapshot_candidate_count,
+                    &mut statistics_candidate_count,
+                    path,
+                );
+                orphan_candidates.remove(path);
             });
+            if snapshot_candidate_count == 0 && orphan_candidates.is_empty() {
+                continue;
+            }
+            self.visit_snapshot(after, snapshot, |path| {
+                Self::remove_candidate(
+                    &mut candidates,
+                    &mut snapshot_candidate_count,
+                    &mut statistics_candidate_count,
+                    path,
+                );
+                orphan_candidates.remove(path);
+            })?;
         }
         for location in retained_metadata {
             candidates.remove(location);
+            orphan_candidates.remove(location);
         }
         Self::validate_owned_candidates(owned_table_root, candidates.keys())?;
+        Self::validate_owned_candidates(owned_table_root, orphan_candidates.iter())?;
         let mut result = ReachabilityDeletionCandidates::default();
         for kind in candidates.values() {
             let counter = match kind {
@@ -120,16 +191,36 @@ impl IcebergReachabilityPlanner {
             })?;
         }
         result.paths = candidates.into_keys().collect();
-        Ok(result)
+        orphan_candidates.retain(|path| !result.paths.contains(path));
+        Ok((result, orphan_candidates))
     }
 
-    pub(crate) fn orphan_candidates(
+    fn remove_candidate(
+        candidates: &mut HashMap<String, CandidateKind>,
+        snapshot_candidate_count: &mut usize,
+        statistics_candidate_count: &mut usize,
+        path: &str,
+    ) {
+        if let Some(kind) = candidates.remove(path) {
+            if kind.is_snapshot_object() {
+                *snapshot_candidate_count = snapshot_candidate_count
+                    .checked_sub(1)
+                    .expect("snapshot candidate count tracks the candidate map");
+            } else if kind.is_statistics() {
+                *statistics_candidate_count = statistics_candidate_count
+                    .checked_sub(1)
+                    .expect("statistics candidate count tracks the candidate map");
+            }
+        }
+    }
+
+    fn list_orphan_candidates(
+        &self,
         table: &Table,
         older_than_ms: i64,
-        owned_table_root: &ManagedTableRoot,
     ) -> IcebergResult<HashSet<String>> {
         let storage = table.file_io().storage();
-        let mut candidates = if let Some(local) = storage.as_any().downcast_ref::<LocalStorage>() {
+        if let Some(local) = storage.as_any().downcast_ref::<LocalStorage>() {
             local.list_older_than(table.metadata().location(), older_than_ms)?
         } else if let Some(object) = storage.as_any().downcast_ref::<ObjectStorage>() {
             object.list_older_than(table.metadata().location(), older_than_ms)?
@@ -137,10 +228,7 @@ impl IcebergReachabilityPlanner {
             return Err(crate::error::IcebergError::InvariantViolated(
                 "orphan cleanup requires a known local or object storage backend",
             ));
-        };
-        Self::remove_reachable(table, &mut candidates)?;
-        Self::validate_owned_candidates(owned_table_root, candidates.iter())?;
-        Ok(candidates)
+        }
     }
 
     fn validate_owned_candidates<'a>(
@@ -154,25 +242,37 @@ impl IcebergReachabilityPlanner {
     }
 
     fn seed_snapshot_candidates(
+        &mut self,
         table: &Table,
         snapshot: &Snapshot,
         candidates: &mut HashMap<String, CandidateKind>,
     ) -> IcebergResult<()> {
+        let first_manifest_list_visit = !self
+            .manifest_lists
+            .contains_key(snapshot.manifest_list());
         candidates
             .entry(snapshot.manifest_list().to_owned())
             .or_insert(CandidateKind::ManifestList);
-        let manifest_list =
-            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
+        if !first_manifest_list_visit {
+            return Ok(());
+        }
+        let manifest_list = self.manifest_list(table, snapshot, true)?;
         for manifest_file in manifest_list.entries() {
             pgrx::pg_sys::check_for_interrupts!();
+            let first_manifest_visit = !self
+                .manifests
+                .contains_key(&manifest_file.manifest_path);
             candidates
                 .entry(manifest_file.manifest_path.clone())
                 .or_insert(CandidateKind::Manifest);
+            if !first_manifest_visit {
+                continue;
+            }
             let content_kind = match manifest_file.content {
                 ManifestContentType::Data => CandidateKind::Data,
                 ManifestContentType::Deletes => CandidateKind::Delete,
             };
-            let manifest = manifest_file.load_manifest(table.file_io())?;
+            let manifest = self.manifest(table, manifest_file, true)?;
             for entry in manifest.entries() {
                 if entry.is_alive() {
                     candidates
@@ -184,39 +284,30 @@ impl IcebergReachabilityPlanner {
         Ok(())
     }
 
-    fn remove_reachable(
-        table: &Table,
-        candidates: &mut HashSet<String>,
-    ) -> IcebergResult<()> {
-        if let Some(location) = table.metadata_location() {
-            candidates.remove(location);
-        }
-        for log in table.metadata().metadata_log() {
-            candidates.remove(&log.metadata_file);
-        }
-        for snapshot in table.metadata().snapshots() {
-            Self::visit_snapshot(table, snapshot, |path| {
-                candidates.remove(path);
-            })?;
-            Self::visit_statistics(table.metadata(), snapshot.snapshot_id(), |path| {
-                candidates.remove(path);
-            });
-        }
-        Ok(())
-    }
-
     fn visit_snapshot(
+        &mut self,
         table: &Table,
         snapshot: &Snapshot,
         mut visit: impl FnMut(&str),
     ) -> IcebergResult<()> {
         visit(snapshot.manifest_list());
-        let manifest_list =
-            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
+        if !self
+            .visited_manifest_lists
+            .insert(snapshot.manifest_list().to_owned())
+        {
+            return Ok(());
+        }
+        let manifest_list = self.manifest_list(table, snapshot, false)?;
         for manifest_file in manifest_list.entries() {
             pgrx::pg_sys::check_for_interrupts!();
             visit(&manifest_file.manifest_path);
-            let manifest = manifest_file.load_manifest(table.file_io())?;
+            if !self
+                .visited_manifests
+                .insert(manifest_file.manifest_path.clone())
+            {
+                continue;
+            }
+            let manifest = self.manifest(table, manifest_file, false)?;
             for entry in manifest.entries() {
                 if entry.is_alive() {
                     visit(entry.file_path());
@@ -224,6 +315,46 @@ impl IcebergReachabilityPlanner {
             }
         }
         Ok(())
+    }
+
+    fn manifest_list(
+        &mut self,
+        table: &Table,
+        snapshot: &Snapshot,
+        cache: bool,
+    ) -> IcebergResult<Arc<ManifestList>> {
+        if let Some(manifest_list) = self.manifest_lists.get(snapshot.manifest_list()) {
+            return Ok(Arc::clone(manifest_list));
+        }
+        let manifest_list = Arc::new(
+            snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?,
+        );
+        if cache {
+            self.manifest_lists.insert(
+                snapshot.manifest_list().to_owned(),
+                Arc::clone(&manifest_list),
+            );
+        }
+        Ok(manifest_list)
+    }
+
+    fn manifest(
+        &mut self,
+        table: &Table,
+        manifest_file: &ManifestFile,
+        cache: bool,
+    ) -> IcebergResult<Arc<Manifest>> {
+        if let Some(manifest) = self.manifests.get(&manifest_file.manifest_path) {
+            return Ok(Arc::clone(manifest));
+        }
+        let manifest = Arc::new(manifest_file.load_manifest(table.file_io())?);
+        if cache {
+            self.manifests.insert(
+                manifest_file.manifest_path.clone(),
+                Arc::clone(&manifest),
+            );
+        }
+        Ok(manifest)
     }
 
     fn visit_statistics(

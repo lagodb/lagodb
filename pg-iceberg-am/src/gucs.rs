@@ -11,6 +11,9 @@ static MAX_COMMIT_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(100);
 static MUTATION_BUFFER_FLUSH_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
 static VACUUM_COMPACT_DATA_FILES: GucSetting<bool> = GucSetting::<bool>::new(true);
 static VACUUM_ORPHAN_RETENTION_S: GucSetting<i32> = GucSetting::<i32>::new(259_200);
+static AUTO_MAINTENANCE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
+static AUTO_MAINTENANCE_INTERVAL_S: GucSetting<i32> = GucSetting::<i32>::new(300);
+static AUTO_MAINTENANCE_MAX_TABLES: GucSetting<i32> = GucSetting::<i32>::new(32);
 
 /// Injection point for testing purposes.
 static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
@@ -58,6 +61,34 @@ static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
 static MIN_SCAN_FRACTION: GucSetting<f64> = GucSetting::<f64>::new(0.02);
 
 pub fn init() {
+    GucRegistry::define_bool_guc(
+        c"pg_iceberg_am.auto_maintenance_enabled",
+        c"Enable periodic Iceberg logical-table maintenance",
+        c"The runtime worker uses one short transaction per selected table.",
+        &AUTO_MAINTENANCE_ENABLED,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_iceberg_am.auto_maintenance_interval_s",
+        c"Delay between Iceberg automatic maintenance rounds",
+        c"Tables skipped because of locks are reconsidered in a later round.",
+        &AUTO_MAINTENANCE_INTERVAL_S,
+        10,
+        86_400,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_iceberg_am.auto_maintenance_max_tables",
+        c"Maximum Iceberg tables considered in one maintenance round",
+        c"Bounds one worker invocation; candidates are shuffled between rounds.",
+        &AUTO_MAINTENANCE_MAX_TABLES,
+        1,
+        10_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
     GucRegistry::define_bool_guc(
         c"pg_iceberg_am.vacuum_compact_data_files",
         c"Compact eligible data files during ordinary VACUUM",
@@ -131,6 +162,18 @@ pub fn init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+}
+
+pub(crate) fn auto_maintenance_enabled() -> bool {
+    AUTO_MAINTENANCE_ENABLED.get()
+}
+
+pub(crate) fn auto_maintenance_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(AUTO_MAINTENANCE_INTERVAL_S.get() as u64)
+}
+
+pub(crate) fn auto_maintenance_max_tables() -> usize {
+    AUTO_MAINTENANCE_MAX_TABLES.get() as usize
 }
 
 pub fn vacuum_compact_data_files() -> bool {

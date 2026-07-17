@@ -4,6 +4,7 @@ mod reachability;
 mod cleanup;
 mod types;
 mod writer;
+mod worker;
 
 pub(crate) use types::{record_metric, PreparedVacuum, VacuumPolicy};
 

@@ -321,6 +321,7 @@ impl ManifestWriter {
             entry.sequence_number = None;
             entry.file_sequence_number = None;
         };
+        self.suppress_added_file_row_id(&mut entry.data_file);
         self.add_entry_inner(entry)?;
         Ok(())
     }
@@ -330,10 +331,11 @@ impl ManifestWriter {
     /// assigned at commit.
     pub fn add_file(
         &mut self,
-        data_file: DataFile,
+        mut data_file: DataFile,
         sequence_number: i64,
     ) -> Result<()> {
         self.check_data_file(&data_file)?;
+        self.suppress_added_file_row_id(&mut data_file);
         let entry = ManifestEntry {
             status: ManifestStatus::Added,
             snapshot_id: self.snapshot_id,
@@ -343,6 +345,17 @@ impl ManifestWriter {
         };
         self.add_entry_inner(entry)?;
         Ok(())
+    }
+
+    /// Iceberg v3 assigns row-ID ranges at the manifest-list layer. An ADDED
+    /// data file must not carry a file-level `first_row_id`, even when its
+    /// physical `_row_id` column is fully materialized by a rewrite.
+    fn suppress_added_file_row_id(&self, data_file: &mut DataFile) {
+        if self.metadata.format_version == FormatVersion::V3
+            && data_file.content_type() == DataContentType::Data
+        {
+            data_file.first_row_id = None;
+        }
     }
 
     /// Add a delete manifest entry. This method will update following status of the entry:

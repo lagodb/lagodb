@@ -2,7 +2,7 @@
 
 use core::ffi::CStr;
 use core::marker::PhantomData;
-use std::sync::{OnceLock, RwLock};
+use std::cell::RefCell;
 
 use pgrx::pg_sys;
 
@@ -82,11 +82,10 @@ impl<P: LakebaseCustomScanProvider> ErasedProvider for ProviderEntry<P> {
     }
 }
 
-/// Process-global provider registry (`OnceLock<RwLock<...>>`).
-static REGISTRY: OnceLock<RwLock<Vec<&'static dyn ErasedProvider>>> = OnceLock::new();
-
-fn registry() -> &'static RwLock<Vec<&'static dyn ErasedProvider>> {
-    REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
+thread_local! {
+    /// DSO-local planner providers. Registration and lookup both occur on the
+    /// single PostgreSQL backend thread; this is intentionally not cross-DSO.
+    static REGISTRY: RefCell<Vec<&'static dyn ErasedProvider>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Register provider at `_PG_init`; leaks entry for `'static` registry + calls
@@ -94,17 +93,15 @@ fn registry() -> &'static RwLock<Vec<&'static dyn ErasedProvider>> {
 pub fn register_provider<P: LakebaseCustomScanProvider>() {
     let entry: &'static ProviderEntry<P> =
         Box::leak(Box::new(ProviderEntry::<P>::new()));
-    let mut reg = registry()
-        .write()
-        .expect("LakebaseCustomScanProvider registry RwLock poisoned");
-    if reg.iter().any(|e| e.name() == P::NAME) {
-        panic!(
-            "LakebaseCustomScanProvider with name {:?} is already registered",
-            P::NAME
-        );
-    }
-    reg.push(entry as &'static dyn ErasedProvider);
-    drop(reg);
+    REGISTRY.with_borrow_mut(|registry| {
+        if registry.iter().any(|provider| provider.name() == P::NAME) {
+            panic!(
+                "LakebaseCustomScanProvider with name {:?} is already registered",
+                P::NAME
+            );
+        }
+        registry.push(entry as &'static dyn ErasedProvider);
+    });
 
     let methods: *const pg_sys::CustomScanMethods =
         super::method_tables_for::<P>().scan();
@@ -118,20 +115,17 @@ pub fn register_provider<P: LakebaseCustomScanProvider>() {
 pub fn find_matching_provider(
     ctx: &RelPathContext,
 ) -> Result<Option<&'static dyn ErasedProvider>, CustomScanError> {
-    let reg = registry()
-        .read()
-        .expect("LakebaseCustomScanProvider registry RwLock poisoned");
-
-    // Collect all matches to detect ambiguity (not first-hit wins).
-    let mut iter = reg.iter().copied().filter(|p| p.supports_relation(ctx));
-    let Some(first) = iter.next() else {
-        // Zero providers match — leave PG's default paths in place.
-        return Ok(None);
-    };
-    if iter.next().is_some() {
-        return Err(CustomScanError::multi_provider_match(
-            ctx.rel_oid().to_u32(),
-        ));
-    }
-    Ok(Some(first))
+    REGISTRY.with_borrow(|registry| {
+        let mut matches = registry
+            .iter()
+            .copied()
+            .filter(|provider| provider.supports_relation(ctx));
+        let Some(first) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Err(CustomScanError::multi_provider_match(ctx.rel_oid().to_u32()));
+        }
+        Ok(Some(first))
+    })
 }

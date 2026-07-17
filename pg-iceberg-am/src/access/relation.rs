@@ -7,7 +7,8 @@ use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::prelude::*;
 use pg_lakebase_core::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
-    TableMaintenanceOptions, TableMaintenanceRequest, TableMaintenanceRouter,
+    LakebaseTableMaintenanceProvider, TableMaintenanceOptions,
+    TableMaintenanceRequest,
 };
 use pgrx::pg_sys;
 
@@ -52,13 +53,15 @@ impl AmRelation for IcebergTableAm {
         }
         let command_time = TableMaintenanceCommandTime::now()
             .map_err(PgReportError::from_domain_error)?;
-        TableMaintenanceRouter::execute(TableMaintenanceRequest {
-            relation: rel,
-            mode: TableMaintenanceMode::Routine,
-            options,
-            budget: TableMaintenanceBudget::configured(),
-            command_time,
-        })
+        <crate::maintenance::IcebergTableMaintenanceProvider as LakebaseTableMaintenanceProvider>::execute(
+            TableMaintenanceRequest {
+                relation: rel,
+                mode: TableMaintenanceMode::Routine,
+                options,
+                budget: TableMaintenanceBudget::configured(),
+                command_time,
+            },
+        )
         .map_err(PgReportError::from_domain_error)?;
         Ok(())
     }

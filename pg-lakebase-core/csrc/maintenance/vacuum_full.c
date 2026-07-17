@@ -4,6 +4,14 @@
  * PostgreSQL keeps relation expansion and vacuum_rel() private to vacuum.c.
  * This file mirrors only the option/expansion and per-provider transaction
  * boundaries needed to replace cluster_rel(); native work remains in core.
+ *
+ * Provenance: PostgreSQL REL_17_STABLE as shipped by the local 17.9 pgrx
+ * source tree, primarily src/backend/commands/vacuum.c.  This is not a copy of
+ * vacuum.c: every exported lakebase_* function below is a deliberately narrow
+ * adapter for parse_vacuum_options(), expand_vacuum_rel() and vacuum_rel()
+ * semantics that PostgreSQL does not expose.  Re-audit this file, its Rust
+ * declarations, and the FULL routing regression matrix before enabling a
+ * different PostgreSQL major version.
  */
 #include "postgres.h"
 

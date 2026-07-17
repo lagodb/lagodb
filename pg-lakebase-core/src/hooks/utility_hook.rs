@@ -2,9 +2,10 @@ use super::error::{UtilityHookError, UtilityHookPhase};
 use crate::diag::ReportableError;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
+use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::os::raw::c_char;
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 
 /// Type-level binding between a marker type, PostgreSQL utility statement
 /// struct, and its [`pg_sys::NodeTag`].
@@ -142,12 +143,9 @@ type UtilityHookList = &'static [UtilityHookEntry];
 // for post hooks, so the snapshot crossing that direct call must not own Drop
 // state such as an Arc<Vec<_>> or a lock guard.
 //
-// A PostgreSQL backend is single-threaded, so this lock is not for runtime
-// concurrency: it only provides the interior mutability/`Sync` required to
-// mutate a `static` during initialization. It is written a handful of times
-// at startup (register/freeze) and is never touched on the hot path, which
-// reads the lock-free `FROZEN_REGISTRY` snapshot instead.
-static BUILDING_REGISTRY: RwLock<Vec<UtilityHookEntry>> = RwLock::new(Vec::new());
+thread_local! {
+    static BUILDING_REGISTRY: RefCell<Vec<UtilityHookEntry>> = const { RefCell::new(Vec::new()) };
+}
 static FROZEN_REGISTRY: OnceLock<UtilityHookList> = OnceLock::new();
 
 static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
@@ -290,18 +288,17 @@ pub fn register_utility_hook(
     hook: Box<dyn UtilityHook + Send + Sync>,
 ) {
     let hook_name = hook.name();
-    let mut entries = BUILDING_REGISTRY.write().unwrap();
     if FROZEN_REGISTRY.get().is_some() {
         panic!("register_utility_hook called after freeze_utility_hooks");
     }
-
-    if entries.iter().any(|(existing_tag, existing_hook)| {
-        *existing_tag == tag && existing_hook.name() == hook_name
-    }) {
-        return;
-    }
-
-    entries.push((tag, hook));
+    BUILDING_REGISTRY.with_borrow_mut(|entries| {
+        if entries.iter().any(|(existing_tag, existing_hook)| {
+            *existing_tag == tag && existing_hook.name() == hook_name
+        }) {
+            return;
+        }
+        entries.push((tag, hook));
+    });
 }
 
 /// Freeze registered utility hooks and install the ProcessUtility router.
@@ -315,20 +312,17 @@ pub fn freeze_utility_hooks() {
         if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
             !hooks.is_empty()
         } else {
-            let mut entries = BUILDING_REGISTRY.write().unwrap();
-            if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
-                !hooks.is_empty()
-            } else {
+            BUILDING_REGISTRY.with_borrow_mut(|entries| {
                 let hooks: UtilityHookList = if entries.is_empty() {
                     &[]
                 } else {
-                    Box::leak(std::mem::take(&mut *entries).into_boxed_slice())
+                    Box::leak(std::mem::take(entries).into_boxed_slice())
                 };
                 if FROZEN_REGISTRY.set(hooks).is_err() {
                     unreachable!("utility hook registry frozen concurrently");
                 }
                 !hooks.is_empty()
-            }
+            })
         }
     };
 

@@ -13,6 +13,7 @@ mod registry;
 mod runtime;
 mod state;
 mod storage;
+mod table_maintenance;
 
 pg_module_magic!();
 
@@ -22,8 +23,8 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
     gucs::init();
-    pg_lakebase_core::maintenance::init_gucs();
     storage::init();
+    table_maintenance::init();
 
     if unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
         pgrx::pg_shmem_init!(RUNTIME_STATE);

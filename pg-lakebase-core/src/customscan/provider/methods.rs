@@ -1,8 +1,8 @@
 //! Per-provider PostgreSQL method tables, allocated and cached as one unit.
 
 use core::any::TypeId;
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 use pgrx::pg_sys;
 
@@ -37,23 +37,16 @@ impl ProviderMethodTables {
 #[derive(Clone, Copy)]
 struct MethodTablesRef(&'static ProviderMethodTables);
 
-// SAFETY: `ProviderMethodTables` is process-lifetime immutable callback data.
-unsafe impl Send for MethodTablesRef {}
-unsafe impl Sync for MethodTablesRef {}
-
-static METHOD_TABLES: OnceLock<Mutex<HashMap<TypeId, MethodTablesRef>>> =
-    OnceLock::new();
+thread_local! {
+    static METHOD_TABLES: RefCell<HashMap<TypeId, MethodTablesRef>> = RefCell::new(HashMap::new());
+}
 
 /// Return the stable PostgreSQL callback tables for provider `P`.
 pub fn method_tables_for<P: LakebaseCustomScanProvider>()
 -> &'static ProviderMethodTables {
-    let cache = METHOD_TABLES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache
-        .lock()
-        .expect("customscan method-table cache mutex poisoned");
     let key = TypeId::of::<P>();
-    if let Some(entry) = guard.get(&key) {
-        return entry.0;
+    if let Some(tables) = METHOD_TABLES.with_borrow(|cache| cache.get(&key).copied()) {
+        return tables.0;
     }
 
     let name = P::NAME.as_ptr();
@@ -101,6 +94,8 @@ pub fn method_tables_for<P: LakebaseCustomScanProvider>()
     };
 
     let leaked = Box::leak(Box::new(tables));
-    guard.insert(key, MethodTablesRef(leaked));
+    METHOD_TABLES.with_borrow_mut(|cache| {
+        cache.insert(key, MethodTablesRef(leaked));
+    });
     leaked
 }
