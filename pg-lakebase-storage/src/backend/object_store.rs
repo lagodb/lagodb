@@ -166,6 +166,7 @@ impl ObjectBackend for ObjectStoreBackend {
                     key: meta.location.to_string(),
                     size: meta.size,
                     etag: meta.e_tag,
+                    last_modified_ms: Some(meta.last_modified.timestamp_millis()),
                 }),
                 Err(error) => Err(StorageError::backend_source(
                     format!("list objects in bucket {bucket_label}"),

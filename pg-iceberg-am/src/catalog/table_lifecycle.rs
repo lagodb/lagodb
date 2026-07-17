@@ -129,7 +129,7 @@ impl<'a> IcebergTableLifecycle<'a> {
 ///
 /// For distributed storage we keep a flatter `{base}/{spcOid}/{dbOid}/{rel}_iceberg`
 /// hierarchy that is collision-free across databases and tablespaces.
-pub(super) fn compute_table_location(
+pub(crate) fn compute_table_location(
     rel: &RelationHandle<'_>,
     base_path: &str,
     is_distributed: bool,

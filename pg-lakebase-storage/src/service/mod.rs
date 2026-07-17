@@ -488,6 +488,7 @@ impl<I: CacheIndex + 'static> StorageService<I> {
                 key: entry.key,
                 size: entry.size,
                 etag: entry.etag,
+                last_modified_ms: entry.last_modified_ms,
             })
             .collect();
         let next_cursor = (!drain.exhausted).then_some(cursor);

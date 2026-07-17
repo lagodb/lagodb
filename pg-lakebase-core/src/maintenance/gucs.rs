@@ -19,6 +19,10 @@ static RETRY_MAX_MS: GucSetting<i32> = GucSetting::<i32>::new(300_000);
 static RETRY_MAX_ATTEMPTS: GucSetting<i32> = GucSetting::<i32>::new(32);
 static REQUEST_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
 static SHUTDOWN_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
+static VACUUM_MAX_INPUT_OBJECTS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
+static VACUUM_MAX_INPUT_MB: GucSetting<i32> = GucSetting::<i32>::new(4_096);
+static VACUUM_MAX_GROUP_OBJECTS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
+static VACUUM_MAX_GROUP_MB: GucSetting<i32> = GucSetting::<i32>::new(4_096);
 
 const MAX_MAINTENANCE_BATCH_ITEMS: i32 =
     if MAX_BULK_DELETE_OBJECT_KEYS < MAX_LIST_PAGE_SIZE as usize {
@@ -36,6 +40,7 @@ const MIN_MAINTENANCE_RETRY_DELAY_MS: i32 =
     STORAGE_CONNECTION_DRAIN_TIMEOUT_MS + 1_000;
 
 pub(crate) fn init() {
+    define_vacuum_budget_gucs();
     GucRegistry::define_bool_guc(
         c"pg_lakebase.maintenance_worker_enabled",
         c"Start the Lakebase maintenance background worker",
@@ -102,6 +107,71 @@ pub(crate) fn init() {
         100,
         3_600_000,
     );
+}
+
+fn define_vacuum_budget_gucs() {
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.vacuum_max_input_objects",
+        c"Maximum selected input objects for ordinary provider VACUUM",
+        c"A soft whole-group budget; VACUUM FULL ignores this value.",
+        &VACUUM_MAX_INPUT_OBJECTS,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.vacuum_max_input_mb",
+        c"Maximum selected input MiB for ordinary provider VACUUM",
+        c"A soft whole-group budget; VACUUM FULL ignores this value.",
+        &VACUUM_MAX_INPUT_MB,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.vacuum_max_group_objects",
+        c"Maximum input objects in one provider maintenance group",
+        c"A hard streaming-resource bound for ordinary and FULL VACUUM.",
+        &VACUUM_MAX_GROUP_OBJECTS,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.vacuum_max_group_mb",
+        c"Maximum input MiB in one provider maintenance group",
+        c"A hard streaming-resource bound for ordinary and FULL VACUUM.",
+        &VACUUM_MAX_GROUP_MB,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+}
+
+pub(crate) fn table_maintenance_budget() -> crate::table_maintenance::TableMaintenanceBudget {
+    const MIB: u64 = 1_048_576;
+    let mb_to_bytes = |value: i32| {
+        u64::try_from(value)
+            .expect("PostgreSQL enforces positive VACUUM budget GUC values")
+            .checked_mul(MIB)
+            .expect("VACUUM budget MiB value exceeds u64")
+    };
+    crate::table_maintenance::TableMaintenanceBudget {
+        max_input_objects: u64::try_from(VACUUM_MAX_INPUT_OBJECTS.get())
+            .expect("PostgreSQL enforces positive vacuum_max_input_objects"),
+        max_input_bytes: mb_to_bytes(VACUUM_MAX_INPUT_MB.get()),
+        max_group_objects: u64::try_from(VACUUM_MAX_GROUP_OBJECTS.get())
+            .expect("PostgreSQL enforces positive vacuum_max_group_objects"),
+        max_group_bytes: mb_to_bytes(VACUUM_MAX_GROUP_MB.get()),
+    }
+}
+
+pub(crate) fn producer_batch_items() -> usize {
+    batch_items()
 }
 
 fn define_ms(

@@ -449,6 +449,64 @@ impl IcebergMetadata {
         }
     }
 
+    /// Tuple-lock the metadata row and prove its pointer is still unchanged.
+    /// The tuple lock is held until the surrounding PostgreSQL transaction ends.
+    pub fn lock_and_validate_location(
+        relid: pg_sys::Oid,
+        expected_location: &str,
+    ) -> IcebergResult<()> {
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
+                .map_catalog_err(CatalogOp::Update)?;
+        let mut scan = table_guard
+            .begin_scan(
+                Self::pkey_oid()?,
+                true,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(column::RELID as _, relid)],
+            )
+            .map_catalog_err(CatalogOp::Update)?;
+        let Some(tuple) = scan.get_next().map_catalog_err(CatalogOp::Update)? else {
+            return Err(IcebergError::MetadataCatalogNotFound(relid));
+        };
+        let current: Option<String> = unsafe {
+            get_attr(
+                tuple.as_raw(),
+                table_guard.as_handle().tuple_desc(),
+                column::METADATA_LOCATION,
+            )
+        };
+        if current.as_deref() != Some(expected_location) {
+            return Err(IcebergError::MetadataCatalogConflict);
+        }
+        let mut buffer = pg_sys::InvalidBuffer as pg_sys::Buffer;
+        let mut failure = pg_sys::TM_FailureData::default();
+        let result = unsafe {
+            pg_sys::heap_lock_tuple(
+                table_guard.as_raw(),
+                tuple.as_raw(),
+                pg_sys::GetCurrentCommandId(false),
+                pg_sys::LockTupleMode::LockTupleExclusive,
+                pg_sys::LockWaitPolicy::LockWaitBlock,
+                false,
+                &mut buffer,
+                &mut failure,
+            )
+        };
+        if buffer != pg_sys::InvalidBuffer as pg_sys::Buffer {
+            unsafe { pg_sys::ReleaseBuffer(buffer) };
+        }
+        match result {
+            pg_sys::TM_Result::TM_Ok => Ok(()),
+            pg_sys::TM_Result::TM_Updated | pg_sys::TM_Result::TM_Deleted => {
+                Err(IcebergError::MetadataCatalogConflict)
+            }
+            _ => Err(IcebergError::InvariantViolated(
+                "unexpected tuple-lock result for Iceberg metadata row",
+            )),
+        }
+    }
+
     // -- CRUD: Delete ---------------------------------------------------------
 
     /// Delete the row for `relid`. Errors if the row is missing.

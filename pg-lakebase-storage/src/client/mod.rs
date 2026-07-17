@@ -450,6 +450,7 @@ impl StorageClient {
                         key: entry.key,
                         size: entry.size,
                         etag: entry.etag,
+                        last_modified_ms: entry.last_modified_ms,
                     })
                     .collect(),
                 next_cursor,

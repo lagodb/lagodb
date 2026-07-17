@@ -69,6 +69,49 @@ impl ObjectStorage {
             staging_resolver,
         })
     }
+
+    pub(crate) fn maintenance_target_owned(
+        &self,
+        mut uri: String,
+    ) -> Result<pg_lakebase_core::maintenance::ObjectTarget> {
+        let relative_path_pos = resolve_object_uri(&self.scheme, &self.bucket, &uri)?;
+        let path = uri.split_off(relative_path_pos);
+        pg_lakebase_core::maintenance::ObjectTarget::new(
+            self.store_id.as_str(),
+            self.bucket.as_ref(),
+            path,
+        )
+        .map_err(storage_err)
+    }
+
+    pub(crate) fn list_older_than(
+        &self,
+        table_location: &str,
+        cutoff_ms: i64,
+    ) -> Result<std::collections::HashSet<String>> {
+        let relative = resolve_object_uri(&self.scheme, &self.bucket, table_location)?;
+        let prefix = format!("{}/", table_location[relative..].trim_end_matches('/'));
+        let uses_absolute_uris = table_location.contains("://");
+        let mut paths = std::collections::HashSet::new();
+        for entry in self.client.list(
+            self.store_id.as_str(),
+            self.bucket.as_ref(),
+            Some(&prefix),
+        ) {
+            let entry = entry.map_err(storage_err)?;
+            if entry.last_modified_ms.is_some_and(|modified| modified < cutoff_ms) {
+                if uses_absolute_uris {
+                    paths.insert(format!(
+                        "{}://{}/{}",
+                        self.scheme, self.bucket, entry.key
+                    ));
+                } else {
+                    paths.insert(entry.key);
+                }
+            }
+        }
+        Ok(paths)
+    }
 }
 
 fn resolve_object_uri(scheme: &str, bucket: &str, uri: &str) -> Result<usize> {

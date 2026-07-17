@@ -84,7 +84,7 @@ impl std::fmt::Debug for CanceledFilesDelete {
 impl PendingDelete for CanceledFilesDelete {
     fn execute(&self) {
         if ArtifactRegistry::local_needs_wal(&self.file_io)
-            && let Some(lsn) = log_delete_files(&self.paths)
+            && let Some(lsn) = log_delete_files(self.paths.iter().map(String::as_str))
         {
             // XLogInsert only places the cleanup fact in the WAL stream. Flush
             // its end LSN before unlinking so crash/archive recovery cannot

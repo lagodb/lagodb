@@ -70,6 +70,9 @@ pub mod transaction;
 /// Format-neutral durable maintenance queue and worker framework.
 pub mod maintenance;
 
+/// Format-neutral logical table-maintenance provider SPI and VACUUM routing.
+pub mod table_maintenance;
+
 /// Helper functions and diagnostics
 pub mod diag;
 

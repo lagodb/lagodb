@@ -39,6 +39,7 @@ use crate::catalog::metadata_table::{CasUpdate, IcebergMetadata};
 use crate::catalog::row_mutations::RelationRowRegistry;
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
+use crate::maintenance::PreparedVacuum;
 use crate::storage::transactional_artifacts::MetadataAttempt;
 
 const TOTAL_RECORDS: &str = "total-records";
@@ -112,6 +113,7 @@ enum TxTableAction {
     Schema(PreparedSchemaUpdate),
     Data(TxDataEpoch),
     Truncate(TxTruncateAction),
+    Vacuum(Box<PreparedVacuum>),
     Drop,
 }
 
@@ -128,6 +130,7 @@ struct TxDataEpoch {
 
 struct TxTableCommitPlan<'a> {
     actions: Vec<EffectiveCommitAction<'a>>,
+    vacuum: Option<&'a PreparedVacuum>,
     expected_metadata_location: Option<&'a str>,
     canceled_created_paths: Vec<String>,
 }
@@ -163,6 +166,12 @@ impl TxDataEpoch {
 }
 
 impl TxTableActionLog {
+    fn has_vacuum(&self) -> bool {
+        self.actions
+            .iter()
+            .any(|action| matches!(action, TxTableAction::Vacuum(_)))
+    }
+
     fn invalidate_combined_delta(&mut self) {
         self.combined_delta_cache.take();
     }
@@ -176,11 +185,25 @@ impl TxTableActionLog {
                 TxTableAction::Truncate(truncate) => Some((index, truncate)),
                 TxTableAction::Schema(_)
                 | TxTableAction::Data(_)
+                | TxTableAction::Vacuum(_)
                 | TxTableAction::Drop => None,
             })
     }
 
     fn commit_plan(&self) -> IcebergResult<TxTableCommitPlan<'_>> {
+        if let Some(TxTableAction::Vacuum(vacuum)) = self.actions.first() {
+            if self.actions.len() != 1 {
+                return Err(IcebergError::InvariantViolated(
+                    "VACUUM action is not exclusive in metadata tracker",
+                ));
+            }
+            return Ok(TxTableCommitPlan {
+                actions: Vec::new(),
+                vacuum: Some(vacuum.as_ref()),
+                expected_metadata_location: None,
+                canceled_created_paths: Vec::new(),
+            });
+        }
         let last_truncate = self.last_truncate();
         let last_truncate_index = last_truncate.map(|(index, _)| index);
         let expected_metadata_location = last_truncate
@@ -217,6 +240,11 @@ impl TxTableActionLog {
                     pending_truncate = false;
                 }
                 TxTableAction::Truncate(_) => {}
+                TxTableAction::Vacuum(_) => {
+                    return Err(IcebergError::InvariantViolated(
+                        "non-exclusive VACUUM reached commit planning",
+                    ));
+                }
                 TxTableAction::Drop => {
                     return Err(IcebergError::InvariantViolated(
                         "dropped table reached Iceberg commit planning",
@@ -232,6 +260,7 @@ impl TxTableActionLog {
         canceled_created_paths.sort_unstable();
         Ok(TxTableCommitPlan {
             actions: effective_actions,
+            vacuum: None,
             expected_metadata_location,
             canceled_created_paths,
         })
@@ -268,6 +297,7 @@ impl TxTableActionLog {
             TxTableAction::Schema(update) => update.is_empty(),
             TxTableAction::Data(epoch) => epoch.is_empty(),
             TxTableAction::Truncate(_) => false,
+            TxTableAction::Vacuum(_) => false,
             TxTableAction::Drop => false,
         })
     }
@@ -276,6 +306,15 @@ impl TxTableActionLog {
         if !update.is_empty() {
             self.actions.push(TxTableAction::Schema(update));
         }
+    }
+
+    fn stage_vacuum(&mut self, vacuum: PreparedVacuum) -> IcebergResult<()> {
+        if !self.actions.is_empty() {
+            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
+        }
+        self.invalidate_combined_delta();
+        self.actions.push(TxTableAction::Vacuum(Box::new(vacuum)));
+        Ok(())
     }
 
     fn current_data_epoch_mut(&mut self) -> &mut TxDataEpoch {
@@ -388,6 +427,7 @@ impl TxTableActionLog {
                     has_delta = true;
                 }
                 TxTableAction::Drop => return Ok(None),
+                TxTableAction::Vacuum(_) => return Ok(None),
                 TxTableAction::Schema(_) | TxTableAction::Data(_) => {}
             }
         }
@@ -430,6 +470,9 @@ impl TableState {
     where
         F: FnOnce(&mut TxTableActionLog) -> IcebergResult<()>,
     {
+        if self.actions.has_vacuum() {
+            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
+        }
         let (marker, should_record_history) = self.record_history(nest_level);
         if let Err(err) = mutation(Rc::make_mut(&mut self.actions)) {
             Rc::make_mut(&mut self.actions).truncate(marker);
@@ -442,22 +485,35 @@ impl TableState {
         Ok(())
     }
 
-    fn record_validation(&mut self, nest_level: i32, validation: RowDeltaValidation) {
+    fn record_validation(
+        &mut self,
+        nest_level: i32,
+        validation: RowDeltaValidation,
+    ) -> IcebergResult<()> {
+        if self.actions.has_vacuum() {
+            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
+        }
         self.record_history(nest_level);
         Rc::make_mut(&mut self.actions).record_validation(validation);
+        Ok(())
     }
 
     fn record_schema_update(
         &mut self,
         nest_level: i32,
         update: PreparedSchemaUpdate,
-    ) {
+    ) -> IcebergResult<()> {
         if update.is_empty() {
-            return;
+            return Ok(());
+        }
+
+        if self.actions.has_vacuum() {
+            return Err(IcebergError::Vacuum { source: crate::error::IcebergVacuumError::ActionConflict });
         }
 
         self.record_history(nest_level);
         Rc::make_mut(&mut self.actions).stage_schema(update);
+        Ok(())
     }
 
     fn record_data_files(
@@ -856,8 +912,7 @@ impl TxMetadata {
         file_io: &FileIO,
     ) -> IcebergResult<()> {
         self.stage_table_mutation(relid, file_io, |state, nest_level| {
-            state.record_validation(nest_level, validation);
-            Ok(())
+            state.record_validation(nest_level, validation)
         })
     }
 
@@ -907,8 +962,22 @@ impl TxMetadata {
         file_io: &FileIO,
     ) -> IcebergResult<()> {
         self.stage_table_mutation(relid, file_io, |state, nest_level| {
-            state.record_schema_update(nest_level, update);
-            Ok(())
+            state.record_schema_update(nest_level, update)
+        })
+    }
+
+    /// Stage one aggregate VACUUM action. It is intentionally exclusive with
+    /// DML, schema evolution, TRUNCATE, and DROP for this relation.
+    pub(crate) fn stage_vacuum(
+        &self,
+        relid: pg_sys::Oid,
+        vacuum: PreparedVacuum,
+        file_io: &FileIO,
+    ) -> IcebergResult<()> {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
+            state.record_action_mutation(nest_level, |actions| {
+                actions.stage_vacuum(vacuum)
+            })
         })
     }
 
@@ -1085,6 +1154,9 @@ impl TxMetadata {
 
             let mut retries = 0;
             let max_retries = gucs::max_commit_retries();
+            let vacuum_commit_started = plan
+                .vacuum
+                .map(|_| std::time::Instant::now());
 
             loop {
                 if retries > max_retries {
@@ -1116,6 +1188,47 @@ impl TxMetadata {
 
                 let catalog = StagedCatalog::new(&base_table);
                 let mut tx = Transaction::new(&base_table);
+                let owned_table_root = plan
+                    .vacuum
+                    .map(|vacuum| &vacuum.owned_table_root);
+                if let Some(vacuum) = plan.vacuum {
+                    vacuum
+                        .owned_table_root
+                        .ensure_table_location(base_table.metadata().location())?;
+                    vacuum
+                        .owned_table_root
+                        .ensure_path(&latest_global_location)?;
+                    if let Some(rewrite) = &vacuum.rewrite {
+                        let mut action = tx
+                            .rewrite_files(
+                                rewrite.starting_snapshot_id,
+                                rewrite.starting_sequence_number,
+                            )
+                            .rewrite_data_files(
+                                rewrite.input_files.clone(),
+                                rewrite.output_files.clone(),
+                            )
+                            .rewrite_delete_files(
+                                rewrite.materialized_delete_files.clone(),
+                            );
+                        if rewrite.added_data_files_have_row_ids {
+                            action = action.with_preassigned_row_ids();
+                        }
+                        tx = action.apply(tx)?;
+                    }
+                    if let Some(manifests) = vacuum.manifest_rewrite {
+                        tx = tx
+                            .rewrite_manifests(
+                                manifests.min_count_to_merge,
+                                manifests.target_size_bytes,
+                            )
+                            .apply(tx)?;
+                    }
+                    tx = tx
+                        .expire_snapshots()
+                        .as_of_ms(vacuum.expiration.as_of_ms)
+                        .apply(tx)?;
+                }
                 let mut schema_metadata = base_table.metadata().clone();
                 for action in &plan.actions {
                     match action {
@@ -1164,8 +1277,263 @@ impl TxMetadata {
                 let new_metadata_location = updated_table
                     .metadata_location()
                     .ok_or(IcebergError::MetadataLocationNull)?;
+                if let Some(owned_table_root) = owned_table_root {
+                    owned_table_root.ensure_table_location(
+                        updated_table.metadata().location(),
+                    )?;
+                    owned_table_root.ensure_path(new_metadata_location)?;
+                }
+                let mut vacuum_report = plan.vacuum.map(|vacuum| vacuum.report.clone());
+                if let Some(report) = &mut vacuum_report {
+                    let base_snapshot_ids: HashSet<i64> = base_table
+                        .metadata()
+                        .snapshots()
+                        .map(|snapshot| snapshot.snapshot_id())
+                        .collect();
+                    let expired_snapshot_count = base_table
+                        .metadata()
+                        .snapshots()
+                        .filter(|snapshot| {
+                            updated_table
+                                .metadata()
+                                .snapshot_by_id(snapshot.snapshot_id())
+                                .is_none()
+                        })
+                        .count();
+                    report.snapshots_expired = u64::try_from(expired_snapshot_count)
+                    .map_err(|_| IcebergError::Vacuum {
+                        source: crate::error::IcebergVacuumError::ResourceLimit(
+                            "expired snapshot count does not fit u64".to_owned(),
+                        ),
+                    })?;
+                    let expired_refs = base_table
+                        .metadata()
+                        .snapshot_references()
+                        .filter(|(name, _)| {
+                            updated_table.metadata().snapshot_reference(name).is_none()
+                        })
+                        .count();
+                    crate::maintenance::record_metric(
+                        report,
+                        c"expired_refs",
+                        u64::try_from(expired_refs).map_err(|_| IcebergError::Vacuum {
+                            source: crate::error::IcebergVacuumError::ResourceLimit(
+                                "expired reference count does not fit u64".to_owned(),
+                            ),
+                        })?,
+                    )?;
+                    let created_snapshot_count = updated_table
+                        .metadata()
+                        .snapshots()
+                        .filter(|snapshot| {
+                            !base_snapshot_ids.contains(&snapshot.snapshot_id())
+                        })
+                        .count();
+                    let rewrite_snapshot_count = if plan
+                        .vacuum
+                        .is_some_and(|vacuum| vacuum.rewrite.is_some())
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                    if plan
+                        .vacuum
+                        .is_some_and(|vacuum| vacuum.manifest_rewrite.is_some())
+                        && created_snapshot_count > rewrite_snapshot_count
+                    {
+                        let current = updated_table.metadata().current_snapshot().ok_or(
+                            IcebergError::InvariantViolated(
+                                "manifest rewrite committed without a current snapshot",
+                            ),
+                        )?;
+                        let manifests = current.load_manifest_list(
+                            updated_table.file_io(),
+                            &updated_table.metadata_ref(),
+                        )?;
+                        let rewritten = manifests
+                            .entries()
+                            .iter()
+                            .filter(|manifest| {
+                                manifest.added_snapshot_id == current.snapshot_id()
+                            })
+                            .count();
+                        report.manifests_rewritten = u64::try_from(rewritten).map_err(
+                            |_| IcebergError::Vacuum {
+                                source: crate::error::IcebergVacuumError::ResourceLimit(
+                                    "rewritten manifest count does not fit u64".to_owned(),
+                                ),
+                            },
+                        )?;
+                    }
+                    let cas_retries = retries.checked_sub(1).ok_or_else(|| {
+                        IcebergError::Vacuum {
+                            source: crate::error::IcebergVacuumError::ResourceLimit(
+                                "CAS retry counter underflow".to_owned(),
+                            ),
+                        }
+                    })?;
+                    report.cas_retries = u64::from(cas_retries);
+                    crate::maintenance::record_metric(
+                        report,
+                        c"validation_conflicts",
+                        report.cas_retries,
+                    )?;
+                }
+                let cleanup_planning_started = plan
+                    .vacuum
+                    .map(|_| std::time::Instant::now());
+                let expiration_candidates = if plan.vacuum.is_some()
+                    && new_metadata_location != latest_global_location
+                {
+                    crate::maintenance::IcebergReachabilityPlanner::deletion_candidates(
+                        &base_table,
+                        &updated_table,
+                        owned_table_root.ok_or(IcebergError::InvariantViolated(
+                            "VACUUM reachability has no managed table root",
+                        ))?,
+                    )?
+                } else {
+                    crate::maintenance::ReachabilityDeletionCandidates::default()
+                };
+                if let Some(report) = &mut vacuum_report {
+                    crate::maintenance::record_metric(
+                        report,
+                        c"expiration_unreachable_objects",
+                        u64::try_from(expiration_candidates.paths.len()).map_err(|_| {
+                            IcebergError::Vacuum {
+                                source: crate::error::IcebergVacuumError::ResourceLimit(
+                                    "expiration cleanup count does not fit u64".to_owned(),
+                                ),
+                            }
+                        })?,
+                    )?;
+                    for (name, value) in [
+                        (c"unreachable_data_files", expiration_candidates.data),
+                        (
+                            c"unreachable_delete_files",
+                            expiration_candidates.delete,
+                        ),
+                        (
+                            c"unreachable_manifests",
+                            expiration_candidates.manifest,
+                        ),
+                        (
+                            c"unreachable_manifest_lists",
+                            expiration_candidates.manifest_list,
+                        ),
+                        (
+                            c"unreachable_statistics",
+                            expiration_candidates.statistics,
+                        ),
+                        (
+                            c"unreachable_metadata_files",
+                            expiration_candidates.metadata,
+                        ),
+                    ] {
+                        crate::maintenance::record_metric(report, name, value)?;
+                    }
+                }
+                let mut cleanup_candidates = expiration_candidates.paths;
+                if let Some(orphan) = plan
+                    .vacuum
+                    .and_then(|vacuum| vacuum.orphan_cleanup)
+                {
+                    let orphan_candidates =
+                        crate::maintenance::IcebergReachabilityPlanner::orphan_candidates(
+                            &updated_table,
+                            orphan.older_than_ms,
+                            owned_table_root.ok_or(IcebergError::InvariantViolated(
+                                "VACUUM orphan cleanup has no managed table root",
+                            ))?,
+                        )?;
+                    if let Some(report) = &mut vacuum_report {
+                        crate::maintenance::record_metric(
+                            report,
+                            c"orphan_candidates",
+                            u64::try_from(orphan_candidates.len()).map_err(|_| {
+                                IcebergError::Vacuum {
+                                    source: crate::error::IcebergVacuumError::ResourceLimit(
+                                        "orphan candidate count does not fit u64".to_owned(),
+                                    ),
+                                }
+                            })?,
+                        )?;
+                    }
+                    cleanup_candidates.extend(orphan_candidates);
+                }
+                if let (Some(report), Some(started)) =
+                    (&mut vacuum_report, cleanup_planning_started)
+                {
+                    crate::maintenance::record_metric(
+                        report,
+                        c"cleanup_planning_ms",
+                        u64::try_from(started.elapsed().as_millis()).map_err(|_| {
+                            IcebergError::Vacuum {
+                                source: crate::error::IcebergVacuumError::ResourceLimit(
+                                    "cleanup planning duration does not fit u64 milliseconds"
+                                        .to_owned(),
+                                ),
+                            }
+                        })?,
+                    )?;
+                }
                 if new_metadata_location == latest_global_location {
                     metadata_attempt.discard()?;
+                    if plan.vacuum.is_some() && !cleanup_candidates.is_empty() {
+                        if let Some(report) = &mut vacuum_report {
+                            report.objects_scheduled_for_deletion =
+                                u64::try_from(cleanup_candidates.len()).map_err(|_| {
+                                    IcebergError::Vacuum {
+                                        source: crate::error::IcebergVacuumError::ResourceLimit(
+                                            "cleanup candidate count does not fit u64"
+                                                .to_owned(),
+                                        ),
+                                    }
+                                })?;
+                        }
+                        match IcebergMetadata::lock_and_validate_location(
+                            relid,
+                            &latest_global_location,
+                        ) {
+                            Ok(()) => {
+                                let registration =
+                                    crate::maintenance::VacuumCleanup::register(
+                                        relid,
+                                        &file_io,
+                                        cleanup_candidates,
+                                    )?;
+                                if let Some(report) = &mut vacuum_report {
+                                    registration.record(report)?;
+                                }
+                            }
+                            Err(IcebergError::MetadataCatalogConflict) => {
+                                diag::report_notice(
+                                    "Concurrent Iceberg update detected, rebasing...",
+                                );
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    if let (Some(vacuum), Some(report)) = (plan.vacuum, &vacuum_report) {
+                        let mut report = report.clone();
+                        if let Some(started) = &vacuum_commit_started {
+                            crate::maintenance::record_metric(
+                                &mut report,
+                                c"commit_ms",
+                                u64::try_from(started.elapsed().as_millis()).map_err(|_| {
+                                    IcebergError::Vacuum {
+                                        source: crate::error::IcebergVacuumError::ResourceLimit(
+                                            "VACUUM commit duration does not fit u64 milliseconds"
+                                                .to_owned(),
+                                        ),
+                                    }
+                                })?,
+                            )?;
+                        }
+                        vacuum.report_success(&report);
+                    }
                     crate::storage::transactional_artifacts::register_canceled_files_for_commit(
                         file_io.clone(),
                         plan.canceled_created_paths.clone(),
@@ -1183,6 +1551,45 @@ impl TxMetadata {
                 ) {
                     Ok(()) => {
                         metadata_attempt.promote()?;
+                        if plan.vacuum.is_some() {
+                            if let Some(report) = &mut vacuum_report {
+                                report.objects_scheduled_for_deletion =
+                                    u64::try_from(cleanup_candidates.len()).map_err(|_| {
+                                        IcebergError::Vacuum {
+                                            source: crate::error::IcebergVacuumError::ResourceLimit(
+                                                "cleanup candidate count does not fit u64"
+                                                    .to_owned(),
+                                            ),
+                                        }
+                                    })?;
+                            }
+                            let registration = crate::maintenance::VacuumCleanup::register(
+                                relid,
+                                &file_io,
+                                cleanup_candidates,
+                            )?;
+                            if let Some(report) = &mut vacuum_report {
+                                registration.record(report)?;
+                            }
+                        }
+                        if let (Some(vacuum), Some(report)) = (plan.vacuum, &vacuum_report) {
+                            let mut report = report.clone();
+                            if let Some(started) = &vacuum_commit_started {
+                                crate::maintenance::record_metric(
+                                    &mut report,
+                                    c"commit_ms",
+                                    u64::try_from(started.elapsed().as_millis()).map_err(|_| {
+                                        IcebergError::Vacuum {
+                                            source: crate::error::IcebergVacuumError::ResourceLimit(
+                                                "VACUUM commit duration does not fit u64 milliseconds"
+                                                    .to_owned(),
+                                            ),
+                                        }
+                                    })?,
+                                )?;
+                            }
+                            vacuum.report_success(&report);
+                        }
                         crate::storage::transactional_artifacts::register_canceled_files_for_commit(
                             file_io.clone(),
                             plan.canceled_created_paths.clone(),

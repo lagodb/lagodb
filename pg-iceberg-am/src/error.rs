@@ -54,6 +54,37 @@ impl Display for MetadataCatalogOperation {
 // ============================================================================
 
 #[derive(Error, Debug)]
+pub enum IcebergVacuumError {
+    #[error("gc.enabled must be true")]
+    GcDisabled,
+    #[error("VACUUM cannot be combined with DML, DDL, TRUNCATE, or DROP for the same relation")]
+    ActionConflict,
+    #[error("invalid Iceberg VACUUM policy: {0}")]
+    InvalidPolicy(String),
+    #[error("Iceberg VACUUM path is outside the relation-owned table root: {0}")]
+    UnsafePath(String),
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimit(String),
+    #[error("Iceberg relation {relid} unexpectedly owns a PostgreSQL TOAST relation")]
+    UnexpectedToastRelation { relid: pg_sys::Oid },
+}
+
+impl SqlStateError for IcebergVacuumError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        match self {
+            Self::InvalidPolicy(_) => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            Self::GcDisabled
+            | Self::ActionConflict
+            | Self::UnsafePath(_)
+            | Self::UnexpectedToastRelation { .. } => {
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+            }
+            Self::ResourceLimit(_) => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+        }
+    }
+}
+
+#[derive(Error, Debug)]
 pub enum IcebergError {
     #[error("failed to {operation} iceberg.iceberg_metadata catalog: {source}")]
     MetadataCatalog {
@@ -73,6 +104,12 @@ pub enum IcebergError {
 
     #[error("optimistic locking failed: metadata location changed concurrently")]
     MetadataCatalogConflict,
+
+    #[error("Iceberg VACUUM failed: {source}")]
+    Vacuum {
+        #[source]
+        source: IcebergVacuumError,
+    },
 
     #[error("metadata tracker error: {0}")]
     MetadataTracker(String),
@@ -214,6 +251,8 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
             }
 
+            IcebergError::Vacuum { source } => source.sql_error_code(),
+
             IcebergError::MetadataCatalogInvalidRecord(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
@@ -312,6 +351,14 @@ impl From<IcebergError> for ErrorReport {
 }
 
 pub type IcebergResult<T> = Result<T, IcebergError>;
+
+impl From<IcebergError>
+    for pg_lakebase_core::table_maintenance::TableMaintenanceError
+{
+    fn from(source: IcebergError) -> Self {
+        Self::provider(source)
+    }
+}
 
 impl IcebergError {
     pub fn metadata_catalog(

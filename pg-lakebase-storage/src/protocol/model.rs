@@ -36,6 +36,7 @@ pub struct WireListEntry {
     pub key: String,
     pub size: u64,
     pub etag: Option<String>,
+    pub last_modified_ms: Option<i64>,
 }
 
 /// Client→server operation body after decode ([`crate::protocol::decode_request`]).

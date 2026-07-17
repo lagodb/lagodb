@@ -236,11 +236,13 @@ fn response_payloads_roundtrip() {
                     key: "scope/a".to_string(),
                     size: 11,
                     etag: Some("etag-a".to_string()),
+                    last_modified_ms: Some(1_700_000_000_000),
                 },
                 crate::protocol::WireListEntry {
                     key: "scope/b".to_string(),
                     size: 22,
                     etag: None,
+                    last_modified_ms: None,
                 },
             ],
             next_cursor: Some(crate::protocol::ListCursor::from_wire(

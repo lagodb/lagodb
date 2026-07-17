@@ -165,7 +165,7 @@ type ProcessUtilityHookFn = unsafe extern "C-unwind" fn(
 );
 
 #[derive(Clone, Copy)]
-struct ProcessUtilityArgs {
+pub(crate) struct ProcessUtilityArgs {
     pstmt: *mut pg_sys::PlannedStmt,
     query_string: *const c_char,
     read_only_tree: bool,
@@ -216,6 +216,34 @@ impl ProcessUtilityArgs {
         }
     }
 
+    pub(crate) unsafe fn call_parent_with_node(
+        self,
+        node: *mut pg_sys::Node,
+    ) {
+        let original_node = unsafe { (*self.pstmt).utilityStmt };
+        unsafe { (*self.pstmt).utilityStmt = node };
+        let mut completion = pg_sys::QueryCompletion::default();
+        let nested = Self {
+            completion_tag: &mut completion,
+            ..self
+        };
+        match PREV_PROCESS_UTILITY.get() {
+            Some(Some(prev)) => unsafe { nested.call_prev_direct(*prev) },
+            _ => unsafe { nested.call_standard() },
+        }
+        unsafe { (*self.pstmt).utilityStmt = original_node };
+    }
+
+    pub(crate) unsafe fn complete_vacuum(self) {
+        unsafe {
+            pg_sys::SetQueryCompletion(
+                self.completion_tag,
+                pg_sys::CommandTag::CMDTAG_VACUUM,
+                0,
+            );
+        }
+    }
+
     unsafe fn tail_chain(self, prev: pg_sys::ProcessUtility_hook_type) {
         match prev {
             Some(prev) => unsafe {
@@ -250,6 +278,11 @@ fn install_process_utility_hook() {
         pg_sys::ProcessUtility_hook = Some(process_utility_router);
         prev
     });
+}
+
+#[cfg(feature = "pg17")]
+pub(crate) fn install_table_maintenance_router() {
+    install_process_utility_hook();
 }
 
 pub fn register_utility_hook(
@@ -329,22 +362,29 @@ unsafe extern "C-unwind" fn process_utility_router(
         let target_node = args.target_node();
         let tag = (*target_node).type_;
 
-        let Some(hooks) = current_hooks() else {
+        let hooks = current_hooks().unwrap_or(&[]);
+        #[cfg(feature = "pg17")]
+        let may_consume = tag == pg_sys::NodeTag::T_VacuumStmt;
+        #[cfg(not(feature = "pg17"))]
+        let may_consume = false;
+
+        if hooks.is_empty() && !may_consume {
             args.tail_chain(PREV_PROCESS_UTILITY.get().copied().flatten());
             return;
-        };
+        }
 
         let has_matching_hooks = hooks.iter().any(|(reg_tag, _)| *reg_tag == tag);
-        if !has_matching_hooks {
+        if !has_matching_hooks && !may_consume {
             args.tail_chain(PREV_PROCESS_UTILITY.get().copied().flatten());
             return;
         }
 
         // Only deep-copy the statement tree when hooks need the pre-mutation
         // snapshot; this avoids copyObjectImpl overhead for unhooked tags.
-        let copied_node =
+        let copied_node = has_matching_hooks.then(|| {
             pg_sys::copyObjectImpl(target_node as *const std::ffi::c_void)
-                as *mut pg_sys::Node;
+                as *mut pg_sys::Node
+        });
 
         let mut safe_node = UtilityNode::new(target_node);
         for (reg_tag, hook) in hooks.iter() {
@@ -361,6 +401,33 @@ unsafe extern "C-unwind" fn process_utility_router(
             }
         }
 
+        #[cfg(feature = "pg17")]
+        if may_consume
+            && crate::table_maintenance::try_route_vacuum_full(
+                target_node.cast(),
+                args,
+                context == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
+            )
+        {
+            if let Some(copied_node) = copied_node {
+                let post_context = PostUtilityContext::new(copied_node);
+                for (reg_tag, hook) in hooks.iter() {
+                    if *reg_tag == tag {
+                        hook.on_post(&post_context)
+                            .map_err(|err| {
+                                err.with_utility_context(
+                                    hook.name(),
+                                    UtilityHookPhase::PostSuccess,
+                                    tag,
+                                )
+                            })
+                            .report_unwrap();
+                    }
+                }
+            }
+            return;
+        }
+
         match PREV_PROCESS_UTILITY.get() {
             Some(Some(prev)) => {
                 args.call_prev_direct(*prev);
@@ -370,18 +437,20 @@ unsafe extern "C-unwind" fn process_utility_router(
             }
         }
 
-        let post_context = PostUtilityContext::new(copied_node);
-        for (reg_tag, hook) in hooks.iter() {
-            if *reg_tag == tag {
-                hook.on_post(&post_context)
-                    .map_err(|err| {
-                        err.with_utility_context(
-                            hook.name(),
-                            UtilityHookPhase::PostSuccess,
-                            tag,
-                        )
-                    })
-                    .report_unwrap();
+        if let Some(copied_node) = copied_node {
+            let post_context = PostUtilityContext::new(copied_node);
+            for (reg_tag, hook) in hooks.iter() {
+                if *reg_tag == tag {
+                    hook.on_post(&post_context)
+                        .map_err(|err| {
+                            err.with_utility_context(
+                                hook.name(),
+                                UtilityHookPhase::PostSuccess,
+                                tag,
+                            )
+                        })
+                        .report_unwrap();
+                }
             }
         }
     }

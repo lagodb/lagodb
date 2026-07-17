@@ -9,6 +9,8 @@ fn main() {
     println!(
         "cargo:rerun-if-changed=csrc/custom/modify/lakebase_node_modify_table.h"
     );
+    println!("cargo:rerun-if-changed=csrc/maintenance/vacuum_full.c");
+    println!("cargo:rerun-if-changed=csrc/maintenance/vacuum_full.h");
 
     // The Custom ModifyTable fork is a PG17 framework. Keep the rest of core
     // buildable for PG16 consumers without compiling or exposing this module.
@@ -26,7 +28,9 @@ fn main() {
 
     cc::Build::new()
         .file("csrc/custom/modify/lakebase_node_modify_table.c")
+        .file("csrc/maintenance/vacuum_full.c")
         .include(PathBuf::from("csrc/custom/modify"))
+        .include(PathBuf::from("csrc/maintenance"))
         .include(include)
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter")

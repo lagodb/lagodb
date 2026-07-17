@@ -297,6 +297,19 @@ impl TableMetadata {
         self.snapshots.values()
     }
 
+    /// Returns all named snapshot references.
+    #[inline]
+    pub fn snapshot_references(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&str, &SnapshotReference)> {
+        self.refs.iter().map(|(name, reference)| (name.as_str(), reference))
+    }
+
+    #[inline]
+    pub fn snapshot_reference(&self, name: &str) -> Option<&SnapshotReference> {
+        self.refs.get(name)
+    }
+
     /// Lookup snapshot by id.
     #[inline]
     pub fn snapshot_by_id(&self, snapshot_id: i64) -> Option<&SnapshotRef> {

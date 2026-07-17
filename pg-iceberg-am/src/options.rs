@@ -56,6 +56,15 @@ pub const OPT_WRITE_ISOLATION_LEVEL_VALUES: &[&str] = &[
     IsolationLevel::Serializable.as_str(),
 ];
 
+pub const OPT_TARGET_FILE_SIZE: &str = TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES;
+pub const OPT_MAX_SNAPSHOT_AGE: &str = TableProperties::PROPERTY_MAX_SNAPSHOT_AGE_MS;
+pub const OPT_MIN_SNAPSHOTS: &str = TableProperties::PROPERTY_MIN_SNAPSHOTS_TO_KEEP;
+pub const OPT_MAX_REF_AGE: &str = TableProperties::PROPERTY_MAX_REF_AGE_MS;
+pub const OPT_METADATA_VERSIONS: &str = TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX;
+pub const OPT_MANIFEST_TARGET_SIZE: &str = TableProperties::PROPERTY_MANIFEST_TARGET_SIZE_BYTES;
+pub const OPT_MANIFEST_MIN_COUNT: &str = TableProperties::PROPERTY_MANIFEST_MIN_COUNT_TO_MERGE;
+pub const OPT_MANIFEST_MERGE: &str = TableProperties::PROPERTY_MANIFEST_MERGE_ENABLED;
+
 // ============================================================================
 //  Option Definitions
 // ============================================================================
@@ -111,6 +120,14 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
         },
         description: "Iceberg MERGE isolation level (snapshot or serializable)",
     },
+    OptionDef { name: OPT_TARGET_FILE_SIZE, kind: OptionKind::String { default: Some("536870912") }, description: "Target data-file size in bytes" },
+    OptionDef { name: OPT_MAX_SNAPSHOT_AGE, kind: OptionKind::String { default: Some("432000000") }, description: "Maximum snapshot age in milliseconds" },
+    OptionDef { name: OPT_MIN_SNAPSHOTS, kind: OptionKind::String { default: Some("1") }, description: "Minimum snapshots retained per branch" },
+    OptionDef { name: OPT_MAX_REF_AGE, kind: OptionKind::String { default: Some("9223372036854775807") }, description: "Maximum non-main reference age in milliseconds" },
+    OptionDef { name: OPT_METADATA_VERSIONS, kind: OptionKind::String { default: Some("100") }, description: "Maximum previous metadata versions retained" },
+    OptionDef { name: OPT_MANIFEST_TARGET_SIZE, kind: OptionKind::String { default: Some("8388608") }, description: "Target manifest size in bytes" },
+    OptionDef { name: OPT_MANIFEST_MIN_COUNT, kind: OptionKind::String { default: Some("100") }, description: "Minimum live manifests before merging" },
+    OptionDef { name: OPT_MANIFEST_MERGE, kind: OptionKind::Bool { default: true }, description: "Enable automatic manifest merging" },
 ];
 
 #[repr(u8)]
@@ -190,6 +207,14 @@ pub(crate) struct ResolvedIcebergOptions {
     delete_isolation: IsolationLevel,
     update_isolation: IsolationLevel,
     merge_isolation: IsolationLevel,
+    target_file_size: usize,
+    max_snapshot_age_ms: i64,
+    min_snapshots_to_keep: usize,
+    max_ref_age_ms: i64,
+    metadata_versions: usize,
+    manifest_target_size: u64,
+    manifest_min_count: usize,
+    manifest_merge: bool,
 }
 
 impl ResolvedIcebergOptions {
@@ -238,6 +263,10 @@ impl ResolvedIcebergOptions {
             .and_then(|options| options.get_str(OPT_WRITE_MERGE_ISOLATION_LEVEL))
             .unwrap_or(OPT_WRITE_ISOLATION_LEVEL_DEFAULT);
 
+        let value = |name, default| {
+            options.and_then(|options| options.get_str(name)).unwrap_or(default)
+        };
+
         Self::from_parts(
             format_version,
             compression,
@@ -245,6 +274,14 @@ impl ResolvedIcebergOptions {
             delete_isolation,
             update_isolation,
             merge_isolation,
+            value(OPT_TARGET_FILE_SIZE, "536870912"),
+            value(OPT_MAX_SNAPSHOT_AGE, "432000000"),
+            value(OPT_MIN_SNAPSHOTS, "1"),
+            value(OPT_MAX_REF_AGE, "9223372036854775807"),
+            value(OPT_METADATA_VERSIONS, "100"),
+            value(OPT_MANIFEST_TARGET_SIZE, "8388608"),
+            value(OPT_MANIFEST_MIN_COUNT, "100"),
+            value(OPT_MANIFEST_MERGE, "true"),
         )
     }
 
@@ -255,6 +292,14 @@ impl ResolvedIcebergOptions {
         delete_isolation: &str,
         update_isolation: &str,
         merge_isolation: &str,
+        target_file_size: &str,
+        max_snapshot_age_ms: &str,
+        min_snapshots_to_keep: &str,
+        max_ref_age_ms: &str,
+        metadata_versions: &str,
+        manifest_target_size: &str,
+        manifest_min_count: &str,
+        manifest_merge: &str,
     ) -> Result<Self, TableOptionError> {
         let compression = CompressionOption::parse(compression)?;
         let write_format = WriteFormatOption::parse(write_format)?;
@@ -271,6 +316,23 @@ impl ResolvedIcebergOptions {
             merge_isolation,
         )?;
 
+        let parse_positive = |name: &str, value: &str| -> Result<u64, TableOptionError> {
+            let parsed = value.parse::<u64>().map_err(|_| {
+                TableOptionError::InvalidOption(format!("{name} must be a positive integer"))
+            })?;
+            (parsed > 0).then_some(parsed).ok_or_else(|| {
+                TableOptionError::InvalidOption(format!("{name} must be greater than zero"))
+            })
+        };
+        let parse_i64_nonnegative = |name: &str, value: &str| -> Result<i64, TableOptionError> {
+            let parsed = value.parse::<i64>().map_err(|_| {
+                TableOptionError::InvalidOption(format!("{name} must be a non-negative integer"))
+            })?;
+            (parsed >= 0).then_some(parsed).ok_or_else(|| {
+                TableOptionError::InvalidOption(format!("{name} must not be negative"))
+            })
+        };
+
         Ok(Self {
             format_version: Self::resolve_format_version(format_version)?,
             compression,
@@ -278,6 +340,20 @@ impl ResolvedIcebergOptions {
             delete_isolation,
             update_isolation,
             merge_isolation,
+            target_file_size: usize::try_from(parse_positive(OPT_TARGET_FILE_SIZE, target_file_size)?)
+                .map_err(|_| TableOptionError::InvalidOption(format!("{OPT_TARGET_FILE_SIZE} is too large")))?,
+            max_snapshot_age_ms: parse_i64_nonnegative(OPT_MAX_SNAPSHOT_AGE, max_snapshot_age_ms)?,
+            min_snapshots_to_keep: usize::try_from(parse_positive(OPT_MIN_SNAPSHOTS, min_snapshots_to_keep)?)
+                .map_err(|_| TableOptionError::InvalidOption(format!("{OPT_MIN_SNAPSHOTS} is too large")))?,
+            max_ref_age_ms: parse_i64_nonnegative(OPT_MAX_REF_AGE, max_ref_age_ms)?,
+            metadata_versions: usize::try_from(parse_positive(OPT_METADATA_VERSIONS, metadata_versions)?)
+                .map_err(|_| TableOptionError::InvalidOption(format!("{OPT_METADATA_VERSIONS} is too large")))?,
+            manifest_target_size: parse_positive(OPT_MANIFEST_TARGET_SIZE, manifest_target_size)?,
+            manifest_min_count: usize::try_from(parse_positive(OPT_MANIFEST_MIN_COUNT, manifest_min_count)?)
+                .map_err(|_| TableOptionError::InvalidOption(format!("{OPT_MANIFEST_MIN_COUNT} is too large")))?,
+            manifest_merge: manifest_merge.parse::<bool>().map_err(|_| {
+                TableOptionError::InvalidOption(format!("{OPT_MANIFEST_MERGE} must be true or false"))
+            })?,
         })
     }
 
@@ -336,6 +412,14 @@ impl ResolvedIcebergOptions {
                 OPT_WRITE_MERGE_ISOLATION_LEVEL.to_owned(),
                 self.merge_isolation.as_str().to_owned(),
             ),
+            (OPT_TARGET_FILE_SIZE.to_owned(), self.target_file_size.to_string()),
+            (OPT_MAX_SNAPSHOT_AGE.to_owned(), self.max_snapshot_age_ms.to_string()),
+            (OPT_MIN_SNAPSHOTS.to_owned(), self.min_snapshots_to_keep.to_string()),
+            (OPT_MAX_REF_AGE.to_owned(), self.max_ref_age_ms.to_string()),
+            (OPT_METADATA_VERSIONS.to_owned(), self.metadata_versions.to_string()),
+            (OPT_MANIFEST_TARGET_SIZE.to_owned(), self.manifest_target_size.to_string()),
+            (OPT_MANIFEST_MIN_COUNT.to_owned(), self.manifest_min_count.to_string()),
+            (OPT_MANIFEST_MERGE.to_owned(), self.manifest_merge.to_string()),
         ])
     }
 

@@ -141,6 +141,12 @@ pub struct TableProperties {
     pub write_format_default: String,
     /// The target file size for files.
     pub write_target_file_size_bytes: usize,
+    pub metadata_previous_versions_max: usize,
+    /// Minimum live manifest count before automatic merging.
+    pub manifest_min_count_to_merge: usize,
+    /// Target size for rewritten manifest files.
+    pub manifest_target_size_bytes: u64,
+    pub manifest_merge_enabled: bool,
     /// Compression codec for metadata files.
     pub metadata_compression_codec: CompressionCodec,
     /// Whether to use `FanoutWriter` for partitioned tables.
@@ -209,6 +215,9 @@ impl TableProperties {
         "write.metadata.previous-versions-max";
     /// Default value for max number of previous versions to keep.
     pub const PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT: usize = 100;
+    pub const PROPERTY_METADATA_DELETE_AFTER_COMMIT_ENABLED: &str =
+        "write.metadata.delete-after-commit.enabled";
+    pub const PROPERTY_METADATA_DELETE_AFTER_COMMIT_ENABLED_DEFAULT: bool = false;
 
     /// Property key for max number of partitions to keep summary stats for.
     pub const PROPERTY_WRITE_PARTITION_SUMMARY_LIMIT: &str =
@@ -280,6 +289,16 @@ impl TableProperties {
     /// Default target file size
     pub const PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT: usize =
         512 * 1024 * 1024; // 512 MB
+    /// Minimum live manifest count before automatic merging is considered.
+    pub const PROPERTY_MANIFEST_MIN_COUNT_TO_MERGE: &str =
+        "commit.manifest.min-count-to-merge";
+    pub const PROPERTY_MANIFEST_MIN_COUNT_TO_MERGE_DEFAULT: usize = 100;
+    /// Target size for rewritten manifest files.
+    pub const PROPERTY_MANIFEST_TARGET_SIZE_BYTES: &str =
+        "commit.manifest.target-size-bytes";
+    pub const PROPERTY_MANIFEST_TARGET_SIZE_BYTES_DEFAULT: u64 = 8 * 1024 * 1024;
+    pub const PROPERTY_MANIFEST_MERGE_ENABLED: &str = "commit.manifest-merge.enabled";
+    pub const PROPERTY_MANIFEST_MERGE_ENABLED_DEFAULT: bool = true;
     /// Compression codec for metadata files.
     pub const PROPERTY_METADATA_COMPRESSION_CODEC: &str =
         "write.metadata.compression-codec";
@@ -377,6 +396,26 @@ impl TryFrom<&HashMap<String, String>> for TableProperties {
                 props,
                 TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES,
                 TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT,
+            )?,
+            metadata_previous_versions_max: parse_property(
+                props,
+                TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX,
+                TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT,
+            )?,
+            manifest_min_count_to_merge: parse_property(
+                props,
+                TableProperties::PROPERTY_MANIFEST_MIN_COUNT_TO_MERGE,
+                TableProperties::PROPERTY_MANIFEST_MIN_COUNT_TO_MERGE_DEFAULT,
+            )?,
+            manifest_target_size_bytes: parse_property(
+                props,
+                TableProperties::PROPERTY_MANIFEST_TARGET_SIZE_BYTES,
+                TableProperties::PROPERTY_MANIFEST_TARGET_SIZE_BYTES_DEFAULT,
+            )?,
+            manifest_merge_enabled: parse_property(
+                props,
+                TableProperties::PROPERTY_MANIFEST_MERGE_ENABLED,
+                TableProperties::PROPERTY_MANIFEST_MERGE_ENABLED_DEFAULT,
             )?,
             metadata_compression_codec: parse_metadata_file_compression(props)?,
             write_datafusion_fanout_enabled: parse_property(

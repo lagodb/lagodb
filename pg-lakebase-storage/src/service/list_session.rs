@@ -239,6 +239,7 @@ mod tests {
             key: key.to_string(),
             size: 1,
             etag: None,
+            last_modified_ms: None,
         })
     }
 

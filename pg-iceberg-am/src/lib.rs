@@ -64,6 +64,9 @@ extern "C-unwind" fn _PG_init() {
         IcebergCustomScanProvider,
     >();
     pg_lakebase_core::customscan::init();
+    pg_lakebase_core::table_maintenance::register_provider::<
+        maintenance::IcebergTableMaintenanceProvider,
+    >();
 }
 
 // ============================================================================

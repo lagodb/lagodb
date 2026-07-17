@@ -123,6 +123,7 @@ impl ManifestEntryContext {
             length: 0,
             record_count: Some(self.manifest_entry.record_count()),
             first_row_id: self.first_row_id,
+            last_updated_sequence_number: self.manifest_entry.sequence_number(),
 
             data_file_path: self.manifest_entry.file_path().to_string(),
             data_file_format: self.manifest_entry.file_format(),

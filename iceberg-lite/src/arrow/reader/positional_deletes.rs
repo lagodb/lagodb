@@ -464,6 +464,7 @@ mod tests {
             length: 0,
             record_count: Some(200),
             first_row_id: None,
+            last_updated_sequence_number: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -704,6 +705,7 @@ mod tests {
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
             first_row_id: None,
+            last_updated_sequence_number: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -941,6 +943,7 @@ mod tests {
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
             first_row_id: None,
+            last_updated_sequence_number: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,

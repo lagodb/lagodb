@@ -79,6 +79,13 @@ pub struct FileScanTask {
     #[builder(default)]
     pub first_row_id: Option<u64>,
 
+    /// Data sequence inherited by rows when the v3 last-updated lineage field
+    /// is not physically present in the source file.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub last_updated_sequence_number: Option<i64>,
+
     /// The data file path corresponding to the task.
     pub data_file_path: String,
 

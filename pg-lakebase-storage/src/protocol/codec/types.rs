@@ -319,10 +319,26 @@ impl WireDecode for u64 {
     }
 }
 
+impl WireEncode for i64 {
+    fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {
+        out.put_i64(*self);
+        Ok(())
+    }
+}
+
+impl WireDecode for i64 {
+    fn decode(input: &mut impl Buf) -> StorageResult<Self> {
+        if input.remaining() < std::mem::size_of::<i64>() {
+            return Err(StorageError::protocol("truncated i64 field"));
+        }
+        Ok(input.get_i64())
+    }
+}
+
 // ---- list cursor / entry -----------------------------------------------------------------------
 //
 // `ListCursor` is a length-prefixed string newtype (server-issued opaque token).
-// `WireListEntry` is encoded as `(key, size, etag)` matching the field order used by every
+// `WireListEntry` is encoded as `(key, size, etag, last_modified_ms)`.
 // `(store_id, bucket, key)` carrying message in this codec.
 
 impl WireEncode for ListCursor {
@@ -341,7 +357,8 @@ impl WireEncode for WireListEntry {
     fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {
         self.key.encode(out)?;
         self.size.encode(out)?;
-        self.etag.encode(out)
+        self.etag.encode(out)?;
+        self.last_modified_ms.encode(out)
     }
 }
 
@@ -351,6 +368,7 @@ impl WireDecode for WireListEntry {
             key: WireDecode::decode(input)?,
             size: WireDecode::decode(input)?,
             etag: WireDecode::decode(input)?,
+            last_modified_ms: WireDecode::decode(input)?,
         })
     }
 }

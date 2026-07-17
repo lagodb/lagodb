@@ -33,6 +33,7 @@ use crate::{Error, ErrorKind, Result, TableRequirement, TableUpdate};
 /// Physical file cleanup is the responsibility of a higher-level maintenance operation built on
 /// top of this action.
 pub struct ExpireSnapshotsAction {
+    as_of_ms: i64,
     explicit_ids_to_remove: Vec<i64>,
     older_than_ms: Option<i64>,
     retain_last: Option<usize>,
@@ -41,10 +42,24 @@ pub struct ExpireSnapshotsAction {
 impl ExpireSnapshotsAction {
     pub(crate) fn new() -> Self {
         Self {
+            // Freeze the action clock when the logical operation is created.
+            // Catalog retries may re-run `commit` against newer metadata, but
+            // must not move the retention boundary forward while doing so.
+            as_of_ms: Utc::now().timestamp_millis(),
             explicit_ids_to_remove: vec![],
             older_than_ms: None,
             retain_last: None,
         }
+    }
+
+    /// Evaluate all age-based retention rules at `as_of_ms`.
+    ///
+    /// This is primarily useful to share one command timestamp across several
+    /// independently materialized transaction attempts.  The value is a Unix
+    /// epoch timestamp in milliseconds.
+    pub fn as_of_ms(mut self, as_of_ms: i64) -> Self {
+        self.as_of_ms = as_of_ms;
+        self
     }
 
     /// Expire these snapshot ids in addition to any age-based selection.
@@ -79,26 +94,44 @@ impl ExpireSnapshotsAction {
                 "Number of snapshots to retain must be at least 1",
             ));
         }
+        if properties.max_snapshot_age_ms < 0
+            || properties.min_snapshots_to_keep == 0
+            || properties.max_ref_age_ms < 0
+        {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "snapshot retention table properties must be non-negative and retain at least one snapshot",
+            ));
+        }
 
         let metadata = table.metadata();
-        let now = Utc::now().timestamp_millis();
+        let now = self.as_of_ms;
         let default_cutoff = self
             .older_than_ms
-            .unwrap_or_else(|| now.saturating_sub(properties.max_snapshot_age_ms));
+            .map_or_else(
+                || Self::age_cutoff(now, properties.max_snapshot_age_ms),
+                |value| Ok(value),
+            )?;
         let default_min_to_keep =
             self.retain_last.unwrap_or(properties.min_snapshots_to_keep);
 
         let mut removed_ref_names: Vec<String> = vec![];
         let mut retained_refs: Vec<&SnapshotReference> = vec![];
         for (ref_name, snapshot_ref) in &metadata.refs {
-            if ref_name == MAIN_BRANCH
-                || !Self::ref_aged_out(
-                    metadata,
-                    snapshot_ref,
-                    now,
-                    properties.max_ref_age_ms,
-                )
-            {
+            Self::validate_ref_retention(ref_name, snapshot_ref)?;
+            if ref_name == MAIN_BRANCH {
+                retained_refs.push(snapshot_ref);
+            } else if metadata.snapshot_by_id(snapshot_ref.snapshot_id).is_none() {
+                // Match RemoveSnapshots: a non-main reference whose target no
+                // longer exists is invalid metadata, not a permanent retention
+                // root.  Removing it also keeps it out of `ref_head_ids` below.
+                removed_ref_names.push(ref_name.clone());
+            } else if !Self::ref_aged_out(
+                metadata,
+                snapshot_ref,
+                now,
+                properties.max_ref_age_ms,
+            )? {
                 retained_refs.push(snapshot_ref);
             } else {
                 removed_ref_names.push(ref_name.clone());
@@ -133,10 +166,21 @@ impl ExpireSnapshotsAction {
                     max_snapshot_age_ms,
                     ..
                 } => {
-                    let min_to_keep = min_snapshots_to_keep
-                        .map_or(default_min_to_keep, |m| m as usize);
-                    let cutoff = max_snapshot_age_ms
-                        .map_or(default_cutoff, |age| now.saturating_sub(age));
+                    let min_to_keep = (*min_snapshots_to_keep)
+                        .map(|value| {
+                            usize::try_from(value).map_err(|_| {
+                                Error::new(
+                                    ErrorKind::DataInvalid,
+                                    "branch min-snapshots-to-keep does not fit usize",
+                                )
+                            })
+                        })
+                        .transpose()?
+                        .unwrap_or(default_min_to_keep);
+                    let cutoff = (*max_snapshot_age_ms)
+                        .map(|age| Self::age_cutoff(now, age))
+                        .transpose()?
+                        .unwrap_or(default_cutoff);
                     branches.push((snapshot_ref.snapshot_id, min_to_keep, cutoff));
                 }
                 SnapshotRetention::Tag { .. } => {
@@ -160,6 +204,20 @@ impl ExpireSnapshotsAction {
                 &mut retained_ids,
                 &mut referenced_ids,
             );
+        }
+
+        if let Some(snapshot_id) = self
+            .explicit_ids_to_remove
+            .iter()
+            .copied()
+            .find(|snapshot_id| retained_ids.contains(snapshot_id))
+        {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "Cannot expire snapshot {snapshot_id}: required by retained branch history"
+                ),
+            ));
         }
 
         for snapshot in metadata.snapshots() {
@@ -190,18 +248,62 @@ impl ExpireSnapshotsAction {
         snapshot_ref: &SnapshotReference,
         now: i64,
         default_max_ref_age_ms: i64,
-    ) -> bool {
-        let max_ref_age_ms = match snapshot_ref.retention {
+    ) -> Result<bool> {
+        let max_ref_age_ms = match &snapshot_ref.retention {
             SnapshotRetention::Branch { max_ref_age_ms, .. }
-            | SnapshotRetention::Tag { max_ref_age_ms } => max_ref_age_ms,
+            | SnapshotRetention::Tag { max_ref_age_ms } => *max_ref_age_ms,
         }
         .unwrap_or(default_max_ref_age_ms);
         match metadata.snapshot_by_id(snapshot_ref.snapshot_id) {
-            Some(snapshot) => {
-                now.saturating_sub(snapshot.timestamp_ms()) > max_ref_age_ms
-            }
-            None => false,
+            Some(snapshot) => Ok(
+                snapshot.timestamp_ms() < Self::age_cutoff(now, max_ref_age_ms)?,
+            ),
+            None => Ok(false),
         }
+    }
+
+    fn age_cutoff(now: i64, age_ms: i64) -> Result<i64> {
+        if age_ms < 0 {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "snapshot retention age must not be negative",
+            ));
+        }
+        // A retention duration larger than the representable history means
+        // that no timestamp can be old enough; clamp rather than turning a
+        // valid long-retention policy into a planning failure.
+        Ok(now.checked_sub(age_ms).unwrap_or(i64::MIN))
+    }
+
+    fn validate_ref_retention(
+        ref_name: &str,
+        snapshot_ref: &SnapshotReference,
+    ) -> Result<()> {
+        let (min_snapshots_to_keep, max_snapshot_age_ms, max_ref_age_ms) =
+            match &snapshot_ref.retention {
+                SnapshotRetention::Branch {
+                    min_snapshots_to_keep,
+                    max_snapshot_age_ms,
+                    max_ref_age_ms,
+                } => (
+                    *min_snapshots_to_keep,
+                    *max_snapshot_age_ms,
+                    *max_ref_age_ms,
+                ),
+                SnapshotRetention::Tag { max_ref_age_ms } => {
+                    (None, None, *max_ref_age_ms)
+                }
+            };
+        if min_snapshots_to_keep.is_some_and(|value| value <= 0)
+            || max_snapshot_age_ms.is_some_and(|value| value < 0)
+            || max_ref_age_ms.is_some_and(|value| value < 0)
+        {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!("snapshot reference {ref_name:?} has invalid retention values"),
+            ));
+        }
+        Ok(())
     }
 
     fn retain_branch(

@@ -170,6 +170,9 @@ pub struct ListEntry {
     pub key: String,
     pub size: u64,
     pub etag: Option<String>,
+    /// Backend-reported modification time in Unix epoch milliseconds.
+    /// `None` means the object is not eligible for age-gated orphan removal.
+    pub last_modified_ms: Option<i64>,
 }
 
 #[must_use]

@@ -435,6 +435,7 @@ pub(crate) mod tests {
                 length: 0,
                 record_count: None,
                 first_row_id: None,
+                last_updated_sequence_number: None,
                 data_file_path: format!(
                     "{}/1.parquet",
                     table_location.to_str().unwrap()
@@ -456,6 +457,7 @@ pub(crate) mod tests {
                 length: 0,
                 record_count: None,
                 first_row_id: None,
+                last_updated_sequence_number: None,
                 data_file_path: format!(
                     "{}/2.parquet",
                     table_location.to_str().unwrap()
@@ -520,6 +522,7 @@ pub(crate) mod tests {
             length: 0,
             record_count: None,
             first_row_id: None,
+            last_updated_sequence_number: None,
             data_file_path: "data.parquet".to_string(),
             data_file_format: crate::spec::DataFileFormat::Parquet,
             partition_spec_id: 0,

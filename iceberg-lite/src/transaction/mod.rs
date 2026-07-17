@@ -55,6 +55,8 @@ pub use action::*;
 mod append;
 mod expire_snapshots;
 mod row_delta;
+mod rewrite_files;
+mod rewrite_manifests;
 mod snapshot;
 mod snapshot_delta;
 mod sort_order;
@@ -81,6 +83,8 @@ use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
 pub use crate::transaction::row_delta::{
     RowDeltaAction, RowDeltaValidation, RowLevelCommand,
 };
+pub use crate::transaction::rewrite_files::RewriteFilesAction;
+pub use crate::transaction::rewrite_manifests::RewriteManifestsAction;
 use crate::transaction::snapshot_delta::SnapshotDeltaAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
@@ -192,6 +196,24 @@ impl Transaction {
     /// Creates an action that expires snapshots from table metadata.
     pub fn expire_snapshots(&self) -> ExpireSnapshotsAction {
         ExpireSnapshotsAction::new()
+    }
+
+    /// Rewrites small manifests in the transaction-local current snapshot.
+    pub fn rewrite_manifests(
+        &self,
+        min_count_to_merge: usize,
+        target_size_bytes: u64,
+    ) -> RewriteManifestsAction {
+        RewriteManifestsAction::new(min_count_to_merge, target_size_bytes)
+    }
+
+    /// Creates an Iceberg `RewriteFiles` action planned from a fixed snapshot.
+    pub fn rewrite_files(
+        &self,
+        starting_snapshot_id: i64,
+        starting_sequence_number: i64,
+    ) -> RewriteFilesAction {
+        RewriteFilesAction::new(starting_snapshot_id, starting_sequence_number)
     }
 
     /// Commit transaction.

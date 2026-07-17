@@ -43,6 +43,92 @@ mod lakebase {
     use super::*;
 
     #[pg_extern]
+    #[allow(clippy::type_complexity)]
+    fn table_maintenance_stats(
+        relation: pg_sys::Oid,
+    ) -> TableIterator<
+        'static,
+        (
+            name!(provider, String),
+            name!(format, Option<String>),
+            name!(history_points, i64),
+            name!(current_content_objects, i64),
+            name!(current_content_bytes, i64),
+            name!(retained_content_objects, i64),
+            name!(retained_content_bytes, i64),
+            name!(current_data_objects, i64),
+            name!(current_data_bytes, i64),
+            name!(retained_data_objects, i64),
+            name!(retained_data_bytes, i64),
+        ),
+    > {
+        use pg_lakebase_core::diag::ReportableError;
+        let relation = pg_lakebase_core::handles::RelationGuard::open(
+            relation,
+            pg_sys::AccessShareLock as _,
+        )
+        .report_unwrap();
+        let stats = pg_lakebase_core::table_maintenance::TableMaintenanceRouter::inspect(
+            &relation.as_handle(),
+        )
+        .report_unwrap();
+        let sql_i64 = |value: u64, metric: &'static str| {
+            i64::try_from(value).unwrap_or_else(|_| {
+                pg_lakebase_core::table_maintenance::TableMaintenanceError::framework(
+                    format!("{metric} exceeds PostgreSQL bigint"),
+                )
+                .report()
+            })
+        };
+        TableIterator::new(std::iter::once((
+            stats.provider,
+            stats.format,
+            sql_i64(stats.history_points, "history-point count"),
+            sql_i64(stats.current_content_objects, "current content object count"),
+            sql_i64(stats.current_content_bytes, "current content byte count"),
+            sql_i64(stats.retained_content_objects, "retained content object count"),
+            sql_i64(stats.retained_content_bytes, "retained content byte count"),
+            sql_i64(stats.current_data_objects, "current data object count"),
+            sql_i64(stats.current_data_bytes, "current data byte count"),
+            sql_i64(stats.retained_data_objects, "retained data object count"),
+            sql_i64(stats.retained_data_bytes, "retained data byte count"),
+        )))
+    }
+
+    #[pg_extern]
+    fn observe_object_tree(
+        store_id: &str,
+        namespace: &str,
+        prefix: &str,
+    ) -> TableIterator<'static, (name!(objects, i64), name!(bytes, i64))> {
+        use pg_lakebase_core::diag::{PgReportError, ReportableError};
+        let stats = pg_lakebase_core::maintenance::ObjectTreeObserver::connect(
+            std::time::Duration::from_secs(5),
+        )
+        .and_then(|observer| observer.observe(store_id, namespace, prefix))
+        .unwrap_or_else(|error| {
+            PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("failed to observe object tree: {error}"),
+            )
+            .report()
+        });
+        let sql_i64 = |value: u64, metric: &'static str| {
+            i64::try_from(value).unwrap_or_else(|_| {
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                    format!("object-tree {metric} exceeds PostgreSQL bigint"),
+                )
+                .report()
+            })
+        };
+        TableIterator::new(std::iter::once((
+            sql_i64(stats.objects, "object count"),
+            sql_i64(stats.bytes, "byte count"),
+        )))
+    }
+
+    #[pg_extern]
     fn register_worker_impl(worker_name: &str, entrypoint: pg_sys::Oid) {
         ensure_runtime_preloaded();
         let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
@@ -197,6 +283,12 @@ mod lakebase {
         .unwrap_or_else(|error| error.report())
     }
 }
+
+pgrx::extension_sql!(
+    "REVOKE ALL ON FUNCTION lakebase.observe_object_tree(text, text, text) FROM PUBLIC;",
+    name = "lock_down_observe_object_tree",
+    requires = [lakebase::observe_object_tree],
+);
 
 #[cfg(test)]
 pub mod pg_test {

@@ -120,6 +120,7 @@ impl ObjectBackend for MemoryObjectBackend {
                         key: key.key().to_string(),
                         size: value.len() as u64,
                         etag: None,
+                        last_modified_ms: None,
                     })
                 })
                 .collect()

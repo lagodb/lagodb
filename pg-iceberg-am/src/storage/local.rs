@@ -101,6 +101,51 @@ impl LocalStorage {
     pub fn needs_wal(&self) -> bool {
         self.needs_wal
     }
+
+    pub(crate) fn list_older_than(
+        &self,
+        table_location: &str,
+        cutoff_ms: i64,
+    ) -> Result<std::collections::HashSet<String>> {
+        let (prefix, root) = match table_location.strip_prefix("file://") {
+            Some(path) => ("file://", Path::new(path)),
+            None => ("", Path::new(table_location)),
+        };
+        let mut pending = vec![root.to_path_buf()];
+        let mut paths = std::collections::HashSet::new();
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+                let metadata = entry.metadata()?;
+                if metadata.is_dir() {
+                    pending.push(entry.path());
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+                let modified_ms = metadata
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| {
+                        iceberg_lite::Error::new(
+                            iceberg_lite::ErrorKind::DataInvalid,
+                            "local object modification time predates Unix epoch",
+                        )
+                        .with_source(error)
+                    })?
+                    .as_millis();
+                if modified_ms < u128::try_from(cutoff_ms).unwrap_or(0) {
+                    paths.insert(format!("{prefix}{}", entry.path().display()));
+                }
+            }
+        }
+        Ok(paths)
+    }
 }
 
 impl Storage for LocalStorage {

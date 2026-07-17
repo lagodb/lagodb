@@ -9,6 +9,8 @@ static MAX_COMMIT_RETRIES: GucSetting<i32> = GucSetting::<i32>::new(100);
 /// control the size of produced Parquet data files (the rolling writer owns
 /// that).
 static MUTATION_BUFFER_FLUSH_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
+static VACUUM_COMPACT_DATA_FILES: GucSetting<bool> = GucSetting::<bool>::new(true);
+static VACUUM_ORPHAN_RETENTION_S: GucSetting<i32> = GucSetting::<i32>::new(259_200);
 
 /// Injection point for testing purposes.
 static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
@@ -56,6 +58,25 @@ static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
 static MIN_SCAN_FRACTION: GucSetting<f64> = GucSetting::<f64>::new(0.02);
 
 pub fn init() {
+    GucRegistry::define_bool_guc(
+        c"pg_iceberg_am.vacuum_compact_data_files",
+        c"Compact eligible data files during ordinary VACUUM",
+        c"VACUUM FULL always uses the exhaustive compaction profile.",
+        &VACUUM_COMPACT_DATA_FILES,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_iceberg_am.vacuum_orphan_retention_s",
+        c"Minimum age in seconds for VACUUM FULL orphan removal",
+        c"The hard minimum is one day; newly-created and reachable objects are preserved.",
+        &VACUUM_ORPHAN_RETENTION_S,
+        86_400,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_int_guc(
         c"pg_iceberg_am.max_commit_retries",
         c"Maximum number of retries for optimistic concurrency control commits",
@@ -110,6 +131,16 @@ pub fn init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+}
+
+pub fn vacuum_compact_data_files() -> bool {
+    VACUUM_COMPACT_DATA_FILES.get()
+}
+
+pub fn vacuum_orphan_retention_ms() -> i64 {
+    i64::from(VACUUM_ORPHAN_RETENTION_S.get())
+        .checked_mul(1_000)
+        .expect("vacuum_orphan_retention_s is range checked")
 }
 
 pub fn max_commit_retries() -> i32 {

@@ -48,7 +48,8 @@ use crate::expr::BoundPredicate;
 use crate::io::{FileIO, FileMetadata, FileRead};
 use crate::metadata_columns::{
     RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS,
-    RESERVED_FIELD_ID_ROW_ID, is_metadata_field,
+    RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER, RESERVED_FIELD_ID_ROW_ID,
+    is_metadata_field,
 };
 use crate::scan::{ArrowRecordBatchIterator, FileScanTask};
 use crate::spec::{Datum, NameMapping, PartitionSpec, SchemaRef, Struct};
@@ -75,6 +76,7 @@ struct FileReadPlan<'a> {
     start: u64,
     length: u64,
     first_row_id: Option<u64>,
+    last_updated_sequence_number: Option<i64>,
     data_file_path: &'a str,
     schema: &'a SchemaRef,
     project_field_ids: &'a [i32],
@@ -110,6 +112,7 @@ impl FileReadRequest {
                 start: task.start,
                 length: task.length,
                 first_row_id: task.first_row_id,
+                last_updated_sequence_number: task.last_updated_sequence_number,
                 data_file_path: &task.data_file_path,
                 schema: &task.schema,
                 project_field_ids: &task.project_field_ids,
@@ -137,6 +140,7 @@ impl FileReadRequest {
                     start: task.start,
                     length: task.length,
                     first_row_id: task.first_row_id,
+                    last_updated_sequence_number: task.last_updated_sequence_number,
                     data_file_path: &task.data_file_path,
                     schema: &task.schema,
                     project_field_ids: &task.project_field_ids,
@@ -154,6 +158,7 @@ impl FileReadRequest {
                 start: 0,
                 length: 0,
                 first_row_id: None,
+                last_updated_sequence_number: None,
                 data_file_path: &request.data_file_path,
                 schema: &request.schema,
                 project_field_ids: &request.projected_field_ids,
@@ -463,7 +468,30 @@ impl ArrowReader {
         let needs_row_id_column = requested_project_field_ids
             .contains(&RESERVED_FIELD_ID_ROW_ID)
             || post_transform_field_ids.contains(&RESERVED_FIELD_ID_ROW_ID);
-        let needs_row_number_column = needs_position_column || needs_row_id_column;
+        let needs_last_updated_column = requested_project_field_ids
+            .contains(&RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER)
+            || post_transform_field_ids
+                .contains(&RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER);
+        let file_has_field_id = |field_id: i32| {
+            arrow_metadata.schema().fields().iter().any(|field| {
+                field
+                    .metadata()
+                    .get(PARQUET_FIELD_ID_META_KEY)
+                    .and_then(|value| value.parse::<i32>().ok())
+                    == Some(field_id)
+            })
+        };
+        let stored_row_id = needs_row_id_column
+            && file_has_field_id(RESERVED_FIELD_ID_ROW_ID);
+        let stored_last_updated = needs_last_updated_column
+            && file_has_field_id(RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER);
+        // A pre-v3 file carried into a v3 table can still have no effective
+        // row-id range. Preserve that state as NULL; the snapshot/manifest
+        // writer that first commits it in v3 assigns the inherited range.
+        let inherit_row_id = needs_row_id_column && plan.first_row_id.is_some();
+        let inherit_last_updated =
+            needs_last_updated_column && plan.first_row_id.is_some();
+        let needs_row_number_column = needs_position_column || inherit_row_id;
         let mut effective_project_field_ids = requested_project_field_ids.clone();
         let mut ordered_post_transform_field_ids =
             post_transform_field_ids.iter().copied().collect::<Vec<_>>();
@@ -473,21 +501,12 @@ impl ArrowReader {
                 effective_project_field_ids.push(field_id);
             }
         }
-        if needs_row_id_column
+        if inherit_row_id
             && !effective_project_field_ids.contains(&RESERVED_FIELD_ID_POS)
         {
             effective_project_field_ids.push(RESERVED_FIELD_ID_POS);
         }
-        let first_row_id = if needs_row_id_column {
-            Some(plan.first_row_id.ok_or_else(|| {
-                Error::new(
-                    ErrorKind::FeatureUnsupported,
-                    "_row_id requires Iceberg format v3 row lineage",
-                )
-            })?)
-        } else {
-            None
-        };
+        let first_row_id = inherit_row_id.then_some(plan.first_row_id).flatten();
 
         let arrow_metadata = if needs_row_number_column {
             Self::with_row_number_column(arrow_metadata)?
@@ -510,6 +529,9 @@ impl ArrowReader {
                 .filter(|&&id| {
                     !is_metadata_field(id)
                         || (id == RESERVED_FIELD_ID_POS && needs_row_number_column)
+                        || (*id == RESERVED_FIELD_ID_ROW_ID && stored_row_id)
+                        || (*id == RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER
+                            && stored_last_updated)
                 })
                 .copied()
                 .collect();
@@ -552,6 +574,17 @@ impl ArrowReader {
         if let Some(first_row_id) = first_row_id {
             record_batch_transformer_builder =
                 record_batch_transformer_builder.with_row_id_column(first_row_id);
+        }
+
+        if inherit_last_updated {
+            let sequence_number = plan.last_updated_sequence_number.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    "_last_updated_sequence_number requires Iceberg format v3 row lineage",
+                )
+            })?;
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_last_updated_sequence_number_column(sequence_number);
         }
 
         if let (Some(partition_spec), Some(partition_data)) =

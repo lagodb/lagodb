@@ -3,10 +3,21 @@ use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::IcebergResult;
 use crate::storage::StorageContext;
 use pg_lakebase_core::diag::report_warning;
+use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::prelude::*;
+use pg_lakebase_core::table_maintenance::{
+    TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
+    TableMaintenanceOptions, TableMaintenanceRequest, TableMaintenanceRouter,
+};
 use pgrx::pg_sys;
 
 impl AmRelation for IcebergTableAm {
+    fn relation_needs_toast_table(_rel: &RelationHandle) -> AmResult<bool> {
+        // Iceberg values live in managed data files; PostgreSQL must not attach
+        // a heap TOAST relation to the table-AM relation.
+        Ok(false)
+    }
+
     fn relation_estimate_size(
         rel: &RelationHandle,
         _attr_widths: Option<&mut AttrWidthsHandle>,
@@ -25,6 +36,31 @@ impl AmRelation for IcebergTableAm {
         }
 
         Ok(RelationStats::load_or_default(rel).bytes)
+    }
+
+    fn relation_vacuum(
+        rel: &RelationHandle,
+        params: &VacuumParamsHandle,
+        _bstrategy: &BufferAccessStrategyHandle,
+    ) -> AmResult<()> {
+        if unsafe { pg_sys::AmAutoVacuumWorkerProcess() } {
+            return Ok(());
+        }
+        let options = TableMaintenanceOptions::from_vacuum_params(params);
+        if !options.process_main {
+            return Ok(());
+        }
+        let command_time = TableMaintenanceCommandTime::now()
+            .map_err(PgReportError::from_domain_error)?;
+        TableMaintenanceRouter::execute(TableMaintenanceRequest {
+            relation: rel,
+            mode: TableMaintenanceMode::Routine,
+            options,
+            budget: TableMaintenanceBudget::configured(),
+            command_time,
+        })
+        .map_err(PgReportError::from_domain_error)?;
+        Ok(())
     }
 }
 

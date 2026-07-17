@@ -173,7 +173,9 @@ pub fn log_delete_directory(path: &str) -> XLogRecPtr {
 /// before deleting the files on the primary. Paths that cannot fit the record
 /// representation are skipped with a warning; their primary cleanup may still
 /// proceed and standby orphan maintenance can reclaim any replayed copy.
-pub fn log_delete_files(paths: &[String]) -> Option<XLogRecPtr> {
+pub fn log_delete_files<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Option<XLogRecPtr> {
     let mut payload = Vec::with_capacity(MAX_DELETE_FILES_PAYLOAD_BYTES);
     let mut path_count = 0_u32;
     let mut last_lsn = None;
@@ -218,6 +220,14 @@ pub fn log_delete_files(paths: &[String]) -> Option<XLogRecPtr> {
         last_lsn = Some(insert_delete_files_record(path_count, &payload));
     }
     last_lsn
+}
+
+pub(crate) fn delete_file_fits_wal(path: &str) -> bool {
+    !path.is_empty()
+        && !path.as_bytes().contains(&0)
+        && u32::try_from(path.len()).is_ok()
+        && std::mem::size_of::<u32>() + path.len()
+            <= MAX_DELETE_FILES_PAYLOAD_BYTES
 }
 
 fn insert_delete_files_record(path_count: u32, payload: &[u8]) -> XLogRecPtr {

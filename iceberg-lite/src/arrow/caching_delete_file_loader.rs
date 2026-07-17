@@ -1052,6 +1052,7 @@ mod tests {
             length: 0,
             record_count: None,
             first_row_id: None,
+            last_updated_sequence_number: None,
             data_file_path: format!(
                 "{}/data-1.parquet",
                 table_location.to_str().unwrap()
@@ -1137,6 +1138,7 @@ mod tests {
             length: 0,
             record_count: None,
             first_row_id: None,
+            last_updated_sequence_number: None,
             data_file_path: "data-a.parquet".to_owned(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,

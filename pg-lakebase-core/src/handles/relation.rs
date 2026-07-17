@@ -82,6 +82,12 @@ impl<'a> RelationHandle<'a> {
         unsafe { (*self.rd_rel()).relkind }
     }
 
+    #[inline]
+    pub fn toast_relation_oid(&self) -> Option<pg_sys::Oid> {
+        let oid = unsafe { (*self.rd_rel()).reltoastrelid };
+        (oid != pg_sys::InvalidOid).then_some(oid)
+    }
+
     /// Check if the relation needs WAL logging.
     ///
     /// This is equivalent to PostgreSQL's `RelationNeedsWAL(rel)` macro.

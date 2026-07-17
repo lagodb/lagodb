@@ -34,7 +34,10 @@ use crate::arrow::value::{
 };
 use crate::arrow::{datum_to_arrow_type_with_ree, schema_to_arrow_schema};
 use crate::metadata_columns::get_metadata_field;
-use crate::metadata_columns::{RESERVED_FIELD_ID_POS, RESERVED_FIELD_ID_ROW_ID};
+use crate::metadata_columns::{
+    RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER, RESERVED_FIELD_ID_POS,
+    RESERVED_FIELD_ID_ROW_ID,
+};
 use crate::spec::{
     Datum, Literal, PartitionSpec, PrimitiveLiteral, Schema as IcebergSchema, Struct,
     Transform,
@@ -122,6 +125,7 @@ fn constants_map(
 pub(crate) enum GeneratedMetadataColumn {
     Position,
     RowId { first_row_id: u64 },
+    LastUpdatedSequenceNumber { sequence_number: i64 },
 }
 
 #[derive(Debug)]
@@ -154,6 +158,10 @@ pub(crate) enum ColumnSource {
         value: Option<PrimitiveLiteral>,
     },
     Generated {
+        field_id: i32,
+    },
+    CoalesceGenerated {
+        source_index: usize,
         field_id: i32,
     },
     // The iceberg spec refers to other permissible schema evolution actions
@@ -251,6 +259,19 @@ impl RecordBatchTransformerBuilder {
         self.generated_metadata_fields.insert(
             RESERVED_FIELD_ID_ROW_ID,
             GeneratedMetadataColumn::RowId { first_row_id },
+        );
+        self
+    }
+
+    pub(crate) fn with_last_updated_sequence_number_column(
+        mut self,
+        sequence_number: i64,
+    ) -> Self {
+        self.generated_metadata_fields.insert(
+            RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER,
+            GeneratedMetadataColumn::LastUpdatedSequenceNumber {
+                sequence_number,
+            },
         );
         self
     }
@@ -482,7 +503,14 @@ impl RecordBatchTransformer {
 
         let target_schema = Arc::new(ArrowSchema::new(fields?));
 
-        match Self::compare_schemas(source_schema, &target_schema) {
+        let comparison = if generated_metadata_fields.is_empty() {
+            Self::compare_schemas(source_schema, &target_schema)
+        } else {
+            // Row-lineage fields may be physically present but still contain
+            // NULL values that must be filled through Iceberg inheritance.
+            SchemaComparison::Different
+        };
+        match comparison {
             SchemaComparison::Equivalent => Ok(BatchTransform::PassThrough),
             SchemaComparison::NameChangesOnly => {
                 Ok(BatchTransform::ModifySchema { target_schema })
@@ -511,9 +539,15 @@ impl RecordBatchTransformer {
         source_schema: &ArrowSchemaRef,
         operations: &[ColumnSource],
     ) -> Result<Option<usize>> {
-        if !operations
-            .iter()
-            .any(|operation| matches!(operation, ColumnSource::Generated { .. }))
+        if !operations.iter().any(|operation| {
+            matches!(
+                operation,
+                ColumnSource::Generated { field_id }
+                    | ColumnSource::CoalesceGenerated { field_id, .. }
+                    if *field_id == RESERVED_FIELD_ID_POS
+                        || *field_id == RESERVED_FIELD_ID_ROW_ID
+            )
+        })
         {
             return Ok(None);
         }
@@ -613,19 +647,10 @@ impl RecordBatchTransformer {
                         ColumnSource::Generated {
                             field_id: *field_id,
                         },
-                        |(source_field, source_index)| {
-                            if source_field
-                                .data_type()
-                                .equals_datatype(&DataType::Int64)
-                            {
-                                ColumnSource::PassThrough {
-                                    source_index: *source_index,
-                                }
-                            } else {
-                                ColumnSource::Promote {
-                                    target_type: DataType::Int64,
-                                    source_index: *source_index,
-                                }
+                        |(_, source_index)| {
+                            ColumnSource::CoalesceGenerated {
+                                source_index: *source_index,
+                                field_id: *field_id,
                             }
                         },
                     ));
@@ -772,13 +797,24 @@ impl RecordBatchTransformer {
                     ColumnSource::Generated { field_id } => self
                         .create_generated_column(
                             *field_id,
-                            generated_positions.ok_or_else(|| {
-                                Error::new(
-                                    ErrorKind::Unexpected,
-                                    "generated row metadata requested without row positions",
-                                )
-                            })?,
+                            generated_positions,
+                            num_rows,
                         )?,
+
+                    ColumnSource::CoalesceGenerated {
+                        source_index,
+                        field_id,
+                    } => self.coalesce_generated_column(
+                        columns.get(*source_index).ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::Unexpected,
+                                "generated metadata source index is outside the record batch",
+                            )
+                        })?,
+                        *field_id,
+                        generated_positions,
+                        num_rows,
+                    )?,
                 })
             })
             .collect()
@@ -818,7 +854,8 @@ impl RecordBatchTransformer {
     fn create_generated_column(
         &self,
         field_id: i32,
-        positions: &[i64],
+        positions: Option<&[i64]>,
+        num_rows: usize,
     ) -> Result<ArrayRef> {
         let Some(column) = self.generated_metadata_fields.get(&field_id) else {
             return Err(Error::new(
@@ -829,9 +866,21 @@ impl RecordBatchTransformer {
 
         match column {
             GeneratedMetadataColumn::Position => {
+                let positions = positions.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "generated row position requested without row positions",
+                    )
+                })?;
                 Ok(Arc::new(Int64Array::from(positions.to_vec())))
             }
             GeneratedMetadataColumn::RowId { first_row_id } => {
+                let positions = positions.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "generated row id requested without row positions",
+                    )
+                })?;
                 let values: Result<Vec<i64>> = positions
                     .iter()
                     .map(|pos| {
@@ -858,7 +907,53 @@ impl RecordBatchTransformer {
                     .collect();
                 Ok(Arc::new(Int64Array::from(values?)))
             }
+            GeneratedMetadataColumn::LastUpdatedSequenceNumber {
+                sequence_number,
+            } => Ok(Arc::new(Int64Array::from_value(
+                *sequence_number,
+                num_rows,
+            ))),
         }
+    }
+
+    fn coalesce_generated_column(
+        &self,
+        source: &ArrayRef,
+        field_id: i32,
+        positions: Option<&[i64]>,
+        num_rows: usize,
+    ) -> Result<ArrayRef> {
+        let source = source.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "Iceberg row-lineage column has unexpected Arrow type",
+            )
+        })?;
+        if source.null_count() == 0 {
+            return Ok(Arc::new(source.clone()));
+        }
+        let fallback = self.create_generated_column(field_id, positions, num_rows)?;
+        let fallback = fallback
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "generated Iceberg row-lineage column has unexpected Arrow type",
+                )
+            })?;
+        if source.len() != fallback.len() {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                "generated Iceberg row-lineage column length mismatch",
+            ));
+        }
+        let values = source
+            .iter()
+            .zip(fallback.values())
+            .map(|(value, fallback)| value.unwrap_or(*fallback))
+            .collect::<Vec<_>>();
+        Ok(Arc::new(Int64Array::from(values)))
     }
 
     fn create_column(
@@ -917,7 +1012,8 @@ mod test {
         ColumnSource, RecordBatchTransformer, RecordBatchTransformerBuilder,
     };
     use crate::metadata_columns::{
-        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS, RESERVED_FIELD_ID_ROW_ID,
+        RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER,
+        RESERVED_FIELD_ID_POS, RESERVED_FIELD_ID_ROW_ID,
     };
     use crate::spec::{Literal, NestedField, PrimitiveType, Schema, Struct, Type};
 
@@ -983,6 +1079,55 @@ mod test {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn row_lineage_keeps_stored_ids_and_inherits_nulls() {
+        let transformer = RecordBatchTransformerBuilder::new(
+            Arc::new(iceberg_table_schema()),
+            &[],
+        )
+        .with_row_id_column(100)
+        .build();
+        let source: arrow_array::ArrayRef = Arc::new(Int64Array::from(vec![
+            Some(7),
+            None,
+            Some(9),
+        ]));
+        let result = transformer
+            .coalesce_generated_column(
+                &source,
+                RESERVED_FIELD_ID_ROW_ID,
+                Some(&[0, 1, 2]),
+                3,
+            )
+            .unwrap();
+        let result = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(result.values(), &[7, 101, 9]);
+    }
+
+    #[test]
+    fn last_updated_sequence_keeps_stored_values_and_inherits_nulls() {
+        let transformer = RecordBatchTransformerBuilder::new(
+            Arc::new(iceberg_table_schema()),
+            &[],
+        )
+        .with_last_updated_sequence_number_column(23)
+        .build();
+        let source: arrow_array::ArrayRef = Arc::new(Int64Array::from(vec![
+            None,
+            Some(11),
+        ]));
+        let result = transformer
+            .coalesce_generated_column(
+                &source,
+                RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER,
+                None,
+                2,
+            )
+            .unwrap();
+        let result = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(result.values(), &[23, 11]);
     }
 
     /// Helper to extract string values from either StringArray or RunEndEncoded<StringArray>
