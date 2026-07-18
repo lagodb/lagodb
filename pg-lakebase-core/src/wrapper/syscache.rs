@@ -36,6 +36,21 @@ impl PgWrapper {
         }
     }
 
+    pub(crate) fn search_sys_cache2_raw(
+        cache_id: i32,
+        key1: pg_sys::Datum,
+        key2: pg_sys::Datum,
+    ) -> Result<Option<pg_sys::HeapTuple>, PgError> {
+        unsafe {
+            PgTryBuilder::new(move || {
+                let tuple = pg_sys::SearchSysCache2(cache_id, key1, key2);
+                Ok(if tuple.is_null() { None } else { Some(tuple) })
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
+
     /// # Safety
     ///
     /// `tuple` must be a valid tuple for `cache_id`, and `is_null` must be a

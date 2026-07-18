@@ -86,4 +86,29 @@ impl PgWrapper {
             .execute()
         }
     }
+
+    /// Return the extended-statistics object OIDs cached for a relation.
+    ///
+    /// # Safety
+    ///
+    /// `relation` must remain valid for the duration of the call.
+    pub(crate) unsafe fn relation_stat_ext_oids(
+        relation: pg_sys::Relation,
+    ) -> Result<Vec<pg_sys::Oid>, PgError> {
+        let relation = AssertUnwindSafe(relation);
+        unsafe {
+            PgTryBuilder::new(move || {
+                let statistics = pg_sys::RelationGetStatExtList(*relation);
+                let len = pg_sys::list_length(statistics);
+                let mut result = Vec::with_capacity(len as usize);
+                for index in 0..len {
+                    result.push(pg_sys::list_nth_oid(statistics, index));
+                }
+                pg_sys::list_free(statistics);
+                Ok(result)
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
 }

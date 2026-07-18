@@ -18,6 +18,10 @@ static AUTO_MAINTENANCE_JITTER_PERCENT: GucSetting<i32> = GucSetting::<i32>::new
 static AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S: GucSetting<i32> =
     GucSetting::<i32>::new(3_600);
 
+/// Maximum number of Iceberg data files opened by one bounded ANALYZE sample.
+/// Rows within the selected files are sampled using manifest record counts.
+static ANALYZE_MAX_DATA_FILES: GucSetting<i32> = GucSetting::<i32>::new(32);
+
 /// Injection point for testing purposes.
 static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(None);
@@ -64,6 +68,16 @@ static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
 static MIN_SCAN_FRACTION: GucSetting<f64> = GucSetting::<f64>::new(0.02);
 
 pub fn init() {
+    GucRegistry::define_int_guc(
+        c"pg_iceberg_am.analyze_max_data_files",
+        c"Maximum Iceberg data files sampled by ANALYZE",
+        c"ANALYZE uses manifest record counts to build a fixed-size self-weighting sample while bounding file-level I/O locality.",
+        &ANALYZE_MAX_DATA_FILES,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_bool_guc(
         c"pg_iceberg_am.auto_maintenance_enabled",
         c"Enable periodic Iceberg logical-table maintenance",
@@ -189,6 +203,10 @@ pub fn init() {
 
 pub(crate) fn auto_maintenance_enabled() -> bool {
     AUTO_MAINTENANCE_ENABLED.get()
+}
+
+pub(crate) fn analyze_max_data_files() -> usize {
+    ANALYZE_MAX_DATA_FILES.get() as usize
 }
 
 pub(crate) fn auto_maintenance_interval() -> std::time::Duration {

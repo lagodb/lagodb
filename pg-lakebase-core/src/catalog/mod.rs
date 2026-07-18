@@ -13,6 +13,7 @@ pub use ids::{
     get_lakebase_namespace_oid, get_table_options_oid, get_table_options_pkey_oid,
 };
 pub(crate) use ids::{MaintenanceCatalogIds, get_maintenance_catalog_ids};
+pub(crate) use syscache::search_syscache2;
 pub use syscache::{
     SysCacheTuple, SysCacheTupleCopy, search_syscache_copy, search_syscache1,
 };

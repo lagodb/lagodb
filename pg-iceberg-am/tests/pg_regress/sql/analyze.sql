@@ -46,6 +46,22 @@ WHERE schemaname = 'analyze_test'
   AND tablename = 'stats_t'
   AND attname = 'id';
 
+-- Separate statements create separate Iceberg data files. With one selected
+-- file, its 100 physical rows cannot supply the fixed 400-observation target
+-- without replacement. The AM must reuse reader rows by multiplicity while
+-- preserving the whole-population row estimate.
+CREATE TABLE locality_t (id integer) USING iceberg;
+INSERT INTO locality_t SELECT generate_series(1, 100);
+INSERT INTO locality_t SELECT generate_series(101, 200);
+INSERT INTO locality_t SELECT generate_series(201, 300);
+INSERT INTO locality_t SELECT generate_series(301, 400);
+SET pg_iceberg_am.analyze_max_data_files = 1;
+ANALYZE locality_t;
+SELECT reltuples::bigint = 400 AS locality_sample_estimates_all_files
+FROM pg_class
+WHERE oid = 'locality_t'::regclass;
+RESET pg_iceberg_am.analyze_max_data_files;
+
 CREATE TABLE deletes_t (id integer, visibility text) USING iceberg;
 INSERT INTO deletes_t
 SELECT value, CASE WHEN value <= 40 THEN 'deleted' ELSE 'live' END

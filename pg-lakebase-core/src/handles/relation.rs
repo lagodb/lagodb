@@ -1,4 +1,5 @@
 use super::borrowed::{PgBorrowed, PgNullable};
+use crate::catalog::{search_syscache1, search_syscache2};
 use crate::diag::PgError;
 use crate::wrapper::PgWrapper;
 use pgrx::pg_sys;
@@ -187,6 +188,69 @@ impl<'a> RelationHandle<'a> {
             )
         };
         attrs.iter().map(|a| (a.atttypid, a.atttypmod)).collect()
+    }
+
+    /// Largest effective column or extended-statistics target for this relation.
+    ///
+    /// PostgreSQL stores `-1` in `attstattarget` when a column inherits
+    /// `default_statistics_target`. Dropped columns cannot participate in
+    /// ANALYZE and are excluded. An explicit target on a relation's extended
+    /// statistics object participates in the same upper bound.
+    pub fn max_statistics_target(&self) -> Result<i32, PgError> {
+        let tup_desc = self.tuple_desc();
+        debug_assert!(
+            !tup_desc.is_null(),
+            "RelationHandle::max_statistics_target: rd_att is NULL"
+        );
+        // SAFETY: a live RelationHandle owns a valid TupleDesc and PostgreSQL's
+        // backend-local GUC value is readable for the duration of this call.
+        let (attrs, default_target) = unsafe {
+            (
+                std::slice::from_raw_parts(
+                    (*tup_desc).attrs.as_ptr(),
+                    (*tup_desc).natts as usize,
+                ),
+                pg_sys::default_statistics_target,
+            )
+        };
+
+        let mut max_target = None;
+        for attr in attrs.iter().filter(|attr| !attr.attisdropped) {
+            let Some(tuple) = search_syscache2(
+                pg_sys::SysCacheIdentifier::ATTNUM as i32,
+                pg_sys::Datum::from(self.oid()),
+                pg_sys::Datum::from(attr.attnum),
+            )?
+            else {
+                continue;
+            };
+            let target = tuple
+                .get_attr(pg_sys::Anum_pg_attribute_attstattarget as i16)?
+                .map_or(default_target, |datum| datum.value() as i16 as i32);
+            max_target =
+                Some(max_target.map_or(target, |current: i32| current.max(target)));
+        }
+
+        for statistics_oid in
+            unsafe { PgWrapper::relation_stat_ext_oids(self.as_raw())? }
+        {
+            let Some(tuple) = search_syscache1(
+                pg_sys::SysCacheIdentifier::STATEXTOID as i32,
+                pg_sys::Datum::from(statistics_oid),
+            )?
+            else {
+                continue;
+            };
+            let Some(datum) =
+                tuple.get_attr(pg_sys::Anum_pg_statistic_ext_stxstattarget as i16)?
+            else {
+                continue;
+            };
+            let target = datum.value() as i16 as i32;
+            max_target =
+                Some(max_target.map_or(target, |current: i32| current.max(target)));
+        }
+        Ok(max_target.unwrap_or(0))
     }
 
     #[inline]

@@ -408,7 +408,10 @@ impl ScanSpec {
 
     /// Plan the whole logical snapshot for PostgreSQL ANALYZE. Sampling is
     /// intentionally deferred until PostgreSQL supplies its ReadStream tickets.
-    pub(crate) fn prepare_analyze(&self) -> IcebergResult<AnalyzePreparation> {
+    pub(crate) fn prepare_analyze(
+        &self,
+        statistics_target: i32,
+    ) -> IcebergResult<AnalyzePreparation> {
         let scan = self.build_scan(true, None)?;
         let tasks = scan.plan_files()?;
         AnalyzePreparation::try_new(
@@ -418,6 +421,7 @@ impl ScanSpec {
             self.storage_bytes.ok_or(IcebergError::InvariantViolated(
                 "ANALYZE ScanSpec is missing storage-byte statistics",
             ))?,
+            statistics_target,
         )
     }
 
@@ -924,7 +928,7 @@ pub struct IcebergScan {
 
 enum ScanPurpose {
     Query,
-    Analyze,
+    Analyze { statistics_target: i32 },
 }
 
 // Query state stays inline intentionally: boxing it would add an allocation
@@ -963,7 +967,9 @@ impl AmScanSession for IcebergScan {
             spc_oid: rel.tablespace_oid(),
             shape: RelationShape::from_relation(rel),
             state: IcebergScanState::Pending(if flags.is_analyze() {
-                ScanPurpose::Analyze
+                ScanPurpose::Analyze {
+                    statistics_target: rel.max_statistics_target()?,
+                }
             } else {
                 ScanPurpose::Query
             }),
@@ -989,13 +995,13 @@ impl AmScanSession for IcebergScan {
                 let cursor = spec.open_batch_cursor()?;
                 IcebergScanState::Query { spec, cursor }
             }
-            ScanPurpose::Analyze => {
+            ScanPurpose::Analyze { statistics_target } => {
                 let spec = ScanSpec::build_for_analyze(
                     self.rel_oid,
                     self.spc_oid,
                     &self.shape,
                 )?;
-                let preparation = spec.prepare_analyze()?;
+                let preparation = spec.prepare_analyze(statistics_target)?;
                 IcebergScanState::Analyze(Box::new(
                     crate::access::analyze::AnalyzeScanState::pending(preparation),
                 ))

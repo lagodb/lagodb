@@ -2,9 +2,9 @@
 //!
 //! PostgreSQL exposes a block-oriented callback, while Iceberg's stable
 //! physical population is rows in planned data files. This module treats the
-//! `ReadStream` blocks as sampling tickets, selects physical row ordinals
-//! uniformly without replacement, and reads those rows in per-file batches
-//! through iceberg-lite's normal delete-aware pipeline.
+//! `ReadStream` blocks as sampling tickets, selects a bounded number of data
+//! files, and samples their physical rows through iceberg-lite's normal
+//! delete-aware pipeline.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -27,6 +27,8 @@ use crate::error::{IcebergError, IcebergResult};
 
 const TUPLES_PER_SYNTHETIC_BLOCK: u64 = 2048;
 const MAX_VIRTUAL_BLOCKS: u64 = u32::MAX as u64 - 1;
+const MIN_ANALYZE_SAMPLE_ROWS: u64 = 100;
+const SAMPLE_ROWS_PER_STATISTICS_TARGET: u64 = 300;
 
 /// Immutable whole-snapshot population captured before sampling begins.
 pub(crate) struct AnalyzePopulation {
@@ -36,7 +38,6 @@ pub(crate) struct AnalyzePopulation {
 
 struct AnalyzeFile {
     task: FileScanTask,
-    start_ordinal: u64,
     record_count: u64,
 }
 
@@ -64,11 +65,7 @@ impl AnalyzePopulation {
                     "ANALYZE planned duplicate data-file tasks",
                 ));
             }
-            files.push(AnalyzeFile {
-                task,
-                start_ordinal: physical_rows,
-                record_count,
-            });
+            files.push(AnalyzeFile { task, record_count });
             physical_rows = physical_rows.checked_add(record_count).ok_or(
                 IcebergError::InvariantViolated(
                     "Iceberg physical row population exceeds unsigned long range",
@@ -82,56 +79,77 @@ impl AnalyzePopulation {
         })
     }
 
-    fn selected_plan<R: Rng + ?Sized>(
+    fn locality_plan<R: Rng + ?Sized>(
         self,
-        candidate_count: u64,
+        desired_candidates: u64,
+        max_data_files: usize,
         rng: &mut R,
-    ) -> IcebergResult<AnalyzeReadPlan> {
-        let ordinals = AnalyzeSampler::sample_ordinals(
+    ) -> IcebergResult<AnalyzePlannedSample> {
+        if desired_candidates == self.physical_rows
+            && !self.files.is_empty()
+            && self.files.len() <= max_data_files
+        {
+            return Ok(AnalyzePlannedSample {
+                read_plan: self.full_plan(),
+                candidate_count: desired_candidates,
+            });
+        }
+        let record_counts = self
+            .files
+            .iter()
+            .map(|file| file.record_count)
+            .collect::<Vec<_>>();
+        let sampling = AnalyzeSampler::sample_population(
+            &record_counts,
             self.physical_rows,
-            candidate_count,
+            desired_candidates,
+            max_data_files,
             rng,
         )?;
-        let mut ordinal_index = 0;
+
         let mut requests = Vec::new();
         let mut expected_files = Vec::new();
+        let mut samples = sampling.files.into_iter().peekable();
 
-        for file in self.files {
-            let file_end = file.start_ordinal.checked_add(file.record_count).ok_or(
-                IcebergError::InvariantViolated(
-                    "ANALYZE file ordinal range overflowed",
-                ),
-            )?;
-            let first = ordinal_index;
-            while ordinal_index < ordinals.len() && ordinals[ordinal_index] < file_end
-            {
-                ordinal_index += 1;
+        for (file_index, file) in self.files.into_vec().into_iter().enumerate() {
+            let Some(sample) = samples.peek() else {
+                break;
+            };
+            if sample.file_index != file_index {
+                continue;
             }
-            if first == ordinal_index {
+            let sample = samples.next().ok_or(IcebergError::InvariantViolated(
+                "ANALYZE sampled file disappeared during plan construction",
+            ))?;
+            if sample.positions.is_empty() {
                 continue;
             }
             let path: Arc<str> = Arc::from(file.task.data_file_path.as_str());
-            let positions = ordinals[first..ordinal_index]
+            let positions = sample
+                .positions
                 .iter()
-                .map(|ordinal| ordinal - file.start_ordinal)
+                .map(|position| position.position)
                 .collect::<Vec<_>>();
             expected_files.push(ExpectedFile {
                 path,
                 positions: ExpectedPositions::Selected(
-                    positions.clone().into_boxed_slice(),
+                    sample.positions.into_boxed_slice(),
                 ),
             });
             requests.push(SelectedRowsReadRequest::try_new(file.task, positions)?);
         }
-        if ordinal_index != ordinals.len() {
+        if samples.next().is_some() {
             return Err(IcebergError::InvariantViolated(
-                "sampled ordinal does not belong to a planned data file",
+                "ANALYZE sampled file does not belong to the population",
             ));
         }
 
-        Ok(AnalyzeReadPlan::Selected {
-            requests,
-            expected: ExpectedCursor::new(expected_files),
+        Ok(AnalyzePlannedSample {
+            read_plan: AnalyzeReadPlan::Selected {
+                requests,
+                expected: ExpectedCursor::new(expected_files),
+            },
+            candidate_count: sampling.observation_count,
         })
     }
 
@@ -150,6 +168,27 @@ impl AnalyzePopulation {
             expected: ExpectedCursor::new(expected_files),
         }
     }
+}
+
+struct AnalyzePlannedSample {
+    read_plan: AnalyzeReadPlan,
+    candidate_count: u64,
+}
+
+struct AnalyzePopulationSample {
+    files: Vec<AnalyzeFileSample>,
+    observation_count: u64,
+}
+
+struct AnalyzeFileSample {
+    file_index: usize,
+    positions: Vec<SampledPosition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampledPosition {
+    position: u64,
+    multiplicity: u64,
 }
 
 struct AnalyzeSampler;
@@ -184,33 +223,224 @@ impl AnalyzeSampler {
         Ok(ordinals)
     }
 
-    fn candidate_count_and_weight(
+    /// Select a locality-bounded file set whose probability is proportional to
+    /// its manifest row count, then draw a fixed number of observations from
+    /// that set. Every physical row has the same expected observation count.
+    fn sample_population<R: Rng + ?Sized>(
+        record_counts: &[u64],
+        physical_rows: u64,
+        desired_candidates: u64,
+        max_data_files: usize,
+        rng: &mut R,
+    ) -> IcebergResult<AnalyzePopulationSample> {
+        if desired_candidates > physical_rows {
+            return Err(IcebergError::InvariantViolated(
+                "ANALYZE desired sample exceeds physical row population",
+            ));
+        }
+        if max_data_files == 0 {
+            return Err(IcebergError::InvariantViolated(
+                "ANALYZE data-file limit must be positive",
+            ));
+        }
+        let verified_rows = record_counts.iter().try_fold(0_u64, |sum, count| {
+            sum.checked_add(*count)
+                .ok_or(IcebergError::InvariantViolated(
+                    "ANALYZE physical row population overflowed",
+                ))
+        })?;
+        if verified_rows != physical_rows {
+            return Err(IcebergError::InvariantViolated(
+                "ANALYZE file record counts do not match physical population",
+            ));
+        }
+        if record_counts.is_empty() || physical_rows == 0 || desired_candidates == 0 {
+            return Ok(AnalyzePopulationSample {
+                files: Vec::new(),
+                observation_count: 0,
+            });
+        }
+
+        let sampled_file_count = record_counts.len().min(max_data_files);
+        let total_file_count = u64::try_from(record_counts.len()).map_err(|_| {
+            IcebergError::InvariantViolated(
+                "ANALYZE file population exceeds unsigned long range",
+            )
+        })?;
+        let anchor_ticket = rng.random_range(0..physical_rows);
+        let mut cumulative_rows = 0_u64;
+        let anchor_index = record_counts
+            .iter()
+            .position(|record_count| {
+                cumulative_rows = cumulative_rows.saturating_add(*record_count);
+                anchor_ticket < cumulative_rows
+            })
+            .ok_or(IcebergError::InvariantViolated(
+                "ANALYZE weighted file sample did not select an anchor",
+            ))?;
+
+        let mut file_indices = Vec::with_capacity(sampled_file_count);
+        file_indices.push(anchor_index);
+        if sampled_file_count > 1 {
+            let remaining_population = total_file_count.checked_sub(1).ok_or(
+                IcebergError::InvariantViolated(
+                    "ANALYZE file population underflowed",
+                ),
+            )?;
+            let remaining_sample =
+                u64::try_from(sampled_file_count - 1).map_err(|_| {
+                    IcebergError::InvariantViolated(
+                        "ANALYZE sampled file count exceeds unsigned long range",
+                    )
+                })?;
+            for logical_index in
+                Self::sample_ordinals(remaining_population, remaining_sample, rng)?
+            {
+                let logical_index = usize::try_from(logical_index).map_err(|_| {
+                    IcebergError::InvariantViolated(
+                        "ANALYZE sampled file index exceeds platform capacity",
+                    )
+                })?;
+                file_indices.push(if logical_index < anchor_index {
+                    logical_index
+                } else {
+                    logical_index + 1
+                });
+            }
+        }
+        file_indices.sort_unstable();
+
+        let selected_rows = file_indices.iter().try_fold(0_u64, |sum, index| {
+            sum.checked_add(record_counts[*index]).ok_or(
+                IcebergError::InvariantViolated(
+                    "ANALYZE selected row population overflowed",
+                ),
+            )
+        })?;
+        let observations =
+            Self::sample_observations(selected_rows, desired_candidates, rng)?;
+        let mut observations = observations.into_iter().peekable();
+        let mut selected_offset = 0_u64;
+        let mut files = Vec::with_capacity(file_indices.len());
+        for file_index in file_indices {
+            let file_end = selected_offset
+                .checked_add(record_counts[file_index])
+                .ok_or(IcebergError::InvariantViolated(
+                    "ANALYZE selected file boundary overflowed",
+                ))?;
+            let mut positions = Vec::new();
+            while let Some(observation) = observations.peek() {
+                if observation.position >= file_end {
+                    break;
+                }
+                let observation =
+                    observations.next().ok_or(IcebergError::InvariantViolated(
+                        "ANALYZE sampled observation disappeared",
+                    ))?;
+                positions.push(SampledPosition {
+                    position: observation.position - selected_offset,
+                    multiplicity: observation.multiplicity,
+                });
+            }
+            if !positions.is_empty() {
+                files.push(AnalyzeFileSample {
+                    file_index,
+                    positions,
+                });
+            }
+            selected_offset = file_end;
+        }
+        if observations.next().is_some() {
+            return Err(IcebergError::InvariantViolated(
+                "ANALYZE sampled observation lies outside selected files",
+            ));
+        }
+
+        Ok(AnalyzePopulationSample {
+            files,
+            observation_count: desired_candidates,
+        })
+    }
+
+    fn sample_observations<R: Rng + ?Sized>(
+        population: u64,
+        observation_count: u64,
+        rng: &mut R,
+    ) -> IcebergResult<Vec<SampledPosition>> {
+        if observation_count <= population {
+            return Ok(Self::sample_ordinals(population, observation_count, rng)?
+                .into_iter()
+                .map(|position| SampledPosition {
+                    position,
+                    multiplicity: 1,
+                })
+                .collect());
+        }
+        if population == 0 {
+            return Err(IcebergError::InvariantViolated(
+                "ANALYZE cannot sample observations from an empty file set",
+            ));
+        }
+        let capacity = usize::try_from(observation_count).map_err(|_| {
+            IcebergError::InvariantViolated(
+                "ANALYZE observation count exceeds platform collection capacity",
+            )
+        })?;
+        let mut observations = Vec::with_capacity(capacity);
+        for _ in 0..observation_count {
+            observations.push(rng.random_range(0..population));
+        }
+        observations.sort_unstable();
+
+        let mut sampled: Vec<SampledPosition> = Vec::with_capacity(
+            observations
+                .len()
+                .min(usize::try_from(population).unwrap_or(usize::MAX)),
+        );
+        for position in observations {
+            if let Some(last) = sampled.last_mut()
+                && last.position == position
+            {
+                last.multiplicity = last.multiplicity.checked_add(1).ok_or(
+                    IcebergError::InvariantViolated(
+                        "ANALYZE observation multiplicity overflowed",
+                    ),
+                )?;
+            } else {
+                sampled.push(SampledPosition {
+                    position,
+                    multiplicity: 1,
+                });
+            }
+        }
+        Ok(sampled)
+    }
+
+    fn desired_candidate_count(
         physical_rows: u64,
         virtual_blocks: u64,
         tickets: u64,
-    ) -> IcebergResult<(u64, f64)> {
+        target_rows: u64,
+    ) -> IcebergResult<u64> {
         if tickets > virtual_blocks {
             return Err(IcebergError::InvariantViolated(
                 "PostgreSQL ANALYZE selected more tickets than virtual blocks",
             ));
         }
         if tickets == 0 || physical_rows == 0 {
-            return Ok((0, 0.0));
+            return Ok(0);
         }
         if virtual_blocks == 0 {
             return Err(IcebergError::InvariantViolated(
                 "non-empty ANALYZE sample has zero virtual blocks",
             ));
         }
-
-        let candidate_count = if tickets == virtual_blocks {
-            physical_rows
+        let requested_rows = if tickets < virtual_blocks {
+            tickets
         } else {
-            physical_rows.min(tickets)
+            tickets.max(target_rows)
         };
-        let weight = (tickets as f64 / virtual_blocks as f64)
-            * (physical_rows as f64 / candidate_count as f64);
-        Ok((candidate_count, weight))
+        Ok(physical_rows.min(requested_rows))
     }
 }
 
@@ -252,6 +482,7 @@ pub(crate) struct AnalyzePreparation {
     population: AnalyzePopulation,
     decoder: ArrowColumnDecoder,
     virtual_blocks: u64,
+    target_rows: u64,
 }
 
 impl AnalyzePreparation {
@@ -260,6 +491,7 @@ impl AnalyzePreparation {
         tasks: Vec<FileScanTask>,
         decoder: ArrowColumnDecoder,
         storage_bytes: u64,
+        statistics_target: i32,
     ) -> IcebergResult<Self> {
         let population = AnalyzePopulation::try_new(tasks)?;
         let page_size = pg_sys::BLCKSZ as u64;
@@ -270,35 +502,54 @@ impl AnalyzePreparation {
                 "non-empty Iceberg population has zero virtual ANALYZE blocks",
             ));
         }
+        let statistics_target = u64::try_from(statistics_target).map_err(|_| {
+            IcebergError::InvariantViolated(
+                "ANALYZE statistics target must not be negative",
+            )
+        })?;
+        let target_rows = statistics_target
+            .checked_mul(SAMPLE_ROWS_PER_STATISTICS_TARGET)
+            .ok_or(IcebergError::InvariantViolated(
+                "ANALYZE statistics sample target overflowed",
+            ))?
+            .max(MIN_ANALYZE_SAMPLE_ROWS);
         Ok(Self {
             scan,
             population,
             decoder,
             virtual_blocks,
+            target_rows,
         })
     }
 
     fn start(self, tickets: u64, seed: u64) -> AmResult<AnalyzeBatchCursor> {
         let physical_rows = self.population.physical_rows;
-        let (candidate_count, weight) = AnalyzeSampler::candidate_count_and_weight(
+        let desired_candidates = AnalyzeSampler::desired_candidate_count(
             physical_rows,
             self.virtual_blocks,
             tickets,
+            self.target_rows,
         )?;
-
-        let plan = if tickets == self.virtual_blocks {
-            self.population.full_plan()
+        let mut rng = StdRng::seed_from_u64(seed);
+        let max_data_files = crate::gucs::analyze_max_data_files();
+        let sample = self.population.locality_plan(
+            desired_candidates,
+            max_data_files,
+            &mut rng,
+        )?;
+        let weight = if sample.candidate_count == 0 {
+            0.0
         } else {
-            let mut rng = StdRng::seed_from_u64(seed);
-            self.population.selected_plan(candidate_count, &mut rng)?
+            (tickets as f64 / self.virtual_blocks as f64)
+                * (physical_rows as f64 / sample.candidate_count as f64)
         };
-        let (source, expected) = plan.open(&self.scan)?;
+        let (source, expected) = sample.read_plan.open(&self.scan)?;
         Ok(AnalyzeBatchCursor::try_new(
             source,
             self.decoder,
             expected,
             tickets,
-            candidate_count,
+            sample.candidate_count,
             weight,
         )?)
     }
@@ -462,12 +713,18 @@ impl AnalyzeBatchCursor {
                     Ordering::Equal => {
                         let ordinal = self.expected.ordinal;
                         self.write_current_row(out, ordinal)?;
-                        self.expected.advance()?;
+                        if self.expected.advance()? {
+                            self.row_index += 1;
+                        }
                         return Ok(AnalyzeTupleOutcome::visible(self.live_weight));
                     }
-                    Ordering::Greater => self.expected.advance()?,
+                    Ordering::Greater => {
+                        self.expected.advance()?;
+                    }
                 },
-                None => self.expected.advance()?,
+                None => {
+                    self.expected.advance()?;
+                }
             }
         }
 
@@ -546,7 +803,6 @@ impl AnalyzeBatchCursor {
         self.decoder
             .write_row(&batch.decoded, self.row_index, out)?;
         out.set_tid(&Self::synthetic_tid(sample_ordinal)?);
-        self.row_index += 1;
         Ok(())
     }
 
@@ -576,6 +832,7 @@ struct ExpectedCursor {
     files: Box<[ExpectedFile]>,
     file_index: usize,
     position_index: u64,
+    repetition_index: u64,
     ordinal: u64,
 }
 
@@ -585,7 +842,7 @@ struct ExpectedFile {
 }
 
 enum ExpectedPositions {
-    Selected(Box<[u64]>),
+    Selected(Box<[SampledPosition]>),
     All(u64),
 }
 
@@ -601,6 +858,7 @@ impl ExpectedCursor {
             files: files.into_boxed_slice(),
             file_index: 0,
             position_index: 0,
+            repetition_index: 0,
             ordinal: 0,
         }
     }
@@ -609,7 +867,9 @@ impl ExpectedCursor {
         let file = self.files.get(self.file_index)?;
         let position = match &file.positions {
             ExpectedPositions::Selected(positions) => {
-                *positions.get(usize::try_from(self.position_index).ok()?)?
+                positions
+                    .get(usize::try_from(self.position_index).ok()?)?
+                    .position
             }
             ExpectedPositions::All(count) if self.position_index < *count => {
                 self.position_index
@@ -622,27 +882,51 @@ impl ExpectedCursor {
         })
     }
 
-    fn advance(&mut self) -> IcebergResult<()> {
+    /// Advance one logical observation. Returns true when the underlying
+    /// physical row has no remaining multiplicity and the reader may advance.
+    fn advance(&mut self) -> IcebergResult<bool> {
         let file = self.files.get(self.file_index).ok_or(
             IcebergError::InvariantViolated(
                 "ANALYZE expected cursor advanced past its population",
             ),
         )?;
-        self.position_index = self.position_index.checked_add(1).ok_or(
+        let multiplicity = match &file.positions {
+            ExpectedPositions::Selected(positions) => positions
+                .get(usize::try_from(self.position_index).map_err(|_| {
+                    IcebergError::InvariantViolated(
+                        "ANALYZE expected position index exceeds platform capacity",
+                    )
+                })?)
+                .ok_or(IcebergError::InvariantViolated(
+                    "ANALYZE expected selected position disappeared",
+                ))?
+                .multiplicity,
+            ExpectedPositions::All(_) => 1,
+        };
+        self.repetition_index = self.repetition_index.checked_add(1).ok_or(
             IcebergError::InvariantViolated(
-                "ANALYZE expected position index overflowed",
+                "ANALYZE expected repetition index overflowed",
             ),
         )?;
-        let exhausted = match &file.positions {
-            ExpectedPositions::Selected(positions) => {
-                usize::try_from(self.position_index)
-                    .map_or(true, |index| index >= positions.len())
+        let physical_row_exhausted = self.repetition_index == multiplicity;
+        if physical_row_exhausted {
+            self.repetition_index = 0;
+            self.position_index = self.position_index.checked_add(1).ok_or(
+                IcebergError::InvariantViolated(
+                    "ANALYZE expected position index overflowed",
+                ),
+            )?;
+            let file_exhausted = match &file.positions {
+                ExpectedPositions::Selected(positions) => {
+                    usize::try_from(self.position_index)
+                        .map_or(true, |index| index >= positions.len())
+                }
+                ExpectedPositions::All(count) => self.position_index >= *count,
+            };
+            if file_exhausted {
+                self.file_index += 1;
+                self.position_index = 0;
             }
-            ExpectedPositions::All(count) => self.position_index >= *count,
-        };
-        if exhausted {
-            self.file_index += 1;
-            self.position_index = 0;
         }
         self.ordinal =
             self.ordinal
@@ -650,7 +934,7 @@ impl ExpectedCursor {
                 .ok_or(IcebergError::InvariantViolated(
                     "ANALYZE candidate ordinal overflowed",
                 ))?;
-        Ok(())
+        Ok(physical_row_exhausted)
     }
 }
 
@@ -718,22 +1002,166 @@ mod tests {
     }
 
     #[test]
-    fn candidate_weight_matches_postgresql_extrapolation() {
-        let (candidates, weight) =
-            AnalyzeSampler::candidate_count_and_weight(10_000, 1_000, 100).unwrap();
-        assert_eq!(candidates, 100);
-        assert_eq!(weight, 10.0);
-        assert_eq!(1_000.0 / 100.0 * 100.0 * weight, 10_000.0);
+    fn locality_sample_has_fixed_observation_and_file_bounds() {
+        let mut record_counts = vec![1; 99];
+        record_counts.push(10_000_000);
+        let physical_rows = record_counts.iter().sum();
+        let mut rng = StdRng::seed_from_u64(9);
+        let sample = AnalyzeSampler::sample_population(
+            &record_counts,
+            physical_rows,
+            30_000,
+            8,
+            &mut rng,
+        )
+        .unwrap();
 
-        let (candidates, weight) =
-            AnalyzeSampler::candidate_count_and_weight(10_000, 1_000, 1_000).unwrap();
-        assert_eq!(candidates, 10_000);
-        assert_eq!(weight, 1.0);
+        assert_eq!(sample.observation_count, 30_000);
+        assert!(sample.files.len() <= 8);
+        let unique_positions = sample
+            .files
+            .iter()
+            .map(|file| file.positions.len())
+            .sum::<usize>();
+        assert!(unique_positions <= 30_000);
+        assert!(
+            sample
+                .files
+                .windows(2)
+                .all(|pair| pair[0].file_index < pair[1].file_index)
+        );
+        assert_eq!(
+            sample
+                .files
+                .iter()
+                .flat_map(|file| &file.positions)
+                .map(|position| position.multiplicity)
+                .sum::<u64>(),
+            30_000
+        );
+    }
 
-        let (candidates, weight) =
-            AnalyzeSampler::candidate_count_and_weight(10, 1_000, 100).unwrap();
-        assert_eq!(candidates, 10);
-        assert!((weight - 0.1).abs() < f64::EPSILON);
+    #[test]
+    fn uneven_files_produce_unbiased_fixed_size_observations() {
+        const RUNS: u64 = 20_000;
+        let record_counts = [10_u64, 100, 1_000];
+        let physical_rows = record_counts.into_iter().sum();
+        let mut observations = [0_u64; 3];
+
+        for seed in 0..RUNS {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let sample = AnalyzeSampler::sample_population(
+                &record_counts,
+                physical_rows,
+                60,
+                2,
+                &mut rng,
+            )
+            .unwrap();
+            assert_eq!(sample.observation_count, 60);
+            for file in sample.files {
+                observations[file.file_index] += file
+                    .positions
+                    .iter()
+                    .map(|position| position.multiplicity)
+                    .sum::<u64>();
+            }
+        }
+
+        let total_observations = RUNS * 60;
+        for (observed, population) in observations.into_iter().zip(record_counts) {
+            let observed_fraction = observed as f64 / total_observations as f64;
+            let population_fraction = population as f64 / physical_rows as f64;
+            assert!((observed_fraction - population_fraction).abs() < 0.005);
+        }
+    }
+
+    #[test]
+    fn replacement_sampling_preserves_fixed_observation_count() {
+        let sample = (0..10_000)
+            .find_map(|seed| {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let sample = AnalyzeSampler::sample_population(
+                    &[1, 1, 1, 100],
+                    103,
+                    20,
+                    1,
+                    &mut rng,
+                )
+                .unwrap();
+                (sample.files[0].positions[0].multiplicity > 1).then_some(sample)
+            })
+            .expect(
+                "a small anchor file should be selected across deterministic seeds",
+            );
+
+        assert_eq!(sample.files.len(), 1);
+        assert_eq!(sample.observation_count, 20);
+        assert_eq!(sample.files[0].positions.len(), 1);
+        assert_eq!(sample.files[0].positions[0].multiplicity, 20);
+    }
+
+    #[test]
+    fn desired_candidates_are_bounded_by_statistics_target() {
+        assert_eq!(
+            AnalyzeSampler::desired_candidate_count(10_000, 1_000, 100, 30_000)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            AnalyzeSampler::desired_candidate_count(10_000_000, 1_000, 100, 30_000)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            AnalyzeSampler::desired_candidate_count(
+                10_000_000,
+                1_000,
+                1_000,
+                30_000,
+            )
+            .unwrap(),
+            30_000
+        );
+        assert_eq!(
+            AnalyzeSampler::desired_candidate_count(
+                10_000_000, 1_000_000, 300_000, 30_000,
+            )
+            .unwrap(),
+            300_000
+        );
+        assert!(
+            AnalyzeSampler::desired_candidate_count(10, 100, 101, 30_000).is_err()
+        );
+    }
+
+    #[test]
+    fn locality_sampler_handles_empty_full_and_invalid_boundaries() {
+        let mut rng = StdRng::seed_from_u64(23);
+        let empty =
+            AnalyzeSampler::sample_population(&[], 0, 0, 32, &mut rng).unwrap();
+        assert!(empty.files.is_empty());
+        assert_eq!(empty.observation_count, 0);
+
+        let full =
+            AnalyzeSampler::sample_population(&[5, 5], 10, 10, 32, &mut rng).unwrap();
+        assert_eq!(full.observation_count, 10);
+        assert_eq!(full.files.len(), 2);
+        assert!(full.files.iter().all(|file| {
+            file.positions.len() == 5
+                && file
+                    .positions
+                    .iter()
+                    .all(|position| position.multiplicity == 1)
+        }));
+
+        assert!(
+            AnalyzeSampler::sample_population(&[10], 10, 1, 0, &mut rng).is_err()
+        );
+        assert!(AnalyzeSampler::sample_population(&[9], 10, 1, 1, &mut rng).is_err());
+        assert!(
+            AnalyzeSampler::sample_population(&[10], 10, 11, 1, &mut rng).is_err()
+        );
     }
 
     #[test]
@@ -744,6 +1172,35 @@ mod tests {
 
         assert_eq!(boundaries.last(), Some(&23));
         assert!(boundaries.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn expected_cursor_repeats_one_physical_position_without_reordering() {
+        let mut cursor = ExpectedCursor::new(vec![ExpectedFile {
+            path: Arc::from("data.parquet"),
+            positions: ExpectedPositions::Selected(
+                vec![
+                    SampledPosition {
+                        position: 3,
+                        multiplicity: 2,
+                    },
+                    SampledPosition {
+                        position: 8,
+                        multiplicity: 1,
+                    },
+                ]
+                .into_boxed_slice(),
+            ),
+        }]);
+
+        assert_eq!(cursor.current().unwrap().position, 3);
+        assert!(!cursor.advance().unwrap());
+        assert_eq!(cursor.current().unwrap().position, 3);
+        assert!(cursor.advance().unwrap());
+        assert_eq!(cursor.current().unwrap().position, 8);
+        assert!(cursor.advance().unwrap());
+        assert!(cursor.current().is_none());
+        assert_eq!(cursor.ordinal, 3);
     }
 
     #[test]
