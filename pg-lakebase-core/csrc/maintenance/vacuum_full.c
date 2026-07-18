@@ -22,10 +22,12 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
+#include "commands/defrem.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_node.h"
+#include "postmaster/bgworker_internals.h"
 #include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/guc.h"
@@ -339,9 +341,9 @@ void *
 lakebase_copy_node_to_context(const void *node, MemoryContext context)
 {
     MemoryContext oldcontext = MemoryContextSwitchTo(context);
-    void *copy = copyObject(node);
+    const void *copy = copyObject(node);
     MemoryContextSwitchTo(oldcontext);
-    return copy;
+    return unconstify(void *, copy);
 }
 
 int

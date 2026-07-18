@@ -313,7 +313,7 @@ impl<'a> DeltaSnapshotProducer<'a> {
         ))
     }
 
-    pub(super) fn commit(mut self, plan: DeltaPlan) -> Result<ActionCommit> {
+    pub(super) fn commit(self, plan: DeltaPlan) -> Result<ActionCommit> {
         let semantics = DeltaCommitSemantics {
             operation: plan.operation(),
             added_sequence_number: self.table.metadata().next_sequence_number(),

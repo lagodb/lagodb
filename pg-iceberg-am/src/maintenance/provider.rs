@@ -10,9 +10,10 @@ use pg_lakebase_core::table_maintenance::{
 };
 use pgrx::pg_sys;
 
+use crate::catalog::IcebergAccessMethod;
 use crate::catalog::bridge::IcebergTableId;
+use crate::catalog::metadata_table::IcebergMetadata;
 use crate::catalog::metadata_tracker::TxMetadata;
-use crate::catalog::{IcebergAccessMethod, IcebergMetadata};
 use crate::constants::ICEBERG_AM_NAME;
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
 use crate::options::IcebergTableOptions;
@@ -275,7 +276,6 @@ impl IcebergTableMaintenanceProvider {
             request.relation.oid(),
             PreparedVacuum {
                 owned_table_root,
-                policy,
                 rewrite,
                 expiration: PreparedExpiration {
                     as_of_ms: policy.command_time.unix_epoch_ms(),

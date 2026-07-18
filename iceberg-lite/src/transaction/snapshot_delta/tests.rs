@@ -650,7 +650,7 @@ fn expire_snapshots_preserves_retained_refs_then_removes_aged_refs() {
     let retained_table = table.clone().with_metadata(Arc::new(retained_metadata));
     let action = Transaction::new(&retained_table)
         .expire_snapshots()
-        .as_of_ms(newest_timestamp.saturating_add(1))
+        .with_as_of_ms(newest_timestamp.saturating_add(1))
         .expire_older_than_ms(i64::MAX);
     let mut commit = Arc::new(action).commit(&retained_table).unwrap();
     let retained_updates = commit.take_updates();
@@ -689,7 +689,7 @@ fn expire_snapshots_preserves_retained_refs_then_removes_aged_refs() {
     let aged_table = table.clone().with_metadata(Arc::new(aged_metadata));
     let action = Transaction::new(&aged_table)
         .expire_snapshots()
-        .as_of_ms(newest_timestamp.saturating_add(1))
+        .with_as_of_ms(newest_timestamp.saturating_add(1))
         .expire_older_than_ms(i64::MAX);
     let mut commit = Arc::new(action).commit(&aged_table).unwrap();
     let aged_updates = commit.take_updates();

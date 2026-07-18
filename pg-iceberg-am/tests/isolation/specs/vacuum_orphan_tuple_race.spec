@@ -15,7 +15,11 @@ setup
     absolute_path text :=
       current_setting('data_directory') || '/' || relative_path;
   BEGIN
-    PERFORM pg_catalog.pg_write_file(relative_path, 'orphan', false);
+    EXECUTE format(
+      'COPY (SELECT %L) TO %L',
+      'orphan',
+      absolute_path
+    );
     EXECUTE format(
       'COPY (SELECT '''') TO PROGRAM %L',
       'touch -d "7 days ago" ' || absolute_path

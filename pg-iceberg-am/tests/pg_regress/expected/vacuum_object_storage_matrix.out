@@ -1,4 +1,11 @@
 \set ECHO none
+object_store_ready: true
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true
 WITH after AS (
     SELECT format, count(*) AS row_count,
            md5(string_agg(id::text || ':' || payload, ',' ORDER BY id)) AS digest
@@ -46,3 +53,9 @@ CROSS JOIN LATERAL lakebase.observe_object_tree(
 (1 row)
 
 \set ECHO none
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true
+maintenance_complete: true

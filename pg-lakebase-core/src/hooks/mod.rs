@@ -8,6 +8,7 @@ mod error;
 pub mod object_access_hook;
 pub mod utility_hook;
 
+pub(crate) use error::UtilityHookPhase;
 pub use error::{HookError, ObjectAccessHookError, UtilityHookError};
 
 pub use object_access_hook::{

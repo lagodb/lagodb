@@ -19,7 +19,7 @@ use super::IcebergTableMaintenanceProvider;
 
 fn candidate_relations() -> Result<Vec<pg_sys::Oid>, PgReportError> {
     let limit = crate::gucs::auto_maintenance_max_tables();
-    Spi::connect(|client| {
+    Spi::connect_mut(|client| {
         client.update(
             "DELETE FROM iceberg.automatic_maintenance_state AS state \
              WHERE NOT EXISTS ( \
@@ -45,11 +45,10 @@ fn candidate_relations() -> Result<Vec<pg_sys::Oid>, PgReportError> {
         client
             .select(&query, None, &[])?
             .map(|row| {
-                row.get::<pg_sys::Oid>(1)?.ok_or_else(|| {
-                    pgrx::spi::Error::NoTupleTable
-                })
+                row.get::<pg_sys::Oid>(1)?
+                    .ok_or(pgrx::spi::Error::NoTupleTable)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
     })
     .map_err(|source| {
         PgReportError::from_message(
@@ -184,8 +183,10 @@ fn record_failure(
     policy: SchedulerPolicy,
 ) -> Result<(), pgrx::spi::Error> {
     let previous = Spi::get_one_with_args::<i32>(
-        "SELECT consecutive_failures \
-         FROM iceberg.automatic_maintenance_state WHERE relid = $1",
+        "SELECT COALESCE(( \
+             SELECT consecutive_failures \
+             FROM iceberg.automatic_maintenance_state WHERE relid = $1 \
+         ), 0)",
         &[DatumWithOid::from(relid)],
     )?
     .unwrap_or(0);

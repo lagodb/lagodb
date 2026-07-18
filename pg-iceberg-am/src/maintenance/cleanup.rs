@@ -4,7 +4,7 @@ use iceberg_lite::io::FileIO;
 use pg_lakebase_core::maintenance::{
     MaintenanceContext, MaintenanceItemRef, MaintenanceQueue,
 };
-use pg_lakebase_core::transaction::{
+use pg_lakebase_core::transaction::cleanup::{
     CleanupTiming, PendingDelete, register_pending_delete,
 };
 use pgrx::pg_sys;

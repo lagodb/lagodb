@@ -4,10 +4,12 @@ starting permutation: s1_begin s1_lock s2_wakeup_locked s2_wait_locked s1_commit
 step s1_begin: BEGIN;
 step s1_lock: 
   LOCK TABLE automatic_worker_iso.t IN SHARE UPDATE EXCLUSIVE MODE;
+
 step s2_wakeup_locked: 
   SELECT lakebase.request_worker_wakeup(
     'pg_iceberg_am', 'iceberg_automatic_maintenance'
   );
+
 request_worker_wakeup
 ---------------------
                      
@@ -30,6 +32,7 @@ step s2_wait_locked:
     END LOOP;
   END
   $$;
+
 step s1_commit: COMMIT;
 step s2_unlock_retry: 
   UPDATE iceberg.automatic_maintenance_state
@@ -38,6 +41,7 @@ step s2_unlock_retry:
   SELECT lakebase.request_worker_wakeup(
     'pg_iceberg_am', 'iceberg_automatic_maintenance'
   );
+
 request_worker_wakeup
 ---------------------
                      
@@ -60,12 +64,14 @@ step s2_wait_maintained:
     END LOOP;
   END
   $$;
+
 step s2_verify: 
   SELECT (SELECT current_data_objects
           FROM lakebase.table_maintenance_stats('automatic_worker_iso.t')) = 1
            AS compacted,
          (SELECT array_agg(id ORDER BY id) FROM automatic_worker_iso.t)
            = ARRAY[1, 2, 3, 4, 5, 6] AS rows_preserved;
+
 compacted|rows_preserved
 ---------+--------------
 t        |t             

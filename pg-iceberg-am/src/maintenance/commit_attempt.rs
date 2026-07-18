@@ -149,7 +149,7 @@ impl<'a> VacuumCommitAttempt<'a> {
         }
         transaction = transaction
             .expire_snapshots()
-            .as_of_ms(self.vacuum.expiration.as_of_ms)
+            .with_as_of_ms(self.vacuum.expiration.as_of_ms)
             .apply(transaction)?;
         Ok(transaction)
     }
@@ -171,7 +171,8 @@ impl<'a> VacuumCommitAttempt<'a> {
         let mut report = self.vacuum.report.clone();
         self.record_snapshot_report(updated_table, &mut report)?;
         report.cas_retries = u64::from(self.retry_count);
-        record_metric(&mut report, c"validation_conflicts", report.cas_retries)?;
+        let validation_conflicts = report.cas_retries;
+        record_metric(&mut report, c"validation_conflicts", validation_conflicts)?;
 
         let cleanup_started = Instant::now();
         let orphan_cutoff = self

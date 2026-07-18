@@ -20,6 +20,7 @@ step s2_verify:
            '_iceberg/data/orphan.parquet',
            true
          ) IS NULL AS orphan_deleted;
+
 rows_preserved|orphan_deleted
 --------------+--------------
 t             |t             

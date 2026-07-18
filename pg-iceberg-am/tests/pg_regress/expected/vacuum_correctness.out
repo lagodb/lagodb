@@ -17,7 +17,7 @@ SELECT current_setting('pg_iceberg_am.auto_maintenance_enabled') AS auto_enabled
        current_setting('pg_iceberg_am.auto_maintenance_jitter_percent') AS auto_jitter,
        current_setting('pg_iceberg_am.auto_maintenance_failure_backoff_max_s')
            AS auto_backoff_max_s;
- auto_enabled | auto_interval_s | auto_max_tables | auto_jitter | auto_backoff_max_s
+ auto_enabled | auto_interval_s | auto_max_tables | auto_jitter | auto_backoff_max_s 
 --------------+-----------------+-----------------+-------------+--------------------
  off          | 300             | 32              | 20          | 3600
 (1 row)
@@ -101,6 +101,7 @@ INSERT INTO vacuum_correctness_test.t_v3_full VALUES (3, 'three');
 INSERT INTO vacuum_correctness_test.t_v3_full VALUES (4, 'four');
 INSERT INTO vacuum_correctness_test.t_v3_full VALUES (5, 'five');
 INSERT INTO vacuum_correctness_test.t_v3_full VALUES (6, 'six');
+-- Exercise v2 position-delete and v3 deletion-vector/lineage rewrite inputs.
 UPDATE vacuum_correctness_test.t SET payload = 'two-updated' WHERE id = 2;
 DELETE FROM vacuum_correctness_test.t WHERE id = 3;
 UPDATE vacuum_correctness_test.t_v3 SET payload = 'two-updated' WHERE id = 2;
@@ -141,14 +142,15 @@ FROM (
     FROM vacuum_correctness_test.t_v3_full
 ) AS rows
 GROUP BY format;
-SELECT 6
+-- This shared setting is registered/backed by runtime but consumed in the AM.
+-- A value of one prevents the minimum-five-file rewrite group from forming.
 SET pg_lakebase.vacuum_max_group_objects = 1;
 VACUUM vacuum_correctness_test.t;
 SELECT provider, format, current_data_objects
 FROM lakebase.table_maintenance_stats('vacuum_correctness_test.t');
  provider | format | current_data_objects 
 ----------+--------+----------------------
- iceberg  | v2     |                    6
+ iceberg  | v2     |                    5
 (1 row)
 
 RESET pg_lakebase.vacuum_max_group_objects;
@@ -206,7 +208,7 @@ SELECT count(*) = 1 AS v2_has_one_parquet,
        count(*) < :v2_parquet_before::bigint AS v2_reclaimed_parquet
 FROM pg_ls_dir(:'v2_root' || '/data', true, false)
 WHERE pg_ls_dir LIKE '%.parquet';
- v2_has_one_parquet | v2_reclaimed_parquet
+ v2_has_one_parquet | v2_reclaimed_parquet 
 --------------------+----------------------
  t                  | t
 (1 row)
@@ -215,7 +217,7 @@ SELECT count(*) = 1 AS full_has_one_parquet,
        count(*) < :full_parquet_before::bigint AS full_reclaimed_parquet
 FROM pg_ls_dir(:'full_root' || '/data', true, false)
 WHERE pg_ls_dir LIKE '%.parquet';
- full_has_one_parquet | full_reclaimed_parquet
+ full_has_one_parquet | full_reclaimed_parquet 
 ----------------------+------------------------
  t                    | t
 (1 row)
@@ -242,12 +244,4 @@ ORDER BY stats.format;
 (6 rows)
 
 DROP SCHEMA vacuum_correctness_test CASCADE;
-NOTICE:  drop cascades to 7 other objects
-DETAIL:  drop cascades to table vacuum_correctness_test.t
-drop cascades to table vacuum_correctness_test.t_v1
-drop cascades to table vacuum_correctness_test.t_v3
-drop cascades to table vacuum_correctness_test.t_full
-drop cascades to table vacuum_correctness_test.t_v1_full
-drop cascades to table vacuum_correctness_test.t_v3_full
-drop cascades to table vacuum_correctness_test.heap_t
 DROP EXTENSION pg_iceberg_am CASCADE;

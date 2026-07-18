@@ -7,12 +7,12 @@
 use std::ffi::c_void;
 use std::ptr;
 
-use pgrx::pg_sys;
+use pgrx::{pg_guard, pg_sys};
 
 use crate::diag::ReportableError;
 use crate::handles::{RelationHandle, VacuumParamsHandle};
-use crate::hooks::error::{HookError, UtilityHookPhase};
 use crate::hooks::utility_hook::ProcessUtilityArgs;
+use crate::hooks::{HookError, UtilityHookPhase};
 
 use super::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
@@ -51,6 +51,13 @@ struct ProviderContext {
     command_time: TableMaintenanceCommandTime,
     budget: TableMaintenanceBudget,
 }
+
+// pg-lakebase-core can be statically linked into more than one loaded
+// extension. A synthetic statement must therefore bypass every copy of the
+// utility router in the hook chain, not merely the copy that created it.
+// DefElem.location is parser bookkeeping ignored by ExecVacuum, so a private
+// negative sentinel keeps the standard option valid while surviving copyObject.
+const DELEGATED_NATIVE_OPTION_LOCATION: i32 = i32::MIN;
 
 #[pg_guard]
 unsafe extern "C-unwind" fn execute_provider(
@@ -127,6 +134,37 @@ unsafe fn set_boolean_option(
     }
 }
 
+unsafe fn mark_delegated_native_run(options: *mut pg_sys::List) -> *mut pg_sys::List {
+    unsafe {
+        let options = set_boolean_option(options, c"skip_database_stats", true);
+        let count = pg_sys::list_length(options);
+        for index in 0..count {
+            let option = pg_sys::list_nth(options, index).cast::<pg_sys::DefElem>();
+            if option_name(option) == b"skip_database_stats" {
+                (*option).location = DELEGATED_NATIVE_OPTION_LOCATION;
+                break;
+            }
+        }
+        options
+    }
+}
+
+unsafe fn is_delegated_native_run(stmt: *mut pg_sys::VacuumStmt) -> bool {
+    unsafe {
+        let count = pg_sys::list_length((*stmt).options);
+        for index in 0..count {
+            let option =
+                pg_sys::list_nth((*stmt).options, index).cast::<pg_sys::DefElem>();
+            if option_name(option) == b"skip_database_stats"
+                && (*option).location == DELEGATED_NATIVE_OPTION_LOCATION
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 unsafe fn copy_stmt_in_portal(
     stmt: *mut pg_sys::VacuumStmt,
 ) -> *mut pg_sys::VacuumStmt {
@@ -143,9 +181,18 @@ unsafe fn delegate_native_run(
 ) {
     unsafe {
         let stmt = copy_stmt_in_portal(original);
-        (*stmt).rels = relations;
-        (*stmt).options =
-            set_boolean_option((*stmt).options, c"skip_database_stats", true);
+        // Native VACUUM commits between relations. Both the statement and its
+        // relation list must therefore outlive the current transaction.
+        (*stmt).rels =
+            lakebase_copy_node_to_context(relations.cast(), pg_sys::PortalContext)
+                .cast::<pg_sys::List>();
+        // standard_ProcessUtility allocates a ParseState in
+        // CurrentMemoryContext before ExecVacuum commits the current
+        // transaction. Match PortalRunUtility's lifetime boundary so that
+        // ParseState survives those commits. The previous context can belong
+        // to the transaction being committed and must not be restored.
+        pg_sys::MemoryContextSwitchTo(pg_sys::PortalContext);
+        (*stmt).options = mark_delegated_native_run((*stmt).options);
         args.call_parent_with_node(stmt.cast());
     }
 }
@@ -182,7 +229,13 @@ unsafe fn delegate_provider_analyze(
                 (*stmt).options = pg_sys::lappend((*stmt).options, copied.cast());
             }
         }
+        // A single-relation ANALYZE reuses the caller's transaction and
+        // expects ProcessUtility to have installed an active snapshot. The
+        // preceding provider FULL committed that original transaction, so
+        // recreate the normal ProcessUtility snapshot boundary explicitly.
+        pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
         args.call_parent_with_node(stmt.cast());
+        pg_sys::PopActiveSnapshot();
     }
 }
 
@@ -193,6 +246,9 @@ pub(crate) unsafe fn try_route_vacuum_full(
     is_top_level: bool,
 ) -> bool {
     unsafe {
+        if is_delegated_native_run(stmt) {
+            return false;
+        }
         let mut params = pg_sys::VacuumParams::default();
         if !lakebase_parse_vacuum_full(stmt, &mut params) {
             return false;

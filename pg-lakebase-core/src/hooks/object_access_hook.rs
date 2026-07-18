@@ -329,11 +329,12 @@ fn freeze_object_access_registry() -> bool {
         return !hooks.is_empty();
     }
     let hooks: ObjectAccessHookList = BUILDING_REGISTRY.with_borrow_mut(|entries| {
-        if entries.is_empty() {
+        let hooks: ObjectAccessHookList = if entries.is_empty() {
             &[]
         } else {
             Box::leak(std::mem::take(entries).into_boxed_slice())
-        }
+        };
+        hooks
     });
     if FROZEN_REGISTRY.set(hooks).is_err() {
         unreachable!("object access hook registry frozen concurrently");
@@ -347,11 +348,12 @@ fn freeze_object_access_str_registry() -> bool {
     }
     let hooks: ObjectAccessStrHookList =
         STR_BUILDING_REGISTRY.with_borrow_mut(|entries| {
-            if entries.is_empty() {
+            let hooks: ObjectAccessStrHookList = if entries.is_empty() {
                 &[]
             } else {
                 Box::leak(std::mem::take(entries).into_boxed_slice())
-            }
+            };
+            hooks
         });
     if STR_FROZEN_REGISTRY.set(hooks).is_err() {
         unreachable!("object access str hook registry frozen concurrently");

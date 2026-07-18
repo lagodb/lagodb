@@ -113,13 +113,8 @@ FROM lakebase.table_maintenance_stats(
  t
 (1 row)
 
+REVOKE SELECT ON vacuum_full_routing_test.security_t FROM vacuum_full_nonowner;
+REVOKE USAGE ON SCHEMA vacuum_full_routing_test FROM vacuum_full_nonowner;
 DROP ROLE vacuum_full_nonowner;
 DROP SCHEMA vacuum_full_routing_test CASCADE;
-NOTICE:  drop cascades to 6 other objects
-DETAIL:  drop cascades to table vacuum_full_routing_test.partitioned_t
-drop cascades to table vacuum_full_routing_test.partitioned_t_a
-drop cascades to table vacuum_full_routing_test.partitioned_t_b
-drop cascades to table vacuum_full_routing_test.heap_t
-drop cascades to table vacuum_full_routing_test.database_wide_t
-drop cascades to table vacuum_full_routing_test.security_t
 DROP EXTENSION pg_iceberg_am CASCADE;

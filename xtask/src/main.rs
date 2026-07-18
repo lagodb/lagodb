@@ -95,6 +95,10 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     )?;
 
     println!("\n=== Phase 2: framework pg_test (PostgreSQL) ===\n");
+    // Framework backend tests exercise the same cross-DSO runtime ABI used by
+    // product extensions. Install the runtime before pgrx starts the test
+    // cluster so pg-backend-tests can preload the sole owner of shared GUCs.
+    install_runtime(pg_version)?;
     run_command(
         Command::new("cargo")
             .arg("pgrx")
@@ -105,7 +109,6 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     )?;
 
     println!("\n=== Phase 3: pg-iceberg-am Rust tests (host + pg_test) ===\n");
-    install_runtime(pg_version)?;
     run_command(
         Command::new("cargo")
             .arg("pgrx")

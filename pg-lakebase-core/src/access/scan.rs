@@ -93,7 +93,10 @@ where
 
         // Convert raw C pointers to safe Handle types
         let rel_handle = RelationHandle::from_raw(rel);
-        let snapshot_handle = SnapshotHandle::from_raw(snapshot);
+        // PostgreSQL's table_beginscan_analyze() deliberately passes a null
+        // snapshot; all other scan entry points pass a live Snapshot.
+        let snapshot_handle =
+            (!snapshot.is_null()).then(|| SnapshotHandle::from_raw(snapshot));
         let pscan_handle = if pscan.is_null() {
             None
         } else {
@@ -102,7 +105,7 @@ where
 
         let instance = <A::ScanSession as AmScanSession>::new(
             &rel_handle,
-            &snapshot_handle,
+            snapshot_handle.as_ref(),
             pscan_handle.as_ref(),
             flags,
         )
@@ -538,10 +541,11 @@ where
 
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
+        let mut columns = SlotColumns::new(slot, state.tmp_ctx);
 
         let (found, live, dead) = state
             .am_instance
-            .scan_analyze_next_tuple(oldest_xmin, &mut state.row)
+            .scan_analyze_next_tuple(oldest_xmin, &mut columns)
             .report_unwrap();
 
         *liverows = live;
@@ -551,7 +555,6 @@ where
             return false;
         }
 
-        state.write_row_to_slot(slot).report_unwrap();
         pg_sys::ExecStoreVirtualTuple(slot);
         true
     }

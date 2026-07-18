@@ -90,7 +90,7 @@ impl DeltaPlan {
         }
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(in crate::transaction) fn is_empty(&self) -> bool {
         self.added_data_files.is_empty()
             && self.position_delete_files.is_empty()
             && self.removals.is_empty()

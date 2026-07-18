@@ -27,12 +27,14 @@ impl<'a> TableCommitCoordinator<'a> {
             plan,
             file_io,
         } = self;
-        let mut retries = 0;
+        let mut retries = 0_u32;
         let max_retries = gucs::max_commit_retries();
+        let max_retry_count = u32::try_from(max_retries)
+            .expect("max_commit_retries is constrained to non-negative values");
         let vacuum_commit_started = plan.vacuum.map(|_| std::time::Instant::now());
 
         loop {
-            if retries > max_retries {
+            if retries > max_retry_count {
                 return Err(IcebergError::MetadataCommitConflict {
                     relid,
                     max_retries,
@@ -87,6 +89,12 @@ impl<'a> TableCommitCoordinator<'a> {
                             .apply_to_metadata(&schema_metadata)
                             .map_err(IcebergError::from)?;
                         tx = (**schema_update).clone().apply(tx)?;
+                    }
+                    EffectiveCommitAction::Properties(update) => {
+                        update.validate_base_metadata(&schema_metadata)?;
+                        schema_metadata =
+                            update.apply_to_metadata(&schema_metadata)?;
+                        tx = update.apply_to_transaction(tx)?;
                     }
                     EffectiveCommitAction::Data {
                         epoch,

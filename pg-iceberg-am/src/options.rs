@@ -265,6 +265,23 @@ pub(crate) struct ResolvedIcebergOptions {
     manifest_merge: bool,
 }
 
+struct UnresolvedIcebergOptions<'a> {
+    format_version: i32,
+    compression: &'a str,
+    write_format: &'a str,
+    delete_isolation: &'a str,
+    update_isolation: &'a str,
+    merge_isolation: &'a str,
+    target_file_size: &'a str,
+    max_snapshot_age_ms: &'a str,
+    min_snapshots_to_keep: &'a str,
+    max_ref_age_ms: &'a str,
+    metadata_versions: &'a str,
+    manifest_target_size: &'a str,
+    manifest_min_count: &'a str,
+    manifest_merge: &'a str,
+}
+
 impl ResolvedIcebergOptions {
     /// Resolve parsed options, applying defaults and validating semantic values.
     pub(crate) fn from_table_options(
@@ -317,40 +334,43 @@ impl ResolvedIcebergOptions {
                 .unwrap_or(default)
         };
 
-        Self::from_parts(
+        Self::from_parts(UnresolvedIcebergOptions {
             format_version,
             compression,
             write_format,
             delete_isolation,
             update_isolation,
             merge_isolation,
-            value(OPT_TARGET_FILE_SIZE, "536870912"),
-            value(OPT_MAX_SNAPSHOT_AGE, "432000000"),
-            value(OPT_MIN_SNAPSHOTS, "1"),
-            value(OPT_MAX_REF_AGE, "9223372036854775807"),
-            value(OPT_METADATA_VERSIONS, "100"),
-            value(OPT_MANIFEST_TARGET_SIZE, "8388608"),
-            value(OPT_MANIFEST_MIN_COUNT, "100"),
-            value(OPT_MANIFEST_MERGE, "true"),
-        )
+            target_file_size: value(OPT_TARGET_FILE_SIZE, "536870912"),
+            max_snapshot_age_ms: value(OPT_MAX_SNAPSHOT_AGE, "432000000"),
+            min_snapshots_to_keep: value(OPT_MIN_SNAPSHOTS, "1"),
+            max_ref_age_ms: value(OPT_MAX_REF_AGE, "9223372036854775807"),
+            metadata_versions: value(OPT_METADATA_VERSIONS, "100"),
+            manifest_target_size: value(OPT_MANIFEST_TARGET_SIZE, "8388608"),
+            manifest_min_count: value(OPT_MANIFEST_MIN_COUNT, "100"),
+            manifest_merge: value(OPT_MANIFEST_MERGE, "true"),
+        })
     }
 
     fn from_parts(
-        format_version: i32,
-        compression: &str,
-        write_format: &str,
-        delete_isolation: &str,
-        update_isolation: &str,
-        merge_isolation: &str,
-        target_file_size: &str,
-        max_snapshot_age_ms: &str,
-        min_snapshots_to_keep: &str,
-        max_ref_age_ms: &str,
-        metadata_versions: &str,
-        manifest_target_size: &str,
-        manifest_min_count: &str,
-        manifest_merge: &str,
+        parts: UnresolvedIcebergOptions<'_>,
     ) -> Result<Self, TableOptionError> {
+        let UnresolvedIcebergOptions {
+            format_version,
+            compression,
+            write_format,
+            delete_isolation,
+            update_isolation,
+            merge_isolation,
+            target_file_size,
+            max_snapshot_age_ms,
+            min_snapshots_to_keep,
+            max_ref_age_ms,
+            metadata_versions,
+            manifest_target_size,
+            manifest_min_count,
+            manifest_merge,
+        } = parts;
         let compression = CompressionOption::parse(compression)?;
         let write_format = WriteFormatOption::parse(write_format)?;
         let delete_isolation = Self::resolve_isolation_level(

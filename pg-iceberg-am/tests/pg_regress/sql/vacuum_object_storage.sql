@@ -10,14 +10,15 @@ SELECT endpoint AS lakebase_regress_endpoint,
 FROM lakebase_regress.object_storage_fixture
 \gset
 
-\! mkdir -p /tmp/iceberg_regress_vacuum_object
-\! rm -rf /tmp/iceberg_regress_vacuum_object/*
-
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
 DROP TABLESPACE IF EXISTS regress_vacuum_object;
 RESET client_min_messages;
+
+\! mkdir -p /tmp/iceberg_regress_vacuum_object
+\! rm -rf /tmp/iceberg_regress_vacuum_object/*
+
 CREATE TABLESPACE regress_vacuum_object
 LOCATION '/tmp/iceberg_regress_vacuum_object'
 WITH (
@@ -35,12 +36,13 @@ WITH (
 \! bin/wait_for_object_store 30
 
 CREATE TABLE vacuum_object_t (id integer, payload text)
-USING iceberg TABLESPACE regress_vacuum_object
+USING iceberg
 WITH (
     "format-version" = 3,
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
-);
+)
+TABLESPACE regress_vacuum_object;
 INSERT INTO vacuum_object_t VALUES (1, 'one');
 INSERT INTO vacuum_object_t VALUES (2, 'two');
 INSERT INTO vacuum_object_t VALUES (3, 'three');

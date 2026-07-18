@@ -69,7 +69,7 @@ pub fn init() {
         c"Enable periodic Iceberg logical-table maintenance",
         c"The runtime worker uses one short transaction per selected table.",
         &AUTO_MAINTENANCE_ENABLED,
-        GucContext::Sighup,
+        GucContext::Userset,
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
@@ -79,7 +79,7 @@ pub fn init() {
         &AUTO_MAINTENANCE_INTERVAL_S,
         10,
         86_400,
-        GucContext::Sighup,
+        GucContext::Userset,
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
@@ -89,7 +89,7 @@ pub fn init() {
         &AUTO_MAINTENANCE_MAX_TABLES,
         1,
         10_000,
-        GucContext::Sighup,
+        GucContext::Userset,
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
@@ -99,7 +99,7 @@ pub fn init() {
         &AUTO_MAINTENANCE_JITTER_PERCENT,
         0,
         100,
-        GucContext::Sighup,
+        GucContext::Userset,
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
@@ -109,7 +109,7 @@ pub fn init() {
         &AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S,
         10,
         86_400,
-        GucContext::Sighup,
+        GucContext::Userset,
         GucFlags::default(),
     );
     GucRegistry::define_bool_guc(

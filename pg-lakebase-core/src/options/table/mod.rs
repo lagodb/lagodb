@@ -7,4 +7,4 @@ pub use cache::{
     AmCache, AmCacheRef, AmCacheString, AmCacheValue, AmCacheValueBuilder,
     AmCacheable,
 };
-pub use options::{TableOptionError, TableOptions};
+pub use options::{TableOptionAlterations, TableOptionError, TableOptions};

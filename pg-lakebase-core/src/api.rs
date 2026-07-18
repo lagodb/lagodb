@@ -78,7 +78,7 @@ use crate::handles::{
     TupleTableSlotHandle, VacuumParamsHandle, ValidateIndexStateHandle,
     VarlenaHandle,
 };
-use crate::tuple::{Row, TupleSlotBatch, TupleSlotRow};
+use crate::tuple::{Row, SlotColumns, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -248,7 +248,7 @@ pub trait AmScanSession {
     /// where the AM is expected to do schema-aware work.
     fn new(
         rel: &RelationHandle,
-        snapshot: &SnapshotHandle,
+        snapshot: Option<&SnapshotHandle>,
         pscan: Option<&ParallelTableScanDescHandle>,
         flags: u32,
     ) -> AmResult<Self>
@@ -370,9 +370,9 @@ pub trait AmScanSession {
     fn scan_analyze_next_tuple(
         &mut self,
         oldest_xmin: pg_sys::TransactionId,
-        row: &mut Row,
+        out: &mut SlotColumns<'_>,
     ) -> AmResult<(bool, f64, f64)> {
-        let _ = (oldest_xmin, row);
+        let _ = (oldest_xmin, out);
         unsupported_callback("scan_analyze_next_tuple")
     }
 

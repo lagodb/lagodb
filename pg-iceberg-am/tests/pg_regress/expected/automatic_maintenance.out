@@ -11,32 +11,34 @@ INSERT INTO automatic_maintenance_test.eligible VALUES (5);
 INSERT INTO automatic_maintenance_test.eligible VALUES (6);
 CREATE TABLE automatic_maintenance_test.not_eligible (id integer) USING iceberg;
 INSERT INTO automatic_maintenance_test.not_eligible VALUES (1);
+-- Database settings are required because the worker runs in another backend.
 SELECT format(
     'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_enabled = on',
     current_database()
 )
 \gexec
+ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_enabled = on
 SELECT format(
     'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_interval_s = 10',
     current_database()
 )
 \gexec
+ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_interval_s = 10
 SELECT format(
     'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_jitter_percent = 0',
     current_database()
 )
 \gexec
+ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_jitter_percent = 0
 CREATE TEMP TABLE eligible_metadata_before_failure AS
 SELECT metadata_location
 FROM iceberg.iceberg_metadata
 WHERE relid = 'automatic_maintenance_test.eligible'::regclass;
-SELECT 1
 UPDATE iceberg.iceberg_metadata
 SET metadata_location = regexp_replace(
     metadata_location, '[^/]+$', 'missing-metadata.json'
 )
 WHERE relid = 'automatic_maintenance_test.eligible'::regclass;
-UPDATE 1
 SELECT lakebase.request_worker_wakeup(
     'pg_iceberg_am', 'iceberg_automatic_maintenance'
 );
@@ -81,7 +83,6 @@ UPDATE iceberg.iceberg_metadata AS metadata
 SET metadata_location = saved.metadata_location
 FROM eligible_metadata_before_failure AS saved
 WHERE metadata.relid = 'automatic_maintenance_test.eligible'::regclass;
-UPDATE 1
 SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6]
     AS rows_preserved_after_failed_rewrite
 FROM automatic_maintenance_test.eligible;
@@ -90,10 +91,11 @@ FROM automatic_maintenance_test.eligible;
  t
 (1 row)
 
+-- Remove the fault and make the failed relation immediately eligible. The
+-- runtime launches a new worker process, which must reuse persistent state.
 UPDATE iceberg.automatic_maintenance_state
 SET next_attempt_at = '-infinity'
 WHERE relid = 'automatic_maintenance_test.eligible'::regclass::oid;
-UPDATE 1
 SELECT lakebase.request_worker_wakeup(
     'pg_iceberg_am', 'iceberg_automatic_maintenance'
 );
@@ -151,16 +153,19 @@ SELECT format(
     current_database()
 )
 \gexec
+ALTER DATABASE pg_iceberg_am_regress RESET pg_iceberg_am.auto_maintenance_enabled
 SELECT format(
     'ALTER DATABASE %I RESET pg_iceberg_am.auto_maintenance_interval_s',
     current_database()
 )
 \gexec
+ALTER DATABASE pg_iceberg_am_regress RESET pg_iceberg_am.auto_maintenance_interval_s
 SELECT format(
     'ALTER DATABASE %I RESET pg_iceberg_am.auto_maintenance_jitter_percent',
     current_database()
 )
 \gexec
+ALTER DATABASE pg_iceberg_am_regress RESET pg_iceberg_am.auto_maintenance_jitter_percent
 SELECT lakebase.request_worker_wakeup(
     'pg_iceberg_am', 'iceberg_automatic_maintenance'
 );
@@ -170,7 +175,4 @@ SELECT lakebase.request_worker_wakeup(
 (1 row)
 
 DROP SCHEMA automatic_maintenance_test CASCADE;
-NOTICE:  drop cascades to 2 other objects
-DETAIL:  drop cascades to table automatic_maintenance_test.eligible
-drop cascades to table automatic_maintenance_test.not_eligible
 DROP EXTENSION pg_iceberg_am CASCADE;

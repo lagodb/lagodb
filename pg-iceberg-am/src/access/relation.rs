@@ -44,7 +44,7 @@ impl AmRelation for IcebergTableAm {
         params: &VacuumParamsHandle,
         _bstrategy: &BufferAccessStrategyHandle,
     ) -> AmResult<()> {
-        if unsafe { pg_sys::AmAutoVacuumWorkerProcess() } {
+        if unsafe { pg_sys::MyBackendType == pg_sys::BackendType::B_AUTOVAC_WORKER } {
             return Ok(());
         }
         let options = TableMaintenanceOptions::from_vacuum_params(params);

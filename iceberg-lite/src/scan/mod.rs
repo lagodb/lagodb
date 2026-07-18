@@ -39,8 +39,8 @@ use crate::metadata_columns::{
 use crate::overlay::{SnapshotDelta, SnapshotDeltaRemovalLookup};
 
 use crate::spec::{
-    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, DataFile, ManifestContentType,
-    NameMapping, SnapshotRef,
+    DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, ManifestContentType, NameMapping,
+    SnapshotRef,
 };
 use crate::table::Table;
 use crate::util::available_parallelism;
@@ -507,7 +507,7 @@ impl TableScan {
     }
 
     /// Plans the current snapshot once while retaining the exact source
-    /// [`DataFile`] values required by metadata-maintenance actions.
+    /// [`crate::spec::DataFile`] values required by metadata-maintenance actions.
     pub fn plan_files_with_data_files(&self) -> Result<FileScanPlan> {
         let (files, manifest_count) = self.plan_files_internal(true)?;
         let FilePlanAccumulator::Maintenance(files) = files else {

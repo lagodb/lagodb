@@ -68,6 +68,18 @@ pub struct TableOptions {
     options: Vec<(String, Option<String>)>,
 }
 
+/// Ordered custom-option changes extracted from `ALTER TABLE ... SET/RESET`.
+#[derive(Debug)]
+pub struct TableOptionAlterations {
+    changes: Vec<TableOptionChange>,
+}
+
+#[derive(Debug)]
+enum TableOptionChange {
+    Set(TableOptions),
+    Reset(Vec<String>),
+}
+
 impl TableOptions {
     pub fn new(options: Vec<(String, Option<String>)>) -> Self {
         Self { options }
@@ -165,6 +177,77 @@ impl TableOptions {
         Ok(())
     }
 
+    /// Replace the complete persisted option set for one relation.
+    ///
+    /// The caller must hold a lock that excludes concurrent option changes.
+    pub fn replace_in_catalog(
+        &self,
+        relid: pg_sys::Oid,
+    ) -> Result<(), TableOptionError> {
+        if self.options.is_empty() {
+            Self::delete_from_catalog(relid)?;
+            unsafe { pg_sys::CacheInvalidateRelcacheByRelid(relid) };
+            return Ok(());
+        }
+
+        let table_oid = catalog::get_table_options_oid()
+            .map_err(TableOptionError::PersistFailed)?;
+        let index_oid = catalog::get_table_options_pkey_oid()
+            .map_err(TableOptionError::PersistFailed)?;
+        let rel_guard =
+            CatalogRelation::open(table_oid, pg_sys::RowExclusiveLock as _)
+                .map_err(TableOptionError::PersistFailed)?;
+        let rel = rel_guard.as_raw();
+        let mut scan_guard = rel_guard
+            .begin_scan(
+                index_oid,
+                true,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(1, relid)],
+            )
+            .map_err(TableOptionError::PersistFailed)?;
+
+        let options: Vec<String> = self
+            .options
+            .iter()
+            .map(|(key, value)| format!("{}={}", key, value.as_deref().unwrap_or("")))
+            .collect();
+
+        if let Some(old_tuple) = scan_guard
+            .get_next()
+            .map_err(TableOptionError::PersistFailed)?
+        {
+            let options_datum = options.into_datum();
+            let tup_desc = unsafe { (*rel).rd_att };
+            let natts = unsafe { (*tup_desc).natts as usize };
+            let mut values = vec![pg_sys::Datum::from(0); natts];
+            let mut nulls = vec![false; natts];
+            let mut replacements = vec![false; natts];
+            values[1] = options_datum.unwrap_or(pg_sys::Datum::from(0));
+            nulls[1] = options_datum.is_none();
+            replacements[1] = true;
+            let new_tuple = unsafe {
+                pg_sys::heap_modify_tuple(
+                    old_tuple.as_raw(),
+                    tup_desc,
+                    values.as_mut_ptr(),
+                    nulls.as_mut_ptr(),
+                    replacements.as_mut_ptr(),
+                )
+            };
+            let new_tuple = unsafe { crate::handles::HeapTupleGuard::new(new_tuple) };
+            rel_guard
+                .catalog_update(old_tuple, &new_tuple)
+                .map_err(TableOptionError::PersistFailed)?;
+        } else {
+            drop(scan_guard);
+            self.persist_to_catalog(relid)?;
+        }
+
+        unsafe { pg_sys::CacheInvalidateRelcacheByRelid(relid) };
+        Ok(())
+    }
+
     pub fn load_from_catalog(
         relid: pg_sys::Oid,
     ) -> Result<Option<Self>, TableOptionError> {
@@ -251,5 +334,144 @@ impl TableOptions {
         }
 
         Ok(())
+    }
+}
+
+impl TableOptionAlterations {
+    /// Whether an ALTER command list contains an option owned by this schema.
+    ///
+    /// # Safety
+    ///
+    /// `cmds` must be null or a live PostgreSQL list of `AlterTableCmd` nodes.
+    pub unsafe fn commands_contain_options(
+        cmds: *mut pg_sys::List,
+        valid_options: &[OptionDef],
+    ) -> bool {
+        if cmds.is_null() {
+            return false;
+        }
+
+        let len = unsafe { pg_sys::list_length(cmds) };
+        for idx in 0..len {
+            let command = unsafe {
+                pg_sys::list_nth(cmds, idx) as *const pg_sys::AlterTableCmd
+            };
+            if command.is_null()
+                || !matches!(
+                    unsafe { (*command).subtype },
+                    pg_sys::AlterTableType::AT_SetRelOptions
+                        | pg_sys::AlterTableType::AT_ResetRelOptions
+                )
+            {
+                continue;
+            }
+
+            let options = unsafe { (*command).def as *mut pg_sys::List };
+            if options.is_null() {
+                continue;
+            }
+            let option_count = unsafe { pg_sys::list_length(options) };
+            for option_idx in 0..option_count {
+                let element = unsafe {
+                    pg_sys::list_nth(options, option_idx) as *const pg_sys::DefElem
+                };
+                if element.is_null() {
+                    continue;
+                }
+                let name = unsafe { std::ffi::CStr::from_ptr((*element).defname) };
+                if valid_options
+                    .iter()
+                    .any(|option| name.to_bytes() == option.name.as_bytes())
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Extract custom changes and remove them from PostgreSQL's command tree.
+    ///
+    /// # Safety
+    ///
+    /// `cmds` must be null or a uniquely borrowed live PostgreSQL list of
+    /// `AlterTableCmd` nodes.
+    pub unsafe fn extract_from_commands(
+        cmds: *mut pg_sys::List,
+        valid_options: &[OptionDef],
+    ) -> Result<Self, TableOptionError> {
+        let mut changes = Vec::new();
+        if cmds.is_null() {
+            return Ok(Self { changes });
+        }
+
+        let len = unsafe { pg_sys::list_length(cmds) };
+        for idx in 0..len {
+            let command =
+                unsafe { pg_sys::list_nth(cmds, idx) as *mut pg_sys::AlterTableCmd };
+            if command.is_null() {
+                continue;
+            }
+
+            match unsafe { (*command).subtype } {
+                pg_sys::AlterTableType::AT_SetRelOptions => {
+                    let options_ptr = unsafe {
+                        std::ptr::addr_of_mut!((*command).def)
+                            .cast::<*mut pg_sys::List>()
+                    };
+                    let options = unsafe {
+                        schema::extract_and_remove_options(
+                            options_ptr,
+                            valid_options,
+                        )?
+                    };
+                    if !options.is_empty() {
+                        changes
+                            .push(TableOptionChange::Set(TableOptions::new(options)));
+                    }
+                }
+                pg_sys::AlterTableType::AT_ResetRelOptions => {
+                    let options_ptr = unsafe {
+                        std::ptr::addr_of_mut!((*command).def)
+                            .cast::<*mut pg_sys::List>()
+                    };
+                    let names = unsafe {
+                        schema::extract_and_remove_option_names(
+                            options_ptr,
+                            valid_options,
+                        )?
+                    };
+                    if !names.is_empty() {
+                        changes.push(TableOptionChange::Reset(names));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Self { changes })
+    }
+
+    pub fn apply_to(self, current: Option<TableOptions>) -> TableOptions {
+        let mut options = current.map_or_else(Vec::new, |current| current.options);
+        for change in self.changes {
+            match change {
+                TableOptionChange::Set(set) => {
+                    for (key, value) in set.options {
+                        if let Some((_, current_value)) =
+                            options.iter_mut().find(|(name, _)| *name == key)
+                        {
+                            *current_value = value;
+                        } else {
+                            options.push((key, value));
+                        }
+                    }
+                }
+                TableOptionChange::Reset(names) => {
+                    options.retain(|(name, _)| !names.contains(name));
+                }
+            }
+        }
+        TableOptions::new(options)
     }
 }

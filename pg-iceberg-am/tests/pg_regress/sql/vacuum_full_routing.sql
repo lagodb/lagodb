@@ -86,6 +86,8 @@ SELECT current_data_objects = 1 AS owner_rewrite_succeeded
 FROM lakebase.table_maintenance_stats(
     'vacuum_full_routing_test.security_t'
 );
+REVOKE SELECT ON vacuum_full_routing_test.security_t FROM vacuum_full_nonowner;
+REVOKE USAGE ON SCHEMA vacuum_full_routing_test FROM vacuum_full_nonowner;
 DROP ROLE vacuum_full_nonowner;
 
 DROP SCHEMA vacuum_full_routing_test CASCADE;

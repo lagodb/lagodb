@@ -9,14 +9,15 @@ SELECT endpoint AS lakebase_regress_endpoint,
 FROM lakebase_regress.object_storage_fixture
 \gset
 
-\! mkdir -p /tmp/iceberg_regress_vacuum_object_matrix
-\! rm -rf /tmp/iceberg_regress_vacuum_object_matrix/*
-
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
 DROP TABLESPACE IF EXISTS regress_vacuum_object_matrix;
 RESET client_min_messages;
+
+\! mkdir -p /tmp/iceberg_regress_vacuum_object_matrix
+\! rm -rf /tmp/iceberg_regress_vacuum_object_matrix/*
+
 CREATE TABLESPACE regress_vacuum_object_matrix
 LOCATION '/tmp/iceberg_regress_vacuum_object_matrix'
 WITH (
@@ -34,47 +35,53 @@ WITH (
 \! bin/wait_for_object_store 30
 
 CREATE TABLE object_v1_ordinary (id integer, payload text)
-USING iceberg TABLESPACE regress_vacuum_object_matrix
+USING iceberg
 WITH (
     "format-version" = 1,
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
-);
+)
+TABLESPACE regress_vacuum_object_matrix;
 CREATE TABLE object_v2_ordinary (id integer, payload text)
-USING iceberg TABLESPACE regress_vacuum_object_matrix
+USING iceberg
 WITH (
     "format-version" = 2,
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
-);
+)
+TABLESPACE regress_vacuum_object_matrix;
 CREATE TABLE object_v3_ordinary (id integer, payload text)
-USING iceberg TABLESPACE regress_vacuum_object_matrix
+USING iceberg
 WITH (
     "format-version" = 3,
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
-);
+)
+TABLESPACE regress_vacuum_object_matrix;
 CREATE TABLE object_v1_full (id integer, payload text)
-USING iceberg TABLESPACE regress_vacuum_object_matrix
+USING iceberg
 WITH (
     "format-version" = 1,
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
-);
+)
+TABLESPACE regress_vacuum_object_matrix;
 CREATE TABLE object_v2_full (id integer, payload text)
-USING iceberg TABLESPACE regress_vacuum_object_matrix
+USING iceberg
 WITH (
     "format-version" = 2,
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
-);
+)
+TABLESPACE regress_vacuum_object_matrix;
 CREATE TABLE object_v3_full (id integer, payload text)
-USING iceberg TABLESPACE regress_vacuum_object_matrix
+USING iceberg
 WITH (
     "format-version" = 3,
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
-);
+)
+TABLESPACE regress_vacuum_object_matrix;
 
 SELECT format(
     'INSERT INTO %I VALUES (%s, %L)',

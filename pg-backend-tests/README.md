@@ -57,14 +57,20 @@ host-versus-backend rationale.
 
 ## Running tests
 
-```bash
-cargo pgrx test pg17 --package pg-backend-tests
-```
-
-Or as part of the full workspace suite:
+The backend tests preload `pg_lakebase_runtime`, which is the production owner
+of shared `pg_lakebase.*` GUCs and the cross-DSO runtime ABI. The full workspace
+runner installs that extension before starting the test cluster:
 
 ```bash
 cargo xtask test-all pg17
+```
+
+To run only this crate, install the current runtime build first:
+
+```bash
+cargo pgrx install --package pg-lakebase-runtime \
+  --pg-config "$(cargo pgrx info pg-config pg17)"
+cargo pgrx test pg17 --package pg-backend-tests
 ```
 
 ## Prerequisites

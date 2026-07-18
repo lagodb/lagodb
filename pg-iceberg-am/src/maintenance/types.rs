@@ -156,7 +156,6 @@ pub(crate) struct PreparedOrphanPolicy {
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedVacuum {
     pub(crate) owned_table_root: ManagedTableRoot,
-    pub(crate) policy: VacuumPolicy,
     pub(crate) rewrite: Option<PreparedRewrite>,
     pub(crate) expiration: PreparedExpiration,
     pub(crate) manifest_rewrite: Option<PreparedManifestRewrite>,

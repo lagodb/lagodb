@@ -57,7 +57,7 @@ impl ExpireSnapshotsAction {
     /// This is primarily useful to share one command timestamp across several
     /// independently materialized transaction attempts.  The value is a Unix
     /// epoch timestamp in milliseconds.
-    pub fn as_of_ms(mut self, as_of_ms: i64) -> Self {
+    pub fn with_as_of_ms(mut self, as_of_ms: i64) -> Self {
         self.as_of_ms = as_of_ms;
         self
     }
@@ -108,7 +108,7 @@ impl ExpireSnapshotsAction {
         let now = self.as_of_ms;
         let default_cutoff = self.older_than_ms.map_or_else(
             || Self::age_cutoff(now, properties.max_snapshot_age_ms),
-            |value| Ok(value),
+            Ok,
         )?;
         let default_min_to_keep =
             self.retain_last.unwrap_or(properties.min_snapshots_to_keep);

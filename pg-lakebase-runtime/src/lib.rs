@@ -1,4 +1,5 @@
 use pg_lakebase_core::maintenance::{MaintenanceItemId, MaintenanceQueue};
+use pgrx::PgRelation;
 use pgrx::datum::{Internal, Uuid};
 use pgrx::prelude::*;
 use runtime::RUNTIME_STATE;
@@ -46,7 +47,7 @@ mod lakebase {
     #[pg_extern]
     #[allow(clippy::type_complexity)]
     fn table_maintenance_stats(
-        relation: pg_sys::Oid,
+        relation: PgRelation,
     ) -> TableIterator<
         'static,
         (
@@ -63,20 +64,23 @@ mod lakebase {
             name!(retained_data_bytes, i64),
         ),
     > {
-        use pg_lakebase_core::diag::ReportableError;
+        use pg_lakebase_core::diag::{PgReportError, ReportableError};
         let relation = pg_lakebase_core::handles::RelationGuard::open(
-            relation,
+            relation.oid(),
             pg_sys::AccessShareLock as _,
         )
+        .map_err(PgReportError::from_domain_error)
         .report_unwrap();
         let stats =
             pg_lakebase_core::table_maintenance::TableMaintenanceRouter::inspect(
                 &relation.as_handle(),
             )
+            .map_err(PgReportError::from_domain_error)
             .report_unwrap();
         let sql_i64 = |value: u64, metric: &'static str| {
             i64::try_from(value).unwrap_or_else(|_| {
-                pg_lakebase_core::table_maintenance::TableMaintenanceError::framework(
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
                     format!("{metric} exceeds PostgreSQL bigint"),
                 )
                 .report()
@@ -109,7 +113,7 @@ mod lakebase {
         namespace: &str,
         prefix: &str,
     ) -> TableIterator<'static, (name!(objects, i64), name!(bytes, i64))> {
-        use pg_lakebase_core::diag::{PgReportError, ReportableError};
+        use pg_lakebase_core::diag::PgReportError;
         let stats = pg_lakebase_core::maintenance::ObjectTreeObserver::connect(
             std::time::Duration::from_secs(5),
         )

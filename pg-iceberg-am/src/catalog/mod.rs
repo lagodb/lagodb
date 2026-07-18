@@ -6,6 +6,7 @@ pub(crate) mod row_mutations;
 pub(crate) mod schema_evolution;
 pub(crate) mod table_drop;
 pub mod table_lifecycle;
+pub(crate) mod table_properties;
 
 // `schema_builder` is intentionally crate-private: PostgreSQL → Iceberg type
 // conversion has exactly one supported entry point, [`schema_builder::tuple_desc_to_schema`].

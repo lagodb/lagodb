@@ -14,9 +14,6 @@ SELECT endpoint AS lakebase_regress_endpoint,
 FROM lakebase_regress.object_storage_fixture
 \gset
 
-\! mkdir -p /tmp/iceberg_regress_object
-\! rm -rf /tmp/iceberg_regress_object/*
-
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
@@ -24,6 +21,9 @@ DROP TABLE IF EXISTS maintenance_remote_drop;
 DROP TABLE IF EXISTS maintenance_remote_rollback;
 DROP TABLESPACE IF EXISTS regress_object;
 RESET client_min_messages;
+
+\! mkdir -p /tmp/iceberg_regress_object
+\! rm -rf /tmp/iceberg_regress_object/*
 
 CREATE TABLESPACE regress_object
 LOCATION '/tmp/iceberg_regress_object'
@@ -57,17 +57,19 @@ SELECT 'regress_object' AS store_id,
 \setenv LAKEBASE_REGRESS_STORE_ID :store_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
-SELECT NOT iceberg.object_tree_is_empty(
+SELECT objects > 0 AS tree_exists_before_drop
+FROM lakebase.observe_object_tree(
     :'store_id', :'object_namespace', :'object_path'
-) AS tree_exists_before_drop;
+);
 
 DROP TABLE maintenance_remote_drop;
 
 \! bin/wait_for_maintenance_item 30
 
-SELECT iceberg.object_tree_is_empty(
+SELECT objects = 0 AS tree_empty_after_drop
+FROM lakebase.observe_object_tree(
     :'store_id', :'object_namespace', :'object_path'
-) AS tree_empty_after_drop;
+);
 SELECT count(*) AS relation_gone
 FROM pg_class WHERE relname = 'maintenance_remote_drop';
 SELECT state AS maintenance_worker_state
@@ -99,9 +101,10 @@ DROP TABLE maintenance_remote_rollback;
 
 \! bin/wait_for_maintenance_item 30
 
-SELECT iceberg.object_tree_is_empty(
+SELECT objects = 0 AS rollback_tree_empty_after_cleanup
+FROM lakebase.observe_object_tree(
     :'store_id', :'object_namespace', :'object_path'
-) AS rollback_tree_empty_after_cleanup;
+);
 
 DROP TABLESPACE regress_object;
 \! rm -rf /tmp/iceberg_regress_object/*

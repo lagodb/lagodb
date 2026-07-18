@@ -13,7 +13,7 @@ pub use schema::{
 };
 pub use table::{
     AmCache, AmCacheRef, AmCacheString, AmCacheValue, AmCacheValueBuilder,
-    AmCacheable, TableOptionError, TableOptions,
+    AmCacheable, TableOptionAlterations, TableOptionError, TableOptions,
 };
 pub use tablespace::{
     CachedTablespaceOpts, TablespaceCacheError, TablespaceError, TablespaceOptions,

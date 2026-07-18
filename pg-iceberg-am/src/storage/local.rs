@@ -41,11 +41,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pgrx::pg_sys;
 
+use crate::wal::log_write_file;
 use iceberg_lite::Result;
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
-use pg_lakebase_core::diag;
-
-use crate::wal::log_write_file;
 
 /// Local file storage implementation using PostgreSQL's VFD system.
 ///
@@ -579,10 +577,9 @@ impl Write for PgFileWrite {
 
             // Injection point for WAL/recovery testing.
             if crate::gucs::injection_point_matches("panic_after_wal_write") {
-                diag::report_panic(
-                    pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                return Err(io::Error::other(
                     "iceberg: injection point panic_after_wal_write triggered",
-                );
+                ));
             }
         }
 

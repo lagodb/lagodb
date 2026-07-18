@@ -1,6 +1,7 @@
 use crate::catalog::metadata_table::IcebergMetadata;
 use crate::catalog::schema_evolution::SchemaEvolutionUpdate;
 use crate::catalog::table_lifecycle::IcebergTableLifecycle;
+use crate::catalog::table_properties::PreparedTablePropertyUpdate;
 use crate::catalog::{IcebergAccessMethod, IcebergRelationExt};
 use crate::hooks::column_drop_guard::ControlledColumnDrops;
 use crate::options::{ICEBERG_TABLE_OPTIONS, ResolvedIcebergOptions};
@@ -14,7 +15,7 @@ use pg_lakebase_core::hooks::{
     CreateTableAsStmtNode, HookError, PostUtilityContext, RenameStmtNode,
     UtilityHook, UtilityHookError, UtilityNode, register_utility_hook,
 };
-use pg_lakebase_core::options::TableOptions;
+use pg_lakebase_core::options::{TableOptionAlterations, TableOptions};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use std::ffi::CStr;
@@ -31,6 +32,7 @@ struct AlterTableIcebergOperations {
     sets_access_method: bool,
     sets_access_method_to_iceberg: bool,
     sets_tablespace: bool,
+    alters_table_options: bool,
     schema_update: SchemaEvolutionUpdate,
     unsupported_schema_operation: Option<String>,
     required_lockmode: pg_sys::LOCKMODE,
@@ -318,6 +320,17 @@ impl AlterTableIcebergOperations {
         }
 
         let mut schema_plan = AlterTableSchemaPlan::default();
+        result.alters_table_options = unsafe {
+            TableOptionAlterations::commands_contain_options(
+                cmds,
+                ICEBERG_TABLE_OPTIONS,
+            )
+        };
+        if result.alters_table_options {
+            // PostgreSQL cannot infer a lock level for AM-owned option names.
+            // Serialize catalog replacement and rd_amcache invalidation.
+            result.require_lock(pg_sys::AccessExclusiveLock as _);
+        }
         let len = unsafe { pg_sys::list_length(cmds) };
         for idx in 0..len {
             let cmd = unsafe {
@@ -452,6 +465,7 @@ impl AlterTableIcebergOperations {
     fn has_guarded_operation(&self) -> bool {
         self.sets_access_method
             || self.sets_tablespace
+            || self.alters_table_options
             || !self.schema_update.is_empty()
             || self.unsupported_schema_operation.is_some()
     }
@@ -725,7 +739,7 @@ impl UtilityHook for IcebergAlterTableGuard {
 
     fn on_pre(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
         let stmt = context
-            .cast::<AlterTableStmtNode>()
+            .cast_mut::<AlterTableStmtNode>()
             .expect("Hook registered for T_AlterTableStmt");
 
         if stmt.objtype != pg_sys::ObjectType::OBJECT_TABLE
@@ -785,6 +799,24 @@ impl UtilityHook for IcebergAlterTableGuard {
                     target.controlled_column_drop_keys(&ops.schema_update)?,
                 );
             }
+            if ops.alters_table_options {
+                if rel.relkind() as u8 == pg_sys::RELKIND_PARTITIONED_TABLE {
+                    return Err(HookError::with_code(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "ALTER TABLE options on partitioned Iceberg roots are not supported",
+                    ));
+                }
+                let alterations = unsafe {
+                    TableOptionAlterations::extract_from_commands(
+                        stmt.cmds,
+                        ICEBERG_TABLE_OPTIONS,
+                    )?
+                };
+                let options =
+                    alterations.apply_to(TableOptions::load_from_catalog(oid)?);
+                ResolvedIcebergOptions::from_table_options(Some(&options))?;
+                options.replace_in_catalog(oid)?;
+            }
         }
 
         Ok(())
@@ -803,7 +835,7 @@ impl UtilityHook for IcebergAlterTableGuard {
         }
 
         let ops = AlterTableIcebergOperations::from_command_list(stmt.cmds);
-        if ops.schema_update.is_empty() {
+        if ops.schema_update.is_empty() && !ops.alters_table_options {
             return Ok(());
         }
 
@@ -820,6 +852,16 @@ impl UtilityHook for IcebergAlterTableGuard {
 
         let guard = RelationGuard::open(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         let rel = guard.as_handle();
+        if ops.alters_table_options {
+            let options = TableOptions::load_from_catalog(oid)?;
+            let resolved =
+                ResolvedIcebergOptions::from_table_options(options.as_ref())?;
+            PreparedTablePropertyUpdate::from_options(resolved)
+                .stage_for_relation(&rel)?;
+        }
+        if ops.schema_update.is_empty() {
+            return Ok(());
+        }
         let Some(target) =
             SchemaEvolutionTarget::resolve(&rel, pg_sys::NoLock as pg_sys::LOCKMODE)?
         else {

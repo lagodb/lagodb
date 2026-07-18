@@ -224,6 +224,54 @@ pub unsafe fn extract_options(
     Ok(custom_opts)
 }
 
+/// Extract and remove recognized option names from a `RESET (...)` list.
+///
+/// Unlike [`extract_and_remove_options`], RESET entries carry no value, so
+/// this path validates only membership and duplicate names.
+///
+/// # Safety
+///
+/// The safety requirements are identical to [`extract_and_remove_options`].
+pub unsafe fn extract_and_remove_option_names(
+    options_list_ptr: *mut *mut pg_sys::List,
+    valid_options: &[OptionDef],
+) -> Result<Vec<String>, OptionSchemaError> {
+    let mut custom_names = Vec::new();
+    let mut new_pg_opts: *mut pg_sys::List = std::ptr::null_mut();
+
+    if unsafe { (*options_list_ptr).is_null() } {
+        return Ok(custom_names);
+    }
+
+    let (cell, length) = unsafe {
+        let list = *options_list_ptr;
+        ((*list).elements, (*list).length)
+    };
+
+    for i in 0..length {
+        let def_elem_ptr =
+            unsafe { (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem };
+        let def_name =
+            unsafe { CStr::from_ptr((*def_elem_ptr).defname) }.to_string_lossy();
+
+        if valid_options.iter().any(|option| option.name == def_name) {
+            if custom_names.iter().any(|name| name == def_name.as_ref()) {
+                return Err(OptionSchemaError::Duplicate {
+                    option: def_name.into_owned(),
+                });
+            }
+            custom_names.push(def_name.into_owned());
+        } else {
+            new_pg_opts = unsafe {
+                pg_sys::lappend(new_pg_opts, def_elem_ptr as *mut std::ffi::c_void)
+            };
+        }
+    }
+
+    unsafe { *options_list_ptr = new_pg_opts };
+    Ok(custom_names)
+}
+
 fn validate_option_value(
     def: &OptionDef,
     option: &str,

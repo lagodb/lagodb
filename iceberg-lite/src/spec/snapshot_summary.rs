@@ -343,17 +343,6 @@ pub(crate) fn update_snapshot_summaries(
     previous_summary: Option<&Summary>,
     truncate_full_table: bool,
 ) -> Result<Summary> {
-    // Validate that the operation is supported
-    if summary.operation != Operation::Append
-        && summary.operation != Operation::Overwrite
-        && summary.operation != Operation::Delete
-    {
-        return Err(Error::new(
-            ErrorKind::DataInvalid,
-            "Operation is not supported.",
-        ));
-    }
-
     let mut summary = match previous_summary {
         Some(prev_summary)
             if truncate_full_table
@@ -547,7 +536,17 @@ fn update_totals(
                     .expect("must be parsable as it was just serialized")
             });
 
-    let new_total = previous_total + added - removed;
+    let Some(new_total) = previous_total
+        .checked_add(added)
+        .and_then(|value| value.checked_sub(removed))
+    else {
+        tracing::warn!(
+            "Snapshot summary total '{total_property}' cannot be updated from \
+             previous={previous_total}, added={added}, removed={removed}. \
+             Skipping total computation.",
+        );
+        return;
+    };
     summary
         .additional_properties
         .insert(total_property.to_string(), new_total.to_string());

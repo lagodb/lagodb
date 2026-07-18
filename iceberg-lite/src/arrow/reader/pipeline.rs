@@ -529,8 +529,8 @@ impl ArrowReader {
                 .filter(|&&id| {
                     !is_metadata_field(id)
                         || (id == RESERVED_FIELD_ID_POS && needs_row_number_column)
-                        || (*id == RESERVED_FIELD_ID_ROW_ID && stored_row_id)
-                        || (*id == RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER
+                        || (id == RESERVED_FIELD_ID_ROW_ID && stored_row_id)
+                        || (id == RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER
                             && stored_last_updated)
                 })
                 .copied()

@@ -18,6 +18,12 @@ const PERCENT_SCALE: u64 = 100;
 const DELETE_RATIO_PERCENT: u64 = 30;
 const MIN_INPUT_FILES: usize = 5;
 
+struct RewriteCandidate {
+    file: DataFile,
+    task: FileScanTask,
+    delete_heavy: bool,
+}
+
 pub(crate) struct VacuumPlanner;
 
 impl VacuumPlanner {
@@ -29,15 +35,17 @@ impl VacuumPlanner {
         })
     }
 
-    fn materialized_deletion_vectors(
-        groups: &[RewriteGroup],
-    ) -> Vec<DeleteFileIdentity> {
+    fn materialized_delete_files(groups: &[RewriteGroup]) -> Vec<DeleteFileIdentity> {
         let mut identities = HashSet::new();
         for input in groups.iter().flat_map(|group| &group.inputs) {
             for delete in &input.task.deletes {
-                if delete.is_deletion_vector()
-                    && delete.referenced_data_file_path()
-                        == Some(input.file.file_path())
+                // A delete file with an exact referenced data-file path is
+                // file-scoped. Rewriting that input materializes the delete
+                // into the replacement rows, so retaining the delete entry
+                // would leave an unreachable content file live in the current
+                // snapshot. Deletes without an exact reference may still
+                // apply to unselected inputs and must remain.
+                if delete.referenced_data_file_path() == Some(input.file.file_path())
                 {
                     identities.insert(DeleteFileIdentity::new(
                         delete.file_path.clone(),
@@ -161,7 +169,11 @@ impl VacuumPlanner {
             let oversized = u128::from(size) * u128::from(PERCENT_SCALE)
                 > u128::from(target_bytes) * u128::from(OVERSIZED_PERCENT);
             if undersized || oversized || delete_heavy {
-                candidates.push((file, task, delete_heavy));
+                candidates.push(RewriteCandidate {
+                    file,
+                    task,
+                    delete_heavy,
+                });
             }
         }
 
@@ -169,8 +181,8 @@ impl VacuumPlanner {
             Self::count(candidates.len(), "eligible file count")?;
         metrics.eligible_bytes = candidates
             .iter()
-            .try_fold(0_u64, |total, (file, _, _)| {
-                total.checked_add(file.file_size_in_bytes())
+            .try_fold(0_u64, |total, candidate| {
+                total.checked_add(candidate.file.file_size_in_bytes())
             })
             .ok_or_else(|| IcebergError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
@@ -218,8 +230,7 @@ impl VacuumPlanner {
                 })
         })?;
 
-        let materialized_delete_identities =
-            Self::materialized_deletion_vectors(&groups);
+        let materialized_delete_identities = Self::materialized_delete_files(&groups);
         Ok(VacuumPlan {
             policy,
             starting_snapshot_id: Some(snapshot.snapshot_id()),
@@ -316,24 +327,25 @@ impl VacuumPlanner {
     }
 
     fn bin_pack(
-        mut candidates: Vec<(DataFile, FileScanTask, bool)>,
+        mut candidates: Vec<RewriteCandidate>,
         target_bytes: u64,
         policy: VacuumPolicy,
     ) -> IcebergResult<Vec<RewriteGroup>> {
-        candidates.sort_by(|(left, _, _), (right, _, _)| {
+        candidates.sort_by(|left, right| {
             right
+                .file
                 .file_size_in_bytes()
-                .cmp(&left.file_size_in_bytes())
-                .then_with(|| left.file_path().cmp(right.file_path()))
+                .cmp(&left.file.file_size_in_bytes())
+                .then_with(|| left.file.file_path().cmp(right.file.file_path()))
         });
         let mut partitions: HashMap<
             (i32, iceberg_lite::spec::Struct),
-            Vec<(DataFile, FileScanTask, bool)>,
+            Vec<RewriteCandidate>,
         > = HashMap::new();
         for candidate in candidates {
-            let file = &candidate.0;
+            let file = &candidate.file;
             partitions
-                .entry((file.partition_spec_id, file.partition().clone()))
+                .entry((file.partition_spec_id(), file.partition().clone()))
                 .or_default()
                 .push(candidate);
         }
@@ -347,7 +359,12 @@ impl VacuumPlanner {
             })?;
         for (_, files) in partitions {
             let mut bins: Vec<RewriteGroup> = Vec::new();
-            for (file, task, delete_heavy) in files {
+            for candidate in files {
+                let RewriteCandidate {
+                    file,
+                    task,
+                    delete_heavy,
+                } = candidate;
                 let file_bytes = file.file_size_in_bytes();
                 if file_bytes > policy.budget.max_group_bytes {
                     return Err(IcebergError::Vacuum {
@@ -404,11 +421,10 @@ impl VacuumPlanner {
                         > u128::from(target_bytes) * u128::from(OVERSIZED_PERCENT)
                 });
                 group.expected_file_reduction =
-                    input_count.checked_sub(expected_outputs).unwrap_or(0);
-                if (group.inputs.len() >= MIN_INPUT_FILES
-                    || repairs_oversize
-                    || group.delete_heavy)
-                    && (reduces_files || repairs_oversize || group.delete_heavy)
+                    input_count.saturating_sub(expected_outputs);
+                if repairs_oversize
+                    || group.delete_heavy
+                    || (group.inputs.len() >= MIN_INPUT_FILES && reduces_files)
                 {
                     accepted.push(group);
                 }

@@ -39,6 +39,7 @@ use pgrx::prelude::PgSqlErrorCode;
 use crate::catalog::bridge::{IcebergTableId, StagedCatalog};
 use crate::catalog::metadata_table::{CasUpdate, IcebergMetadata};
 use crate::catalog::row_mutations::RelationRowRegistry;
+use crate::catalog::table_properties::PreparedTablePropertyUpdate;
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
 use crate::maintenance::PreparedVacuum;
@@ -95,6 +96,39 @@ struct TableCommitInput {
     file_io: FileIO,
 }
 
+/// Owns the active snapshot required by catalog access during a transaction
+/// pre-commit callback.
+///
+/// Ordinary executor paths often still have an active snapshot when the
+/// callback runs, but PostgreSQL's VACUUM transaction loop explicitly pops
+/// its snapshot before `CommitTransactionCommand`. Metadata materialization
+/// must not depend on which command initiated the commit.
+struct PreCommitSnapshot {
+    pushed: bool,
+}
+
+impl PreCommitSnapshot {
+    fn ensure() -> Self {
+        let pushed = unsafe {
+            if pg_sys::ActiveSnapshotSet() {
+                false
+            } else {
+                pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+                true
+            }
+        };
+        Self { pushed }
+    }
+}
+
+impl Drop for PreCommitSnapshot {
+    fn drop(&mut self) {
+        if self.pushed {
+            unsafe { pg_sys::PopActiveSnapshot() };
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct TxTableActionLog {
     actions: Vec<TxTableAction>,
@@ -113,6 +147,7 @@ struct TxTableActionLogMarker {
 #[derive(Debug, Clone)]
 enum TxTableAction {
     Schema(PreparedSchemaUpdate),
+    Properties(PreparedTablePropertyUpdate),
     Data(TxDataEpoch),
     Truncate(TxTruncateAction),
     Vacuum(Box<PreparedVacuum>),
@@ -139,6 +174,7 @@ struct TxTableCommitPlan<'a> {
 
 enum EffectiveCommitAction<'a> {
     Schema(&'a PreparedSchemaUpdate),
+    Properties(&'a PreparedTablePropertyUpdate),
     Data {
         epoch: &'a TxDataEpoch,
         truncate_base: bool,
@@ -186,6 +222,7 @@ impl TxTableActionLog {
             .find_map(|(index, action)| match action {
                 TxTableAction::Truncate(truncate) => Some((index, truncate)),
                 TxTableAction::Schema(_)
+                | TxTableAction::Properties(_)
                 | TxTableAction::Data(_)
                 | TxTableAction::Vacuum(_)
                 | TxTableAction::Drop => None,
@@ -218,6 +255,9 @@ impl TxTableActionLog {
             match action {
                 TxTableAction::Schema(update) => {
                     effective_actions.push(EffectiveCommitAction::Schema(update));
+                }
+                TxTableAction::Properties(update) => {
+                    effective_actions.push(EffectiveCommitAction::Properties(update));
                 }
                 TxTableAction::Data(epoch) => {
                     if let Some(truncate_index) = last_truncate_index {
@@ -297,6 +337,7 @@ impl TxTableActionLog {
     fn is_empty(&self) -> bool {
         self.actions.iter().all(|action| match action {
             TxTableAction::Schema(update) => update.is_empty(),
+            TxTableAction::Properties(_) => false,
             TxTableAction::Data(epoch) => epoch.is_empty(),
             TxTableAction::Truncate(_) => false,
             TxTableAction::Vacuum(_) => false,
@@ -308,6 +349,10 @@ impl TxTableActionLog {
         if !update.is_empty() {
             self.actions.push(TxTableAction::Schema(update));
         }
+    }
+
+    fn stage_properties(&mut self, update: PreparedTablePropertyUpdate) {
+        self.actions.push(TxTableAction::Properties(update));
     }
 
     fn stage_vacuum(&mut self, vacuum: PreparedVacuum) -> IcebergResult<()> {
@@ -401,13 +446,22 @@ impl TxTableActionLog {
         mut metadata: TableMetadata,
     ) -> IcebergResult<TableMetadata> {
         for action in &self.actions {
-            if let TxTableAction::Schema(update) = action {
-                update
-                    .validate_base_metadata(&metadata)
-                    .map_err(IcebergError::schema_evolution_conflict)?;
-                metadata = update
-                    .apply_to_metadata(&metadata)
-                    .map_err(IcebergError::from)?;
+            match action {
+                TxTableAction::Schema(update) => {
+                    update
+                        .validate_base_metadata(&metadata)
+                        .map_err(IcebergError::schema_evolution_conflict)?;
+                    metadata = update
+                        .apply_to_metadata(&metadata)
+                        .map_err(IcebergError::from)?;
+                }
+                TxTableAction::Properties(update) => {
+                    metadata = update.apply_to_metadata(&metadata)?;
+                }
+                TxTableAction::Data(_)
+                | TxTableAction::Truncate(_)
+                | TxTableAction::Vacuum(_)
+                | TxTableAction::Drop => {}
             }
         }
         Ok(metadata)
@@ -432,7 +486,9 @@ impl TxTableActionLog {
                 }
                 TxTableAction::Drop => return Ok(None),
                 TxTableAction::Vacuum(_) => return Ok(None),
-                TxTableAction::Schema(_) | TxTableAction::Data(_) => {}
+                TxTableAction::Schema(_)
+                | TxTableAction::Properties(_)
+                | TxTableAction::Data(_) => {}
             }
         }
         let delta = has_delta.then(|| Arc::new(combined));
@@ -524,6 +580,17 @@ impl TableState {
         self.record_history(nest_level);
         Rc::make_mut(&mut self.actions).stage_schema(update);
         Ok(())
+    }
+
+    fn record_table_property_update(
+        &mut self,
+        nest_level: i32,
+        update: PreparedTablePropertyUpdate,
+    ) -> IcebergResult<()> {
+        self.record_action_mutation(nest_level, |actions| {
+            actions.stage_properties(update);
+            Ok(())
+        })
     }
 
     fn record_data_files(
@@ -976,6 +1043,18 @@ impl TxMetadata {
         })
     }
 
+    /// DDL path: stage a fully resolved Iceberg table-property replacement.
+    pub(crate) fn stage_table_property_update(
+        &self,
+        relid: pg_sys::Oid,
+        update: PreparedTablePropertyUpdate,
+        file_io: &FileIO,
+    ) -> IcebergResult<()> {
+        self.stage_table_mutation(relid, file_io, |state, nest_level| {
+            state.record_table_property_update(nest_level, update)
+        })
+    }
+
     /// Stage one aggregate VACUUM action. It is intentionally exclusive with
     /// DML, schema evolution, TRUNCATE, and DROP for this relation.
     pub(crate) fn stage_vacuum(
@@ -1215,6 +1294,7 @@ impl TransactionResource for TxMetadata {
     fn set_nest_level(&self, _level: i32) {}
 
     fn on_pre_commit(&self) -> TransactionResult<()> {
+        let _snapshot = PreCommitSnapshot::ensure();
         self.commit_all()?;
         Ok(())
     }

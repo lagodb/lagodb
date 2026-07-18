@@ -225,7 +225,9 @@ impl IcebergReachabilityPlanner {
         older_than_ms: i64,
     ) -> IcebergResult<HashSet<String>> {
         let storage = table.file_io().storage();
-        if let Some(local) = storage.as_any().downcast_ref::<LocalStorage>() {
+        let candidates = if let Some(local) =
+            storage.as_any().downcast_ref::<LocalStorage>()
+        {
             local.list_older_than(table.metadata().location(), older_than_ms)?
         } else if let Some(object) = storage.as_any().downcast_ref::<ObjectStorage>()
         {
@@ -234,7 +236,8 @@ impl IcebergReachabilityPlanner {
             return Err(crate::error::IcebergError::InvariantViolated(
                 "orphan cleanup requires a known local or object storage backend",
             ));
-        }
+        };
+        Ok(candidates)
     }
 
     fn validate_owned_candidates<'a>(

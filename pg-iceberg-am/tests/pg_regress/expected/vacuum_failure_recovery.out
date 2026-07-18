@@ -37,7 +37,7 @@ SELECT current_data_objects = 6 AS failed_attempt_not_published
 FROM lakebase.table_maintenance_stats('vacuum_failure_recovery_t');
  failed_attempt_not_published 
 ------------------------------
-t
+ t
 (1 row)
 
 SELECT count(*) = :objects_before_failure::bigint

@@ -145,18 +145,17 @@ impl From<TableMaintenanceReport> for MaintenanceReportV1 {
 
 impl From<MaintenanceReportV1> for TableMaintenanceReport {
     fn from(report: MaintenanceReportV1) -> Self {
-        Self {
-            groups_rewritten: report.groups_rewritten,
-            input_objects: report.input_objects,
-            input_bytes: report.input_bytes,
-            output_objects: report.output_objects,
-            output_bytes: report.output_bytes,
-            snapshots_expired: report.snapshots_expired,
-            manifests_rewritten: report.manifests_rewritten,
-            objects_scheduled_for_deletion: report.objects_scheduled_for_deletion,
-            cas_retries: report.cas_retries,
-            ..TableMaintenanceReport::default()
-        }
+        let mut result = Self::default();
+        result.groups_rewritten = report.groups_rewritten;
+        result.input_objects = report.input_objects;
+        result.input_bytes = report.input_bytes;
+        result.output_objects = report.output_objects;
+        result.output_bytes = report.output_bytes;
+        result.snapshots_expired = report.snapshots_expired;
+        result.manifests_rewritten = report.manifests_rewritten;
+        result.objects_scheduled_for_deletion = report.objects_scheduled_for_deletion;
+        result.cas_retries = report.cas_retries;
+        result
     }
 }
 
@@ -267,6 +266,13 @@ unsafe extern "C" {
     fn find_rendezvous_variable(name: *const c_char) -> *mut *mut c_void;
 }
 
+/// Return the PostgreSQL rendezvous slot owned by the runtime extension.
+///
+/// # Safety
+///
+/// PostgreSQL must be initialized in the current backend process. The returned
+/// slot is backend-lifetime memory; callers must validate any published pointer
+/// and ABI version before dereferencing it.
 pub unsafe fn rendezvous_slot() -> *mut *mut c_void {
     unsafe { find_rendezvous_variable(RUNTIME_API_RENDEZVOUS.as_ptr()) }
 }

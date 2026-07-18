@@ -94,12 +94,12 @@ impl RewriteGroupWriter {
         })?;
         let spec = table
             .metadata()
-            .partition_spec_by_id(first.file.partition_spec_id)
+            .partition_spec_by_id(first.file.partition_spec_id())
             .cloned()
             .ok_or_else(|| IcebergError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(format!(
                     "partition spec {} no longer exists",
-                    first.file.partition_spec_id
+                    first.file.partition_spec_id()
                 )),
             })?;
         let partition_key = (!spec.is_unpartitioned()).then(|| {

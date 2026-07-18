@@ -7,7 +7,7 @@ mod types;
 mod worker;
 mod writer;
 
-pub(crate) use types::{PreparedVacuum, VacuumPolicy, record_metric};
+pub(crate) use types::{PreparedVacuum, record_metric};
 
 pub(crate) use cleanup::VacuumCleanup;
 pub(crate) use commit_attempt::{
