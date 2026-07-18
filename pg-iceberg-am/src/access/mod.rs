@@ -1,3 +1,4 @@
+pub mod analyze;
 pub mod column_mapping;
 pub mod ddl;
 pub mod index;

@@ -1,9 +1,7 @@
 //! Tablespace catalog option definitions.
 
 use super::storage::StorageProtocol;
-use crate::options::schema::{
-    self, OptionDef, OptionKind, OptionMutability,
-};
+use crate::options::schema::{self, OptionDef, OptionKind, OptionMutability};
 use pgrx::pg_sys;
 
 pub(crate) const OPT_PROTOCOL: &str = "protocol";

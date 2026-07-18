@@ -58,9 +58,9 @@ static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
 /// It is a worst-case guard, not a model correction: it only bites when the
 /// selectivity is implausibly small. Raise it to be more conservative about
 /// selecting CustomScan on weak statistics; lower it toward `0.0` to trust
-/// the raw selectivity. Once ANALYZE is implemented for Iceberg tables the
-/// selectivity quality improves and this floor will rarely trigger, but it
-/// remains a cheap insurance.
+/// the raw selectivity. ANALYZE improves selectivity quality for Iceberg
+/// tables, so this floor should rarely trigger after statistics are present,
+/// but it remains cheap insurance for stale or weak statistics.
 static MIN_SCAN_FRACTION: GucSetting<f64> = GucSetting::<f64>::new(0.02);
 
 pub fn init() {

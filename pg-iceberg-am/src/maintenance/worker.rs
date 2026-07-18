@@ -109,10 +109,7 @@ impl SchedulerPolicy {
         failures: u32,
         attempted_at: pg_sys::TimestampTz,
     ) -> pg_sys::TimestampTz {
-        Self::timestamp_after(
-            attempted_at,
-            self.failure_delay(relid, failures),
-        )
+        Self::timestamp_after(attempted_at, self.failure_delay(relid, failures))
     }
 
     fn timestamp_after(
@@ -133,12 +130,7 @@ fn record_success(
     let attempted_at = unsafe { pg_sys::GetCurrentTimestamp() };
     let next_attempt_at = policy.relation_next_attempt_at(relid, attempted_at);
     let catalog = AutomaticMaintenanceCatalog::open()?;
-    catalog.record_success(
-        relid,
-        outcome,
-        attempted_at,
-        next_attempt_at,
-    )
+    catalog.record_success(relid, outcome, attempted_at, next_attempt_at)
 }
 
 fn record_failure(
@@ -152,13 +144,7 @@ fn record_failure(
     let attempted_at = unsafe { pg_sys::GetCurrentTimestamp() };
     let next_attempt_at =
         policy.failure_next_attempt_at(relid, failures, attempted_at);
-    catalog.record_failure(
-        relid,
-        failures,
-        error,
-        attempted_at,
-        next_attempt_at,
-    )
+    catalog.record_failure(relid, failures, error, attempted_at, next_attempt_at)
 }
 
 fn maintain_relation(

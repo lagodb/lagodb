@@ -42,6 +42,7 @@ use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
+use crate::access::analyze::AnalyzePreparation;
 use crate::access::column_mapping::{RelationShape, ScanColumns};
 use crate::access::isolation::PgTransactionIsolation;
 use crate::access::mutation::{IcebergFileSource, IcebergModifyQueryState};
@@ -135,11 +136,27 @@ pub(crate) struct ScanSpec {
     row_filter: Option<Predicate>,
     /// Transaction-local Iceberg file delta captured for this statement.
     delta: Option<Arc<SnapshotDelta>>,
+    /// Storage bytes used by PostgreSQL to define this scan's virtual block
+    /// population. Captured with the same metadata snapshot as the file tasks.
+    storage_bytes: Option<u64>,
     /// Stable planned tasks for ordinary query projection.
     query_tasks: Option<Arc<PlannedScanTasks>>,
     /// Stable planned tasks for mutation projection, including row-location
     /// metadata and a path index used by v3 deletion-vector finalization.
     mutation_tasks: Option<Arc<PlannedScanTasks>>,
+}
+
+#[derive(Clone, Copy)]
+enum ScanMetadataPurpose {
+    Query,
+    Analyze,
+}
+
+struct LoadedScanMetadata {
+    table: Table,
+    schema: Arc<IcebergSchema>,
+    delta: Option<Arc<SnapshotDelta>>,
+    storage_bytes: Option<u64>,
 }
 
 impl ScanSpec {
@@ -165,6 +182,21 @@ impl ScanSpec {
         Ok(spec)
     }
 
+    fn build_for_analyze(
+        rel_oid: pg_sys::Oid,
+        spc_oid: pg_sys::Oid,
+        shape: &RelationShape,
+    ) -> IcebergResult<Self> {
+        Self::build_with_predicates_for(
+            rel_oid,
+            spc_oid,
+            None,
+            None,
+            shape,
+            ScanMetadataPurpose::Analyze,
+        )
+    }
+
     pub(crate) fn build_with_predicates(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
@@ -172,14 +204,33 @@ impl ScanSpec {
         row_filter: Option<Predicate>,
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
-        let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
-        let plan = ScanColumns::new(schema, shape)?;
+        Self::build_with_predicates_for(
+            rel_oid,
+            spc_oid,
+            planning_filter,
+            row_filter,
+            shape,
+            ScanMetadataPurpose::Query,
+        )
+    }
+
+    fn build_with_predicates_for(
+        rel_oid: pg_sys::Oid,
+        spc_oid: pg_sys::Oid,
+        planning_filter: Option<Predicate>,
+        row_filter: Option<Predicate>,
+        shape: &RelationShape,
+        purpose: ScanMetadataPurpose,
+    ) -> IcebergResult<Self> {
+        let loaded = Self::load_table(rel_oid, spc_oid, purpose)?;
+        let plan = ScanColumns::new(loaded.schema, shape)?;
         Ok(Self {
-            table: Arc::new(table),
+            table: Arc::new(loaded.table),
             plan,
             planning_filter,
             row_filter,
-            delta,
+            delta: loaded.delta,
+            storage_bytes: loaded.storage_bytes,
             query_tasks: None,
             mutation_tasks: None,
         })
@@ -202,20 +253,21 @@ impl ScanSpec {
         shape: &RelationShape,
         scan_attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
-        let (table, schema, delta) = Self::load_table(rel_oid, spc_oid)?;
+        let loaded = Self::load_table(rel_oid, spc_oid, ScanMetadataPurpose::Query)?;
         let plan = ScanColumns::with_projection(
-            schema,
+            loaded.schema,
             shape,
             &projection,
             scan_attr_types.len(),
             scan_attr_types,
         )?;
         Ok(Self {
-            table: Arc::new(table),
+            table: Arc::new(loaded.table),
             plan,
             planning_filter,
             row_filter,
-            delta,
+            delta: loaded.delta,
+            storage_bytes: loaded.storage_bytes,
             query_tasks: None,
             mutation_tasks: None,
         })
@@ -227,7 +279,8 @@ impl ScanSpec {
     fn load_table(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
-    ) -> IcebergResult<(Table, Arc<IcebergSchema>, Option<Arc<SnapshotDelta>>)> {
+        purpose: ScanMetadataPurpose,
+    ) -> IcebergResult<LoadedScanMetadata> {
         // Validate the transaction mode on every execution-side scan entry.
         // Serializable currently retains statement-level metadata visibility
         // and strengthens Iceberg row-level write validation; see
@@ -238,6 +291,12 @@ impl ScanSpec {
         let loaded =
             TxMetadata::current().current_table_metadata(rel_oid, ctx.file_io())?;
         let schema = loaded.metadata.current_schema().clone();
+        let storage_bytes = match purpose {
+            ScanMetadataPurpose::Query => None,
+            ScanMetadataPurpose::Analyze => {
+                Some(loaded.relation_stats(ctx.file_io())?.1)
+            }
+        };
 
         let table = Table::builder()
             .file_io(ctx.file_io().clone())
@@ -246,7 +305,12 @@ impl ScanSpec {
             .identifier(IcebergTableId::for_relation(rel_oid).into_table_ident())
             .build()?;
 
-        Ok((table, schema, loaded.delta))
+        Ok(LoadedScanMetadata {
+            table,
+            schema,
+            delta: loaded.delta,
+            storage_bytes,
+        })
     }
 
     /// Replace both the planning and row predicates. Used by the TableAM
@@ -342,6 +406,21 @@ impl ScanSpec {
         Ok(IcebergBatchCursor::new(source, decoder, None))
     }
 
+    /// Plan the whole logical snapshot for PostgreSQL ANALYZE. Sampling is
+    /// intentionally deferred until PostgreSQL supplies its ReadStream tickets.
+    pub(crate) fn prepare_analyze(&self) -> IcebergResult<AnalyzePreparation> {
+        let scan = self.build_scan(true, None)?;
+        let tasks = scan.plan_files()?;
+        AnalyzePreparation::try_new(
+            scan,
+            tasks,
+            ArrowColumnDecoder::new(self.plan.decoded_columns()),
+            self.storage_bytes.ok_or(IcebergError::InvariantViolated(
+                "ANALYZE ScanSpec is missing storage-byte statistics",
+            ))?,
+        )
+    }
+
     /// Open the provider cursor for `ScanPurpose::Modify`. The cursor consumes
     /// Iceberg's metadata columns to produce the executor's synthetic `ctid`.
     pub(crate) fn open_mutation_batch_cursor(
@@ -414,7 +493,7 @@ impl ScanSpec {
 /// reclassified as a `ConvError::DatumConversionError` (`DATA_EXCEPTION`).
 /// `pg-arrow-conv` stays format-neutral: it only requires the error to map into
 /// the boundary error, which `IcebergError` already does.
-struct IcebergArrowBatches(ArrowRecordBatchIterator);
+pub(crate) struct IcebergArrowBatches(pub(crate) ArrowRecordBatchIterator);
 
 impl Iterator for IcebergArrowBatches {
     type Item = Result<RecordBatch, IcebergError>;
@@ -433,11 +512,12 @@ impl Iterator for IcebergArrowBatches {
     }
 }
 
-type IcebergArrowBatchSource = ArrowBatchSource<IcebergArrowBatches, IcebergError>;
+pub(crate) type IcebergArrowBatchSource =
+    ArrowBatchSource<IcebergArrowBatches, IcebergError>;
 
 struct IcebergBoundBatch {
     decoded: BoundBatch,
-    pos_column: Option<Int64Array>,
+    metadata: Option<BatchMetadataColumns>,
     file_runs: Option<Box<[RegisteredFileRun]>>,
 }
 
@@ -493,6 +573,25 @@ impl MetadataStringColumn {
             array.data_type()
         ))
         .into())
+    }
+
+    fn value(&self, row: usize) -> IcebergResult<&str> {
+        let (values, index) = match self {
+            Self::Plain(values) => (values, row),
+            Self::RunEndEncoded(runs) => {
+                let values =
+                    runs.values().as_any().downcast_ref::<StringArray>().expect(
+                        "metadata string column values type checked at construction",
+                    );
+                (values, runs.get_physical_index(row))
+            }
+        };
+        if values.is_null(index) {
+            return Err(IcebergError::InvariantViolated(
+                "row-location file metadata cannot be NULL",
+            ));
+        }
+        Ok(values.value(index))
     }
 
     /// Visit contiguous logical runs without expanding run-end encoding.
@@ -553,6 +652,55 @@ impl MetadataStringColumn {
     }
 }
 
+/// Typed access to Iceberg's `_file` and `_pos` virtual columns.
+///
+/// Both Modify and ANALYZE cursors use this object so metadata field-id lookup,
+/// Arrow type validation, NULL handling, and run-end decoding have one owner.
+pub(crate) struct BatchMetadataColumns {
+    files: MetadataStringColumn,
+    positions: Int64Array,
+}
+
+impl BatchMetadataColumns {
+    pub(crate) fn try_new(batch: &RecordBatch) -> AmResult<Self> {
+        let files = MetadataStringColumn::try_new(
+            IcebergBatchCursor::metadata_column_ref(
+                batch,
+                RESERVED_FIELD_ID_FILE,
+                RESERVED_COL_NAME_FILE,
+            )?,
+            RESERVED_COL_NAME_FILE,
+        )?;
+        let positions = IcebergBatchCursor::typed_metadata_column::<Int64Array>(
+            batch,
+            RESERVED_FIELD_ID_POS,
+            RESERVED_COL_NAME_POS,
+        )?;
+        Ok(Self { files, positions })
+    }
+
+    pub(crate) fn file(&self, row: usize) -> IcebergResult<&str> {
+        self.files.value(row)
+    }
+
+    pub(crate) fn position(&self, row: usize) -> IcebergResult<u64> {
+        if self.positions.is_null(row) {
+            return Err(IcebergError::InvariantViolated(
+                "row-location position metadata cannot be NULL",
+            ));
+        }
+        u64::try_from(self.positions.value(row)).map_err(|_| {
+            IcebergError::InvariantViolated(
+                "row-location position cannot be negative",
+            )
+        })
+    }
+
+    fn files(&self) -> &MetadataStringColumn {
+        &self.files
+    }
+}
+
 /// Arrow batches decoded straight into the slot. Provider Modify mode consumes
 /// `_file`/`_pos` internally to synthesize the PostgreSQL row-identity column.
 pub struct IcebergBatchCursor {
@@ -581,29 +729,15 @@ impl IcebergBatchCursor {
     }
 
     fn bind_batch(&mut self, batch: RecordBatch) -> AmResult<IcebergBoundBatch> {
-        let (pos_column, file_column) = if self.modify.is_some() {
-            let file_column = MetadataStringColumn::try_new(
-                Self::metadata_column_ref(
-                    &batch,
-                    RESERVED_FIELD_ID_FILE,
-                    RESERVED_COL_NAME_FILE,
-                )?,
-                RESERVED_COL_NAME_FILE,
-            )?;
-            let pos_column = Self::typed_metadata_column::<Int64Array>(
-                &batch,
-                RESERVED_FIELD_ID_POS,
-                RESERVED_COL_NAME_POS,
-            )?;
-
-            (Some(pos_column), Some(file_column))
+        let metadata = if self.modify.is_some() {
+            Some(BatchMetadataColumns::try_new(&batch)?)
         } else {
-            (None, None)
+            None
         };
 
-        let file_runs = match (&file_column, self.modify.as_mut()) {
-            (Some(files), Some(modify)) => {
-                Some(Self::register_file_runs(files, modify)?)
+        let file_runs = match (&metadata, self.modify.as_mut()) {
+            (Some(metadata), Some(modify)) => {
+                Some(Self::register_file_runs(metadata.files(), modify)?)
             }
             (None, None) => None,
             _ => {
@@ -616,7 +750,7 @@ impl IcebergBatchCursor {
         let decoded = self.decoder.bind(batch)?;
         Ok(IcebergBoundBatch {
             decoded,
-            pos_column,
+            metadata,
             file_runs,
         })
     }
@@ -704,23 +838,12 @@ impl IcebergBatchCursor {
             {
                 let row_idx = self.row_idx;
                 self.decoder.write_row(&bound.decoded, row_idx, out)?;
-                let pos_column = bound.pos_column.as_ref().ok_or(
+                let metadata = bound.metadata.as_ref().ok_or(
                     IcebergError::InvariantViolated(
-                        "Modify scan is missing _pos metadata",
+                        "Modify scan is missing row-location metadata",
                     ),
                 )?;
-                if pos_column.is_null(row_idx) {
-                    return Err(IcebergError::InvariantViolated(
-                        "Row identity metadata cannot be NULL",
-                    )
-                    .into());
-                }
-                let position =
-                    u64::try_from(pos_column.value(row_idx)).map_err(|_| {
-                        IcebergError::InvariantViolated(
-                            "Row position cannot be negative",
-                        )
-                    })?;
+                let position = metadata.position(row_idx)?;
 
                 let runs = bound.file_runs.as_ref().ok_or(
                     IcebergError::InvariantViolated(
@@ -796,11 +919,33 @@ pub struct IcebergScan {
     /// Relation shape captured in [`AmScanSession::new`] (the one place the
     /// `RelationHandle` is in scope), threaded into `ScanSpec::build`.
     shape: RelationShape,
-    spec: Option<ScanSpec>,
-    cursor: Option<IcebergBatchCursor>,
+    state: IcebergScanState,
 }
 
-impl AmScan for IcebergTableAm {}
+enum ScanPurpose {
+    Query,
+    Analyze,
+}
+
+// Query state stays inline intentionally: boxing it would add an allocation
+// per ordinary scan and an indirection on every scan_getnextslot call merely
+// to shrink this once-per-scan state object.
+#[allow(clippy::large_enum_variant)]
+enum IcebergScanState {
+    Pending(ScanPurpose),
+    Query {
+        spec: ScanSpec,
+        cursor: IcebergBatchCursor,
+    },
+    Analyze(Box<crate::access::analyze::AnalyzeScanState>),
+    Ended,
+}
+
+impl AmScan for IcebergTableAm {
+    fn analyze_slot_callbacks() -> *const pg_sys::TupleTableSlotOps {
+        pg_lakebase_core::access::scan::virtual_slot_callbacks_with_tid()
+    }
+}
 
 impl AmScanSession for IcebergScan {
     type BatchDriver = IcebergBatchCursor;
@@ -809,7 +954,7 @@ impl AmScanSession for IcebergScan {
         rel: &RelationHandle,
         _snapshot: Option<&SnapshotHandle>,
         _pscan: Option<&ParallelTableScanDescHandle>,
-        _flags: u32,
+        flags: ScanFlags,
     ) -> AmResult<Self> {
         // No metadata IO yet: defer schema-dependent work to `scan_begin`. The
         // relation shape is captured here, where the `RelationHandle` is in scope.
@@ -817,17 +962,45 @@ impl AmScanSession for IcebergScan {
             rel_oid: rel.oid(),
             spc_oid: rel.tablespace_oid(),
             shape: RelationShape::from_relation(rel),
-            spec: None,
-            cursor: None,
+            state: IcebergScanState::Pending(if flags.is_analyze() {
+                ScanPurpose::Analyze
+            } else {
+                ScanPurpose::Query
+            }),
         })
     }
 
     fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
-        let mut spec =
-            ScanSpec::build(self.rel_oid, self.spc_oid, keys, &self.shape)?;
-        let cursor = spec.open_batch_cursor()?;
-        self.spec = Some(spec);
-        self.cursor = Some(cursor);
+        let purpose =
+            match std::mem::replace(&mut self.state, IcebergScanState::Ended) {
+                IcebergScanState::Pending(purpose) => purpose,
+                state => {
+                    self.state = state;
+                    return Err(IcebergError::InvariantViolated(
+                        "scan_begin called more than once for one Iceberg scan",
+                    )
+                    .into());
+                }
+            };
+        self.state = match purpose {
+            ScanPurpose::Query => {
+                let mut spec =
+                    ScanSpec::build(self.rel_oid, self.spc_oid, keys, &self.shape)?;
+                let cursor = spec.open_batch_cursor()?;
+                IcebergScanState::Query { spec, cursor }
+            }
+            ScanPurpose::Analyze => {
+                let spec = ScanSpec::build_for_analyze(
+                    self.rel_oid,
+                    self.spc_oid,
+                    &self.shape,
+                )?;
+                let preparation = spec.prepare_analyze()?;
+                IcebergScanState::Analyze(Box::new(
+                    crate::access::analyze::AnalyzeScanState::pending(preparation),
+                ))
+            }
+        };
         Ok(())
     }
 
@@ -837,9 +1010,10 @@ impl AmScanSession for IcebergScan {
     fn scan_driver(&mut self) -> &mut Self::BatchDriver {
         // `scan_begin` builds the cursor before the executor fetches any row,
         // so it is always present by the time the framework calls this.
-        self.cursor
-            .as_mut()
-            .expect("scan_driver called after scan_begin")
+        match &mut self.state {
+            IcebergScanState::Query { cursor, .. } => cursor,
+            _ => panic!("scan_driver called outside a query scan"),
+        }
     }
 
     /// Restart the scan, re-translating the current effective scan keys.
@@ -857,23 +1031,52 @@ impl AmScanSession for IcebergScan {
         _allow_sync: bool,
         _allow_pagemode: bool,
     ) -> AmResult<()> {
-        let Some(spec) = self.spec.as_mut() else {
-            // Defensive: rescan before the first scan_begin shouldn't happen.
-            self.cursor = None;
-            return Ok(());
-        };
-
-        spec.refresh_filter(keys)?;
-        self.cursor = Some(spec.open_batch_cursor()?);
-        Ok(())
+        match &mut self.state {
+            IcebergScanState::Query { spec, cursor } => {
+                spec.refresh_filter(keys)?;
+                *cursor = spec.open_batch_cursor()?;
+                Ok(())
+            }
+            IcebergScanState::Pending(_) => Ok(()),
+            IcebergScanState::Analyze(_) => Err(IcebergError::InvariantViolated(
+                "PostgreSQL attempted to rescan an ANALYZE session",
+            )
+            .into()),
+            IcebergScanState::Ended => Ok(()),
+        }
     }
 
     fn scan_end(&mut self) -> AmResult<()> {
-        self.cursor = None;
-        self.spec = None;
+        self.state = IcebergScanState::Ended;
         Ok(())
     }
 
+    fn scan_analyze_next_block(
+        &mut self,
+        stream: &ReadStreamHandle,
+    ) -> AmResult<bool> {
+        match &mut self.state {
+            IcebergScanState::Analyze(state) => state.next_block(stream),
+            _ => Err(IcebergError::InvariantViolated(
+                "ANALYZE block callback used a non-ANALYZE scan",
+            )
+            .into()),
+        }
+    }
+
+    fn scan_analyze_next_tuple(
+        &mut self,
+        _oldest_xmin: pg_sys::TransactionId,
+        out: &mut SlotColumns<'_>,
+    ) -> AmResult<AnalyzeTupleOutcome> {
+        match &mut self.state {
+            IcebergScanState::Analyze(state) => state.next_tuple(out),
+            _ => Err(IcebergError::InvariantViolated(
+                "ANALYZE tuple callback used a non-ANALYZE scan",
+            )
+            .into()),
+        }
+    }
 }
 
 /// Translate PostgreSQL [`OwnedScanKeys`] into an Iceberg [`Predicate`].

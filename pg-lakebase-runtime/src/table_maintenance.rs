@@ -4,8 +4,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_void};
 
 use pg_lakebase_core::table_maintenance::abi::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3,
-    PROVIDER_CAPABILITIES_KNOWN,
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3, PROVIDER_CAPABILITIES_KNOWN,
     REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
     REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RUNTIME_API_VERSION, RuntimeApiV1,
     RuntimeMaintenanceConfigV1, provider_access_method_name, provider_name,

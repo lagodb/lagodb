@@ -318,6 +318,23 @@ impl<'a> ReadStreamHandle<'a> {
     pub fn as_raw(&self) -> *mut pg_sys::ReadStream {
         self.inner.as_ptr()
     }
+
+    /// Consume the next block chosen by PostgreSQL's sampling stream.
+    ///
+    /// The block identity is intentionally opaque to non-block storage
+    /// engines; receiving `Some` means one sampling ticket was selected.
+    #[inline]
+    pub fn next_block(&self) -> Option<pg_sys::BlockNumber> {
+        let mut strategy: pg_sys::BufferAccessStrategy = std::ptr::null_mut();
+        // SAFETY: `inner` is a live PostgreSQL-owned ReadStream for this
+        // callback and `strategy` is writable out-parameter storage. The AM
+        // deliberately discards the reported buffer strategy because it does
+        // not read PostgreSQL relation buffers.
+        let block = unsafe {
+            pg_sys::read_stream_next_block(self.inner.as_ptr(), &mut strategy)
+        };
+        (block != u32::MAX).then_some(block)
+    }
 }
 
 /// Safe wrapper for PostgreSQL ParallelTableScanDesc.

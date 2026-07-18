@@ -98,8 +98,8 @@ mod tests {
         .expect("DO block to attempt non-deterministic collation creation");
 
         let nd_oid_raw = Spi::get_one::<i64>(
-            "SELECT oid::int8 FROM pg_collation WHERE collname = 'nd_test_collation' \
-         LIMIT 1",
+            "SELECT (SELECT oid::int8 FROM pg_collation \
+         WHERE collname = 'nd_test_collation' LIMIT 1)",
         )
         .expect("collation OID lookup query");
 

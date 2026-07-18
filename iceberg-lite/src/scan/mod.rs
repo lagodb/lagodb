@@ -28,7 +28,7 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 pub use task::*;
 
-use crate::arrow::ArrowReaderBuilder;
+use crate::arrow::{ArrowReaderBuilder, SelectedRowsReadRequest};
 use crate::delete_file_index::DeleteFileIndexBuilder;
 use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluator;
 use crate::expr::{Bind, BoundPredicate, Predicate};
@@ -693,6 +693,26 @@ impl TableScan {
             .read_shared_with_filter(tasks, bound_filter)
     }
 
+    /// Read validated physical-position requests with this scan's reader
+    /// configuration. Requests must have been built from tasks planned by the
+    /// same scan so schema, projection, predicates, deletes, and transaction
+    /// overlay remain aligned.
+    pub fn to_arrow_with_selected_rows(
+        &self,
+        requests: Vec<SelectedRowsReadRequest>,
+    ) -> Result<ArrowRecordBatchIterator> {
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
+            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+            .with_row_group_filtering_enabled(self.row_group_filtering_enabled)
+            .with_row_selection_enabled(true);
+
+        if let Some(batch_size) = self.batch_size {
+            arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
+        }
+
+        arrow_reader_builder.build().read_selected_rows(requests)
+    }
+
     /// Returns a reference to the column names of the table scan.
     pub fn column_names(&self) -> Option<&[String]> {
         self.column_names.as_deref()
@@ -830,10 +850,14 @@ pub mod tests {
 
     use crate::Result;
     use crate::TableIdent;
-    use crate::arrow::{ArrowReaderBuilder, PhysicalRowReadContext};
+    use crate::arrow::{
+        ArrowReaderBuilder, PhysicalRowReadContext, SelectedRowsReadRequest,
+    };
     use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
-    use crate::metadata_columns::RESERVED_COL_NAME_FILE;
+    use crate::metadata_columns::{
+        RESERVED_COL_NAME_FILE, RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_POS,
+    };
     use crate::overlay::SnapshotDelta;
     use crate::scan::FileScanTask;
     use crate::spec::{
@@ -1923,6 +1947,63 @@ pub mod tests {
                 .read_physical_row(out_of_bounds)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn test_selected_rows_are_batched_with_position_metadata() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files();
+        let data_file_path = format!("{}/1.parquet", fixture.table_location);
+        let table_scan = fixture.table.scan().build().unwrap();
+        let mut task = table_scan
+            .plan_files()
+            .unwrap()
+            .into_iter()
+            .find(|task| task.data_file_path == data_file_path)
+            .unwrap();
+        task.project_field_ids = vec![2, RESERVED_FIELD_ID_POS];
+        // This legacy fixture uses a manifest count of one while writing
+        // 1,024 physical rows. Selected-row requests intentionally validate
+        // that count against the footer, so make this request internally
+        // consistent instead of weakening production validation.
+        task.record_count = Some(1_024);
+        let record_count = task.record_count.unwrap();
+        let requested_positions = vec![0, record_count / 2, record_count - 1];
+        let request =
+            SelectedRowsReadRequest::try_new(task, requested_positions.clone())
+                .unwrap();
+
+        let batches = fixture
+            .table
+            .reader_builder()
+            .with_row_selection_enabled(true)
+            .build()
+            .read_selected_rows(vec![request])
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let positions = batches
+            .iter()
+            .flat_map(|batch| {
+                let values = batch
+                    .column_by_name(RESERVED_COL_NAME_POS)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                values.values().iter().copied().collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rows, 3);
+        assert_eq!(
+            positions,
+            requested_positions
+                .into_iter()
+                .map(|position| i64::try_from(position).unwrap())
+                .collect::<Vec<_>>()
         );
     }
 

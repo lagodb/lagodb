@@ -182,6 +182,68 @@ pub struct ScanCapabilities {
     pub bitmap: bool,
 }
 
+/// Type-safe view of PostgreSQL's `ScanOptions` bitmask.
+///
+/// Keeping the raw value private prevents access methods from scattering
+/// bit arithmetic and PostgreSQL constants through their scan state machines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanFlags(u32);
+
+impl ScanFlags {
+    #[inline]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    #[inline]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn is_analyze(self) -> bool {
+        self.0 & pg_sys::ScanOptions::SO_TYPE_ANALYZE != 0
+    }
+
+    #[inline]
+    pub const fn is_seqscan(self) -> bool {
+        self.0 & pg_sys::ScanOptions::SO_TYPE_SEQSCAN != 0
+    }
+}
+
+/// Result of inspecting one candidate row during `ANALYZE`.
+///
+/// `live_delta` and `dead_delta` are contributions to PostgreSQL-owned
+/// running totals, not replacement totals.  A visible row normally uses
+/// `visible(1.0)`; storage engines using unequal scan units may provide a
+/// statistically justified weight.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnalyzeTupleOutcome {
+    pub found: bool,
+    pub live_delta: f64,
+    pub dead_delta: f64,
+}
+
+impl AnalyzeTupleOutcome {
+    #[inline]
+    pub const fn visible(live_delta: f64) -> Self {
+        Self {
+            found: true,
+            live_delta,
+            dead_delta: 0.0,
+        }
+    }
+
+    #[inline]
+    pub const fn end_of_block() -> Self {
+        Self {
+            found: false,
+            live_delta: 0.0,
+            dead_delta: 0.0,
+        }
+    }
+}
+
 impl ScanCapabilities {
     pub const NONE: Self = Self {
         tid_range: false,
@@ -199,6 +261,15 @@ pub trait AmScan {
 
     fn slot_callbacks() -> *const pg_sys::TupleTableSlotOps {
         unsafe { &pg_sys::TTSOpsVirtual }
+    }
+
+    /// Slot operations used after an ANALYZE callback has produced a sample.
+    ///
+    /// PostgreSQL allocates the slot using [`Self::slot_callbacks`], so an
+    /// override must use the same slot layout and may only customize behavior
+    /// that does not affect allocation or initialization.
+    fn analyze_slot_callbacks() -> *const pg_sys::TupleTableSlotOps {
+        Self::slot_callbacks()
     }
 
     fn parallelscan_estimate(rel: &RelationHandle) -> AmResult<pg_sys::Size>
@@ -250,7 +321,7 @@ pub trait AmScanSession {
         rel: &RelationHandle,
         snapshot: Option<&SnapshotHandle>,
         pscan: Option<&ParallelTableScanDescHandle>,
-        flags: u32,
+        flags: ScanFlags,
     ) -> AmResult<Self>
     where
         Self: Sized;
@@ -371,7 +442,7 @@ pub trait AmScanSession {
         &mut self,
         oldest_xmin: pg_sys::TransactionId,
         out: &mut SlotColumns<'_>,
-    ) -> AmResult<(bool, f64, f64)> {
+    ) -> AmResult<AnalyzeTupleOutcome> {
         let _ = (oldest_xmin, out);
         unsupported_callback("scan_analyze_next_tuple")
     }

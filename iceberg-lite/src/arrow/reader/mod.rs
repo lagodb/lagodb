@@ -27,6 +27,8 @@ pub(super) mod predicate_visitor;
 mod projection;
 mod row_filter;
 mod row_position;
+mod row_positions;
+mod selected_rows;
 
 pub use file_reader::ArrowFileReader;
 pub(crate) use options::ParquetReadOptions;
@@ -36,6 +38,7 @@ use predicate_visitor::{CollectFieldIdVisitor, PredicateConverter};
 use projection::{
     add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema,
 };
+pub use selected_rows::SelectedRowsReadRequest;
 
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::io::FileIO;

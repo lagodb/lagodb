@@ -34,9 +34,11 @@ use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 use super::predicate_plan::FilePredicatePlan;
 use super::row_filter::TransformedRecordBatchFilter;
 use super::row_position::RowPositionSelection;
+use super::row_positions::RowPositionsSelection;
 use super::{
     ArrowFileReader, ArrowReader, ParquetReadOptions, PhysicalRowReadRequest,
-    add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema,
+    SelectedRowsReadRequest, add_fallback_field_ids_to_arrow_schema,
+    apply_name_mapping_to_arrow_schema,
 };
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::delete_filter::is_equality_delete;
@@ -67,6 +69,7 @@ enum FileReadRequest {
         predicate: Option<Arc<BoundPredicate>>,
     },
     Physical(PhysicalRowReadRequest),
+    SelectedRows(Box<SelectedRowsReadRequest>),
 }
 
 /// Borrowed inputs shared by the Parquet execution core after request-specific
@@ -87,6 +90,8 @@ struct FileReadPlan<'a> {
     has_deletes: bool,
     has_equality_deletes: bool,
     row_position: Option<i64>,
+    row_positions: Option<&'a [i64]>,
+    expected_record_count: Option<u64>,
 }
 
 impl FileReadRequest {
@@ -102,6 +107,7 @@ impl FileReadRequest {
                 )
             }),
             Self::Physical(_) => Ok(None),
+            Self::SelectedRows(request) => Ok(Some(&request.task)),
         }
     }
 
@@ -123,6 +129,8 @@ impl FileReadRequest {
                 has_deletes: !task.deletes.is_empty(),
                 has_equality_deletes: task.deletes.iter().any(is_equality_delete),
                 row_position: None,
+                row_positions: None,
+                expected_record_count: None,
             }),
             Self::SharedScan {
                 tasks,
@@ -151,6 +159,8 @@ impl FileReadRequest {
                     has_deletes: !task.deletes.is_empty(),
                     has_equality_deletes: task.deletes.iter().any(is_equality_delete),
                     row_position: None,
+                    row_positions: None,
+                    expected_record_count: None,
                 })
             }
             Self::Physical(request) => Ok(FileReadPlan {
@@ -169,6 +179,33 @@ impl FileReadRequest {
                 has_deletes: false,
                 has_equality_deletes: false,
                 row_position: Some(request.position),
+                row_positions: None,
+                expected_record_count: None,
+            }),
+            Self::SelectedRows(request) => Ok(FileReadPlan {
+                file_size_in_bytes: request.task.file_size_in_bytes,
+                start: request.task.start,
+                length: request.task.length,
+                first_row_id: request.task.first_row_id,
+                last_updated_sequence_number: request
+                    .task
+                    .last_updated_sequence_number,
+                data_file_path: &request.task.data_file_path,
+                schema: &request.task.schema,
+                project_field_ids: &request.task.project_field_ids,
+                predicate: request.task.predicate.as_ref(),
+                partition: request.task.partition.as_ref(),
+                partition_spec: request.task.partition_spec.as_ref(),
+                name_mapping: request.task.name_mapping.as_ref(),
+                has_deletes: !request.task.deletes.is_empty(),
+                has_equality_deletes: request
+                    .task
+                    .deletes
+                    .iter()
+                    .any(is_equality_delete),
+                row_position: None,
+                row_positions: Some(&request.positions),
+                expected_record_count: request.task.record_count,
             }),
         }
     }
@@ -268,6 +305,21 @@ impl ArrowReader {
         Ok(None)
     }
 
+    /// Read batches for validated physical-position requests while retaining
+    /// normal Iceberg visibility and transformation semantics.
+    pub fn read_selected_rows(
+        self,
+        requests: Vec<SelectedRowsReadRequest>,
+    ) -> Result<ArrowRecordBatchIterator> {
+        Ok(self
+            .read_requests_with_metrics(
+                requests
+                    .into_iter()
+                    .map(|request| FileReadRequest::SelectedRows(Box::new(request))),
+            )?
+            .stream())
+    }
+
     fn read_requests_with_metrics<I>(self, requests: I) -> Result<ScanResult>
     where
         I: IntoIterator<Item = FileReadRequest>,
@@ -332,6 +384,7 @@ impl ArrowReader {
             PageIndexPolicy::Skip
         };
         let offset_index_policy = if plan.row_position.is_some()
+            || plan.row_positions.is_some()
             || predicate_page_pruning
             || plan.has_deletes
         {
@@ -629,7 +682,34 @@ impl ArrowReader {
             selected_row_group_indices = Some(byte_range_filtered_row_groups);
         }
 
-        let position_selection = plan
+        if let Some(expected) = plan.expected_record_count {
+            let actual = record_batch_reader_builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .try_fold(0_u64, |total, group| {
+                let rows = u64::try_from(group.num_rows()).map_err(|_| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        "parquet row group has a negative row count",
+                    )
+                })?;
+                total.checked_add(rows).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        "parquet row count exceeds unsigned long range",
+                    )
+                })
+            })?;
+            if actual != expected {
+                return Err(Error::new(
+                    ErrorKind::DataInvalid,
+                    "parquet footer row count differs from the Iceberg manifest",
+                ));
+            }
+        }
+
+        let single_position_selection = plan
             .row_position
             .map(|position| {
                 RowPositionSelection::try_new(
@@ -638,7 +718,20 @@ impl ArrowReader {
                 )
             })
             .transpose()?;
-        if let Some(position_selection) = &position_selection {
+        if let Some(position_selection) = &single_position_selection {
+            position_selection.restrict_row_groups(&mut selected_row_group_indices);
+        }
+
+        let positions_selection = plan
+            .row_positions
+            .map(|positions| {
+                RowPositionsSelection::try_new(
+                    record_batch_reader_builder.metadata(),
+                    positions,
+                )
+            })
+            .transpose()?;
+        if let Some(position_selection) = &positions_selection {
             position_selection.restrict_row_groups(&mut selected_row_group_indices);
         }
 
@@ -697,8 +790,12 @@ impl ArrowReader {
             }
         }
 
-        if let Some(position_selection) = position_selection {
+        if let Some(position_selection) = single_position_selection {
             position_selection.merge_row_selection(&mut row_selection);
+        }
+        if let Some(position_selection) = positions_selection {
+            position_selection
+                .merge_row_selection(&selected_row_group_indices, &mut row_selection);
         }
 
         if let Some(positional_delete_indexes) = positional_delete_indexes {

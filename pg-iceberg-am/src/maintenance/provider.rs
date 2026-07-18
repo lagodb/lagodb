@@ -419,6 +419,7 @@ impl IcebergTableMaintenanceProvider {
 impl LakebaseTableMaintenanceProvider for IcebergTableMaintenanceProvider {
     const NAME: &'static CStr = c"iceberg";
     const ACCESS_METHOD_NAME: &'static CStr = ICEBERG_AM_NAME;
+    const SUPPORTS_ANALYZE: bool = true;
 
     fn access_method_oid() -> Option<pg_sys::Oid> {
         IcebergAccessMethod::oid()

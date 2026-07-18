@@ -680,10 +680,9 @@ mod tests {
         let create_without_options =
             ResolvedIcebergOptions::from_table_options(None).unwrap();
         let empty_overrides = TableOptions::new(Vec::new());
-        let after_reset = ResolvedIcebergOptions::from_table_options(Some(
-            &empty_overrides,
-        ))
-        .unwrap();
+        let after_reset =
+            ResolvedIcebergOptions::from_table_options(Some(&empty_overrides))
+                .unwrap();
 
         assert_eq!(after_reset, create_without_options);
     }

@@ -39,15 +39,11 @@ mod column {
 }
 
 trait CatalogResultExt<T> {
-    fn map_maintenance_catalog_err(self, operation: CatalogOp)
-    -> IcebergResult<T>;
+    fn map_maintenance_catalog_err(self, operation: CatalogOp) -> IcebergResult<T>;
 }
 
 impl<T> CatalogResultExt<T> for Result<T, PgError> {
-    fn map_maintenance_catalog_err(
-        self,
-        operation: CatalogOp,
-    ) -> IcebergResult<T> {
+    fn map_maintenance_catalog_err(self, operation: CatalogOp) -> IcebergResult<T> {
         self.map_err(|source| IcebergError::AutomaticMaintenanceCatalog {
             operation,
             source,
@@ -163,19 +159,16 @@ impl AutomaticMaintenanceOutcome {
 }
 
 impl StateRecord<'_> {
-    fn encode(
-        &self,
-        tuple_desc: pg_sys::TupleDesc,
-    ) -> IcebergResult<HeapTupleGuard> {
+    fn encode(&self, tuple_desc: pg_sys::TupleDesc) -> IcebergResult<HeapTupleGuard> {
         // SAFETY: tuple_desc belongs to the repository's open relation.
         let attribute_count = unsafe { (*tuple_desc).natts as usize };
         if attribute_count != column::COUNT {
-            return Err(
-                IcebergError::AutomaticMaintenanceCatalogInvalidRecord(format!(
+            return Err(IcebergError::AutomaticMaintenanceCatalogInvalidRecord(
+                format!(
                     "expected {} columns, found {attribute_count}",
                     column::COUNT,
-                )),
-            );
+                ),
+            ));
         }
         let mut values = vec![pg_sys::Datum::from(0); attribute_count];
         let mut nulls = vec![true; attribute_count];
@@ -210,12 +203,7 @@ impl StateRecord<'_> {
             column::LAST_OUTCOME,
             Some(self.last_outcome),
         );
-        Self::set(
-            &mut values,
-            &mut nulls,
-            column::LAST_ERROR,
-            self.last_error,
-        );
+        Self::set(&mut values, &mut nulls, column::LAST_ERROR, self.last_error);
 
         // SAFETY: the arrays have one entry for every live attribute in the
         // repository-owned table schema, and tuple_desc belongs to the open
@@ -282,16 +270,15 @@ impl AutomaticMaintenanceCatalog {
         )
         .map_maintenance_catalog_err(CatalogOp::Access)?;
         // SAFETY: the tuple descriptor belongs to the live state relation.
-        let attribute_count = unsafe {
-            (*state.as_handle().tuple_desc()).natts as usize
-        };
+        let attribute_count =
+            unsafe { (*state.as_handle().tuple_desc()).natts as usize };
         if attribute_count != column::COUNT {
-            return Err(
-                IcebergError::AutomaticMaintenanceCatalogInvalidRecord(format!(
+            return Err(IcebergError::AutomaticMaintenanceCatalogInvalidRecord(
+                format!(
                     "expected {} columns, found {attribute_count}",
                     column::COUNT,
-                )),
-            );
+                ),
+            ));
         }
         Ok(Some(Self { state, pkey_oid }))
     }
@@ -328,9 +315,8 @@ impl AutomaticMaintenanceCatalog {
         {
             // SAFETY: this tuple comes from a live pg_class scan and therefore
             // has PostgreSQL's fixed Form_pg_class layout.
-            let form = unsafe {
-                pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_class
-            };
+            let form =
+                unsafe { pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_class };
             if form.is_null() {
                 continue;
             }
@@ -534,10 +520,8 @@ impl AutomaticMaintenanceCatalog {
             pg_sys::LockRelationOid(relid, pg_sys::AccessShareLock as _);
             let relkind = pg_sys::get_rel_relkind(relid) as u8;
             let relam = pg_sys::get_rel_relam(relid);
-            matches!(
-                relkind,
-                pg_sys::RELKIND_RELATION | pg_sys::RELKIND_MATVIEW
-            ) && IcebergAccessMethod::oid() == Some(relam)
+            matches!(relkind, pg_sys::RELKIND_RELATION | pg_sys::RELKIND_MATVIEW)
+                && IcebergAccessMethod::oid() == Some(relam)
         }
     }
 
@@ -609,9 +593,9 @@ impl AutomaticMaintenanceCatalog {
     ) -> IcebergResult<T> {
         unsafe { Self::optional_attr(tuple, tuple_desc, attribute_number) }
             .ok_or_else(|| {
-                IcebergError::AutomaticMaintenanceCatalogInvalidRecord(
-                    format!("{name} is null or undecodable"),
-                )
+                IcebergError::AutomaticMaintenanceCatalogInvalidRecord(format!(
+                    "{name} is null or undecodable"
+                ))
             })
     }
 
@@ -638,9 +622,9 @@ impl AutomaticMaintenanceCatalog {
     ) -> IcebergResult<pg_sys::TimestampTz> {
         unsafe { Self::optional_timestamp(tuple, tuple_desc, attribute_number) }
             .ok_or_else(|| {
-                IcebergError::AutomaticMaintenanceCatalogInvalidRecord(
-                    format!("{name} is null or undecodable"),
-                )
+                IcebergError::AutomaticMaintenanceCatalogInvalidRecord(format!(
+                    "{name} is null or undecodable"
+                ))
             })
     }
 }

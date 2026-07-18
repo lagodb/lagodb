@@ -39,6 +39,7 @@ parquet = { version = "58", default-features = false, features = ["arrow"] }
 roaring = { workspace = true }
 tempfile = "3.10"
 bytes = "1.10.1"
+rand = "0.9.3"
 
 # Rustls is shared by some other dependencies but not directly used by pg-iceberg-am.
 # Since Rustls 0.22, it is required to choose the provider of the cryptographic

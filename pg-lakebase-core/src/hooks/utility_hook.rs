@@ -139,8 +139,7 @@ const UTILITY_ROUTER_ABI_VERSION: u32 = 1;
 const UTILITY_HOOK_ABI_VERSION: u32 = 1;
 const REGISTER_HOOK_OK: u32 = 0;
 const REGISTER_HOOK_INVALID: u32 = 1;
-const UTILITY_ROUTER_RENDEZVOUS: &std::ffi::CStr =
-    c"pg_lakebase.utility_router.v1";
+const UTILITY_ROUTER_RENDEZVOUS: &std::ffi::CStr = c"pg_lakebase.utility_router.v1";
 
 type RoutedPreHook = unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::Node);
 type RoutedPostHook = unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::Node);
@@ -164,8 +163,7 @@ struct UtilityHookDescriptorV1 {
 struct UtilityRouterApiV1 {
     abi_version: u32,
     struct_size: u32,
-    register_hook:
-        unsafe extern "C-unwind" fn(*const UtilityHookDescriptorV1) -> u32,
+    register_hook: unsafe extern "C-unwind" fn(*const UtilityHookDescriptorV1) -> u32,
 }
 
 struct ExternalHookContext {
@@ -186,9 +184,8 @@ struct RoutedHookSnapshot {
 
 impl RoutedHookSnapshot {
     fn capture(tag: pg_sys::NodeTag) -> Self {
-        let (first, last) = ROUTED_REGISTRY.with(|registry| {
-            (registry.head.get(), registry.tail.get())
-        });
+        let (first, last) = ROUTED_REGISTRY
+            .with(|registry| (registry.head.get(), registry.tail.get()));
         Self {
             first,
             last,
@@ -396,9 +393,8 @@ fn install_process_utility_hook() {
 pub(crate) fn install_runtime_owned_router() {
     // SAFETY: PostgreSQL owns a backend-lifetime rendezvous slot for this
     // constant NUL-terminated name.
-    let slot = unsafe {
-        find_rendezvous_variable(UTILITY_ROUTER_RENDEZVOUS.as_ptr())
-    };
+    let slot =
+        unsafe { find_rendezvous_variable(UTILITY_ROUTER_RENDEZVOUS.as_ptr()) };
     assert!(
         !slot.is_null(),
         "PostgreSQL returned a null utility-router rendezvous slot"
@@ -422,9 +418,8 @@ fn runtime_router_api() -> Option<&'static UtilityRouterApiV1> {
     }
     // SAFETY: PostgreSQL owns a backend-lifetime rendezvous slot for this
     // constant NUL-terminated name.
-    let slot = unsafe {
-        find_rendezvous_variable(UTILITY_ROUTER_RENDEZVOUS.as_ptr())
-    };
+    let slot =
+        unsafe { find_rendezvous_variable(UTILITY_ROUTER_RENDEZVOUS.as_ptr()) };
     if slot.is_null() {
         return None;
     }
@@ -432,8 +427,8 @@ fn runtime_router_api() -> Option<&'static UtilityRouterApiV1> {
     // null, ABI version, and structure size before it is cached or invoked.
     let api = unsafe { *slot }.cast::<UtilityRouterApiV1>();
     let api = unsafe { api.as_ref() }?;
-    let expected_size = u32::try_from(std::mem::size_of::<UtilityRouterApiV1>())
-        .ok()?;
+    let expected_size =
+        u32::try_from(std::mem::size_of::<UtilityRouterApiV1>()).ok()?;
     let api = (api.abi_version == UTILITY_ROUTER_ABI_VERSION
         && api.struct_size >= expected_size)
         .then_some(api)?;
@@ -625,9 +620,9 @@ unsafe extern "C-unwind" fn process_utility_router(
             } else {
                 None
             };
-            let copied = pg_sys::copyObjectImpl(
-                target_node as *const std::ffi::c_void,
-            ) as *mut pg_sys::Node;
+            let copied =
+                pg_sys::copyObjectImpl(target_node as *const std::ffi::c_void)
+                    as *mut pg_sys::Node;
             if let Some(old_context) = old_context {
                 pg_sys::MemoryContextSwitchTo(old_context);
             }
@@ -637,12 +632,10 @@ unsafe extern "C-unwind" fn process_utility_router(
         hooks.for_each(|descriptor| {
             // SAFETY: descriptor validation requires a non-null backend-lifetime
             // context and callback; target_node is the current PlannedStmt node.
-            unsafe {
-                descriptor.on_pre.expect("validated utility pre-hook")(
-                    descriptor.context,
-                    target_node,
-                );
-            }
+            descriptor.on_pre.expect("validated utility pre-hook")(
+                descriptor.context,
+                target_node,
+            );
         });
 
         #[cfg(feature = "pg17")]
@@ -657,12 +650,10 @@ unsafe extern "C-unwind" fn process_utility_router(
                 hooks.for_each(|descriptor| {
                     // SAFETY: copied_node is the backend-owned copy of the
                     // original statement and descriptor was ABI-validated.
-                    unsafe {
-                        descriptor.on_post.expect("validated utility post-hook")(
-                            descriptor.context,
-                            copied_node,
-                        );
-                    }
+                    descriptor.on_post.expect("validated utility post-hook")(
+                        descriptor.context,
+                        copied_node,
+                    );
                 });
             }
             return;
@@ -681,12 +672,10 @@ unsafe extern "C-unwind" fn process_utility_router(
             hooks.for_each(|descriptor| {
                 // SAFETY: copied_node is the backend-owned copy of the original
                 // statement and descriptor was ABI-validated.
-                unsafe {
-                    descriptor.on_post.expect("validated utility post-hook")(
-                        descriptor.context,
-                        copied_node,
-                    );
-                }
+                descriptor.on_post.expect("validated utility post-hook")(
+                    descriptor.context,
+                    copied_node,
+                );
             });
         }
     }

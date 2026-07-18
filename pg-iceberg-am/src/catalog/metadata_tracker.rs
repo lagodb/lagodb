@@ -47,6 +47,7 @@ use crate::storage::transactional_artifacts::MetadataAttempt;
 
 const TOTAL_RECORDS: &str = "total-records";
 const TOTAL_FILES_SIZE: &str = "total-files-size";
+const TOTAL_DELETE_FILES: &str = "total-delete-files";
 
 // =============================================================================
 // Per-table state
@@ -738,6 +739,32 @@ impl LoadedTableMetadata {
         }
 
         Ok((rows, bytes))
+    }
+
+    /// Whether the captured snapshot may contain row-level delete files.
+    ///
+    /// A false result is exact and allows the manifest `total-records` value to
+    /// serve as the live-row estimate. A true result is deliberately
+    /// conservative when transaction-local removal of the last committed
+    /// delete file cannot be proven from summary counters alone.
+    pub(crate) fn may_have_row_deletes(&self) -> bool {
+        let delta_stats = self.delta.as_ref().map(|delta| delta.stats());
+        let base_was_replaced = delta_stats
+            .as_ref()
+            .is_some_and(|stats| stats.truncates_base);
+        let base_may_have_deletes =
+            if base_was_replaced || self.metadata.current_snapshot().is_none() {
+                false
+            } else {
+                // Snapshot summary properties are extensible metadata. Treat a
+                // missing or malformed delete count conservatively: returning
+                // false here authorizes the planner to treat physical records as
+                // an exact live-row count.
+                Self::summary_u64(&self.metadata, TOTAL_DELETE_FILES)
+                    .is_none_or(|count| count != 0)
+            };
+        base_may_have_deletes
+            || delta_stats.is_some_and(|stats| stats.added_delete_file_bytes != 0)
     }
 
     fn has_live_data_file_path(

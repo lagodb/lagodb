@@ -107,7 +107,9 @@ pub enum IcebergError {
     #[error("optimistic locking failed: metadata location changed concurrently")]
     MetadataCatalogConflict,
 
-    #[error("failed to {operation} iceberg.automatic_maintenance_state catalog: {source}")]
+    #[error(
+        "failed to {operation} iceberg.automatic_maintenance_state catalog: {source}"
+    )]
     AutomaticMaintenanceCatalog {
         operation: MetadataCatalogOperation,
         #[source]
@@ -133,6 +135,11 @@ pub enum IcebergError {
 
     #[error("Iceberg row identity exceeds the synthetic ctid capacity")]
     RowIdentityLimitExceeded,
+
+    #[error(
+        "Iceberg ANALYZE physical population exceeds PostgreSQL synthetic TID capacity"
+    )]
+    AnalyzeTidCapacityExceeded,
 
     #[error(
         "failed to commit metadata for relid {relid} after {max_retries} retries due to concurrent updates"
@@ -300,7 +307,8 @@ impl SqlStateError for IcebergError {
             }
 
             IcebergError::FileIdLimitExceeded { .. }
-            | IcebergError::RowIdentityLimitExceeded => {
+            | IcebergError::RowIdentityLimitExceeded
+            | IcebergError::AnalyzeTidCapacityExceeded => {
                 PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED
             }
 

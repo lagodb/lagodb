@@ -5,9 +5,7 @@
 
 use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use crate::diag::{PgError, SqlStateError, domain_error_report};
-use crate::options::schema::{
-    self, OptionDef, OptionMutability, OptionSchemaError,
-};
+use crate::options::schema::{self, OptionDef, OptionMutability, OptionSchemaError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -358,16 +356,16 @@ impl TableOptionAlterations {
         }
         let count = unsafe { pg_sys::list_length(options) };
         for index in 0..count {
-            let element = unsafe {
-                pg_sys::list_nth(options, index).cast::<pg_sys::DefElem>()
-            };
+            let element =
+                unsafe { pg_sys::list_nth(options, index).cast::<pg_sys::DefElem>() };
             if element.is_null() {
                 continue;
             }
             let name = unsafe { std::ffi::CStr::from_ptr((*element).defname) };
-            if let Some(definition) = valid_options.iter().find(|definition| {
-                name.to_bytes() == definition.name.as_bytes()
-            }) && definition.mutability == OptionMutability::CreateOnly
+            if let Some(definition) = valid_options
+                .iter()
+                .find(|definition| name.to_bytes() == definition.name.as_bytes())
+                && definition.mutability == OptionMutability::CreateOnly
             {
                 return Err(TableOptionError::CreateOnlyOption(
                     definition.name.to_owned(),
@@ -509,10 +507,7 @@ impl TableOptionAlterations {
     /// default value. The AM must pass the result through the same option
     /// resolver used by CREATE TABLE, so an absent value regains that schema's
     /// current CREATE default.
-    pub fn apply_to_overrides(
-        self,
-        current: Option<TableOptions>,
-    ) -> TableOptions {
+    pub fn apply_to_overrides(self, current: Option<TableOptions>) -> TableOptions {
         let mut options = current.map_or_else(Vec::new, |current| current.options);
         for change in self.changes {
             match change {
@@ -554,9 +549,7 @@ mod tests {
             ("write-format".to_owned(), Some("parquet".to_owned())),
         ]);
         let alterations = TableOptionAlterations {
-            changes: vec![TableOptionChange::Reset(vec![
-                "compression".to_owned(),
-            ])],
+            changes: vec![TableOptionChange::Reset(vec!["compression".to_owned()])],
         };
 
         let updated = alterations.apply_to_overrides(Some(current));

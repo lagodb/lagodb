@@ -82,6 +82,13 @@ impl<'a> RelationHandle<'a> {
         unsafe { (*self.rd_rel()).relkind }
     }
 
+    /// Row estimate last persisted by PostgreSQL ANALYZE, or a negative value
+    /// when the relation has never been analyzed.
+    #[inline]
+    pub fn reltuples(&self) -> f32 {
+        unsafe { (*self.rd_rel()).reltuples }
+    }
+
     #[inline]
     pub fn toast_relation_oid(&self) -> Option<pg_sys::Oid> {
         let oid = unsafe { (*self.rd_rel()).reltoastrelid };

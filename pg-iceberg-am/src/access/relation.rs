@@ -25,7 +25,7 @@ impl AmRelation for IcebergTableAm {
     ) -> AmResult<(pg_sys::BlockNumber, f64, f64)> {
         let stats = RelationStats::load_or_default(rel);
 
-        Ok((stats.pages(), stats.rows as f64, 0.0))
+        Ok((stats.pages(), stats.estimated_live_rows(rel), 0.0))
     }
 
     fn relation_size(
@@ -36,7 +36,7 @@ impl AmRelation for IcebergTableAm {
             return Ok(0);
         }
 
-        Ok(RelationStats::load_or_default(rel).bytes)
+        Ok(RelationStats::load_or_default(rel).representable_bytes())
     }
 
     fn relation_vacuum(
@@ -71,6 +71,7 @@ impl AmRelation for IcebergTableAm {
 struct RelationStats {
     rows: u64,
     bytes: u64,
+    may_have_row_deletes: bool,
 }
 
 impl RelationStats {
@@ -98,13 +99,44 @@ impl RelationStats {
         let loaded =
             TxMetadata::current().current_table_metadata(rel.oid(), ctx.file_io())?;
         let (rows, bytes) = loaded.relation_stats(ctx.file_io())?;
+        let may_have_row_deletes = loaded.may_have_row_deletes();
 
-        Ok(Self { rows, bytes })
+        Ok(Self {
+            rows,
+            bytes,
+            may_have_row_deletes,
+        })
     }
 
     fn pages(&self) -> pg_sys::BlockNumber {
         let page_size = pg_sys::BLCKSZ as u64;
         let pages = self.bytes.div_ceil(page_size);
-        pages.min(u32::MAX as u64) as pg_sys::BlockNumber
+        pg_sys::BlockNumber::try_from(pages.min(u32::MAX as u64 - 1))
+            .expect("capped Iceberg page count fits PostgreSQL BlockNumber")
+    }
+
+    fn representable_bytes(&self) -> u64 {
+        let max = (u32::MAX as u64 - 1).saturating_mul(pg_sys::BLCKSZ as u64);
+        self.bytes.min(max)
+    }
+
+    fn estimated_live_rows(&self, rel: &RelationHandle) -> f64 {
+        if !self.may_have_row_deletes {
+            return self.rows as f64;
+        }
+
+        let analyzed_rows = f64::from(rel.reltuples());
+        if analyzed_rows >= 0.0 {
+            // Do not apply PostgreSQL's heap-style page scaling here. Iceberg
+            // relation bytes include delete files: adding a delete file grows
+            // the byte/page count while reducing, rather than increasing, the
+            // live population. The last ANALYZE estimate remains the best
+            // available visibility-aware value until ANALYZE runs again.
+            return analyzed_rows;
+        }
+
+        // Before the first ANALYZE, manifest records are a safe upper bound:
+        // delete files can only reduce the logical live population.
+        self.rows as f64
     }
 }

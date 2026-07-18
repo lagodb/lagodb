@@ -6,9 +6,9 @@ use pg_lakebase_core::maintenance::{
 };
 use pg_lakebase_core::options::{TableOptions, get_tablespace};
 
+use super::automatic_maintenance::AutomaticMaintenanceCatalog;
 use super::metadata_table::IcebergMetadata;
 use super::metadata_tracker::TxMetadata;
-use super::automatic_maintenance::AutomaticMaintenanceCatalog;
 use super::table_lifecycle::compute_table_location;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::StorageContext;

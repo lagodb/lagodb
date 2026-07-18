@@ -27,17 +27,21 @@ INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (105);
 CREATE TABLE vacuum_full_routing_test.heap_t (id integer);
 INSERT INTO vacuum_full_routing_test.heap_t VALUES (10), (20);
 
-\set VERBOSITY terse
 VACUUM (FULL, ANALYZE)
     vacuum_full_routing_test.heap_t,
     vacuum_full_routing_test.partitioned_t;
-\set VERBOSITY default
-SELECT bool_and(current_data_objects > 1) AS rejected_analyze_did_not_run_full
+SELECT bool_and(current_data_objects = 1) AS full_analyze_compacted_each_leaf
 FROM (VALUES
     ('vacuum_full_routing_test.partitioned_t_a'::regclass),
     ('vacuum_full_routing_test.partitioned_t_b'::regclass)
 ) AS leaves(relid)
 CROSS JOIN LATERAL lakebase.table_maintenance_stats(leaves.relid);
+SELECT bool_and(reltuples::bigint = 5) AS full_analyze_updated_each_leaf
+FROM pg_class
+WHERE oid IN (
+    'vacuum_full_routing_test.partitioned_t_a'::regclass,
+    'vacuum_full_routing_test.partitioned_t_b'::regclass
+);
 
 VACUUM (FULL)
     vacuum_full_routing_test.heap_t,

@@ -4,7 +4,7 @@
 //! scan callbacks with the AM-level scan facet and scan session implementation.
 
 use super::common::FfiContainer;
-use crate::api::{AmScanSession, TableAccessMethod};
+use crate::api::{AmScanSession, ScanFlags, TableAccessMethod};
 use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, ReportableError};
 use crate::handles::{
@@ -15,6 +15,48 @@ use crate::handles::{
 use crate::tuple::{Row, SlotColumns};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::*;
+use std::sync::OnceLock;
+
+/// Virtual-slot operations that preserve `tts_tid` when PostgreSQL copies an
+/// ANALYZE sample into a HeapTuple.
+///
+/// PostgreSQL's stock `tts_virtual_copy_heap_tuple()` forms only attribute
+/// data, leaving `HeapTuple.t_self` invalid. ANALYZE later sorts its reservoir
+/// by `t_self` to compute column correlation, so a columnar AM must retain the
+/// synthetic physical order supplied in the slot.
+pub fn virtual_slot_callbacks_with_tid() -> *const pg_sys::TupleTableSlotOps {
+    static OPS: OnceLock<pg_sys::TupleTableSlotOps> = OnceLock::new();
+    OPS.get_or_init(|| {
+        // SAFETY: PostgreSQL exposes TTSOpsVirtual as immutable process-lifetime
+        // data. Copying the POD function table and replacing one callback keeps
+        // every other virtual-slot invariant and gives this crate stable-owned
+        // process-lifetime storage.
+        let mut ops = unsafe { pg_sys::TTSOpsVirtual };
+        ops.copy_heap_tuple = Some(copy_virtual_heap_tuple_with_tid);
+        ops
+    })
+}
+
+#[pg_guard]
+unsafe extern "C-unwind" fn copy_virtual_heap_tuple_with_tid(
+    slot: *mut pg_sys::TupleTableSlot,
+) -> pg_sys::HeapTuple {
+    // SAFETY: PostgreSQL calls a TupleTableSlotOps callback with a non-null,
+    // non-empty slot matching this ops table. slot_getallattrs materializes all
+    // virtual attributes before heap_form_tuple borrows the value/null arrays.
+    unsafe {
+        pg_sys::slot_getallattrs(slot);
+        let tuple = pg_sys::heap_form_tuple(
+            (*slot).tts_tupleDescriptor,
+            (*slot).tts_values,
+            (*slot).tts_isnull,
+        );
+        if !tuple.is_null() {
+            (*tuple).t_self = (*slot).tts_tid;
+        }
+        tuple
+    }
+}
 
 struct TableScanState<T> {
     am_instance: T,
@@ -107,7 +149,7 @@ where
             &rel_handle,
             snapshot_handle.as_ref(),
             pscan_handle.as_ref(),
-            flags,
+            ScanFlags::from_bits(flags),
         )
         .report_unwrap();
 
@@ -543,7 +585,7 @@ where
         state.reset_tmp_context();
         let mut columns = SlotColumns::new(slot, state.tmp_ctx);
 
-        let (found, live_delta, dead_delta) = state
+        let outcome = state
             .am_instance
             .scan_analyze_next_tuple(oldest_xmin, &mut columns)
             .report_unwrap();
@@ -551,13 +593,25 @@ where
         // PostgreSQL owns these running totals.  A table AM reports the
         // contribution of the tuple it just inspected; replacing the totals
         // makes ANALYZE observe at most one row regardless of sample size.
-        *liverows += live_delta;
-        *deadrows += dead_delta;
+        *liverows += outcome.live_delta;
+        *deadrows += outcome.dead_delta;
 
-        if !found {
+        if !outcome.found {
             return false;
         }
 
+        // ANALYZE may need copy behavior that is irrelevant to ordinary
+        // executor scans. Keep the relation's normal slot ops during planning
+        // and allocation so PostgreSQL can retain its exact virtual-slot fast
+        // paths, then switch only a produced ANALYZE sample to a layout-
+        // compatible callback table.
+        let analyze_ops = A::analyze_slot_callbacks();
+        debug_assert_eq!(
+            (*(*slot).tts_ops).base_slot_size,
+            (*analyze_ops).base_slot_size,
+            "ANALYZE slot callbacks must preserve the allocated slot layout"
+        );
+        (*slot).tts_ops = analyze_ops;
         pg_sys::ExecStoreVirtualTuple(slot);
         true
     }
