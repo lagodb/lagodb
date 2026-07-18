@@ -52,13 +52,6 @@ struct ProviderContext {
     budget: TableMaintenanceBudget,
 }
 
-// pg-lakebase-core can be statically linked into more than one loaded
-// extension. A synthetic statement must therefore bypass every copy of the
-// utility router in the hook chain, not merely the copy that created it.
-// DefElem.location is parser bookkeeping ignored by ExecVacuum, so a private
-// negative sentinel keeps the standard option valid while surviving copyObject.
-const DELEGATED_NATIVE_OPTION_LOCATION: i32 = i32::MIN;
-
 #[pg_guard]
 unsafe extern "C-unwind" fn execute_provider(
     relation: pg_sys::Relation,
@@ -134,37 +127,6 @@ unsafe fn set_boolean_option(
     }
 }
 
-unsafe fn mark_delegated_native_run(options: *mut pg_sys::List) -> *mut pg_sys::List {
-    unsafe {
-        let options = set_boolean_option(options, c"skip_database_stats", true);
-        let count = pg_sys::list_length(options);
-        for index in 0..count {
-            let option = pg_sys::list_nth(options, index).cast::<pg_sys::DefElem>();
-            if option_name(option) == b"skip_database_stats" {
-                (*option).location = DELEGATED_NATIVE_OPTION_LOCATION;
-                break;
-            }
-        }
-        options
-    }
-}
-
-unsafe fn is_delegated_native_run(stmt: *mut pg_sys::VacuumStmt) -> bool {
-    unsafe {
-        let count = pg_sys::list_length((*stmt).options);
-        for index in 0..count {
-            let option =
-                pg_sys::list_nth((*stmt).options, index).cast::<pg_sys::DefElem>();
-            if option_name(option) == b"skip_database_stats"
-                && (*option).location == DELEGATED_NATIVE_OPTION_LOCATION
-            {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 unsafe fn copy_stmt_in_portal(
     stmt: *mut pg_sys::VacuumStmt,
 ) -> *mut pg_sys::VacuumStmt {
@@ -192,7 +154,10 @@ unsafe fn delegate_native_run(
         // ParseState survives those commits. The previous context can belong
         // to the transaction being committed and must not be restored.
         pg_sys::MemoryContextSwitchTo(pg_sys::PortalContext);
-        (*stmt).options = mark_delegated_native_run((*stmt).options);
+        // Database frozen-XID statistics are updated once after all provider
+        // and native runs complete, not once for every delegated native run.
+        (*stmt).options =
+            set_boolean_option((*stmt).options, c"skip_database_stats", true);
         args.call_parent_with_node(stmt.cast());
     }
 }
@@ -239,6 +204,44 @@ unsafe fn delegate_provider_analyze(
     }
 }
 
+/// Validate every provider part of a compound FULL+ANALYZE before VACUUM
+/// starts switching transactions.  A provider FULL commit cannot be rolled
+/// back, so discovering a missing ANALYZE implementation afterwards would
+/// expose a partially successful command.
+unsafe fn preflight_provider_analyze(
+    expanded: *mut pg_sys::List,
+    params: &pg_sys::VacuumParams,
+) {
+    unsafe {
+        if params.options & pg_sys::VACOPT_ANALYZE == 0 {
+            return;
+        }
+        let count = pg_sys::list_length(expanded);
+        for index in 0..count {
+            let relation =
+                pg_sys::list_nth(expanded, index).cast::<pg_sys::VacuumRelation>();
+            let am = lakebase_relation_access_method((*relation).oid);
+            if am == pg_sys::InvalidOid
+                || !TableMaintenanceRouter::is_registered_am(am).report_unwrap()
+            {
+                continue;
+            }
+            if !TableMaintenanceRouter::supports_analyze(am).report_unwrap() {
+                let error = HookError::with_code(
+                    pgrx::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "VACUUM (FULL, ANALYZE) is not supported by this table maintenance provider",
+                )
+                .with_utility_context(
+                    "TableMaintenanceRouter",
+                    UtilityHookPhase::Pre,
+                    pg_sys::NodeTag::T_VacuumStmt,
+                );
+                Result::<(), HookError>::Err(error).report_unwrap();
+            }
+        }
+    }
+}
+
 /// Return true only when the FULL statement was consumed.
 pub(crate) unsafe fn try_route_vacuum_full(
     stmt: *mut pg_sys::VacuumStmt,
@@ -246,9 +249,6 @@ pub(crate) unsafe fn try_route_vacuum_full(
     is_top_level: bool,
 ) -> bool {
     unsafe {
-        if is_delegated_native_run(stmt) {
-            return false;
-        }
         let mut params = pg_sys::VacuumParams::default();
         if !lakebase_parse_vacuum_full(stmt, &mut params) {
             return false;
@@ -267,6 +267,7 @@ pub(crate) unsafe fn try_route_vacuum_full(
             &mut params,
             pg_sys::PortalContext,
         );
+        preflight_provider_analyze(expanded, &params);
         let mut provider_context = ProviderContext {
             command_time,
             budget: TableMaintenanceBudget::configured(),

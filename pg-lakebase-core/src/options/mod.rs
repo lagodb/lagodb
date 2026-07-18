@@ -9,7 +9,8 @@ pub mod table;
 pub mod tablespace;
 
 pub use schema::{
-    OptionDef, OptionKind, OptionSchemaError, extract_and_remove_options,
+    OptionDef, OptionKind, OptionMutability, OptionSchemaError,
+    extract_and_remove_options,
 };
 pub use table::{
     AmCache, AmCacheRef, AmCacheString, AmCacheValue, AmCacheValueBuilder,

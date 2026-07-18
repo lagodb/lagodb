@@ -8,6 +8,7 @@ use pg_lakebase_core::options::{TableOptions, get_tablespace};
 
 use super::metadata_table::IcebergMetadata;
 use super::metadata_tracker::TxMetadata;
+use super::automatic_maintenance::AutomaticMaintenanceCatalog;
 use super::table_lifecycle::compute_table_location;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::StorageContext;
@@ -83,6 +84,7 @@ impl<'a> IcebergTableDrop<'a> {
 
         IcebergMetadata::delete_if_exists(self.rel.oid())?;
         TableOptions::delete_from_catalog(self.rel.oid())?;
+        AutomaticMaintenanceCatalog::delete_relation_if_available(self.rel.oid())?;
         Ok(())
     }
 }

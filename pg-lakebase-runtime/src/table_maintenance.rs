@@ -4,7 +4,8 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_void};
 
 use pg_lakebase_core::table_maintenance::abi::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV2,
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3,
+    PROVIDER_CAPABILITIES_KNOWN,
     REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
     REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RUNTIME_API_VERSION, RuntimeApiV1,
     RuntimeMaintenanceConfigV1, provider_access_method_name, provider_name,
@@ -18,14 +19,14 @@ thread_local! {
 }
 
 struct StoredProvider {
-    descriptor: Box<MaintenanceProviderV2>,
+    descriptor: Box<MaintenanceProviderV3>,
     _name: CString,
     _access_method_name: CString,
 }
 
 impl StoredProvider {
     fn new(
-        descriptor: &MaintenanceProviderV2,
+        descriptor: &MaintenanceProviderV3,
         name: &CStr,
         access_method_name: &CStr,
     ) -> Self {
@@ -55,7 +56,7 @@ impl ProviderDirectory {
 
     fn register(
         &mut self,
-        descriptor: &MaintenanceProviderV2,
+        descriptor: &MaintenanceProviderV3,
         name: &CStr,
         access_method_name: &CStr,
     ) -> u32 {
@@ -69,6 +70,8 @@ impl ProviderDirectory {
             if existing_name == name {
                 let same_descriptor = existing_access_method_name
                     == access_method_name
+                    && existing_descriptor.capability_flags
+                        == descriptor.capability_flags
                     && std::ptr::fn_addr_eq(
                         existing_descriptor.access_method_oid,
                         descriptor.access_method_oid,
@@ -103,24 +106,25 @@ impl ProviderDirectory {
         self.providers.len()
     }
 
-    fn descriptor(&self, index: usize) -> *const MaintenanceProviderV2 {
+    fn descriptor(&self, index: usize) -> *const MaintenanceProviderV3 {
         self.providers[index].descriptor.as_ref()
     }
 }
 
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn register_provider(
-    descriptor: *const MaintenanceProviderV2,
+    descriptor: *const MaintenanceProviderV3,
 ) -> u32 {
     let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
         return REGISTER_INVALID_DESCRIPTOR;
     };
-    let expected_size = u32::try_from(std::mem::size_of::<MaintenanceProviderV2>())
+    let expected_size = u32::try_from(std::mem::size_of::<MaintenanceProviderV3>())
         .expect("maintenance descriptor size exceeds u32");
     if descriptor.abi_version != MAINTENANCE_PROVIDER_VERSION
         || descriptor.struct_size < expected_size
         || descriptor.name.is_null()
         || descriptor.access_method_name.is_null()
+        || descriptor.capability_flags & !PROVIDER_CAPABILITIES_KNOWN != 0
     {
         return REGISTER_INVALID_DESCRIPTOR;
     }
@@ -160,12 +164,12 @@ unsafe extern "C-unwind" fn has_providers() -> u8 {
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn provider_for_am(
     access_method_oid: pg_sys::Oid,
-) -> *const MaintenanceProviderV2 {
+) -> *const MaintenanceProviderV3 {
     // AM OIDs are database-local and do not exist yet during shared-preload
     // registration. Copy one stable descriptor pointer at a time, release the
     // RefCell borrow, and only then invoke catalog-reading provider callbacks.
     let provider_count = PROVIDERS.with_borrow(ProviderDirectory::len);
-    let mut matched: *const MaintenanceProviderV2 = std::ptr::null();
+    let mut matched: *const MaintenanceProviderV3 = std::ptr::null();
     for index in 0..provider_count {
         let descriptor =
             PROVIDERS.with_borrow(|providers| providers.descriptor(index));
@@ -257,12 +261,13 @@ mod tests {
     fn descriptor(
         name: &'static CStr,
         access_method_name: &'static CStr,
-    ) -> MaintenanceProviderV2 {
-        MaintenanceProviderV2 {
+    ) -> MaintenanceProviderV3 {
+        MaintenanceProviderV3 {
             abi_version: MAINTENANCE_PROVIDER_VERSION,
-            struct_size: std::mem::size_of::<MaintenanceProviderV2>() as u32,
+            struct_size: std::mem::size_of::<MaintenanceProviderV3>() as u32,
             name: name.as_ptr(),
             access_method_name: access_method_name.as_ptr(),
+            capability_flags: 0,
             access_method_oid,
             execute,
             inspect,

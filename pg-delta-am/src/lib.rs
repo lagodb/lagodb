@@ -7,7 +7,7 @@
 
 #[cfg(feature = "pg_test")]
 use pg_lakebase_core::table_maintenance::abi::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV2, MaintenanceReportV1,
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3, MaintenanceReportV1,
     MaintenanceRequestV1, MaintenanceStatsV1, REGISTER_DUPLICATE_ACCESS_METHOD,
     runtime_api,
 };
@@ -114,11 +114,12 @@ mod delta {
     #[pg_extern]
     fn duplicate_iceberg_registration_rejected() -> bool {
         let api = runtime_api().expect("runtime API must be published");
-        let descriptor = MaintenanceProviderV2 {
+        let descriptor = MaintenanceProviderV3 {
             abi_version: MAINTENANCE_PROVIDER_VERSION,
-            struct_size: std::mem::size_of::<MaintenanceProviderV2>() as u32,
+            struct_size: std::mem::size_of::<MaintenanceProviderV3>() as u32,
             name: c"delta-duplicate".as_ptr(),
             access_method_name: c"iceberg".as_ptr(),
+            capability_flags: 0,
             access_method_oid: duplicate_am_oid,
             execute: duplicate_execute,
             inspect: duplicate_inspect,

@@ -12,71 +12,28 @@ use pg_lakebase_core::table_maintenance::{
     TableMaintenanceCommandTime, TableMaintenanceMode, TableMaintenanceOptions,
     TableMaintenanceRequest,
 };
-use pgrx::datum::{DatumWithOid, Internal};
+use pgrx::datum::Internal;
 use pgrx::prelude::*;
 
 use super::IcebergTableMaintenanceProvider;
+use crate::catalog::automatic_maintenance::{
+    AutomaticMaintenanceCatalog, AutomaticMaintenanceOutcome,
+};
+use crate::error::IcebergResult;
 
 fn candidate_relations() -> Result<Vec<pg_sys::Oid>, PgReportError> {
     let limit = crate::gucs::auto_maintenance_max_tables();
-    Spi::connect_mut(|client| {
-        client.update(
-            "DELETE FROM iceberg.automatic_maintenance_state AS state \
-             WHERE NOT EXISTS ( \
-                 SELECT 1 FROM pg_catalog.pg_class AS c \
-                 WHERE c.oid = state.relid \
-             )",
-            None,
-            &[],
-        )?;
-        let query = format!(
-            "SELECT c.oid \
-             FROM pg_catalog.pg_class AS c \
-             JOIN pg_catalog.pg_am AS a ON a.oid = c.relam \
-             LEFT JOIN iceberg.automatic_maintenance_state AS state \
-               ON state.relid = c.oid \
-             WHERE a.amname = 'iceberg' AND c.relkind = 'r' \
-               AND (state.next_attempt_at IS NULL \
-                    OR state.next_attempt_at <= pg_catalog.clock_timestamp()) \
-             ORDER BY state.last_attempt_at ASC NULLS FIRST, \
-                      pg_catalog.hashint8(c.oid::int8 # pg_catalog.pg_backend_pid()::int8) \
-             LIMIT {limit}"
-        );
-        client
-            .select(&query, None, &[])?
-            .map(|row| {
-                row.get::<pg_sys::Oid>(1)?
-                    .ok_or(pgrx::spi::Error::NoTupleTable)
-            })
-            .collect::<Result<Vec<_>, _>>()
-    })
-    .map_err(|source| {
-        PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            format!("failed to discover Iceberg maintenance candidates: {source}"),
-        )
-    })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RelationOutcome {
-    LockSkipped,
-    NoWork,
-    Maintained,
-}
-
-impl RelationOutcome {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::LockSkipped => "lock-skipped",
-            Self::NoWork => "not-eligible",
-            Self::Maintained => "maintained",
-        }
-    }
-
-    const fn completed(self) -> bool {
-        !matches!(self, Self::LockSkipped)
-    }
+    let catalog = AutomaticMaintenanceCatalog::open()
+        .map_err(PgReportError::from_domain_error)?;
+    // SAFETY: this worker runs inside a connected PostgreSQL backend.
+    let backend_seed =
+        u64::try_from(unsafe { pg_sys::MyProcPid }).unwrap_or_default();
+    // SAFETY: the worker transaction is active and PostgreSQL initializes its
+    // timestamp subsystem before invoking extension code.
+    let now = unsafe { pg_sys::GetCurrentTimestamp() };
+    catalog
+        .eligible_relations(limit, now, backend_seed)
+        .map_err(PgReportError::from_domain_error)
 }
 
 #[derive(Clone, Copy)]
@@ -137,43 +94,50 @@ impl SchedulerPolicy {
         )
         .min(self.failure_backoff_max)
     }
-}
 
-fn duration_millis(delay: Duration) -> i64 {
-    i64::try_from(delay.as_millis()).unwrap_or(i64::MAX)
+    fn relation_next_attempt_at(
+        self,
+        relid: pg_sys::Oid,
+        attempted_at: pg_sys::TimestampTz,
+    ) -> pg_sys::TimestampTz {
+        Self::timestamp_after(attempted_at, self.relation_delay(relid))
+    }
+
+    fn failure_next_attempt_at(
+        self,
+        relid: pg_sys::Oid,
+        failures: u32,
+        attempted_at: pg_sys::TimestampTz,
+    ) -> pg_sys::TimestampTz {
+        Self::timestamp_after(
+            attempted_at,
+            self.failure_delay(relid, failures),
+        )
+    }
+
+    fn timestamp_after(
+        timestamp: pg_sys::TimestampTz,
+        delay: Duration,
+    ) -> pg_sys::TimestampTz {
+        let micros = i64::try_from(delay.as_micros()).unwrap_or(i64::MAX);
+        timestamp.saturating_add(micros)
+    }
 }
 
 fn record_success(
     relid: pg_sys::Oid,
-    outcome: RelationOutcome,
+    outcome: AutomaticMaintenanceOutcome,
     policy: SchedulerPolicy,
-) -> Result<(), pgrx::spi::Error> {
-    let delay_ms = duration_millis(policy.relation_delay(relid));
-    Spi::run_with_args(
-        "INSERT INTO iceberg.automatic_maintenance_state \
-             (relid, consecutive_failures, next_attempt_at, last_attempt_at, \
-              last_success_at, last_outcome, last_error) \
-         VALUES ($1, 0, pg_catalog.clock_timestamp() + \
-                     $2::double precision * interval '1 millisecond', \
-                 pg_catalog.clock_timestamp(), \
-                 CASE WHEN $4 THEN pg_catalog.clock_timestamp() END, \
-                 $3, NULL) \
-         ON CONFLICT (relid) DO UPDATE SET \
-             consecutive_failures = 0, \
-             next_attempt_at = EXCLUDED.next_attempt_at, \
-             last_attempt_at = EXCLUDED.last_attempt_at, \
-             last_success_at = COALESCE( \
-                 EXCLUDED.last_success_at, \
-                 automatic_maintenance_state.last_success_at \
-             ), \
-             last_outcome = EXCLUDED.last_outcome, \
-             last_error = NULL",
-        &[
-            DatumWithOid::from(relid),
-            DatumWithOid::from(delay_ms),
-            DatumWithOid::from(outcome.label()),
-            DatumWithOid::from(outcome.completed()),
-        ],
+) -> IcebergResult<()> {
+    // SAFETY: record_success executes inside WorkerTransaction::run.
+    let attempted_at = unsafe { pg_sys::GetCurrentTimestamp() };
+    let next_attempt_at = policy.relation_next_attempt_at(relid, attempted_at);
+    let catalog = AutomaticMaintenanceCatalog::open()?;
+    catalog.record_success(
+        relid,
+        outcome,
+        attempted_at,
+        next_attempt_at,
     )
 }
 
@@ -181,40 +145,25 @@ fn record_failure(
     relid: pg_sys::Oid,
     error: &str,
     policy: SchedulerPolicy,
-) -> Result<(), pgrx::spi::Error> {
-    let previous = Spi::get_one_with_args::<i32>(
-        "SELECT COALESCE(( \
-             SELECT consecutive_failures \
-             FROM iceberg.automatic_maintenance_state WHERE relid = $1 \
-         ), 0)",
-        &[DatumWithOid::from(relid)],
-    )?
-    .unwrap_or(0);
-    let failures = u32::try_from(previous).unwrap_or(0).saturating_add(1);
-    let delay_ms = duration_millis(policy.failure_delay(relid, failures));
-    Spi::run_with_args(
-        "INSERT INTO iceberg.automatic_maintenance_state \
-             (relid, consecutive_failures, next_attempt_at, last_attempt_at, \
-              last_outcome, last_error) \
-         VALUES ($1, $2, pg_catalog.clock_timestamp() + \
-                     $3::double precision * interval '1 millisecond', \
-                 pg_catalog.clock_timestamp(), 'failed', $4) \
-         ON CONFLICT (relid) DO UPDATE SET \
-             consecutive_failures = EXCLUDED.consecutive_failures, \
-             next_attempt_at = EXCLUDED.next_attempt_at, \
-             last_attempt_at = EXCLUDED.last_attempt_at, \
-             last_outcome = EXCLUDED.last_outcome, \
-             last_error = EXCLUDED.last_error",
-        &[
-            DatumWithOid::from(relid),
-            DatumWithOid::from(i32::try_from(failures).unwrap_or(i32::MAX)),
-            DatumWithOid::from(delay_ms),
-            DatumWithOid::from(error),
-        ],
+) -> IcebergResult<()> {
+    let catalog = AutomaticMaintenanceCatalog::open()?;
+    let failures = catalog.consecutive_failures(relid)?.saturating_add(1);
+    // SAFETY: record_failure executes inside WorkerTransaction::run.
+    let attempted_at = unsafe { pg_sys::GetCurrentTimestamp() };
+    let next_attempt_at =
+        policy.failure_next_attempt_at(relid, failures, attempted_at);
+    catalog.record_failure(
+        relid,
+        failures,
+        error,
+        attempted_at,
+        next_attempt_at,
     )
 }
 
-fn maintain_relation(relid: pg_sys::Oid) -> Result<RelationOutcome, PgReportError> {
+fn maintain_relation(
+    relid: pg_sys::Oid,
+) -> Result<AutomaticMaintenanceOutcome, PgReportError> {
     let locked = unsafe {
         pg_sys::ConditionalLockRelationOid(
             relid,
@@ -222,14 +171,14 @@ fn maintain_relation(relid: pg_sys::Oid) -> Result<RelationOutcome, PgReportErro
         )
     };
     if !locked {
-        return Ok(RelationOutcome::LockSkipped);
+        return Ok(AutomaticMaintenanceOutcome::LockSkipped);
     }
     let relation = RelationGuard::open(relid, pg_sys::NoLock as pg_sys::LOCKMODE)
         .map_err(PgReportError::from_domain_error)?;
     let relation = relation.as_handle();
     let expected_am = <IcebergTableMaintenanceProvider as LakebaseTableMaintenanceProvider>::access_method_oid();
     if expected_am != Some(relation.access_method_oid()) {
-        return Ok(RelationOutcome::NoWork);
+        return Ok(AutomaticMaintenanceOutcome::NoWork);
     }
     let command_time = TableMaintenanceCommandTime::now()
         .map_err(PgReportError::from_domain_error)?;
@@ -253,9 +202,9 @@ fn maintain_relation(relid: pg_sys::Oid) -> Result<RelationOutcome, PgReportErro
         || report.manifests_rewritten != 0
         || report.objects_scheduled_for_deletion != 0;
     Ok(if did_work {
-        RelationOutcome::Maintained
+        AutomaticMaintenanceOutcome::Maintained
     } else {
-        RelationOutcome::NoWork
+        AutomaticMaintenanceOutcome::NoWork
     })
 }
 
@@ -289,14 +238,8 @@ mod iceberg {
             match WorkerTransaction::run(|| maintain_relation(relid)) {
                 Ok(outcome) => {
                     if let Err(error) = WorkerTransaction::run(|| {
-                        record_success(relid, outcome, policy).map_err(|source| {
-                                PgReportError::from_message(
-                                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                                    format!(
-                                        "failed to persist automatic maintenance state: {source}"
-                                    ),
-                                )
-                            })
+                        record_success(relid, outcome, policy)
+                            .map_err(PgReportError::from_domain_error)
                     }) {
                         report_warning(format_args!(
                             "automatic Iceberg maintenance could not persist state for relation {}: {}",
@@ -308,14 +251,8 @@ mod iceberg {
                 Err(error) => {
                     let message = error.to_string();
                     if let Err(state_error) = WorkerTransaction::run(|| {
-                        record_failure(relid, &message, policy).map_err(|source| {
-                                PgReportError::from_message(
-                                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                                    format!(
-                                        "failed to persist automatic maintenance failure: {source}"
-                                    ),
-                                )
-                            })
+                        record_failure(relid, &message, policy)
+                            .map_err(PgReportError::from_domain_error)
                     }) {
                         report_warning(format_args!(
                             "automatic Iceberg maintenance could not persist failure state for relation {}: {}",

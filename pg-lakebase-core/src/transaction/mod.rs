@@ -81,6 +81,44 @@ thread_local! {
     static CALLBACK_REGISTERED: RefCell<bool> = const { RefCell::new(false) };
 }
 
+/// Active-snapshot boundary shared by every pre-commit resource.
+///
+/// PostgreSQL command paths such as VACUUM may commit after popping their
+/// command snapshot. Transaction resources are nevertheless allowed to use
+/// catalog APIs during `on_pre_commit`, so the framework supplies the same
+/// prerequisite uniformly instead of making each resource reconstruct it.
+struct PreCommitSnapshot {
+    pushed: bool,
+}
+
+impl PreCommitSnapshot {
+    fn ensure() -> Self {
+        // SAFETY: this runs inside PostgreSQL's PRE_COMMIT callback while a
+        // transaction is active. GetTransactionSnapshot returns a snapshot
+        // owned by PostgreSQL; PushActiveSnapshot registers the corresponding
+        // active-stack reference until this guard is dropped.
+        let pushed = unsafe {
+            if pg_sys::ActiveSnapshotSet() {
+                false
+            } else {
+                pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+                true
+            }
+        };
+        Self { pushed }
+    }
+}
+
+impl Drop for PreCommitSnapshot {
+    fn drop(&mut self) {
+        if self.pushed {
+            // SAFETY: `ensure` pushed exactly one active snapshot and this
+            // guard is neither Clone nor movable across callback invocations.
+            unsafe { pg_sys::PopActiveSnapshot() };
+        }
+    }
+}
+
 /// Register a transaction resource.
 ///
 /// Registered resources are invoked in the order they are registered for
@@ -162,13 +200,17 @@ unsafe extern "C-unwind" fn xact_callback(
             // they WILL receive the subsequent on_commit / on_abort.
             let snapshot: Vec<Rc<dyn TransactionResource>> =
                 RESOURCES.with(|res| res.borrow().clone());
-            for r in &snapshot {
-                if r.nest_level() >= current_nest_level
-                    && let Err(error) = r.on_pre_commit()
-                {
-                    // PgReportError::report() raises PostgreSQL ERROR and
-                    // does not return, so this aborts the pre-commit loop.
-                    error.report();
+            if !snapshot.is_empty() {
+                let active_snapshot = PreCommitSnapshot::ensure();
+                for r in &snapshot {
+                    if r.nest_level() >= current_nest_level
+                        && let Err(error) = r.on_pre_commit()
+                    {
+                        // Drop Rust-owned boundary state before raising a
+                        // PostgreSQL ERROR, whose longjmp does not run Drop.
+                        drop(active_snapshot);
+                        error.report();
+                    }
                 }
             }
         }

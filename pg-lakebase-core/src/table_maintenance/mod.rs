@@ -21,13 +21,14 @@ pub use provider::{
     TableMaintenanceRouter, register_provider,
 };
 
-#[cfg(feature = "pg17")]
+/// Publish and install the runtime-owned ProcessUtility router.
+///
+/// The router owns FULL dispatch and receives AM utility-hook descriptors over
+/// a fixed-layout rendezvous ABI; AM-linked core copies never install their own
+/// ProcessUtility dispatcher.
 pub fn install_runtime_router() {
-    crate::hooks::utility_hook::install_table_maintenance_router();
+    crate::hooks::utility_hook::install_runtime_owned_router();
 }
-
-#[cfg(not(feature = "pg17"))]
-pub fn install_runtime_router() {}
 pub use types::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMetric,
     TableMaintenanceMode, TableMaintenanceOptions, TableMaintenanceReport,

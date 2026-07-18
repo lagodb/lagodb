@@ -5,7 +5,9 @@
 
 use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use crate::diag::{PgError, SqlStateError, domain_error_report};
-use crate::options::schema::{self, OptionDef, OptionSchemaError};
+use crate::options::schema::{
+    self, OptionDef, OptionMutability, OptionSchemaError,
+};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -24,6 +26,9 @@ pub enum TableOptionError {
 
     #[error("invalid table option: {0}")]
     InvalidOption(String),
+
+    #[error("table option '{0}' can only be specified by CREATE TABLE")]
+    CreateOnlyOption(String),
 
     #[error("failed to persist table options")]
     PersistFailed(#[source] PgError),
@@ -49,6 +54,9 @@ impl SqlStateError for TableOptionError {
         match self {
             Self::InvalidSchema(_) | Self::InvalidOption(_) => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+            }
+            Self::CreateOnlyOption(_) => {
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::PersistFailed(error)
             | Self::LoadFailed(error)
@@ -338,6 +346,37 @@ impl TableOptions {
 }
 
 impl TableOptionAlterations {
+    /// Reject recognized CREATE-only options before the command tree is
+    /// rewritten.  Keeping this rule on the shared schema ensures SET and
+    /// RESET cannot drift apart as AM option sets grow.
+    unsafe fn reject_create_only(
+        options: *mut pg_sys::List,
+        valid_options: &[OptionDef],
+    ) -> Result<(), TableOptionError> {
+        if options.is_null() {
+            return Ok(());
+        }
+        let count = unsafe { pg_sys::list_length(options) };
+        for index in 0..count {
+            let element = unsafe {
+                pg_sys::list_nth(options, index).cast::<pg_sys::DefElem>()
+            };
+            if element.is_null() {
+                continue;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*element).defname) };
+            if let Some(definition) = valid_options.iter().find(|definition| {
+                name.to_bytes() == definition.name.as_bytes()
+            }) && definition.mutability == OptionMutability::CreateOnly
+            {
+                return Err(TableOptionError::CreateOnlyOption(
+                    definition.name.to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Whether an ALTER command list contains an option owned by this schema.
     ///
     /// # Safety
@@ -415,6 +454,12 @@ impl TableOptionAlterations {
 
             match unsafe { (*command).subtype } {
                 pg_sys::AlterTableType::AT_SetRelOptions => {
+                    unsafe {
+                        Self::reject_create_only(
+                            (*command).def.cast::<pg_sys::List>(),
+                            valid_options,
+                        )?;
+                    }
                     let options_ptr = unsafe {
                         std::ptr::addr_of_mut!((*command).def)
                             .cast::<*mut pg_sys::List>()
@@ -431,6 +476,12 @@ impl TableOptionAlterations {
                     }
                 }
                 pg_sys::AlterTableType::AT_ResetRelOptions => {
+                    unsafe {
+                        Self::reject_create_only(
+                            (*command).def.cast::<pg_sys::List>(),
+                            valid_options,
+                        )?;
+                    }
                     let options_ptr = unsafe {
                         std::ptr::addr_of_mut!((*command).def)
                             .cast::<*mut pg_sys::List>()
@@ -452,7 +503,16 @@ impl TableOptionAlterations {
         Ok(Self { changes })
     }
 
-    pub fn apply_to(self, current: Option<TableOptions>) -> TableOptions {
+    /// Apply ordered SET/RESET operations to persisted option overrides.
+    ///
+    /// RESET removes the persisted override; it does not persist a copied
+    /// default value. The AM must pass the result through the same option
+    /// resolver used by CREATE TABLE, so an absent value regains that schema's
+    /// current CREATE default.
+    pub fn apply_to_overrides(
+        self,
+        current: Option<TableOptions>,
+    ) -> TableOptions {
         let mut options = current.map_or_else(Vec::new, |current| current.options);
         for change in self.changes {
             match change {
@@ -473,5 +533,52 @@ impl TableOptionAlterations {
             }
         }
         TableOptions::new(options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn option_value<'a>(options: &'a TableOptions, name: &str) -> Option<&'a str> {
+        options
+            .iter()
+            .find_map(|(key, value)| (key == name).then_some(value))
+            .flatten()
+    }
+
+    #[test]
+    fn reset_removes_persisted_override_instead_of_copying_a_default() {
+        let current = TableOptions::new(vec![
+            ("compression".to_owned(), Some("snappy".to_owned())),
+            ("write-format".to_owned(), Some("parquet".to_owned())),
+        ]);
+        let alterations = TableOptionAlterations {
+            changes: vec![TableOptionChange::Reset(vec![
+                "compression".to_owned(),
+            ])],
+        };
+
+        let updated = alterations.apply_to_overrides(Some(current));
+
+        assert_eq!(option_value(&updated, "compression"), None);
+        assert_eq!(option_value(&updated, "write-format"), Some("parquet"));
+    }
+
+    #[test]
+    fn ordered_set_then_reset_restores_the_unspecified_state() {
+        let alterations = TableOptionAlterations {
+            changes: vec![
+                TableOptionChange::Set(TableOptions::new(vec![(
+                    "compression".to_owned(),
+                    Some("snappy".to_owned()),
+                )])),
+                TableOptionChange::Reset(vec!["compression".to_owned()]),
+            ],
+        };
+
+        let updated = alterations.apply_to_overrides(None);
+
+        assert_eq!(option_value(&updated, "compression"), None);
     }
 }

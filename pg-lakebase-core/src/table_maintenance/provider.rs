@@ -6,10 +6,10 @@ use crate::diag::PgReportError;
 use crate::handles::RelationHandle;
 
 use super::abi::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV2, MaintenanceReportV1,
-    MaintenanceRequestV1, MaintenanceStatsV1, REGISTER_DUPLICATE_ACCESS_METHOD,
-    REGISTER_DUPLICATE_NAME, REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, provider_name,
-    runtime_api,
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3, MaintenanceReportV1,
+    MaintenanceRequestV1, MaintenanceStatsV1, PROVIDER_CAPABILITY_ANALYZE,
+    REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
+    REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, provider_name, runtime_api,
 };
 use super::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceError,
@@ -28,6 +28,9 @@ pub struct TableMaintenanceRequest<'a> {
 pub trait LakebaseTableMaintenanceProvider: 'static {
     const NAME: &'static CStr;
     const ACCESS_METHOD_NAME: &'static CStr;
+    /// Whether PostgreSQL can obtain a statistically valid ANALYZE sample
+    /// through this provider's table-AM callbacks.
+    const SUPPORTS_ANALYZE: bool = false;
 
     fn access_method_oid() -> Option<pg_sys::Oid>;
 
@@ -122,12 +125,17 @@ where
     let api = runtime_api().unwrap_or_else(|| {
         panic!("pg_lakebase runtime API is unavailable; preload pg_lakebase_runtime before provider extensions")
     });
-    let descriptor = MaintenanceProviderV2 {
+    let descriptor = MaintenanceProviderV3 {
         abi_version: MAINTENANCE_PROVIDER_VERSION,
-        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV2>())
+        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV3>())
             .expect("maintenance provider descriptor size exceeds u32"),
         name: P::NAME.as_ptr(),
         access_method_name: P::ACCESS_METHOD_NAME.as_ptr(),
+        capability_flags: if P::SUPPORTS_ANALYZE {
+            PROVIDER_CAPABILITY_ANALYZE
+        } else {
+            0
+        },
         access_method_oid: provider_access_method_oid::<P>,
         execute: provider_execute::<P>,
         inspect: provider_inspect::<P>,
@@ -161,7 +169,7 @@ impl TableMaintenanceRouter {
 
     fn provider_for_am(
         access_method_oid: pg_sys::Oid,
-    ) -> Result<&'static MaintenanceProviderV2, TableMaintenanceError> {
+    ) -> Result<&'static MaintenanceProviderV3, TableMaintenanceError> {
         let api = runtime_api().ok_or_else(|| {
             TableMaintenanceError::framework("pg_lakebase runtime API is unavailable")
         })?;
@@ -180,6 +188,13 @@ impl TableMaintenanceRouter {
             return Ok(false);
         };
         Ok(!unsafe { (api.provider_for_am)(access_method_oid) }.is_null())
+    }
+
+    pub fn supports_analyze(
+        access_method_oid: pg_sys::Oid,
+    ) -> Result<bool, TableMaintenanceError> {
+        let provider = Self::provider_for_am(access_method_oid)?;
+        Ok(provider.capability_flags & PROVIDER_CAPABILITY_ANALYZE != 0)
     }
 
     pub fn execute(

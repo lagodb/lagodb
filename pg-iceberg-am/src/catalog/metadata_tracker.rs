@@ -96,39 +96,6 @@ struct TableCommitInput {
     file_io: FileIO,
 }
 
-/// Owns the active snapshot required by catalog access during a transaction
-/// pre-commit callback.
-///
-/// Ordinary executor paths often still have an active snapshot when the
-/// callback runs, but PostgreSQL's VACUUM transaction loop explicitly pops
-/// its snapshot before `CommitTransactionCommand`. Metadata materialization
-/// must not depend on which command initiated the commit.
-struct PreCommitSnapshot {
-    pushed: bool,
-}
-
-impl PreCommitSnapshot {
-    fn ensure() -> Self {
-        let pushed = unsafe {
-            if pg_sys::ActiveSnapshotSet() {
-                false
-            } else {
-                pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
-                true
-            }
-        };
-        Self { pushed }
-    }
-}
-
-impl Drop for PreCommitSnapshot {
-    fn drop(&mut self) {
-        if self.pushed {
-            unsafe { pg_sys::PopActiveSnapshot() };
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 struct TxTableActionLog {
     actions: Vec<TxTableAction>,
@@ -1294,7 +1261,6 @@ impl TransactionResource for TxMetadata {
     fn set_nest_level(&self, _level: i32) {}
 
     fn on_pre_commit(&self) -> TransactionResult<()> {
-        let _snapshot = PreCommitSnapshot::ensure();
         self.commit_all()?;
         Ok(())
     }

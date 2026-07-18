@@ -30,6 +30,10 @@ CREATE TABLE vacuum_correctness_test.t_v3 (
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
 );
+\set VERBOSITY terse
+ALTER TABLE vacuum_correctness_test.t SET ("format-version" = 3);
+ALTER TABLE vacuum_correctness_test.t RESET ("format-version");
+\set VERBOSITY default
 ALTER TABLE vacuum_correctness_test.t SET (
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
@@ -153,7 +157,7 @@ VACUUM vacuum_correctness_test.t_v3;
 
 CREATE TABLE vacuum_correctness_test.heap_t (id integer);
 INSERT INTO vacuum_correctness_test.heap_t VALUES (10), (20);
-VACUUM (FULL, ANALYZE)
+VACUUM (FULL)
     vacuum_correctness_test.heap_t,
     vacuum_correctness_test.t_v1,
     vacuum_correctness_test.t,

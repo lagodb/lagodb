@@ -107,6 +107,16 @@ pub enum IcebergError {
     #[error("optimistic locking failed: metadata location changed concurrently")]
     MetadataCatalogConflict,
 
+    #[error("failed to {operation} iceberg.automatic_maintenance_state catalog: {source}")]
+    AutomaticMaintenanceCatalog {
+        operation: MetadataCatalogOperation,
+        #[source]
+        source: PgError,
+    },
+
+    #[error("invalid automatic maintenance catalog record: {0}")]
+    AutomaticMaintenanceCatalogInvalidRecord(String),
+
     #[error("Iceberg VACUUM failed: {source}")]
     Vacuum {
         #[source]
@@ -239,7 +249,10 @@ pub enum IcebergError {
 impl SqlStateError for IcebergError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            IcebergError::MetadataCatalog { source, .. } => source.sql_error_code(),
+            IcebergError::MetadataCatalog { source, .. }
+            | IcebergError::AutomaticMaintenanceCatalog { source, .. } => {
+                source.sql_error_code()
+            }
 
             IcebergError::MetadataCatalogNotFound(_) => {
                 PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
@@ -255,7 +268,8 @@ impl SqlStateError for IcebergError {
 
             IcebergError::Vacuum { source } => source.sql_error_code(),
 
-            IcebergError::MetadataCatalogInvalidRecord(_) => {
+            IcebergError::MetadataCatalogInvalidRecord(_)
+            | IcebergError::AutomaticMaintenanceCatalogInvalidRecord(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
 

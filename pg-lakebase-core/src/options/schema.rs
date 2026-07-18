@@ -72,9 +72,16 @@ pub enum OptionKind {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionMutability {
+    CreateOnly,
+    Mutable,
+}
+
 pub struct OptionDef {
     pub name: &'static str,
     pub kind: OptionKind,
+    pub mutability: OptionMutability,
     pub description: &'static str,
 }
 

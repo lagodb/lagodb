@@ -798,7 +798,6 @@ pub struct IcebergScan {
     shape: RelationShape,
     spec: Option<ScanSpec>,
     cursor: Option<IcebergBatchCursor>,
-    analyze_block_started: bool,
 }
 
 impl AmScan for IcebergTableAm {}
@@ -820,7 +819,6 @@ impl AmScanSession for IcebergScan {
             shape: RelationShape::from_relation(rel),
             spec: None,
             cursor: None,
-            analyze_block_started: false,
         })
     }
 
@@ -876,26 +874,6 @@ impl AmScanSession for IcebergScan {
         Ok(())
     }
 
-    fn scan_analyze_next_block(
-        &mut self,
-        _stream: &ReadStreamHandle,
-    ) -> AmResult<bool> {
-        if self.analyze_block_started {
-            Ok(false)
-        } else {
-            self.analyze_block_started = true;
-            Ok(true)
-        }
-    }
-
-    fn scan_analyze_next_tuple(
-        &mut self,
-        _oldest_xmin: pg_sys::TransactionId,
-        out: &mut SlotColumns<'_>,
-    ) -> AmResult<(bool, f64, f64)> {
-        let found = self.scan_driver().next_into_slot(out)?;
-        Ok((found, f64::from(found), 0.0))
-    }
 }
 
 /// Translate PostgreSQL [`OwnedScanKeys`] into an Iceberg [`Predicate`].

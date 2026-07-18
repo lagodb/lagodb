@@ -543,13 +543,16 @@ where
         state.reset_tmp_context();
         let mut columns = SlotColumns::new(slot, state.tmp_ctx);
 
-        let (found, live, dead) = state
+        let (found, live_delta, dead_delta) = state
             .am_instance
             .scan_analyze_next_tuple(oldest_xmin, &mut columns)
             .report_unwrap();
 
-        *liverows = live;
-        *deadrows = dead;
+        // PostgreSQL owns these running totals.  A table AM reports the
+        // contribution of the tuple it just inspected; replacing the totals
+        // makes ANALYZE observe at most one row regardless of sample size.
+        *liverows += live_delta;
+        *deadrows += dead_delta;
 
         if !found {
             return false;

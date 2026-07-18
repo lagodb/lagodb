@@ -2,9 +2,9 @@
 //!
 //! PostgreSQL table options are the DDL surface, while Iceberg metadata is the
 //! runtime source of truth. This object bridges the two without committing
-//! metadata from the utility hook: it captures the fully resolved property
-//! state and stages it in [`TxMetadata`] for savepoint-aware, CAS-replayable
-//! commit.
+//! metadata from the utility hook: it captures the effective values of every
+//! AM-managed property after CREATE-default resolution and stages them in
+//! [`TxMetadata`] for savepoint-aware, CAS-replayable commit.
 
 use std::collections::HashMap;
 
@@ -17,19 +17,24 @@ use crate::error::IcebergResult;
 use crate::options::ResolvedIcebergOptions;
 use crate::storage::StorageContext;
 
-/// A fully resolved Iceberg property replacement prepared from PostgreSQL
-/// table options.
+/// Effective values of all AM-managed Iceberg properties prepared from
+/// PostgreSQL table-option overrides.
+///
+/// RESET removes an override from `lakebase.table_options`; the shared CREATE
+/// resolver then places the CREATE default in this update. Applying the update
+/// extends the Iceberg property map so properties not owned by this AM remain
+/// untouched.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedTablePropertyUpdate {
     format_version: FormatVersion,
-    properties: HashMap<String, String>,
+    effective_properties: HashMap<String, String>,
 }
 
 impl PreparedTablePropertyUpdate {
     pub(crate) fn from_options(options: ResolvedIcebergOptions) -> Self {
         Self {
             format_version: options.format_version(),
-            properties: options.properties(),
+            effective_properties: options.properties(),
         }
     }
 
@@ -62,7 +67,7 @@ impl PreparedTablePropertyUpdate {
         Ok(metadata
             .clone()
             .into_builder(None)
-            .set_properties(self.properties.clone())?
+            .set_properties(self.effective_properties.clone())?
             .build()?
             .metadata)
     }
@@ -72,7 +77,7 @@ impl PreparedTablePropertyUpdate {
         mut transaction: Transaction,
     ) -> IcebergResult<Transaction> {
         let mut action = transaction.update_table_properties();
-        for (key, value) in &self.properties {
+        for (key, value) in &self.effective_properties {
             action = action.set(key.clone(), value.clone());
         }
         transaction = action.apply(transaction)?;

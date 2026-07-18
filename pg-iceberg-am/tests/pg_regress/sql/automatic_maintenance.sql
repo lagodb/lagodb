@@ -119,6 +119,15 @@ SELECT last_outcome, consecutive_failures
 FROM iceberg.automatic_maintenance_state
 WHERE relid = 'automatic_maintenance_test.eligible'::regclass::oid;
 
+CREATE TEMP TABLE dropped_maintenance_relid AS
+SELECT 'automatic_maintenance_test.eligible'::regclass::oid AS relid;
+DROP TABLE automatic_maintenance_test.eligible;
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM iceberg.automatic_maintenance_state AS state
+    JOIN dropped_maintenance_relid USING (relid)
+) AS drop_removed_maintenance_state;
+
 SELECT format(
     'ALTER DATABASE %I RESET pg_iceberg_am.auto_maintenance_enabled',
     current_database()

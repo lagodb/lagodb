@@ -16,7 +16,7 @@ use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::table::{
     AmCache, AmCacheRef, AmCacheValue, AmCacheable, TableOptionError, TableOptions,
 };
-use pg_lakebase_core::options::{OptionDef, OptionKind};
+use pg_lakebase_core::options::{OptionDef, OptionKind, OptionMutability};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -77,6 +77,7 @@ pub const OPT_MANIFEST_MERGE: &str = TableProperties::PROPERTY_MANIFEST_MERGE_EN
 pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     OptionDef {
         name: OPT_FORMAT_VERSION,
+        mutability: OptionMutability::CreateOnly,
         kind: OptionKind::Int {
             default: OPT_FORMAT_VERSION_DEFAULT,
             min: Some(OPT_FORMAT_VERSION_MIN),
@@ -86,6 +87,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_COMPRESSION_CODEC,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Enum {
             default: OPT_COMPRESSION_CODEC_DEFAULT,
             values: OPT_COMPRESSION_CODEC_VALUES,
@@ -94,6 +96,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_FORMAT,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_FORMAT_DEFAULT,
             values: OPT_WRITE_FORMAT_VALUES,
@@ -102,6 +105,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_DELETE_ISOLATION_LEVEL,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
             values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
@@ -110,6 +114,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_UPDATE_ISOLATION_LEVEL,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
             values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
@@ -118,6 +123,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_MERGE_ISOLATION_LEVEL,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
             values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
@@ -126,6 +132,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_TARGET_FILE_SIZE,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
             default: Some("536870912"),
         },
@@ -133,6 +140,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MAX_SNAPSHOT_AGE,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
             default: Some("432000000"),
         },
@@ -140,11 +148,13 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MIN_SNAPSHOTS,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: Some("1") },
         description: "Minimum snapshots retained per branch",
     },
     OptionDef {
         name: OPT_MAX_REF_AGE,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
             default: Some("9223372036854775807"),
         },
@@ -152,6 +162,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_METADATA_VERSIONS,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
             default: Some("100"),
         },
@@ -159,6 +170,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MANIFEST_TARGET_SIZE,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
             default: Some("8388608"),
         },
@@ -166,6 +178,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MANIFEST_MIN_COUNT,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
             default: Some("100"),
         },
@@ -173,6 +186,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MANIFEST_MERGE,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Bool { default: true },
         description: "Enable automatic manifest merging",
     },
@@ -659,6 +673,19 @@ mod tests {
                 Some(OPT_WRITE_ISOLATION_LEVEL_DEFAULT),
             );
         }
+    }
+
+    #[test]
+    fn reset_to_empty_overrides_matches_create_without_options() {
+        let create_without_options =
+            ResolvedIcebergOptions::from_table_options(None).unwrap();
+        let empty_overrides = TableOptions::new(Vec::new());
+        let after_reset = ResolvedIcebergOptions::from_table_options(Some(
+            &empty_overrides,
+        ))
+        .unwrap();
+
+        assert_eq!(after_reset, create_without_options);
     }
 
     #[test]

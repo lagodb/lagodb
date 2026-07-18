@@ -812,8 +812,9 @@ impl UtilityHook for IcebergAlterTableGuard {
                         ICEBERG_TABLE_OPTIONS,
                     )?
                 };
-                let options =
-                    alterations.apply_to(TableOptions::load_from_catalog(oid)?);
+                let options = alterations.apply_to_overrides(
+                    TableOptions::load_from_catalog(oid)?,
+                );
                 ResolvedIcebergOptions::from_table_options(Some(&options))?;
                 options.replace_in_catalog(oid)?;
             }

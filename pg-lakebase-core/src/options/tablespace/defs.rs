@@ -1,7 +1,9 @@
 //! Tablespace catalog option definitions.
 
 use super::storage::StorageProtocol;
-use crate::options::schema::{self, OptionDef, OptionKind};
+use crate::options::schema::{
+    self, OptionDef, OptionKind, OptionMutability,
+};
 use pgrx::pg_sys;
 
 pub(crate) const OPT_PROTOCOL: &str = "protocol";
@@ -36,6 +38,7 @@ pub(crate) const DEFAULT_ALLOW_HTTP: bool = false;
 static TABLESPACE_OPTION_DEFS: &[OptionDef] = &[
     OptionDef {
         name: OPT_PROTOCOL,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Enum {
             default: DEFAULT_PROTOCOL,
             values: StorageProtocol::ALL,
@@ -44,11 +47,13 @@ static TABLESPACE_OPTION_DEFS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_BUCKET,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Object storage bucket name",
     },
     OptionDef {
         name: OPT_REGION,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
             default: Some(DEFAULT_S3_REGION),
         },
@@ -56,11 +61,13 @@ static TABLESPACE_OPTION_DEFS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_ENDPOINT,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "S3 or Azure object storage endpoint",
     },
     OptionDef {
         name: OPT_ALLOW_HTTP,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Bool {
             default: DEFAULT_ALLOW_HTTP,
         },
@@ -68,86 +75,103 @@ static TABLESPACE_OPTION_DEFS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_ACCESS_KEY_ID,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "S3 access key id",
     },
     OptionDef {
         name: OPT_SECRET_ACCESS_KEY,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "S3 secret access key",
     },
     OptionDef {
         name: OPT_TOKEN,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "S3 session token",
     },
     OptionDef {
         name: OPT_VIRTUAL_HOSTED_STYLE_REQUEST,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Bool { default: false },
         description: "Use virtual-hosted-style S3 requests",
     },
     OptionDef {
         name: OPT_SKIP_SIGNATURE,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Bool { default: false },
         description: "Skip object-store request signing",
     },
     OptionDef {
         name: OPT_BASE_URL,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "GCS API base URL",
     },
     OptionDef {
         name: OPT_SERVICE_ACCOUNT_PATH,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "GCS service account JSON path",
     },
     OptionDef {
         name: OPT_SERVICE_ACCOUNT_KEY,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "GCS service account JSON",
     },
     OptionDef {
         name: OPT_APPLICATION_CREDENTIALS_PATH,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "GCS application credentials path",
     },
     OptionDef {
         name: OPT_CONTAINER,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Azure Blob Storage container",
     },
     OptionDef {
         name: OPT_ACCOUNT,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Azure storage account",
     },
     OptionDef {
         name: OPT_ACCESS_KEY,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Azure storage access key",
     },
     OptionDef {
         name: OPT_BEARER_TOKEN,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Azure bearer token",
     },
     OptionDef {
         name: OPT_CLIENT_ID,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Azure client id",
     },
     OptionDef {
         name: OPT_CLIENT_SECRET,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Azure client secret",
     },
     OptionDef {
         name: OPT_TENANT_ID,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::String { default: None },
         description: "Azure tenant id",
     },
     OptionDef {
         name: OPT_USE_EMULATOR,
+        mutability: OptionMutability::Mutable,
         kind: OptionKind::Bool { default: false },
         description: "Use Azure storage emulator",
     },
