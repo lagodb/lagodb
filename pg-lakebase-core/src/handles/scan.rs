@@ -4,6 +4,61 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use std::fmt;
 
+#[cfg(feature = "pg17")]
+#[repr(C)]
+#[derive(Debug, Default)]
+struct RawAnalyzeSamplerState {
+    population_blocks: pg_sys::BlockNumber,
+    target_rows: core::ffi::c_int,
+    visited_blocks: pg_sys::BlockNumber,
+    selected_blocks: core::ffi::c_int,
+}
+
+#[cfg(feature = "pg17")]
+unsafe extern "C" {
+    fn lakebase_read_stream_analyze_sampler_state(
+        stream: *mut pg_sys::ReadStream,
+        state: *mut RawAnalyzeSamplerState,
+    ) -> bool;
+}
+
+/// PostgreSQL's exact block-sampler state for one PG17 ANALYZE scan.
+///
+/// `target_rows` is the `targrows` passed to `acquire_sample_rows()`. During
+/// inherited ANALYZE PostgreSQL has already replaced it with this relation's
+/// proportional `childtargrows` before constructing the `ReadStream`.
+#[cfg(feature = "pg17")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalyzeSamplerState {
+    population_blocks: u64,
+    target_rows: u64,
+    visited_blocks: u64,
+    selected_blocks: u64,
+}
+
+#[cfg(feature = "pg17")]
+impl AnalyzeSamplerState {
+    #[inline]
+    pub fn population_blocks(self) -> u64 {
+        self.population_blocks
+    }
+
+    #[inline]
+    pub fn target_rows(self) -> u64 {
+        self.target_rows
+    }
+
+    #[inline]
+    pub fn visited_blocks(self) -> u64 {
+        self.visited_blocks
+    }
+
+    #[inline]
+    pub fn selected_blocks(self) -> u64 {
+        self.selected_blocks
+    }
+}
+
 /// Safe wrapper for PostgreSQL TableScanDesc.
 #[derive(Debug)]
 pub struct TableScanDescHandle<'a> {
@@ -297,26 +352,63 @@ impl<'a> SampleScanStateHandle<'a> {
     }
 }
 
-/// Safe wrapper for PostgreSQL ReadStream.
+/// PG17 ANALYZE-only wrapper for PostgreSQL's block-sampling ReadStream.
+///
+/// Core constructs this type only for `scan_analyze_next_block`, after
+/// PostgreSQL's `acquire_sample_rows()` has installed a live
+/// `BlockSamplerData` callback-private pointer. Keeping that precondition in a
+/// dedicated type prevents the private-layout bridge from being called on an
+/// arbitrary ReadStream.
 #[derive(Debug)]
-pub struct ReadStreamHandle<'a> {
+pub struct AnalyzeReadStreamHandle<'a> {
     inner: PgBorrowed<'a, pg_sys::ReadStream>,
 }
 
-impl<'a> ReadStreamHandle<'a> {
+impl<'a> AnalyzeReadStreamHandle<'a> {
     /// # Safety
     ///
-    /// `ptr` must be non-null and valid for `'a`.
+    /// `ptr` must be non-null and valid for `'a`. It must be the PG17
+    /// ReadStream created by `acquire_sample_rows()` for the active
+    /// `scan_analyze_next_block` callback, with callback-private data pointing
+    /// to that stack frame's live `BlockSamplerData`.
     #[inline]
-    pub unsafe fn from_raw(ptr: *mut pg_sys::ReadStream) -> Self {
+    pub(crate) unsafe fn from_raw(ptr: *mut pg_sys::ReadStream) -> Self {
         Self {
             inner: unsafe { PgBorrowed::from_raw(ptr) },
         }
     }
 
-    #[inline]
-    pub fn as_raw(&self) -> *mut pg_sys::ReadStream {
-        self.inner.as_ptr()
+    /// Copy PG17's exact ANALYZE `BlockSamplerData` state.
+    ///
+    /// Returns `None` if this stream is not backed by the sampler shape used by
+    /// PostgreSQL's `acquire_sample_rows()`, or if the versioned C bridge finds
+    /// invalid sampler fields. Callers must additionally compare snapshots
+    /// before and after consuming the stream so inconsistent sampler semantics
+    /// cannot silently change the sample size. The exact-version C build and
+    /// runtime guards, rather than these sampler checks, protect the private-
+    /// layout dereference.
+    #[cfg(feature = "pg17")]
+    pub fn analyze_sampler_state(&self) -> Option<AnalyzeSamplerState> {
+        let mut raw = RawAnalyzeSamplerState::default();
+        // SAFETY: the handle owns a non-null PostgreSQL ReadStream borrow for
+        // this callback, and `raw` is writable for the duration of the call.
+        // The PG17-versioned C bridge owns the private-layout dereference and
+        // returns false unless its copied BlockSamplerData fields are valid.
+        let valid = unsafe {
+            lakebase_read_stream_analyze_sampler_state(
+                self.inner.as_ptr(),
+                &mut raw,
+            )
+        };
+        if !valid {
+            return None;
+        }
+        Some(AnalyzeSamplerState {
+            population_blocks: u64::from(raw.population_blocks),
+            target_rows: u64::try_from(raw.target_rows).ok()?,
+            visited_blocks: u64::from(raw.visited_blocks),
+            selected_blocks: u64::try_from(raw.selected_blocks).ok()?,
+        })
     }
 
     /// Consume the next block chosen by PostgreSQL's sampling stream.

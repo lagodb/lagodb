@@ -27,12 +27,11 @@ use crate::error::{IcebergError, IcebergResult};
 
 const TUPLES_PER_SYNTHETIC_BLOCK: u64 = 2048;
 const MAX_VIRTUAL_BLOCKS: u64 = u32::MAX as u64 - 1;
-const MIN_ANALYZE_SAMPLE_ROWS: u64 = 100;
-const SAMPLE_ROWS_PER_STATISTICS_TARGET: u64 = 300;
 
 /// Immutable whole-snapshot population captured before sampling begins.
 pub(crate) struct AnalyzePopulation {
     files: Box<[AnalyzeFile]>,
+    zero_row_files: Box<[AnalyzeFile]>,
     physical_rows: u64,
 }
 
@@ -44,6 +43,7 @@ struct AnalyzeFile {
 impl AnalyzePopulation {
     fn try_new(tasks: Vec<FileScanTask>) -> IcebergResult<Self> {
         let mut files = Vec::with_capacity(tasks.len());
+        let mut zero_row_files = Vec::new();
         let mut paths = HashSet::with_capacity(tasks.len());
         let mut physical_rows = 0_u64;
 
@@ -57,13 +57,14 @@ impl AnalyzePopulation {
                 task.record_count.ok_or(IcebergError::InvariantViolated(
                     "ANALYZE file task is missing its manifest record count",
                 ))?;
-            if record_count == 0 {
-                continue;
-            }
             if !paths.insert(task.data_file_path.clone()) {
                 return Err(IcebergError::InvariantViolated(
                     "ANALYZE planned duplicate data-file tasks",
                 ));
+            }
+            if record_count == 0 {
+                zero_row_files.push(AnalyzeFile { task, record_count });
+                continue;
             }
             files.push(AnalyzeFile { task, record_count });
             physical_rows = physical_rows.checked_add(record_count).ok_or(
@@ -75,6 +76,7 @@ impl AnalyzePopulation {
 
         Ok(Self {
             files: files.into_boxed_slice(),
+            zero_row_files: zero_row_files.into_boxed_slice(),
             physical_rows,
         })
     }
@@ -85,9 +87,16 @@ impl AnalyzePopulation {
         max_data_files: usize,
         rng: &mut R,
     ) -> IcebergResult<AnalyzePlannedSample> {
+        let full_plan_file_count = self
+            .files
+            .len()
+            .checked_add(self.zero_row_files.len())
+            .ok_or(IcebergError::InvariantViolated(
+                "ANALYZE data-file count overflowed",
+            ))?;
         if desired_candidates == self.physical_rows
-            && !self.files.is_empty()
-            && self.files.len() <= max_data_files
+            && full_plan_file_count != 0
+            && full_plan_file_count <= max_data_files
         {
             return Ok(AnalyzePlannedSample {
                 read_plan: self.full_plan(),
@@ -154,9 +163,10 @@ impl AnalyzePopulation {
     }
 
     fn full_plan(self) -> AnalyzeReadPlan {
-        let mut tasks = Vec::with_capacity(self.files.len());
-        let mut expected_files = Vec::with_capacity(self.files.len());
-        for file in self.files {
+        let file_count = self.files.len() + self.zero_row_files.len();
+        let mut tasks = Vec::with_capacity(file_count);
+        let mut expected_files = Vec::with_capacity(file_count);
+        for file in self.files.into_iter().chain(self.zero_row_files) {
             expected_files.push(ExpectedFile {
                 path: Arc::from(file.task.data_file_path.as_str()),
                 positions: ExpectedPositions::All(file.record_count),
@@ -465,7 +475,7 @@ impl AnalyzeReadPlan {
                 (scan.to_arrow_with_selected_rows(requests)?, expected)
             }
             Self::Full { tasks, expected } => {
-                (scan.to_arrow_with_tasks(tasks)?, expected)
+                (scan.to_arrow_with_validated_tasks(tasks)?, expected)
             }
         };
         Ok((
@@ -482,6 +492,7 @@ pub(crate) struct AnalyzePreparation {
     population: AnalyzePopulation,
     decoder: ArrowColumnDecoder,
     virtual_blocks: u64,
+    #[cfg(not(feature = "pg17"))]
     target_rows: u64,
 }
 
@@ -491,7 +502,7 @@ impl AnalyzePreparation {
         tasks: Vec<FileScanTask>,
         decoder: ArrowColumnDecoder,
         storage_bytes: u64,
-        statistics_target: i32,
+        #[cfg(not(feature = "pg17"))] statistics_target: i32,
     ) -> IcebergResult<Self> {
         let population = AnalyzePopulation::try_new(tasks)?;
         let page_size = pg_sys::BLCKSZ as u64;
@@ -502,33 +513,45 @@ impl AnalyzePreparation {
                 "non-empty Iceberg population has zero virtual ANALYZE blocks",
             ));
         }
-        let statistics_target = u64::try_from(statistics_target).map_err(|_| {
-            IcebergError::InvariantViolated(
-                "ANALYZE statistics target must not be negative",
-            )
-        })?;
-        let target_rows = statistics_target
-            .checked_mul(SAMPLE_ROWS_PER_STATISTICS_TARGET)
-            .ok_or(IcebergError::InvariantViolated(
-                "ANALYZE statistics sample target overflowed",
-            ))?
-            .max(MIN_ANALYZE_SAMPLE_ROWS);
+        #[cfg(not(feature = "pg17"))]
+        let target_rows = {
+            const MIN_ANALYZE_SAMPLE_ROWS: u64 = 100;
+            const SAMPLE_ROWS_PER_STATISTICS_TARGET: u64 = 300;
+            let statistics_target =
+                u64::try_from(statistics_target).map_err(|_| {
+                    IcebergError::InvariantViolated(
+                        "ANALYZE statistics target must not be negative",
+                    )
+                })?;
+            statistics_target
+                .checked_mul(SAMPLE_ROWS_PER_STATISTICS_TARGET)
+                .ok_or(IcebergError::InvariantViolated(
+                    "ANALYZE statistics sample target overflowed",
+                ))?
+                .max(MIN_ANALYZE_SAMPLE_ROWS)
+        };
         Ok(Self {
             scan,
             population,
             decoder,
             virtual_blocks,
+            #[cfg(not(feature = "pg17"))]
             target_rows,
         })
     }
 
-    fn start(self, tickets: u64, seed: u64) -> AmResult<AnalyzeBatchCursor> {
+    fn start(
+        self,
+        tickets: u64,
+        target_rows: u64,
+        seed: u64,
+    ) -> AmResult<AnalyzeBatchCursor> {
         let physical_rows = self.population.physical_rows;
         let desired_candidates = AnalyzeSampler::desired_candidate_count(
             physical_rows,
             self.virtual_blocks,
             tickets,
-            self.target_rows,
+            target_rows,
         )?;
         let mut rng = StdRng::seed_from_u64(seed);
         let max_data_files = crate::gucs::analyze_max_data_files();
@@ -573,12 +596,30 @@ impl AnalyzeScanState {
         }
     }
 
-    pub(crate) fn next_block(&mut self, stream: &ReadStreamHandle) -> AmResult<bool> {
+    pub(crate) fn next_block(
+        &mut self,
+        stream: &AnalyzeReadStreamHandle,
+    ) -> AmResult<bool> {
         if let AnalyzeScanPhase::Pending(preparation) = &mut self.phase {
             let preparation =
                 preparation.take().ok_or(IcebergError::InvariantViolated(
                     "ANALYZE preparation was consumed more than once",
                 ))?;
+            #[cfg(feature = "pg17")]
+            let initial_sampler = stream.analyze_sampler_state().ok_or(
+                IcebergError::InvariantViolated(
+                    "ANALYZE ReadStream is missing valid PG17 BlockSampler state",
+                ),
+            )?;
+            #[cfg(feature = "pg17")]
+            if initial_sampler.visited_blocks() != 0
+                || initial_sampler.selected_blocks() != 0
+            {
+                return Err(IcebergError::InvariantViolated(
+                    "ANALYZE ReadStream was consumed before provider initialization",
+                )
+                .into());
+            }
             let mut tickets = 0_u64;
             while stream.next_block().is_some() {
                 tickets =
@@ -588,12 +629,41 @@ impl AnalyzeScanState {
                             "PostgreSQL ANALYZE ticket count overflowed",
                         ))?;
             }
+            #[cfg(feature = "pg17")]
+            let completed_sampler = stream.analyze_sampler_state().ok_or(
+                IcebergError::InvariantViolated(
+                    "ANALYZE ReadStream lost its PG17 BlockSampler state",
+                ),
+            )?;
+            #[cfg(feature = "pg17")]
+            {
+                let population_blocks = initial_sampler.population_blocks();
+                let target_rows = initial_sampler.target_rows();
+                let expected_tickets = population_blocks.min(target_rows);
+                if completed_sampler.population_blocks() != population_blocks
+                    || completed_sampler.target_rows() != target_rows
+                    || preparation.virtual_blocks != population_blocks
+                    || tickets != expected_tickets
+                    || completed_sampler.selected_blocks() != tickets
+                {
+                    return Err(IcebergError::InvariantViolated(
+                        "ANALYZE PG17 BlockSampler state is inconsistent with consumed tickets",
+                    )
+                    .into());
+                }
+            }
             if tickets == 0 {
                 self.phase = AnalyzeScanPhase::Finished;
                 return Ok(false);
             }
             let seed = rand::rng().random::<u64>();
-            self.phase = AnalyzeScanPhase::Ready(preparation.start(tickets, seed)?);
+            #[cfg(feature = "pg17")]
+            let target_rows = initial_sampler.target_rows();
+            #[cfg(not(feature = "pg17"))]
+            let target_rows = preparation.target_rows;
+            self.phase = AnalyzeScanPhase::Ready(
+                preparation.start(tickets, target_rows, seed)?,
+            );
         }
 
         match &mut self.phase {
@@ -1102,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn desired_candidates_are_bounded_by_statistics_target() {
+    fn desired_candidates_are_bounded_by_postgresql_sample_target() {
         assert_eq!(
             AnalyzeSampler::desired_candidate_count(10_000, 1_000, 100, 30_000)
                 .unwrap(),

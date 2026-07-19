@@ -41,8 +41,10 @@ pub use relation::{
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
 };
 pub use scan::{
-    OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle,
+    AnalyzeReadStreamHandle, OwnedScanKeys, ParallelTableScanDescHandle,
     SampleScanStateHandle, ScanDirection, ScanKeyEntry, ScanKeyIter,
     TBMIterateResultHandle, TableScanDescHandle,
 };
+#[cfg(feature = "pg17")]
+pub use scan::AnalyzeSamplerState;
 pub use tuple::{HeapTupleGuard, HeapTupleRef, ItemPointer, TupleTableSlotHandle};

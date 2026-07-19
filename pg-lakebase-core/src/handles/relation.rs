@@ -190,12 +190,15 @@ impl<'a> RelationHandle<'a> {
         attrs.iter().map(|a| (a.atttypid, a.atttypmod)).collect()
     }
 
-    /// Largest effective column or extended-statistics target for this relation.
+    /// Largest effective column or explicitly configured extended-statistics
+    /// target for this relation.
     ///
-    /// PostgreSQL stores `-1` in `attstattarget` when a column inherits
-    /// `default_statistics_target`. Dropped columns cannot participate in
-    /// ANALYZE and are excluded. An explicit target on a relation's extended
-    /// statistics object participates in the same upper bound.
+    /// PostgreSQL stores an inherited column target as SQL NULL in
+    /// `pg_attribute.attstattarget`; `examine_attribute()` converts that NULL
+    /// to its internal `-1` sentinel before typanalyze resolves it against
+    /// `default_statistics_target`. Dropped columns are excluded. This is a
+    /// relation-wide catalog summary, not PostgreSQL's actual per-scan
+    /// `targrows` or inherited `childtargrows`.
     pub fn max_statistics_target(&self) -> Result<i32, PgError> {
         let tup_desc = self.tuple_desc();
         debug_assert!(

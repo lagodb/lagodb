@@ -8,9 +8,9 @@ use crate::api::{AmScanSession, ScanFlags, TableAccessMethod};
 use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, ReportableError};
 use crate::handles::{
-    ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle,
-    RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
-    TBMIterateResultHandle,
+    AnalyzeReadStreamHandle, ItemPointer, OwnedScanKeys,
+    ParallelTableScanDescHandle, RelationHandle, SampleScanStateHandle,
+    ScanDirection, SnapshotHandle, TBMIterateResultHandle,
 };
 use crate::tuple::{Row, SlotColumns};
 use pgrx::memcxt::PgMemoryContexts;
@@ -557,7 +557,11 @@ where
     unsafe {
         let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
-        let stream_handle = ReadStreamHandle::from_raw(stream);
+        // SAFETY: PostgreSQL invokes this callback only from the active
+        // acquire_sample_rows() loop. On PG17 that loop owns both `stream` and
+        // the BlockSamplerData installed as its callback-private data until
+        // table_endscan() and read_stream_end() after the callback loop.
+        let stream_handle = AnalyzeReadStreamHandle::from_raw(stream);
 
         state
             .am_instance

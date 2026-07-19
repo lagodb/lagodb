@@ -635,6 +635,30 @@ impl TableScan {
         arrow_reader_builder.build().read(tasks)
     }
 
+    /// Read pre-planned tasks and validate every manifest record count against
+    /// the corresponding Parquet footer before yielding rows.
+    ///
+    /// The check belongs to the file-reader boundary: delete filtering may
+    /// change logical visibility, but it must not explain a mismatch in the
+    /// file's physical cardinality.
+    pub fn to_arrow_with_validated_tasks(
+        &self,
+        tasks: Vec<FileScanTask>,
+    ) -> Result<ArrowRecordBatchIterator> {
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
+            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+            .with_row_group_filtering_enabled(self.row_group_filtering_enabled)
+            .with_row_selection_enabled(self.row_selection_enabled);
+
+        if let Some(batch_size) = self.batch_size {
+            arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
+        }
+
+        arrow_reader_builder
+            .build()
+            .read_with_record_count_validation(tasks)
+    }
+
     /// Returns an [`ArrowRecordBatchIterator`] for a pre-planned task list,
     /// replacing each task's reader predicate with `filter`.
     ///

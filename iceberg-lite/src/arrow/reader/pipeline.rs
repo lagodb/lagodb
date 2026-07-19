@@ -62,7 +62,10 @@ use crate::{Error, ErrorKind};
 /// Keeping the scan variant inline avoids one heap allocation per data file.
 #[allow(clippy::large_enum_variant)]
 enum FileReadRequest {
-    Scan(FileScanTask),
+    Scan {
+        task: FileScanTask,
+        validate_record_count: bool,
+    },
     SharedScan {
         tasks: Arc<[FileScanTask]>,
         task_index: usize,
@@ -97,7 +100,7 @@ struct FileReadPlan<'a> {
 impl FileReadRequest {
     fn scan_task(&self) -> Result<Option<&FileScanTask>> {
         match self {
-            Self::Scan(task) => Ok(Some(task)),
+            Self::Scan { task, .. } => Ok(Some(task)),
             Self::SharedScan {
                 tasks, task_index, ..
             } => tasks.get(*task_index).map(Some).ok_or_else(|| {
@@ -113,25 +116,40 @@ impl FileReadRequest {
 
     fn plan(&self) -> Result<FileReadPlan<'_>> {
         match self {
-            Self::Scan(task) => Ok(FileReadPlan {
-                file_size_in_bytes: task.file_size_in_bytes,
-                start: task.start,
-                length: task.length,
-                first_row_id: task.first_row_id,
-                last_updated_sequence_number: task.last_updated_sequence_number,
-                data_file_path: &task.data_file_path,
-                schema: &task.schema,
-                project_field_ids: &task.project_field_ids,
-                predicate: task.predicate.as_ref(),
-                partition: task.partition.as_ref(),
-                partition_spec: task.partition_spec.as_ref(),
-                name_mapping: task.name_mapping.as_ref(),
-                has_deletes: !task.deletes.is_empty(),
-                has_equality_deletes: task.deletes.iter().any(is_equality_delete),
-                row_position: None,
-                row_positions: None,
-                expected_record_count: None,
-            }),
+            Self::Scan {
+                task,
+                validate_record_count,
+            } => {
+                let expected_record_count = if *validate_record_count {
+                    Some(task.record_count.ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            "validated file scan task is missing its manifest record count",
+                        )
+                    })?)
+                } else {
+                    None
+                };
+                Ok(FileReadPlan {
+                    file_size_in_bytes: task.file_size_in_bytes,
+                    start: task.start,
+                    length: task.length,
+                    first_row_id: task.first_row_id,
+                    last_updated_sequence_number: task.last_updated_sequence_number,
+                    data_file_path: &task.data_file_path,
+                    schema: &task.schema,
+                    project_field_ids: &task.project_field_ids,
+                    predicate: task.predicate.as_ref(),
+                    partition: task.partition.as_ref(),
+                    partition_spec: task.partition_spec.as_ref(),
+                    name_mapping: task.name_mapping.as_ref(),
+                    has_deletes: !task.deletes.is_empty(),
+                    has_equality_deletes: task.deletes.iter().any(is_equality_delete),
+                    row_position: None,
+                    row_positions: None,
+                    expected_record_count,
+                })
+            }
             Self::SharedScan {
                 tasks,
                 task_index,
@@ -269,7 +287,29 @@ impl ArrowReader {
     ///
     /// Returns a [`ScanResult`] containing the record batch iterator and scan metrics.
     pub fn read_with_metrics(self, tasks: Vec<FileScanTask>) -> Result<ScanResult> {
-        self.read_requests_with_metrics(tasks.into_iter().map(FileReadRequest::Scan))
+        self.read_requests_with_metrics(tasks.into_iter().map(|task| {
+            FileReadRequest::Scan {
+                task,
+                validate_record_count: false,
+            }
+        }))
+    }
+
+    /// Read scan tasks while validating each file's manifest record count
+    /// against the physical row count in its Parquet footer.
+    ///
+    /// The validation reuses footer metadata already opened by the reader and
+    /// therefore adds no footer I/O. Callers should use this for integrity-
+    /// sensitive whole-file reads; ordinary scans retain upstream behavior.
+    pub fn read_with_record_count_validation(
+        self,
+        tasks: Vec<FileScanTask>,
+    ) -> Result<ArrowRecordBatchIterator> {
+        let requests = tasks.into_iter().map(|task| FileReadRequest::Scan {
+            task,
+            validate_record_count: true,
+        });
+        Ok(self.read_requests_with_metrics(requests)?.stream())
     }
 
     /// Reads the exact stored row at one original, zero-based file position.

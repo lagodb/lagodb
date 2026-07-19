@@ -410,7 +410,7 @@ impl ScanSpec {
     /// intentionally deferred until PostgreSQL supplies its ReadStream tickets.
     pub(crate) fn prepare_analyze(
         &self,
-        statistics_target: i32,
+        #[cfg(not(feature = "pg17"))] statistics_target: i32,
     ) -> IcebergResult<AnalyzePreparation> {
         let scan = self.build_scan(true, None)?;
         let tasks = scan.plan_files()?;
@@ -421,6 +421,7 @@ impl ScanSpec {
             self.storage_bytes.ok_or(IcebergError::InvariantViolated(
                 "ANALYZE ScanSpec is missing storage-byte statistics",
             ))?,
+            #[cfg(not(feature = "pg17"))]
             statistics_target,
         )
     }
@@ -928,7 +929,10 @@ pub struct IcebergScan {
 
 enum ScanPurpose {
     Query,
-    Analyze { statistics_target: i32 },
+    Analyze {
+        #[cfg(not(feature = "pg17"))]
+        statistics_target: i32,
+    },
 }
 
 // Query state stays inline intentionally: boxing it would add an allocation
@@ -968,6 +972,7 @@ impl AmScanSession for IcebergScan {
             shape: RelationShape::from_relation(rel),
             state: IcebergScanState::Pending(if flags.is_analyze() {
                 ScanPurpose::Analyze {
+                    #[cfg(not(feature = "pg17"))]
                     statistics_target: rel.max_statistics_target()?,
                 }
             } else {
@@ -995,13 +1000,19 @@ impl AmScanSession for IcebergScan {
                 let cursor = spec.open_batch_cursor()?;
                 IcebergScanState::Query { spec, cursor }
             }
-            ScanPurpose::Analyze { statistics_target } => {
+            ScanPurpose::Analyze {
+                #[cfg(not(feature = "pg17"))]
+                statistics_target,
+            } => {
                 let spec = ScanSpec::build_for_analyze(
                     self.rel_oid,
                     self.spc_oid,
                     &self.shape,
                 )?;
-                let preparation = spec.prepare_analyze(statistics_target)?;
+                let preparation = spec.prepare_analyze(
+                    #[cfg(not(feature = "pg17"))]
+                    statistics_target,
+                )?;
                 IcebergScanState::Analyze(Box::new(
                     crate::access::analyze::AnalyzeScanState::pending(preparation),
                 ))
@@ -1059,7 +1070,7 @@ impl AmScanSession for IcebergScan {
 
     fn scan_analyze_next_block(
         &mut self,
-        stream: &ReadStreamHandle,
+        stream: &AnalyzeReadStreamHandle,
     ) -> AmResult<bool> {
         match &mut self.state {
             IcebergScanState::Analyze(state) => state.next_block(stream),

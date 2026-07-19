@@ -11,9 +11,12 @@ fn main() {
     );
     println!("cargo:rerun-if-changed=csrc/maintenance/vacuum_full.c");
     println!("cargo:rerun-if-changed=csrc/maintenance/vacuum_full.h");
+    println!("cargo:rerun-if-changed=csrc/analyze/read_stream_pg17.c");
+    println!("cargo:rerun-if-changed=csrc/analyze/read_stream_pg17.h");
+    println!("cargo:rerun-if-changed=csrc/analyze/PG17.md");
 
-    // The Custom ModifyTable fork is a PG17 framework. Keep the rest of core
-    // buildable for PG16 consumers without compiling or exposing this module.
+    // These C forks/adapters are PG17 frameworks. Keep the rest of core
+    // buildable for PG16 consumers without compiling or exposing them.
     if std::env::var_os("CARGO_FEATURE_PG17").is_none() {
         return;
     }
@@ -29,8 +32,10 @@ fn main() {
     cc::Build::new()
         .file("csrc/custom/modify/lakebase_node_modify_table.c")
         .file("csrc/maintenance/vacuum_full.c")
+        .file("csrc/analyze/read_stream_pg17.c")
         .include(PathBuf::from("csrc/custom/modify"))
         .include(PathBuf::from("csrc/maintenance"))
+        .include(PathBuf::from("csrc/analyze"))
         .include(include)
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter")

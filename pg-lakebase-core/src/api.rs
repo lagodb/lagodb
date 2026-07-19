@@ -72,11 +72,11 @@ use crate::diag::{PgReportError, SqlStateError};
 use crate::handles::{
     AttrWidthsHandle, BufferAccessStrategyHandle, BulkInsertStateHandle,
     CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
-    OwnedScanKeys, ParallelTableScanDescHandle, ReadStreamHandle, RelFileLocator,
-    RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
-    TBMIterateResultHandle, TMIndexDeleteOpHandle, TableScanDescHandle,
-    TupleTableSlotHandle, VacuumParamsHandle, ValidateIndexStateHandle,
-    VarlenaHandle,
+    AnalyzeReadStreamHandle, OwnedScanKeys, ParallelTableScanDescHandle,
+    RelFileLocator, RelationHandle, SampleScanStateHandle, ScanDirection,
+    SnapshotHandle, TBMIterateResultHandle, TMIndexDeleteOpHandle,
+    TableScanDescHandle, TupleTableSlotHandle, VacuumParamsHandle,
+    ValidateIndexStateHandle, VarlenaHandle,
 };
 use crate::tuple::{Row, SlotColumns, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
@@ -432,7 +432,7 @@ pub trait AmScanSession {
 
     fn scan_analyze_next_block(
         &mut self,
-        stream: &ReadStreamHandle,
+        stream: &AnalyzeReadStreamHandle,
     ) -> AmResult<bool> {
         let _ = stream;
         unsupported_callback("scan_analyze_next_block")
