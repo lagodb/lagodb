@@ -1,22 +1,18 @@
 //! Reads maintenance settings backed by `pg_lakebase_runtime`.
 
-use std::mem::MaybeUninit;
 use std::time::Duration;
 
-use crate::table_maintenance::abi::RuntimeMaintenanceConfigV1;
+use crate::runtime_api::RuntimeMaintenanceConfigV1;
 
 struct RuntimeSettings;
 
 impl RuntimeSettings {
     fn get() -> RuntimeMaintenanceConfigV1 {
-        let api = crate::table_maintenance::abi::runtime_api().unwrap_or_else(|| {
-            panic!("pg_lakebase runtime API is unavailable while reading maintenance settings")
-        });
-        let mut config = MaybeUninit::uninit();
-        unsafe {
-            (api.maintenance_config)(config.as_mut_ptr());
-            config.assume_init()
-        }
+        crate::runtime_api::RuntimeClient::connect()
+            .unwrap_or_else(|error| {
+                panic!("cannot read maintenance settings: {error}")
+            })
+            .maintenance_config()
     }
 }
 

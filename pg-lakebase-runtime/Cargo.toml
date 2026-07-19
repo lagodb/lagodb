@@ -37,3 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
 
 [dev-dependencies]
 pgrx-tests = { workspace = true }
+
+[build-dependencies]
+cc = "1"
+pgrx-pg-config = "=0.18.1"

@@ -64,6 +64,9 @@ pub mod wal;
 /// ResourceOwner-scoped cleanup callbacks.  Distinct from transaction events.
 pub mod resource;
 
+/// Versioned C ABI published by `pg-lakebase-runtime` through rendezvous.
+pub mod runtime_api;
+
 /// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.
 pub mod transaction;
 

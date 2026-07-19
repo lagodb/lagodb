@@ -4,7 +4,7 @@
  *
  * PostgreSQL keeps relation expansion and vacuum_rel() private to vacuum.c.
  * This file mirrors only the option/expansion and per-provider transaction
- * boundaries needed to replace cluster_rel(); native work remains in core.
+ * boundaries needed to replace cluster_rel(); native work stays in PostgreSQL.
  *
  * Provenance: PostgreSQL 17.10, primarily src/backend/commands/vacuum.c. This
  * is not a copy of vacuum.c: every exported lakebase_* function below is a

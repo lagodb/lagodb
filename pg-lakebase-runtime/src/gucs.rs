@@ -49,8 +49,8 @@ pub(crate) fn customscan_mode_code() -> u32 {
 }
 
 pub(crate) fn maintenance_config()
--> pg_lakebase_core::table_maintenance::abi::RuntimeMaintenanceConfigV1 {
-    pg_lakebase_core::table_maintenance::abi::RuntimeMaintenanceConfigV1 {
+-> pg_lakebase_core::runtime_api::RuntimeMaintenanceConfigV1 {
+    pg_lakebase_core::runtime_api::RuntimeMaintenanceConfigV1 {
         enabled: u8::from(MAINTENANCE_ENABLED.get()),
         _padding: [0; 3],
         actor_threads: MAINTENANCE_ACTOR_THREADS.get(),

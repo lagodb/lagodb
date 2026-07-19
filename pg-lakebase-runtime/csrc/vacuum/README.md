@@ -1,4 +1,4 @@
-# VACUUM C bridge
+# Runtime VACUUM C bridge
 
 ## PostgreSQL 17 provenance
 

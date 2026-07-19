@@ -9,15 +9,16 @@ use std::ptr;
 
 use pgrx::{pg_guard, pg_sys};
 
-use crate::diag::ReportableError;
-use crate::handles::{RelationHandle, VacuumParamsHandle};
-use crate::hooks::utility_hook::ProcessUtilityArgs;
-use crate::hooks::{HookError, UtilityHookPhase};
+use pg_lakebase_core::diag::ReportableError;
+use pg_lakebase_core::handles::{RelationHandle, VacuumParamsHandle};
+use pg_lakebase_core::hooks::{HookError, UtilityHookPhase};
 
-use super::{
+use pg_lakebase_core::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
     TableMaintenanceOptions, TableMaintenanceRequest, TableMaintenanceRouter,
 };
+
+use super::ProcessUtilityArgs;
 
 unsafe extern "C" {
     fn lakebase_parse_vacuum_full(

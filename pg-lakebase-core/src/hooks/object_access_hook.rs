@@ -4,7 +4,11 @@ use pgrx::pg_sys;
 use pgrx::prelude::*;
 use std::cell::RefCell;
 use std::ffi::{CStr, c_void};
-use std::sync::OnceLock;
+
+use crate::runtime_api::{
+    HOOK_DESCRIPTOR_VERSION, ObjectAccessFilter, ObjectAccessHookDescriptorV1,
+    ObjectAccessStrHookDescriptorV1,
+};
 
 #[derive(Debug)]
 pub enum ObjectAccessEvent<'a> {
@@ -203,6 +207,8 @@ pub trait ObjectAccessHook {
         std::any::type_name::<Self>()
     }
 
+    fn filter(&self) -> ObjectAccessFilter;
+
     fn on_access(
         &self,
         event: &mut ObjectAccessEvent<'_>,
@@ -214,74 +220,73 @@ pub trait ObjectAccessStrHook {
         std::any::type_name::<Self>()
     }
 
+    fn filter(&self) -> ObjectAccessFilter;
+
     fn on_access_str(
         &self,
         event: &mut ObjectAccessStrEvent<'_>,
     ) -> Result<(), ObjectAccessHookError>;
 }
 
-type ObjectAccessHookList = &'static [Box<dyn ObjectAccessHook + Send + Sync>];
-type ObjectAccessStrHookList =
-    &'static [Box<dyn ObjectAccessStrHook + Send + Sync>];
+type ObjectAccessHookEntry = Box<dyn ObjectAccessHook + Send + Sync>;
+type ObjectAccessStrHookEntry = Box<dyn ObjectAccessStrHook + Send + Sync>;
 
-// Object-access hooks are backend-lifetime extension metadata.  Registration
-// happens during extension initialization, then the registry is frozen once
-// and the object-access routers see only an immutable static slice.  The
-// matching-hook path tail-chains directly to a saved PostgreSQL hook that may
-// raise an ERROR and longjmp, so the snapshot crossing that direct call must
-// not own Drop state such as an Arc<Vec<_>> or a lock guard.  Freezing to a
-// `&'static` slice keeps the hot path Copy-only and removes that hazard by
-// construction (mirrors `utility_hook.rs`).
-//
-// PostgreSQL backends are single-threaded, so the mutable building phase is
-// thread-local. It is written only during startup; the hot path reads the
-// lock-free `FROZEN_*` snapshots.
+struct ExternalObjectAccessContext {
+    hook: ObjectAccessHookEntry,
+}
+
+struct ExternalObjectAccessStrContext {
+    hook: ObjectAccessStrHookEntry,
+}
+
+pub(super) struct PreparedObjectAccessHooks {
+    // Descriptors hold raw context pointers while these vectors are prepared
+    // and moved. The boxes are therefore required for stable pointee addresses.
+    #[allow(clippy::vec_box)]
+    contexts: Vec<Box<ExternalObjectAccessContext>>,
+    descriptors: Vec<ObjectAccessHookDescriptorV1>,
+    #[allow(clippy::vec_box)]
+    str_contexts: Vec<Box<ExternalObjectAccessStrContext>>,
+    str_descriptors: Vec<ObjectAccessStrHookDescriptorV1>,
+}
+
+impl PreparedObjectAccessHooks {
+    pub(super) fn descriptors(&self) -> &[ObjectAccessHookDescriptorV1] {
+        &self.descriptors
+    }
+
+    pub(super) fn str_descriptors(&self) -> &[ObjectAccessStrHookDescriptorV1] {
+        &self.str_descriptors
+    }
+
+    pub(super) fn publish_contexts(self) {
+        for context in self.contexts {
+            let _ = Box::into_raw(context);
+        }
+        for context in self.str_contexts {
+            let _ = Box::into_raw(context);
+        }
+    }
+
+    pub(super) fn restore(self) {
+        BUILDING_REGISTRY.with_borrow_mut(|entries| {
+            entries.extend(self.contexts.into_iter().map(|context| context.hook));
+        });
+        STR_BUILDING_REGISTRY.with_borrow_mut(|entries| {
+            entries.extend(self.str_contexts.into_iter().map(|context| context.hook));
+        });
+    }
+}
+
 thread_local! {
-    static BUILDING_REGISTRY: RefCell<Vec<Box<dyn ObjectAccessHook + Send + Sync>>> = const { RefCell::new(Vec::new()) };
-    static STR_BUILDING_REGISTRY: RefCell<Vec<Box<dyn ObjectAccessStrHook + Send + Sync>>> = const { RefCell::new(Vec::new()) };
-}
-static FROZEN_REGISTRY: OnceLock<ObjectAccessHookList> = OnceLock::new();
-static STR_FROZEN_REGISTRY: OnceLock<ObjectAccessStrHookList> = OnceLock::new();
-
-static PREV_OBJECT_ACCESS_HOOK: OnceLock<pg_sys::object_access_hook_type> =
-    OnceLock::new();
-static PREV_OBJECT_ACCESS_STR_HOOK: OnceLock<pg_sys::object_access_hook_type_str> =
-    OnceLock::new();
-
-fn current_object_access_hooks() -> Option<ObjectAccessHookList> {
-    FROZEN_REGISTRY
-        .get()
-        .copied()
-        .filter(|hooks| !hooks.is_empty())
-}
-
-fn current_object_access_str_hooks() -> Option<ObjectAccessStrHookList> {
-    STR_FROZEN_REGISTRY
-        .get()
-        .copied()
-        .filter(|hooks| !hooks.is_empty())
-}
-
-fn install_object_access_router() {
-    PREV_OBJECT_ACCESS_HOOK.get_or_init(|| unsafe {
-        let prev = pg_sys::object_access_hook;
-        pg_sys::object_access_hook = Some(object_access_router);
-        prev
-    });
-}
-
-fn install_object_access_str_router() {
-    PREV_OBJECT_ACCESS_STR_HOOK.get_or_init(|| unsafe {
-        let prev = pg_sys::object_access_hook_str;
-        pg_sys::object_access_hook_str = Some(object_access_str_router);
-        prev
-    });
+    static BUILDING_REGISTRY: RefCell<Vec<ObjectAccessHookEntry>> = const { RefCell::new(Vec::new()) };
+    static STR_BUILDING_REGISTRY: RefCell<Vec<ObjectAccessStrHookEntry>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>) {
     let hook_name = hook.name();
-    if FROZEN_REGISTRY.get().is_some() {
-        panic!("register_object_access_hook called after freeze_object_access_hooks");
+    if super::hooks_frozen() {
+        panic!("register_object_access_hook called after freeze_hooks");
     }
     BUILDING_REGISTRY.with_borrow_mut(|entries| {
         if entries.iter().any(|existing| existing.name() == hook_name) {
@@ -295,10 +300,8 @@ pub fn register_object_access_str_hook(
     hook: Box<dyn ObjectAccessStrHook + Send + Sync>,
 ) {
     let hook_name = hook.name();
-    if STR_FROZEN_REGISTRY.get().is_some() {
-        panic!(
-            "register_object_access_str_hook called after freeze_object_access_hooks"
-        );
+    if super::hooks_frozen() {
+        panic!("register_object_access_str_hook called after freeze_hooks");
     }
     STR_BUILDING_REGISTRY.with_borrow_mut(|entries| {
         if entries.iter().any(|existing| existing.name() == hook_name) {
@@ -308,57 +311,52 @@ pub fn register_object_access_str_hook(
     });
 }
 
-/// Freeze registered object-access hooks and install the routers.
-///
-/// Call this once after all [`register_object_access_hook`] and
-/// [`register_object_access_str_hook`] calls in extension initialization.
-/// After freezing, the routers read a single immutable backend-lifetime
-/// snapshot, so the direct tail-chain to a saved PostgreSQL hook does not carry
-/// Rust ownership state across ERROR/longjmp paths.
-pub fn freeze_object_access_hooks() {
-    if freeze_object_access_registry() {
-        install_object_access_router();
-    }
-    if freeze_object_access_str_registry() {
-        install_object_access_str_router();
-    }
-}
-
-fn freeze_object_access_registry() -> bool {
-    if let Some(hooks) = FROZEN_REGISTRY.get().copied() {
-        return !hooks.is_empty();
-    }
-    let hooks: ObjectAccessHookList = BUILDING_REGISTRY.with_borrow_mut(|entries| {
-        let hooks: ObjectAccessHookList = if entries.is_empty() {
-            &[]
-        } else {
-            Box::leak(std::mem::take(entries).into_boxed_slice())
-        };
-        hooks
-    });
-    if FROZEN_REGISTRY.set(hooks).is_err() {
-        unreachable!("object access hook registry frozen concurrently");
-    }
-    !hooks.is_empty()
-}
-
-fn freeze_object_access_str_registry() -> bool {
-    if let Some(hooks) = STR_FROZEN_REGISTRY.get().copied() {
-        return !hooks.is_empty();
-    }
-    let hooks: ObjectAccessStrHookList =
-        STR_BUILDING_REGISTRY.with_borrow_mut(|entries| {
-            let hooks: ObjectAccessStrHookList = if entries.is_empty() {
-                &[]
-            } else {
-                Box::leak(std::mem::take(entries).into_boxed_slice())
-            };
-            hooks
+pub(super) fn prepare_object_access_hooks() -> PreparedObjectAccessHooks {
+    let entries = BUILDING_REGISTRY.with_borrow_mut(std::mem::take);
+    let mut contexts = Vec::with_capacity(entries.len());
+    let mut descriptors = Vec::with_capacity(entries.len());
+    for hook in entries {
+        let filter = hook.filter();
+        let mut context = Box::new(ExternalObjectAccessContext { hook });
+        descriptors.push(ObjectAccessHookDescriptorV1 {
+            abi_version: HOOK_DESCRIPTOR_VERSION,
+            struct_size: u32::try_from(std::mem::size_of::<
+                ObjectAccessHookDescriptorV1,
+            >())
+            .expect("object-access hook descriptor size exceeds u32"),
+            event_mask: filter.event_mask(),
+            class_id: filter.class_id(),
+            context: std::ptr::from_mut(context.as_mut()).cast(),
+            on_access: Some(route_external_object_access_hook),
         });
-    if STR_FROZEN_REGISTRY.set(hooks).is_err() {
-        unreachable!("object access str hook registry frozen concurrently");
+        contexts.push(context);
     }
-    !hooks.is_empty()
+
+    let entries = STR_BUILDING_REGISTRY.with_borrow_mut(std::mem::take);
+    let mut str_contexts = Vec::with_capacity(entries.len());
+    let mut str_descriptors = Vec::with_capacity(entries.len());
+    for hook in entries {
+        let filter = hook.filter();
+        let mut context = Box::new(ExternalObjectAccessStrContext { hook });
+        str_descriptors.push(ObjectAccessStrHookDescriptorV1 {
+            abi_version: HOOK_DESCRIPTOR_VERSION,
+            struct_size: u32::try_from(std::mem::size_of::<
+                ObjectAccessStrHookDescriptorV1,
+            >())
+            .expect("object-access-str hook descriptor size exceeds u32"),
+            event_mask: filter.event_mask(),
+            class_id: filter.class_id(),
+            context: std::ptr::from_mut(context.as_mut()).cast(),
+            on_access: Some(route_external_object_access_str_hook),
+        });
+        str_contexts.push(context);
+    }
+    PreparedObjectAccessHooks {
+        contexts,
+        descriptors,
+        str_contexts,
+        str_descriptors,
+    }
 }
 
 unsafe fn event_from_raw<'a>(
@@ -495,107 +493,116 @@ unsafe fn str_event_from_raw<'a>(
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn object_access_router(
+unsafe extern "C-unwind" fn route_external_object_access_hook(
+    context: *mut c_void,
     access: pg_sys::ObjectAccessType::Type,
     class_id: pg_sys::Oid,
     object_id: pg_sys::Oid,
     sub_id: i32,
     arg: *mut c_void,
 ) {
-    unsafe {
-        // `hooks` is a backend-lifetime `&'static` slice (Copy, no Drop), so it
-        // carries no Rust ownership state across the tail-chain to `prev`.
-        let Some(hooks) = current_object_access_hooks() else {
-            if let Some(Some(prev)) = PREV_OBJECT_ACCESS_HOOK.get() {
-                prev(access, class_id, object_id, sub_id, arg);
-            }
-            return;
-        };
-
-        // Bound the event's borrow of `arg` to this scope. `ObjectAccessEvent`
-        // holds no Drop state, but `NamespaceSearch` borrows `&mut` the same
-        // `ObjectAccessNamespaceSearch` that `prev` receives via the raw `arg`
-        // pointer below.  Closing the borrow explicitly (rather than leaning on
-        // NLL) makes the FFI boundary unambiguous: no live Rust view of `arg`
-        // outlives the direct hand-off to the saved PostgreSQL hook.
-        {
-            let mut event = event_from_raw(access, class_id, object_id, sub_id, arg);
-            for hook in hooks.iter() {
-                hook.on_access(&mut event)
-                    .map_err(|err| {
-                        err.with_object_access_context(
-                            hook.name(),
-                            event.access(),
-                            event.class_id(),
-                            event.object_id(),
-                            event.sub_id(),
-                        )
-                    })
-                    .report_unwrap();
-            }
-        }
-
-        if let Some(Some(prev)) = PREV_OBJECT_ACCESS_HOOK.get() {
-            // Tail-chain only: no Rust logic follows this saved hook call.  If
-            // future code must resume Rust after `prev`, do not add a blanket
-            // FFI boundary here; first ensure any state crossing the direct
-            // hook call is trivially deallocated or prove the callee is a leaf
-            // C function.
-            prev(access, class_id, object_id, sub_id, arg);
-        }
-    }
+    // SAFETY: runtime validation rejects null contexts and stores this callback
+    // together with the originating AM context layout.
+    let context = unsafe { &*context.cast::<ExternalObjectAccessContext>() };
+    let mut event =
+        unsafe { event_from_raw(access, class_id, object_id, sub_id, arg) };
+    context
+        .hook
+        .on_access(&mut event)
+        .map_err(|err| {
+            err.with_object_access_context(
+                context.hook.name(),
+                event.access(),
+                event.class_id(),
+                event.object_id(),
+                event.sub_id(),
+            )
+        })
+        .report_unwrap();
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn object_access_str_router(
+unsafe extern "C-unwind" fn route_external_object_access_str_hook(
+    context: *mut c_void,
     access: pg_sys::ObjectAccessType::Type,
     class_id: pg_sys::Oid,
     object_name: *const std::os::raw::c_char,
     sub_id: i32,
     arg: *mut c_void,
 ) {
-    unsafe {
-        // `hooks` is a backend-lifetime `&'static` slice (Copy, no Drop), so it
-        // carries no Rust ownership state across the tail-chain to `prev`.
-        let Some(hooks) = current_object_access_str_hooks() else {
-            if let Some(Some(prev)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
-                prev(access, class_id, object_name, sub_id, arg);
-            }
-            return;
-        };
+    // SAFETY: runtime validation rejects null contexts and stores this callback
+    // together with the originating AM context layout.
+    let context = unsafe { &*context.cast::<ExternalObjectAccessStrContext>() };
+    let mut event =
+        unsafe { str_event_from_raw(access, class_id, object_name, sub_id, arg) };
+    context
+        .hook
+        .on_access_str(&mut event)
+        .map_err(|err: HookError| {
+            err.with_object_access_str_context(
+                context.hook.name(),
+                event.access(),
+                event.class_id(),
+                Some(event.object_name().to_string_lossy().into_owned()),
+                event.sub_id(),
+            )
+        })
+        .report_unwrap();
+}
 
-        // Bound the event's borrow of `arg`/`object_name` to this scope.
-        // `ObjectAccessStrEvent` holds no Drop state, but `NamespaceSearch`
-        // borrows `&mut` the same `ObjectAccessNamespaceSearch` that `prev`
-        // receives via the raw `arg` pointer below.  Closing the borrow
-        // explicitly (rather than leaning on NLL) makes the FFI boundary
-        // unambiguous: no live Rust view of `arg` outlives the direct hand-off
-        // to the saved PostgreSQL hook.
-        {
-            let mut event =
-                str_event_from_raw(access, class_id, object_name, sub_id, arg);
-            for hook in hooks.iter() {
-                hook.on_access_str(&mut event)
-                    .map_err(|err: HookError| {
-                        err.with_object_access_str_context(
-                            hook.name(),
-                            event.access(),
-                            event.class_id(),
-                            Some(event.object_name().to_string_lossy().into_owned()),
-                            event.sub_id(),
-                        )
-                    })
-                    .report_unwrap();
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_api::OBJECT_ACCESS_DROP;
+
+    struct TestObjectHook;
+
+    impl ObjectAccessHook for TestObjectHook {
+        fn filter(&self) -> ObjectAccessFilter {
+            ObjectAccessFilter::new(OBJECT_ACCESS_DROP)
         }
 
-        if let Some(Some(prev)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
-            // Tail-chain only: no Rust logic follows this saved hook call.  If
-            // future code must resume Rust after `prev`, do not add a blanket
-            // FFI boundary here; first ensure any state crossing the direct
-            // hook call is trivially deallocated or prove the callee is a leaf
-            // C function.
-            prev(access, class_id, object_name, sub_id, arg);
+        fn on_access(
+            &self,
+            _event: &mut ObjectAccessEvent<'_>,
+        ) -> Result<(), ObjectAccessHookError> {
+            Ok(())
         }
+    }
+
+    struct TestObjectStrHook;
+
+    impl ObjectAccessStrHook for TestObjectStrHook {
+        fn filter(&self) -> ObjectAccessFilter {
+            ObjectAccessFilter::new(OBJECT_ACCESS_DROP)
+        }
+
+        fn on_access_str(
+            &self,
+            _event: &mut ObjectAccessStrEvent<'_>,
+        ) -> Result<(), ObjectAccessHookError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rejected_preparation_can_restore_both_building_registries() {
+        BUILDING_REGISTRY.with_borrow_mut(|entries| {
+            entries.clear();
+            entries.push(Box::new(TestObjectHook));
+        });
+        STR_BUILDING_REGISTRY.with_borrow_mut(|entries| {
+            entries.clear();
+            entries.push(Box::new(TestObjectStrHook));
+        });
+
+        let prepared = prepare_object_access_hooks();
+        assert_eq!(prepared.descriptors().len(), 1);
+        assert_eq!(prepared.str_descriptors().len(), 1);
+        prepared.restore();
+        assert_eq!(BUILDING_REGISTRY.with_borrow(Vec::len), 1);
+        assert_eq!(STR_BUILDING_REGISTRY.with_borrow(Vec::len), 1);
+        BUILDING_REGISTRY.with_borrow_mut(Vec::clear);
+        STR_BUILDING_REGISTRY.with_borrow_mut(Vec::clear);
     }
 }

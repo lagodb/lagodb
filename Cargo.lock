@@ -4154,10 +4154,12 @@ dependencies = [
 name = "pg-lakebase-runtime"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "libc",
  "pg-lakebase-core",
  "pg-lakebase-storage",
  "pgrx",
+ "pgrx-pg-config",
  "pgrx-tests",
  "thiserror 1.0.69",
  "tokio",

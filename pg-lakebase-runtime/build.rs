@@ -12,7 +12,7 @@ static PG_FEATURES: [PgFeature; 2] = [
     PgFeature {
         environment: "CARGO_FEATURE_PG16",
         pgrx_config: "pg16",
-        // PG16 TableAM callbacks require a separate compatibility port.
+        // The runtime VACUUM bridge has not been ported to PG16.
         c_forks_supported: false,
     },
     PgFeature {
@@ -37,11 +37,11 @@ fn active_pg_config() -> Option<&'static PgFeature> {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=csrc/modify/lakebase_node_modify_table.c");
-    println!("cargo:rerun-if-changed=csrc/modify/lakebase_node_modify_table.h");
-    println!("cargo:rerun-if-changed=csrc/analyze/lakebase_analyze.c");
-    println!("cargo:rerun-if-changed=csrc/analyze/lakebase_analyze.h");
-    println!("cargo:rerun-if-changed=csrc/compat/lakebase_pg_compat.h");
+    println!("cargo:rerun-if-changed=csrc/vacuum/lakebase_vacuum.c");
+    println!("cargo:rerun-if-changed=csrc/vacuum/lakebase_vacuum.h");
+    println!(
+        "cargo:rerun-if-changed=../pg-lakebase-core/csrc/compat/lakebase_pg_compat.h"
+    );
 
     let Some(pg_feature) = active_pg_config() else {
         return;
@@ -65,13 +65,11 @@ fn main() {
     });
 
     cc::Build::new()
-        .file("csrc/modify/lakebase_node_modify_table.c")
-        .file("csrc/analyze/lakebase_analyze.c")
-        .include(PathBuf::from("csrc/compat"))
-        .include(PathBuf::from("csrc/modify"))
-        .include(PathBuf::from("csrc/analyze"))
+        .file("csrc/vacuum/lakebase_vacuum.c")
+        .include(PathBuf::from("../pg-lakebase-core/csrc/compat"))
+        .include(PathBuf::from("csrc/vacuum"))
         .include(include)
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter")
-        .compile("lakebase_pg_bridges");
+        .compile("lakebase_runtime_pg_bridges");
 }

@@ -5,8 +5,9 @@ use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::*;
 
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum UtilityHookPhase {
+pub enum UtilityHookPhase {
     Pre,
     PostSuccess,
 }
@@ -156,7 +157,8 @@ impl HookError {
         }))
     }
 
-    pub(crate) fn with_utility_context(
+    #[doc(hidden)]
+    pub fn with_utility_context(
         mut self,
         hook_name: &'static str,
         phase: UtilityHookPhase,

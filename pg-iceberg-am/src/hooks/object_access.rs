@@ -3,7 +3,8 @@ use crate::catalog::table_drop::IcebergTableDrop;
 use crate::hooks::column_drop_guard::ControlledColumnDrops;
 use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
 use pg_lakebase_core::hooks::{
-    self, HookError, ObjectAccessEvent, ObjectAccessHook, ObjectAccessHookError,
+    self, HookError, OBJECT_ACCESS_DROP, ObjectAccessEvent, ObjectAccessFilter,
+    ObjectAccessHook, ObjectAccessHookError,
 };
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
@@ -11,6 +12,11 @@ use pgrx::prelude::PgSqlErrorCode;
 pub struct IcebergObjectAccessHook;
 
 impl ObjectAccessHook for IcebergObjectAccessHook {
+    fn filter(&self) -> ObjectAccessFilter {
+        ObjectAccessFilter::new(OBJECT_ACCESS_DROP)
+            .for_class(pg_sys::RelationRelationId)
+    }
+
     fn on_access(
         &self,
         event: &mut ObjectAccessEvent<'_>,

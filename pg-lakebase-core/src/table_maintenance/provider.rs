@@ -5,16 +5,15 @@ use pgrx::pg_sys;
 use crate::diag::PgReportError;
 use crate::handles::RelationHandle;
 
-use super::abi::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3, MaintenanceReportV1,
-    MaintenanceRequestV1, MaintenanceStatsV1, PROVIDER_CAPABILITY_ANALYZE,
-    REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
-    REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, provider_name, runtime_api,
-};
 use super::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceError,
     TableMaintenanceMode, TableMaintenanceOptions, TableMaintenanceReport,
     TableMaintenanceStats,
+};
+use crate::runtime_api::{
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3, MaintenanceReportV1,
+    MaintenanceRequestV1, MaintenanceStatsV1, PROVIDER_CAPABILITY_ANALYZE,
+    RuntimeApiError, RuntimeClient, RuntimeRegistrationError, provider_name,
 };
 
 pub struct TableMaintenanceRequest<'a> {
@@ -118,13 +117,14 @@ unsafe extern "C-unwind" fn provider_inspect<P>(
     unsafe { stats.write(inspected) };
 }
 
+/// Register this DSO's maintenance provider and atomically publish its hooks.
+///
+/// Call this once, after every utility and object-access hook owned by the AM
+/// has been added to the core building registries.
 pub fn register_provider<P>()
 where
     P: LakebaseTableMaintenanceProvider,
 {
-    let api = runtime_api().unwrap_or_else(|| {
-        panic!("pg_lakebase runtime API is unavailable; preload pg_lakebase_runtime before provider extensions")
-    });
     let descriptor = MaintenanceProviderV3 {
         abi_version: MAINTENANCE_PROVIDER_VERSION,
         struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV3>())
@@ -140,41 +140,38 @@ where
         execute: provider_execute::<P>,
         inspect: provider_inspect::<P>,
     };
-    let status = unsafe { (api.register_provider)(&descriptor) };
-    match status {
-        REGISTER_OK => {}
-        REGISTER_INVALID_DESCRIPTOR => {
-            panic!("runtime rejected an invalid maintenance provider descriptor")
-        }
-        REGISTER_DUPLICATE_NAME => panic!(
+    match crate::hooks::freeze_hooks_with_provider(Some(&descriptor)) {
+        Ok(()) => {}
+        Err(crate::hooks::HookRegistrationError::Registration(
+            RuntimeRegistrationError::DuplicateProviderName,
+        )) => panic!(
             "runtime already has a different maintenance provider named {:?}",
             P::NAME
         ),
-        REGISTER_DUPLICATE_ACCESS_METHOD => panic!(
+        Err(crate::hooks::HookRegistrationError::Registration(
+            RuntimeRegistrationError::DuplicateAccessMethod,
+        )) => panic!(
             "runtime already has a maintenance provider for access method {:?}",
             P::ACCESS_METHOD_NAME
         ),
-        other => {
-            panic!("runtime returned unknown maintenance registration status {other}")
-        }
+        Err(error) => panic!("cannot register maintenance provider: {error}"),
     }
 }
 
 pub struct TableMaintenanceRouter;
 
 impl TableMaintenanceRouter {
-    pub(crate) fn has_providers() -> bool {
-        runtime_api().is_some_and(|api| unsafe { (api.has_providers)() != 0 })
+    #[doc(hidden)]
+    pub fn has_providers() -> bool {
+        RuntimeClient::connect().is_ok_and(RuntimeClient::has_providers)
     }
 
     fn provider_for_am(
         access_method_oid: pg_sys::Oid,
     ) -> Result<&'static MaintenanceProviderV3, TableMaintenanceError> {
-        let api = runtime_api().ok_or_else(|| {
-            TableMaintenanceError::framework("pg_lakebase runtime API is unavailable")
-        })?;
-        let provider = unsafe { (api.provider_for_am)(access_method_oid) };
-        unsafe { provider.as_ref() }.ok_or_else(|| {
+        let runtime = RuntimeClient::connect()
+            .map_err(|error| TableMaintenanceError::framework(error.to_string()))?;
+        runtime.provider_for_am(access_method_oid).ok_or_else(|| {
             TableMaintenanceError::framework(format!(
                 "no table-maintenance provider is registered for access method OID {access_method_oid}"
             ))
@@ -184,10 +181,11 @@ impl TableMaintenanceRouter {
     pub fn is_registered_am(
         access_method_oid: pg_sys::Oid,
     ) -> Result<bool, TableMaintenanceError> {
-        let Some(api) = runtime_api() else {
-            return Ok(false);
-        };
-        Ok(!unsafe { (api.provider_for_am)(access_method_oid) }.is_null())
+        match RuntimeClient::connect() {
+            Ok(runtime) => Ok(runtime.provider_for_am(access_method_oid).is_some()),
+            Err(RuntimeApiError::Unavailable) => Ok(false),
+            Err(error) => Err(TableMaintenanceError::framework(error.to_string())),
+        }
     }
 
     pub fn supports_analyze(
@@ -217,7 +215,9 @@ impl TableMaintenanceRouter {
         relation: &RelationHandle<'_>,
     ) -> Result<TableMaintenanceStats, TableMaintenanceError> {
         let provider = Self::provider_for_am(relation.access_method_oid())?;
-        let name = provider_name(provider)
+        // SAFETY: runtime only returns descriptors accepted from the trusted
+        // core SDK registration path and owns their copied names.
+        let name = unsafe { provider_name(provider) }
             .ok_or_else(|| TableMaintenanceError::framework("provider has no name"))?
             .to_string_lossy()
             .into_owned();

@@ -8,10 +8,9 @@ enum CustomScanMode {
 }
 
 fn mode() -> CustomScanMode {
-    let api = crate::table_maintenance::abi::runtime_api().unwrap_or_else(|| {
-        panic!("pg_lakebase runtime API is unavailable while planning CustomScan")
-    });
-    match unsafe { (api.customscan_mode)() } {
+    let runtime = crate::runtime_api::RuntimeClient::connect()
+        .unwrap_or_else(|error| panic!("cannot read CustomScan settings: {error}"));
+    match runtime.customscan_mode() {
         0 => CustomScanMode::Off,
         1 => CustomScanMode::Auto,
         2 => CustomScanMode::Force,

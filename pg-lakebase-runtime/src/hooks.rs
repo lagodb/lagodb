@@ -1,5 +1,5 @@
+use std::cell::Cell;
 use std::ffi::CStr;
-use std::sync::OnceLock;
 
 use pg_lakebase_core::catalog::{
     self, CatalogRelation, CatalogScanKey, CatalogSnapshot,
@@ -9,8 +9,9 @@ use pgrx::prelude::*;
 
 use crate::{error::LakebaseError, lifecycle, registry, runtime};
 
-static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
-    OnceLock::new();
+thread_local! {
+    static PREFLIGHT_ENABLED: Cell<bool> = const { Cell::new(false) };
+}
 
 const PG_CATALOG_SCHEMA: &CStr = c"pg_catalog";
 const PG_DEPEND_TABLE: &CStr = c"pg_depend";
@@ -156,26 +157,13 @@ impl RuntimeDropPreflight {
 }
 
 pub(crate) fn init() {
-    PREV_PROCESS_UTILITY.get_or_init(|| unsafe {
-        let previous = pg_sys::ProcessUtility_hook;
-        pg_sys::ProcessUtility_hook = Some(process_utility_hook);
-        previous
-    });
+    PREFLIGHT_ENABLED.set(true);
 }
 
-#[pg_guard]
-#[allow(clippy::too_many_arguments)] // PostgreSQL's ProcessUtility_hook ABI.
-unsafe extern "C-unwind" fn process_utility_hook(
-    pstmt: *mut pg_sys::PlannedStmt,
-    query_string: *const std::os::raw::c_char,
-    read_only_tree: bool,
-    context: pg_sys::ProcessUtilityContext::Type,
-    params: *mut pg_sys::ParamListInfoData,
-    query_env: *mut pg_sys::QueryEnvironment,
-    dest: *mut pg_sys::DestReceiver,
-    completion_tag: *mut pg_sys::QueryCompletion,
-) {
-    let node = unsafe { (*pstmt).utilityStmt };
+pub(crate) unsafe fn preflight(node: *mut pg_sys::Node) {
+    if !PREFLIGHT_ENABLED.get() {
+        return;
+    }
     match unsafe { (*node).type_ } {
         pg_sys::NodeTag::T_DropdbStmt => {
             let statement = node.cast::<pg_sys::DropdbStmt>();
@@ -197,34 +185,6 @@ unsafe extern "C-unwind" fn process_utility_hook(
             }
         }
         _ => {}
-    }
-
-    if let Some(previous) = PREV_PROCESS_UTILITY.get().copied().flatten() {
-        unsafe {
-            previous(
-                pstmt,
-                query_string,
-                read_only_tree,
-                context,
-                params,
-                query_env,
-                dest,
-                completion_tag,
-            );
-        }
-    } else {
-        unsafe {
-            pg_sys::standard_ProcessUtility(
-                pstmt,
-                query_string,
-                read_only_tree,
-                context,
-                params,
-                query_env,
-                dest,
-                completion_tag,
-            );
-        }
     }
 }
 

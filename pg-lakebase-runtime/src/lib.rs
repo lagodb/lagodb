@@ -10,11 +10,13 @@ mod error;
 mod gucs;
 mod hooks;
 mod lifecycle;
+mod object_access;
+mod process_utility;
 mod registry;
 mod runtime;
+mod runtime_api;
 mod state;
 mod storage;
-mod table_maintenance;
 
 pg_module_magic!();
 
@@ -25,7 +27,7 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 extern "C-unwind" fn _PG_init() {
     gucs::init();
     storage::init();
-    table_maintenance::init();
+    runtime_api::init();
 
     if unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
         pgrx::pg_shmem_init!(RUNTIME_STATE);
