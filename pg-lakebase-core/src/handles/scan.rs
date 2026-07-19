@@ -384,21 +384,18 @@ impl<'a> AnalyzeReadStreamHandle<'a> {
     /// PostgreSQL's `acquire_sample_rows()`, or if the versioned C bridge finds
     /// invalid sampler fields. Callers must additionally compare snapshots
     /// before and after consuming the stream so inconsistent sampler semantics
-    /// cannot silently change the sample size. The exact-version C build and
-    /// runtime guards, rather than these sampler checks, protect the private-
-    /// layout dereference.
+    /// cannot silently change the sample size. The C bridge selects the known
+    /// PG17 minor layout epoch; upstream hashes and CI guard that private ABI.
     #[cfg(feature = "pg17")]
     pub fn analyze_sampler_state(&self) -> Option<AnalyzeSamplerState> {
         let mut raw = RawAnalyzeSamplerState::default();
         // SAFETY: the handle owns a non-null PostgreSQL ReadStream borrow for
         // this callback, and `raw` is writable for the duration of the call.
-        // The PG17-versioned C bridge owns the private-layout dereference and
-        // returns false unless its copied BlockSamplerData fields are valid.
+        // The version-gated C bridge owns the private-layout dereference and
+        // selects the PG17 minor layout epoch. It returns false unless its
+        // copied BlockSamplerData fields are valid.
         let valid = unsafe {
-            lakebase_read_stream_analyze_sampler_state(
-                self.inner.as_ptr(),
-                &mut raw,
-            )
+            lakebase_read_stream_analyze_sampler_state(self.inner.as_ptr(), &mut raw)
         };
         if !valid {
             return None;

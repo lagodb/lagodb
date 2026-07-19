@@ -661,9 +661,11 @@ impl AnalyzeScanState {
             let target_rows = initial_sampler.target_rows();
             #[cfg(not(feature = "pg17"))]
             let target_rows = preparation.target_rows;
-            self.phase = AnalyzeScanPhase::Ready(
-                preparation.start(tickets, target_rows, seed)?,
-            );
+            self.phase = AnalyzeScanPhase::Ready(preparation.start(
+                tickets,
+                target_rows,
+                seed,
+            )?);
         }
 
         match &mut self.phase {

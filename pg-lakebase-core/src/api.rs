@@ -70,9 +70,9 @@ use crate::access::mutation::trigger_rows::TriggerQueryState;
 use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, SqlStateError};
 use crate::handles::{
-    AttrWidthsHandle, BufferAccessStrategyHandle, BulkInsertStateHandle,
-    CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
-    AnalyzeReadStreamHandle, OwnedScanKeys, ParallelTableScanDescHandle,
+    AnalyzeReadStreamHandle, AttrWidthsHandle, BufferAccessStrategyHandle,
+    BulkInsertStateHandle, CallbackStateHandle, IndexBuildCallbackHandle,
+    IndexInfoHandle, ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle,
     RelFileLocator, RelationHandle, SampleScanStateHandle, ScanDirection,
     SnapshotHandle, TBMIterateResultHandle, TMIndexDeleteOpHandle,
     TableScanDescHandle, TupleTableSlotHandle, VacuumParamsHandle,

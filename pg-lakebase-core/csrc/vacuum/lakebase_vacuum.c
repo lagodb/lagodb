@@ -1,17 +1,17 @@
 /*
- * Narrow PostgreSQL 17 adapter for table-AM VACUUM FULL providers.
+ * lakebase_vacuum.c
+ *      Narrow PostgreSQL adapter for table-AM VACUUM providers.
  *
  * PostgreSQL keeps relation expansion and vacuum_rel() private to vacuum.c.
  * This file mirrors only the option/expansion and per-provider transaction
  * boundaries needed to replace cluster_rel(); native work remains in core.
  *
- * Provenance: PostgreSQL REL_17_STABLE as shipped by the local 17.9 pgrx
- * source tree, primarily src/backend/commands/vacuum.c.  This is not a copy of
- * vacuum.c: every exported lakebase_* function below is a deliberately narrow
- * adapter for parse_vacuum_options(), expand_vacuum_rel() and vacuum_rel()
- * semantics that PostgreSQL does not expose.  Re-audit this file, its Rust
- * declarations, and the FULL routing regression matrix before enabling a
- * different PostgreSQL major version.
+ * Provenance: PostgreSQL 17.10, primarily src/backend/commands/vacuum.c. This
+ * is not a copy of vacuum.c: every exported lakebase_* function below is a
+ * deliberately narrow adapter for parse_vacuum_options(),
+ * expand_vacuum_rel() and vacuum_rel() semantics that PostgreSQL does not
+ * expose. Re-audit this file, its Rust declarations, and the FULL routing
+ * regression matrix before enabling a different PostgreSQL major version.
  */
 #include "postgres.h"
 
@@ -37,7 +37,12 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
-#include "vacuum_full.h"
+#include "lakebase_pg_compat.h"
+#include "lakebase_vacuum.h"
+
+#if !LAKEBASE_PG17
+#error "VACUUM FULL adapter has not been ported to this PostgreSQL major version"
+#endif
 
 static VacOptValue
 lakebase_vacoptval_from_boolean(DefElem *def)

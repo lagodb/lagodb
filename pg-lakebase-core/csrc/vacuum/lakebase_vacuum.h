@@ -1,5 +1,5 @@
-#ifndef LAKEBASE_VACUUM_FULL_H
-#define LAKEBASE_VACUUM_FULL_H
+#ifndef LAKEBASE_VACUUM_H
+#define LAKEBASE_VACUUM_H
 
 #include "postgres.h"
 #include "commands/vacuum.h"

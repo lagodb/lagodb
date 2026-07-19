@@ -1933,6 +1933,29 @@ pub mod tests {
     }
 
     #[test]
+    fn test_validated_tasks_reject_manifest_footer_row_count_mismatch() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files();
+        let table_scan = fixture.table.scan().build().unwrap();
+        let tasks = table_scan.plan_files().unwrap();
+
+        // This legacy fixture records one row in each manifest entry while
+        // its Parquet files contain 1,024 physical rows.
+        let error = table_scan
+            .to_arrow_with_validated_tasks(tasks)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "parquet footer row count differs from the Iceberg manifest"
+            ),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
     fn test_physical_row_read_returns_requested_row() {
         let mut fixture = TableTestFixture::new();
         fixture.setup_manifest_files();

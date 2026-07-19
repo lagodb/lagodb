@@ -22,7 +22,7 @@ setup
     );
     EXECUTE format(
       'COPY (SELECT '''') TO PROGRAM %L',
-      'touch -d "7 days ago" ' || absolute_path
+      'touch -t 200001010000 ' || absolute_path
     );
   END
   $$;

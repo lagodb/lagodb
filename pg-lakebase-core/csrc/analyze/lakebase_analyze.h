@@ -1,12 +1,12 @@
-#ifndef LAKEBASE_ANALYZE_READ_STREAM_PG17_H
-#define LAKEBASE_ANALYZE_READ_STREAM_PG17_H
+#ifndef LAKEBASE_ANALYZE_H
+#define LAKEBASE_ANALYZE_H
 
 #include "postgres.h"
 #include "storage/read_stream.h"
 
 /*
  * Snapshot of the BlockSamplerData owned by PostgreSQL's
- * acquire_sample_rows().  Values are copied while its stack frame and the
+ * acquire_sample_rows(). Values are copied while its stack frame and the
  * ReadStream callback-private pointer are both live.
  */
 typedef struct LakebaseAnalyzeSamplerState

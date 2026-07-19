@@ -8,9 +8,9 @@ use crate::api::{AmScanSession, ScanFlags, TableAccessMethod};
 use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, ReportableError};
 use crate::handles::{
-    AnalyzeReadStreamHandle, ItemPointer, OwnedScanKeys,
-    ParallelTableScanDescHandle, RelationHandle, SampleScanStateHandle,
-    ScanDirection, SnapshotHandle, TBMIterateResultHandle,
+    AnalyzeReadStreamHandle, ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle,
+    RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
+    TBMIterateResultHandle,
 };
 use crate::tuple::{Row, SlotColumns};
 use pgrx::memcxt::PgMemoryContexts;

@@ -54,7 +54,9 @@
  * PostgreSQL 17.10 nodeModifyTable.c fork.
  *
  * Keep upstream control flow intact. Extension differences are delimited by
- * LAKEBASE BEGIN/END markers and audited against upstream/nodeModifyTable_pg17.c.
+ * LAKEBASE BEGIN/END markers; PG17 minor compatibility stays in local
+ * PG_VERSION_NUM branches. Audit both against
+ * upstream/node_modify_table.pg17.c.
  */
 /* LAKEBASE BEGIN: prefix upstream global symbols linked into the extension. */
 #define ExecInitStoredGenerated LakebaseExecInitStoredGenerated
@@ -81,14 +83,21 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "rewrite/rewriteHandler.h"
+#if PG_VERSION_NUM >= 170006
 #include "rewrite/rewriteManip.h"
+#endif
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
+#include "lakebase_pg_compat.h"
 #include "lakebase_node_modify_table.h"
+
+#if !LAKEBASE_PG17
+#error "ModifyTable fork has not been ported to this PostgreSQL major version"
+#endif
 
 typedef struct MTTargetRelLookup
 {
@@ -1467,6 +1476,7 @@ ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
 
+#if PG_VERSION_NUM >= 170006
 		return ExecBRDeleteTriggersNew(context->estate, context->epqstate,
 									   resultRelInfo,
 									   LakebaseSupportsRelation(context, resultRelInfo) ?
@@ -1474,6 +1484,14 @@ ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 									   oldtuple,
 									   epqreturnslot, result, &context->tmfd,
 									   context->mtstate->operation == CMD_MERGE);
+#else
+		return ExecBRDeleteTriggers(context->estate, context->epqstate,
+								resultRelInfo,
+								LakebaseSupportsRelation(context, resultRelInfo) ?
+								NULL : tupleid,
+								oldtuple,
+								epqreturnslot, result, &context->tmfd);
+#endif
 	}
 
 	return true;
@@ -2130,6 +2148,7 @@ ExecUpdatePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
 
+#if PG_VERSION_NUM >= 170006
 		return ExecBRUpdateTriggersNew(context->estate, context->epqstate,
 									   resultRelInfo,
 									   LakebaseSupportsRelation(context, resultRelInfo) ?
@@ -2137,6 +2156,14 @@ ExecUpdatePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 									   oldtuple, slot,
 									   result, &context->tmfd,
 									   context->mtstate->operation == CMD_MERGE);
+#else
+		return ExecBRUpdateTriggers(context->estate, context->epqstate,
+								resultRelInfo,
+								LakebaseSupportsRelation(context, resultRelInfo) ?
+								NULL : tupleid,
+								oldtuple, slot,
+								result, &context->tmfd);
+#endif
 	}
 
 	return true;
@@ -2669,7 +2696,9 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	}
 	else
 	{
+#if PG_VERSION_NUM >= 170001
 		ItemPointerData lockedtid;
+#endif
 
 		/*
 		 * If we generate a new candidate tuple after EvalPlanQual testing, we
@@ -2679,7 +2708,9 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		 * to do them again.)
 		 */
 redo_act:
+#if PG_VERSION_NUM >= 170001
 		lockedtid = *tupleid;
+#endif
 		result = ExecUpdateAct(context, resultRelInfo, tupleid, oldtuple, slot,
 							   canSetTag, &updateCxt);
 
@@ -2773,6 +2804,7 @@ redo_act:
 								ExecInitUpdateProjection(context->mtstate,
 														 resultRelInfo);
 
+#if PG_VERSION_NUM >= 170001
 							if (resultRelInfo->ri_needLockTagTuple)
 							{
 								UnlockTuple(resultRelationDesc,
@@ -2780,6 +2812,7 @@ redo_act:
 								LockTuple(resultRelationDesc,
 										  tupleid, InplaceUpdateTupleLock);
 							}
+#endif
 
 							/* Fetch the most recent version of old tuple. */
 							oldSlot = resultRelInfo->ri_oldTupleSlot;
@@ -2891,7 +2924,9 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 	 * supporting this; we'd just need to handle LOCKTAG_TUPLE like the other
 	 * ExecUpdate() caller.
 	 */
+#if PG_VERSION_NUM >= 170001
 	Assert(!resultRelInfo->ri_needLockTagTuple);
+#endif
 
 	/* Determine lock mode to use */
 	lockmode = ExecUpdateLockMode(context->estate, resultRelInfo);
@@ -3209,7 +3244,9 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 {
 	ModifyTableState *mtstate = context->mtstate;
 	List	  **mergeActions = resultRelInfo->ri_MergeActions;
+#if PG_VERSION_NUM >= 170001
 	ItemPointerData lockedtid;
+#endif
 	List	   *actionStates;
 	TupleTableSlot *newslot = NULL;
 	TupleTableSlot *rslot = NULL;
@@ -3246,10 +3283,14 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * target wholerow junk attr.
 	 */
 	Assert(tupleid != NULL || oldtuple != NULL);
+#if PG_VERSION_NUM >= 170001
 	ItemPointerSetInvalid(&lockedtid);
+#endif
 	if (oldtuple != NULL)
 	{
+#if PG_VERSION_NUM >= 170001
 		Assert(!resultRelInfo->ri_needLockTagTuple);
+#endif
 		ExecForceStoreHeapTuple(oldtuple, resultRelInfo->ri_oldTupleSlot,
 								false);
 		/* LAKEBASE BEGIN: expose MERGE OLD to the update bridge. */
@@ -3259,6 +3300,7 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	}
 	else
 	{
+#if PG_VERSION_NUM >= 170001
 		if (resultRelInfo->ri_needLockTagTuple)
 		{
 			/*
@@ -3270,6 +3312,7 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 					  InplaceUpdateTupleLock);
 			lockedtid = *tupleid;
 		}
+#endif
 		if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
 										   tupleid,
 										   SnapshotAny,
@@ -3610,6 +3653,7 @@ lmerge_matched:
 								 * we need to switch to the NOT MATCHED BY
 								 * SOURCE case.
 								 */
+#if PG_VERSION_NUM >= 170001
 								if (resultRelInfo->ri_needLockTagTuple)
 								{
 									if (ItemPointerIsValid(&lockedtid))
@@ -3619,6 +3663,7 @@ lmerge_matched:
 											  InplaceUpdateTupleLock);
 									lockedtid = *tupleid;
 								}
+#endif
 
 								if (!table_tuple_fetch_row_version(resultRelationDesc,
 																   tupleid,
@@ -3751,9 +3796,11 @@ lmerge_matched:
 	 * Successfully executed an action or no qualifying action was found.
 	 */
 out:
+#if PG_VERSION_NUM >= 170001
 	if (ItemPointerIsValid(&lockedtid))
 		UnlockTuple(resultRelInfo->ri_RelationDesc, &lockedtid,
 					InplaceUpdateTupleLock);
+#endif
 	return rslot;
 }
 
@@ -4019,6 +4066,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 	 * we can use the first resultRelInfo entry as a reference to calculate
 	 * the attno's for the root table.
 	 */
+#if PG_VERSION_NUM >= 170006
 	if (rootRelInfo != mtstate->resultRelInfo &&
 		rootRelInfo->ri_RelationDesc->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
 		(mtstate->mt_merge_subcommands & MERGE_INSERT) != 0)
@@ -4113,6 +4161,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 										RelationGetDescr(rootRelation));
 		}
 	}
+#endif
 }
 
 /*
@@ -4329,7 +4378,9 @@ ExecModifyTableWithBridge(PlanState *pstate, LakebaseModifyBridge *bridge)
 	HeapTupleData oldtupdata;
 	HeapTuple	oldtuple;
 	ItemPointer tupleid;
+#if PG_VERSION_NUM >= 170001
 	bool		tuplock;
+#endif
 
 	CHECK_FOR_INTERRUPTS();
 
@@ -4719,7 +4770,9 @@ ExecModifyTableWithBridge(PlanState *pstate, LakebaseModifyBridge *bridge)
 				break;
 
 			case CMD_UPDATE:
+#if PG_VERSION_NUM >= 170001
 				tuplock = false;
+#endif
 
 				/* Initialize projection info if first time for this table */
 				if (unlikely(!resultRelInfo->ri_projectNewInfoValid))
@@ -4732,7 +4785,9 @@ ExecModifyTableWithBridge(PlanState *pstate, LakebaseModifyBridge *bridge)
 				oldSlot = resultRelInfo->ri_oldTupleSlot;
 				if (oldtuple != NULL)
 				{
+#if PG_VERSION_NUM >= 170001
 					Assert(!resultRelInfo->ri_needLockTagTuple);
+#endif
 					/* Use the wholerow junk attr as the old tuple. */
 					ExecForceStoreHeapTuple(oldtuple, oldSlot, false);
 					/* LAKEBASE BEGIN: expose OLD to the slot-first bridge. */
@@ -4745,11 +4800,13 @@ ExecModifyTableWithBridge(PlanState *pstate, LakebaseModifyBridge *bridge)
 					/* Fetch the most recent version of old tuple. */
 					Relation	relation = resultRelInfo->ri_RelationDesc;
 
+#if PG_VERSION_NUM >= 170001
 					if (resultRelInfo->ri_needLockTagTuple)
 					{
 						LockTuple(relation, tupleid, InplaceUpdateTupleLock);
 						tuplock = true;
 					}
+#endif
 					if (!table_tuple_fetch_row_version(relation, tupleid,
 													   SnapshotAny,
 													   oldSlot))
@@ -4761,9 +4818,11 @@ ExecModifyTableWithBridge(PlanState *pstate, LakebaseModifyBridge *bridge)
 				/* Now apply the update. */
 				slot = ExecUpdate(&context, resultRelInfo, tupleid, oldtuple,
 								  slot, node->canSetTag);
+#if PG_VERSION_NUM >= 170001
 				if (tuplock)
 					UnlockTuple(resultRelInfo->ri_RelationDesc, tupleid,
 								InplaceUpdateTupleLock);
+#endif
 				break;
 
 			case CMD_DELETE:
@@ -4994,8 +5053,12 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		/*
 		 * Verify result relation is a valid target for the current operation
 		 */
+#if PG_VERSION_NUM >= 170007
 		CheckValidResultRelNew(resultRelInfo, operation,
 							   node->onConflictAction, mergeActions);
+#else
+		CheckValidResultRel(resultRelInfo, operation, mergeActions);
+#endif
 
 		resultRelInfo++;
 		i++;
