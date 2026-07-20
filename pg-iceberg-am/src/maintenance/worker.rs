@@ -15,11 +15,9 @@ use pg_lakebase_core::table_maintenance::{
 use pgrx::datum::Internal;
 use pgrx::prelude::*;
 
-use super::provider::MaintenanceExecution;
 use super::IcebergTableMaintenanceProvider;
-use crate::catalog::metadata_table::{
-    IcebergMetadata, MaintenanceCandidate,
-};
+use super::provider::MaintenanceExecution;
+use crate::catalog::metadata_table::{IcebergMetadata, MaintenanceCandidate};
 use crate::error::IcebergError;
 
 #[derive(Clone, Copy)]
@@ -119,11 +117,8 @@ fn load_candidates(
     policy: SchedulerPolicy,
 ) -> Result<Vec<MaintenanceCandidate>, PgReportError> {
     let now = unsafe { pg_sys::GetCurrentTimestamp() };
-    IcebergMetadata::maintenance_candidates(
-        policy.max_tables.saturating_add(1),
-        now,
-    )
-    .map_err(PgReportError::from_domain_error)
+    IcebergMetadata::maintenance_candidates(policy.max_tables.saturating_add(1), now)
+        .map_err(PgReportError::from_domain_error)
 }
 
 fn defer_candidate(
@@ -168,8 +163,7 @@ fn run() -> WorkerExit {
         pg_sys::check_for_interrupts!();
         match WorkerTransaction::run(|| maintain_relation(candidate)) {
             Ok(
-                MaintenanceAttempt::Completed
-                | MaintenanceAttempt::StaleCandidate,
+                MaintenanceAttempt::Completed | MaintenanceAttempt::StaleCandidate,
             ) => {}
             Ok(MaintenanceAttempt::LockSkipped) => {
                 if let Err(error) =

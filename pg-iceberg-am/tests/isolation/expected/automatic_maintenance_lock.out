@@ -5,7 +5,7 @@ step s1_begin: BEGIN;
 step s1_lock: 
   LOCK TABLE automatic_worker_iso.t IN SHARE UPDATE EXCLUSIVE MODE;
 
-step s2_enable_locked:
+step s2_enable_locked: 
   DO $$
   BEGIN
     EXECUTE format(
@@ -15,7 +15,7 @@ step s2_enable_locked:
   END
   $$;
 
-step s2_wait_deferred:
+step s2_wait_deferred: 
   DO $$
   DECLARE deadline timestamptz := clock_timestamp() + interval '30 seconds';
   BEGIN
@@ -34,7 +34,7 @@ step s2_wait_deferred:
   $$;
 
 step s1_commit: COMMIT;
-step s2_retry:
+step s2_retry: 
   UPDATE iceberg.iceberg_metadata
   SET maintenance_due_at = '-infinity'
   WHERE relid = 'automatic_worker_iso.t'::regclass;
@@ -76,5 +76,6 @@ step s2_verify:
 
 compacted|due_cleared|rows_preserved
 ---------+-----------+--------------
-t        |t          |t
+t        |t          |t             
 (1 row)
+

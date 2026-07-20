@@ -313,6 +313,19 @@ pub(crate) fn load_one(
     Ok(None)
 }
 
+pub(crate) fn registration_extension_oid(
+    extension_name: &str,
+    worker_name: &str,
+) -> LakebaseResult<Option<pg_sys::Oid>> {
+    let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
+    for row in catalog.rows()? {
+        if row.extension_name == extension_name && row.worker_name == worker_name {
+            return extension_oid_by_name(&row.extension_name);
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn delete_extension_registrations(
     extension_name: &CStr,
 ) -> LakebaseResult<()> {

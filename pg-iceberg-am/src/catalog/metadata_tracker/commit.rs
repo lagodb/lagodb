@@ -27,16 +27,13 @@ impl<'a> TableCommitCoordinator<'a> {
             plan,
             file_io,
         } = self;
-        let has_maintenance_action = plan
-            .actions
-            .iter()
-            .any(|action| {
-                matches!(
-                    action,
-                    EffectiveCommitAction::Data { .. }
-                        | EffectiveCommitAction::TruncateOnly
-                )
-            });
+        let has_maintenance_action = plan.actions.iter().any(|action| {
+            matches!(
+                action,
+                EffectiveCommitAction::Data { .. }
+                    | EffectiveCommitAction::TruncateOnly
+            )
+        });
         let mut retries = 0_u32;
         let max_retries = gucs::max_commit_retries();
         let max_retry_count = u32::try_from(max_retries)
@@ -180,12 +177,9 @@ impl<'a> TableCommitCoordinator<'a> {
                         maintenance_schedule,
                     ) {
                         Ok(()) => {
-                            if vacuum_result
-                                .as_ref()
-                                .is_some_and(
-                                    crate::maintenance::VacuumAttemptResult::has_cleanup,
-                                )
-                            {
+                            if vacuum_result.as_ref().is_some_and(
+                                crate::maintenance::VacuumAttemptResult::has_cleanup,
+                            ) {
                                 vacuum_result
                                     .as_mut()
                                     .expect("checked VACUUM result")
@@ -230,7 +224,8 @@ impl<'a> TableCommitCoordinator<'a> {
                     if let (Some(vacuum), Some(result)) =
                         (plan.vacuum, vacuum_result.take())
                     {
-                        result.report_success(vacuum, vacuum_commit_started.as_ref())?;
+                        result
+                            .report_success(vacuum, vacuum_commit_started.as_ref())?;
                     }
                     crate::storage::transactional_artifacts::register_canceled_files_for_commit(
                         file_io.clone(),

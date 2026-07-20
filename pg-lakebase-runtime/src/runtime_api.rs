@@ -10,8 +10,8 @@ use pg_lakebase_core::runtime_api::{
     REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RUNTIME_API_VERSION, RuntimeApiV1,
     RuntimeMaintenanceConfigV1, STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND,
     STAGE_WORKER_WAKEUP_INVALID_REQUEST, STAGE_WORKER_WAKEUP_OK,
-    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED,
-    provider_access_method_name, provider_name, rendezvous_slot,
+    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, provider_access_method_name,
+    provider_name, rendezvous_slot,
 };
 use pgrx::pg_sys;
 

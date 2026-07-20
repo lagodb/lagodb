@@ -27,5 +27,6 @@ step s2_verify:
 
 rows_preserved|orphan_deleted|concurrent_due_preserved
 --------------+--------------+------------------------
-t             |t             |t
+t             |t             |t                       
 (1 row)
+

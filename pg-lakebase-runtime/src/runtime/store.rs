@@ -166,8 +166,7 @@ impl RuntimeStore {
         worker_name: &str,
     ) -> bool {
         let mut state = RUNTIME_STATE.exclusive();
-        let Some(index) =
-            state.worker_slot(database_oid, extension_oid, worker_name)
+        let Some(index) = state.worker_slot(database_oid, extension_oid, worker_name)
         else {
             state.rescan_all = 1;
             return true;

@@ -266,8 +266,7 @@ pub(crate) struct MaintenanceCandidate {
 
 impl MaintenanceCandidate {
     pub(crate) fn matches(&self, token: &MaintenanceCompletionToken) -> bool {
-        self.metadata_location.as_deref()
-            == Some(token.metadata_location.as_str())
+        self.metadata_location.as_deref() == Some(token.metadata_location.as_str())
             && Some(self.due_at) == token.maintenance_due_at
     }
 }
@@ -439,19 +438,10 @@ impl IcebergMetadata {
                 break;
             };
             let relid = unsafe {
-                get_attr_required(
-                    tuple.as_raw(),
-                    tuple_desc,
-                    column::RELID,
-                    "relid",
-                )?
+                get_attr_required(tuple.as_raw(), tuple_desc, column::RELID, "relid")?
             };
             let metadata_location = unsafe {
-                get_attr(
-                    tuple.as_raw(),
-                    tuple_desc,
-                    column::METADATA_LOCATION,
-                )
+                get_attr(tuple.as_raw(), tuple_desc, column::METADATA_LOCATION)
             };
             let due_at = unsafe {
                 get_attr_required::<TimestampWithTimeZone>(
@@ -508,10 +498,7 @@ impl IcebergMetadata {
                 Self::pkey_oid()?,
                 true,
                 CatalogSnapshot::Default,
-                [CatalogScanKey::oid_eq(
-                    column::RELID as _,
-                    candidate.relid,
-                )],
+                [CatalogScanKey::oid_eq(column::RELID as _, candidate.relid)],
             )
             .map_catalog_err(CatalogOp::Update)?;
         let Some(old_tuple) = scan.get_next().map_catalog_err(CatalogOp::Update)?
@@ -520,11 +507,7 @@ impl IcebergMetadata {
         };
         let tuple_desc = table_guard.as_handle().tuple_desc();
         let current_location: Option<String> = unsafe {
-            get_attr(
-                old_tuple.as_raw(),
-                tuple_desc,
-                column::METADATA_LOCATION,
-            )
+            get_attr(old_tuple.as_raw(), tuple_desc, column::METADATA_LOCATION)
         };
         let current_due = unsafe {
             get_attr::<TimestampWithTimeZone>(
@@ -541,8 +524,7 @@ impl IcebergMetadata {
         }
         let mut replacement = unsafe { TupleReplacement::new(tuple_desc) };
         replacement.set(column::MAINTENANCE_DUE_AT, Some(retry_at));
-        let new_tuple =
-            unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
+        let new_tuple = unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
         Ok(matches!(
             table_guard
                 .catalog_update_optimistic(old_tuple, &new_tuple)
@@ -573,11 +555,7 @@ impl IcebergMetadata {
         };
         let tuple_desc = table_guard.as_handle().tuple_desc();
         let current_location: Option<String> = unsafe {
-            get_attr(
-                old_tuple.as_raw(),
-                tuple_desc,
-                column::METADATA_LOCATION,
-            )
+            get_attr(old_tuple.as_raw(), tuple_desc, column::METADATA_LOCATION)
         };
         if current_location.as_deref() != Some(expected_location) {
             return Err(IcebergError::MetadataCatalogConflict);
@@ -596,10 +574,8 @@ impl IcebergMetadata {
                 // A newer due value represents work this maintenance plan did
                 // not authorize itself to complete.
                 if current_due == expected_due {
-                    replacement.set::<pg_sys::TimestampTz>(
-                        column::MAINTENANCE_DUE_AT,
-                        None,
-                    );
+                    replacement
+                        .set::<pg_sys::TimestampTz>(column::MAINTENANCE_DUE_AT, None);
                 }
             }
             MaintenanceScheduleUpdate::Preserve => {}
@@ -609,8 +585,7 @@ impl IcebergMetadata {
                 ));
             }
         }
-        let new_tuple =
-            unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
+        let new_tuple = unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
         match table_guard
             .catalog_update_optimistic(old_tuple, &new_tuple)
             .map_catalog_err(CatalogOp::Update)?
@@ -702,10 +677,8 @@ impl IcebergMetadata {
             MaintenanceScheduleUpdate::CompleteIfDueMatches(expected_due)
                 if current_due == expected_due && current_due.is_some() =>
             {
-                replacement.set::<pg_sys::TimestampTz>(
-                    column::MAINTENANCE_DUE_AT,
-                    None,
-                );
+                replacement
+                    .set::<pg_sys::TimestampTz>(column::MAINTENANCE_DUE_AT, None);
                 false
             }
             // Preserve a newer scheduling token while still publishing the
@@ -799,13 +772,12 @@ impl IcebergMetadata {
                     column::PREVIOUS_METADATA_LOCATION,
                 ),
                 default_spec_id: get_attr(tuple, tup_desc, column::DEFAULT_SPEC_ID),
-                maintenance_due_at:
-                    get_attr::<TimestampWithTimeZone>(
-                        tuple,
-                        tup_desc,
-                        column::MAINTENANCE_DUE_AT,
-                    )
-                    .map(TimestampWithTimeZone::into_inner),
+                maintenance_due_at: get_attr::<TimestampWithTimeZone>(
+                    tuple,
+                    tup_desc,
+                    column::MAINTENANCE_DUE_AT,
+                )
+                .map(TimestampWithTimeZone::into_inner),
             })
         }
     }

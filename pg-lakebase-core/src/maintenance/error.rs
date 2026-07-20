@@ -47,9 +47,7 @@ pub enum MaintenanceError {
     InvalidRecord(String),
 
     #[error("failed to notify maintenance worker: {0}")]
-    WorkerNotification(
-        #[source] crate::extension_worker::WorkerNotificationError,
-    ),
+    WorkerNotification(#[source] crate::extension_worker::WorkerNotificationError),
 
     #[error("maintenance item changed concurrently: {0}")]
     ConcurrentUpdate(super::item::MaintenanceItemId),

@@ -12,5 +12,4 @@ CREATE TABLE iceberg.iceberg_metadata (
 SELECT pg_catalog.pg_extension_config_dump('iceberg.iceberg_metadata', '');
 
 CREATE INDEX iceberg_metadata_maintenance_due_idx
-ON iceberg.iceberg_metadata (maintenance_due_at, relid)
-WHERE maintenance_due_at IS NOT NULL;
+ON iceberg.iceberg_metadata (maintenance_due_at, relid);

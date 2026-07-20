@@ -4,15 +4,25 @@ CREATE EXTENSION pg_iceberg_am;
 CREATE SCHEMA automatic_maintenance_test;
 SELECT to_regclass('iceberg.automatic_maintenance_state') IS NULL
     AS has_no_scheduler_state_table;
- has_no_scheduler_state_table
+ has_no_scheduler_state_table 
 ------------------------------
  t
 (1 row)
 
 SELECT to_regclass('iceberg.iceberg_metadata_maintenance_due_idx') IS NOT NULL
     AS has_due_index;
- has_due_index
+ has_due_index 
 ---------------
+ t
+(1 row)
+
+SELECT indexprs IS NULL AND indpred IS NULL
+    AS due_index_is_catalog_compatible
+FROM pg_index
+WHERE indexrelid =
+    'iceberg.iceberg_metadata_maintenance_due_idx'::regclass;
+ due_index_is_catalog_compatible 
+---------------------------------
  t
 (1 row)
 
@@ -53,7 +63,7 @@ SELECT metadata.maintenance_due_at = first_due.maintenance_due_at
 FROM iceberg.iceberg_metadata AS metadata
 CROSS JOIN first_due
 WHERE metadata.relid = 'automatic_maintenance_test.eligible'::regclass;
- repeated_writes_kept_earliest_deadline
+ repeated_writes_kept_earliest_deadline 
 ----------------------------------------
  t
 (1 row)
@@ -80,7 +90,7 @@ SELECT current_data_objects < 6 AS worker_compacted_eligible_table
 FROM lakebase.table_maintenance_stats(
     'automatic_maintenance_test.eligible'
 );
- worker_compacted_eligible_table
+ worker_compacted_eligible_table 
 ---------------------------------
  t
 (1 row)
@@ -88,7 +98,7 @@ FROM lakebase.table_maintenance_stats(
 SELECT maintenance_due_at IS NULL AS successful_attempt_cleared_due
 FROM iceberg.iceberg_metadata
 WHERE relid = 'automatic_maintenance_test.eligible'::regclass;
- successful_attempt_cleared_due
+ successful_attempt_cleared_due 
 --------------------------------
  t
 (1 row)
@@ -96,7 +106,7 @@ WHERE relid = 'automatic_maintenance_test.eligible'::regclass;
 SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6]
     AS rows_preserved_after_first_attempt
 FROM automatic_maintenance_test.eligible;
- rows_preserved_after_first_attempt
+ rows_preserved_after_first_attempt 
 ------------------------------------
  t
 (1 row)
@@ -140,7 +150,7 @@ SELECT current_data_objects < 7 AS writes_scheduled_compaction
 FROM lakebase.table_maintenance_stats(
     'automatic_maintenance_test.eligible'
 );
- writes_scheduled_compaction
+ writes_scheduled_compaction 
 -----------------------------
  t
 (1 row)
@@ -149,7 +159,7 @@ SELECT current_data_objects = 6 AS worker_did_not_scan_clean_registry_rows
 FROM lakebase.table_maintenance_stats(
     'automatic_maintenance_test.cold'
 );
- worker_did_not_scan_clean_registry_rows
+ worker_did_not_scan_clean_registry_rows 
 -----------------------------------------
  t
 (1 row)
@@ -157,7 +167,7 @@ FROM lakebase.table_maintenance_stats(
 SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     AS rows_preserved_after_second_attempt
 FROM automatic_maintenance_test.eligible;
- rows_preserved_after_second_attempt
+ rows_preserved_after_second_attempt 
 -------------------------------------
  t
 (1 row)

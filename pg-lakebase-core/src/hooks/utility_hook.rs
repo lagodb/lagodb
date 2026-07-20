@@ -6,7 +6,10 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 
-use crate::runtime_api::{HOOK_DESCRIPTOR_VERSION, UtilityHookDescriptorV1};
+use crate::runtime_api::{
+    HOOK_DESCRIPTOR_VERSION, RoutedUtilityPostHook, RoutedUtilityPreHook,
+    UtilityHookDescriptorV1,
+};
 
 /// Type-level binding between a marker type, PostgreSQL utility statement
 /// struct, and its [`pg_sys::NodeTag`].
@@ -179,6 +182,19 @@ impl PreparedUtilityHooks {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct UtilityHookCallbacks {
+    on_pre: RoutedUtilityPreHook,
+    on_post: RoutedUtilityPostHook,
+}
+
+impl UtilityHookCallbacks {
+    pub(super) const BACKEND: Self = Self {
+        on_pre: route_external_pre_hook,
+        on_post: route_external_post_hook,
+    };
+}
+
 #[pg_guard]
 unsafe extern "C-unwind" fn route_external_pre_hook(
     context: *mut c_void,
@@ -247,7 +263,9 @@ pub fn register_utility_hook(
     });
 }
 
-pub(super) fn prepare_utility_hooks() -> PreparedUtilityHooks {
+pub(super) fn prepare_utility_hooks(
+    callbacks: UtilityHookCallbacks,
+) -> PreparedUtilityHooks {
     let entries = BUILDING_REGISTRY.with_borrow_mut(std::mem::take);
     let mut contexts = Vec::with_capacity(entries.len());
     let mut descriptors = Vec::with_capacity(entries.len());
@@ -260,8 +278,8 @@ pub(super) fn prepare_utility_hooks() -> PreparedUtilityHooks {
                     .expect("utility hook descriptor size exceeds u32"),
             tag: tag as u32,
             context: std::ptr::from_mut(context.as_mut()).cast(),
-            on_pre: Some(route_external_pre_hook),
-            on_post: Some(route_external_post_hook),
+            on_pre: Some(callbacks.on_pre),
+            on_post: Some(callbacks.on_post),
         });
         contexts.push(context);
     }
@@ -274,6 +292,17 @@ pub(super) fn prepare_utility_hooks() -> PreparedUtilityHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "C-unwind" fn test_route_hook(
+        _context: *mut c_void,
+        _node: *mut pg_sys::Node,
+    ) {
+    }
+
+    const TEST_CALLBACKS: UtilityHookCallbacks = UtilityHookCallbacks {
+        on_pre: test_route_hook,
+        on_post: test_route_hook,
+    };
 
     struct TestHook;
 
@@ -291,14 +320,16 @@ mod tests {
     }
 
     #[test]
-    fn rejected_preparation_can_restore_building_registry() {
+    fn restoring_prepared_hooks_repopulates_building_registry() {
         BUILDING_REGISTRY.with_borrow_mut(|entries| {
             entries.clear();
             entries.push((pg_sys::NodeTag::T_CommentStmt, Box::new(TestHook)));
         });
 
-        let prepared = prepare_utility_hooks();
+        let prepared = prepare_utility_hooks(TEST_CALLBACKS);
         assert_eq!(prepared.descriptors().len(), 1);
+        assert!(prepared.descriptors()[0].on_pre.is_some());
+        assert!(prepared.descriptors()[0].on_post.is_some());
         assert!(BUILDING_REGISTRY.with_borrow(Vec::is_empty));
         prepared.restore();
         assert_eq!(BUILDING_REGISTRY.with_borrow(Vec::len), 1);

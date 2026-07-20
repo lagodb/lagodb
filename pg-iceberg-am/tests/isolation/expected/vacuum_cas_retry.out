@@ -25,5 +25,6 @@ step s2_verify:
 
 compacted|concurrent_due_preserved|rows_preserved
 ---------+------------------------+--------------
-t        |t                       |t
+t        |t                       |t             
 (1 row)
+

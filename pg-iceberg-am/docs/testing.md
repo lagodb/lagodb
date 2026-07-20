@@ -58,6 +58,16 @@ process, not inside PostgreSQL.
 For `pg-iceberg-am`, ordinary `#[test]` functions must only exercise logic
 that can run in a normal process without PostgreSQL backend state.
 
+The `test` cfg is crate-local. If a test target depends on another workspace
+crate, that dependency is normally compiled without `cfg(test)`. It must not
+be used as a general "host process versus PostgreSQL backend" capability flag
+across crate boundaries.
+
+Linking also follows reachability, not execution. A host test does not need to
+call a backend callback to retain it: constructing a reachable descriptor that
+stores a `#[pg_guard]` function pointer is enough. The linker must then retain
+the expanded guard and resolve its PostgreSQL backend symbols.
+
 ## pgrx `#[pg_test]`
 
 `#[pgrx::pg_test]` is different from ordinary `#[test]`. The macro expands
@@ -136,6 +146,14 @@ building the extension shared library for test installation.
 Do not gate `#[pg_test]` modules only with `#[cfg(test)]`; the SQL functions
 would be visible to the host test wrapper but absent from the extension
 shared library built for PostgreSQL.
+
+For code that prepares callback descriptors, keep registry ownership and
+descriptor lifecycle logic independent from the backend callback binding.
+Production registration should supply the real `#[pg_guard]` trampolines;
+ordinary unit tests should supply host-safe callbacks to the same preparation
+logic. Test the real trampolines, and any logic that genuinely needs backend
+state, with `#[pg_test]`. Do not replace production callback bodies with
+`cfg(test)` panic stubs.
 
 ## Current Module Layout
 

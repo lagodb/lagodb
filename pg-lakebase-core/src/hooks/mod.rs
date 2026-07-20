@@ -102,8 +102,12 @@ pub(crate) fn freeze_hooks_with_provider(
     // Resolve and validate the runtime before moving hooks out of the AM-local
     // building registries, so a load-order error leaves them intact.
     let runtime = RuntimeClient::connect()?;
-    let utility = utility_hook::prepare_utility_hooks();
-    let object_access = object_access_hook::prepare_object_access_hooks();
+    let utility = utility_hook::prepare_utility_hooks(
+        utility_hook::UtilityHookCallbacks::BACKEND,
+    );
+    let object_access = object_access_hook::prepare_object_access_hooks(
+        object_access_hook::ObjectAccessHookCallbacks::BACKEND,
+    );
 
     let counts = (
         u32::try_from(utility.descriptors().len()),

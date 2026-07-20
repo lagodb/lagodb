@@ -7,6 +7,11 @@ SELECT to_regclass('iceberg.automatic_maintenance_state') IS NULL
     AS has_no_scheduler_state_table;
 SELECT to_regclass('iceberg.iceberg_metadata_maintenance_due_idx') IS NOT NULL
     AS has_due_index;
+SELECT indexprs IS NULL AND indpred IS NULL
+    AS due_index_is_catalog_compatible
+FROM pg_index
+WHERE indexrelid =
+    'iceberg.iceberg_metadata_maintenance_due_idx'::regclass;
 
 -- Database settings are required because the worker runs in another backend.
 SELECT format(

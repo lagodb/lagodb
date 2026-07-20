@@ -14,8 +14,8 @@ WHERE extension_name = 'pg_iceberg_am'
 SELECT current_setting('pg_iceberg_am.auto_maintenance_enabled') AS auto_enabled,
        current_setting('pg_iceberg_am.auto_maintenance_naptime_s')
            AS auto_naptime_s;
- auto_enabled | auto_naptime_s
---------------+-----------------
+ auto_enabled | auto_naptime_s 
+--------------+----------------
  off          | 300
 (1 row)
 

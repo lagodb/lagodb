@@ -7,7 +7,8 @@ use std::ffi::{CStr, c_void};
 
 use crate::runtime_api::{
     HOOK_DESCRIPTOR_VERSION, ObjectAccessFilter, ObjectAccessHookDescriptorV1,
-    ObjectAccessStrHookDescriptorV1,
+    ObjectAccessStrHookDescriptorV1, RoutedObjectAccessHook,
+    RoutedObjectAccessStrHook,
 };
 
 #[derive(Debug)]
@@ -283,6 +284,19 @@ thread_local! {
     static STR_BUILDING_REGISTRY: RefCell<Vec<ObjectAccessStrHookEntry>> = const { RefCell::new(Vec::new()) };
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ObjectAccessHookCallbacks {
+    on_access: RoutedObjectAccessHook,
+    on_access_str: RoutedObjectAccessStrHook,
+}
+
+impl ObjectAccessHookCallbacks {
+    pub(super) const BACKEND: Self = Self {
+        on_access: route_external_object_access_hook,
+        on_access_str: route_external_object_access_str_hook,
+    };
+}
+
 pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>) {
     let hook_name = hook.name();
     if super::hooks_frozen() {
@@ -311,7 +325,9 @@ pub fn register_object_access_str_hook(
     });
 }
 
-pub(super) fn prepare_object_access_hooks() -> PreparedObjectAccessHooks {
+pub(super) fn prepare_object_access_hooks(
+    callbacks: ObjectAccessHookCallbacks,
+) -> PreparedObjectAccessHooks {
     let entries = BUILDING_REGISTRY.with_borrow_mut(std::mem::take);
     let mut contexts = Vec::with_capacity(entries.len());
     let mut descriptors = Vec::with_capacity(entries.len());
@@ -327,7 +343,7 @@ pub(super) fn prepare_object_access_hooks() -> PreparedObjectAccessHooks {
             event_mask: filter.event_mask(),
             class_id: filter.class_id(),
             context: std::ptr::from_mut(context.as_mut()).cast(),
-            on_access: Some(route_external_object_access_hook),
+            on_access: Some(callbacks.on_access),
         });
         contexts.push(context);
     }
@@ -347,7 +363,7 @@ pub(super) fn prepare_object_access_hooks() -> PreparedObjectAccessHooks {
             event_mask: filter.event_mask(),
             class_id: filter.class_id(),
             context: std::ptr::from_mut(context.as_mut()).cast(),
-            on_access: Some(route_external_object_access_str_hook),
+            on_access: Some(callbacks.on_access_str),
         });
         str_contexts.push(context);
     }
@@ -555,6 +571,31 @@ mod tests {
     use super::*;
     use crate::runtime_api::OBJECT_ACCESS_DROP;
 
+    unsafe extern "C-unwind" fn test_route_object_access_hook(
+        _context: *mut c_void,
+        _access: pg_sys::ObjectAccessType::Type,
+        _class_id: pg_sys::Oid,
+        _object_id: pg_sys::Oid,
+        _sub_id: i32,
+        _arg: *mut c_void,
+    ) {
+    }
+
+    unsafe extern "C-unwind" fn test_route_object_access_str_hook(
+        _context: *mut c_void,
+        _access: pg_sys::ObjectAccessType::Type,
+        _class_id: pg_sys::Oid,
+        _object_name: *const std::os::raw::c_char,
+        _sub_id: i32,
+        _arg: *mut c_void,
+    ) {
+    }
+
+    const TEST_CALLBACKS: ObjectAccessHookCallbacks = ObjectAccessHookCallbacks {
+        on_access: test_route_object_access_hook,
+        on_access_str: test_route_object_access_str_hook,
+    };
+
     struct TestObjectHook;
 
     impl ObjectAccessHook for TestObjectHook {
@@ -586,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_preparation_can_restore_both_building_registries() {
+    fn restoring_prepared_hooks_repopulates_both_building_registries() {
         BUILDING_REGISTRY.with_borrow_mut(|entries| {
             entries.clear();
             entries.push(Box::new(TestObjectHook));
@@ -596,9 +637,13 @@ mod tests {
             entries.push(Box::new(TestObjectStrHook));
         });
 
-        let prepared = prepare_object_access_hooks();
+        let prepared = prepare_object_access_hooks(TEST_CALLBACKS);
         assert_eq!(prepared.descriptors().len(), 1);
         assert_eq!(prepared.str_descriptors().len(), 1);
+        assert!(prepared.descriptors()[0].on_access.is_some());
+        assert!(prepared.str_descriptors()[0].on_access.is_some());
+        assert!(BUILDING_REGISTRY.with_borrow(Vec::is_empty));
+        assert!(STR_BUILDING_REGISTRY.with_borrow(Vec::is_empty));
         prepared.restore();
         assert_eq!(BUILDING_REGISTRY.with_borrow(Vec::len), 1);
         assert_eq!(STR_BUILDING_REGISTRY.with_borrow(Vec::len), 1);

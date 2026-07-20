@@ -209,13 +209,11 @@ impl PendingAction {
                     },
                 )
             }
-            PendingActionKind::Wake(worker) if committed => {
-                runtime::wake_worker(
-                    self.database_oid,
-                    worker.extension_oid,
-                    &worker.worker_name,
-                )
-            }
+            PendingActionKind::Wake(worker) if committed => runtime::wake_worker(
+                self.database_oid,
+                worker.extension_oid,
+                &worker.worker_name,
+            ),
             PendingActionKind::Wake(_) => false,
             PendingActionKind::ReconcileDatabase => {
                 runtime::request_database_reconcile(self.database_oid)

@@ -24,6 +24,14 @@ setup
   INSERT INTO automatic_worker_iso.t VALUES (4);
   INSERT INTO automatic_worker_iso.t VALUES (5);
   INSERT INTO automatic_worker_iso.t VALUES (6);
+}
+
+# Iceberg metadata is published at pre-commit, so force the completed setup
+# state due in a separate transaction. Updating the internal catalog in the
+# first setup transaction would update the same tuple again from its pre-commit
+# callback, which is not a production DML lifecycle.
+setup
+{
   UPDATE iceberg.iceberg_metadata
   SET maintenance_due_at = '-infinity'
   WHERE relid = 'automatic_worker_iso.t'::regclass;

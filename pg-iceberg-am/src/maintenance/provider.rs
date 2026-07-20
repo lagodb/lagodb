@@ -457,13 +457,11 @@ impl LakebaseTableMaintenanceProvider for IcebergTableMaintenanceProvider {
             .map_err(TableMaintenanceError::from)?
         {
             MaintenanceExecution::Executed(report) => Ok(report),
-            MaintenanceExecution::StaleCandidate => {
-                Err(TableMaintenanceError::from(
-                    IcebergError::InvariantViolated(
-                        "explicit Iceberg maintenance cannot have a stale scheduler candidate",
-                    ),
-                ))
-            }
+            MaintenanceExecution::StaleCandidate => Err(TableMaintenanceError::from(
+                IcebergError::InvariantViolated(
+                    "explicit Iceberg maintenance cannot have a stale scheduler candidate",
+                ),
+            )),
         }
     }
 
