@@ -4,7 +4,27 @@
 //! iteration rebuilds its base table and all metadata/manifest state, so no
 //! attempt-scoped cache can survive a failed catalog CAS.
 
-use super::*;
+use std::sync::Arc;
+
+use iceberg_lite::io::FileIO;
+use iceberg_lite::overlay::SnapshotDelta;
+use iceberg_lite::spec::TableMetadata;
+use iceberg_lite::table::Table;
+use iceberg_lite::transaction::{ApplyTransactionAction, Transaction};
+use pg_lakebase_core::diag;
+use pgrx::pg_sys;
+
+use crate::catalog::bridge::{IcebergTableId, StagedCatalog};
+use crate::catalog::metadata_table::{
+    CasUpdate, IcebergMetadata, MaintenanceScheduleUpdate,
+};
+use crate::error::{IcebergError, IcebergResult};
+use crate::gucs;
+use crate::storage::transactional_artifacts::MetadataAttempt;
+
+use super::TxMetadata;
+use super::action_log::{EffectiveCommitAction, TxTableCommitPlan};
+use super::table_state::TableCommitInput;
 
 struct TableCommitCoordinator<'a> {
     relid: pg_sys::Oid,
