@@ -1,5 +1,6 @@
 use std::fmt;
 
+use pg_lakebase_core::extension_worker::WorkerExit;
 use pgrx::{PGRXSharedMemory, pg_sys};
 
 pub(crate) const RUNTIME_MAGIC: u64 = 0x5047_4c41_4b45_4257;
@@ -326,6 +327,63 @@ impl WorkerSlot {
             && self.extension_oid == extension_oid
             && self.worker_name() == worker_name.as_bytes()
     }
+
+    pub(crate) fn request_wakeup(&mut self) {
+        self.wake_requested = 1;
+    }
+
+    pub(crate) fn request_wakeup_preempting_schedule(
+        &mut self,
+    ) -> Result<(), RuntimeStateTransitionError> {
+        if WorkerState::from_raw(self.state) == WorkerState::Scheduled {
+            self.transition_to(WorkerState::Dormant)?;
+            self.restart_at_ms = 0;
+        }
+        self.request_wakeup();
+        Ok(())
+    }
+
+    pub(crate) fn finish_invocation(
+        &mut self,
+        directive: WorkerExit,
+        now_ms: i64,
+    ) -> Result<(), RuntimeStateTransitionError> {
+        let current = WorkerState::from_raw(self.state);
+        self.pid = 0;
+        self.proc_number = pg_sys::INVALID_PROC_NUMBER;
+        self.startup_deadline_ms = 0;
+
+        if current == WorkerState::Stopping {
+            self.transition_to(WorkerState::Dormant)?;
+            self.restart_at_ms = 0;
+            return Ok(());
+        }
+
+        match directive {
+            WorkerExit::Dormant => {
+                self.transition_to(WorkerState::Dormant)?;
+                self.restart_at_ms = 0;
+            }
+            WorkerExit::RestartImmediately => {
+                self.transition_to(WorkerState::Dormant)?;
+                self.request_wakeup();
+                self.restart_at_ms = 0;
+            }
+            // A wake published after this invocation started is newer than the
+            // worker's own deadline decision.
+            WorkerExit::RestartAfter(_) if self.wake_requested != 0 => {
+                self.transition_to(WorkerState::Dormant)?;
+                self.restart_at_ms = 0;
+            }
+            WorkerExit::RestartAfter(delay) => {
+                self.transition_to(WorkerState::Scheduled)?;
+                self.restart_at_ms = now_ms.saturating_add(
+                    i64::try_from(delay.as_millis()).unwrap_or(i64::MAX),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -643,5 +701,93 @@ mod tests {
             ReconcilerState::from_raw(reconciler.state),
             ReconcilerState::Starting
         );
+    }
+
+    #[test]
+    fn running_wakeup_survives_dormant_worker_exit() {
+        let mut worker = WorkerSlot {
+            state: WorkerState::Running as u8,
+            wake_requested: 1,
+            pid: 123,
+            proc_number: 7,
+            ..WorkerSlot::EMPTY
+        };
+
+        worker.finish_invocation(WorkerExit::Dormant, 100).unwrap();
+
+        assert_eq!(WorkerState::from_raw(worker.state), WorkerState::Dormant);
+        assert_eq!(worker.wake_requested, 1);
+        assert_eq!(worker.restart_at_ms, 0);
+        assert_eq!(worker.pid, 0);
+        assert_eq!(worker.proc_number, pg_sys::INVALID_PROC_NUMBER);
+    }
+
+    #[test]
+    fn running_wakeup_preempts_worker_restart_deadline() {
+        let mut worker = WorkerSlot {
+            state: WorkerState::Running as u8,
+            wake_requested: 1,
+            ..WorkerSlot::EMPTY
+        };
+
+        worker
+            .finish_invocation(
+                WorkerExit::RestartAfter(std::time::Duration::from_secs(60)),
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(WorkerState::from_raw(worker.state), WorkerState::Dormant);
+        assert_eq!(worker.wake_requested, 1);
+        assert_eq!(worker.restart_at_ms, 0);
+    }
+
+    #[test]
+    fn restart_deadline_is_kept_without_a_running_wakeup() {
+        let mut worker = WorkerSlot {
+            state: WorkerState::Running as u8,
+            ..WorkerSlot::EMPTY
+        };
+
+        worker
+            .finish_invocation(
+                WorkerExit::RestartAfter(std::time::Duration::from_secs(2)),
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(WorkerState::from_raw(worker.state), WorkerState::Scheduled);
+        assert_eq!(worker.wake_requested, 0);
+        assert_eq!(worker.restart_at_ms, 2_100);
+    }
+
+    #[test]
+    fn explicit_wakeup_preempts_scheduled_deadline() {
+        let mut worker = WorkerSlot {
+            state: WorkerState::Scheduled as u8,
+            restart_at_ms: 60_000,
+            ..WorkerSlot::EMPTY
+        };
+
+        worker.request_wakeup_preempting_schedule().unwrap();
+
+        assert_eq!(WorkerState::from_raw(worker.state), WorkerState::Dormant);
+        assert_eq!(worker.wake_requested, 1);
+        assert_eq!(worker.restart_at_ms, 0);
+    }
+
+    #[test]
+    fn explicit_wakeup_preserves_crash_backoff() {
+        let mut worker = WorkerSlot {
+            state: WorkerState::Backoff as u8,
+            restart_at_ms: 60_000,
+            ..WorkerSlot::EMPTY
+        };
+
+        worker.request_wakeup_preempting_schedule().unwrap();
+
+        assert_eq!(WorkerState::from_raw(worker.state), WorkerState::Backoff);
+        assert_eq!(worker.wake_requested, 1);
+        assert_eq!(worker.restart_at_ms, 60_000);
     }
 }

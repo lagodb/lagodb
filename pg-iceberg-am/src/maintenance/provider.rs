@@ -12,7 +12,9 @@ use pgrx::pg_sys;
 
 use crate::catalog::IcebergAccessMethod;
 use crate::catalog::bridge::IcebergTableId;
-use crate::catalog::metadata_table::IcebergMetadata;
+use crate::catalog::metadata_table::{
+    IcebergMetadata, MaintenanceCandidate, MaintenanceCompletionToken,
+};
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::constants::ICEBERG_AM_NAME;
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
@@ -29,6 +31,11 @@ use super::writer::RewriteGroupWriter;
 
 pub(crate) struct IcebergTableMaintenanceProvider;
 
+pub(crate) enum MaintenanceExecution {
+    Executed(TableMaintenanceReport),
+    StaleCandidate,
+}
+
 impl IcebergTableMaintenanceProvider {
     fn checked_count(value: usize, description: &'static str) -> IcebergResult<u64> {
         u64::try_from(value).map_err(|_| IcebergError::Vacuum {
@@ -40,7 +47,8 @@ impl IcebergTableMaintenanceProvider {
 
     fn execute_iceberg(
         request: TableMaintenanceRequest<'_>,
-    ) -> IcebergResult<TableMaintenanceReport> {
+        expected_candidate: Option<&MaintenanceCandidate>,
+    ) -> IcebergResult<MaintenanceExecution> {
         if request.relation.toast_relation_oid().is_some() {
             return Err(IcebergError::Vacuum {
                 source: IcebergVacuumError::UnexpectedToastRelation {
@@ -62,6 +70,15 @@ impl IcebergTableMaintenanceProvider {
         let file_io = storage.into_file_io();
         let tracker = TxMetadata::current();
         let loaded = tracker.begin_table_modify(request.relation.oid(), &file_io)?;
+        let completion_token = MaintenanceCompletionToken {
+            metadata_location: loaded.location.clone(),
+            maintenance_due_at: loaded.maintenance_due_at,
+        };
+        if expected_candidate
+            .is_some_and(|candidate| !candidate.matches(&completion_token))
+        {
+            return Ok(MaintenanceExecution::StaleCandidate);
+        }
         let owned_table_root = ManagedTableRoot::new(
             expected_table_location,
             loaded.metadata.location(),
@@ -275,6 +292,7 @@ impl IcebergTableMaintenanceProvider {
         tracker.stage_vacuum(
             request.relation.oid(),
             PreparedVacuum {
+                completion_token,
                 owned_table_root,
                 rewrite,
                 expiration: PreparedExpiration {
@@ -287,7 +305,14 @@ impl IcebergTableMaintenanceProvider {
             },
             &file_io,
         )?;
-        Ok(report)
+        Ok(MaintenanceExecution::Executed(report))
+    }
+
+    pub(crate) fn execute_scheduled(
+        request: TableMaintenanceRequest<'_>,
+        candidate: &MaintenanceCandidate,
+    ) -> IcebergResult<MaintenanceExecution> {
+        Self::execute_iceberg(request, Some(candidate))
     }
 
     fn inspect_iceberg(
@@ -428,7 +453,18 @@ impl LakebaseTableMaintenanceProvider for IcebergTableMaintenanceProvider {
     fn execute(
         request: TableMaintenanceRequest<'_>,
     ) -> Result<TableMaintenanceReport, TableMaintenanceError> {
-        Self::execute_iceberg(request).map_err(TableMaintenanceError::from)
+        match Self::execute_iceberg(request, None)
+            .map_err(TableMaintenanceError::from)?
+        {
+            MaintenanceExecution::Executed(report) => Ok(report),
+            MaintenanceExecution::StaleCandidate => {
+                Err(TableMaintenanceError::from(
+                    IcebergError::InvariantViolated(
+                        "explicit Iceberg maintenance cannot have a stale scheduler candidate",
+                    ),
+                ))
+            }
+        }
     }
 
     fn inspect(

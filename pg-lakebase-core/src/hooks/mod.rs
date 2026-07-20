@@ -11,7 +11,7 @@ pub mod utility_hook;
 use std::cell::Cell;
 
 use crate::runtime_api::{
-    AM_REGISTRATION_VERSION, AmRegistrationV1, MaintenanceProviderV3,
+    AM_REGISTRATION_VERSION, AmRegistrationV1, MaintenanceProviderV1,
     RuntimeApiError, RuntimeClient, RuntimeRegistrationError,
 };
 
@@ -84,7 +84,7 @@ pub fn freeze_hooks() -> Result<(), HookRegistrationError> {
 }
 
 pub(crate) fn freeze_hooks_with_provider(
-    maintenance_provider: Option<&MaintenanceProviderV3>,
+    maintenance_provider: Option<&MaintenanceProviderV1>,
 ) -> Result<(), HookRegistrationError> {
     match (FREEZE_STATE.get(), maintenance_provider.is_some()) {
         (FreezeState::Building, _) => {}

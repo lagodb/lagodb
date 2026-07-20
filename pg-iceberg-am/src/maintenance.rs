@@ -1,5 +1,6 @@
 mod cleanup;
 mod commit_attempt;
+mod notification;
 mod planner;
 mod provider;
 mod reachability;
@@ -13,6 +14,7 @@ pub(crate) use cleanup::VacuumCleanup;
 pub(crate) use commit_attempt::{
     VacuumAttemptOutcome, VacuumAttemptResult, VacuumCommitAttempt,
 };
+pub(crate) use notification::AutomaticMaintenanceNotifier;
 pub(crate) use provider::IcebergTableMaintenanceProvider;
 pub(crate) use reachability::{
     IcebergReachabilityPlanner, ReachabilityDeletionCandidates,

@@ -22,7 +22,8 @@ pub(super) struct RuntimeStore;
 
 pub(super) struct RegistrationReconciliation {
     pub(super) starts: Vec<WorkerToken>,
-    pub(super) capacity_exhausted: bool,
+    pub(super) registration_capacity_exhausted: bool,
+    pub(super) worker_capacity_exhausted: bool,
 }
 
 pub(super) struct WorkerStart {
@@ -154,7 +155,7 @@ impl RuntimeStore {
         slot.proc_number = pg_sys::INVALID_PROC_NUMBER;
         slot.restart_at_ms = 0;
         slot.startup_deadline_ms = 0;
-        slot.wake_requested = 1;
+        slot.request_wakeup();
         true
     }
 
@@ -165,22 +166,37 @@ impl RuntimeStore {
         worker_name: &str,
     ) -> bool {
         let mut state = RUNTIME_STATE.exclusive();
-        let Some(index) = state.worker_slot(database_oid, extension_oid, worker_name)
+        let Some(index) =
+            state.worker_slot(database_oid, extension_oid, worker_name)
         else {
             state.rescan_all = 1;
             return true;
         };
-        if WorkerState::from_raw(state.workers[index].state) == WorkerState::Scheduled
-        {
-            if let Err(error) =
-                state.workers[index].transition_to(WorkerState::Dormant)
-            {
-                warn_transition_error(error);
-                return false;
-            }
-            state.workers[index].restart_at_ms = 0;
+        let slot = &mut state.workers[index];
+        if let Err(error) = slot.request_wakeup_preempting_schedule() {
+            warn_transition_error(error);
+            return false;
         }
-        state.workers[index].wake_requested = 1;
+        true
+    }
+
+    pub(super) fn wake_database_workers(&self, database_oid: u32) -> bool {
+        let mut state = RUNTIME_STATE.exclusive();
+        let mut found = false;
+        for slot in &mut state.workers {
+            if slot.database_oid == database_oid
+                && WorkerState::from_raw(slot.state) != WorkerState::Empty
+            {
+                if let Err(error) = slot.request_wakeup_preempting_schedule() {
+                    warn_transition_error(error);
+                    continue;
+                }
+                found = true;
+            }
+        }
+        if !found {
+            state.rescan_all = 1;
+        }
         true
     }
 
@@ -191,7 +207,7 @@ impl RuntimeStore {
             if slot.database_oid == database_oid
                 && WorkerState::from_raw(slot.state) != WorkerState::Empty
             {
-                slot.wake_requested = 1;
+                slot.request_wakeup();
                 found = true;
             }
         }
@@ -377,7 +393,7 @@ impl RuntimeStore {
                 WorkerState::Scheduled | WorkerState::Backoff
             ) && worker.restart_at_ms <= now
             {
-                worker.wake_requested = 1;
+                worker.request_wakeup();
                 if let Err(error) = worker.transition_to(WorkerState::Dormant) {
                     warn_transition_error(error);
                     continue;
@@ -609,14 +625,26 @@ impl RuntimeStore {
             })
             .collect();
         let mut starts = Vec::new();
-        let mut capacity_exhausted = false;
+        let mut registration_capacity_exhausted = false;
+        let mut worker_capacity_exhausted = false;
         {
             let mut state = RUNTIME_STATE.exclusive();
-            let mut active = state
+            let mut registrations_tracked = state
                 .workers
                 .iter()
                 .filter(|slot| {
                     WorkerState::from_raw(slot.state) != WorkerState::Empty
+                })
+                .count();
+            let mut active_workers = state
+                .workers
+                .iter()
+                .filter(|slot| {
+                    matches!(
+                        WorkerState::from_raw(slot.state),
+                        WorkerState::Starting | WorkerState::Running
+                    ) || (WorkerState::from_raw(slot.state) == WorkerState::Stopping
+                        && slot.pid > 0)
                 })
                 .count();
             let start = if registrations.is_empty() {
@@ -633,8 +661,10 @@ impl RuntimeStore {
                     extension_oid,
                     &registration.worker_name,
                 );
-                if existing.is_none() && active >= gucs::max_registrations() {
-                    capacity_exhausted = true;
+                if existing.is_none()
+                    && registrations_tracked >= gucs::max_registrations()
+                {
+                    registration_capacity_exhausted = true;
                     continue;
                 }
                 let Some(index) = state.ensure_worker_slot(
@@ -642,12 +672,12 @@ impl RuntimeStore {
                     extension_oid,
                     &registration.worker_name,
                 ) else {
-                    capacity_exhausted = true;
+                    registration_capacity_exhausted = true;
                     continue;
                 };
                 if existing.is_none() {
-                    active += 1;
-                    state.workers[index].wake_requested = 1;
+                    registrations_tracked += 1;
+                    state.workers[index].request_wakeup();
                 }
                 let slot = &mut state.workers[index];
                 if WorkerState::from_raw(slot.state) == WorkerState::Stopping
@@ -663,6 +693,10 @@ impl RuntimeStore {
                 if should_start
                     && WorkerState::from_raw(slot.state) == WorkerState::Dormant
                 {
+                    if active_workers >= gucs::max_active_workers() {
+                        worker_capacity_exhausted = true;
+                        continue;
+                    }
                     if let Err(error) = slot.transition_to(WorkerState::Starting) {
                         warn_transition_error(error);
                         continue;
@@ -671,6 +705,7 @@ impl RuntimeStore {
                     slot.generation = slot.generation.wrapping_add(1).max(1);
                     slot.startup_deadline_ms = startup_deadline_ms;
                     starts.push(WorkerToken::new(index, slot.generation));
+                    active_workers += 1;
                 }
             }
             if !registrations.is_empty() {
@@ -694,7 +729,8 @@ impl RuntimeStore {
         }
         RegistrationReconciliation {
             starts,
-            capacity_exhausted,
+            registration_capacity_exhausted,
+            worker_capacity_exhausted,
         }
     }
 
@@ -791,6 +827,7 @@ impl RuntimeStore {
         let extension_oid;
         let worker_name;
         let previous;
+        let now_ms = timestamp_ms();
         {
             let Some(slot) = state.workers.get_mut(token.index()) else {
                 return;
@@ -798,21 +835,16 @@ impl RuntimeStore {
             if slot.generation != token.generation() {
                 return;
             }
-            slot.pid = 0;
-            slot.proc_number = pg_sys::INVALID_PROC_NUMBER;
-            slot.startup_deadline_ms = 0;
             database_oid = slot.database_oid;
             extension_oid = slot.extension_oid;
             worker_name = slot.worker_name_str().to_owned();
             previous = WorkerState::from_raw(slot.state);
-        }
-        if previous == WorkerState::Stopping {
-            let slot = &mut state.workers[token.index()];
-            if let Err(error) = slot.transition_to(WorkerState::Dormant) {
+            if let Err(error) = slot.finish_invocation(directive, now_ms) {
                 warn_transition_error(error);
                 return;
             }
-            slot.restart_at_ms = 0;
+        }
+        if previous == WorkerState::Stopping {
             drop(state);
             crate::diag::info(format_args!(
                 "finished stopping Lakebase extension worker: database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}, generation={}, ignored_directive={directive:?}",
@@ -820,34 +852,6 @@ impl RuntimeStore {
             ));
             self.signal_launcher();
             return;
-        }
-        match directive {
-            WorkerExit::Dormant => {
-                let slot = &mut state.workers[token.index()];
-                if let Err(error) = slot.transition_to(WorkerState::Dormant) {
-                    warn_transition_error(error);
-                    return;
-                }
-                slot.restart_at_ms = 0;
-            }
-            WorkerExit::RestartImmediately => {
-                let slot = &mut state.workers[token.index()];
-                if let Err(error) = slot.transition_to(WorkerState::Dormant) {
-                    warn_transition_error(error);
-                    return;
-                }
-                slot.wake_requested = 1;
-            }
-            WorkerExit::RestartAfter(delay) => {
-                let slot = &mut state.workers[token.index()];
-                if let Err(error) = slot.transition_to(WorkerState::Scheduled) {
-                    warn_transition_error(error);
-                    return;
-                }
-                slot.restart_at_ms = timestamp_ms().saturating_add(
-                    i64::try_from(delay.as_millis()).unwrap_or(i64::MAX),
-                );
-            }
         }
         drop(state);
         crate::diag::info(format_args!(

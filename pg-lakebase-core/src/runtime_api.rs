@@ -31,13 +31,18 @@ use crate::table_maintenance::{
     TableMaintenanceOptions, TableMaintenanceReport, TableMaintenanceStats,
 };
 
-pub const RUNTIME_API_VERSION: u32 = 3;
-pub const RUNTIME_API_RENDEZVOUS: &CStr = c"pg_lakebase.runtime_api.v3";
-// Provider version 3 adds capability flags so the router can reject
+pub const RUNTIME_API_VERSION: u32 = 1;
+pub const RUNTIME_API_RENDEZVOUS: &CStr = c"pg_lakebase.runtime_api.v1";
+// The initial provider ABI includes capability flags so the router can reject
 // unsupported compound operations before any provider performs irreversible
 // work.
-pub const MAINTENANCE_PROVIDER_VERSION: u32 = 3;
+pub const MAINTENANCE_PROVIDER_VERSION: u32 = 1;
 pub const FORMAT_NAME_CAPACITY: usize = 32;
+
+pub const STAGE_WORKER_WAKEUP_OK: u32 = 0;
+pub const STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND: u32 = 1;
+pub const STAGE_WORKER_WAKEUP_INVALID_REQUEST: u32 = 2;
+pub const STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED: u32 = 3;
 
 pub const PROVIDER_CAPABILITY_ANALYZE: u32 = 1 << 0;
 pub const PROVIDER_CAPABILITIES_KNOWN: u32 = PROVIDER_CAPABILITY_ANALYZE;
@@ -163,7 +168,7 @@ pub struct AmRegistrationV1 {
     pub abi_version: u32,
     pub struct_size: u32,
     /// Optional maintenance provider staged by the same AM. Null means none.
-    pub maintenance_provider: *const MaintenanceProviderV3,
+    pub maintenance_provider: *const MaintenanceProviderV1,
     pub utility_hooks: *const UtilityHookDescriptorV1,
     pub utility_hook_count: u32,
     pub object_access_hooks: *const ObjectAccessHookDescriptorV1,
@@ -415,6 +420,10 @@ pub type InspectCallback = unsafe extern "C-unwind" fn(
     relation: pg_sys::Relation,
     stats: *mut MaintenanceStatsV1,
 );
+pub type StageWorkerWakeupCallback = unsafe extern "C-unwind" fn(
+    extension_name: *const c_char,
+    worker_name: *const c_char,
+) -> u32;
 
 /// Versioned maintenance-provider descriptor published by an AM DSO.
 ///
@@ -423,7 +432,7 @@ pub type InspectCallback = unsafe extern "C-unwind" fn(
 /// contract and remain live for the PostgreSQL backend lifetime.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct MaintenanceProviderV3 {
+pub struct MaintenanceProviderV1 {
     pub abi_version: u32,
     pub struct_size: u32,
     pub name: *const c_char,
@@ -445,16 +454,17 @@ pub struct MaintenanceProviderV3 {
 /// minimum size under the module-level internal ABI contract.
 #[repr(C)]
 #[derive(Debug)]
-pub struct RuntimeApiV3 {
+pub struct RuntimeApiV1 {
     pub abi_version: u32,
     pub struct_size: u32,
     pub register_am: unsafe extern "C-unwind" fn(*const AmRegistrationV1) -> u32,
     pub has_providers: unsafe extern "C-unwind" fn() -> u8,
     pub provider_for_am:
-        unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const MaintenanceProviderV3,
+        unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const MaintenanceProviderV1,
     pub customscan_mode: unsafe extern "C-unwind" fn() -> u32,
     pub maintenance_config:
         unsafe extern "C-unwind" fn(*mut RuntimeMaintenanceConfigV1),
+    pub stage_worker_wakeup: StageWorkerWakeupCallback,
 }
 
 unsafe extern "C" {
@@ -472,7 +482,7 @@ pub unsafe fn rendezvous_slot() -> *mut *mut c_void {
     unsafe { find_rendezvous_variable(RUNTIME_API_RENDEZVOUS.as_ptr()) }
 }
 
-static RUNTIME_API_CACHE: OnceLock<&'static RuntimeApiV3> = OnceLock::new();
+static RUNTIME_API_CACHE: OnceLock<&'static RuntimeApiV1> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeApiError {
@@ -506,9 +516,21 @@ pub enum RuntimeRegistrationError {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum WorkerWakeupError {
+    #[error("pg_lakebase runtime is not loaded through shared_preload_libraries")]
+    RuntimeNotPreloaded,
+    #[error("worker-owning extension is not installed in the current database")]
+    ExtensionNotInstalled,
+    #[error("invalid Lakebase worker wakeup request")]
+    InvalidRequest,
+    #[error("Lakebase runtime returned unknown worker wakeup status {0}")]
+    UnknownStatus(u32),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeClient {
-    api: &'static RuntimeApiV3,
+    api: &'static RuntimeApiV1,
 }
 
 impl RuntimeClient {
@@ -528,7 +550,7 @@ impl RuntimeClient {
         let Some(header) = (unsafe { published.cast::<AbiHeader>().as_ref() }) else {
             return Err(RuntimeApiError::Unavailable);
         };
-        let expected_size = u32::try_from(std::mem::size_of::<RuntimeApiV3>())
+        let expected_size = u32::try_from(std::mem::size_of::<RuntimeApiV1>())
             .expect("runtime API size exceeds u32");
         if header.abi_version != RUNTIME_API_VERSION
             || header.struct_size < expected_size
@@ -540,7 +562,7 @@ impl RuntimeClient {
                 expected_size,
             });
         }
-        let api = unsafe { &*published.cast::<RuntimeApiV3>() };
+        let api = unsafe { &*published.cast::<RuntimeApiV1>() };
         let _ = RUNTIME_API_CACHE.set(api);
         Ok(Self { api })
     }
@@ -584,7 +606,7 @@ impl RuntimeClient {
     pub fn provider_for_am(
         self,
         access_method_oid: pg_sys::Oid,
-    ) -> Option<&'static MaintenanceProviderV3> {
+    ) -> Option<&'static MaintenanceProviderV1> {
         let provider = unsafe { (self.api.provider_for_am)(access_method_oid) };
         unsafe { provider.as_ref() }
     }
@@ -600,6 +622,32 @@ impl RuntimeClient {
             config.assume_init()
         }
     }
+
+    pub fn stage_worker_wakeup(
+        self,
+        extension_name: &CStr,
+        worker_name: &CStr,
+    ) -> Result<(), WorkerWakeupError> {
+        let status = unsafe {
+            (self.api.stage_worker_wakeup)(
+                extension_name.as_ptr(),
+                worker_name.as_ptr(),
+            )
+        };
+        match status {
+            STAGE_WORKER_WAKEUP_OK => Ok(()),
+            STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND => {
+                Err(WorkerWakeupError::ExtensionNotInstalled)
+            }
+            STAGE_WORKER_WAKEUP_INVALID_REQUEST => {
+                Err(WorkerWakeupError::InvalidRequest)
+            }
+            STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED => {
+                Err(WorkerWakeupError::RuntimeNotPreloaded)
+            }
+            status => Err(WorkerWakeupError::UnknownStatus(status)),
+        }
+    }
 }
 
 /// Borrow the provider name carried by a validated descriptor.
@@ -607,7 +655,7 @@ impl RuntimeClient {
 /// # Safety
 ///
 /// A non-null `provider.name` must point to a live NUL-terminated C string.
-pub unsafe fn provider_name(provider: &MaintenanceProviderV3) -> Option<&CStr> {
+pub unsafe fn provider_name(provider: &MaintenanceProviderV1) -> Option<&CStr> {
     (!provider.name.is_null()).then(|| unsafe { CStr::from_ptr(provider.name) })
 }
 
@@ -618,7 +666,7 @@ pub unsafe fn provider_name(provider: &MaintenanceProviderV3) -> Option<&CStr> {
 /// A non-null `provider.access_method_name` must point to a live
 /// NUL-terminated C string.
 pub unsafe fn provider_access_method_name(
-    provider: &MaintenanceProviderV3,
+    provider: &MaintenanceProviderV1,
 ) -> Option<&CStr> {
     (!provider.access_method_name.is_null())
         .then(|| unsafe { CStr::from_ptr(provider.access_method_name) })

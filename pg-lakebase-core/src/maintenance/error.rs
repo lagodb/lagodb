@@ -46,6 +46,11 @@ pub enum MaintenanceError {
     #[error("invalid maintenance queue record: {0}")]
     InvalidRecord(String),
 
+    #[error("failed to notify maintenance worker: {0}")]
+    WorkerNotification(
+        #[source] crate::extension_worker::WorkerNotificationError,
+    ),
+
     #[error("maintenance item changed concurrently: {0}")]
     ConcurrentUpdate(super::item::MaintenanceItemId),
 
@@ -82,7 +87,9 @@ impl SqlStateError for MaintenanceError {
                 PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
             }
             Self::QueueUnavailable => PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
-            Self::InvalidRecord(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            Self::InvalidRecord(_) | Self::WorkerNotification(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
         }
     }
 }

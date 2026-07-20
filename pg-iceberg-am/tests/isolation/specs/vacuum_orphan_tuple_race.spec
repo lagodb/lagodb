@@ -37,7 +37,7 @@ session s1
 step s1_begin { BEGIN; }
 step s1_touch_metadata {
   UPDATE iceberg.iceberg_metadata
-  SET previous_metadata_location = previous_metadata_location
+  SET maintenance_due_at = 'infinity'
   WHERE relid = 'vacuum_orphan_iso.t'::regclass;
 }
 step s1_commit { COMMIT; }
@@ -51,7 +51,11 @@ step s2_verify {
            pg_relation_filepath('vacuum_orphan_iso.t') ||
            '_iceberg/data/orphan.parquet',
            true
-         ) IS NULL AS orphan_deleted;
+         ) IS NULL AS orphan_deleted,
+         (SELECT maintenance_due_at = 'infinity'
+          FROM iceberg.iceberg_metadata
+          WHERE relid = 'vacuum_orphan_iso.t'::regclass)
+           AS concurrent_due_preserved;
 }
 
 permutation

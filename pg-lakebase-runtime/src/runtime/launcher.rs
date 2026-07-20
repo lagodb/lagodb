@@ -143,7 +143,7 @@ impl Launcher {
             .unwrap_or_else(Instant::now);
         let mut database_scheduler = DatabaseScheduler::new();
 
-        while BackgroundWorker::worker_continue() {
+        loop {
             if BackgroundWorker::sighup_received() {
                 unsafe { pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP) };
             }

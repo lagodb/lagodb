@@ -37,7 +37,9 @@ use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
 use crate::catalog::bridge::{IcebergTableId, StagedCatalog};
-use crate::catalog::metadata_table::{CasUpdate, IcebergMetadata};
+use crate::catalog::metadata_table::{
+    CasUpdate, IcebergMetadata, MaintenanceScheduleUpdate,
+};
 use crate::catalog::row_mutations::RelationRowRegistry;
 use crate::catalog::table_properties::PreparedTablePropertyUpdate;
 use crate::error::{IcebergError, IcebergResult};
@@ -695,6 +697,7 @@ impl TableState {
 #[derive(Debug)]
 pub struct LoadedTableMetadata {
     pub location: String,
+    pub maintenance_due_at: Option<pg_sys::TimestampTz>,
     pub metadata: TableMetadata,
     pub delta: Option<Arc<SnapshotDelta>>,
 }
@@ -1050,7 +1053,7 @@ impl TxMetadata {
     }
 
     /// Stage one aggregate VACUUM action. It is intentionally exclusive with
-    /// DML, schema evolution, TRUNCATE, and DROP for this relation.
+    /// Data writes, schema evolution, TRUNCATE, and DROP for this relation.
     pub(crate) fn stage_vacuum(
         &self,
         relid: pg_sys::Oid,
@@ -1145,7 +1148,8 @@ impl TxMetadata {
             }
         };
 
-        let location = IcebergMetadata::get(relid)?
+        let catalog_metadata = IcebergMetadata::get(relid)?;
+        let location = catalog_metadata
             .metadata_location
             .ok_or(IcebergError::MetadataLocationNull)?;
         let mut metadata = TableMetadata::read_from(file_io, &location)?;
@@ -1157,6 +1161,7 @@ impl TxMetadata {
         };
         Ok(LoadedTableMetadata {
             location,
+            maintenance_due_at: catalog_metadata.maintenance_due_at,
             metadata,
             delta,
         })
@@ -1288,7 +1293,9 @@ impl TransactionResource for TxMetadata {
     fn set_nest_level(&self, _level: i32) {}
 
     fn on_pre_commit(&self) -> TransactionResult<()> {
-        self.commit_all()?;
+        if self.commit_all()? {
+            crate::maintenance::AutomaticMaintenanceNotifier::stage_wakeup()?;
+        }
         Ok(())
     }
 

@@ -8,11 +8,8 @@ FROM lakebase.workers
 WHERE extension_name = 'pg_iceberg_am'
   AND worker_name = 'iceberg_automatic_maintenance';
 SELECT current_setting('pg_iceberg_am.auto_maintenance_enabled') AS auto_enabled,
-       current_setting('pg_iceberg_am.auto_maintenance_interval_s') AS auto_interval_s,
-       current_setting('pg_iceberg_am.auto_maintenance_max_tables') AS auto_max_tables,
-       current_setting('pg_iceberg_am.auto_maintenance_jitter_percent') AS auto_jitter,
-       current_setting('pg_iceberg_am.auto_maintenance_failure_backoff_max_s')
-           AS auto_backoff_max_s;
+       current_setting('pg_iceberg_am.auto_maintenance_naptime_s')
+           AS auto_naptime_s;
 
 CREATE TABLE vacuum_correctness_test.t (
     id integer,

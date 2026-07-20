@@ -374,15 +374,13 @@ fn notify_worker() -> Result<(), MaintenanceError> {
     const NOTIFIER: crate::extension_worker::WorkerNotifier =
         crate::extension_worker::WorkerNotifier::new(
             crate::extension_worker::WorkerIdentity::new(
-                "pg_lakebase_runtime",
-                "maintenance",
+                c"pg_lakebase_runtime",
+                c"maintenance",
             ),
         );
-    NOTIFIER.notify_after_commit().map_err(|error| {
-        MaintenanceError::InvalidRecord(format!(
-            "failed to notify maintenance worker: {error}"
-        ))
-    })
+    NOTIFIER
+        .stage_wakeup()
+        .map_err(MaintenanceError::WorkerNotification)
 }
 
 struct MaintenanceQueueCatalog {

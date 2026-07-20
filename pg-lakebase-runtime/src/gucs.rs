@@ -11,6 +11,7 @@ use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
 use crate::state::{MAX_RECONCILERS, MAX_WORKERS};
 
 static MAX_REGISTRATIONS: GucSetting<i32> = GucSetting::<i32>::new(256);
+static MAX_ACTIVE_WORKERS: GucSetting<i32> = GucSetting::<i32>::new(8);
 static LAUNCHER_NAPTIME_MS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
 static RECONCILE_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
 static STOP_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
@@ -86,6 +87,16 @@ pub(crate) fn init() {
         &MAX_DATABASE_RECONCILERS,
         1,
         MAX_RECONCILERS as i32,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.max_active_workers",
+        c"Maximum concurrent database-local Lakebase workers",
+        c"Bounds dynamic background-worker usage across all databases.",
+        &MAX_ACTIVE_WORKERS,
+        1,
+        MAX_WORKERS as i32,
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -264,6 +275,10 @@ fn define_ms(
 
 pub(crate) fn max_registrations() -> usize {
     MAX_REGISTRATIONS.get() as usize
+}
+
+pub(crate) fn max_active_workers() -> usize {
+    MAX_ACTIVE_WORKERS.get() as usize
 }
 
 pub(crate) fn launcher_naptime() -> Duration {

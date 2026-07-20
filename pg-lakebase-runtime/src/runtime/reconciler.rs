@@ -77,12 +77,18 @@ impl DatabaseReconciler {
                 store.worker_start_failed(token);
             }
         }
-        if reconciliation.capacity_exhausted {
+        if reconciliation.registration_capacity_exhausted {
             store.warn_capacity_exhausted(
                 "pg_lakebase.max_worker_registrations is exhausted; worker reconciliation remains pending",
             );
         }
-        reconciliation.capacity_exhausted
+        if reconciliation.worker_capacity_exhausted {
+            store.warn_capacity_exhausted(
+                "pg_lakebase.max_active_workers is exhausted; worker reconciliation remains pending",
+            );
+        }
+        reconciliation.registration_capacity_exhausted
+            || reconciliation.worker_capacity_exhausted
     }
 }
 

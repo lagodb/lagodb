@@ -1,50 +1,61 @@
--- Exercise the real runtime-managed worker across failure and restart.
+-- Exercise the due-index-driven runtime worker.
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
 CREATE SCHEMA automatic_maintenance_test;
-CREATE TABLE automatic_maintenance_test.eligible (id integer) USING iceberg;
-INSERT INTO automatic_maintenance_test.eligible VALUES (1);
-INSERT INTO automatic_maintenance_test.eligible VALUES (2);
-INSERT INTO automatic_maintenance_test.eligible VALUES (3);
-INSERT INTO automatic_maintenance_test.eligible VALUES (4);
-INSERT INTO automatic_maintenance_test.eligible VALUES (5);
-INSERT INTO automatic_maintenance_test.eligible VALUES (6);
-CREATE TABLE automatic_maintenance_test.not_eligible (id integer) USING iceberg;
-INSERT INTO automatic_maintenance_test.not_eligible VALUES (1);
+SELECT to_regclass('iceberg.automatic_maintenance_state') IS NULL
+    AS has_no_scheduler_state_table;
+ has_no_scheduler_state_table
+------------------------------
+ t
+(1 row)
+
+SELECT to_regclass('iceberg.iceberg_metadata_maintenance_due_idx') IS NOT NULL
+    AS has_due_index;
+ has_due_index
+---------------
+ t
+(1 row)
+
 -- Database settings are required because the worker runs in another backend.
+SELECT format(
+    'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_enabled = off',
+    current_database()
+)
+\gexec
+ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_enabled = off
+SELECT format(
+    'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_naptime_s = 10',
+    current_database()
+)
+\gexec
+ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_naptime_s = 10
+SET pg_iceberg_am.auto_maintenance_enabled = off;
+SET pg_iceberg_am.auto_maintenance_naptime_s = 10;
 SELECT format(
     'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_enabled = on',
     current_database()
 )
 \gexec
 ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_enabled = on
-SELECT format(
-    'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_interval_s = 10',
-    current_database()
-)
-\gexec
-ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_interval_s = 10
-SELECT format(
-    'ALTER DATABASE %I SET pg_iceberg_am.auto_maintenance_jitter_percent = 0',
-    current_database()
-)
-\gexec
-ALTER DATABASE pg_iceberg_am_regress SET pg_iceberg_am.auto_maintenance_jitter_percent = 0
-CREATE TEMP TABLE eligible_metadata_before_failure AS
-SELECT metadata_location
+CREATE TABLE automatic_maintenance_test.eligible (id integer) USING iceberg;
+INSERT INTO automatic_maintenance_test.eligible VALUES (1);
+CREATE TEMP TABLE first_due AS
+SELECT maintenance_due_at
 FROM iceberg.iceberg_metadata
 WHERE relid = 'automatic_maintenance_test.eligible'::regclass;
-UPDATE iceberg.iceberg_metadata
-SET metadata_location = regexp_replace(
-    metadata_location, '[^/]+$', 'missing-metadata.json'
-)
-WHERE relid = 'automatic_maintenance_test.eligible'::regclass;
-SELECT lakebase.request_worker_wakeup(
-    'pg_iceberg_am', 'iceberg_automatic_maintenance'
-);
- request_worker_wakeup 
------------------------
- 
+INSERT INTO automatic_maintenance_test.eligible VALUES (2);
+INSERT INTO automatic_maintenance_test.eligible VALUES (3);
+INSERT INTO automatic_maintenance_test.eligible VALUES (4);
+INSERT INTO automatic_maintenance_test.eligible VALUES (5);
+INSERT INTO automatic_maintenance_test.eligible VALUES (6);
+SELECT metadata.maintenance_due_at = first_due.maintenance_due_at
+    AS repeated_writes_kept_earliest_deadline
+FROM iceberg.iceberg_metadata AS metadata
+CROSS JOIN first_due
+WHERE metadata.relid = 'automatic_maintenance_test.eligible'::regclass;
+ repeated_writes_kept_earliest_deadline
+----------------------------------------
+ t
 (1 row)
 
 DO $$
@@ -53,111 +64,101 @@ DECLARE
 BEGIN
     LOOP
         EXIT WHEN (
-            SELECT count(*) = 2
-            FROM iceberg.automatic_maintenance_state
-            WHERE relid IN (
-                'automatic_maintenance_test.eligible'::regclass::oid,
-                'automatic_maintenance_test.not_eligible'::regclass::oid
+            SELECT current_data_objects < 6
+            FROM lakebase.table_maintenance_stats(
+                'automatic_maintenance_test.eligible'
             )
         );
         IF clock_timestamp() >= deadline THEN
-            RAISE EXCEPTION 'automatic maintenance first round timed out';
+            RAISE EXCEPTION 'automatic maintenance initial compaction timed out';
         END IF;
         PERFORM pg_sleep(0.1);
     END LOOP;
 END
 $$;
-SELECT bool_or(last_outcome = 'failed') AS isolated_failure_recorded,
-       bool_or(last_outcome = 'not-eligible') AS other_relation_completed
-FROM iceberg.automatic_maintenance_state
-WHERE relid IN (
-    'automatic_maintenance_test.eligible'::regclass::oid,
-    'automatic_maintenance_test.not_eligible'::regclass::oid
+SELECT current_data_objects < 6 AS worker_compacted_eligible_table
+FROM lakebase.table_maintenance_stats(
+    'automatic_maintenance_test.eligible'
 );
- isolated_failure_recorded | other_relation_completed 
----------------------------+--------------------------
- t                         | t
-(1 row)
-
-UPDATE iceberg.iceberg_metadata AS metadata
-SET metadata_location = saved.metadata_location
-FROM eligible_metadata_before_failure AS saved
-WHERE metadata.relid = 'automatic_maintenance_test.eligible'::regclass;
-SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6]
-    AS rows_preserved_after_failed_rewrite
-FROM automatic_maintenance_test.eligible;
- rows_preserved_after_failed_rewrite 
--------------------------------------
+ worker_compacted_eligible_table
+---------------------------------
  t
 (1 row)
 
--- Remove the fault and make the failed relation immediately eligible. The
--- runtime launches a new worker process, which must reuse persistent state.
-UPDATE iceberg.automatic_maintenance_state
-SET next_attempt_at = '-infinity'
-WHERE relid = 'automatic_maintenance_test.eligible'::regclass::oid;
-SELECT lakebase.request_worker_wakeup(
-    'pg_iceberg_am', 'iceberg_automatic_maintenance'
-);
- request_worker_wakeup 
------------------------
- 
+SELECT maintenance_due_at IS NULL AS successful_attempt_cleared_due
+FROM iceberg.iceberg_metadata
+WHERE relid = 'automatic_maintenance_test.eligible'::regclass;
+ successful_attempt_cleared_due
+--------------------------------
+ t
 (1 row)
 
+SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6]
+    AS rows_preserved_after_first_attempt
+FROM automatic_maintenance_test.eligible;
+ rows_preserved_after_first_attempt
+------------------------------------
+ t
+(1 row)
+
+-- A registry row with no due timestamp must not be visited by a relation wake.
+CREATE TABLE automatic_maintenance_test.cold (id integer) USING iceberg;
+INSERT INTO automatic_maintenance_test.cold VALUES (1);
+INSERT INTO automatic_maintenance_test.cold VALUES (2);
+INSERT INTO automatic_maintenance_test.cold VALUES (3);
+INSERT INTO automatic_maintenance_test.cold VALUES (4);
+INSERT INTO automatic_maintenance_test.cold VALUES (5);
+INSERT INTO automatic_maintenance_test.cold VALUES (6);
+UPDATE iceberg.iceberg_metadata
+SET maintenance_due_at = NULL
+WHERE relid = 'automatic_maintenance_test.cold'::regclass;
+INSERT INTO automatic_maintenance_test.eligible VALUES (7);
+INSERT INTO automatic_maintenance_test.eligible VALUES (8);
+INSERT INTO automatic_maintenance_test.eligible VALUES (9);
+INSERT INTO automatic_maintenance_test.eligible VALUES (10);
+INSERT INTO automatic_maintenance_test.eligible VALUES (11);
+INSERT INTO automatic_maintenance_test.eligible VALUES (12);
 DO $$
 DECLARE
     deadline timestamptz := clock_timestamp() + interval '30 seconds';
 BEGIN
     LOOP
-        EXIT WHEN EXISTS (
-            SELECT 1
-            FROM iceberg.automatic_maintenance_state
-            WHERE relid = 'automatic_maintenance_test.eligible'::regclass::oid
-              AND last_outcome = 'maintained'
-              AND consecutive_failures = 0
+        EXIT WHEN (
+            SELECT current_data_objects < 7
+            FROM lakebase.table_maintenance_stats(
+                'automatic_maintenance_test.eligible'
+            )
         );
         IF clock_timestamp() >= deadline THEN
-            RAISE EXCEPTION 'automatic maintenance retry timed out';
+            RAISE EXCEPTION 'automatic maintenance write scheduling timed out';
         END IF;
         PERFORM pg_sleep(0.1);
     END LOOP;
 END
 $$;
-SELECT current_data_objects = 1 AS worker_compacted_eligible_table
+SELECT current_data_objects < 7 AS writes_scheduled_compaction
 FROM lakebase.table_maintenance_stats(
     'automatic_maintenance_test.eligible'
 );
- worker_compacted_eligible_table 
----------------------------------
+ writes_scheduled_compaction
+-----------------------------
  t
 (1 row)
 
-SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6]
-    AS rows_preserved_after_retry
+SELECT current_data_objects = 6 AS worker_did_not_scan_clean_registry_rows
+FROM lakebase.table_maintenance_stats(
+    'automatic_maintenance_test.cold'
+);
+ worker_did_not_scan_clean_registry_rows
+-----------------------------------------
+ t
+(1 row)
+
+SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    AS rows_preserved_after_second_attempt
 FROM automatic_maintenance_test.eligible;
- rows_preserved_after_retry 
-----------------------------
- t
-(1 row)
-
-SELECT last_outcome, consecutive_failures
-FROM iceberg.automatic_maintenance_state
-WHERE relid = 'automatic_maintenance_test.eligible'::regclass::oid;
- last_outcome | consecutive_failures 
---------------+----------------------
- maintained   |                    0
-(1 row)
-
-CREATE TEMP TABLE dropped_maintenance_relid AS
-SELECT 'automatic_maintenance_test.eligible'::regclass::oid AS relid;
-DROP TABLE automatic_maintenance_test.eligible;
-SELECT NOT EXISTS (
-    SELECT 1
-    FROM iceberg.automatic_maintenance_state AS state
-    JOIN dropped_maintenance_relid USING (relid)
-) AS drop_removed_maintenance_state;
- drop_removed_maintenance_state 
---------------------------------
+ rows_preserved_after_second_attempt
+-------------------------------------
  t
 (1 row)
 
@@ -168,24 +169,12 @@ SELECT format(
 \gexec
 ALTER DATABASE pg_iceberg_am_regress RESET pg_iceberg_am.auto_maintenance_enabled
 SELECT format(
-    'ALTER DATABASE %I RESET pg_iceberg_am.auto_maintenance_interval_s',
+    'ALTER DATABASE %I RESET pg_iceberg_am.auto_maintenance_naptime_s',
     current_database()
 )
 \gexec
-ALTER DATABASE pg_iceberg_am_regress RESET pg_iceberg_am.auto_maintenance_interval_s
-SELECT format(
-    'ALTER DATABASE %I RESET pg_iceberg_am.auto_maintenance_jitter_percent',
-    current_database()
-)
-\gexec
-ALTER DATABASE pg_iceberg_am_regress RESET pg_iceberg_am.auto_maintenance_jitter_percent
-SELECT lakebase.request_worker_wakeup(
-    'pg_iceberg_am', 'iceberg_automatic_maintenance'
-);
- request_worker_wakeup 
------------------------
- 
-(1 row)
-
+ALTER DATABASE pg_iceberg_am_regress RESET pg_iceberg_am.auto_maintenance_naptime_s
+RESET pg_iceberg_am.auto_maintenance_enabled;
+RESET pg_iceberg_am.auto_maintenance_naptime_s;
 DROP SCHEMA automatic_maintenance_test CASCADE;
 DROP EXTENSION pg_iceberg_am CASCADE;

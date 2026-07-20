@@ -1,7 +1,7 @@
 use pgrx::datum::Internal;
 
 const WORKER_CONTEXT_MAGIC: u64 = 0x5047_4c42_5743_5458;
-const WORKER_CONTEXT_ABI_VERSION: u32 = 2;
+const WORKER_CONTEXT_ABI_VERSION: u32 = 1;
 const MAX_WORKER_NAME_BYTES: usize = 255;
 
 /// Borrowed invocation context passed to a registered Lakebase worker.

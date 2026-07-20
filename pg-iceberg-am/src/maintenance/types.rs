@@ -7,6 +7,7 @@ use pg_lakebase_core::table_maintenance::{
 };
 use std::ffi::CStr;
 
+use crate::catalog::metadata_table::MaintenanceCompletionToken;
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
 
 #[derive(Clone, Debug)]
@@ -155,6 +156,7 @@ pub(crate) struct PreparedOrphanPolicy {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedVacuum {
+    pub(crate) completion_token: MaintenanceCompletionToken,
     pub(crate) owned_table_root: ManagedTableRoot,
     pub(crate) rewrite: Option<PreparedRewrite>,
     pub(crate) expiration: PreparedExpiration,

@@ -7,7 +7,7 @@ use pg_lakebase_core::hooks::{
 };
 use pg_lakebase_core::runtime_api::{
     AM_REGISTRATION_VERSION, AmRegistrationV1, MAINTENANCE_PROVIDER_VERSION,
-    MaintenanceProviderV3, MaintenanceReportV1, MaintenanceRequestV1,
+    MaintenanceProviderV1, MaintenanceReportV1, MaintenanceRequestV1,
     MaintenanceStatsV1, RuntimeClient, RuntimeRegistrationError,
 };
 use pgrx::prelude::*;
@@ -86,9 +86,9 @@ mod delta {
     fn duplicate_iceberg_registration_rejected() -> bool {
         let runtime =
             RuntimeClient::connect().expect("runtime API must be published");
-        let descriptor = MaintenanceProviderV3 {
+        let descriptor = MaintenanceProviderV1 {
             abi_version: MAINTENANCE_PROVIDER_VERSION,
-            struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV3>())
+            struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV1>())
                 .expect("maintenance provider descriptor size exceeds u32"),
             name: c"delta-duplicate".as_ptr(),
             access_method_name: c"iceberg".as_ptr(),

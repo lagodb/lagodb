@@ -1,15 +1,17 @@
 //! Publisher of the unified runtime API and owner of the provider directory.
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 
 use pg_lakebase_core::runtime_api::{
     AM_REGISTRATION_VERSION, AbiHeader, AmRegistrationV1,
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3, PROVIDER_CAPABILITIES_KNOWN,
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV1, PROVIDER_CAPABILITIES_KNOWN,
     REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
-    REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RUNTIME_API_VERSION, RuntimeApiV3,
-    RuntimeMaintenanceConfigV1, provider_access_method_name, provider_name,
-    rendezvous_slot,
+    REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RUNTIME_API_VERSION, RuntimeApiV1,
+    RuntimeMaintenanceConfigV1, STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND,
+    STAGE_WORKER_WAKEUP_INVALID_REQUEST, STAGE_WORKER_WAKEUP_OK,
+    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED,
+    provider_access_method_name, provider_name, rendezvous_slot,
 };
 use pgrx::pg_sys;
 
@@ -19,14 +21,14 @@ thread_local! {
 }
 
 struct StoredProvider {
-    descriptor: Box<MaintenanceProviderV3>,
+    descriptor: Box<MaintenanceProviderV1>,
     _name: CString,
     _access_method_name: CString,
 }
 
 impl StoredProvider {
     fn new(
-        descriptor: &MaintenanceProviderV3,
+        descriptor: &MaintenanceProviderV1,
         name: &CStr,
         access_method_name: &CStr,
     ) -> Self {
@@ -60,7 +62,7 @@ impl ProviderDirectory {
 
     fn prepare(
         &mut self,
-        descriptor: &MaintenanceProviderV3,
+        descriptor: &MaintenanceProviderV1,
         name: &CStr,
         access_method_name: &CStr,
     ) -> Result<PreparedProviderRegistration, u32> {
@@ -120,7 +122,7 @@ impl ProviderDirectory {
     #[cfg(test)]
     fn register(
         &mut self,
-        descriptor: &MaintenanceProviderV3,
+        descriptor: &MaintenanceProviderV1,
         name: &CStr,
         access_method_name: &CStr,
     ) -> u32 {
@@ -137,24 +139,24 @@ impl ProviderDirectory {
         self.providers.len()
     }
 
-    fn descriptor(&self, index: usize) -> *const MaintenanceProviderV3 {
+    fn descriptor(&self, index: usize) -> *const MaintenanceProviderV1 {
         self.providers[index].descriptor.as_ref()
     }
 }
 
 struct ValidatedProvider<'a> {
-    descriptor: &'a MaintenanceProviderV3,
+    descriptor: &'a MaintenanceProviderV1,
     name: &'a CStr,
     access_method_name: &'a CStr,
 }
 
 unsafe fn validate_provider<'a>(
-    descriptor: *const MaintenanceProviderV3,
+    descriptor: *const MaintenanceProviderV1,
 ) -> Option<ValidatedProvider<'a>> {
     // SAFETY: callers uphold the module's trusted internal-ABI pointer and
     // alignment contract; `as_ref` handles the permitted null input.
     let header = unsafe { descriptor.cast::<AbiHeader>().as_ref() }?;
-    let expected_size = u32::try_from(std::mem::size_of::<MaintenanceProviderV3>())
+    let expected_size = u32::try_from(std::mem::size_of::<MaintenanceProviderV1>())
         .expect("maintenance descriptor size exceeds u32");
     if header.abi_version != MAINTENANCE_PROVIDER_VERSION
         || header.struct_size < expected_size
@@ -208,12 +210,12 @@ unsafe extern "C-unwind" fn has_providers() -> u8 {
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn provider_for_am(
     access_method_oid: pg_sys::Oid,
-) -> *const MaintenanceProviderV3 {
+) -> *const MaintenanceProviderV1 {
     // AM OIDs are database-local and do not exist yet during shared-preload
     // registration. Copy one stable descriptor pointer at a time, release the
     // RefCell borrow, and only then invoke catalog-reading provider callbacks.
     let provider_count = PROVIDERS.with_borrow(ProviderDirectory::len);
-    let mut matched: *const MaintenanceProviderV3 = std::ptr::null();
+    let mut matched: *const MaintenanceProviderV1 = std::ptr::null();
     for index in 0..provider_count {
         let descriptor =
             PROVIDERS.with_borrow(|providers| providers.descriptor(index));
@@ -244,6 +246,40 @@ unsafe extern "C-unwind" fn maintenance_config(
         panic!("runtime maintenance config output pointer is null");
     };
     *config = crate::gucs::maintenance_config();
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn stage_worker_wakeup(
+    extension_name: *const c_char,
+    worker_name: *const c_char,
+) -> u32 {
+    if crate::runtime::ensure_preloaded().is_err() {
+        return STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED;
+    }
+    if extension_name.is_null() || worker_name.is_null() {
+        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
+    }
+    let extension_name = unsafe { CStr::from_ptr(extension_name) };
+    let worker_name = unsafe { CStr::from_ptr(worker_name) };
+    if extension_name.is_empty()
+        || worker_name.is_empty()
+        || worker_name.to_bytes().len() > crate::state::MAX_WORKER_NAME_BYTES
+    {
+        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
+    }
+    let Ok(worker_name) = worker_name.to_str() else {
+        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
+    };
+    // Resolve the extension through PostgreSQL's syscache rather than scanning
+    // lakebase.workers. Lifecycle publishes the wake only after commit. A
+    // missing shared-memory slot triggers conservative database reconciliation.
+    let extension_oid =
+        unsafe { pg_sys::get_extension_oid(extension_name.as_ptr(), true) };
+    if extension_oid == pg_sys::InvalidOid {
+        return STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND;
+    }
+    crate::lifecycle::request_wakeup(u32::from(extension_oid), worker_name);
+    STAGE_WORKER_WAKEUP_OK
 }
 
 struct AmRegistrationRef<'a> {
@@ -365,14 +401,15 @@ unsafe extern "C-unwind" fn register_am(
     REGISTER_OK
 }
 
-static RUNTIME_API: RuntimeApiV3 = RuntimeApiV3 {
+static RUNTIME_API: RuntimeApiV1 = RuntimeApiV1 {
     abi_version: RUNTIME_API_VERSION,
-    struct_size: std::mem::size_of::<RuntimeApiV3>() as u32,
+    struct_size: std::mem::size_of::<RuntimeApiV1>() as u32,
     register_am,
     has_providers,
     provider_for_am,
     customscan_mode,
     maintenance_config,
+    stage_worker_wakeup,
 };
 
 pub(crate) fn init() {
@@ -384,14 +421,14 @@ pub(crate) fn init() {
     let published = unsafe { *slot };
     if !published.is_null()
         && published
-            != (&RUNTIME_API as *const RuntimeApiV3)
+            != (&RUNTIME_API as *const RuntimeApiV1)
                 .cast_mut()
                 .cast::<c_void>()
     {
         panic!("a different pg_lakebase runtime API is already published");
     }
     unsafe {
-        *slot = (&RUNTIME_API as *const RuntimeApiV3)
+        *slot = (&RUNTIME_API as *const RuntimeApiV1)
             .cast_mut()
             .cast::<c_void>();
     }
@@ -431,10 +468,10 @@ mod tests {
     fn descriptor(
         name: &'static CStr,
         access_method_name: &'static CStr,
-    ) -> MaintenanceProviderV3 {
-        MaintenanceProviderV3 {
+    ) -> MaintenanceProviderV1 {
+        MaintenanceProviderV1 {
             abi_version: MAINTENANCE_PROVIDER_VERSION,
-            struct_size: std::mem::size_of::<MaintenanceProviderV3>() as u32,
+            struct_size: std::mem::size_of::<MaintenanceProviderV1>() as u32,
             name: name.as_ptr(),
             access_method_name: access_method_name.as_ptr(),
             capability_flags: 0,

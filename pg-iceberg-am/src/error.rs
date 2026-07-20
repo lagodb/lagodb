@@ -14,6 +14,7 @@
 //! perform the final conversion to PostgreSQL.
 
 use pg_lakebase_core::diag::{PgError, SqlStateError, domain_error_report};
+use pg_lakebase_core::extension_worker::WorkerNotificationError;
 use pg_lakebase_core::maintenance::MaintenanceError;
 use pg_lakebase_core::options::TablespaceError;
 use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
@@ -107,18 +108,6 @@ pub enum IcebergError {
     #[error("optimistic locking failed: metadata location changed concurrently")]
     MetadataCatalogConflict,
 
-    #[error(
-        "failed to {operation} iceberg.automatic_maintenance_state catalog: {source}"
-    )]
-    AutomaticMaintenanceCatalog {
-        operation: MetadataCatalogOperation,
-        #[source]
-        source: PgError,
-    },
-
-    #[error("invalid automatic maintenance catalog record: {0}")]
-    AutomaticMaintenanceCatalogInvalidRecord(String),
-
     #[error("Iceberg VACUUM failed: {source}")]
     Vacuum {
         #[source]
@@ -166,6 +155,12 @@ pub enum IcebergError {
 
     #[error("maintenance error: {0}")]
     MaintenanceError(#[from] MaintenanceError),
+
+    #[error("failed to schedule Iceberg automatic maintenance: {source}")]
+    AutomaticMaintenanceNotification {
+        #[source]
+        source: WorkerNotificationError,
+    },
 
     #[error("storage target is still being cleaned by maintenance")]
     ActiveMaintenanceTarget,
@@ -256,10 +251,7 @@ pub enum IcebergError {
 impl SqlStateError for IcebergError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            IcebergError::MetadataCatalog { source, .. }
-            | IcebergError::AutomaticMaintenanceCatalog { source, .. } => {
-                source.sql_error_code()
-            }
+            IcebergError::MetadataCatalog { source, .. } => source.sql_error_code(),
 
             IcebergError::MetadataCatalogNotFound(_) => {
                 PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
@@ -275,8 +267,7 @@ impl SqlStateError for IcebergError {
 
             IcebergError::Vacuum { source } => source.sql_error_code(),
 
-            IcebergError::MetadataCatalogInvalidRecord(_)
-            | IcebergError::AutomaticMaintenanceCatalogInvalidRecord(_) => {
+            IcebergError::MetadataCatalogInvalidRecord(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
 
@@ -289,6 +280,10 @@ impl SqlStateError for IcebergError {
             IcebergError::StorageError(error) => storage_sql_error_code(error),
 
             IcebergError::MaintenanceError(error) => error.sql_error_code(),
+
+            IcebergError::AutomaticMaintenanceNotification { .. } => {
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+            }
 
             IcebergError::ActiveMaintenanceTarget => {
                 PgSqlErrorCode::ERRCODE_OBJECT_IN_USE

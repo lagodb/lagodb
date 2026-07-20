@@ -92,6 +92,10 @@ pub(crate) fn wake_worker(
     store::RuntimeStore::new().wake_worker(database_oid, extension_oid, worker_name)
 }
 
+pub(crate) fn wake_database_workers(database_oid: u32) -> bool {
+    store::RuntimeStore::new().wake_database_workers(database_oid)
+}
+
 pub(crate) fn request_database_reconcile(database_oid: u32) -> bool {
     store::RuntimeStore::new().request_database_reconcile(database_oid)
 }

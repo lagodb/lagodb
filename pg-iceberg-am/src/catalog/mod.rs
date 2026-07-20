@@ -1,5 +1,4 @@
 pub mod access_method;
-pub(crate) mod automatic_maintenance;
 pub mod bridge;
 pub mod metadata_table;
 pub mod metadata_tracker;

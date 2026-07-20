@@ -178,6 +178,11 @@ pub(crate) unsafe fn preflight(node: *mut pg_sys::Node) {
             }
         }
         pg_sys::NodeTag::T_CreatedbStmt => lifecycle::request_global_reconcile(),
+        pg_sys::NodeTag::T_AlterDatabaseSetStmt => {
+            let statement = unsafe { &*node.cast::<pg_sys::AlterDatabaseSetStmt>() };
+            let database_oid = unsafe { pg_sys::get_database_oid(statement.dbname, false) };
+            lifecycle::request_database_workers_wakeup(database_oid.to_u32());
+        }
         pg_sys::NodeTag::T_DropStmt => {
             let statement = unsafe { &*node.cast::<pg_sys::DropStmt>() };
             if statement.removeType == pg_sys::ObjectType::OBJECT_EXTENSION {

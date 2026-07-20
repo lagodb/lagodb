@@ -25,6 +25,7 @@ enum PendingActionKind {
     ReserveRegistration(runtime::RegistrationReservation),
     Wake(WorkerActionKey),
     ReconcileDatabase,
+    WakeDatabaseWorkers,
     DropDatabase,
     RescanAll,
 }
@@ -74,6 +75,10 @@ pub(crate) fn request_wakeup(extension_oid: u32, worker_name: &str) {
 pub(crate) fn request_database_reconcile() {
     let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
     push(database_oid, PendingActionKind::ReconcileDatabase);
+}
+
+pub(crate) fn request_database_workers_wakeup(database_oid: u32) {
+    push(database_oid, PendingActionKind::WakeDatabaseWorkers);
 }
 
 pub(crate) fn request_database_drop(database_oid: u32) {
@@ -157,6 +162,7 @@ impl PendingActions {
                         PendingActionKind::ReconcileDatabase,
                     );
                 }
+                PendingActionKind::WakeDatabaseWorkers => {}
                 PendingActionKind::RescanAll => {
                     self.record(
                         action.database_oid,
@@ -203,14 +209,21 @@ impl PendingAction {
                     },
                 )
             }
-            PendingActionKind::Wake(worker) if committed => runtime::wake_worker(
-                self.database_oid,
-                worker.extension_oid,
-                &worker.worker_name,
-            ),
+            PendingActionKind::Wake(worker) if committed => {
+                runtime::wake_worker(
+                    self.database_oid,
+                    worker.extension_oid,
+                    &worker.worker_name,
+                )
+            }
+            PendingActionKind::Wake(_) => false,
             PendingActionKind::ReconcileDatabase => {
                 runtime::request_database_reconcile(self.database_oid)
             }
+            PendingActionKind::WakeDatabaseWorkers if committed => {
+                runtime::wake_database_workers(self.database_oid)
+            }
+            PendingActionKind::WakeDatabaseWorkers => false,
             PendingActionKind::DropDatabase if committed => {
                 runtime::request_full_rescan()
             }
@@ -219,7 +232,6 @@ impl PendingAction {
                     | runtime::request_full_rescan()
             }
             PendingActionKind::RescanAll => runtime::request_full_rescan(),
-            PendingActionKind::Wake(_) => false,
         }
     }
 }
@@ -230,6 +242,10 @@ fn same_action(left: &PendingActionKind, right: &PendingActionKind) -> bool {
         (
             PendingActionKind::ReconcileDatabase,
             PendingActionKind::ReconcileDatabase,
+        )
+        | (
+            PendingActionKind::WakeDatabaseWorkers,
+            PendingActionKind::WakeDatabaseWorkers,
         )
         | (PendingActionKind::DropDatabase, PendingActionKind::DropDatabase)
         | (PendingActionKind::RescanAll, PendingActionKind::RescanAll) => true,

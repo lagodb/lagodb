@@ -9,6 +9,7 @@
 //!     metadata_location text,
 //!     previous_metadata_location text,
 //!     default_spec_id integer,
+//!     maintenance_due_at timestamptz,
 //!     PRIMARY KEY (relid)
 //! );
 //! ```
@@ -21,6 +22,7 @@ use pg_lakebase_core::catalog::{
 };
 use pg_lakebase_core::diag::PgError;
 use pg_lakebase_core::handles::HeapTupleGuard;
+use pgrx::prelude::TimestampWithTimeZone;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
 use crate::error::{
@@ -34,6 +36,8 @@ use crate::error::{
 const ICEBERG_SCHEMA: &CStr = c"iceberg";
 const ICEBERG_METADATA_TABLE: &CStr = c"iceberg_metadata";
 const ICEBERG_METADATA_PKEY: &CStr = c"iceberg_metadata_pkey";
+const ICEBERG_METADATA_MAINTENANCE_DUE_IDX: &CStr =
+    c"iceberg_metadata_maintenance_due_idx";
 
 /// Column numbers in `iceberg.iceberg_metadata` (1-based, as required by
 /// `heap_getattr`/`heap_modify_tuple`).
@@ -42,6 +46,7 @@ mod column {
     pub const METADATA_LOCATION: i16 = 2;
     pub const PREVIOUS_METADATA_LOCATION: i16 = 3;
     pub const DEFAULT_SPEC_ID: i16 = 4;
+    pub const MAINTENANCE_DUE_AT: i16 = 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +240,36 @@ impl TupleReplacement {
 pub struct CasUpdate<'a> {
     pub metadata_location: Option<&'a str>,
     pub previous_metadata_location: Option<&'a str>,
+    pub maintenance_schedule: MaintenanceScheduleUpdate,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum MaintenanceScheduleUpdate {
+    #[default]
+    Preserve,
+    ScheduleNoLaterThan(pg_sys::TimestampTz),
+    CompleteIfDueMatches(Option<pg_sys::TimestampTz>),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct MaintenanceCompletionToken {
+    pub(crate) metadata_location: String,
+    pub(crate) maintenance_due_at: Option<pg_sys::TimestampTz>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct MaintenanceCandidate {
+    pub(crate) relid: pg_sys::Oid,
+    pub(crate) metadata_location: Option<String>,
+    pub(crate) due_at: pg_sys::TimestampTz,
+}
+
+impl MaintenanceCandidate {
+    pub(crate) fn matches(&self, token: &MaintenanceCompletionToken) -> bool {
+        self.metadata_location.as_deref()
+            == Some(token.metadata_location.as_str())
+            && Some(self.due_at) == token.maintenance_due_at
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +283,7 @@ pub struct IcebergMetadata {
     pub metadata_location: Option<String>,
     pub previous_metadata_location: Option<String>,
     pub default_spec_id: Option<i32>,
+    pub maintenance_due_at: Option<pg_sys::TimestampTz>,
 }
 
 impl IcebergMetadata {
@@ -286,6 +322,10 @@ impl IcebergMetadata {
         iceberg_relation_oid(ICEBERG_METADATA_PKEY)
     }
 
+    fn maintenance_due_index_oid() -> IcebergResult<pg_sys::Oid> {
+        iceberg_relation_oid(ICEBERG_METADATA_MAINTENANCE_DUE_IDX)
+    }
+
     // -- CRUD: Insert ---------------------------------------------------------
 
     /// Insert this record. Errors if a row with the same `relid` already
@@ -314,6 +354,7 @@ impl IcebergMetadata {
             self.previous_metadata_location.as_deref(),
         );
         fields.set(column::DEFAULT_SPEC_ID, self.default_spec_id);
+        fields.set(column::MAINTENANCE_DUE_AT, self.maintenance_due_at);
 
         // SAFETY: `heap_form_tuple` returns an owned heap tuple freed by
         // `HeapTupleGuard` via `heap_freetuple`.
@@ -370,6 +411,217 @@ impl IcebergMetadata {
         Ok(Self::find_by_relid(relid)?.is_some())
     }
 
+    pub(crate) fn maintenance_candidates(
+        limit: usize,
+        now: pg_sys::TimestampTz,
+    ) -> IcebergResult<Vec<MaintenanceCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::AccessShareLock as _)
+                .map_catalog_err(CatalogOp::Read)?;
+        let mut scan = table_guard
+            .begin_ordered_scan(
+                Self::maintenance_due_index_oid()?,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::timestamptz_le(
+                    column::MAINTENANCE_DUE_AT as _,
+                    now,
+                )],
+            )
+            .map_catalog_err(CatalogOp::Read)?;
+        let tuple_desc = table_guard.as_handle().tuple_desc();
+        let mut candidates = Vec::with_capacity(limit);
+        while candidates.len() < limit {
+            let Some(tuple) = scan.get_next().map_catalog_err(CatalogOp::Read)?
+            else {
+                break;
+            };
+            let relid = unsafe {
+                get_attr_required(
+                    tuple.as_raw(),
+                    tuple_desc,
+                    column::RELID,
+                    "relid",
+                )?
+            };
+            let metadata_location = unsafe {
+                get_attr(
+                    tuple.as_raw(),
+                    tuple_desc,
+                    column::METADATA_LOCATION,
+                )
+            };
+            let due_at = unsafe {
+                get_attr_required::<TimestampWithTimeZone>(
+                    tuple.as_raw(),
+                    tuple_desc,
+                    column::MAINTENANCE_DUE_AT,
+                    "maintenance_due_at",
+                )?
+            }
+            .into_inner();
+            candidates.push(MaintenanceCandidate {
+                relid,
+                metadata_location,
+                due_at,
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub(crate) fn next_maintenance_due_at()
+    -> IcebergResult<Option<pg_sys::TimestampTz>> {
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::AccessShareLock as _)
+                .map_catalog_err(CatalogOp::Read)?;
+        let mut scan = table_guard
+            .begin_ordered_scan(
+                Self::maintenance_due_index_oid()?,
+                CatalogSnapshot::Default,
+                std::iter::empty(),
+            )
+            .map_catalog_err(CatalogOp::Read)?;
+        let Some(tuple) = scan.get_next().map_catalog_err(CatalogOp::Read)? else {
+            return Ok(None);
+        };
+        Ok(unsafe {
+            get_attr::<TimestampWithTimeZone>(
+                tuple.as_raw(),
+                table_guard.as_handle().tuple_desc(),
+                column::MAINTENANCE_DUE_AT,
+            )
+            .map(TimestampWithTimeZone::into_inner)
+        })
+    }
+
+    pub(crate) fn defer_maintenance(
+        candidate: &MaintenanceCandidate,
+        retry_at: pg_sys::TimestampTz,
+    ) -> IcebergResult<bool> {
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
+                .map_catalog_err(CatalogOp::Update)?;
+        let mut scan = table_guard
+            .begin_scan(
+                Self::pkey_oid()?,
+                true,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(
+                    column::RELID as _,
+                    candidate.relid,
+                )],
+            )
+            .map_catalog_err(CatalogOp::Update)?;
+        let Some(old_tuple) = scan.get_next().map_catalog_err(CatalogOp::Update)?
+        else {
+            return Ok(false);
+        };
+        let tuple_desc = table_guard.as_handle().tuple_desc();
+        let current_location: Option<String> = unsafe {
+            get_attr(
+                old_tuple.as_raw(),
+                tuple_desc,
+                column::METADATA_LOCATION,
+            )
+        };
+        let current_due = unsafe {
+            get_attr::<TimestampWithTimeZone>(
+                old_tuple.as_raw(),
+                tuple_desc,
+                column::MAINTENANCE_DUE_AT,
+            )
+            .map(TimestampWithTimeZone::into_inner)
+        };
+        if current_location.as_deref() != candidate.metadata_location.as_deref()
+            || current_due != Some(candidate.due_at)
+        {
+            return Ok(false);
+        }
+        let mut replacement = unsafe { TupleReplacement::new(tuple_desc) };
+        replacement.set(column::MAINTENANCE_DUE_AT, Some(retry_at));
+        let new_tuple =
+            unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
+        Ok(matches!(
+            table_guard
+                .catalog_update_optimistic(old_tuple, &new_tuple)
+                .map_catalog_err(CatalogOp::Update)?,
+            CatalogUpdateResult::Success
+        ))
+    }
+
+    pub(crate) fn finish_maintenance(
+        relid: pg_sys::Oid,
+        expected_location: &str,
+        schedule: MaintenanceScheduleUpdate,
+    ) -> IcebergResult<()> {
+        let table_guard =
+            CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
+                .map_catalog_err(CatalogOp::Update)?;
+        let mut scan = table_guard
+            .begin_scan(
+                Self::pkey_oid()?,
+                true,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::oid_eq(column::RELID as _, relid)],
+            )
+            .map_catalog_err(CatalogOp::Update)?;
+        let Some(old_tuple) = scan.get_next().map_catalog_err(CatalogOp::Update)?
+        else {
+            return Err(IcebergError::MetadataCatalogNotFound(relid));
+        };
+        let tuple_desc = table_guard.as_handle().tuple_desc();
+        let current_location: Option<String> = unsafe {
+            get_attr(
+                old_tuple.as_raw(),
+                tuple_desc,
+                column::METADATA_LOCATION,
+            )
+        };
+        if current_location.as_deref() != Some(expected_location) {
+            return Err(IcebergError::MetadataCatalogConflict);
+        }
+        let mut replacement = unsafe { TupleReplacement::new(tuple_desc) };
+        match schedule {
+            MaintenanceScheduleUpdate::CompleteIfDueMatches(expected_due) => {
+                let current_due = unsafe {
+                    get_attr::<TimestampWithTimeZone>(
+                        old_tuple.as_raw(),
+                        tuple_desc,
+                        column::MAINTENANCE_DUE_AT,
+                    )
+                    .map(TimestampWithTimeZone::into_inner)
+                };
+                // A newer due value represents work this maintenance plan did
+                // not authorize itself to complete.
+                if current_due == expected_due {
+                    replacement.set::<pg_sys::TimestampTz>(
+                        column::MAINTENANCE_DUE_AT,
+                        None,
+                    );
+                }
+            }
+            MaintenanceScheduleUpdate::Preserve => {}
+            MaintenanceScheduleUpdate::ScheduleNoLaterThan(_) => {
+                return Err(IcebergError::InvariantViolated(
+                    "maintenance completion cannot schedule new maintenance work",
+                ));
+            }
+        }
+        let new_tuple =
+            unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
+        match table_guard
+            .catalog_update_optimistic(old_tuple, &new_tuple)
+            .map_catalog_err(CatalogOp::Update)?
+        {
+            CatalogUpdateResult::Success => Ok(()),
+            CatalogUpdateResult::Conflict => {
+                Err(IcebergError::MetadataCatalogConflict)
+            }
+        }
+    }
+
     // -- CRUD: CAS update -----------------------------------------------------
 
     /// Compare-and-swap update for the row identified by `relid`.
@@ -388,7 +640,7 @@ impl IcebergMetadata {
         relid: pg_sys::Oid,
         expected_previous_location: Option<&str>,
         new: CasUpdate<'_>,
-    ) -> IcebergResult<()> {
+    ) -> IcebergResult<bool> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
                 .map_catalog_err(CatalogOp::Update)?;
@@ -430,6 +682,36 @@ impl IcebergMetadata {
             column::PREVIOUS_METADATA_LOCATION,
             new.previous_metadata_location,
         );
+        let current_due = unsafe {
+            get_attr::<TimestampWithTimeZone>(
+                old_tuple.as_raw(),
+                tup_desc,
+                column::MAINTENANCE_DUE_AT,
+            )
+            .map(TimestampWithTimeZone::into_inner)
+        };
+        let maintenance_deadline_advanced = match new.maintenance_schedule {
+            MaintenanceScheduleUpdate::Preserve => false,
+            MaintenanceScheduleUpdate::ScheduleNoLaterThan(proposed)
+                if current_due.is_none_or(|current| proposed < current) =>
+            {
+                replacement.set(column::MAINTENANCE_DUE_AT, Some(proposed));
+                true
+            }
+            MaintenanceScheduleUpdate::ScheduleNoLaterThan(_) => false,
+            MaintenanceScheduleUpdate::CompleteIfDueMatches(expected_due)
+                if current_due == expected_due && current_due.is_some() =>
+            {
+                replacement.set::<pg_sys::TimestampTz>(
+                    column::MAINTENANCE_DUE_AT,
+                    None,
+                );
+                false
+            }
+            // Preserve a newer scheduling token while still publishing the
+            // metadata columns through the existing optimistic tuple update.
+            MaintenanceScheduleUpdate::CompleteIfDueMatches(_) => false,
+        };
 
         // SAFETY: the replacement was built from this relation's TupleDesc
         // and `old_tuple` is from the matching scan.
@@ -442,68 +724,10 @@ impl IcebergMetadata {
             .catalog_update_optimistic(old_tuple, &new_tuple_guard)
             .map_catalog_err(CatalogOp::Update)?
         {
-            CatalogUpdateResult::Success => Ok(()),
+            CatalogUpdateResult::Success => Ok(maintenance_deadline_advanced),
             CatalogUpdateResult::Conflict => {
                 Err(IcebergError::MetadataCatalogConflict)
             }
-        }
-    }
-
-    /// Tuple-lock the metadata row and prove its pointer is still unchanged.
-    /// The tuple lock is held until the surrounding PostgreSQL transaction ends.
-    pub fn lock_and_validate_location(
-        relid: pg_sys::Oid,
-        expected_location: &str,
-    ) -> IcebergResult<()> {
-        let table_guard =
-            CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
-                .map_catalog_err(CatalogOp::Update)?;
-        let mut scan = table_guard
-            .begin_scan(
-                Self::pkey_oid()?,
-                true,
-                CatalogSnapshot::Default,
-                [CatalogScanKey::oid_eq(column::RELID as _, relid)],
-            )
-            .map_catalog_err(CatalogOp::Update)?;
-        let Some(tuple) = scan.get_next().map_catalog_err(CatalogOp::Update)? else {
-            return Err(IcebergError::MetadataCatalogNotFound(relid));
-        };
-        let current: Option<String> = unsafe {
-            get_attr(
-                tuple.as_raw(),
-                table_guard.as_handle().tuple_desc(),
-                column::METADATA_LOCATION,
-            )
-        };
-        if current.as_deref() != Some(expected_location) {
-            return Err(IcebergError::MetadataCatalogConflict);
-        }
-        let mut buffer = pg_sys::InvalidBuffer as pg_sys::Buffer;
-        let mut failure = pg_sys::TM_FailureData::default();
-        let result = unsafe {
-            pg_sys::heap_lock_tuple(
-                table_guard.as_raw(),
-                tuple.as_raw(),
-                pg_sys::GetCurrentCommandId(false),
-                pg_sys::LockTupleMode::LockTupleExclusive,
-                pg_sys::LockWaitPolicy::LockWaitBlock,
-                false,
-                &mut buffer,
-                &mut failure,
-            )
-        };
-        if buffer != pg_sys::InvalidBuffer as pg_sys::Buffer {
-            unsafe { pg_sys::ReleaseBuffer(buffer) };
-        }
-        match result {
-            pg_sys::TM_Result::TM_Ok => Ok(()),
-            pg_sys::TM_Result::TM_Updated | pg_sys::TM_Result::TM_Deleted => {
-                Err(IcebergError::MetadataCatalogConflict)
-            }
-            _ => Err(IcebergError::InvariantViolated(
-                "unexpected tuple-lock result for Iceberg metadata row",
-            )),
         }
     }
 
@@ -575,7 +799,41 @@ impl IcebergMetadata {
                     column::PREVIOUS_METADATA_LOCATION,
                 ),
                 default_spec_id: get_attr(tuple, tup_desc, column::DEFAULT_SPEC_ID),
+                maintenance_due_at:
+                    get_attr::<TimestampWithTimeZone>(
+                        tuple,
+                        tup_desc,
+                        column::MAINTENANCE_DUE_AT,
+                    )
+                    .map(TimestampWithTimeZone::into_inner),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_candidate_matches_location_and_due_token() {
+        let candidate = MaintenanceCandidate {
+            relid: pg_sys::Oid::from(42_u32),
+            metadata_location: Some("metadata/v1.json".to_owned()),
+            due_at: 100,
+        };
+
+        assert!(candidate.matches(&MaintenanceCompletionToken {
+            metadata_location: "metadata/v1.json".to_owned(),
+            maintenance_due_at: Some(100),
+        }));
+        assert!(!candidate.matches(&MaintenanceCompletionToken {
+            metadata_location: "metadata/v2.json".to_owned(),
+            maintenance_due_at: Some(100),
+        }));
+        assert!(!candidate.matches(&MaintenanceCompletionToken {
+            metadata_location: "metadata/v1.json".to_owned(),
+            maintenance_due_at: Some(101),
+        }));
     }
 }

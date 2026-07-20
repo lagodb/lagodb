@@ -11,7 +11,7 @@ use super::{
     TableMaintenanceStats,
 };
 use crate::runtime_api::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV3, MaintenanceReportV1,
+    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV1, MaintenanceReportV1,
     MaintenanceRequestV1, MaintenanceStatsV1, PROVIDER_CAPABILITY_ANALYZE,
     RuntimeApiError, RuntimeClient, RuntimeRegistrationError, provider_name,
 };
@@ -125,9 +125,9 @@ pub fn register_provider<P>()
 where
     P: LakebaseTableMaintenanceProvider,
 {
-    let descriptor = MaintenanceProviderV3 {
+    let descriptor = MaintenanceProviderV1 {
         abi_version: MAINTENANCE_PROVIDER_VERSION,
-        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV3>())
+        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV1>())
             .expect("maintenance provider descriptor size exceeds u32"),
         name: P::NAME.as_ptr(),
         access_method_name: P::ACCESS_METHOD_NAME.as_ptr(),
@@ -168,7 +168,7 @@ impl TableMaintenanceRouter {
 
     fn provider_for_am(
         access_method_oid: pg_sys::Oid,
-    ) -> Result<&'static MaintenanceProviderV3, TableMaintenanceError> {
+    ) -> Result<&'static MaintenanceProviderV1, TableMaintenanceError> {
         let runtime = RuntimeClient::connect()
             .map_err(|error| TableMaintenanceError::framework(error.to_string()))?;
         runtime.provider_for_am(access_method_oid).ok_or_else(|| {

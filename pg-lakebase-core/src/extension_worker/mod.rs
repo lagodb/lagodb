@@ -7,5 +7,5 @@ mod transaction;
 
 pub use context::{WorkerContext, WorkerContextError};
 pub use exit::{WorkerExit, WorkerExitCodeError};
-pub use notifier::{WorkerIdentity, WorkerNotifier};
+pub use notifier::{WorkerIdentity, WorkerNotificationError, WorkerNotifier};
 pub use transaction::WorkerTransaction;

@@ -12,11 +12,8 @@ static MUTATION_BUFFER_FLUSH_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
 static VACUUM_COMPACT_DATA_FILES: GucSetting<bool> = GucSetting::<bool>::new(true);
 static VACUUM_ORPHAN_RETENTION_S: GucSetting<i32> = GucSetting::<i32>::new(259_200);
 static AUTO_MAINTENANCE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
-static AUTO_MAINTENANCE_INTERVAL_S: GucSetting<i32> = GucSetting::<i32>::new(300);
+static AUTO_MAINTENANCE_NAPTIME_S: GucSetting<i32> = GucSetting::<i32>::new(300);
 static AUTO_MAINTENANCE_MAX_TABLES: GucSetting<i32> = GucSetting::<i32>::new(32);
-static AUTO_MAINTENANCE_JITTER_PERCENT: GucSetting<i32> = GucSetting::<i32>::new(20);
-static AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S: GucSetting<i32> =
-    GucSetting::<i32>::new(3_600);
 
 /// Maximum number of Iceberg data files opened by one bounded ANALYZE sample.
 /// Rows within the selected files are sampled using manifest record counts.
@@ -80,17 +77,17 @@ pub fn init() {
     );
     GucRegistry::define_bool_guc(
         c"pg_iceberg_am.auto_maintenance_enabled",
-        c"Enable periodic Iceberg logical-table maintenance",
+        c"Enable Iceberg logical-table automatic maintenance",
         c"The runtime worker uses one short transaction per selected table.",
         &AUTO_MAINTENANCE_ENABLED,
         GucContext::Userset,
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
-        c"pg_iceberg_am.auto_maintenance_interval_s",
-        c"Delay between Iceberg automatic maintenance rounds",
-        c"Tables skipped because of locks are reconsidered in a later round.",
-        &AUTO_MAINTENANCE_INTERVAL_S,
+        c"pg_iceberg_am.auto_maintenance_naptime_s",
+        c"Delay before changed Iceberg tables become eligible for maintenance",
+        c"Also provides the retry delay after a skipped or failed table attempt.",
+        &AUTO_MAINTENANCE_NAPTIME_S,
         10,
         86_400,
         GucContext::Userset,
@@ -98,31 +95,11 @@ pub fn init() {
     );
     GucRegistry::define_int_guc(
         c"pg_iceberg_am.auto_maintenance_max_tables",
-        c"Maximum Iceberg tables considered in one maintenance round",
-        c"Bounds one worker invocation; candidates are shuffled between rounds.",
+        c"Maximum Iceberg tables processed in one maintenance invocation",
+        c"Bounds transient worker duration and memory use.",
         &AUTO_MAINTENANCE_MAX_TABLES,
         1,
         10_000,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        c"pg_iceberg_am.auto_maintenance_jitter_percent",
-        c"Jitter applied to automatic maintenance scheduling",
-        c"Jitter avoids synchronized maintenance rounds and retry storms.",
-        &AUTO_MAINTENANCE_JITTER_PERCENT,
-        0,
-        100,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        c"pg_iceberg_am.auto_maintenance_failure_backoff_max_s",
-        c"Maximum per-relation automatic maintenance failure backoff",
-        c"Repeated failures back off independently without starving other relations.",
-        &AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S,
-        10,
-        86_400,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -209,20 +186,12 @@ pub(crate) fn analyze_max_data_files() -> usize {
     ANALYZE_MAX_DATA_FILES.get() as usize
 }
 
-pub(crate) fn auto_maintenance_interval() -> std::time::Duration {
-    std::time::Duration::from_secs(AUTO_MAINTENANCE_INTERVAL_S.get() as u64)
+pub(crate) fn auto_maintenance_naptime() -> std::time::Duration {
+    std::time::Duration::from_secs(AUTO_MAINTENANCE_NAPTIME_S.get() as u64)
 }
 
 pub(crate) fn auto_maintenance_max_tables() -> usize {
     AUTO_MAINTENANCE_MAX_TABLES.get() as usize
-}
-
-pub(crate) fn auto_maintenance_jitter_percent() -> u32 {
-    AUTO_MAINTENANCE_JITTER_PERCENT.get() as u32
-}
-
-pub(crate) fn auto_maintenance_failure_backoff_max() -> std::time::Duration {
-    std::time::Duration::from_secs(AUTO_MAINTENANCE_FAILURE_BACKOFF_MAX_S.get() as u64)
 }
 
 pub fn vacuum_compact_data_files() -> bool {

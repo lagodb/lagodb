@@ -21,19 +21,38 @@ impl<'a> TableCommitCoordinator<'a> {
         }
     }
 
-    fn commit(self) -> IcebergResult<()> {
+    fn commit(self) -> IcebergResult<bool> {
         let Self {
             relid,
             plan,
             file_io,
         } = self;
+        let has_maintenance_action = plan
+            .actions
+            .iter()
+            .any(|action| {
+                matches!(
+                    action,
+                    EffectiveCommitAction::Data { .. }
+                        | EffectiveCommitAction::TruncateOnly
+                )
+            });
         let mut retries = 0_u32;
         let max_retries = gucs::max_commit_retries();
         let max_retry_count = u32::try_from(max_retries)
             .expect("max_commit_retries is constrained to non-negative values");
         let vacuum_commit_started = plan.vacuum.map(|_| std::time::Instant::now());
+        let write_maintenance_schedule = if has_maintenance_action {
+            let naptime = gucs::auto_maintenance_naptime();
+            let micros = i64::try_from(naptime.as_micros()).unwrap_or(i64::MAX);
+            let due_at = unsafe { pg_sys::GetCurrentTransactionStartTimestamp() }
+                .saturating_add(micros);
+            MaintenanceScheduleUpdate::ScheduleNoLaterThan(due_at)
+        } else {
+            MaintenanceScheduleUpdate::Preserve
+        };
 
-        loop {
+        let outcome = loop {
             if retries > max_retry_count {
                 return Err(IcebergError::MetadataCommitConflict {
                     relid,
@@ -45,6 +64,18 @@ impl<'a> TableCommitCoordinator<'a> {
             let latest_global_location = IcebergMetadata::get(relid)?
                 .metadata_location
                 .ok_or(IcebergError::MetadataLocationNull)?;
+            let maintenance_schedule = match plan.vacuum {
+                Some(vacuum)
+                    if vacuum.completion_token.metadata_location.as_str()
+                        == latest_global_location.as_str() =>
+                {
+                    MaintenanceScheduleUpdate::CompleteIfDueMatches(
+                        vacuum.completion_token.maintenance_due_at,
+                    )
+                }
+                Some(_) => MaintenanceScheduleUpdate::Preserve,
+                None => write_maintenance_schedule,
+            };
             if plan
                 .expected_metadata_location
                 .is_some_and(|expected| expected != latest_global_location.as_str())
@@ -142,19 +173,24 @@ impl<'a> TableCommitCoordinator<'a> {
                 .map(crate::maintenance::VacuumAttemptOutcome::into_result);
             if new_metadata_location == latest_global_location {
                 metadata_attempt.discard()?;
-                if vacuum_result
-                    .as_ref()
-                    .is_some_and(crate::maintenance::VacuumAttemptResult::has_cleanup)
-                {
-                    match IcebergMetadata::lock_and_validate_location(
+                if plan.vacuum.is_some() {
+                    match IcebergMetadata::finish_maintenance(
                         relid,
                         &latest_global_location,
+                        maintenance_schedule,
                     ) {
                         Ok(()) => {
-                            vacuum_result
-                                .as_mut()
-                                .expect("checked VACUUM result")
-                                .register_cleanup(relid, &file_io)?;
+                            if vacuum_result
+                                .as_ref()
+                                .is_some_and(
+                                    crate::maintenance::VacuumAttemptResult::has_cleanup,
+                                )
+                            {
+                                vacuum_result
+                                    .as_mut()
+                                    .expect("checked VACUUM result")
+                                    .register_cleanup(relid, &file_io)?;
+                            }
                         }
                         Err(IcebergError::MetadataCatalogConflict) => {
                             diag::report_notice(
@@ -174,7 +210,7 @@ impl<'a> TableCommitCoordinator<'a> {
                     file_io.clone(),
                     plan.canceled_created_paths.clone(),
                 );
-                break;
+                break false;
             }
 
             match IcebergMetadata::cas_update(
@@ -183,9 +219,10 @@ impl<'a> TableCommitCoordinator<'a> {
                 CasUpdate {
                     metadata_location: Some(new_metadata_location),
                     previous_metadata_location: Some(&latest_global_location),
+                    maintenance_schedule,
                 },
             ) {
-                Ok(()) => {
+                Ok(maintenance_deadline_advanced) => {
                     metadata_attempt.promote()?;
                     if let Some(result) = &mut vacuum_result {
                         result.register_cleanup(relid, &file_io)?;
@@ -193,14 +230,13 @@ impl<'a> TableCommitCoordinator<'a> {
                     if let (Some(vacuum), Some(result)) =
                         (plan.vacuum, vacuum_result.take())
                     {
-                        result
-                            .report_success(vacuum, vacuum_commit_started.as_ref())?;
+                        result.report_success(vacuum, vacuum_commit_started.as_ref())?;
                     }
                     crate::storage::transactional_artifacts::register_canceled_files_for_commit(
                         file_io.clone(),
                         plan.canceled_created_paths.clone(),
                     );
-                    break;
+                    break maintenance_deadline_advanced;
                 }
                 Err(IcebergError::MetadataCatalogConflict) => {
                     metadata_attempt.discard()?;
@@ -211,29 +247,31 @@ impl<'a> TableCommitCoordinator<'a> {
                 }
                 Err(e) => return Err(e),
             }
-        }
+        };
 
-        Ok(())
+        Ok(outcome)
     }
 }
 
 impl TxMetadata {
     /// Detach one immutable action snapshot at a time, then hand all I/O,
     /// optimistic retry, artifact and cleanup work to the table coordinator.
-    pub(super) fn commit_all(&self) -> IcebergResult<()> {
+    pub(super) fn commit_all(&self) -> IcebergResult<bool> {
         let mut table_oids: Vec<pg_sys::Oid> =
             self.inner.borrow().tables.keys().copied().collect();
         table_oids.sort_unstable_by_key(|oid| u32::from(*oid));
 
+        let mut automatic_maintenance_wakeup = false;
         for relid in table_oids {
             let Some(TableCommitInput { actions, file_io }) =
                 self.commit_input(relid)?
             else {
                 continue;
             };
-            TableCommitCoordinator::new(relid, actions.commit_plan()?, file_io)
-                .commit()?;
+            automatic_maintenance_wakeup |=
+                TableCommitCoordinator::new(relid, actions.commit_plan()?, file_io)
+                    .commit()?;
         }
-        Ok(())
+        Ok(automatic_maintenance_wakeup)
     }
 }
