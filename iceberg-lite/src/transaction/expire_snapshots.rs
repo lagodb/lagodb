@@ -32,6 +32,11 @@ use crate::{Error, ErrorKind, Result, TableRequirement, TableUpdate};
 /// This only rewrites metadata; the now-unreferenced data and metadata files are left untouched.
 /// Physical file cleanup is the responsibility of a higher-level maintenance operation built on
 /// top of this action.
+///
+/// Explicit ids and age-based expiry are combined: a snapshot is expired if it
+/// is named explicitly or selected by age. Branch retention protects snapshots
+/// from age-based expiry, but does not protect snapshots named explicitly.
+/// Heads of retained refs, including the current snapshot, cannot be expired.
 pub struct ExpireSnapshotsAction {
     as_of_ms: i64,
     explicit_ids_to_remove: Vec<i64>,
@@ -63,6 +68,10 @@ impl ExpireSnapshotsAction {
     }
 
     /// Expire these snapshot ids in addition to any age-based selection.
+    ///
+    /// An id that is still the head of a retained branch or tag cannot be
+    /// expired. Other ids named explicitly are not protected by age-based
+    /// branch retention.
     pub fn expire_snapshot_ids(
         mut self,
         snapshot_ids: impl IntoIterator<Item = i64>,
@@ -78,6 +87,9 @@ impl ExpireSnapshotsAction {
     }
 
     /// Keep at least the `retain_last` most recent snapshots of each branch when expiring by age.
+    ///
+    /// This does not protect snapshots named via
+    /// [`expire_snapshot_ids`](Self::expire_snapshot_ids).
     pub fn retain_last(mut self, retain_last: usize) -> Self {
         self.retain_last = Some(retain_last);
         self
@@ -204,20 +216,6 @@ impl ExpireSnapshotsAction {
             );
         }
 
-        if let Some(snapshot_id) = self
-            .explicit_ids_to_remove
-            .iter()
-            .copied()
-            .find(|snapshot_id| retained_ids.contains(snapshot_id))
-        {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                format!(
-                    "Cannot expire snapshot {snapshot_id}: required by retained branch history"
-                ),
-            ));
-        }
-
         for snapshot in metadata.snapshots() {
             let id = snapshot.snapshot_id();
             if !referenced_ids.contains(&id)
@@ -226,6 +224,8 @@ impl ExpireSnapshotsAction {
                 retained_ids.insert(id);
             }
         }
+        // Explicit ids are already in `expiring_ids`; branch retention only
+        // controls which additional snapshots are selected by age.
         for snapshot in metadata.snapshots() {
             if !retained_ids.contains(&snapshot.snapshot_id()) {
                 expiring_ids.insert(snapshot.snapshot_id());

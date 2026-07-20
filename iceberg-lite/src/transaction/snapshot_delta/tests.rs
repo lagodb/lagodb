@@ -709,6 +709,73 @@ fn expire_snapshots_preserves_retained_refs_then_removes_aged_refs() {
     }));
 }
 
+#[test]
+fn explicit_expiration_overrides_branch_retention_but_not_ref_heads() {
+    let catalog = new_memory_catalog();
+    let mut table = make_v3_minimal_table_in_catalog(&catalog);
+    for index in 0..3 {
+        let mut delta = SnapshotDelta::new();
+        delta
+            .add_data_file(data_file(&format!("test/explicit-{index}.parquet")))
+            .unwrap();
+        table = commit_delta(&catalog, &table, delta);
+    }
+    let oldest_id = table
+        .metadata()
+        .snapshots()
+        .find(|snapshot| snapshot.parent_snapshot_id().is_none())
+        .expect("first append snapshot has no parent")
+        .snapshot_id();
+
+    let action = Transaction::new(&table)
+        .expire_snapshots()
+        .expire_older_than_ms(i64::MIN)
+        .retain_last(3)
+        .expire_snapshot_ids([oldest_id]);
+    let mut commit = Arc::new(action).commit(&table).unwrap();
+    let updates = commit.take_updates();
+    let explicitly_removed = updates
+        .iter()
+        .find_map(|update| match update {
+            TableUpdate::RemoveSnapshots { snapshot_ids } => {
+                Some(snapshot_ids.as_slice())
+            }
+            _ => None,
+        })
+        .expect("explicit expiration produces a snapshot removal");
+    assert_eq!(explicitly_removed, &[oldest_id]);
+
+    let tagged_metadata = table
+        .metadata()
+        .clone()
+        .into_builder(None)
+        .set_ref(
+            "retained-tag",
+            SnapshotReference::new(
+                oldest_id,
+                SnapshotRetention::Tag {
+                    max_ref_age_ms: Some(i64::MAX),
+                },
+            ),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+        .metadata;
+    let tagged_table = table.with_metadata(Arc::new(tagged_metadata));
+    let action = Transaction::new(&tagged_table)
+        .expire_snapshots()
+        .expire_older_than_ms(i64::MIN)
+        .retain_last(3)
+        .expire_snapshot_ids([oldest_id]);
+    let error = Arc::new(action)
+        .commit(&tagged_table)
+        .err()
+        .expect("a retained ref head cannot be expired explicitly");
+    assert_eq!(error.kind(), ErrorKind::DataInvalid);
+    assert!(error.to_string().contains("still referenced by"));
+}
+
 fn commit_delta(
     catalog: &impl Catalog,
     table: &Table,
