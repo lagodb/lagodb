@@ -1,10 +1,14 @@
 pub mod local;
 pub mod object;
+mod post_commit_delete;
 pub mod transactional_artifacts;
 mod wait_event;
 
 pub use local::LocalStorage;
 pub use object::ObjectStorage;
+pub(crate) use post_commit_delete::{
+    PostCommitDeletePurpose, PostCommitFileDeleteBatch,
+};
 
 use crate::error::IcebergResult;
 use iceberg_lite::io::FileIO;

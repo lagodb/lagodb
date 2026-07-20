@@ -4,13 +4,12 @@ use iceberg_lite::io::FileIO;
 use pg_lakebase_core::maintenance::{
     MaintenanceContext, MaintenanceItemRef, MaintenanceQueue,
 };
-use pg_lakebase_core::transaction::cleanup::{
-    CleanupTiming, PendingDelete, register_pending_delete,
-};
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
-use crate::storage::{LocalStorage, ObjectStorage};
+use crate::storage::{
+    LocalStorage, ObjectStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch,
+};
 
 use super::record_metric;
 
@@ -35,51 +34,6 @@ impl VacuumCleanupRegistration {
             self.local_pending_paths + self.remote_queue_rows
         );
         Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct LocalVacuumPendingDelete {
-    file_io: FileIO,
-    paths: Vec<String>,
-    needs_wal: bool,
-}
-
-impl PendingDelete for LocalVacuumPendingDelete {
-    fn execute(&self) {
-        if self.needs_wal {
-            if self
-                .paths
-                .iter()
-                .any(|path| !crate::wal::record::delete_file_fits_wal(path))
-            {
-                pg_lakebase_core::diag::report_warning(
-                    "post-commit Iceberg VACUUM left paths whose names cannot be represented in DELETE_FILES WAL",
-                );
-            }
-            if let Some(lsn) = crate::wal::log_delete_files(
-                self.paths
-                    .iter()
-                    .filter(|path| crate::wal::record::delete_file_fits_wal(path))
-                    .map(String::as_str),
-            ) {
-                unsafe { pg_sys::XLogFlush(lsn) };
-            }
-        }
-        for path in self.paths.iter().filter(|path| {
-            !self.needs_wal || crate::wal::record::delete_file_fits_wal(path)
-        }) {
-            if let Err(error) = self.file_io.delete(path) {
-                pg_lakebase_core::diag::report_warning(format_args!(
-                    "post-commit Iceberg VACUUM could not delete {path}: {error}"
-                ));
-                break;
-            }
-        }
-    }
-
-    fn timing(&self) -> CleanupTiming {
-        CleanupTiming::OnCommit
     }
 }
 
@@ -158,11 +112,11 @@ impl VacuumCleanup {
             } else {
                 0
             };
-            register_pending_delete(Box::new(LocalVacuumPendingDelete {
-                file_io: file_io.clone(),
+            PostCommitFileDeleteBatch::register(
+                file_io.clone(),
                 paths,
-                needs_wal: local.needs_wal(),
-            }));
+                PostCommitDeletePurpose::Vacuum,
+            );
             return Ok(VacuumCleanupRegistration {
                 objects: count,
                 local_pending_paths: count,

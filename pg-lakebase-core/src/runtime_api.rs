@@ -334,6 +334,8 @@ impl From<TableMaintenanceReport> for MaintenanceReportV1 {
 
 impl From<MaintenanceReportV1> for TableMaintenanceReport {
     fn from(report: MaintenanceReportV1) -> Self {
+        // V1 carries only common counters. Start from Default so the private
+        // provider-metrics collection remains valid and empty.
         let mut result = Self::default();
         result.groups_rewritten = report.groups_rewritten;
         result.input_objects = report.input_objects;

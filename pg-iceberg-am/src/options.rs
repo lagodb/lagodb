@@ -56,18 +56,29 @@ pub const OPT_WRITE_ISOLATION_LEVEL_VALUES: &[&str] = &[
     IsolationLevel::Serializable.as_str(),
 ];
 
+// Each default is declared once here and shared by both the `OptionDef` that
+// CREATE applies and the `from_table_options` fallback, so the two paths cannot
+// drift. The string form matches the Iceberg table-property wire value.
 pub const OPT_TARGET_FILE_SIZE: &str =
     TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES;
+pub const OPT_TARGET_FILE_SIZE_DEFAULT: &str = "536870912";
 pub const OPT_MAX_SNAPSHOT_AGE: &str = TableProperties::PROPERTY_MAX_SNAPSHOT_AGE_MS;
+pub const OPT_MAX_SNAPSHOT_AGE_DEFAULT: &str = "432000000";
 pub const OPT_MIN_SNAPSHOTS: &str = TableProperties::PROPERTY_MIN_SNAPSHOTS_TO_KEEP;
+pub const OPT_MIN_SNAPSHOTS_DEFAULT: &str = "1";
 pub const OPT_MAX_REF_AGE: &str = TableProperties::PROPERTY_MAX_REF_AGE_MS;
+pub const OPT_MAX_REF_AGE_DEFAULT: &str = "9223372036854775807";
 pub const OPT_METADATA_VERSIONS: &str =
     TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX;
+pub const OPT_METADATA_VERSIONS_DEFAULT: &str = "100";
 pub const OPT_MANIFEST_TARGET_SIZE: &str =
     TableProperties::PROPERTY_MANIFEST_TARGET_SIZE_BYTES;
+pub const OPT_MANIFEST_TARGET_SIZE_DEFAULT: &str = "8388608";
 pub const OPT_MANIFEST_MIN_COUNT: &str =
     TableProperties::PROPERTY_MANIFEST_MIN_COUNT_TO_MERGE;
+pub const OPT_MANIFEST_MIN_COUNT_DEFAULT: &str = "100";
 pub const OPT_MANIFEST_MERGE: &str = TableProperties::PROPERTY_MANIFEST_MERGE_ENABLED;
+pub const OPT_MANIFEST_MERGE_DEFAULT: bool = true;
 
 // ============================================================================
 //  Option Definitions
@@ -134,7 +145,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
         name: OPT_TARGET_FILE_SIZE,
         mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
-            default: Some("536870912"),
+            default: Some(OPT_TARGET_FILE_SIZE_DEFAULT),
         },
         description: "Target data-file size in bytes",
     },
@@ -142,21 +153,23 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
         name: OPT_MAX_SNAPSHOT_AGE,
         mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
-            default: Some("432000000"),
+            default: Some(OPT_MAX_SNAPSHOT_AGE_DEFAULT),
         },
         description: "Maximum snapshot age in milliseconds",
     },
     OptionDef {
         name: OPT_MIN_SNAPSHOTS,
         mutability: OptionMutability::Mutable,
-        kind: OptionKind::String { default: Some("1") },
+        kind: OptionKind::String {
+            default: Some(OPT_MIN_SNAPSHOTS_DEFAULT),
+        },
         description: "Minimum snapshots retained per branch",
     },
     OptionDef {
         name: OPT_MAX_REF_AGE,
         mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
-            default: Some("9223372036854775807"),
+            default: Some(OPT_MAX_REF_AGE_DEFAULT),
         },
         description: "Maximum non-main reference age in milliseconds",
     },
@@ -164,7 +177,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
         name: OPT_METADATA_VERSIONS,
         mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
-            default: Some("100"),
+            default: Some(OPT_METADATA_VERSIONS_DEFAULT),
         },
         description: "Maximum previous metadata versions retained",
     },
@@ -172,7 +185,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
         name: OPT_MANIFEST_TARGET_SIZE,
         mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
-            default: Some("8388608"),
+            default: Some(OPT_MANIFEST_TARGET_SIZE_DEFAULT),
         },
         description: "Target manifest size in bytes",
     },
@@ -180,14 +193,16 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
         name: OPT_MANIFEST_MIN_COUNT,
         mutability: OptionMutability::Mutable,
         kind: OptionKind::String {
-            default: Some("100"),
+            default: Some(OPT_MANIFEST_MIN_COUNT_DEFAULT),
         },
         description: "Minimum live manifests before merging",
     },
     OptionDef {
         name: OPT_MANIFEST_MERGE,
         mutability: OptionMutability::Mutable,
-        kind: OptionKind::Bool { default: true },
+        kind: OptionKind::Bool {
+            default: OPT_MANIFEST_MERGE_DEFAULT,
+        },
         description: "Enable automatic manifest merging",
     },
 ];
@@ -355,14 +370,39 @@ impl ResolvedIcebergOptions {
             delete_isolation,
             update_isolation,
             merge_isolation,
-            target_file_size: value(OPT_TARGET_FILE_SIZE, "536870912"),
-            max_snapshot_age_ms: value(OPT_MAX_SNAPSHOT_AGE, "432000000"),
-            min_snapshots_to_keep: value(OPT_MIN_SNAPSHOTS, "1"),
-            max_ref_age_ms: value(OPT_MAX_REF_AGE, "9223372036854775807"),
-            metadata_versions: value(OPT_METADATA_VERSIONS, "100"),
-            manifest_target_size: value(OPT_MANIFEST_TARGET_SIZE, "8388608"),
-            manifest_min_count: value(OPT_MANIFEST_MIN_COUNT, "100"),
-            manifest_merge: value(OPT_MANIFEST_MERGE, "true"),
+            target_file_size: value(
+                OPT_TARGET_FILE_SIZE,
+                OPT_TARGET_FILE_SIZE_DEFAULT,
+            ),
+            max_snapshot_age_ms: value(
+                OPT_MAX_SNAPSHOT_AGE,
+                OPT_MAX_SNAPSHOT_AGE_DEFAULT,
+            ),
+            min_snapshots_to_keep: value(
+                OPT_MIN_SNAPSHOTS,
+                OPT_MIN_SNAPSHOTS_DEFAULT,
+            ),
+            max_ref_age_ms: value(OPT_MAX_REF_AGE, OPT_MAX_REF_AGE_DEFAULT),
+            metadata_versions: value(
+                OPT_METADATA_VERSIONS,
+                OPT_METADATA_VERSIONS_DEFAULT,
+            ),
+            manifest_target_size: value(
+                OPT_MANIFEST_TARGET_SIZE,
+                OPT_MANIFEST_TARGET_SIZE_DEFAULT,
+            ),
+            manifest_min_count: value(
+                OPT_MANIFEST_MIN_COUNT,
+                OPT_MANIFEST_MIN_COUNT_DEFAULT,
+            ),
+            manifest_merge: value(
+                OPT_MANIFEST_MERGE,
+                if OPT_MANIFEST_MERGE_DEFAULT {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
         })
     }
 

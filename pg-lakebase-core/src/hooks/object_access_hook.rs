@@ -229,8 +229,11 @@ pub trait ObjectAccessStrHook {
     ) -> Result<(), ObjectAccessHookError>;
 }
 
-type ObjectAccessHookEntry = Box<dyn ObjectAccessHook + Send + Sync>;
-type ObjectAccessStrHookEntry = Box<dyn ObjectAccessStrHook + Send + Sync>;
+// Backend-local registry: object-access hooks are registered, stored, and
+// dispatched entirely within a single PostgreSQL backend thread, so no
+// `Send + Sync` bound is required.
+type ObjectAccessHookEntry = Box<dyn ObjectAccessHook>;
+type ObjectAccessStrHookEntry = Box<dyn ObjectAccessStrHook>;
 
 struct ExternalObjectAccessContext {
     hook: ObjectAccessHookEntry,
@@ -297,7 +300,7 @@ impl ObjectAccessHookCallbacks {
     };
 }
 
-pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>) {
+pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook>) {
     let hook_name = hook.name();
     if super::hooks_frozen() {
         panic!("register_object_access_hook called after freeze_hooks");
@@ -310,9 +313,7 @@ pub fn register_object_access_hook(hook: Box<dyn ObjectAccessHook + Send + Sync>
     });
 }
 
-pub fn register_object_access_str_hook(
-    hook: Box<dyn ObjectAccessStrHook + Send + Sync>,
-) {
+pub fn register_object_access_str_hook(hook: Box<dyn ObjectAccessStrHook>) {
     let hook_name = hook.name();
     if super::hooks_frozen() {
         panic!("register_object_access_str_hook called after freeze_hooks");
