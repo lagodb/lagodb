@@ -198,20 +198,57 @@ SELECT count(*) = 6 AS all_cases_present,
 FROM object_matrix_before AS before
 JOIN after USING (format);
 
-SELECT count(*) = 6 AS all_cases_inspected,
-       bool_and(stats.current_data_objects = 1) AS one_current_data_file
+SELECT roots.format,
+       CASE WHEN stats.current_data_objects = 1
+            THEN NULL
+            ELSE stats.current_data_objects
+       END AS current_data_on_failure,
+       stats.current_data_objects = 1 AS one_current_data_file
 FROM object_matrix_roots AS roots
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats;
+CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats
+ORDER BY roots.format;
 
-SELECT count(*) = 6 AS all_cases_observed,
-       bool_and(observed.objects < roots.objects_before)
-           AS physical_objects_reclaimed
-FROM object_matrix_roots AS roots
-CROSS JOIN LATERAL lakebase.observe_object_tree(
-    'regress_vacuum_object_matrix',
-    :'lakebase_regress_bucket',
-    roots.prefix
-) AS observed;
+WITH observations AS (
+    SELECT roots.format,
+           roots.objects_before,
+           observed.objects AS objects_after,
+           stats.history_points,
+           stats.current_content_objects,
+           stats.retained_content_objects,
+           stats.current_data_objects,
+           stats.retained_data_objects
+    FROM object_matrix_roots AS roots
+    CROSS JOIN LATERAL lakebase.observe_object_tree(
+        'regress_vacuum_object_matrix',
+        :'lakebase_regress_bucket',
+        roots.prefix
+    ) AS observed
+    CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats
+)
+SELECT format,
+       CASE WHEN objects_after < objects_before
+            THEN NULL
+            ELSE objects_before
+       END AS failed_before,
+       CASE WHEN objects_after < objects_before
+            THEN NULL
+            ELSE objects_after
+       END AS failed_after,
+       CASE WHEN objects_after < objects_before
+            THEN NULL
+            ELSE pg_catalog.format(
+                'history=%s current_content=%s retained_content=%s '
+                'current_data=%s retained_data=%s',
+                history_points,
+                current_content_objects,
+                retained_content_objects,
+                current_data_objects,
+                retained_data_objects
+            )
+       END AS failed_state,
+       objects_after < objects_before AS reclaimed
+FROM observations
+ORDER BY format;
 
 \set ECHO none
 DROP TABLE object_v1_ordinary, object_v2_ordinary, object_v3_ordinary,

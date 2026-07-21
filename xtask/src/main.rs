@@ -86,6 +86,8 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg("--exclude")
             .arg("pg-backend-tests")
             .arg("--exclude")
+            .arg(RUNTIME_PACKAGE)
+            .arg("--exclude")
             .arg(EXTENSION_PACKAGE)
             .arg("--exclude")
             .arg(DELTA_AM_PACKAGE)
@@ -108,7 +110,7 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg("pg-backend-tests"),
     )?;
 
-    println!("\n=== Phase 3: pg-iceberg-am Rust tests (host + pg_test) ===\n");
+    println!("\n=== Phase 3: Extension Rust tests (host + pg_test) ===\n");
     run_command(
         Command::new("cargo")
             .arg("pgrx")
@@ -117,6 +119,11 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg("--package")
             .arg(RUNTIME_PACKAGE),
     )?;
+    // `cargo pgrx test` replaces the runtime artifacts in PostgreSQL's shared
+    // extension directory with a build containing `pg_test` SQL entities.
+    // Restore the production artifacts before creating the runtime as a
+    // dependency of another extension's test cluster.
+    install_runtime(pg_version)?;
     run_command(
         Command::new("cargo")
             .arg("pgrx")

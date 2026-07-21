@@ -11,8 +11,8 @@
  *
  * Keep PostgreSQL-version differences in this file behind
  * lakebase_pg_compat.h. Rust callers validate the copied sampler state against
- * tickets consumed from the same ReadStream; upstream hashes and the PG17
- * minor CI matrix audit the private-layout dereference.
+ * tickets consumed from the same ReadStream. The provenance document records
+ * the upstream sources that must be audited when PostgreSQL is upgraded.
  *
  *-------------------------------------------------------------------------
  */

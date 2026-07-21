@@ -21,7 +21,7 @@ use super::target::ObjectTreeTarget;
 const MAX_PRODUCER_BYTES: usize = 128;
 const MAX_SOURCE_NAME_BYTES: usize = 256;
 const MAX_ERROR_BYTES: usize = 2_048;
-const COLUMN_COUNT: usize = 13;
+const COLUMN_COUNT: usize = 14;
 
 mod column {
     pub const ITEM_ID: i16 = 1;
@@ -33,10 +33,11 @@ mod column {
     pub const SOURCE_RELID: i16 = 7;
     pub const SOURCE_NAME: i16 = 8;
     pub const ATTEMPT_COUNT: i16 = 9;
-    pub const NOT_BEFORE: i16 = 10;
-    pub const FAILED: i16 = 11;
-    pub const LAST_ERROR: i16 = 12;
-    pub const CREATED_AT: i16 = 13;
+    pub const REVISION: i16 = 10;
+    pub const NOT_BEFORE: i16 = 11;
+    pub const FAILED: i16 = 12;
+    pub const LAST_ERROR: i16 = 13;
+    pub const CREATED_AT: i16 = 14;
 }
 
 pub struct MaintenanceQueue;
@@ -266,9 +267,12 @@ impl MaintenanceRepository {
     }
 
     pub(crate) fn complete(item: &MaintenanceItem) -> Result<(), MaintenanceError> {
+        // A queue item's physical target is immutable after insertion. A
+        // successful idempotent delete therefore dominates any stale retry or
+        // failure result, regardless of the revision that was dispatched.
         let catalog =
             MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
-        catalog.delete(item.id)
+        catalog.delete_if_exists(item.id)
     }
 
     pub(crate) fn retry(
@@ -277,7 +281,7 @@ impl MaintenanceRepository {
     ) -> Result<(), MaintenanceError> {
         let attempt = item.attempt_count.saturating_add(1);
         if attempt >= gucs::retry_max_attempts() {
-            return Self::fail_with_attempt(item.id, attempt, error);
+            return Self::fail_with_attempt(item, attempt, error);
         }
         let exponent =
             u32::try_from(attempt.saturating_sub(1).clamp(0, 30)).unwrap_or(30);
@@ -285,7 +289,7 @@ impl MaintenanceRepository {
             .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
             .min(gucs::retry_max_ms());
         let error = bounded_error(error);
-        Self::update(item.id, |row| {
+        Self::update_if_current(item, |row| {
             row.attempt_count = attempt;
             row.not_before = timestamp_after(delay_ms);
             row.failed = false;
@@ -297,7 +301,7 @@ impl MaintenanceRepository {
         item: &MaintenanceItem,
         error: &str,
     ) -> Result<(), MaintenanceError> {
-        Self::fail_with_attempt(item.id, item.attempt_count, error)
+        Self::fail_with_attempt(item, item.attempt_count, error)
     }
 
     pub(crate) fn fail_invalid(
@@ -306,22 +310,17 @@ impl MaintenanceRepository {
     ) -> Result<(), MaintenanceError> {
         let catalog =
             MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
-        if catalog.quarantine_invalid(item_id, bounded_error(error))? {
-            Ok(())
-        } else {
-            Err(MaintenanceError::InvalidRecord(format!(
-                "maintenance item {item_id} disappeared"
-            )))
-        }
+        catalog.quarantine_invalid(item_id, bounded_error(error))?;
+        Ok(())
     }
 
     fn fail_with_attempt(
-        item_id: MaintenanceItemId,
+        item: &MaintenanceItem,
         attempt: i32,
         error: &str,
     ) -> Result<(), MaintenanceError> {
         let error = bounded_error(error);
-        Self::update(item_id, |row| {
+        Self::update_if_current(item, |row| {
             row.attempt_count = attempt;
             row.failed = true;
             row.last_error = Some(error);
@@ -336,6 +335,7 @@ impl MaintenanceRepository {
                 return false;
             }
             row.attempt_count = 0;
+            row.revision = row.revision.saturating_add(1);
             row.not_before = current_timestamp();
             row.failed = false;
             row.last_error = None;
@@ -350,22 +350,26 @@ impl MaintenanceRepository {
         Ok(updated)
     }
 
-    fn update(
-        item_id: MaintenanceItemId,
+    fn update_if_current(
+        item: &MaintenanceItem,
         mutate: impl FnOnce(&mut QueueRow),
     ) -> Result<(), MaintenanceError> {
         let catalog =
             MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
-        let Some(updated) = catalog.mutate_row(item_id, |row| {
+        // Missing rows, a newer revision, and optimistic tuple conflicts all
+        // mean another at-least-once consumer has already advanced the same
+        // obligation. They are successful supersession, not persistence loss.
+        let Some(_) = catalog.mutate_row(item.id, |row| {
+            if row.revision != item.revision {
+                return false;
+            }
             mutate(row);
+            row.revision = row.revision.saturating_add(1);
             true
         })?
         else {
-            return Err(MaintenanceError::InvalidRecord(format!(
-                "maintenance item {item_id} disappeared"
-            )));
+            return Ok(());
         };
-        debug_assert!(updated);
         Ok(())
     }
 }
@@ -441,8 +445,7 @@ impl MaintenanceQueueCatalog {
         if !mutate(&mut row) {
             return Ok(Some(false));
         }
-        self.replace_row(old_tuple, &row)?;
-        Ok(Some(true))
+        Ok(Some(self.replace_row(old_tuple, &row)?))
     }
 
     fn quarantine_invalid(
@@ -475,6 +478,7 @@ impl MaintenanceQueueCatalog {
         } {
             Ok(mut row) => {
                 row.attempt_count = 0;
+                row.revision = row.revision.saturating_add(1);
                 row.failed = true;
                 row.last_error = Some(error);
                 row
@@ -484,15 +488,14 @@ impl MaintenanceQueueCatalog {
             // only the independently decoded primary identity and diagnostic.
             Err(_) => QueueRow::quarantined(item_id, error),
         };
-        self.replace_row(old_tuple, &row)?;
-        Ok(true)
+        self.replace_row(old_tuple, &row)
     }
 
     fn replace_row(
         &self,
         old_tuple: HeapTupleRef<'_>,
         row: &QueueRow,
-    ) -> Result<(), MaintenanceError> {
+    ) -> Result<bool, MaintenanceError> {
         let new_tuple = row.encode(self.relation.as_handle().tuple_desc());
         match self
             .relation
@@ -500,14 +503,15 @@ impl MaintenanceQueueCatalog {
             .map_err(|source| {
                 MaintenanceError::catalog(MaintenanceCatalogOperation::Update, source)
             })? {
-            CatalogUpdateResult::Success => Ok(()),
-            CatalogUpdateResult::Conflict => {
-                Err(MaintenanceError::ConcurrentUpdate(row.id))
-            }
+            CatalogUpdateResult::Success => Ok(true),
+            CatalogUpdateResult::Conflict => Ok(false),
         }
     }
 
-    fn delete(&self, item_id: MaintenanceItemId) -> Result<(), MaintenanceError> {
+    fn delete_if_exists(
+        &self,
+        item_id: MaintenanceItemId,
+    ) -> Result<(), MaintenanceError> {
         let mut scan = self
             .relation
             .begin_scan(
@@ -523,13 +527,12 @@ impl MaintenanceQueueCatalog {
             MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
         })?
         else {
-            return Err(MaintenanceError::InvalidRecord(format!(
-                "maintenance item {item_id} disappeared"
-            )));
+            return Ok(());
         };
         self.relation.catalog_delete(tuple).map_err(|source| {
             MaintenanceError::catalog(MaintenanceCatalogOperation::Delete, source)
-        })
+        })?;
+        Ok(())
     }
 }
 
@@ -544,6 +547,7 @@ struct QueueRow {
     source_relid: Option<pg_sys::Oid>,
     source_name: Option<String>,
     attempt_count: i32,
+    revision: i64,
     not_before: pg_sys::TimestampTz,
     failed: bool,
     last_error: Option<String>,
@@ -564,6 +568,7 @@ impl QueueRow {
             source_relid: context.source_relid,
             source_name: context.source_name.map(str::to_owned),
             attempt_count: 0,
+            revision: 0,
             not_before: now,
             failed: false,
             last_error: None,
@@ -589,6 +594,7 @@ impl QueueRow {
             source_relid: None,
             source_name: None,
             attempt_count: 0,
+            revision: 0,
             not_before: now,
             failed: true,
             last_error: Some(error),
@@ -607,6 +613,7 @@ impl QueueRow {
         fields.set(column::SOURCE_RELID, self.source_relid);
         fields.set(column::SOURCE_NAME, self.source_name.as_deref());
         fields.set(column::ATTEMPT_COUNT, Some(self.attempt_count));
+        fields.set(column::REVISION, Some(self.revision));
         fields.set(column::NOT_BEFORE, Some(self.not_before));
         fields.set(column::FAILED, Some(self.failed));
         fields.set(column::LAST_ERROR, self.last_error.as_deref());
@@ -667,6 +674,9 @@ impl QueueRow {
                     "attempt_count",
                 )?
             },
+            revision: unsafe {
+                required_attr(tuple, tuple_desc, column::REVISION, "revision")?
+            },
             not_before: not_before.into_inner(),
             failed: unsafe {
                 required_attr(tuple, tuple_desc, column::FAILED, "failed")?
@@ -682,6 +692,11 @@ impl QueueRow {
         if self.attempt_count < 0 {
             return Err(MaintenanceError::InvalidRecord(
                 "maintenance attempt count is negative".to_owned(),
+            ));
+        }
+        if self.revision < 0 {
+            return Err(MaintenanceError::InvalidRecord(
+                "maintenance revision is negative".to_owned(),
             ));
         }
         if self.producer.is_empty() || self.producer.len() > MAX_PRODUCER_BYTES {
@@ -732,6 +747,7 @@ impl QueueRow {
             id: self.id,
             target,
             attempt_count: self.attempt_count,
+            revision: self.revision,
         })
     }
 }

@@ -1,29 +1,28 @@
 use std::ffi::CStr;
 use std::panic::AssertUnwindSafe;
 
-use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
+use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
 use crate::error::LakebaseError;
 use crate::registry;
-use pg_lakebase_core::extension_worker::{WorkerContext, WorkerExit};
+use pg_lakebase_core::extension_worker::{WorkerContextRaw, WorkerDirective};
 
 use super::CRASH_BACKOFF;
-use super::bgworker::{WorkerToken, install_terminating_sigterm_handler};
+use super::bgworker::WorkerToken;
 use super::store::{RuntimeStore, WorkerStart};
 
 pub(super) struct ExtensionWorker;
 
 impl ExtensionWorker {
     pub(super) fn run(arg: pg_sys::Datum) {
-        BackgroundWorker::attach_signal_handlers(
-            SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM,
-        );
-        install_terminating_sigterm_handler();
         let token = WorkerToken::from_datum(arg);
         // SAFETY: worker_exit_callback has PostgreSQL's before_shmem_exit ABI,
         // and arg is the scalar worker token supplied to this process.
         unsafe { pg_sys::before_shmem_exit(Some(worker_exit_callback), arg) };
+        super::signals::BackgroundWorkerSignals::install_dynamic_worker();
+        #[cfg(feature = "pg_test")]
+        super::test_support::RuntimeTestInjection::before_worker_start();
 
         let store = RuntimeStore::new();
         let Some(start) = store.begin_worker(token) else {
@@ -45,7 +44,15 @@ impl ExtensionWorker {
             Some(pg_sys::Oid::from(database_oid)),
             None,
         );
+        #[cfg(feature = "pg_test")]
+        super::test_support::RuntimeTestInjection::after_running(database_oid);
+        if !store.validate_worker_token(token) {
+            return;
+        }
         let function = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            if !store.validate_worker_token(token) {
+                return Ok::<_, LakebaseError>(None);
+            }
             let Some(registration) =
                 registry::load_one(pg_sys::Oid::from(extension_oid), &worker_name)?
             else {
@@ -94,7 +101,6 @@ impl ExtensionWorker {
                     "Lakebase worker registration disappeared before start: database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}, generation={}",
                     token.generation()
                 ));
-                store.finish_worker(token, WorkerExit::Dormant);
                 return;
             }
             Err(error) => {
@@ -102,7 +108,6 @@ impl ExtensionWorker {
                     "failed to load Lakebase worker entry point: database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}, generation={}, error={error}",
                     token.generation()
                 ));
-                store.finish_worker(token, WorkerExit::Dormant);
                 return;
             }
         };
@@ -112,8 +117,15 @@ impl ExtensionWorker {
             token.generation()
         ));
 
-        let worker_context =
-            WorkerContext::new(database_oid, extension_oid, &worker_name);
+        let worker_context = WorkerContextRaw::new(
+            database_oid,
+            extension_oid,
+            &worker_name,
+            super::signals::BackgroundWorkerSignals::process_config_reload_callback,
+        );
+        if !store.validate_worker_token(token) {
+            return;
+        }
         // SAFETY: FmgrInfo was resolved in the committed validation transaction
         // into TopMemoryContext. The registered signature was revalidated as
         // (internal) RETURNS bigint. FunctionCall1Coll is synchronous, so the
@@ -129,14 +141,16 @@ impl ExtensionWorker {
         // bigint, so result is a valid i64 Datum. FunctionCall1Coll cannot
         // represent a SQL NULL result, hence is_null is false.
         let code = unsafe { i64::from_datum(result, false) }.unwrap_or(0);
-        let directive = WorkerExit::decode(code).unwrap_or_else(|error| {
+        let directive = WorkerDirective::decode(code).unwrap_or_else(|error| {
             crate::diag::warning(format_args!(
                 "Lakebase worker returned an invalid exit directive: database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}, generation={}, error={error}",
                 token.generation()
             ));
-            WorkerExit::RestartAfter(CRASH_BACKOFF)
+            WorkerDirective::RunAfter(CRASH_BACKOFF)
         });
         store.finish_worker(token, directive);
+        #[cfg(feature = "pg_test")]
+        super::test_support::RuntimeTestInjection::after_directive(database_oid);
     }
 }
 

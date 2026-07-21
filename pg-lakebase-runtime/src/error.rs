@@ -65,14 +65,14 @@ pub(crate) enum LakebaseError {
     #[error("cannot PREPARE a transaction with pending Lakebase runtime actions")]
     PreparedTransactionWithRuntimeActions,
 
-    #[error("timed out waiting for Lakebase workers to stop")]
-    StopDatabaseTimeout,
+    #[error("timed out waiting for Lakebase workers to stop: {details}")]
+    StopDatabaseTimeout { details: String },
 
-    #[error("timed out waiting for extension workers to stop")]
-    StopExtensionTimeout,
+    #[error("timed out waiting for extension workers to stop: {details}")]
+    StopExtensionTimeout { details: String },
 
-    #[error("timed out waiting for Lakebase worker to stop")]
-    StopWorkerTimeout,
+    #[error("timed out waiting for Lakebase worker to stop: {details}")]
+    StopWorkerTimeout { details: String },
 
     #[error("worker registration requires superuser")]
     WorkerRegistrationRequiresSuperuser,
@@ -233,9 +233,11 @@ impl SqlStateError for LakebaseError {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
 
-            Self::StopDatabaseTimeout
-            | Self::StopExtensionTimeout
-            | Self::StopWorkerTimeout => PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            Self::StopDatabaseTimeout { .. }
+            | Self::StopExtensionTimeout { .. }
+            | Self::StopWorkerTimeout { .. } => {
+                PgSqlErrorCode::ERRCODE_QUERY_CANCELED
+            }
 
             Self::WorkerRegistrationRequiresSuperuser
             | Self::WorkerDeregistrationRequiresSuperuser => {

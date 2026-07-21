@@ -96,6 +96,7 @@ pub(crate) struct MaintenanceItem {
     pub(crate) id: MaintenanceItemId,
     pub(crate) target: MaintenanceTarget,
     pub(crate) attempt_count: i32,
+    pub(crate) revision: i64,
 }
 
 #[derive(Clone, Debug)]

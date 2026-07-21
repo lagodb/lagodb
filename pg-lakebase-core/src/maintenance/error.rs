@@ -49,9 +49,6 @@ pub enum MaintenanceError {
     #[error("failed to notify maintenance worker: {0}")]
     WorkerNotification(#[source] crate::extension_worker::WorkerNotificationError),
 
-    #[error("maintenance item changed concurrently: {0}")]
-    ConcurrentUpdate(super::item::MaintenanceItemId),
-
     #[error("maintenance producer name must not be empty or exceed 128 bytes")]
     InvalidProducer,
 
@@ -81,9 +78,6 @@ impl SqlStateError for MaintenanceError {
             }
             Self::BatchTooLarge(_) => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
             Self::Catalog { source, .. } => source.sql_error_code(),
-            Self::ConcurrentUpdate(_) => {
-                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-            }
             Self::QueueUnavailable => PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
             Self::InvalidRecord(_) | Self::WorkerNotification(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR

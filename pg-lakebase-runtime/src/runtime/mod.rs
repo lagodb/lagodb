@@ -10,9 +10,15 @@ mod bgworker;
 mod control;
 mod launcher;
 mod locks;
+mod process;
+pub(crate) mod reconcile;
 mod reconciler;
+mod signals;
 mod status;
 mod store;
+mod supervisor;
+#[cfg(feature = "pg_test")]
+mod test_support;
 mod worker;
 
 pub(crate) use locks::DatabaseLifecycleLock;
@@ -20,15 +26,20 @@ pub(crate) use status::{ProcessStatus, WorkerStatus};
 pub(crate) use store::{
     RUNTIME_STATE, RegistrationCompletion, RegistrationReservation,
 };
+#[cfg(feature = "pg_test")]
+pub(crate) use test_support::RuntimeTestInjection;
 
 const LAUNCHER_FUNCTION: &str = "pg_lakebase_runtime_launcher_main";
 pub(super) const RECONCILER_FUNCTION: &str =
     "pg_lakebase_runtime_database_reconciler_main";
 pub(super) const WORKER_FUNCTION: &str = "pg_lakebase_runtime_extension_worker_main";
 pub(super) const LIBRARY_NAME: &str = "pg_lakebase_runtime";
+pub(super) const RECONCILER_TYPE: &str = "pg-lakebase-runtime database reconciler";
+pub(super) const WORKER_TYPE: &str = "pg-lakebase-runtime extension worker";
 pub(super) const CRASH_BACKOFF: Duration = Duration::from_secs(5);
 // Measured from reservation to the runtime entrypoint handshake, not merely
-// fork latency. Keep this generous because worker starts are awaited serially.
+// fork latency. Keep this generous for postmaster scheduling and database
+// connection delays; the launcher polls all retained handles nonblockingly.
 pub(super) const BGWORKER_START_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const CAPACITY_WARNING_INTERVAL: Duration = Duration::from_secs(60);
 

@@ -70,6 +70,7 @@ CREATE EXTENSION pg_lakebase_runtime;
 DO $$
 DECLARE
     observed boolean := false;
+    status_details text;
 BEGIN
     FOR attempt IN 1..200 LOOP
         SELECT EXISTS (
@@ -77,13 +78,23 @@ BEGIN
             WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
               AND extension_name = 'pg_lakebase_runtime'
               AND worker_name = 'maintenance'
-              AND state = 'dormant'
+              AND registration_state = 'registered'
+              AND dispatch_state = 'idle'
+              AND process_state = 'stopped'
         ) INTO observed;
         EXIT WHEN observed;
         PERFORM pg_sleep(0.05);
     END LOOP;
     IF NOT observed THEN
-        RAISE EXCEPTION 'committed registration did not become dormant';
+        SELECT coalesce(jsonb_agg(to_jsonb(status) ORDER BY database_oid,
+                                                        extension_name,
+                                                        worker_name)::text, '[]')
+        INTO status_details
+        FROM lakebase.worker_runtime_status AS status
+        WHERE database_oid = (SELECT oid FROM pg_database
+                              WHERE datname = current_database());
+        RAISE EXCEPTION 'committed registration did not become idle and stopped'
+            USING DETAIL = status_details;
     END IF;
 END
 $$;
@@ -92,17 +103,36 @@ BEGIN;
 DROP EXTENSION pg_lakebase_runtime;
 ROLLBACK;
 DO $$
+DECLARE
+    observed boolean := false;
+    status_details text;
 BEGIN
     FOR attempt IN 1..200 LOOP
-        EXIT WHEN EXISTS (
+        SELECT EXISTS (
             SELECT FROM lakebase.worker_runtime_status
             WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
-              AND worker_name = 'maintenance' AND state = 'dormant'
-        );
+              AND extension_name = 'pg_lakebase_runtime'
+              AND worker_name = 'maintenance'
+              AND registration_state = 'registered'
+              AND dispatch_state = 'idle'
+              AND process_state = 'stopped'
+        ) INTO observed;
+        EXIT WHEN observed;
         PERFORM pg_sleep(0.05);
     END LOOP;
     IF NOT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime') THEN
         RAISE EXCEPTION 'DROP EXTENSION rollback lost the extension';
+    END IF;
+    IF NOT observed THEN
+        SELECT coalesce(jsonb_agg(to_jsonb(status) ORDER BY database_oid,
+                                                        extension_name,
+                                                        worker_name)::text, '[]')
+        INTO status_details
+        FROM lakebase.worker_runtime_status AS status
+        WHERE database_oid = (SELECT oid FROM pg_database
+                              WHERE datname = current_database());
+        RAISE EXCEPTION 'DROP EXTENSION rollback did not reactivate its worker'
+            USING DETAIL = status_details;
     END IF;
 END
 $$;
@@ -210,19 +240,31 @@ SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
 DO \$\$
 DECLARE
     observed boolean := false;
+    status_details text;
 BEGIN
     FOR attempt IN 1..200 LOOP
         SELECT EXISTS (
             SELECT FROM lakebase.worker_runtime_status
             WHERE database_oid = (SELECT oid FROM pg_database
                                     WHERE datname = current_database())
-              AND worker_name = 'maintenance' AND state = 'scheduled'
+              AND extension_name = 'pg_lakebase_runtime'
+              AND worker_name = 'maintenance'
+              AND dispatch_state = 'delayed'
+              AND process_state = 'stopped'
         ) INTO observed;
         EXIT WHEN observed;
         PERFORM pg_sleep(0.05);
     END LOOP;
     IF NOT observed THEN
-        RAISE EXCEPTION 'maintenance worker did not publish its future schedule';
+        SELECT coalesce(jsonb_agg(to_jsonb(status) ORDER BY database_oid,
+                                                        extension_name,
+                                                        worker_name)::text, '[]')
+        INTO status_details
+        FROM lakebase.worker_runtime_status AS status
+        WHERE database_oid = (SELECT oid FROM pg_database
+                              WHERE datname = current_database());
+        RAISE EXCEPTION 'maintenance worker did not publish its future schedule'
+            USING DETAIL = status_details;
     END IF;
 END
 \$\$;
@@ -238,6 +280,8 @@ SET ROLE $test_role;
 SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
 RESET ROLE;
 DO \$\$
+DECLARE
+    status_details text;
 BEGIN
     FOR attempt IN 1..200 LOOP
         EXIT WHEN EXISTS (
@@ -252,7 +296,23 @@ BEGIN
         WHERE item_id = '00000000-0000-0000-0000-000000000003'
           AND failed
     ) THEN
-        RAISE EXCEPTION 'committed wakeup did not advance scheduled worker';
+        SELECT jsonb_build_object(
+            'workers', coalesce((
+                SELECT jsonb_agg(to_jsonb(status) ORDER BY database_oid,
+                                                          extension_name,
+                                                          worker_name)
+                FROM lakebase.worker_runtime_status AS status
+                WHERE database_oid = (SELECT oid FROM pg_database
+                                      WHERE datname = current_database())
+            ), '[]'::jsonb),
+            'queue', coalesce((
+                SELECT jsonb_agg(to_jsonb(item))
+                FROM lakebase.maintenance_status AS item
+            ), '[]'::jsonb)
+        )::text
+        INTO status_details;
+        RAISE EXCEPTION 'committed wakeup did not advance scheduled worker'
+            USING DETAIL = status_details;
     END IF;
 END
 \$\$;
@@ -271,18 +331,31 @@ psql -XAtq -v ON_ERROR_STOP=1 -d "$copy_db" <<'SQL' >/dev/null
 DO $$
 DECLARE
     observed boolean := false;
+    status_details text;
 BEGIN
     FOR attempt IN 1..200 LOOP
         SELECT EXISTS (
             SELECT FROM lakebase.worker_runtime_status
             WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())
-              AND worker_name = 'maintenance' AND state = 'dormant'
+              AND extension_name = 'pg_lakebase_runtime'
+              AND worker_name = 'maintenance'
+              AND registration_state = 'registered'
+              AND dispatch_state = 'idle'
+              AND process_state = 'stopped'
         ) INTO observed;
         EXIT WHEN observed;
         PERFORM pg_sleep(0.05);
     END LOOP;
     IF NOT observed THEN
-        RAISE EXCEPTION 'template database registration was not discovered';
+        SELECT coalesce(jsonb_agg(to_jsonb(status) ORDER BY database_oid,
+                                                        extension_name,
+                                                        worker_name)::text, '[]')
+        INTO status_details
+        FROM lakebase.worker_runtime_status AS status
+        WHERE database_oid = (SELECT oid FROM pg_database
+                              WHERE datname = current_database());
+        RAISE EXCEPTION 'template database registration was not discovered'
+            USING DETAIL = status_details;
     END IF;
 END
 $$;

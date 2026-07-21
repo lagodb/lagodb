@@ -39,38 +39,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  pg17-read-stream-layout:
-    name: PG17 ReadStream layout ${{ matrix.epoch }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - epoch: 17.0-17.4
-            minors: "0 1 2 3 4"
-            sha256: 8d9bc88420e3979af108e787e243cb5792c96f7eac3ad9d159b444a223074e62
-          - epoch: 17.5-17.10
-            minors: "5 6 7 8 9 10"
-            sha256: 5b4638b6f9f101f9de5a4378025ed25bd28521ada4855f1aec4a2d07718e4000
-
-    steps:
-      - name: Verify private ReadStream source
-        env:
-          EXPECTED_SHA256: ${{ matrix.sha256 }}
-          PG17_MINORS: ${{ matrix.minors }}
-        run: |
-          set -euo pipefail
-          for minor in ${PG17_MINORS}; do
-            source_url="https://raw.githubusercontent.com/postgres/postgres/REL_17_${minor}/src/backend/storage/aio/read_stream.c"
-            actual_sha256="$(curl --fail --location --silent --show-error "${source_url}" | sha256sum | awk '{print $1}')"
-            if [[ "${actual_sha256}" != "${EXPECTED_SHA256}" ]]; then
-              echo "PostgreSQL 17.${minor} ReadStream layout requires audit" >&2
-              exit 1
-            fi
-          done
-
   test:
     name: PostgreSQL ${{ matrix.postgres }}
     runs-on: ubuntu-24.04

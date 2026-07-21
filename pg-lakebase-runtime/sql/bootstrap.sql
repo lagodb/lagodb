@@ -30,6 +30,7 @@ CREATE TABLE lakebase.maintenance_queue (
     source_relid oid,
     source_name text,
     attempt_count integer NOT NULL,
+    revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
     not_before timestamptz NOT NULL,
     failed boolean NOT NULL,
     last_error text,
@@ -58,6 +59,7 @@ SELECT item_id,
            ELSE 'ready'
        END AS state,
        attempt_count,
+       revision,
        not_before,
        last_error,
        created_at

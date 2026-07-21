@@ -385,7 +385,8 @@ impl<'a> AnalyzeReadStreamHandle<'a> {
     /// invalid sampler fields. Callers must additionally compare snapshots
     /// before and after consuming the stream so inconsistent sampler semantics
     /// cannot silently change the sample size. The C bridge selects the known
-    /// PG17 minor layout epoch; upstream hashes and CI guard that private ABI.
+    /// PG17 minor layout epoch; its private ABI must be audited when PostgreSQL
+    /// is upgraded.
     #[cfg(feature = "pg17")]
     pub fn analyze_sampler_state(&self) -> Option<AnalyzeSamplerState> {
         let mut raw = RawAnalyzeSamplerState::default();

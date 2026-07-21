@@ -30,9 +30,15 @@ SELECT e.extname AS extension_name,
        s.worker_name,
        s.database_oid,
        s.extension_oid,
-       s.state,
+       s.registration_state,
+       s.dispatch_state,
+       s.process_state,
        s.pid,
-       s.restart_at_ms
+       s.generation,
+       s.not_before_ms,
+       s.stop_requested,
+       s.launcher_epoch,
+       s.recovery_state
 FROM lakebase.worker_runtime_status() AS s
 LEFT JOIN pg_catalog.pg_extension AS e
   ON e.oid = s.extension_oid

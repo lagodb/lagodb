@@ -16,21 +16,22 @@ use super::item::{MaintenanceItem, MaintenanceItemId};
 use super::repository::{MaintenanceRepository, QueuePoll};
 use super::runner::MaintenanceExecutionOutcome;
 use crate::bgworker::BackendLatch;
-use crate::extension_worker::WorkerExit;
+use crate::extension_worker::{WorkerContext, WorkerDirective};
 use crate::storage_service::StorageEndpoint;
 
 const RESULT_PERSISTENCE_RETRY: Duration = Duration::from_secs(5);
 
 /// Drain maintenance work in the worker's already-connected database.
-pub fn run_database_worker() -> WorkerExit {
+pub fn run_database_worker(worker_context: &WorkerContext<'_>) -> WorkerDirective {
+    worker_context.process_config_reload_if_pending();
     if !gucs::enabled() {
-        return WorkerExit::Dormant;
+        return WorkerDirective::Idle;
     }
 
     match current_schedule() {
-        Schedule::Dormant => return WorkerExit::Dormant,
-        Schedule::RestartAfter(delay) => {
-            return WorkerExit::RestartAfter(delay);
+        Schedule::Idle => return WorkerDirective::Idle,
+        Schedule::RunAfter(delay) => {
+            return WorkerDirective::RunAfter(delay);
         }
         Schedule::Ready => {}
     }
@@ -38,11 +39,11 @@ pub fn run_database_worker() -> WorkerExit {
     let mut supervisor = match MaintenanceWorkerSupervisor::from_gucs() {
         Ok(supervisor) => supervisor,
         Err(error) => {
-            return error.worker_exit();
+            return error.worker_directive();
         }
     };
     crate::diag::report_info("database-local maintenance worker started");
-    let directive = supervisor.run_until_idle();
+    let directive = supervisor.run_until_idle(worker_context);
     supervisor.shutdown();
     crate::diag::report_info("database-local maintenance worker stopped");
     directive
@@ -50,8 +51,8 @@ pub fn run_database_worker() -> WorkerExit {
 
 enum Schedule {
     Ready,
-    Dormant,
-    RestartAfter(Duration),
+    Idle,
+    RunAfter(Duration),
 }
 
 fn current_schedule() -> Schedule {
@@ -65,12 +66,12 @@ fn current_schedule() -> Schedule {
             Schedule::Ready
         }
         Ok(QueuePoll::Ready(_)) => next_schedule(),
-        Ok(QueuePoll::Unavailable) => Schedule::Dormant,
+        Ok(QueuePoll::Unavailable) => Schedule::Idle,
         Err(error) => {
             crate::diag::report_warning(format_args!(
                 "failed to inspect maintenance queue: {error}"
             ));
-            Schedule::RestartAfter(Duration::from_secs(5))
+            Schedule::RunAfter(Duration::from_secs(5))
         }
     }
 }
@@ -87,15 +88,15 @@ fn next_schedule() -> Schedule {
             } else {
                 let micros =
                     u64::try_from(timestamp.saturating_sub(now)).unwrap_or(u64::MAX);
-                Schedule::RestartAfter(Duration::from_micros(micros))
+                Schedule::RunAfter(Duration::from_micros(micros))
             }
         }
-        Ok(None) => Schedule::Dormant,
+        Ok(None) => Schedule::Idle,
         Err(error) => {
             crate::diag::report_warning(format_args!(
                 "failed to schedule maintenance queue: {error}"
             ));
-            Schedule::RestartAfter(Duration::from_secs(5))
+            Schedule::RunAfter(Duration::from_secs(5))
         }
     }
 }
@@ -133,25 +134,25 @@ enum MaintenanceWorkerStartupError {
 }
 
 impl MaintenanceWorkerStartupError {
-    fn worker_exit(&self) -> WorkerExit {
+    fn worker_directive(&self) -> WorkerDirective {
         match self {
             Self::StorageDisabled => {
                 crate::diag::report_warning(
                     "database-local maintenance worker skipped: storage server is disabled",
                 );
-                WorkerExit::Dormant
+                WorkerDirective::Idle
             }
             Self::StorageConfig(_) | Self::StorageUnavailable { .. } => {
                 crate::diag::report_warning(format_args!(
                     "database-local maintenance worker waiting for storage: {self}"
                 ));
-                WorkerExit::RestartAfter(Duration::from_secs(5))
+                WorkerDirective::RunAfter(Duration::from_secs(5))
             }
             Self::ActorPool(_) => {
                 crate::diag::report_warning(format_args!(
                     "database-local maintenance worker startup failed: {self}"
                 ));
-                WorkerExit::RestartAfter(Duration::from_secs(5))
+                WorkerDirective::RunAfter(Duration::from_secs(5))
             }
         }
     }
@@ -191,37 +192,39 @@ impl MaintenanceWorkerSupervisor {
         })
     }
 
-    fn run_until_idle(&mut self) -> WorkerExit {
+    fn run_until_idle(
+        &mut self,
+        worker_context: &WorkerContext<'_>,
+    ) -> WorkerDirective {
         loop {
             self.collect_actor_results();
             if self.apply_pending_results() == PersistenceStatus::PersistenceFailed {
-                return WorkerExit::RestartAfter(RESULT_PERSISTENCE_RETRY);
+                return WorkerDirective::RunAfter(RESULT_PERSISTENCE_RETRY);
             }
 
             if self.actors.has_finished_actor() {
                 crate::diag::report_warning("maintenance actor exited unexpectedly");
-                return WorkerExit::RestartAfter(Duration::from_secs(5));
+                return WorkerDirective::RunAfter(Duration::from_secs(5));
             }
 
             if self.dispatch_ready_tasks() == PersistenceStatus::PersistenceFailed {
-                return WorkerExit::RestartAfter(RESULT_PERSISTENCE_RETRY);
+                return WorkerDirective::RunAfter(RESULT_PERSISTENCE_RETRY);
             }
 
             if self.in_flight.is_empty() && self.pending_results.is_empty() {
                 match next_schedule() {
                     Schedule::Ready => continue,
-                    Schedule::Dormant => return WorkerExit::Dormant,
-                    Schedule::RestartAfter(delay) => {
-                        return WorkerExit::RestartAfter(delay);
+                    Schedule::Idle => return WorkerDirective::Idle,
+                    Schedule::RunAfter(delay) => {
+                        return WorkerDirective::RunAfter(delay);
                     }
                 }
             }
 
             if !BackgroundWorker::wait_latch(Some(Duration::from_millis(50))) {
-                return WorkerExit::Dormant;
+                return WorkerDirective::Idle;
             }
-            if BackgroundWorker::sighup_received() {
-                unsafe { process_config_reload() };
+            if worker_context.process_config_reload_if_pending() {
                 self.actors.reload(actor_runtime_config());
             }
         }
@@ -355,13 +358,5 @@ fn actor_runtime_config() -> ActorRuntimeConfig {
     ActorRuntimeConfig {
         page_size: gucs::batch_items(),
         request_timeout: gucs::request_timeout(),
-    }
-}
-
-unsafe fn process_config_reload() {
-    unsafe {
-        (&raw mut pg_sys::ConfigReloadPending)
-            .write_volatile(0 as pg_sys::sig_atomic_t);
-        pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
     }
 }

@@ -193,9 +193,15 @@ mod lakebase {
             name!(database_oid, pg_sys::Oid),
             name!(extension_oid, pg_sys::Oid),
             name!(worker_name, String),
-            name!(state, &'static str),
+            name!(registration_state, &'static str),
+            name!(dispatch_state, &'static str),
+            name!(process_state, &'static str),
             name!(pid, Option<i32>),
-            name!(restart_at_ms, Option<i64>),
+            name!(generation, i64),
+            name!(not_before_ms, Option<i64>),
+            name!(stop_requested, bool),
+            name!(launcher_epoch, i64),
+            name!(recovery_state, &'static str),
         ),
     > {
         ensure_runtime_preloaded();
@@ -204,14 +210,21 @@ mod lakebase {
                 pg_sys::Oid::from(status.database_oid),
                 pg_sys::Oid::from(status.extension_oid),
                 status.worker_name,
-                status.state,
+                status.registration_state,
+                status.dispatch_state,
+                status.process_state,
                 status.pid,
-                status.restart_at_ms,
+                i64::from(status.generation),
+                status.not_before_ms,
+                status.stop_requested,
+                i64::try_from(status.launcher_epoch).unwrap_or(i64::MAX),
+                status.recovery_state,
             )
         }))
     }
 
     #[pg_extern]
+    #[allow(clippy::type_complexity)] // pgrx names each returned SQL column in the Rust tuple.
     fn process_runtime_status() -> TableIterator<
         'static,
         (
@@ -219,6 +232,7 @@ mod lakebase {
             name!(database_oid, Option<pg_sys::Oid>),
             name!(state, &'static str),
             name!(pid, Option<i32>),
+            name!(recovery_backend_count, Option<i64>),
         ),
     > {
         ensure_runtime_preloaded();
@@ -228,6 +242,7 @@ mod lakebase {
                 status.database_oid.map(pg_sys::Oid::from),
                 status.state,
                 status.pid,
+                status.recovery_backend_count.map(i64::from),
             )
         }))
     }
@@ -277,14 +292,15 @@ mod lakebase {
     fn maintenance_worker(worker_context: Internal) -> i64 {
         // SAFETY: this SQL-inaccessible `internal` argument is supplied only
         // by pg_lakebase_runtime_extension_worker_main.
-        unsafe {
+        let worker_context = unsafe {
             pg_lakebase_core::extension_worker::WorkerContext::from_internal(
                 &worker_context,
             )
-        }
-        .map_err(|source| error::LakebaseError::WorkerContext { source })
-        .unwrap_or_else(|error| error.report());
-        pg_lakebase_core::maintenance::run_database_worker().encode()
+        };
+        let worker_context = worker_context
+            .map_err(|source| error::LakebaseError::WorkerContext { source })
+            .unwrap_or_else(|error| error.report());
+        pg_lakebase_core::maintenance::run_database_worker(&worker_context).encode()
     }
 
     #[pg_extern]
@@ -304,11 +320,8 @@ pgrx::extension_sql!(
     requires = [lakebase::observe_object_tree],
 );
 
-#[cfg(test)]
-pub mod pg_test {
-    pub fn setup(_options: Vec<&str>) {}
-
-    pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["shared_preload_libraries = 'pg_lakebase_runtime'"]
-    }
-}
+// `#[pg_test]` host wrappers call `crate::pg_test::{setup,
+// postgresql_conf_options}` under `cfg(test)`. The module gates its actual
+// PostgreSQL-backed tests independently on the `pg_test` feature.
+#[cfg(any(test, feature = "pg_test"))]
+pub mod pg_test;

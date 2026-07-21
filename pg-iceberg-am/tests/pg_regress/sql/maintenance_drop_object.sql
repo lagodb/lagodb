@@ -72,9 +72,11 @@ FROM lakebase.observe_object_tree(
 );
 SELECT count(*) AS relation_gone
 FROM pg_class WHERE relname = 'maintenance_remote_drop';
-SELECT state AS maintenance_worker_state
+SELECT process_state || '/' || dispatch_state AS maintenance_worker_state
 FROM lakebase.worker_runtime_status
-WHERE extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
+WHERE database_oid = (SELECT oid FROM pg_catalog.pg_database
+                      WHERE datname = pg_catalog.current_database())
+  AND extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
 \gset
 \echo maintenance_worker_state: :maintenance_worker_state
 

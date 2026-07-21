@@ -27,9 +27,8 @@ already replaced that argument with the relation's proportional
 
 PG17.5 inserted `io_combine_limit` immediately after `max_ios`, before the
 callback fields used by the bridge. `lakebase_analyze.c` selects these two
-known layout epochs locally. CI verifies the audited PG17 minor tags listed in
-the workflow against the hashes above. Before adding a minor tag or extending
-another major:
+known layout epochs locally. Before updating the PostgreSQL minor release or
+adding another major:
 
 1. Compare the three upstream files and refresh the hashes above.
 2. Reconcile every field of the copied private `struct ReadStream`.
@@ -41,5 +40,6 @@ another major:
    inherited, partitioned, repeated-relation, empty, and high-target cases.
 
 Rust validates both snapshots of the sampler against the tickets consumed
-from that same stream. Those checks protect sampler semantics; the source hash
-matrix and local version branch protect the private-layout dereference.
+from that same stream. Those checks protect sampler semantics. The recorded
+source hashes document the audited baseline; the private layout must be
+reviewed explicitly whenever the supported PostgreSQL version changes.

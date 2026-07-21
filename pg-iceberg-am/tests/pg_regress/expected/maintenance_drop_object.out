@@ -77,12 +77,14 @@ FROM pg_class WHERE relname = 'maintenance_remote_drop';
              0
 (1 row)
 
-SELECT state AS maintenance_worker_state
+SELECT process_state || '/' || dispatch_state AS maintenance_worker_state
 FROM lakebase.worker_runtime_status
-WHERE extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
+WHERE database_oid = (SELECT oid FROM pg_catalog.pg_database
+                      WHERE datname = pg_catalog.current_database())
+  AND extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
 \gset
 \echo maintenance_worker_state: :maintenance_worker_state
-maintenance_worker_state: dormant
+maintenance_worker_state: stopped/idle
 CREATE TABLE maintenance_remote_rollback (id integer)
 USING iceberg TABLESPACE regress_object;
 INSERT INTO maintenance_remote_rollback VALUES (1), (2);

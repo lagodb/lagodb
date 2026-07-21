@@ -4,7 +4,24 @@ use crate::error::{LakebaseError, LakebaseResult};
 use crate::gucs;
 
 use super::bgworker::{check_for_interrupts, interruptible_sleep};
-use super::store::RuntimeStore;
+use super::store::{RuntimeStore, StopTarget};
+
+#[derive(Clone, Copy)]
+enum StopTimeoutKind {
+    Database,
+    Extension,
+    Worker,
+}
+
+impl StopTimeoutKind {
+    fn error(self, details: String) -> LakebaseError {
+        match self {
+            Self::Database => LakebaseError::StopDatabaseTimeout { details },
+            Self::Extension => LakebaseError::StopExtensionTimeout { details },
+            Self::Worker => LakebaseError::StopWorkerTimeout { details },
+        }
+    }
+}
 
 pub(super) struct StopController {
     store: RuntimeStore,
@@ -18,30 +35,13 @@ impl StopController {
     }
 
     pub(super) fn stop_database(&self, database_oid: u32) -> LakebaseResult<()> {
-        let deadline = Instant::now() + gucs::stop_timeout();
-        loop {
-            let pids = self.store.stop_database_step(database_oid)?;
-            for pid in pids {
-                // PostgreSQL 17's pg_signal_backend() likewise validates shared
-                // process state and calls kill(2) directly, explicitly accepting
-                // the same tiny PID-reuse window. ProcSendSignal(ProcNumber) only
-                // sets a latch; postmaster mediation requires a retained
-                // BackgroundWorkerHandle.
-                // Generation fencing protects our slots, not this OS-level race.
-                // SAFETY: libc::kill accepts any pid_t value; this positive PID
-                // was read from a generation-fenced live runtime slot. ESRCH is
-                // harmless because the stop loop observes slot cleanup.
-                unsafe { libc::kill(pid, libc::SIGTERM) };
-            }
-            if !self.store.database_has_running_processes(database_oid) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(LakebaseError::StopDatabaseTimeout);
-            }
-            check_for_interrupts();
-            interruptible_sleep(Duration::from_millis(10));
-        }
+        self.store.request_stop_database(database_oid)?;
+        self.store.signal_launcher();
+        self.wait_until(
+            || self.store.database_is_stopped(database_oid),
+            StopTarget::Database(database_oid),
+            StopTimeoutKind::Database,
+        )
     }
 
     pub(super) fn stop_extension(
@@ -49,35 +49,17 @@ impl StopController {
         database_oid: u32,
         extension_oid: u32,
     ) -> LakebaseResult<()> {
-        let deadline = Instant::now() + gucs::stop_timeout();
-        loop {
-            let pids = self
-                .store
-                .stop_extension_step(database_oid, extension_oid)?;
-            for pid in pids {
-                // PostgreSQL 17's pg_signal_backend() likewise validates shared
-                // process state and calls kill(2) directly, explicitly accepting
-                // the same tiny PID-reuse window. ProcSendSignal(ProcNumber) only
-                // sets a latch; postmaster mediation requires a retained
-                // BackgroundWorkerHandle.
-                // Generation fencing protects our slots, not this OS-level race.
-                // SAFETY: libc::kill accepts any pid_t value; this positive PID
-                // was read from a generation-fenced live worker slot. ESRCH is
-                // harmless because the stop loop observes slot cleanup.
-                unsafe { libc::kill(pid, libc::SIGTERM) };
-            }
-            if !self
-                .store
-                .extension_has_running_workers(database_oid, extension_oid)
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(LakebaseError::StopExtensionTimeout);
-            }
-            check_for_interrupts();
-            interruptible_sleep(Duration::from_millis(10));
-        }
+        self.store
+            .request_stop_extension(database_oid, extension_oid)?;
+        self.store.signal_launcher();
+        self.wait_until(
+            || self.store.extension_is_stopped(database_oid, extension_oid),
+            StopTarget::Extension {
+                database_oid,
+                extension_oid,
+            },
+            StopTimeoutKind::Extension,
+        )
     }
 
     pub(super) fn stop_worker(
@@ -86,27 +68,44 @@ impl StopController {
         extension_oid: u32,
         worker_name: &str,
     ) -> LakebaseResult<()> {
-        let deadline = Instant::now() + gucs::stop_timeout();
-        loop {
-            let Some(pid) = self.store.stop_worker_step(
+        let requested = self.store.request_stop_worker(
+            database_oid,
+            extension_oid,
+            worker_name,
+        )?;
+        if requested {
+            self.store.signal_launcher();
+        }
+        self.wait_until(
+            || {
+                self.store
+                    .worker_is_stopped(database_oid, extension_oid, worker_name)
+            },
+            StopTarget::Worker {
                 database_oid,
                 extension_oid,
                 worker_name,
-            )?
-            else {
+            },
+            StopTimeoutKind::Worker,
+        )
+    }
+
+    fn wait_until(
+        &self,
+        stopped: impl Fn() -> bool,
+        target: StopTarget<'_>,
+        timeout_kind: StopTimeoutKind,
+    ) -> LakebaseResult<()> {
+        // DDL callers may hold the database lifecycle advisory lock. Each
+        // predicate/diagnostic takes the runtime LWLock only for a bounded shared
+        // state read, and no runtime lock is held while sleeping.
+        let deadline = Instant::now() + gucs::stop_timeout();
+        loop {
+            if stopped() {
                 return Ok(());
-            };
-            // PostgreSQL 17's pg_signal_backend() likewise validates shared
-            // process state and calls kill(2) directly, explicitly accepting
-            // the same tiny PID-reuse window. ProcSendSignal(ProcNumber) only
-            // sets a latch; postmaster mediation requires a retained
-            // BackgroundWorkerHandle.
-            // Generation fencing protects our slots, not this OS-level race.
-            // SAFETY: the PID was read from a generation-fenced live worker slot.
-            // ESRCH is harmless because the exit callback will clear the slot.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
+            }
             if Instant::now() >= deadline {
-                return Err(LakebaseError::StopWorkerTimeout);
+                return Err(timeout_kind.error(self.store.stop_diagnostics(target)));
             }
             check_for_interrupts();
             interruptible_sleep(Duration::from_millis(10));

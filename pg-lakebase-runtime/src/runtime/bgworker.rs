@@ -1,14 +1,17 @@
 use std::fmt;
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+use std::rc::Rc;
 use std::time::Duration;
 
-use pgrx::bgworkers::{BackgroundWorkerBuilder, BackgroundWorkerStatus};
+use pgrx::bgworkers::BackgroundWorkerBuilder;
 use pgrx::prelude::*;
 
 use super::LIBRARY_NAME;
 
 const _: () = assert!(usize::BITS >= 64, "worker tokens require a 64-bit Datum");
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PackedSlotToken {
     index: usize,
     generation: u32,
@@ -47,7 +50,7 @@ impl PackedSlotToken {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ReconcilerToken(PackedSlotToken);
 
 impl ReconcilerToken {
@@ -67,12 +70,12 @@ impl ReconcilerToken {
         Self(PackedSlotToken::from_datum(argument))
     }
 
-    fn into_datum(self) -> pg_sys::Datum {
+    pub(super) fn into_datum(self) -> pg_sys::Datum {
         self.0.into_datum()
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct WorkerToken(PackedSlotToken);
 
 impl WorkerToken {
@@ -92,7 +95,7 @@ impl WorkerToken {
         Self(PackedSlotToken::from_datum(argument))
     }
 
-    fn into_datum(self) -> pg_sys::Datum {
+    pub(super) fn into_datum(self) -> pg_sys::Datum {
         self.0.into_datum()
     }
 }
@@ -100,7 +103,6 @@ impl WorkerToken {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum DynamicWorkerStartError {
     Load,
-    Startup(BackgroundWorkerStatus),
 }
 
 impl fmt::Display for DynamicWorkerStartError {
@@ -109,69 +111,127 @@ impl fmt::Display for DynamicWorkerStartError {
             Self::Load => {
                 formatter.write_str("RegisterDynamicBackgroundWorker returned false")
             }
-            Self::Startup(status) => {
-                write!(formatter, "background worker startup status was {status:?}")
-            }
         }
     }
 }
 
-pub(super) struct DynamicWorkerSpawner;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HandleStatus {
+    Started(i32),
+    NotYetStarted,
+    Stopped,
+    PostmasterDied,
+}
 
-impl DynamicWorkerSpawner {
-    pub(super) fn start_reconciler(
+/// Launcher-local ownership of PostgreSQL's opaque background-worker handle.
+///
+/// The handle is deliberately neither `Send` nor `Sync`: PostgreSQL allocates
+/// it in the registering backend and its APIs must be called by that backend.
+pub(super) struct LauncherWorkerHandle {
+    raw: NonNull<pg_sys::BackgroundWorkerHandle>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl LauncherWorkerHandle {
+    pub(super) const fn raw_ptr(&self) -> *mut pg_sys::BackgroundWorkerHandle {
+        self.raw.as_ptr()
+    }
+
+    pub(super) fn register_reconciler(
         function: &str,
         name: &str,
+        worker_type: &str,
         token: ReconcilerToken,
-    ) -> Result<(), DynamicWorkerStartError> {
-        Self::start(function, name, token.into_datum())
+    ) -> Result<Self, DynamicWorkerStartError> {
+        Self::register(function, name, worker_type, token.into_datum())
     }
 
-    pub(super) fn start_worker(
+    pub(super) fn register_worker(
         function: &str,
         name: &str,
+        worker_type: &str,
         token: WorkerToken,
-    ) -> Result<(), DynamicWorkerStartError> {
-        Self::start(function, name, token.into_datum())
+    ) -> Result<Self, DynamicWorkerStartError> {
+        Self::register(function, name, worker_type, token.into_datum())
     }
 
-    fn start(
+    fn register(
         function: &str,
         name: &str,
+        worker_type: &str,
         argument: pg_sys::Datum,
-    ) -> Result<(), DynamicWorkerStartError> {
-        let worker = BackgroundWorkerBuilder::new(name)
-            .set_type(name)
+    ) -> Result<Self, DynamicWorkerStartError> {
+        let builder = BackgroundWorkerBuilder::new(name)
+            .set_type(worker_type)
             .set_library(LIBRARY_NAME)
             .set_function(function)
             .set_argument(Some(argument))
             .set_notify_pid(unsafe { pg_sys::MyProcPid })
             .enable_spi_access()
-            .set_restart_time(None)
-            .load_dynamic()
-            .map_err(|_| DynamicWorkerStartError::Load)?;
-        worker
-            .wait_for_startup()
-            .map(|_| ())
-            .map_err(DynamicWorkerStartError::Startup)
+            .set_restart_time(None);
+        let mut worker: pg_sys::BackgroundWorker = (&builder).into();
+        let mut raw = std::ptr::null_mut();
+        // RegisterDynamicBackgroundWorker pallocs the returned handle in the
+        // current memory context. Registration can happen inside a short-lived
+        // PostgreSQL transaction, while the launcher must retain the handle until
+        // BGWH_STOPPED. Allocate it in TopMemoryContext so the handle remains
+        // valid for the launcher's lifetime.
+        //
+        // SAFETY: worker is fully initialized by pgrx's public conversion. The
+        // registration call does not unwind through Rust for this valid worker,
+        // and the previous context is restored immediately afterwards.
+        let registered = unsafe {
+            let previous = pg_sys::MemoryContextSwitchTo(pg_sys::TopMemoryContext);
+            let registered =
+                pg_sys::RegisterDynamicBackgroundWorker(&mut worker, &mut raw);
+            pg_sys::MemoryContextSwitchTo(previous);
+            registered
+        };
+        if !registered {
+            return Err(DynamicWorkerStartError::Load);
+        }
+        let raw = NonNull::new(raw).ok_or(DynamicWorkerStartError::Load)?;
+        Ok(Self {
+            raw,
+            _not_send: PhantomData,
+        })
+    }
+
+    pub(super) fn status(&self) -> HandleStatus {
+        let mut pid = 0;
+        // SAFETY: raw remains owned by this launcher and is not released until
+        // this method reports BGWH_STOPPED.
+        let status =
+            unsafe { pg_sys::GetBackgroundWorkerPid(self.raw.as_ptr(), &mut pid) };
+        match status {
+            pg_sys::BgwHandleStatus::BGWH_STARTED => HandleStatus::Started(pid),
+            pg_sys::BgwHandleStatus::BGWH_NOT_YET_STARTED => {
+                HandleStatus::NotYetStarted
+            }
+            pg_sys::BgwHandleStatus::BGWH_STOPPED => HandleStatus::Stopped,
+            pg_sys::BgwHandleStatus::BGWH_POSTMASTER_DIED => {
+                HandleStatus::PostmasterDied
+            }
+            _ => HandleStatus::PostmasterDied,
+        }
+    }
+
+    pub(super) fn request_termination(&mut self) {
+        // SAFETY: raw is the live handle returned by PostgreSQL. Termination is
+        // idempotent and is valid before startup, while running, or after stop.
+        unsafe { pg_sys::TerminateBackgroundWorker(self.raw.as_ptr()) };
+    }
+
+    pub(super) fn release_after_stopped(self) {
+        debug_assert_eq!(self.status(), HandleStatus::Stopped);
+        // SAFETY: PostgreSQL documents this handle as palloc'd and releasable
+        // with pfree. The stopped observation is the runtime ownership fence.
+        unsafe { pg_sys::pfree(self.raw.as_ptr().cast()) };
     }
 }
 
 pub(super) fn timestamp_ms() -> i64 {
     unsafe { pg_sys::GetCurrentTimestamp() / 1_000 }
-}
-
-pub(super) fn install_terminating_sigterm_handler() {
-    // SAFETY: called on the dynamic background-worker main thread after pgrx
-    // unblocks signals. PostgreSQL's standard die handler makes lock waits
-    // interruptible and runs registered exit callbacks before process exit.
-    unsafe {
-        pg_sys::pqsignal(pg_sys::SIGTERM as i32, Some(terminating_sigterm));
-    }
-}
-
-unsafe extern "C-unwind" fn terminating_sigterm(signal: i32) {
-    unsafe { pg_sys::die(signal) };
 }
 
 pub(super) fn interruptible_sleep(duration: Duration) {

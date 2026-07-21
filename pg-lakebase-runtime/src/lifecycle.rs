@@ -4,6 +4,7 @@ use pgrx::pg_sys;
 
 use crate::error::LakebaseResult;
 use crate::runtime;
+use crate::state::INVALID_OID;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkerActionKey {
@@ -86,7 +87,7 @@ pub(crate) fn request_database_drop(database_oid: u32) {
 }
 
 pub(crate) fn request_global_reconcile() {
-    push(0, PendingActionKind::RescanAll);
+    push(INVALID_OID, PendingActionKind::RescanAll);
 }
 
 fn push(database_oid: u32, kind: PendingActionKind) {
@@ -176,7 +177,11 @@ impl PendingActions {
                         parent_level,
                         PendingActionKind::ReconcileDatabase,
                     );
-                    self.record(0, parent_level, PendingActionKind::RescanAll);
+                    self.record(
+                        INVALID_OID,
+                        parent_level,
+                        PendingActionKind::RescanAll,
+                    );
                 }
                 PendingActionKind::Wake(_) => {}
             }

@@ -21,16 +21,13 @@ while :; do
 SELECT NOT EXISTS (
     SELECT 1
     FROM lakebase.maintenance_queue
-    WHERE operation = 2
-      AND store_id = :'store_id'
+    WHERE store_id = :'store_id'
       AND object_namespace = :'namespace'
-      AND object_path = :'object_path'
-) AND EXISTS (
-    SELECT 1
-    FROM lakebase.worker_runtime_status
-    WHERE extension_name = 'pg_lakebase_runtime'
-      AND worker_name = 'maintenance'
-      AND state = 'dormant'
+      AND (
+          (operation = 1
+           AND left(object_path, length(:'object_path')) = :'object_path')
+          OR (operation = 2 AND object_path = :'object_path')
+      )
 );
 SQL
     ); then
@@ -48,12 +45,59 @@ SQL
             --set=store_id="$store_id" \
             --set=namespace="$namespace" \
             --set=object_path="$object_path" >&2 <<'SQL' || true
-SELECT item_id, state, attempt_count, last_error
+SELECT item_id,
+       operation,
+       object_path,
+       producer,
+       source_relid,
+       state,
+       attempt_count,
+       revision,
+       not_before,
+       last_error
 FROM lakebase.maintenance_status
-WHERE operation = 'delete_tree'
-  AND store_id = :'store_id'
+WHERE store_id = :'store_id'
   AND object_namespace = :'namespace'
-  AND object_path = :'object_path';
+  AND (
+      (operation = 'delete_object'
+       AND left(object_path, length(:'object_path')) = :'object_path')
+      OR (operation = 'delete_tree' AND object_path = :'object_path')
+  )
+ORDER BY created_at, item_id;
+
+SELECT extension_name,
+       worker_name,
+       registration_state,
+       dispatch_state,
+       process_state,
+       pid,
+       generation,
+       not_before_ms,
+       stop_requested,
+       recovery_state
+FROM lakebase.worker_runtime_status
+WHERE database_oid = (
+    SELECT oid
+    FROM pg_catalog.pg_database
+    WHERE datname = pg_catalog.current_database()
+)
+  AND extension_name = 'pg_lakebase_runtime'
+  AND worker_name = 'maintenance';
+
+SELECT process_kind,
+       database_oid,
+       state,
+       pid,
+       recovery_backend_count
+FROM lakebase.process_runtime_status
+WHERE process_kind IN ('launcher', 'database_reconciler')
+  AND (database_oid IS NULL
+       OR database_oid = (
+           SELECT oid
+           FROM pg_catalog.pg_database
+           WHERE datname = pg_catalog.current_database()
+       ))
+ORDER BY process_kind;
 SQL
         echo "maintenance_complete: false" >&2
         if [ -n "$last_error" ]; then
