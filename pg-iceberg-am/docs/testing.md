@@ -229,6 +229,51 @@ CREATE SCHEMA IF NOT EXISTS tests;
 That gives the manually placed `#[pg_test(schema = "tests")]` functions a
 valid PostgreSQL schema.
 
+## Native PostgreSQL Injection Points
+
+Tests of PostgreSQL `ERROR`, transaction abort, and background-worker crash
+paths use PostgreSQL 17's native injection-point facility. Prepare the pgrx
+server with:
+
+```bash
+cargo pgrx init --pg17=download \
+  --configure-flag=--enable-injection-points
+```
+
+The complete suite should be run through:
+
+```bash
+cargo xtask test-all pg17
+```
+
+Before running tests, `xtask` verifies `USE_INJECTION_POINTS` in the target
+server's `pg_config.h` and builds/installs PostgreSQL's upstream
+`src/test/modules/injection_points` extension with PGXS. Product extensions do
+not ship an attach/detach control plane.
+
+PostgreSQL 17 attachments are cluster-wide. `injection_points_set_local()` is
+used when the backend that attaches the callback also executes the tested
+operation: it restricts execution to that backend's PID and automatically
+detaches locally tracked points when the backend exits. It is not suitable for
+a callback that must run in another backend or dynamic worker. Native fault
+tests therefore follow these rules:
+
+- use a subsystem-specific, lower-case dash-separated point name;
+- for same-backend SQL faults, call `injection_points_set_local()` before
+  attaching and execute the tested operation in that same session;
+- for cross-process faults, attach immediately before triggering one controlled
+  operation and detach before making assertions that may stop the remainder of
+  the test;
+- add best-effort teardown to an existing fixture when a helper process owns a
+  cross-process attachment;
+- place call sites at statement/process lifecycle boundaries, never per row or
+  per storage write.
+
+The SQL regression files are passed to `pg_regress` as positional tests and run
+serially. Existing `pg_test`-only runtime barriers remain appropriate for
+fine-grained state-machine races; native injection points complement rather
+than replace them.
+
 ## Root Cause in `access::conversion`
 
 The failure was traced to Row-to-Arrow tests that called:

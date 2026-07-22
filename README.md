@@ -128,6 +128,25 @@ cargo pgrx init --pg17=/path/to/pg_config
 cargo pgrx init --pg17=download
 ```
 
+Standard PostgreSQL builds are sufficient for production builds: Lakebase
+injection-point call sites compile to no-ops when `USE_INJECTION_POINTS` is not
+enabled. The complete development test suite intentionally exercises native
+PostgreSQL fault injection and therefore requires a pgrx-managed source build:
+
+```bash
+cargo pgrx init --pg17=download \
+  --configure-flag=--enable-injection-points
+```
+
+If pg17 is already registered without this flag, rerun the command to rebuild
+it. `cargo xtask test-all pg17` verifies the generated `pg_config.h` and
+installs PostgreSQL's own `src/test/modules/injection_points` extension from
+the downloaded source tree. It fails with an actionable error instead of
+silently running fault-injection tests against no-op call sites. The core build
+tracks the selected pgrx configuration, `pg_config`, and server configuration
+header, so changing the registered PostgreSQL target causes its native
+capabilities to be re-evaluated without requiring `cargo clean`.
+
 ## Build
 
 Build the runtime and Iceberg extension crates:
@@ -187,6 +206,12 @@ cargo xtask test-all pg17
 This runs unit tests, pgrx tests, SQL regression, isolation tests, and
 storage E2E tests. Docker must be available because pg_regress provisions a
 MinIO fixture for object-storage coverage.
+
+The full suite also requires the injection-enabled pgrx PostgreSQL build shown
+in [Setup](#setup). Native injection attachments are cluster-wide in
+PostgreSQL 17. Same-backend SQL fault tests use the upstream extension's
+PID-local mode and automatic backend-exit cleanup. Cross-process worker tests
+run serially, detach explicitly, and retain best-effort teardown.
 
 Regression SQL lives in [pg-iceberg-am/tests/pg_regress/sql](./pg-iceberg-am/tests/pg_regress/sql),
 isolation specs in [pg-iceberg-am/tests/isolation/specs](./pg-iceberg-am/tests/isolation/specs),

@@ -8,6 +8,7 @@ use crate::error::{LakebaseError, LakebaseResult};
 
 mod bgworker;
 mod control;
+mod injection_points;
 mod launcher;
 mod locks;
 mod process;

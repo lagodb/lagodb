@@ -17,7 +17,7 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
-  PGRX_POSTGRES_CACHE_VERSION: "v2"
+  PGRX_POSTGRES_CACHE_VERSION: "v3-injection-points"
   PGRX_VERSION: "0.18.1"
   RUST_BACKTRACE: "1"
 
@@ -123,12 +123,15 @@ jobs:
         run: |
           set -euo pipefail
           if ! cargo pgrx info pg-config "pg${PG_VERSION}" >/dev/null 2>&1; then
-            cargo pgrx init "--pg${PG_VERSION}=download"
+            cargo pgrx init "--pg${PG_VERSION}=download" \
+              --configure-flag=--enable-injection-points
           fi
           PG_CONFIG="$(cargo pgrx info pg-config "pg${PG_VERSION}")"
           echo "PG_CONFIG=${PG_CONFIG}" >> "${GITHUB_ENV}"
           echo "$(dirname "${PG_CONFIG}")" >> "${GITHUB_PATH}"
           cargo pgrx info pg-config "pg${PG_VERSION}"
+          grep -Fx '#define USE_INJECTION_POINTS 1' \
+            "$("${PG_CONFIG}" --includedir-server)/pg_config.h"
           test -x "$("${PG_CONFIG}" --pkglibdir)/pgxs/src/test/isolation/pg_isolation_regress"
 
       - name: Run clippy

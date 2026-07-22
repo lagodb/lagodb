@@ -574,13 +574,6 @@ impl Write for PgFileWrite {
         // recovery skips WRITE_FILE redo and relies on close-time FileSync.
         if self.needs_wal && bytes_written > 0 {
             log_write_file(&self.path, write_position, &buf[..bytes_written]);
-
-            // Injection point for WAL/recovery testing.
-            if crate::gucs::injection_point_matches("panic_after_wal_write") {
-                return Err(io::Error::other(
-                    "iceberg: injection point panic_after_wal_write triggered",
-                ));
-            }
         }
 
         Ok(bytes_written)

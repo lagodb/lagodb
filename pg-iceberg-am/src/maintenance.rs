@@ -1,5 +1,6 @@
 mod cleanup;
 mod commit_attempt;
+mod injection_points;
 mod notification;
 mod planner;
 mod provider;

@@ -2,6 +2,7 @@
 -- artifacts, and permit a later VACUUM to succeed.
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
+CREATE EXTENSION injection_points;
 \setenv PGDATABASE :DBNAME
 
 CREATE TABLE vacuum_failure_recovery_t (id integer, payload text)
@@ -25,7 +26,7 @@ SELECT count(*) AS objects_before_failure
 FROM pg_ls_dir(:'failure_root', true, false)
 \gset
 
-\! psql -XAtq -v ON_ERROR_STOP=1 -c "SET pg_iceberg_am.injection_point = 'panic_after_wal_write'" -c "VACUUM vacuum_failure_recovery_t" >/dev/null 2>&1; test $? -ne 0 && echo "injected_vacuum_failed: true"
+\! output="$(psql -XAtq -v ON_ERROR_STOP=1 -c "SELECT injection_points_set_local()" -c "SELECT injection_points_attach('lakebase-iceberg-vacuum-after-rewrite', 'error')" -c "VACUUM vacuum_failure_recovery_t" 2>&1)"; status=$?; if test "$status" -ne 0 && printf '%s\n' "$output" | grep -Fq 'error triggered for injection point lakebase-iceberg-vacuum-after-rewrite'; then echo "injected_vacuum_failed: true"; else echo "injected_vacuum_failed: false"; fi
 
 SELECT count(*) = :rows_before::bigint AS rows_preserved_after_failure,
        md5(string_agg(id::text || ':' || payload, ',' ORDER BY id))
@@ -47,3 +48,4 @@ FROM lakebase.table_maintenance_stats('vacuum_failure_recovery_t');
 
 DROP TABLE vacuum_failure_recovery_t;
 DROP EXTENSION pg_iceberg_am CASCADE;
+DROP EXTENSION injection_points;

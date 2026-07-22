@@ -78,6 +78,9 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     let pg_ver_str = pg_version.to_string_lossy();
     let pg_feature = pg_feature(pg_version)?;
 
+    println!("=== Phase 0: PostgreSQL test capabilities ===\n");
+    prepare_injection_points(pg_version)?;
+
     println!("=== Phase 1: Workspace unit tests (non-pgrx extension crates) ===\n");
     run_command(
         Command::new("cargo")
@@ -171,6 +174,62 @@ fn pg_major(pg_version: &OsStr) -> Result<String, String> {
             "unsupported PostgreSQL version '{value}'; expected pg16 or pg17"
         )),
     }
+}
+
+fn prepare_injection_points(pg_version: &OsStr) -> Result<(), String> {
+    if pg_major(pg_version)? != "17" {
+        return Ok(());
+    }
+
+    let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
+    let server_include = pg_config_value(&pg_config, "--includedir-server")?;
+    let config_header = server_include.join("pg_config.h");
+    let config = fs::read_to_string(&config_header).map_err(|error| {
+        format!(
+            "failed to read PostgreSQL configuration {}: {error}",
+            config_header.display()
+        )
+    })?;
+    if !config
+        .lines()
+        .any(|line| line.trim() == "#define USE_INJECTION_POINTS 1")
+    {
+        return Err(format!(
+            "PostgreSQL 17 at {} was built without injection-point support.\n\
+             Rebuild the pgrx-managed server with:\n  \
+             cargo pgrx init --pg17=download --configure-flag=--enable-injection-points",
+            pg_config.display()
+        ));
+    }
+
+    let install_root = cargo_pgrx_info(pg_version, "path")?;
+    let source_root = install_root.parent().ok_or_else(|| {
+        format!(
+            "pgrx PostgreSQL install path has no source-tree parent: {}",
+            install_root.display()
+        )
+    })?;
+    let module_dir = source_root.join("src/test/modules/injection_points");
+    if !module_dir.join("Makefile").is_file() {
+        return Err(format!(
+            "PostgreSQL injection-points test module not found at {}.\n\
+             Register a pgrx-managed PostgreSQL source build with --pg17=download.",
+            module_dir.display()
+        ));
+    }
+
+    println!(
+        "Installing PostgreSQL injection_points test extension from {}",
+        module_dir.display()
+    );
+    run_command(
+        Command::new("make")
+            .arg("-C")
+            .arg(module_dir)
+            .arg("USE_PGXS=1")
+            .arg(format!("PG_CONFIG={}", pg_config.display()))
+            .arg("install"),
+    )
 }
 
 // ============================================================================

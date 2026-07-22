@@ -121,7 +121,8 @@ method. The Iceberg control file also declares the runtime dependency.
 
 See [docs/testing.md](docs/testing.md) for the pgrx testing model used by
 this crate, including when to use ordinary `#[test]` versus
-`#[pgrx::pg_test]`.
+`#[pgrx::pg_test]`, and how native PostgreSQL injection-point tests are built
+and scoped.
 
 ## Usage
 

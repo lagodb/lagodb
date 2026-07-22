@@ -88,6 +88,9 @@ pub mod catalog;
 /// PostgreSQL bgworker/backend process primitives.
 pub mod bgworker;
 
+/// Typed PostgreSQL injection points with version-compatible no-op fallback.
+pub mod injection_point;
+
 /// Database-local extension worker protocol.
 pub mod extension_worker;
 

@@ -103,8 +103,34 @@ owner-lifetime resources and ERROR paths, and transaction/subtransaction
 callbacks for transaction-scoped publication.
 
 **Supporting infrastructure.** PostgreSQL hook helpers, error reporting and
-diagnostics, background-worker scaffolding, and the registration support that
-builds and installs a `TableAmRoutine`.
+diagnostics, background-worker scaffolding, typed native injection-point call
+sites, and the registration support that builds and installs a
+`TableAmRoutine`.
+
+## Injection Points
+
+`injection_point::InjectionPoint` represents a statically named PostgreSQL
+injection point without allocating at the Rust call site. Concrete subsystems
+own their points as associated constants on a subsystem namespace type; core
+does not maintain a central catalog of product-specific names.
+
+PostgreSQL 17 points execute only when the target server was configured with
+`--enable-injection-points`. PostgreSQL 16 and standard PostgreSQL 17 builds
+compile `InjectionPoint::run` to an inline no-op. On an enabled build,
+PostgreSQL may allocate while loading or caching an attached callback, so call
+sites belong at coarse transaction or process lifecycle boundaries—not in
+per-row, per-tuple, or per-write paths. Calls must run on a PostgreSQL backend
+or background-worker main thread because the pgrx error boundary uses
+PostgreSQL's exception stack.
+
+The C compatibility adapter records PostgreSQL 18's two-argument injection
+point ABI, but this does not enable PG18 framework support. There is no `pg18`
+Cargo feature, and the shared compatibility gate continues to reject PG18
+until every Lakebase C fork has been ported and tested for that major line.
+
+Lakebase deliberately does not expose a production attach/detach API. Tests
+install and use PostgreSQL's upstream `injection_points` test extension; see
+the workspace [testing instructions](../README.md#testing).
 
 Internal PostgreSQL wrapper modules are intentionally not public API.
 
@@ -295,8 +321,13 @@ tests are aggregated in one crate and how to add new modules.
 Initialize pgrx with the target PostgreSQL installation:
 
 ```bash
-cargo pgrx init --pg17=/path/to/pg_config
+cargo pgrx init --pg17=download \
+  --configure-flag=--enable-injection-points
 ```
+
+The flag is required by the workspace's native fault-injection tests.
+`cargo xtask test-all pg17` validates the capability and installs the upstream
+PostgreSQL test extension used to attach callbacks.
 
 ## Building
 

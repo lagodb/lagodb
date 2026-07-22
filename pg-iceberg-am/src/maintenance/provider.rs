@@ -226,6 +226,10 @@ impl IcebergTableMaintenanceProvider {
                 output_files.extend(outputs);
             }
         }
+        if !output_files.is_empty() {
+            super::injection_points::IcebergInjectionPoints::VACUUM_AFTER_REWRITE
+                .run();
+        }
         record_metric(&mut report, c"rewritten_rows", rewritten_rows)?;
         record_metric(
             &mut report,

@@ -7,6 +7,9 @@ copy_db=lakebase_runtime_copy
 test_role=lakebase_runtime_non_superuser
 
 cleanup() {
+    psql -XAtq -v ON_ERROR_STOP=0 -d "$source_db" \
+        -c "SELECT injection_points_detach('lakebase-runtime-worker-after-database-connection')" \
+        >/dev/null 2>&1 || true
     psql -XAtq -v ON_ERROR_STOP=0 -d "$database" <<SQL >/dev/null 2>&1 || true
 DROP DATABASE IF EXISTS $copy_db WITH (FORCE);
 DROP DATABASE IF EXISTS $source_db WITH (FORCE);
@@ -98,6 +101,98 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Exercise the production PostgreSQL injection-point path: an ERROR after the
+-- worker's database connection must be recorded as a crash, enter backoff,
+-- and recover after the cluster-wide attachment is detached.
+CREATE EXTENSION injection_points;
+CREATE TEMP TABLE native_injection_generation AS
+SELECT generation
+FROM lakebase.worker_runtime_status
+WHERE database_oid = (SELECT oid FROM pg_database
+                      WHERE datname = current_database())
+  AND extension_name = 'pg_lakebase_runtime'
+  AND worker_name = 'maintenance';
+SELECT injection_points_attach(
+    'lakebase-runtime-worker-after-database-connection',
+    'error'
+);
+SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+DO $$
+DECLARE
+    observed boolean := false;
+    status_details text;
+BEGIN
+    FOR attempt IN 1..200 LOOP
+        SELECT EXISTS (
+            SELECT FROM lakebase.worker_runtime_status AS status
+            CROSS JOIN native_injection_generation AS previous
+            WHERE status.database_oid = (SELECT oid FROM pg_database
+                                          WHERE datname = current_database())
+              AND status.extension_name = 'pg_lakebase_runtime'
+              AND status.worker_name = 'maintenance'
+              AND status.generation > previous.generation
+              AND status.dispatch_state = 'delayed'
+              AND status.process_state = 'stopped'
+              AND status.not_before_ms IS NOT NULL
+        ) INTO observed;
+        EXIT WHEN observed;
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    IF NOT observed THEN
+        SELECT coalesce(jsonb_agg(to_jsonb(status))::text, '[]')
+        INTO status_details
+        FROM lakebase.worker_runtime_status AS status
+        WHERE status.database_oid = (SELECT oid FROM pg_database
+                                      WHERE datname = current_database());
+        RAISE EXCEPTION 'native worker injection did not enter crash backoff'
+            USING DETAIL = status_details;
+    END IF;
+END
+$$;
+SELECT injection_points_detach(
+    'lakebase-runtime-worker-after-database-connection'
+);
+UPDATE native_injection_generation
+SET generation = status.generation
+FROM lakebase.worker_runtime_status AS status
+WHERE status.database_oid = (SELECT oid FROM pg_database
+                             WHERE datname = current_database())
+  AND status.extension_name = 'pg_lakebase_runtime'
+  AND status.worker_name = 'maintenance';
+SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+DO $$
+DECLARE
+    observed boolean := false;
+    status_details text;
+BEGIN
+    FOR attempt IN 1..200 LOOP
+        SELECT EXISTS (
+            SELECT FROM lakebase.worker_runtime_status AS status
+            CROSS JOIN native_injection_generation AS previous
+            WHERE status.database_oid = (SELECT oid FROM pg_database
+                                          WHERE datname = current_database())
+              AND status.extension_name = 'pg_lakebase_runtime'
+              AND status.worker_name = 'maintenance'
+              AND status.generation > previous.generation
+              AND status.dispatch_state = 'idle'
+              AND status.process_state = 'stopped'
+        ) INTO observed;
+        EXIT WHEN observed;
+        PERFORM pg_sleep(0.05);
+    END LOOP;
+    IF NOT observed THEN
+        SELECT coalesce(jsonb_agg(to_jsonb(status))::text, '[]')
+        INTO status_details
+        FROM lakebase.worker_runtime_status AS status
+        WHERE status.database_oid = (SELECT oid FROM pg_database
+                                      WHERE datname = current_database());
+        RAISE EXCEPTION 'worker did not recover after native injection detach'
+            USING DETAIL = status_details;
+    END IF;
+END
+$$;
+DROP EXTENSION injection_points;
 
 BEGIN;
 DROP EXTENSION pg_lakebase_runtime;

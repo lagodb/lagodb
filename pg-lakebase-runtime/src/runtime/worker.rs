@@ -44,6 +44,8 @@ impl ExtensionWorker {
             Some(pg_sys::Oid::from(database_oid)),
             None,
         );
+        super::injection_points::RuntimeInjectionPoints::WORKER_AFTER_DATABASE_CONNECTION
+            .run();
         #[cfg(feature = "pg_test")]
         super::test_support::RuntimeTestInjection::after_running(database_oid);
         if !store.validate_worker_token(token) {

@@ -19,10 +19,6 @@ static AUTO_MAINTENANCE_MAX_TABLES: GucSetting<i32> = GucSetting::<i32>::new(32)
 /// Rows within the selected files are sampled using manifest record counts.
 static ANALYZE_MAX_DATA_FILES: GucSetting<i32> = GucSetting::<i32>::new(32);
 
-/// Injection point for testing purposes.
-static INJECTION_POINT: GucSetting<Option<std::ffi::CString>> =
-    GucSetting::<Option<std::ffi::CString>>::new(None);
-
 /// Floor on the estimated fraction of a relation that the CustomScan cost
 /// model assumes will be scanned (see `customscan::provider::create_path`).
 ///
@@ -148,15 +144,6 @@ pub fn init() {
         GucFlags::default(),
     );
 
-    GucRegistry::define_string_guc(
-        c"pg_iceberg_am.injection_point",
-        c"Injection point for testing purposes",
-        c"Allows triggering specific failures or panics at predefined points in the code.",
-        &INJECTION_POINT,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-
     GucRegistry::define_float_guc(
         c"pg_iceberg_am.customscan_min_scan_fraction",
         c"Floor on the estimated scanned fraction used by the CustomScan cost model",
@@ -217,18 +204,6 @@ pub fn max_commit_retries() -> i32 {
 pub fn mutation_buffer_flush_bytes() -> usize {
     let mb = MUTATION_BUFFER_FLUSH_MB.get().max(1) as usize;
     mb * 1024 * 1024
-}
-
-pub fn injection_point() -> Option<String> {
-    INJECTION_POINT
-        .get()
-        .map(|s| s.to_string_lossy().to_string())
-}
-
-pub fn injection_point_matches(name: &str) -> bool {
-    INJECTION_POINT
-        .get()
-        .is_some_and(|s| s.as_c_str().to_bytes() == name.as_bytes())
 }
 
 /// Clamp a raw costed-pruning selectivity into the scanned fraction used by
