@@ -113,9 +113,8 @@ impl Drop for MetadataAttempt {
 
 /// Register a local data file for abort cleanup.
 pub(crate) fn register_local_file_created(path: PathBuf) {
-    StorageTransactionResource::current().track(StorageResource::CreatedLocalFile {
-        path,
-    });
+    StorageTransactionResource::current()
+        .track(StorageResource::CreatedLocalFile { path });
 }
 
 /// Delete transaction-created files that the final metadata commit does not
@@ -135,10 +134,8 @@ pub(crate) fn register_canceled_files_for_commit(
 
 /// Register a newly-created table directory for abort cleanup.
 pub(crate) fn register_table_dir_created(location: String, file_io: FileIO) {
-    StorageTransactionResource::current().track(StorageResource::CreatedTableDir {
-        location,
-        file_io,
-    });
+    StorageTransactionResource::current()
+        .track(StorageResource::CreatedTableDir { location, file_io });
 }
 
 /// Register a local table root to be removed on commit (DROP TABLE).
@@ -161,9 +158,8 @@ pub(crate) fn register_local_table_root_dropped(
             "remote storage passed to local table-root cleanup",
         ));
     }
-    StorageTransactionResource::current().track(
-        StorageResource::DroppedLocalTableRoot { location, file_io },
-    );
+    StorageTransactionResource::current()
+        .track(StorageResource::DroppedLocalTableRoot { location, file_io });
     Ok(())
 }
 

@@ -149,7 +149,9 @@ impl StorageResource {
                         location.key(),
                     ) {
                         Ok(()) => true,
-                        Err(error) if error.kind() == StorageErrorKind::NotFound => true,
+                        Err(error) if error.kind() == StorageErrorKind::NotFound => {
+                            true
+                        }
                         Err(error) => {
                             pg_lakebase_core::diag::report_warning(format_args!(
                                 "failed to delete uploaded object '{}': {}",

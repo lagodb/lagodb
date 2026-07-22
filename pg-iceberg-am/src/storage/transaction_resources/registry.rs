@@ -300,7 +300,7 @@ impl StorageTransactionResource {
                 nest_level: Cell::new(TOP_LEVEL_NEST_LEVEL),
             });
             transaction::register_resource(
-                Rc::clone(&resource) as Rc<dyn TransactionResource>,
+                Rc::clone(&resource) as Rc<dyn TransactionResource>
             );
             *slot = Some(Rc::clone(&resource));
             resource

@@ -1,6 +1,11 @@
 //! Runtime [`IcebergPredicateTranslator`] (PG expr → iceberg [`Predicate`]).
 //!
-//! It owns scalar decoding and predicate-tree assembly.
+//! It owns the scalar model and predicate-tree assembly, while the contained
+//! Datum module isolates PostgreSQL's unsafe scalar decoding boundary.
+
+mod datum;
+
+pub(crate) use datum::decode_datum;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,11 +19,9 @@ use pg_lakebase_core::expr::nodes::{
     PgColumnRef, PgComparisonOp, PgLiteral, PgParamValue,
 };
 use pg_lakebase_core::expr::translator::PgPredicateTranslator;
-use pgrx::prelude::{Date, Timestamp, TimestampWithTimeZone};
-use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
+use pgrx::pg_sys;
 
 use super::policy::{ComparisonOpClass, PredicatePushdownPolicy};
-use pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 
 // =============================================================================
 // Scalar leaf model
@@ -158,133 +161,6 @@ pub enum IcebergTranslationError {
 }
 
 // =============================================================================
-// Datum decoding
-//
-// Decode a non-null PG `Datum` (literal/param value) into an iceberg `Datum`.
-// This is the `unsafe` PG-FFI surface of the translator: each arm trusts that
-// `type_oid` accurately describes the value behind `datum`. Temporal arms reuse
-// the shared PG→Unix epoch offsets so pushed bounds match the storage write
-// side (`pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros}`).
-// =============================================================================
-
-/// Decode a non-null PG `Datum` into an iceberg [`Datum`].
-///
-/// Supports integers, date/timestamp types, and text/varchar. Collation
-/// admissibility is enforced in
-/// [`IcebergPredicateTranslator::comparison`].
-///
-/// # Safety
-///
-/// `type_oid` must accurately describe the PG type the `datum` represents.
-pub(crate) unsafe fn decode_datum(
-    type_oid: pg_sys::Oid,
-    datum: pg_sys::Datum,
-) -> Result<Datum, IcebergTranslationError> {
-    let pg_oid = PgOid::from(type_oid);
-    let result = match pg_oid {
-        PgOid::BuiltIn(PgBuiltInOids::INT2OID) => {
-            unsafe { i16::from_datum(datum, false) }
-                .map(|v| Datum::int(v as i32))
-                .ok_or(IcebergTranslationError::DatumDecode { type_oid })?
-        }
-        PgOid::BuiltIn(PgBuiltInOids::INT4OID) => {
-            unsafe { i32::from_datum(datum, false) }
-                .map(Datum::int)
-                .ok_or(IcebergTranslationError::DatumDecode { type_oid })?
-        }
-        PgOid::BuiltIn(PgBuiltInOids::INT8OID) => {
-            unsafe { i64::from_datum(datum, false) }
-                .map(Datum::long)
-                .ok_or(IcebergTranslationError::DatumDecode { type_oid })?
-        }
-        PgOid::BuiltIn(PgBuiltInOids::DATEOID) => {
-            unsafe { decode_date(type_oid, datum) }?
-        }
-        PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => {
-            unsafe { decode_timestamp(type_oid, datum) }?
-        }
-        PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
-            unsafe { decode_timestamptz(type_oid, datum) }?
-        }
-        PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
-            unsafe { String::from_datum(datum, false) }
-                .map(Datum::string)
-                .ok_or(IcebergTranslationError::DatumDecode { type_oid })?
-        }
-        _ => {
-            return Err(IcebergTranslationError::UnsupportedType { type_oid });
-        }
-    };
-    Ok(result)
-}
-
-/// Decode PG `date` using shared PG→Unix day offset.
-///
-/// # Safety
-///
-/// `datum` must be a valid non-null PG `date`.
-unsafe fn decode_date(
-    type_oid: pg_sys::Oid,
-    datum: pg_sys::Datum,
-) -> Result<Datum, IcebergTranslationError> {
-    let date = unsafe { Date::from_datum(datum, false) }
-        .ok_or(IcebergTranslationError::DatumDecode { type_oid })?;
-
-    // ±infinity dates have no finite day count.
-    if !date.is_finite() {
-        return Err(IcebergTranslationError::ValueNotRepresentable { type_oid });
-    }
-
-    let unix_days = pg_epoch_days_to_unix_days(date.to_pg_epoch_days())
-        .ok_or(IcebergTranslationError::ValueNotRepresentable { type_oid })?;
-    Ok(Datum::date(unix_days))
-}
-
-/// Decode PG `timestamp` using shared PG→Unix microsecond offset.
-///
-/// # Safety
-///
-/// `datum` must be a valid non-null PG `timestamp`.
-unsafe fn decode_timestamp(
-    type_oid: pg_sys::Oid,
-    datum: pg_sys::Datum,
-) -> Result<Datum, IcebergTranslationError> {
-    let ts = unsafe { Timestamp::from_datum(datum, false) }
-        .ok_or(IcebergTranslationError::DatumDecode { type_oid })?;
-
-    if !ts.is_finite() {
-        return Err(IcebergTranslationError::ValueNotRepresentable { type_oid });
-    }
-
-    let pg_micros: i64 = ts.into();
-    let unix_micros = pg_epoch_micros_to_unix_micros(pg_micros)
-        .ok_or(IcebergTranslationError::ValueNotRepresentable { type_oid })?;
-    Ok(Datum::timestamp_micros(unix_micros))
-}
-
-/// Decode PG `timestamptz` (PG stores UTC micros since PG epoch).
-///
-/// # Safety
-///
-/// `datum` must be a valid non-null PG `timestamptz`.
-unsafe fn decode_timestamptz(
-    type_oid: pg_sys::Oid,
-    datum: pg_sys::Datum,
-) -> Result<Datum, IcebergTranslationError> {
-    let ts = unsafe { TimestampWithTimeZone::from_datum(datum, false) }
-        .ok_or(IcebergTranslationError::DatumDecode { type_oid })?;
-
-    if !ts.is_finite() {
-        return Err(IcebergTranslationError::ValueNotRepresentable { type_oid });
-    }
-
-    let pg_micros: i64 = ts.into();
-    let unix_micros = pg_epoch_micros_to_unix_micros(pg_micros)
-        .ok_or(IcebergTranslationError::ValueNotRepresentable { type_oid })?;
-    Ok(Datum::timestamptz_micros(unix_micros))
-}
-
-// =============================================================================
 // Translator
 // =============================================================================
 
@@ -399,6 +275,9 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
                 type_oid: lit.type_oid,
             });
         }
+        // SAFETY: PgLiteral carries Const.consttype alongside Const.constvalue;
+        // the NULL branch returned above, and its PG memory context is tied to
+        // the literal borrow for the duration of this call.
         let datum = unsafe { decode_datum(lit.type_oid, lit.datum) }?;
         Ok(IcebergScalar::Datum(datum))
     }
@@ -413,6 +292,9 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
                 type_oid: param.type_oid,
             });
         }
+        // SAFETY: PgParamValue carries the resolved parameter type alongside
+        // its Datum; the NULL branch returned above, and the executor-owned
+        // parameter storage remains live for this translation call.
         let datum = unsafe { decode_datum(param.type_oid, param.datum) }?;
         Ok(IcebergScalar::Datum(datum))
     }
@@ -626,253 +508,8 @@ impl IcebergPredicateTranslator {
         Self::fold(items, combine).ok_or(IcebergTranslationError::EmptyBoolExpr)
     }
 }
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use pgrx::pg_sys::Oid;
-
-    const INT4_TYPE_OID: u32 = 23;
-
-    fn map_comparison_operator(
-        op: PgComparisonOp,
-    ) -> Result<PredicateOperator, IcebergTranslationError> {
-        IcebergPredicateTranslator::new_unbound_for_tests()
-            .map_comparison_operator(op)
-    }
-
-    fn op_triple(opno: u32) -> PgComparisonOp {
-        PgComparisonOp {
-            opno: Oid::from(opno),
-            opfuncid: Oid::INVALID,
-            opresulttype: Oid::INVALID,
-            opcollid: Oid::INVALID,
-            inputcollid: Oid::INVALID,
-        }
-    }
-
-    fn null_scalar(type_oid: u32) -> IcebergScalar {
-        IcebergScalar::Null {
-            type_oid: Oid::from(type_oid),
-        }
-    }
-
-    #[test]
-    fn maps_int4_operators() {
-        assert_eq!(
-            map_comparison_operator(op_triple(96)).unwrap(),
-            PredicateOperator::Eq,
-        );
-        assert_eq!(
-            map_comparison_operator(op_triple(518)).unwrap(),
-            PredicateOperator::NotEq,
-        );
-        assert_eq!(
-            map_comparison_operator(op_triple(97)).unwrap(),
-            PredicateOperator::LessThan,
-        );
-        assert_eq!(
-            map_comparison_operator(op_triple(523)).unwrap(),
-            PredicateOperator::LessThanOrEq,
-        );
-        assert_eq!(
-            map_comparison_operator(op_triple(521)).unwrap(),
-            PredicateOperator::GreaterThan,
-        );
-        assert_eq!(
-            map_comparison_operator(op_triple(525)).unwrap(),
-            PredicateOperator::GreaterThanOrEq,
-        );
-    }
-
-    #[test]
-    fn maps_int8_operators() {
-        for opno in [410u32, 411, 412, 413, 414, 415] {
-            assert!(
-                map_comparison_operator(op_triple(opno)).is_ok(),
-                "int8 opno {opno} must be in the consolidated op_class map",
-            );
-        }
-    }
-
-    #[test]
-    fn maps_supported_non_integer_operators() {
-        assert_eq!(
-            map_comparison_operator(op_triple(1098)).unwrap(),
-            PredicateOperator::GreaterThanOrEq,
-        );
-        assert_eq!(
-            map_comparison_operator(op_triple(98)).unwrap(),
-            PredicateOperator::Eq,
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_operator() {
-        assert!(matches!(
-            map_comparison_operator(op_triple(558)),
-            Err(IcebergTranslationError::UnsupportedOperator { .. })
-        ));
-    }
-
-    #[test]
-    fn map_comparison_operator_is_collation_agnostic() {
-        let mut t = op_triple(96);
-        t.inputcollid = Oid::from(100u32);
-        assert_eq!(map_comparison_operator(t).unwrap(), PredicateOperator::Eq);
-
-        let mut t = op_triple(96);
-        t.opcollid = Oid::from(100u32);
-        assert_eq!(map_comparison_operator(t).unwrap(), PredicateOperator::Eq);
-    }
-
-    #[test]
-    fn is_null_with_null_scalar_fails_closed() {
-        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
-        assert!(matches!(
-            t.is_null(null_scalar(INT4_TYPE_OID)),
-            Err(IcebergTranslationError::NullTestOnNonColumn)
-        ));
-    }
-
-    #[test]
-    fn is_not_null_with_null_scalar_fails_closed() {
-        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
-        assert!(matches!(
-            t.is_not_null(null_scalar(INT4_TYPE_OID)),
-            Err(IcebergTranslationError::NullTestOnNonColumn)
-        ));
-    }
-}
-
-// =============================================================================
-// Predicate-tree algebra tests: pure, no PG backend.
-// =============================================================================
-#[cfg(test)]
-mod predicate_algebra_tests {
-    use super::*;
-    use proptest::prelude::*;
-
-    #[test]
-    fn mirror_operator_is_self_inverse_for_directional_ops() {
-        let t = IcebergPredicateTranslator::new_unbound_for_tests();
-        for op in [
-            PredicateOperator::LessThan,
-            PredicateOperator::LessThanOrEq,
-            PredicateOperator::GreaterThan,
-            PredicateOperator::GreaterThanOrEq,
-        ] {
-            assert_eq!(t.mirror_operator(t.mirror_operator(op)), op);
-        }
-    }
-
-    #[test]
-    fn mirror_operator_is_identity_for_symmetric_ops() {
-        let t = IcebergPredicateTranslator::new_unbound_for_tests();
-        for op in [
-            PredicateOperator::Eq,
-            PredicateOperator::NotEq,
-            PredicateOperator::IsNull,
-            PredicateOperator::NotNull,
-        ] {
-            assert_eq!(t.mirror_operator(op), op);
-        }
-    }
-
-    #[test]
-    fn mirror_operator_swaps_lt_and_gt() {
-        let t = IcebergPredicateTranslator::new_unbound_for_tests();
-        assert_eq!(
-            t.mirror_operator(PredicateOperator::LessThan),
-            PredicateOperator::GreaterThan,
-        );
-        assert_eq!(
-            t.mirror_operator(PredicateOperator::LessThanOrEq),
-            PredicateOperator::GreaterThanOrEq,
-        );
-    }
-
-    #[test]
-    fn fold_predicates_handles_single_child() {
-        let t = IcebergPredicateTranslator::new_unbound_for_tests();
-        let only = Reference::new("a").equal_to(Datum::int(1));
-        let folded = t.fold_predicates(vec![only.clone()], true).unwrap();
-        assert_eq!(folded, only);
-    }
-
-    #[test]
-    fn fold_predicates_chains_and_left_assoc() {
-        let t = IcebergPredicateTranslator::new_unbound_for_tests();
-        let a = Reference::new("a").equal_to(Datum::int(1));
-        let b = Reference::new("b").equal_to(Datum::int(2));
-        let c = Reference::new("c").equal_to(Datum::int(3));
-        let folded = t
-            .fold_predicates(vec![a.clone(), b.clone(), c.clone()], true)
-            .unwrap();
-        let expected = a.and(b).and(c);
-        assert_eq!(folded, expected);
-    }
-
-    #[test]
-    fn fold_predicates_chains_or() {
-        let t = IcebergPredicateTranslator::new_unbound_for_tests();
-        let a = Reference::new("a").equal_to(Datum::int(1));
-        let b = Reference::new("b").equal_to(Datum::int(2));
-        let folded = t
-            .fold_predicates(vec![a.clone(), b.clone()], false)
-            .unwrap();
-        let expected = a.or(b);
-        assert_eq!(folded, expected);
-    }
-
-    #[test]
-    fn fold_predicates_rejects_empty_input() {
-        let t = IcebergPredicateTranslator::new_unbound_for_tests();
-        assert!(matches!(
-            t.fold_predicates(vec![], true),
-            Err(IcebergTranslationError::EmptyBoolExpr),
-        ));
-    }
-
-    fn arb_leaf_predicate() -> impl Strategy<Value = Predicate> {
-        prop_oneof![
-            Just(Predicate::AlwaysTrue),
-            Just(Predicate::AlwaysFalse),
-            any::<i32>().prop_map(|v| Reference::new("a").equal_to(Datum::int(v))),
-            any::<i64>().prop_map(|v| Reference::new("b").less_than(Datum::long(v))),
-            any::<i32>()
-                .prop_map(|v| Reference::new("c").greater_than(Datum::int(v))),
-        ]
-    }
-
-    fn arb_predicate_tree() -> impl Strategy<Value = Predicate> {
-        arb_leaf_predicate().prop_recursive(4, 16, 2, |inner| {
-            prop_oneof![
-                (inner.clone(), inner.clone()).prop_map(|(l, r)| l.and(r)),
-                (inner.clone(), inner.clone()).prop_map(|(l, r)| l.or(r)),
-            ]
-        })
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 256,
-            ..ProptestConfig::default()
-        })]
-
-        #[test]
-        fn prop_always_false_composes_through_and_or(x in arb_predicate_tree()) {
-            prop_assert_eq!(
-                Predicate::AlwaysFalse.and(x.clone()),
-                Predicate::AlwaysFalse
-            );
-            prop_assert_eq!(
-                x.clone().and(Predicate::AlwaysFalse),
-                Predicate::AlwaysFalse
-            );
-
-            prop_assert_eq!(Predicate::AlwaysFalse.or(x.clone()), x.clone());
-            prop_assert_eq!(x.clone().or(Predicate::AlwaysFalse), x.clone());
-        }
-    }
-}
+mod predicate_algebra_tests;

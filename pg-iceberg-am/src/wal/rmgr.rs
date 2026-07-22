@@ -332,6 +332,8 @@ impl IcebergRmgr {
             flags |= libc::O_CREAT | libc::O_TRUNC;
         }
 
+        // SAFETY: `c_path` is NUL-terminated and remains alive for the call;
+        // `flags` is a valid combination accepted by PostgreSQL's VFD API.
         let file = unsafe { pg_sys::PathNameOpenFile(c_path.as_ptr(), flags) };
         if file < 0 {
             let err = std::io::Error::last_os_error();
@@ -365,12 +367,18 @@ impl IcebergRmgr {
         struct FileGuard(pg_sys::File);
         impl Drop for FileGuard {
             fn drop(&mut self) {
+                // SAFETY: `FileGuard` is constructed only after the open call
+                // returned a nonnegative VFD, owns that VFD uniquely, and Drop
+                // runs at most once for this guard.
                 unsafe { pg_sys::FileClose(self.0) };
             }
         }
         let _guard = FileGuard(file);
 
         if !file_data.is_empty() {
+            // SAFETY: `file` is a valid open VFD held by `_guard`; the slice
+            // supplies a readable pointer for exactly `file_data.len()` bytes;
+            // and the wait-event value is the PostgreSQL event for file writes.
             let bytes_written = unsafe {
                 pg_sys::FileWrite(
                     file,
@@ -414,9 +422,10 @@ impl IcebergRmgr {
             return None;
         }
 
-        // Safe unaligned read of the header. PostgreSQL WAL is trusted input for
-        // this cluster, but record parsing still bounds-checks lengths so corrupt
-        // records fail as InvalidRecord instead of reading past the byte slice.
+        // SAFETY: the preceding length check proves that `data` contains at
+        // least one complete header. `read_unaligned` permits the byte slice's
+        // alignment, and the header consists entirely of integer fields for
+        // which every bit pattern is valid.
         let header = unsafe {
             std::ptr::read_unaligned(data.as_ptr() as *const DeleteDirectoryHeader)
         };
@@ -436,6 +445,9 @@ impl IcebergRmgr {
         if data.len() < SIZE_OF_DELETE_FILES {
             return None;
         }
+        // SAFETY: the preceding length check proves that `data` contains at
+        // least one complete header. `read_unaligned` permits the byte slice's
+        // alignment, and the header's integer fields accept every bit pattern.
         let header = unsafe {
             std::ptr::read_unaligned(data.as_ptr() as *const DeleteFilesHeader)
         };
@@ -475,9 +487,10 @@ impl IcebergRmgr {
             return None;
         }
 
-        // Safe unaligned read of the header. PostgreSQL WAL is trusted input for
-        // this cluster, but record parsing still bounds-checks lengths so corrupt
-        // records fail as InvalidRecord instead of reading past the byte slice.
+        // SAFETY: the preceding length check proves that `data` contains at
+        // least one complete header. `read_unaligned` permits the byte slice's
+        // alignment, and the header consists entirely of integer fields for
+        // which every bit pattern is valid.
         let header = unsafe {
             std::ptr::read_unaligned(data.as_ptr() as *const WriteFileHeader)
         };
@@ -503,6 +516,11 @@ mod tests {
     use super::*;
 
     fn header_bytes<T>(header: &T) -> &[u8] {
+        // SAFETY: every caller passes one of this module's `#[repr(C)]` WAL
+        // header structs. Those structs contain only initialized integer fields
+        // and have no implicit padding (WriteFileHeader uses explicit padding),
+        // so all `size_of::<T>()` bytes are initialized and readable while the
+        // returned slice borrows `header`.
         unsafe {
             std::slice::from_raw_parts(
                 header as *const T as *const u8,

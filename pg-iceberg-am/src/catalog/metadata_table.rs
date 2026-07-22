@@ -93,18 +93,25 @@ fn iceberg_relation_oid(name: &CStr) -> IcebergResult<pg_sys::Oid> {
 ///
 /// # Safety
 ///
-/// `tuple` must be a live heap tuple consistent with `tup_desc`.
+/// `tuple` must be a live heap tuple consistent with `tup_desc`; `attno` must
+/// identify an attribute in that descriptor; and the attribute's PostgreSQL
+/// type must be compatible with `T`'s [`FromDatum`] implementation.
 unsafe fn get_attr<T: FromDatum>(
     tuple: pg_sys::HeapTuple,
     tup_desc: pg_sys::TupleDesc,
     attno: i16,
 ) -> Option<T> {
     let mut is_null = false;
+    // SAFETY: the caller guarantees that the tuple and descriptor match and
+    // that `attno` identifies an attribute in the descriptor. `is_null` is a
+    // valid out-parameter for the duration of the call.
     let datum =
         unsafe { pg_sys::heap_getattr(tuple, attno as _, tup_desc, &mut is_null) };
     if is_null {
         None
     } else {
+        // SAFETY: `heap_getattr` reported a non-NULL Datum, and the caller
+        // guarantees that the attribute type is compatible with `T`.
         unsafe { T::from_datum(datum, false) }
     }
 }
@@ -121,6 +128,8 @@ unsafe fn get_attr_required<T: FromDatum>(
     attno: i16,
     field_name: &'static str,
 ) -> IcebergResult<T> {
+    // SAFETY: this function has the same caller requirements as `get_attr` and
+    // forwards the tuple, descriptor, attribute number, and target type unchanged.
     unsafe { get_attr::<T>(tuple, tup_desc, attno) }.ok_or_else(|| {
         IcebergError::MetadataCatalogInvalidRecord(format!(
             "{field_name} (attno {attno}) is null or undecodable"
@@ -145,8 +154,9 @@ struct TupleFields {
 impl TupleFields {
     /// # Safety
     ///
-    /// `tup_desc` must be a valid TupleDesc.
+    /// `tup_desc` must be a non-null, live `TupleDesc`.
     unsafe fn new(tup_desc: pg_sys::TupleDesc) -> Self {
+        // SAFETY: the caller guarantees that `tup_desc` is non-null and live.
         let natts = unsafe { (*tup_desc).natts } as usize;
         // Default to NULL for every column. Callers explicitly `set` the
         // columns they intend to write; any column they forget about
@@ -186,8 +196,11 @@ impl TupleReplacement {
     /// `tup_desc` must be a valid TupleDesc for the relation that the
     /// replacement will be applied to.
     unsafe fn new(tup_desc: pg_sys::TupleDesc) -> Self {
+        // SAFETY: the caller guarantees that `tup_desc` is non-null and live.
         let natts = unsafe { (*tup_desc).natts } as usize;
         Self {
+            // SAFETY: this forwards the same live descriptor required by this
+            // constructor to `TupleFields::new`.
             fields: unsafe { TupleFields::new(tup_desc) },
             repls: vec![false; natts],
         }
@@ -204,12 +217,18 @@ impl TupleReplacement {
     ///
     /// # Safety
     ///
-    /// `tup_desc` and `old_tuple` must come from the same relation.
+    /// `tup_desc` and `old_tuple` must come from the same relation, and
+    /// `tup_desc` must be the descriptor used to construct this replacement.
     unsafe fn apply(
         mut self,
         tup_desc: pg_sys::TupleDesc,
         old_tuple: pg_sys::HeapTuple,
     ) -> HeapTupleGuard {
+        // SAFETY: the caller guarantees that `old_tuple` matches `tup_desc`.
+        // Construction from that same descriptor makes all three replacement
+        // arrays exactly `natts` elements long, and their mutable pointers stay
+        // valid for the duration of `heap_modify_tuple`. PostgreSQL returns a
+        // separately allocated tuple owned by `HeapTupleGuard`.
         unsafe {
             HeapTupleGuard::new(pg_sys::heap_modify_tuple(
                 old_tuple,
@@ -437,12 +456,18 @@ impl IcebergMetadata {
             else {
                 break;
             };
+            // SAFETY: `tuple` is a live result from the scan over `table_guard`;
+            // `tuple_desc` belongs to that relation, and RELID is an OID column.
             let relid = unsafe {
                 get_attr_required(tuple.as_raw(), tuple_desc, column::RELID, "relid")?
             };
+            // SAFETY: the tuple and descriptor match, and METADATA_LOCATION is
+            // a text column decoded to an owned String.
             let metadata_location = unsafe {
                 get_attr(tuple.as_raw(), tuple_desc, column::METADATA_LOCATION)
             };
+            // SAFETY: the tuple and descriptor match, and MAINTENANCE_DUE_AT is
+            // a timestamptz column.
             let due_at = unsafe {
                 get_attr_required::<TimestampWithTimeZone>(
                     tuple.as_raw(),
@@ -476,6 +501,8 @@ impl IcebergMetadata {
         let Some(tuple) = scan.get_next().map_catalog_err(CatalogOp::Read)? else {
             return Ok(None);
         };
+        // SAFETY: `tuple` comes from this open relation's scan, its descriptor
+        // remains live through `table_guard`, and the column is timestamptz.
         Ok(unsafe {
             get_attr::<TimestampWithTimeZone>(
                 tuple.as_raw(),
@@ -506,9 +533,13 @@ impl IcebergMetadata {
             return Ok(false);
         };
         let tuple_desc = table_guard.as_handle().tuple_desc();
+        // SAFETY: `old_tuple` comes from this open relation's scan, the
+        // descriptor matches it, and METADATA_LOCATION is a text column.
         let current_location: Option<String> = unsafe {
             get_attr(old_tuple.as_raw(), tuple_desc, column::METADATA_LOCATION)
         };
+        // SAFETY: the tuple and descriptor match, and MAINTENANCE_DUE_AT is a
+        // timestamptz column.
         let current_due = unsafe {
             get_attr::<TimestampWithTimeZone>(
                 old_tuple.as_raw(),
@@ -522,8 +553,10 @@ impl IcebergMetadata {
         {
             return Ok(false);
         }
+        // SAFETY: `tuple_desc` belongs to the live open relation.
         let mut replacement = unsafe { TupleReplacement::new(tuple_desc) };
         replacement.set(column::MAINTENANCE_DUE_AT, Some(retry_at));
+        // SAFETY: the replacement and `old_tuple` use the same live descriptor.
         let new_tuple = unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
         Ok(matches!(
             table_guard
@@ -554,15 +587,20 @@ impl IcebergMetadata {
             return Err(IcebergError::MetadataCatalogNotFound(relid));
         };
         let tuple_desc = table_guard.as_handle().tuple_desc();
+        // SAFETY: `old_tuple` comes from this open relation's scan, the
+        // descriptor matches it, and METADATA_LOCATION is a text column.
         let current_location: Option<String> = unsafe {
             get_attr(old_tuple.as_raw(), tuple_desc, column::METADATA_LOCATION)
         };
         if current_location.as_deref() != Some(expected_location) {
             return Err(IcebergError::MetadataCatalogConflict);
         }
+        // SAFETY: `tuple_desc` belongs to the live open relation.
         let mut replacement = unsafe { TupleReplacement::new(tuple_desc) };
         match schedule {
             MaintenanceScheduleUpdate::CompleteIfDueMatches(expected_due) => {
+                // SAFETY: `old_tuple` and `tuple_desc` match, and
+                // MAINTENANCE_DUE_AT is a timestamptz column.
                 let current_due = unsafe {
                     get_attr::<TimestampWithTimeZone>(
                         old_tuple.as_raw(),
@@ -585,6 +623,7 @@ impl IcebergMetadata {
                 ));
             }
         }
+        // SAFETY: the replacement and `old_tuple` use the same live descriptor.
         let new_tuple = unsafe { replacement.apply(tuple_desc, old_tuple.as_raw()) };
         match table_guard
             .catalog_update_optimistic(old_tuple, &new_tuple)
@@ -651,12 +690,15 @@ impl IcebergMetadata {
             return Err(IcebergError::MetadataCatalogConflict);
         }
 
+        // SAFETY: `tup_desc` belongs to the live open relation.
         let mut replacement = unsafe { TupleReplacement::new(tup_desc) };
         replacement.set(column::METADATA_LOCATION, new.metadata_location);
         replacement.set(
             column::PREVIOUS_METADATA_LOCATION,
             new.previous_metadata_location,
         );
+        // SAFETY: `old_tuple` and `tup_desc` come from the same open relation,
+        // and MAINTENANCE_DUE_AT is a timestamptz column.
         let current_due = unsafe {
             get_attr::<TimestampWithTimeZone>(
                 old_tuple.as_raw(),
@@ -758,6 +800,9 @@ impl IcebergMetadata {
         tup_desc: pg_sys::TupleDesc,
         tuple: pg_sys::HeapTuple,
     ) -> IcebergResult<Self> {
+        // SAFETY: the caller guarantees that the tuple and descriptor match.
+        // Each attribute number names the documented catalog column, and each
+        // target Rust type matches that column's PostgreSQL type.
         unsafe {
             Ok(Self {
                 relid: get_attr_required(tuple, tup_desc, column::RELID, "relid")?,
