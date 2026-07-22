@@ -248,7 +248,7 @@ impl TableState {
 
     /// Promote every nest level `>= from_level` down to `from_level - 1`.
     ///
-    /// Mirrors `transactional_artifacts::handle_commit_sub`: when a
+    /// Mirrors storage transaction resource promotion: when
     /// `RELEASE SAVEPOINT` fires for `from_level`, every state owned by
     /// that subtransaction (and any lingering deeper frames) belongs to
     /// the parent now, so its recorded nest level must drop accordingly.

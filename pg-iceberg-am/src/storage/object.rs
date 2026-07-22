@@ -11,7 +11,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::storage::transactional_artifacts::{
+use crate::storage::transaction_resources::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
 };
 use crate::storage::wait_event::{StorageWaitEvent, StorageWaitGuard};

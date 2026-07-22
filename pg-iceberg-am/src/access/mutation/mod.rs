@@ -313,7 +313,7 @@ impl AmModifyState for IcebergModifyState {
         // Orphan-file note: data files already uploaded before a later flush
         // failure are NOT leaked. Every produced file is registered via
         // `register_object_file_staged()` / `mark_object_file_uploaded()`, and
-        // `StorageArtifactResource::on_abort` unlinks staging files or issues
+        // `StorageTransactionResource::on_abort` unlinks staging files or issues
         // remote deletes on abort. Do not re-introduce a separate cleanup list here.
         let outcome = self.finish_statement()?;
         self.stage_statement(outcome)?;

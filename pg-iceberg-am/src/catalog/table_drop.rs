@@ -11,7 +11,7 @@ use super::metadata_tracker::TxMetadata;
 use super::table_lifecycle::compute_table_location;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::StorageContext;
-use crate::storage::transactional_artifacts::register_local_table_root_dropped;
+use crate::storage::transaction_resources::register_local_table_root_dropped;
 
 enum TableRootCleanup {
     Local {

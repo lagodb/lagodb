@@ -1,7 +1,7 @@
 pub mod local;
 pub mod object;
 mod post_commit_delete;
-pub mod transactional_artifacts;
+pub(crate) mod transaction_resources;
 mod wait_event;
 
 pub use local::LocalStorage;

@@ -20,7 +20,7 @@ use crate::catalog::metadata_table::{
 };
 use crate::error::{IcebergError, IcebergResult};
 use crate::gucs;
-use crate::storage::transactional_artifacts::MetadataAttempt;
+use crate::storage::transaction_resources::MetadataAttempt;
 
 use super::TxMetadata;
 use super::action_log::{EffectiveCommitAction, TxTableCommitPlan};
@@ -220,7 +220,7 @@ impl<'a> TableCommitCoordinator<'a> {
                 {
                     result.report_success(vacuum, vacuum_commit_started.as_ref())?;
                 }
-                crate::storage::transactional_artifacts::register_canceled_files_for_commit(
+                crate::storage::transaction_resources::register_canceled_files_for_commit(
                     file_io.clone(),
                     plan.canceled_created_paths.clone(),
                 );
@@ -247,7 +247,7 @@ impl<'a> TableCommitCoordinator<'a> {
                         result
                             .report_success(vacuum, vacuum_commit_started.as_ref())?;
                     }
-                    crate::storage::transactional_artifacts::register_canceled_files_for_commit(
+                    crate::storage::transaction_resources::register_canceled_files_for_commit(
                         file_io.clone(),
                         plan.canceled_created_paths.clone(),
                     );

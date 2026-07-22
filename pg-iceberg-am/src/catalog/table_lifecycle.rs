@@ -3,7 +3,7 @@ use super::schema_builder::tuple_desc_to_schema;
 use crate::error::{IcebergError, IcebergResult};
 use crate::options::ResolvedIcebergOptions;
 use crate::storage::StorageContext;
-use crate::storage::transactional_artifacts::register_table_dir_created;
+use crate::storage::transaction_resources::register_table_dir_created;
 use iceberg_lite::catalog::TableCreation;
 use iceberg_lite::spec::{SortOrder, UnboundPartitionSpec};
 use pg_lakebase_core::handles::RelationHandle;
@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 /// stages durable maintenance instead of constructing a live `StorageContext`.
 ///
 /// Callers in the hook layer never see `FileIO` or the underlying
-/// transactional artifact registry: this type owns those bindings so
+/// transaction resource registry: this type owns those bindings so
 /// `(location, FileIO)` is not a public hand-off shape.
 ///
 /// The instance carries a freshly-resolved [`StorageContext`] alongside the
