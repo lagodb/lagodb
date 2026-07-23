@@ -57,7 +57,7 @@ USING iceberg
 TABLESPACE regress_storage_socket_cancel_contexts;
 INSERT INTO storage_socket_cancel_contexts_t VALUES (1);
 
-\! bin/storage_socket_cancel_contexts
+\! sh bin/storage_socket_cancel_contexts
 
 SELECT CASE WHEN count(*) = 1 THEN 'true' ELSE 'false' END
        AS storage_usable_after_cancel
