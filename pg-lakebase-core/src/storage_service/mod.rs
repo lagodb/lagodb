@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use pg_lakebase_storage::{StorageError, StorageResult};
 use pgrx::pg_sys;
 
+mod backend;
+
+pub use backend::BackendStorageService;
+
 const ENABLED_GUC: &CStr = c"pg_lakebase.storage_server_enabled";
 const SOCKET_PATH_GUC: &CStr = c"pg_lakebase.storage_server_socket_path";
 const CACHE_DIR_GUC: &CStr = c"pg_lakebase.storage_server_cache_dir";

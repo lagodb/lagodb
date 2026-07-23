@@ -15,8 +15,8 @@ use crate::error::IcebergResult;
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::get_tablespace;
-use pg_lakebase_core::storage_service::StorageEndpoint;
-use pg_lakebase_storage::{StagingPathResolver, StorageClient};
+use pg_lakebase_core::storage_service::{BackendStorageService, StorageEndpoint};
+use pg_lakebase_storage::StagingPathResolver;
 use pgrx::pg_sys;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -76,9 +76,9 @@ impl StorageContext {
         };
 
         let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
-        let client = StorageClient::connect(endpoint.socket_path())?;
+        let service = BackendStorageService::from_endpoint(&endpoint);
         let resolver = StagingPathResolver::new(endpoint.cache_dir());
-        Self::distributed(&opts, client, resolver)
+        Self::distributed(&opts, service, resolver)
     }
 
     /// Create a storage context for a specific relation.
@@ -120,7 +120,7 @@ impl StorageContext {
 
     fn distributed(
         opts: &pg_lakebase_core::options::CachedTablespaceOpts,
-        storage_client: StorageClient,
+        storage_service: BackendStorageService,
         staging_resolver: StagingPathResolver,
     ) -> IcebergResult<Self> {
         let base_path = opts.effective_base_uri().to_owned();
@@ -128,7 +128,7 @@ impl StorageContext {
             base_path.clone(),
             opts.store_id().clone(),
             opts.object_namespace(),
-            storage_client,
+            storage_service,
             staging_resolver,
         );
 

@@ -25,15 +25,10 @@ use crate::backend::{StorageProbeResult, StoreConfig};
 use crate::error::{StorageError, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::object::ObjectInfo;
-use crate::protocol::{
-    ListCursor, ReadResponsePrefix, ResponseFrameHeader, WireRequest,
-    WireRequestPayload, WireResponsePayload, decode_response, encode_read_request,
-    encode_request,
-};
-use crate::transport::{
-    BlockingFrameCursor, read_fd_blocking, read_frame_blocking, write_frame_blocking,
-};
+use crate::protocol::{ListCursor, WireRequestPayload, WireResponsePayload};
 
+mod connection;
+mod fd;
 mod list;
 mod staging_file;
 mod storage_file;
@@ -41,10 +36,12 @@ mod storage_file;
 #[cfg(test)]
 mod tests;
 
+pub use fd::{ExternalFdLease, ExternalFdPolicy};
 pub use list::ListIter;
 pub use staging_file::StagingFile;
 pub use storage_file::{SeekFrom, StorageFile};
 
+use connection::{ClientConnection, ReceivedFd};
 use storage_file::{DirectReader, ReadPath};
 
 fn unexpected_response(operation: &str, got: &WireResponsePayload) -> StorageError {
@@ -57,6 +54,12 @@ fn unexpected_response(operation: &str, got: &WireResponsePayload) -> StorageErr
 /// intentionally single-threaded and non-multiplexed: each call writes one request and reads its
 /// matching response before the next call may use the connection. For independent concurrent work,
 /// open multiple `StorageClient` connections instead of cloning one client.
+///
+/// # Connection failures
+///
+/// Local I/O, framing, request-ID, and response-shape failures permanently
+/// poison the shared connection generation and close its socket. Server-reported
+/// operation errors leave the protocol stream synchronized and reusable.
 ///
 /// # Long-running calls
 ///
@@ -73,48 +76,15 @@ pub struct StorageClient {
 }
 
 // SAFETY: this is a temporary compatibility boundary for `pg-iceberg-am`, whose
-// `iceberg-lite` storage traits still inherit upstream `Send + Sync` bounds. The
+// `iceberg-lite` storage traits inherit upstream `Send + Sync` bounds. The
 // PostgreSQL AM integration uses `StorageClient` only from one backend thread with
 // blocking, non-multiplexed calls. `StorageClient` must not be moved to a worker
 // thread or shared for concurrent use; doing so would violate the `Rc<RefCell<_>>`
-// invariants. Keep this unsafe impl local to the client type until the upstream
-// trait boundary can be reconciled with the PostgreSQL single-threaded model.
+// invariants and PostgreSQL FD-accounting thread affinity. This remains an
+// acknowledged soundness risk until the Parquet `ChunkReader` boundary is
+// redesigned without per-read owner-thread checks.
 unsafe impl Send for StorageClient {}
 unsafe impl Sync for StorageClient {}
-
-struct ClientConnection {
-    stream: UnixStream,
-    request_ids: RequestIdGenerator,
-}
-
-impl ClientConnection {
-    fn new(stream: UnixStream) -> Self {
-        Self {
-            stream,
-            request_ids: RequestIdGenerator::new(),
-        }
-    }
-
-    fn next_request_id(&mut self) -> u64 {
-        self.request_ids.next()
-    }
-}
-
-struct RequestIdGenerator {
-    next: u64,
-}
-
-impl RequestIdGenerator {
-    fn new() -> Self {
-        Self { next: 1 }
-    }
-
-    fn next(&mut self) -> u64 {
-        let request_id = self.next;
-        self.next = self.next.wrapping_add(1);
-        request_id
-    }
-}
 
 /// Reported outcome of a successful [`StorageClient::upload`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,15 +111,31 @@ pub struct ListPage {
     pub next_cursor: Option<ListCursor>,
 }
 
-struct ReadIntoOutcome {
-    bytes_read: usize,
-}
-
 impl StorageClient {
     pub fn connect(socket_path: impl AsRef<Path>) -> StorageResult<Self> {
         let stream = UnixStream::connect(socket_path)?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(ClientConnection::new(stream))),
+            inner: Rc::new(RefCell::new(ClientConnection::new(stream, None, None))),
+        })
+    }
+
+    /// Connect with descriptor accounting supplied by the embedding runtime.
+    ///
+    /// The policy reserves one descriptor before the socket is opened and is
+    /// retained by the shared connection state. It is also used before each
+    /// direct-I/O descriptor is received.
+    pub fn connect_with_fd_policy(
+        socket_path: impl AsRef<Path>,
+        fd_policy: Box<dyn ExternalFdPolicy>,
+    ) -> StorageResult<Self> {
+        let socket_lease = fd_policy.acquire()?;
+        let stream = UnixStream::connect(socket_path)?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(ClientConnection::new(
+                stream,
+                Some(socket_lease),
+                Some(fd_policy),
+            ))),
         })
     }
 
@@ -167,17 +153,58 @@ impl StorageClient {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(ClientConnection::new(stream))),
+            inner: Rc::new(RefCell::new(ClientConnection::new(stream, None, None))),
         })
     }
 
     fn connection(&self) -> StorageResult<RefMut<'_, ClientConnection>> {
-        self.inner.try_borrow_mut().map_err(|_| {
+        let connection = self.inner.try_borrow_mut().map_err(|_| {
             StorageError::protocol(
                 "client connection is already in use; StorageClient is single-threaded and \
                  does not support reentrant calls",
             )
-        })
+        })?;
+        if !connection.is_usable() {
+            return Err(StorageError::protocol(
+                "storage client connection is poisoned",
+            ));
+        }
+        Ok(connection)
+    }
+
+    /// Returns whether this connection generation is not known to be poisoned.
+    ///
+    /// A currently borrowed connection is treated as healthy. The next operation
+    /// still reports the existing non-reentrant-use error instead of causing a
+    /// connection manager to replace a live generation.
+    pub fn is_usable(&self) -> bool {
+        self.inner
+            .try_borrow()
+            .map_or(true, |connection| connection.is_usable())
+    }
+
+    /// Permanently invalidates this connection generation.
+    ///
+    /// Existing clones and file handles remain associated with the poisoned
+    /// generation and will reject subsequent wire operations.
+    pub fn invalidate(&self) -> StorageResult<()> {
+        let mut connection = self.inner.try_borrow_mut().map_err(|_| {
+            StorageError::protocol(
+                "cannot invalidate storage client connection while it is in use",
+            )
+        })?;
+        connection.poison();
+        Ok(())
+    }
+
+    fn reject_unexpected<T>(
+        &self,
+        operation: &str,
+        response: &WireResponsePayload,
+    ) -> StorageResult<T> {
+        let error = unexpected_response(operation, response);
+        let _ = self.invalidate();
+        Err(error)
     }
 
     pub fn open(
@@ -204,13 +231,16 @@ impl StorageClient {
                             "direct open response did not include fd",
                         )
                     })?;
-                    ReadPath::Direct(DirectReader::new(std::fs::File::from(fd)))
+                    ReadPath::Direct(DirectReader::new(
+                        std::fs::File::from(fd.fd),
+                        fd.lease,
+                    ))
                 } else {
                     ReadPath::Mediated
                 };
                 Ok(StorageFile::new(self.clone(), handle, size, read_path))
             }
-            other => Err(unexpected_response("open", &other)),
+            other => self.reject_unexpected("open", &other),
         }
     }
 
@@ -229,7 +259,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::Head { size, etag } => Ok(ObjectInfo { size, etag }),
-            other => Err(unexpected_response("head", &other)),
+            other => self.reject_unexpected("head", &other),
         }
     }
 
@@ -279,7 +309,7 @@ impl StorageClient {
             WireResponsePayload::Upload { size, etag } => {
                 Ok(UploadInfo { size, etag })
             }
-            other => Err(unexpected_response("upload", &other)),
+            other => self.reject_unexpected("upload", &other),
         }
     }
 
@@ -294,7 +324,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::RegisterStore { replaced } => Ok(replaced),
-            other => Err(unexpected_response("register-store", &other)),
+            other => self.reject_unexpected("register-store", &other),
         }
     }
 
@@ -307,7 +337,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::UnregisterStore { removed } => Ok(removed),
-            other => Err(unexpected_response("unregister-store", &other)),
+            other => self.reject_unexpected("unregister-store", &other),
         }
     }
 
@@ -320,7 +350,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::PurgeStoreCache => Ok(()),
-            other => Err(unexpected_response("purge-store-cache", &other)),
+            other => self.reject_unexpected("purge-store-cache", &other),
         }
     }
 
@@ -342,7 +372,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::ProbeStore { result } => Ok(result),
-            other => Err(unexpected_response("probe-store", &other)),
+            other => self.reject_unexpected("probe-store", &other),
         }
     }
 
@@ -360,7 +390,7 @@ impl StorageClient {
             })?;
         match response {
             WireResponsePayload::InvalidateObjectCache { removed } => Ok(removed),
-            other => Err(unexpected_response("invalidate-object-cache", &other)),
+            other => self.reject_unexpected("invalidate-object-cache", &other),
         }
     }
 
@@ -382,7 +412,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::Delete => Ok(()),
-            other => Err(unexpected_response("delete", &other)),
+            other => self.reject_unexpected("delete", &other),
         }
     }
 
@@ -415,7 +445,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::DeletePrefix { deleted } => Ok(deleted),
-            other => Err(unexpected_response("delete-prefix", &other)),
+            other => self.reject_unexpected("delete-prefix", &other),
         }
     }
 
@@ -433,7 +463,7 @@ impl StorageClient {
         })?;
         match response {
             WireResponsePayload::DeleteObjects { deleted } => Ok(deleted),
-            other => Err(unexpected_response("delete-objects", &other)),
+            other => self.reject_unexpected("delete-objects", &other),
         }
     }
 
@@ -477,7 +507,7 @@ impl StorageClient {
                     .collect(),
                 next_cursor,
             }),
-            other => Err(unexpected_response("list", &other)),
+            other => self.reject_unexpected("list", &other),
         }
     }
 
@@ -486,7 +516,7 @@ impl StorageClient {
         let (response, _) = self.request(WireRequestPayload::CloseList { cursor })?;
         match response {
             WireResponsePayload::CloseList => Ok(()),
-            other => Err(unexpected_response("close-list", &other)),
+            other => self.reject_unexpected("close-list", &other),
         }
     }
 
@@ -515,79 +545,15 @@ impl StorageClient {
         )
     }
 
-    /// Sends a READ request and decodes the response header/prefix, returning the cursor
-    /// positioned at the body start plus the decoded prefix.
-    fn send_read_request<'a>(
-        handle: FileHandle,
-        offset: u64,
-        len: u32,
-        connection: &'a mut ClientConnection,
-    ) -> StorageResult<(
-        BlockingFrameCursor<'a, std::os::unix::net::UnixStream>,
-        ReadResponsePrefix,
-    )> {
-        let request_id = connection.next_request_id();
-        let stream = &mut connection.stream;
-        let frame = encode_read_request(request_id, handle, offset, len);
-        write_frame_blocking(&mut *stream, &frame)?;
-
-        let mut response_frame = BlockingFrameCursor::read_from(&mut *stream)?
-            .ok_or_else(|| StorageError::protocol("connection closed"))?;
-        let mut header_bytes = [0_u8; ResponseFrameHeader::ENCODED_LEN];
-        response_frame.read_exact(&mut header_bytes)?;
-        let header = ResponseFrameHeader::decode(&header_bytes)?;
-        if header.request_id != request_id {
-            response_frame.discard_remaining()?;
-            return Err(StorageError::protocol(format!(
-                "response id {} did not match request id {request_id}",
-                header.request_id
-            )));
-        }
-
-        if !header.is_read() {
-            let response_frame =
-                response_frame.read_remaining_after(&header_bytes)?;
-            let response = decode_response(&response_frame)?;
-            let other = response.into_result()?;
-            return Err(unexpected_response("read", &other));
-        }
-
-        let mut read_tail = [0_u8; ReadResponsePrefix::TAIL_LEN];
-        response_frame.read_exact(&mut read_tail)?;
-        let prefix = ReadResponsePrefix::decode_tail(header, &read_tail)?;
-        if response_frame.remaining() != prefix.data_len {
-            let remaining = response_frame.remaining();
-            response_frame.discard_remaining()?;
-            return Err(StorageError::protocol(format!(
-                "read response frame length mismatch: header announced {} data bytes, frame has {remaining}",
-                prefix.data_len
-            )));
-        }
-        Ok((response_frame, prefix))
-    }
-
     fn read_into(
         &self,
         handle: FileHandle,
         offset: u64,
         len: u32,
         buf: &mut [u8],
-    ) -> StorageResult<ReadIntoOutcome> {
+    ) -> StorageResult<usize> {
         let mut connection = self.connection()?;
-        let (mut response_frame, prefix) =
-            Self::send_read_request(handle, offset, len, &mut connection)?;
-        if prefix.data_len > buf.len() {
-            response_frame.discard_remaining()?;
-            return Err(StorageError::protocol(format!(
-                "read response data length {} exceeds caller buffer length {}",
-                prefix.data_len,
-                buf.len()
-            )));
-        }
-        response_frame.read_exact(&mut buf[..prefix.data_len])?;
-        Ok(ReadIntoOutcome {
-            bytes_read: prefix.data_len,
-        })
+        connection.read_into(handle, offset, len, buf)
     }
 
     /// Allocating read: sends a READ request, decodes the response header to learn the actual
@@ -599,46 +565,14 @@ impl StorageClient {
         len: u32,
     ) -> StorageResult<Vec<u8>> {
         let mut connection = self.connection()?;
-        let (mut response_frame, prefix) =
-            Self::send_read_request(handle, offset, len, &mut connection)?;
-        let mut data = vec![0u8; prefix.data_len];
-        response_frame.read_exact(&mut data)?;
-        Ok(data)
+        connection.read_alloc(handle, offset, len)
     }
 
     fn request(
         &self,
         payload: WireRequestPayload,
-    ) -> StorageResult<(WireResponsePayload, Option<std::os::fd::OwnedFd>)> {
+    ) -> StorageResult<(WireResponsePayload, Option<ReceivedFd>)> {
         let mut connection = self.connection()?;
-        let request_id = connection.next_request_id();
-        let request = WireRequest {
-            request_id,
-            payload,
-        };
-        let frame = encode_request(&request)?;
-        write_frame_blocking(&mut connection.stream, &frame)?;
-        let response_frame = read_frame_blocking(&mut connection.stream)?
-            .ok_or_else(|| StorageError::protocol("connection closed"))?;
-        let response = decode_response(&response_frame)?;
-        if response.request_id != request_id {
-            return Err(StorageError::protocol(format!(
-                "response id {} did not match request id {request_id}",
-                response.request_id
-            )));
-        }
-        let payload = response.into_result()?;
-        let fd = if matches!(
-            payload,
-            WireResponsePayload::Open {
-                direct_io: true,
-                ..
-            }
-        ) {
-            Some(read_fd_blocking(&mut connection.stream)?)
-        } else {
-            None
-        };
-        Ok((payload, fd))
+        connection.request(payload)
     }
 }

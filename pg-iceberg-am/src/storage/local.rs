@@ -4,9 +4,10 @@
 //! internal Virtual File Descriptor (VFD) system via `PathNameOpenFile`, `FileRead`,
 //! `FileWrite`, and `FileClose` functions. This integration provides:
 //!
-//! - **Resource Owner Integration**: File handles are automatically registered with
-//!   PostgreSQL's ResourceOwner system, ensuring automatic cleanup on transaction
-//!   abort or backend exit.
+//! - **Rust-owned VFD lifetime**: Reader and writer owners call `FileClose` from
+//!   `Drop`. Their enclosing executor and transaction state provide the
+//!   error-unwind cleanup boundary; `PathNameOpenFile` does not itself register a
+//!   VFD with PostgreSQL's `ResourceOwner`.
 //! - **VFD Pool Management**: PostgreSQL's VFD system manages file descriptor limits
 //!   transparently, automatically closing/reopening files as needed.
 //! - **Consistent Error Handling**: Uses PostgreSQL's error reporting mechanisms.
@@ -233,8 +234,9 @@ impl Drop for VfdOwner {
 /// PostgreSQL VFD-backed file reader.
 ///
 /// Wraps a PostgreSQL virtual file descriptor for reading operations. The file
-/// handle is automatically registered with the current ResourceOwner and will
-/// be closed when the ResourceOwner is released (e.g., at transaction end).
+/// handle is owned by [`VfdOwner`] and closed by its `Drop` implementation. The
+/// surrounding executor state is responsible for dropping the reader during
+/// normal completion and PostgreSQL error unwinding.
 #[derive(Debug)]
 pub struct PgFileRead {
     /// Path to the file (for error reporting)
@@ -436,8 +438,9 @@ impl Seek for PgFileRead {
 /// PostgreSQL VFD-backed file writer.
 ///
 /// Wraps a PostgreSQL virtual file descriptor for writing operations. The file
-/// handle is automatically registered with the current ResourceOwner and will
-/// be closed when the ResourceOwner is released.
+/// handle is owned by [`VfdOwner`] and closed by its `Drop` implementation. The
+/// surrounding mutation state is responsible for dropping the writer during
+/// normal completion and PostgreSQL error unwinding.
 ///
 /// # WAL Support
 ///

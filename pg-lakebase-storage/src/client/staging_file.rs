@@ -10,6 +10,8 @@ use crate::error::{StorageError, StorageResult};
 use crate::object::ObjectLocation;
 use crate::staging::StagingPathResolver;
 
+use super::{ExternalFdLease, ExternalFdPolicy};
+
 /// Handle to an in-progress staged write.
 ///
 /// # Constructing one
@@ -42,7 +44,9 @@ use crate::staging::StagingPathResolver;
 /// owns the staging directory and removes individual files when its transaction succeeds,
 /// fails, or is rolled forward through crash recovery.
 pub struct StagingFile {
+    // Drop the OS descriptor before releasing its accounting lease.
     file: std::fs::File,
+    _fd_lease: Option<Box<dyn ExternalFdLease>>,
     path: PathBuf,
 }
 
@@ -61,6 +65,32 @@ impl StagingFile {
         store_id: &str,
         bucket: &str,
         key: &str,
+    ) -> StorageResult<Self> {
+        Self::create_inner(resolver, store_id, bucket, key, None)
+    }
+
+    /// Creates a staging file while accounting for its descriptor through the
+    /// embedding runtime.
+    ///
+    /// The reservation is acquired before opening the file and remains owned by
+    /// the returned `StagingFile`. An open failure releases it immediately.
+    pub fn create_with_fd_policy(
+        resolver: &StagingPathResolver,
+        store_id: &str,
+        bucket: &str,
+        key: &str,
+        fd_policy: &dyn ExternalFdPolicy,
+    ) -> StorageResult<Self> {
+        let fd_lease = fd_policy.acquire()?;
+        Self::create_inner(resolver, store_id, bucket, key, Some(fd_lease))
+    }
+
+    fn create_inner(
+        resolver: &StagingPathResolver,
+        store_id: &str,
+        bucket: &str,
+        key: &str,
+        fd_lease: Option<Box<dyn ExternalFdLease>>,
     ) -> StorageResult<Self> {
         let location = ObjectLocation::new(store_id, bucket, key)?;
         let path = resolver.path_for(&location)?;
@@ -94,7 +124,11 @@ impl StagingFile {
                     )
                 }
             })?;
-        Ok(Self { file, path })
+        Ok(Self {
+            file,
+            _fd_lease: fd_lease,
+            path,
+        })
     }
 
     /// Absolute path of the staging file on disk. The caller (database) records this so it can

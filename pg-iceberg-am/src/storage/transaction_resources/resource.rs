@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use iceberg_lite::io::FileIO;
+use pg_lakebase_core::storage_service::BackendStorageService;
 use pg_lakebase_core::wal::flush_wal;
-use pg_lakebase_storage::{ObjectLocation, StorageClient, StorageErrorKind};
+use pg_lakebase_storage::{ObjectLocation, StorageErrorKind};
 
 use crate::storage::LocalStorage;
 use crate::wal::record::log_delete_directory;
@@ -28,7 +29,7 @@ pub(super) enum StorageResource {
     ObjectFile {
         location: ObjectLocation,
         staging_path: PathBuf,
-        client: StorageClient,
+        service: BackendStorageService,
         state: ObjectFileState,
     },
 }
@@ -139,11 +140,11 @@ impl StorageResource {
             Self::ObjectFile {
                 location,
                 staging_path,
-                client,
+                service,
                 state,
             } => {
                 let remote_deleted = if *state == ObjectFileState::Uploaded {
-                    match client.delete(
+                    match service.delete(
                         location.store_id().as_str(),
                         location.bucket(),
                         location.key(),

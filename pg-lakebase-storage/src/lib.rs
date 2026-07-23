@@ -33,7 +33,8 @@ pub use cache::{
     PhysicalCacheId, PhysicalCacheStat, PhysicalCacheUsage, RedbCacheIndex,
 };
 pub use client::{
-    ListIter, ListPage, SeekFrom, StagingFile, StorageClient, StorageFile, UploadInfo,
+    ExternalFdLease, ExternalFdPolicy, ListIter, ListPage, SeekFrom, StagingFile,
+    StorageClient, StorageFile, UploadInfo,
 };
 pub use config::{
     CacheCleanupConfig, CacheRuntimeConfig, DEFAULT_CACHE_CLEANUP_BATCH_BYTES,

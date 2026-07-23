@@ -1,5 +1,7 @@
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backend::{
@@ -7,16 +9,57 @@ use crate::backend::{
     StoreConfig, StoreRegistry,
 };
 use crate::cache::{CacheCleanupPolicy, CacheManager, InMemoryCacheIndex};
-use crate::config::{StorageRuntime, StorageRuntimeConfig};
+use crate::config::{StorageRuntime, StorageRuntimeConfig, StorageServerConfig};
 use crate::error::StorageErrorKind;
 use crate::object::ObjectLocation;
+use crate::protocol::{WireResponse, encode_response};
 use crate::server::StorageServer;
 use crate::service::StorageService;
 use crate::staging::{StagingPathResolver, StagingUploader};
+use crate::transport::{read_frame_blocking, write_frame_blocking};
 
 use super::*;
 
 const TEST_STORE_ID: &str = "test-store";
+
+#[derive(Clone)]
+struct CountingFdPolicy {
+    active: Arc<AtomicUsize>,
+    limit: Option<usize>,
+}
+
+impl ExternalFdPolicy for CountingFdPolicy {
+    fn acquire(&self) -> StorageResult<Box<dyn ExternalFdLease>> {
+        if let Some(limit) = self.limit {
+            self.active
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+                    (active < limit).then_some(active + 1)
+                })
+                .map_err(|_| {
+                    StorageError::resource_exhausted(
+                        "test external file descriptor budget exhausted",
+                    )
+                })?;
+        } else {
+            self.active.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(Box::new(CountingFdLease {
+            active: Arc::clone(&self.active),
+        }))
+    }
+}
+
+struct CountingFdLease {
+    active: Arc<AtomicUsize>,
+}
+
+impl ExternalFdLease for CountingFdLease {}
+
+impl Drop for CountingFdLease {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 #[tokio::test]
 async fn client_reads_through_unix_socket_server() {
@@ -370,6 +413,41 @@ async fn stage_twice_without_finalize_returns_busy() {
     .unwrap();
 }
 
+#[test]
+fn staging_file_holds_external_fd_lease_until_drop() {
+    let root = test_root("staging-fd-accounting");
+    let resolver = StagingPathResolver::new(root);
+    let active_fds = Arc::new(AtomicUsize::new(0));
+    let policy = CountingFdPolicy {
+        active: Arc::clone(&active_fds),
+        limit: None,
+    };
+
+    let staging = StagingFile::create_with_fd_policy(
+        &resolver,
+        TEST_STORE_ID,
+        "bucket",
+        "accounted.txt",
+        &policy,
+    )
+    .unwrap();
+    assert_eq!(active_fds.load(Ordering::SeqCst), 1);
+
+    drop(staging);
+    assert_eq!(active_fds.load(Ordering::SeqCst), 0);
+
+    let error = StagingFile::create_with_fd_policy(
+        &resolver,
+        TEST_STORE_ID,
+        "bucket",
+        "accounted.txt",
+        &policy,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), StorageErrorKind::Busy);
+    assert_eq!(active_fds.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn dropping_storage_file_closes_server_handle_best_effort() {
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "drop-close.txt").unwrap();
@@ -396,9 +474,19 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
         let _ = server.serve_forever().await;
     });
 
+    let active_fds = Arc::new(AtomicUsize::new(0));
+    let active_fds_for_client = Arc::clone(&active_fds);
     let client_socket = socket.clone();
-    let client = tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
+    tokio::task::spawn_blocking(move || {
+        let client = StorageClient::connect_with_fd_policy(
+            &client_socket,
+            Box::new(CountingFdPolicy {
+                active: Arc::clone(&active_fds_for_client),
+                limit: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 1);
 
         let mut file = client
             .open(TEST_STORE_ID, "bucket", "drop-close.txt")
@@ -406,17 +494,26 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
         let data = file.read(16).unwrap();
         assert_eq!(data, b"abcdefghijklmnop");
         file.close().unwrap();
+        assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 1);
 
-        let file = client
+        let mut file = client
             .open(TEST_STORE_ID, "bucket", "drop-close.txt")
             .unwrap();
         assert!(file.is_direct_io());
+        assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 2);
+        file.close().unwrap();
+        assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 1);
+        let error = file.read_at(0, 1).unwrap_err();
+        assert_eq!(error.kind(), StorageErrorKind::ClosedHandle);
         drop(file);
+        assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 1);
 
-        client
+        drop(client);
+        assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 0);
     })
     .await
     .unwrap();
+    assert_eq!(active_fds.load(Ordering::SeqCst), 0);
 
     let mut policy = CacheCleanupPolicy::new(16);
     policy.cleanup_start_ratio = 0.0;
@@ -431,7 +528,93 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
             .unwrap()
     );
 
-    drop(client);
+    let limited_fds = Arc::new(AtomicUsize::new(0));
+    let limited_fds_for_client = Arc::clone(&limited_fds);
+    let client_socket = socket.clone();
+    tokio::task::spawn_blocking(move || {
+        let client = StorageClient::connect_with_fd_policy(
+            &client_socket,
+            Box::new(CountingFdPolicy {
+                active: Arc::clone(&limited_fds_for_client),
+                limit: Some(1),
+            }),
+        )
+        .unwrap();
+        let mut warming_file = client
+            .open(TEST_STORE_ID, "bucket", "drop-close.txt")
+            .unwrap();
+        assert!(!warming_file.is_direct_io());
+        assert_eq!(warming_file.read(16).unwrap(), b"abcdefghijklmnop");
+        warming_file.close().unwrap();
+
+        let error = match client.open(TEST_STORE_ID, "bucket", "drop-close.txt") {
+            Ok(_) => panic!("direct open unexpectedly exceeded the FD budget"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), StorageErrorKind::ResourceExhausted);
+        assert!(!client.is_usable());
+        assert_eq!(limited_fds_for_client.load(Ordering::SeqCst), 0);
+    })
+    .await
+    .unwrap();
+    assert_eq!(limited_fds.load(Ordering::SeqCst), 0);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn panic_unwind_drops_virtual_handle_on_reused_connection() {
+    let key =
+        ObjectLocation::new(TEST_STORE_ID, "bucket", "unwind-close.txt").unwrap();
+    let backend = MemoryObjectBackend::new();
+    backend.insert(key, b"small object".to_vec());
+
+    let root = test_root("unwind-close-cache");
+    let socket = test_root("unwind-close.sock");
+    let cache = Arc::new(
+        CacheManager::new(
+            root,
+            InMemoryCacheIndex::new(),
+            StorageRuntime::new(StorageRuntimeConfig::default()).unwrap(),
+        )
+        .with_limits(64, 64),
+    );
+    cache.spawn_large_fill_reaper();
+    let registry = StoreRegistry::new()
+        .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
+        .unwrap();
+    let service = Arc::new(StorageService::with_registry(registry, cache));
+    let server = StorageServer::bind_with_config(
+        &socket,
+        service,
+        StorageServerConfig::default().with_max_open_handles_per_connection(1),
+    )
+    .await
+    .unwrap();
+    let server_task = tokio::spawn(async move {
+        let _ = server.serve_forever().await;
+    });
+
+    let client_socket = socket.clone();
+    tokio::task::spawn_blocking(move || {
+        let client = StorageClient::connect(&client_socket).unwrap();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _file = client
+                .open(TEST_STORE_ID, "bucket", "unwind-close.txt")
+                .unwrap();
+            panic!("injected error-report unwind");
+        }));
+        assert!(unwind.is_err());
+
+        let mut reopened = client
+            .open(TEST_STORE_ID, "bucket", "unwind-close.txt")
+            .unwrap();
+        assert_eq!(reopened.read(12).unwrap(), b"small object");
+        reopened.close().unwrap();
+    })
+    .await
+    .unwrap();
+
     server_task.abort();
 }
 
@@ -671,6 +854,84 @@ fn test_root(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     PathBuf::from("/tmp").join(format!("pss-{name}-{stamp}"))
+}
+
+#[test]
+fn client_poisons_connection_after_response_id_mismatch() {
+    let socket = test_root("poison-mismatched-response.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _request = read_frame_blocking(&mut stream).unwrap().unwrap();
+        let response = encode_response(&WireResponse {
+            request_id: 99,
+            payload: WireResponsePayload::Head {
+                size: 1,
+                etag: None,
+            },
+        })
+        .unwrap();
+        write_frame_blocking(&mut stream, &response).unwrap();
+    });
+
+    let active_fds = Arc::new(AtomicUsize::new(0));
+    let client = StorageClient::connect_with_fd_policy(
+        &socket,
+        Box::new(CountingFdPolicy {
+            active: Arc::clone(&active_fds),
+            limit: None,
+        }),
+    )
+    .unwrap();
+    assert_eq!(active_fds.load(Ordering::SeqCst), 1);
+    let error = client.head(TEST_STORE_ID, "bucket", "object").unwrap_err();
+    assert_eq!(error.kind(), StorageErrorKind::Protocol);
+    assert!(!client.is_usable());
+    assert_eq!(active_fds.load(Ordering::SeqCst), 0);
+
+    let second = client.head(TEST_STORE_ID, "bucket", "object").unwrap_err();
+    assert_eq!(second.kind(), StorageErrorKind::Protocol);
+    server.join().unwrap();
+}
+
+#[test]
+fn client_keeps_connection_after_remote_operation_error() {
+    let socket = test_root("remote-error-keeps-connection.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _first = read_frame_blocking(&mut stream).unwrap().unwrap();
+        let not_found = encode_response(&WireResponse::error(
+            1,
+            StorageError::not_found("missing"),
+        ))
+        .unwrap();
+        write_frame_blocking(&mut stream, &not_found).unwrap();
+
+        let _second = read_frame_blocking(&mut stream).unwrap().unwrap();
+        let found = encode_response(&WireResponse {
+            request_id: 2,
+            payload: WireResponsePayload::Head {
+                size: 7,
+                etag: None,
+            },
+        })
+        .unwrap();
+        write_frame_blocking(&mut stream, &found).unwrap();
+    });
+
+    let client = StorageClient::connect(&socket).unwrap();
+    let error = client.head(TEST_STORE_ID, "bucket", "missing").unwrap_err();
+    assert_eq!(error.kind(), StorageErrorKind::NotFound);
+    assert!(client.is_usable());
+    assert_eq!(
+        client
+            .head(TEST_STORE_ID, "bucket", "present")
+            .unwrap()
+            .size,
+        7
+    );
+    server.join().unwrap();
 }
 
 #[tokio::test]

@@ -46,7 +46,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
-use pg_lakebase_storage::{ObjectLocation, StorageClient};
+use pg_lakebase_core::storage_service::BackendStorageService;
+use pg_lakebase_storage::ObjectLocation;
 
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::{
@@ -167,12 +168,12 @@ pub(crate) fn register_local_table_root_dropped(
 pub(crate) fn register_object_file_staged(
     location: ObjectLocation,
     staging_path: PathBuf,
-    client: StorageClient,
+    service: BackendStorageService,
 ) {
     StorageTransactionResource::current().track(StorageResource::ObjectFile {
         location,
         staging_path,
-        client,
+        service,
         state: ObjectFileState::Staged,
     });
 }

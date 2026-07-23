@@ -2,11 +2,11 @@
 
 use std::os::unix::fs::FileExt;
 
-use crate::error::StorageResult;
+use crate::error::{StorageError, StorageResult};
 use crate::handle::FileHandle;
 use crate::protocol::{WireRequestPayload, WireResponsePayload};
 
-use super::{StorageClient, unexpected_response};
+use super::{ExternalFdLease, StorageClient};
 
 /// Seek position for [`StorageFile::seek`], mirroring [`std::io::SeekFrom`] without requiring
 /// `std::io` trait implementation.
@@ -28,12 +28,19 @@ pub enum SeekFrom {
 ///
 /// The cursor advances by the number of bytes actually read. Use [`Self::seek`] to reposition.
 pub struct StorageFile {
-    client: StorageClient,
     handle: FileHandle,
     cursor: u64,
     size: u64,
-    read_path: ReadPath,
-    closed: bool,
+    direct_io: bool,
+    state: StorageFileState,
+}
+
+enum StorageFileState {
+    Open {
+        client: StorageClient,
+        read_path: ReadPath,
+    },
+    Closed,
 }
 
 impl StorageFile {
@@ -43,13 +50,13 @@ impl StorageFile {
         size: u64,
         read_path: ReadPath,
     ) -> Self {
+        let direct_io = matches!(read_path, ReadPath::Direct(_));
         Self {
-            client,
             handle,
             cursor: 0,
             size,
-            read_path,
-            closed: false,
+            direct_io,
+            state: StorageFileState::Open { client, read_path },
         }
     }
 
@@ -61,7 +68,7 @@ impl StorageFile {
     /// Returns `true` when the server promoted this handle to direct file I/O (the client
     /// reads from a local cache file via `pread` rather than issuing wire READ RPCs).
     pub fn is_direct_io(&self) -> bool {
-        matches!(self.read_path, ReadPath::Direct(_))
+        self.direct_io
     }
 
     /// Current cursor position (byte offset from start).
@@ -99,15 +106,19 @@ impl StorageFile {
     ///
     /// Returns an empty `Vec` when `offset` is at or past EOF.
     pub fn read_at(&self, offset: u64, len: u32) -> StorageResult<Vec<u8>> {
-        if let ReadPath::Direct(reader) = &self.read_path {
-            let clamped =
-                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
-            if clamped == 0 {
-                return Ok(Vec::new());
+        let (client, read_path) = self.open_resources()?;
+        match read_path {
+            ReadPath::Direct(reader) => {
+                let clamped =
+                    std::cmp::min(len as u64, self.size.saturating_sub(offset))
+                        as usize;
+                if clamped == 0 {
+                    return Ok(Vec::new());
+                }
+                reader.read_at_exact(offset, clamped)
             }
-            return reader.read_at_exact(offset, clamped);
+            ReadPath::Mediated => client.read_alloc(self.handle, offset, len),
         }
-        self.client.read_alloc(self.handle, offset, len)
     }
 
     /// Reads into a caller-provided buffer from the given absolute offset, without modifying the
@@ -115,25 +126,25 @@ impl StorageFile {
     ///
     /// Returns the number of bytes written to `buf`. Returns `0` when `offset` is at or past EOF.
     pub fn read_at_into(&self, offset: u64, buf: &mut [u8]) -> StorageResult<usize> {
+        let (client, read_path) = self.open_resources()?;
         if buf.is_empty() {
             return Ok(0);
         }
         let len = std::cmp::min(buf.len(), u32::MAX as usize) as u32;
-        if let ReadPath::Direct(reader) = &self.read_path {
-            let clamped =
-                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
-            if clamped == 0 {
-                return Ok(0);
+        match read_path {
+            ReadPath::Direct(reader) => {
+                let clamped =
+                    std::cmp::min(len as u64, self.size.saturating_sub(offset))
+                        as usize;
+                if clamped == 0 {
+                    return Ok(0);
+                }
+                reader.read_at_into(offset, &mut buf[..clamped])
             }
-            return reader.read_at_into(offset, &mut buf[..clamped]);
+            ReadPath::Mediated => {
+                client.read_into(self.handle, offset, len, &mut buf[..len as usize])
+            }
         }
-        let result = self.client.read_into(
-            self.handle,
-            offset,
-            len,
-            &mut buf[..len as usize],
-        )?;
-        Ok(result.bytes_read)
     }
 
     /// Reads up to `len` bytes starting at the current cursor, returning them as a new `Vec`.
@@ -141,18 +152,23 @@ impl StorageFile {
     /// The cursor advances by the number of bytes returned. Returns an empty `Vec` when the
     /// cursor is at or past EOF.
     pub fn read(&mut self, len: u32) -> StorageResult<Vec<u8>> {
-        if let ReadPath::Direct(reader) = &self.read_path {
-            let offset = self.cursor;
-            let len =
-                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
-            if len == 0 {
-                return Ok(Vec::new());
+        let offset = self.cursor;
+        let data = {
+            let (client, read_path) = self.open_resources()?;
+            match read_path {
+                ReadPath::Direct(reader) => {
+                    let len =
+                        std::cmp::min(len as u64, self.size.saturating_sub(offset))
+                            as usize;
+                    if len == 0 {
+                        Vec::new()
+                    } else {
+                        reader.read_at_exact(offset, len)?
+                    }
+                }
+                ReadPath::Mediated => client.read_alloc(self.handle, offset, len)?,
             }
-            let data = reader.read_at_exact(offset, len)?;
-            self.cursor += data.len() as u64;
-            return Ok(data);
-        }
-        let data = self.client.read_alloc(self.handle, self.cursor, len)?;
+        };
         self.cursor += data.len() as u64;
         Ok(data)
     }
@@ -162,29 +178,41 @@ impl StorageFile {
     /// At most `buf.len()` bytes are read (clamped to `u32::MAX` for the wire protocol).
     /// The cursor advances by the number of bytes returned. Returns `0` at EOF.
     pub fn read_into(&mut self, buf: &mut [u8]) -> StorageResult<usize> {
+        let (client, read_path) = self.open_resources()?;
         if buf.is_empty() {
             return Ok(0);
         }
         let len = std::cmp::min(buf.len(), u32::MAX as usize) as u32;
-        if let ReadPath::Direct(reader) = &self.read_path {
-            let offset = self.cursor;
-            let clamped =
-                std::cmp::min(len as u64, self.size.saturating_sub(offset)) as usize;
-            if clamped == 0 {
-                return Ok(0);
+        let offset = self.cursor;
+        let bytes_read = match read_path {
+            ReadPath::Direct(reader) => {
+                let clamped =
+                    std::cmp::min(len as u64, self.size.saturating_sub(offset))
+                        as usize;
+                if clamped == 0 {
+                    0
+                } else {
+                    reader.read_at_into(offset, &mut buf[..clamped])?
+                }
             }
-            let n = reader.read_at_into(offset, &mut buf[..clamped])?;
-            self.cursor += n as u64;
-            return Ok(n);
+            ReadPath::Mediated => client.read_into(
+                self.handle,
+                offset,
+                len,
+                &mut buf[..len as usize],
+            )?,
+        };
+        self.cursor += bytes_read as u64;
+        Ok(bytes_read)
+    }
+
+    fn open_resources(&self) -> StorageResult<(&StorageClient, &ReadPath)> {
+        match &self.state {
+            StorageFileState::Open { client, read_path } => Ok((client, read_path)),
+            StorageFileState::Closed => {
+                Err(StorageError::closed_handle(self.handle.0))
+            }
         }
-        let result = self.client.read_into(
-            self.handle,
-            self.cursor,
-            len,
-            &mut buf[..len as usize],
-        )?;
-        self.cursor += result.bytes_read as u64;
-        Ok(result.bytes_read)
     }
 
     /// Closes the server-side handle, releasing cache activity leases and fill sessions.
@@ -193,18 +221,27 @@ impl StorageFile {
     /// calling `close` will attempt to close it automatically (errors are silently ignored in
     /// `Drop`).
     pub fn close(&mut self) -> StorageResult<()> {
-        if self.closed {
-            return Ok(());
-        }
-        let response = self.client.request(WireRequestPayload::Close {
-            handle: self.handle,
-        })?;
+        let response = match &self.state {
+            StorageFileState::Open { client, .. } => {
+                client.request(WireRequestPayload::Close {
+                    handle: self.handle,
+                })?
+            }
+            StorageFileState::Closed => return Ok(()),
+        };
         match response.0 {
             WireResponsePayload::Close => {
-                self.closed = true;
+                self.state = StorageFileState::Closed;
                 Ok(())
             }
-            other => Err(unexpected_response("close", &other)),
+            other => match &self.state {
+                StorageFileState::Open { client, .. } => {
+                    client.reject_unexpected("close", &other)
+                }
+                StorageFileState::Closed => {
+                    unreachable!("file cannot close while processing its response")
+                }
+            },
         }
     }
 }
@@ -224,12 +261,20 @@ pub(super) enum ReadPath {
 }
 
 pub(super) struct DirectReader {
+    // Drop the OS descriptor before releasing its accounting lease.
     file: std::fs::File,
+    _fd_lease: Option<Box<dyn ExternalFdLease>>,
 }
 
 impl DirectReader {
-    pub(super) fn new(file: std::fs::File) -> Self {
-        Self { file }
+    pub(super) fn new(
+        file: std::fs::File,
+        fd_lease: Option<Box<dyn ExternalFdLease>>,
+    ) -> Self {
+        Self {
+            file,
+            _fd_lease: fd_lease,
+        }
     }
 
     fn read_at_exact(&self, offset: u64, len: usize) -> StorageResult<Vec<u8>> {
