@@ -563,7 +563,7 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
 }
 
 #[tokio::test]
-async fn panic_unwind_drops_virtual_handle_on_reused_connection() {
+async fn panic_unwind_poisons_connection_and_allows_reconnect() {
     let key =
         ObjectLocation::new(TEST_STORE_ID, "bucket", "unwind-close.txt").unwrap();
     let backend = MemoryObjectBackend::new();
@@ -605,8 +605,10 @@ async fn panic_unwind_drops_virtual_handle_on_reused_connection() {
             panic!("injected error-report unwind");
         }));
         assert!(unwind.is_err());
+        assert!(!client.is_usable());
 
-        let mut reopened = client
+        let replacement = StorageClient::connect(&client_socket).unwrap();
+        let mut reopened = replacement
             .open(TEST_STORE_ID, "bucket", "unwind-close.txt")
             .unwrap();
         assert_eq!(reopened.read(12).unwrap(), b"small object");

@@ -76,10 +76,9 @@ impl<'a> FdReceiver<'a> {
     }
 }
 
-/// Blocking companion to [`FdReceiver`] used by the synchronous client.
+/// Blocking companion to [`FdReceiver`] for standalone blocking streams.
 pub(super) fn recv_blocking(stream: &mut StdUnixStream) -> StorageResult<OwnedFd> {
-    let mut token = [0_u8; 1];
-    match recvmsg_with_fd(stream.as_raw_fd(), &mut token) {
+    match try_recv_fd(stream) {
         Ok((0, _)) => Err(StorageError::protocol(
             "connection closed while receiving fd",
         )),
@@ -89,6 +88,17 @@ pub(super) fn recv_blocking(stream: &mut StdUnixStream) -> StorageResult<OwnedFd
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Performs one nonblocking-compatible `recvmsg` attempt.
+///
+/// Callers using a nonblocking stream handle `WouldBlock` through their runtime
+/// readiness integration and retry this operation.
+pub(crate) fn try_recv_fd(
+    stream: &StdUnixStream,
+) -> io::Result<(usize, Option<OwnedFd>)> {
+    let mut token = [0_u8; 1];
+    recvmsg_with_fd(stream.as_raw_fd(), &mut token)
 }
 
 // ---- libc glue ---------------------------------------------------------------------------------

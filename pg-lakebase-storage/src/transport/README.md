@@ -64,9 +64,11 @@ The transport provides both async and blocking variants:
 - **Async** (`FrameReader`, `FrameWriter`, `FdSender`, `FdReceiver`) —
   used by the server and in-process wire layer. Built on Tokio's
   `AsyncRead` / `AsyncWrite`.
-- **Blocking** (`read_frame_blocking`, `write_frame_blocking`,
-  `read_fd_blocking`) — used by the synchronous test/tooling client
-  over `std::os::unix::net::UnixStream`.
+- **Synchronous framing** (`read_frame_blocking`, `write_frame_blocking`) —
+  generic over `Read` / `Write`. The production synchronous client supplies
+  its runtime-aware nonblocking adapter; standalone tooling can pass a
+  blocking `std::os::unix::net::UnixStream`. `read_fd_blocking` remains
+  available for the latter.
 
 The two paths intentionally do not share a trait. The format is identical
 (same length prefix, same byte order, same frame cap), but the
@@ -90,10 +92,10 @@ stale-socket handling:
 5  Centralized Unsafe
 =====================
 
-All `libc` calls (`sendmsg`, `recvmsg`, `CMSG` macros) are confined to
-`fd_channel.rs`. The two functions `sendmsg_with_fd` and
-`recvmsg_with_fd` are the only `unsafe` blocks in the transport layer,
-making auditing straightforward.
+All ancillary-data `libc` calls (`sendmsg`, `recvmsg`, `CMSG` macros)
+are confined to `fd_channel.rs`. The standalone synchronous client's
+runtime waiter owns one separate, narrowly-scoped `poll(2)` call in
+`client/socket_wait.rs`.
 
 
 6  Error Handling

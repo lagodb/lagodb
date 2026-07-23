@@ -1,0 +1,221 @@
+#!/usr/bin/env sh
+set -eu
+
+cleanup_injection_point=lakebase-iceberg-object-reader-before-drop
+foreground_injection_point=lakebase-storage-foreground-before-open
+cleanup_application_name=lakebase-storage-cleanup-cancel
+foreground_application_name=lakebase-storage-foreground-cancel
+output_file="/tmp/pg_lakebase_storage_socket_cancel_contexts_${PGPORT:-unknown}_$$.out"
+client_pid=
+storage_pid=
+
+psql_scalar() {
+    psql -XAtq -v ON_ERROR_STOP=1 -c "$1"
+}
+
+detach_injection_point() {
+    point=$1
+    psql_scalar \
+        "SELECT injection_points_detach('${point}')" \
+        >/dev/null 2>&1 || true
+}
+
+wake_injection_point() {
+    point=$1
+    psql_scalar \
+        "SELECT injection_points_wakeup('${point}')" \
+        >/dev/null 2>&1 || true
+}
+
+resume_storage_worker() {
+    if [ -n "$storage_pid" ] && kill -0 "$storage_pid" 2>/dev/null; then
+        kill -CONT "$storage_pid" 2>/dev/null || true
+    fi
+}
+
+cleanup() {
+    wake_injection_point "$cleanup_injection_point"
+    detach_injection_point "$cleanup_injection_point"
+    wake_injection_point "$foreground_injection_point"
+    detach_injection_point "$foreground_injection_point"
+    resume_storage_worker
+    if [ -n "$client_pid" ] && kill -0 "$client_pid" 2>/dev/null; then
+        kill "$client_pid" 2>/dev/null || true
+        wait "$client_pid" 2>/dev/null || true
+    fi
+    rm -f "$output_file"
+}
+
+wait_for_event() {
+    application_name=$1
+    expected_event=$2
+    deadline=$(( $(date +%s) + 10 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if [ "$(psql_scalar "
+            SELECT count(*)
+            FROM pg_stat_activity
+            WHERE application_name = '${application_name}'
+              AND state = 'active'
+              AND wait_event = '${expected_event}'
+        ")" = "1" ]; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    return 1
+}
+
+wait_for_client_exit() {
+    deadline=$(( $(date +%s) + 10 ))
+    while kill -0 "$client_pid" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            return 1
+        fi
+        sleep 0.05
+    done
+}
+
+trap cleanup EXIT HUP INT TERM
+
+storage_pid=$(psql_scalar "
+    SELECT pid
+    FROM pg_stat_activity
+    WHERE backend_type = 'pg-lakebase-storage'
+")
+
+PGAPPNAME=$cleanup_application_name psql -XAtq -v ON_ERROR_STOP=1 \
+    -c "SELECT injection_points_set_local()" \
+    -c "SELECT injection_points_attach('${cleanup_injection_point}', 'wait')" \
+    -c "SELECT count(*) FROM storage_socket_cancel_contexts_t" \
+    >"$output_file" 2>&1 &
+client_pid=$!
+
+if wait_for_event "$cleanup_application_name" "$cleanup_injection_point"; then
+    echo "cleanup_drop_reached: true"
+else
+    echo "cleanup_drop_reached: false"
+    exit 1
+fi
+
+kill -STOP "$storage_pid"
+wake_injection_point "$cleanup_injection_point"
+detach_injection_point "$cleanup_injection_point"
+
+if wait_for_event "$cleanup_application_name" "Extension"; then
+    echo "cleanup_socket_wait_reached: true"
+else
+    echo "cleanup_socket_wait_reached: false"
+    exit 1
+fi
+
+if [ "$(psql_scalar "
+    SELECT pg_cancel_backend(pid)
+    FROM pg_stat_activity
+    WHERE application_name = '${cleanup_application_name}'
+")" != "t" ]; then
+    echo "cleanup_cancel_sent: false"
+    exit 1
+fi
+echo "cleanup_cancel_sent: true"
+
+# Give the target backend enough time to process a latch wakeup. The cleanup
+# waiter intentionally excludes WL_LATCH_SET, so it must remain blocked on the
+# stopped storage worker. The former implementation exited here immediately.
+sleep 1
+if [ "$(psql_scalar "
+    SELECT count(*)
+    FROM pg_stat_activity
+    WHERE application_name = '${cleanup_application_name}'
+      AND state = 'active'
+      AND wait_event = 'Extension'
+")" = "1" ]; then
+    echo "cleanup_ignored_cancel: true"
+else
+    echo "cleanup_ignored_cancel: false"
+    exit 1
+fi
+
+resume_storage_worker
+if ! wait_for_client_exit; then
+    echo "cancel_delivered_after_cleanup: false"
+    exit 1
+fi
+
+if wait "$client_pid"; then
+    client_status=0
+else
+    client_status=$?
+fi
+client_pid=
+
+if [ "$client_status" -ne 0 ] \
+    && grep -Fq "canceling statement due to user request" "$output_file"; then
+    echo "cancel_delivered_after_cleanup: true"
+else
+    echo "cancel_delivered_after_cleanup: false"
+    exit 1
+fi
+
+# Warm the target backend's storage connection before attaching the foreground
+# point. The point runs after acquiring that cached client, so stopping the
+# storage worker cannot move this scenario into the blocking connect path.
+resume_storage_worker
+PGAPPNAME=$foreground_application_name psql -XAtq -v ON_ERROR_STOP=1 \
+    -c "SELECT count(*) FROM storage_socket_cancel_contexts_t" \
+    -c "SELECT injection_points_set_local()" \
+    -c "SELECT injection_points_attach('${foreground_injection_point}', 'wait')" \
+    -c "SELECT count(*) FROM storage_socket_cancel_contexts_t" \
+    >"$output_file" 2>&1 &
+client_pid=$!
+
+if wait_for_event "$foreground_application_name" "$foreground_injection_point"; then
+    echo "foreground_open_reached: true"
+else
+    echo "foreground_open_reached: false"
+    exit 1
+fi
+
+kill -STOP "$storage_pid"
+wake_injection_point "$foreground_injection_point"
+detach_injection_point "$foreground_injection_point"
+
+if wait_for_event "$foreground_application_name" "Extension"; then
+    echo "foreground_socket_wait_reached: true"
+else
+    echo "foreground_socket_wait_reached: false"
+    exit 1
+fi
+
+if [ "$(psql_scalar "
+    SELECT pg_cancel_backend(pid)
+    FROM pg_stat_activity
+    WHERE application_name = '${foreground_application_name}'
+")" != "t" ]; then
+    echo "foreground_cancel_sent: false"
+    exit 1
+fi
+echo "foreground_cancel_sent: true"
+
+# Foreground waits include the PG latch. The query must therefore process the
+# cancel and exit while the storage worker is still stopped.
+if ! wait_for_client_exit; then
+    echo "foreground_cancel_delivered: false"
+    exit 1
+fi
+
+if wait "$client_pid"; then
+    client_status=0
+else
+    client_status=$?
+fi
+client_pid=
+
+if [ "$client_status" -ne 0 ] \
+    && grep -Fq "canceling statement due to user request" "$output_file"; then
+    echo "foreground_cancel_delivered: true"
+else
+    echo "foreground_cancel_delivered: false"
+    exit 1
+fi
+
+resume_storage_worker

@@ -1,3 +1,4 @@
+mod injection_points;
 pub mod local;
 pub mod object;
 mod object_uri;

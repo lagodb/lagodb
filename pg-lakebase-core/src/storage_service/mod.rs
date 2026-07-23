@@ -12,6 +12,8 @@ use pg_lakebase_storage::{StorageError, StorageResult};
 use pgrx::pg_sys;
 
 mod backend;
+mod injection_points;
+mod socket_wait;
 
 pub use backend::BackendStorageService;
 

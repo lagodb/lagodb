@@ -1,6 +1,8 @@
 //! Open object read handle with cursor, seek, and direct I/O support.
 
+use std::mem;
 use std::os::unix::fs::FileExt;
+use std::thread;
 
 use crate::error::{StorageError, StorageResult};
 use crate::handle::FileHandle;
@@ -218,8 +220,9 @@ impl StorageFile {
     /// Closes the server-side handle, releasing cache activity leases and fill sessions.
     ///
     /// Calling `close` on an already-closed file is a no-op. Dropping a `StorageFile` without
-    /// calling `close` will attempt to close it automatically (errors are silently ignored in
-    /// `Drop`).
+    /// calling `close` makes one bounded close attempt. Cleanup errors cannot
+    /// be returned from `Drop`, so they invalidate the connection and let
+    /// server-side connection teardown release the handle.
     pub fn close(&mut self) -> StorageResult<()> {
         let response = match &self.state {
             StorageFileState::Open { client, .. } => {
@@ -248,10 +251,39 @@ impl StorageFile {
 
 impl Drop for StorageFile {
     fn drop(&mut self) {
-        // Match ordinary file-handle semantics for callers that forget to call
-        // `close()`. Errors are intentionally ignored: drop cannot report them, and
-        // connection teardown will release any remaining server-side handles.
-        let _ = self.close();
+        let (client, read_path) =
+            match mem::replace(&mut self.state, StorageFileState::Closed) {
+                StorageFileState::Open { client, read_path } => (client, read_path),
+                StorageFileState::Closed => return,
+            };
+        // The local direct-I/O descriptor is no longer usable once Drop
+        // begins. Release it and its PostgreSQL FD reservation before bounded
+        // cleanup I/O that may time out and invalidate the connection.
+        drop(read_path);
+
+        // Never start protocol I/O while unwinding or on a connection already
+        // poisoned by an interrupted/incomplete operation. Closing the socket
+        // makes the server release every handle owned by this connection.
+        if thread::panicking() || !client.is_usable() {
+            let _ = client.invalidate();
+            return;
+        }
+
+        let response = client.request_cleanup(WireRequestPayload::Close {
+            handle: self.handle,
+        });
+        match response {
+            Ok((WireResponsePayload::Close, _)) => {}
+            Ok((other, _)) => {
+                let _ = client.reject_unexpected::<()>("close", &other);
+            }
+            Err(_) => {
+                // A framed server error leaves the protocol synchronized, but
+                // Drop cannot report or retry it. Invalidate so the server's
+                // connection teardown releases the unclosed handle.
+                let _ = client.invalidate();
+            }
+        }
     }
 }
 

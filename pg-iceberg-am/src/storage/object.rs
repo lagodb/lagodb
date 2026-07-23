@@ -12,6 +12,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::sync::Arc;
 
+use super::injection_points::StorageInjectionPoints;
 use crate::storage::object_uri::resolve_object_uri;
 use crate::storage::transaction_resources::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
@@ -367,6 +368,12 @@ impl ObjectReader {
         }
 
         Ok(bytes::Bytes::from(data))
+    }
+}
+
+impl Drop for ObjectReader {
+    fn drop(&mut self) {
+        StorageInjectionPoints::OBJECT_READER_BEFORE_DROP.run();
     }
 }
 

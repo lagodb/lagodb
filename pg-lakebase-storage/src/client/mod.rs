@@ -17,9 +17,9 @@
 //! other connection so long as it knows the identity tuple.
 
 use std::cell::{RefCell, RefMut};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::backend::{StorageProbeResult, StoreConfig};
 use crate::error::{StorageError, StorageResult};
@@ -27,17 +27,22 @@ use crate::handle::{FileHandle, OpenFlags};
 use crate::object::ObjectInfo;
 use crate::protocol::{ListCursor, WireRequestPayload, WireResponsePayload};
 
+mod client_builder;
 mod connection;
 mod fd;
 mod list;
+mod socket;
+mod socket_wait;
 mod staging_file;
 mod storage_file;
 
 #[cfg(test)]
 mod tests;
 
+pub use client_builder::{DEFAULT_CLIENT_CLEANUP_TIMEOUT, StorageClientBuilder};
 pub use fd::{ExternalFdLease, ExternalFdPolicy};
 pub use list::ListIter;
+pub use socket_wait::{SocketInterest, SocketWait, SocketWaitContext};
 pub use staging_file::StagingFile;
 pub use storage_file::{SeekFrom, StorageFile};
 
@@ -112,11 +117,12 @@ pub struct ListPage {
 }
 
 impl StorageClient {
+    pub fn builder(socket_path: impl AsRef<Path>) -> StorageClientBuilder {
+        StorageClientBuilder::new(socket_path)
+    }
+
     pub fn connect(socket_path: impl AsRef<Path>) -> StorageResult<Self> {
-        let stream = UnixStream::connect(socket_path)?;
-        Ok(Self {
-            inner: Rc::new(RefCell::new(ClientConnection::new(stream, None, None))),
-        })
+        Self::builder(socket_path).connect()
     }
 
     /// Connect with descriptor accounting supplied by the embedding runtime.
@@ -128,32 +134,30 @@ impl StorageClient {
         socket_path: impl AsRef<Path>,
         fd_policy: Box<dyn ExternalFdPolicy>,
     ) -> StorageResult<Self> {
-        let socket_lease = fd_policy.acquire()?;
-        let stream = UnixStream::connect(socket_path)?;
-        Ok(Self {
-            inner: Rc::new(RefCell::new(ClientConnection::new(
-                stream,
-                Some(socket_lease),
-                Some(fd_policy),
-            ))),
-        })
+        Self::builder(socket_path).fd_policy(fd_policy).connect()
     }
 
-    /// Connect with bounded blocking read/write calls.
+    /// Connect synchronously, then use bounded nonblocking socket operations.
     ///
     /// This is intended for long-lived background consumers that must remain
     /// responsive to shutdown even if the storage service or provider stalls.
-    /// A zero timeout is rejected by `UnixStream` and therefore surfaces as an
-    /// I/O error.
+    /// One absolute deadline covers each complete request/response exchange;
+    /// the initial Unix-socket connect remains blocking. A zero timeout is
+    /// rejected as invalid configuration.
     pub fn connect_with_timeout(
         socket_path: impl AsRef<Path>,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> StorageResult<Self> {
-        let stream = UnixStream::connect(socket_path)?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
+        Self::builder(socket_path)
+            .operation_timeout(timeout)
+            .cleanup_timeout(timeout)
+            .connect()
+    }
+
+    fn from_builder(builder: StorageClientBuilder) -> StorageResult<Self> {
+        let (transport, fd_policy) = builder.into_parts()?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(ClientConnection::new(stream, None, None))),
+            inner: Rc::new(RefCell::new(ClientConnection::new(transport, fd_policy))),
         })
     }
 
@@ -573,6 +577,14 @@ impl StorageClient {
         payload: WireRequestPayload,
     ) -> StorageResult<(WireResponsePayload, Option<ReceivedFd>)> {
         let mut connection = self.connection()?;
-        connection.request(payload)
+        connection.request(payload, SocketWaitContext::Foreground)
+    }
+
+    fn request_cleanup(
+        &self,
+        payload: WireRequestPayload,
+    ) -> StorageResult<(WireResponsePayload, Option<ReceivedFd>)> {
+        let mut connection = self.connection()?;
+        connection.request(payload, SocketWaitContext::Cleanup)
     }
 }

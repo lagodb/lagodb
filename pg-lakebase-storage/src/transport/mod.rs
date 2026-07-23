@@ -6,7 +6,9 @@
 //!
 //! The async path ([`FrameReader`] / [`FrameWriter`] / [`FdSender`] / [`FdReceiver`]) is used by the
 //! server and by the in-process wire layer. The blocking path ([`blocking`]) mirrors it for the
-//! synchronous test/tooling client and keeps all unsafe libc access confined to [`fd_channel`].
+//! synchronous test/tooling APIs. The production synchronous client supplies a
+//! runtime-aware nonblocking `Read`/`Write` adapter and uses the same framing
+//! functions. Ancillary-data unsafe code remains confined to [`fd_channel`].
 
 mod bind;
 mod blocking;
@@ -16,5 +18,6 @@ mod frame;
 pub use bind::bind_storage_unix_listener;
 pub(crate) use blocking::BlockingFrameCursor;
 pub use blocking::{read_fd_blocking, read_frame_blocking, write_frame_blocking};
+pub(crate) use fd_channel::try_recv_fd;
 pub use fd_channel::{FdReceiver, FdSender};
 pub use frame::{FrameReader, FrameWriter, read_frame, write_frame};

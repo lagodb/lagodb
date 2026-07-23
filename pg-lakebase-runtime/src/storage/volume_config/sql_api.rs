@@ -4,6 +4,7 @@ use std::ffi::CStr;
 
 use pg_lakebase_core::diag::{PgReportError, SqlStateError};
 use pg_lakebase_core::options::{TablespaceCacheError, get_tablespace};
+use pg_lakebase_core::storage_service::BackendStorageService;
 use pgrx::datum::JsonB;
 use pgrx::prelude::*;
 
@@ -148,15 +149,12 @@ mod lakebase {
         .unwrap_or_else(|error| error.report());
         let (name, store_id, namespace, root_prefix) = metadata;
 
-        let (_, socket_path, _) = crate::storage::resolved_endpoint().into_parts();
-        let probe = pg_lakebase_storage::StorageClient::connect(socket_path)
-            .and_then(|client| {
-                client.probe_store(
-                    store_id.as_str(),
-                    namespace.as_str(),
-                    root_prefix.as_str(),
-                )
-            });
+        let endpoint = crate::storage::resolved_endpoint();
+        let probe = BackendStorageService::from_endpoint(&endpoint).probe_store(
+            store_id.as_str(),
+            namespace.as_str(),
+            root_prefix.as_str(),
+        );
         let row = match probe {
             Ok(result) => (
                 name,

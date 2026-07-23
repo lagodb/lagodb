@@ -1,6 +1,4 @@
-//! Blocking client connection state and external file-descriptor accounting.
-
-use std::os::unix::net::UnixStream;
+//! Synchronous client protocol state and external file-descriptor accounting.
 
 use crate::error::{StorageError, StorageResult};
 use crate::handle::FileHandle;
@@ -9,9 +7,11 @@ use crate::protocol::{
     WireResponsePayload, decode_response, encode_read_request, encode_request,
 };
 use crate::transport::{
-    BlockingFrameCursor, read_fd_blocking, read_frame_blocking, write_frame_blocking,
+    BlockingFrameCursor, read_frame_blocking, write_frame_blocking,
 };
 
+use super::socket::{ClientIo, ClientTransport};
+use super::socket_wait::SocketWaitContext;
 use super::{ExternalFdLease, ExternalFdPolicy, unexpected_response};
 
 pub(super) struct ReceivedFd {
@@ -25,54 +25,29 @@ enum ReadStartError {
 }
 
 pub(super) struct ClientConnection {
-    // Drop the OS descriptor before releasing its accounting lease.
-    stream: Option<UnixStream>,
-    socket_lease: Option<Box<dyn ExternalFdLease>>,
+    transport: ClientTransport,
     fd_policy: Option<Box<dyn ExternalFdPolicy>>,
     request_ids: RequestIdGenerator,
 }
 
 impl ClientConnection {
     pub(super) fn new(
-        stream: UnixStream,
-        socket_lease: Option<Box<dyn ExternalFdLease>>,
+        transport: ClientTransport,
         fd_policy: Option<Box<dyn ExternalFdPolicy>>,
     ) -> Self {
         Self {
-            stream: Some(stream),
-            socket_lease,
+            transport,
             fd_policy,
             request_ids: RequestIdGenerator::new(),
         }
     }
 
-    fn stream(&mut self) -> StorageResult<&mut UnixStream> {
-        self.stream.as_mut().ok_or_else(|| {
-            StorageError::protocol("storage client connection is poisoned")
-        })
-    }
-
     pub(super) fn is_usable(&self) -> bool {
-        self.stream.is_some()
+        self.transport.is_usable()
     }
 
     pub(super) fn poison(&mut self) {
-        // Preserve drop order even when invalidating before ClientConnection
-        // itself is dropped.
-        drop(self.stream.take());
-        drop(self.socket_lease.take());
-    }
-
-    fn poison_with<T>(&mut self, error: StorageError) -> StorageResult<T> {
-        self.poison();
-        Err(error)
-    }
-
-    fn acquire_direct_fd(&self) -> StorageResult<Option<Box<dyn ExternalFdLease>>> {
-        self.fd_policy
-            .as_ref()
-            .map(|policy| policy.acquire())
-            .transpose()
+        self.transport.poison();
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -82,6 +57,7 @@ impl ClientConnection {
     pub(super) fn request(
         &mut self,
         payload: WireRequestPayload,
+        context: SocketWaitContext,
     ) -> StorageResult<(WireResponsePayload, Option<ReceivedFd>)> {
         let request_id = self.next_request_id();
         let request = WireRequest {
@@ -89,27 +65,26 @@ impl ClientConnection {
             payload,
         };
         let frame = encode_request(&request)?;
-        if let Err(error) = write_frame_blocking(self.stream()?, &frame) {
-            return self.poison_with(error);
-        }
-        let response_frame = match read_frame_blocking(self.stream()?) {
-            Ok(Some(response)) => response,
-            Ok(None) => {
-                return self.poison_with(StorageError::protocol("connection closed"));
-            }
-            Err(error) => return self.poison_with(error),
-        };
-        let response = match decode_response(&response_frame) {
-            Ok(response) => response,
-            Err(error) => return self.poison_with(error),
-        };
+        let fd_policy = &self.fd_policy;
+        let mut io = self.transport.session(context)?;
+
+        write_frame_blocking(&mut io, &frame)?;
+        let response_frame = read_frame_blocking(&mut io)?
+            .ok_or_else(|| StorageError::protocol("connection closed"))?;
+        let response = decode_response(&response_frame)?;
         if response.request_id != request_id {
-            return self.poison_with(StorageError::protocol(format!(
+            return Err(StorageError::protocol(format!(
                 "response id {} did not match request id {request_id}",
                 response.request_id
             )));
         }
-        let payload = response.into_result()?;
+        let payload = match response.into_result() {
+            Ok(payload) => payload,
+            Err(error) => {
+                io.finish();
+                return Err(error);
+            }
+        };
         let fd = if matches!(
             payload,
             WireResponsePayload::Open {
@@ -117,18 +92,12 @@ impl ClientConnection {
                 ..
             }
         ) {
-            let lease = match self.acquire_direct_fd() {
-                Ok(lease) => lease,
-                Err(error) => return self.poison_with(error),
-            };
-            let fd = match read_fd_blocking(self.stream()?) {
-                Ok(fd) => fd,
-                Err(error) => return self.poison_with(error),
-            };
+            let (fd, lease) = io.recv_fd(fd_policy.as_deref())?;
             Some(ReceivedFd { fd, lease })
         } else {
             None
         };
+        io.finish();
         Ok((payload, fd))
     }
 
@@ -139,9 +108,11 @@ impl ClientConnection {
         len: u32,
         buf: &mut [u8],
     ) -> StorageResult<usize> {
+        let request_id = self.next_request_id();
+        let mut io = self.transport.session(SocketWaitContext::Foreground)?;
         let result = (|| {
             let (mut response_frame, prefix) =
-                self.start_read(handle, offset, len)?;
+                Self::start_read(&mut io, request_id, handle, offset, len)?;
             if prefix.data_len > buf.len() {
                 let error = match response_frame.discard_remaining() {
                     Ok(()) => StorageError::protocol(format!(
@@ -158,7 +129,7 @@ impl ClientConnection {
                 .map_err(ReadStartError::Connection)?;
             Ok(prefix.data_len)
         })();
-        self.finish_read(result)
+        Self::finish_read(io, result)
     }
 
     pub(super) fn read_alloc(
@@ -167,50 +138,39 @@ impl ClientConnection {
         offset: u64,
         len: u32,
     ) -> StorageResult<Vec<u8>> {
+        let request_id = self.next_request_id();
+        let mut io = self.transport.session(SocketWaitContext::Foreground)?;
         let result = (|| {
             let (mut response_frame, prefix) =
-                self.start_read(handle, offset, len)?;
-            let mut data = vec![0u8; prefix.data_len];
+                Self::start_read(&mut io, request_id, handle, offset, len)?;
+            let mut data = vec![0_u8; prefix.data_len];
             response_frame
                 .read_exact(&mut data)
                 .map_err(ReadStartError::Connection)?;
             Ok(data)
         })();
-        self.finish_read(result)
-    }
-
-    fn finish_read<T>(
-        &mut self,
-        result: Result<T, ReadStartError>,
-    ) -> StorageResult<T> {
-        match result {
-            Ok(value) => Ok(value),
-            Err(ReadStartError::Operation(error)) => Err(error),
-            Err(ReadStartError::Connection(error)) => self.poison_with(error),
-        }
+        Self::finish_read(io, result)
     }
 
     /// Sends a READ request and decodes the response header/prefix, returning
     /// the cursor positioned at the response body.
-    fn start_read(
-        &mut self,
+    fn start_read<'io, 'transport>(
+        io: &'io mut ClientIo<'transport>,
+        request_id: u64,
         handle: FileHandle,
         offset: u64,
         len: u32,
     ) -> Result<
         (
-            BlockingFrameCursor<'_, std::os::unix::net::UnixStream>,
+            BlockingFrameCursor<'io, ClientIo<'transport>>,
             ReadResponsePrefix,
         ),
         ReadStartError,
     > {
-        let request_id = self.next_request_id();
-        let stream = self.stream().map_err(ReadStartError::Connection)?;
         let frame = encode_read_request(request_id, handle, offset, len);
-        write_frame_blocking(&mut *stream, &frame)
-            .map_err(ReadStartError::Connection)?;
+        write_frame_blocking(&mut *io, &frame).map_err(ReadStartError::Connection)?;
 
-        let mut response_frame = BlockingFrameCursor::read_from(&mut *stream)
+        let mut response_frame = BlockingFrameCursor::read_from(&mut *io)
             .map_err(ReadStartError::Connection)?
             .ok_or_else(|| {
                 ReadStartError::Connection(StorageError::protocol(
@@ -262,6 +222,23 @@ impl ClientConnection {
             ))));
         }
         Ok((response_frame, prefix))
+    }
+
+    fn finish_read<T>(
+        io: ClientIo<'_>,
+        result: Result<T, ReadStartError>,
+    ) -> StorageResult<T> {
+        match result {
+            Ok(value) => {
+                io.finish();
+                Ok(value)
+            }
+            Err(ReadStartError::Operation(error)) => {
+                io.finish();
+                Err(error)
+            }
+            Err(ReadStartError::Connection(error)) => Err(error),
+        }
     }
 }
 

@@ -16,12 +16,14 @@ use std::sync::Arc;
 
 use pg_lakebase_storage::{
     ExternalFdLease, ExternalFdPolicy, ListCursor, ListPage, ObjectInfo, StagingFile,
-    StagingPathResolver, StorageClient, StorageError, StorageFile, StorageResult,
-    UploadInfo,
+    StagingPathResolver, StorageClient, StorageError, StorageFile,
+    StorageProbeResult, StorageResult, UploadInfo,
 };
 use pgrx::pg_sys;
 
 use super::StorageEndpoint;
+use super::injection_points::StorageServiceInjectionPoints;
+use super::socket_wait::PostgresSocketWait;
 
 thread_local! {
     static FOREGROUND_CONNECTION: RefCell<BackendConnectionManager> =
@@ -59,7 +61,10 @@ impl BackendStorageService {
         bucket: &str,
         key: &str,
     ) -> StorageResult<StorageFile> {
-        self.with_replay_safe_client(|client| client.open(store_id, bucket, key))
+        self.with_replay_safe_client(|client| {
+            StorageServiceInjectionPoints::FOREGROUND_BEFORE_OPEN.run();
+            client.open(store_id, bucket, key)
+        })
     }
 
     pub fn head(
@@ -78,6 +83,15 @@ impl BackendStorageService {
         key: &str,
     ) -> StorageResult<UploadInfo> {
         self.with_client(|client| client.upload(store_id, bucket, key))
+    }
+
+    pub fn probe_store(
+        &self,
+        store_id: &str,
+        bucket: &str,
+        root_prefix: &str,
+    ) -> StorageResult<StorageProbeResult> {
+        self.with_client(|client| client.probe_store(store_id, bucket, root_prefix))
     }
 
     pub fn create_staging_file(
@@ -177,10 +191,10 @@ impl BackendConnectionManager {
 
     fn acquire(&mut self, socket_path: &Path) -> StorageResult<StorageClient> {
         self.acquire_with(socket_path, |path| {
-            StorageClient::connect_with_fd_policy(
-                path,
-                Box::new(PostgresExternalFdPolicy),
-            )
+            StorageClient::builder(path)
+                .fd_policy(Box::new(PostgresExternalFdPolicy))
+                .socket_waiter(Box::new(PostgresSocketWait::new()))
+                .connect()
         })
     }
 
