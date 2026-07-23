@@ -71,10 +71,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/registry/index
             target
-          key: cargo-${{ runner.os }}-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-${{ runner.os }}-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-${{ env.PGRX_POSTGRES_CACHE_VERSION }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-
-            cargo-${{ runner.os }}-pg${{ matrix.postgres }}-
+            cargo-${{ runner.os }}-pg${{ matrix.postgres }}-${{ env.PGRX_VERSION }}-${{ env.PGRX_POSTGRES_CACHE_VERSION }}-
 
       - name: Cache cargo-pgrx
         uses: actions/cache@v5

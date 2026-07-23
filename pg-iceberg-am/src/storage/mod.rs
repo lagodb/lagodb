@@ -1,5 +1,6 @@
 pub mod local;
 pub mod object;
+mod object_uri;
 mod post_commit_delete;
 pub(crate) mod transaction_resources;
 mod wait_event;
@@ -13,7 +14,7 @@ pub(crate) use post_commit_delete::{
 use crate::error::IcebergResult;
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::options::{CachedTablespaceOpts, get_tablespace};
+use pg_lakebase_core::options::get_tablespace;
 use pg_lakebase_core::storage_service::StorageEndpoint;
 use pg_lakebase_storage::{StagingPathResolver, StorageClient};
 use pgrx::pg_sys;
@@ -118,28 +119,22 @@ impl StorageContext {
     }
 
     fn distributed(
-        opts: &CachedTablespaceOpts,
+        opts: &pg_lakebase_core::options::CachedTablespaceOpts,
         storage_client: StorageClient,
         staging_resolver: StagingPathResolver,
     ) -> IcebergResult<Self> {
-        let store_id = opts.store_id();
-        let object_namespace = opts.object_namespace();
+        let base_path = opts.effective_base_uri().to_owned();
         let storage = ObjectStorage::new(
-            opts.url_scheme(),
-            store_id,
-            object_namespace,
+            base_path.clone(),
+            opts.store_id().clone(),
+            opts.object_namespace(),
             storage_client,
             staging_resolver,
-        )?;
-
-        // Distributed stores are registered by the storage bgworker's
-        // tablespace reconciler at startup and kept in sync via
-        // pg_tablespace syscache invalidation, so we deliberately do not
-        // register from this on-demand path.
+        );
 
         Ok(Self {
             file_io: FileIO::new(Arc::new(storage)),
-            base_path: opts.base_url(),
+            base_path,
             is_distributed: true,
             needs_wal: false,
         })

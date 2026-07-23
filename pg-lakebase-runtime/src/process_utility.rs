@@ -376,17 +376,18 @@ unsafe extern "C-unwind" fn process_utility_router(
         let tag = (*target_node).type_;
         let hooks = UTILITY_HOOKS.with(|directory| directory.snapshot(tag));
         let has_matching_hooks = hooks.has_matching_hooks();
+        let runtime_handles = crate::storage::volume_config::handles_utility(tag);
         #[cfg(feature = "pg17")]
         let may_consume = tag == pg_sys::NodeTag::T_VacuumStmt;
         #[cfg(not(feature = "pg17"))]
         let may_consume = false;
 
-        if !has_matching_hooks && !may_consume {
+        if !has_matching_hooks && !runtime_handles && !may_consume {
             args.call_parent();
             return;
         }
 
-        let copied_node = has_matching_hooks.then(|| {
+        let copied_node = (has_matching_hooks || runtime_handles).then(|| {
             let old_context = if may_consume {
                 Some(pg_sys::MemoryContextSwitchTo(pg_sys::PortalContext))
             } else {
@@ -399,6 +400,13 @@ unsafe extern "C-unwind" fn process_utility_router(
             }
             copied
         });
+
+        if runtime_handles {
+            crate::storage::volume_config::utility_pre(
+                target_node,
+                context == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
+            );
+        }
 
         hooks.for_each(|descriptor| {
             descriptor.on_pre.expect("validated utility pre-hook")(
@@ -427,6 +435,9 @@ unsafe extern "C-unwind" fn process_utility_router(
                     copied_node,
                 );
             });
+            if runtime_handles {
+                crate::storage::volume_config::utility_post(copied_node);
+            }
         }
     }
 }

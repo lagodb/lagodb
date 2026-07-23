@@ -96,6 +96,7 @@ pub mod extension_worker;
 
 /// Consumer API for the runtime-owned storage service.
 pub mod storage_service;
+pub mod storage_volume;
 
 /// The prelude includes all necessary imports to make pg_lakebase_core work
 pub mod prelude {

@@ -1,28 +1,19 @@
-//! Provider-specific [`object_store`] configuration, validation, and lazy client construction.
+//! Provider-specific [`object_store`] configuration and validation facade.
 //!
 //! [`StoreConfig`] is the user-facing enum that wraps one of the provider configs. It owns both
 //! the validation rules exercised at registration time and the actual builder invocations that
 //! hand back an [`ObjectStore`] client for a given bucket.
 //!
-//! [`ConfiguredObjectBackend`] turns a [`StoreConfig`] into an [`ObjectBackend`] by caching a
-//! client per bucket on first access.
+use std::sync::Arc;
 
-use std::collections::HashMap;
-use std::ops::Range;
-use std::sync::{Arc, RwLock};
-
-use async_trait::async_trait;
-use futures::stream::{self, BoxStream, StreamExt};
 use object_store::ObjectStore;
-use object_store::aws::AmazonS3Builder;
-use object_store::azure::MicrosoftAzureBuilder;
-use object_store::gcp::GoogleCloudStorageBuilder;
 
-use super::ObjectBackend;
-use super::object_store::ObjectStoreBackend;
 use super::secret::SecretString;
 use crate::error::{StorageError, StorageResult};
-use crate::object::{ListEntry, ObjectInfo, ObjectLocation};
+
+mod azure;
+mod gcs;
+mod s3;
 
 /// Credentials and transport tweaks for native AWS S3.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -88,11 +79,21 @@ impl StoreConfig {
     /// Validate config invariants (non-empty endpoints, mutually exclusive credential sources…).
     pub fn validate(&self) -> StorageResult<()> {
         match self {
-            Self::S3(config) => validate_s3(config),
-            Self::S3Compatible(config) => validate_s3_compatible(config),
-            Self::Gcs(config) => validate_gcs(config),
-            Self::Azure(config) => validate_azure(config),
+            Self::S3(config) => config.validate(),
+            Self::S3Compatible(config) => config.validate(),
+            Self::Gcs(config) => config.validate(),
+            Self::Azure(config) => config.validate(),
         }
+    }
+
+    /// Validate that this config can construct a local client for `bucket`.
+    ///
+    /// This performs builder parsing and local credential decoding only. It
+    /// does not contact the object-store service or validate remote access.
+    pub fn validate_for_bucket(&self, bucket: &str) -> StorageResult<()> {
+        self.validate()?;
+        let _ = self.build_store(bucket)?;
+        Ok(())
     }
 
     /// Instantiate an [`ObjectStore`] client for `bucket` using this provider config.
@@ -101,74 +102,15 @@ impl StoreConfig {
         bucket: &str,
     ) -> StorageResult<Arc<dyn ObjectStore>> {
         match self {
-            Self::S3(config) => build_s3_store(config, bucket),
-            Self::S3Compatible(config) => build_s3_compatible_store(config, bucket),
-            Self::Gcs(config) => build_gcs_store(config, bucket),
-            Self::Azure(config) => build_azure_store(config, bucket),
+            Self::S3(config) => config.build_store(bucket),
+            Self::S3Compatible(config) => config.build_store(bucket),
+            Self::Gcs(config) => config.build_store(bucket),
+            Self::Azure(config) => config.build_store(bucket),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-fn validate_s3(config: &S3StoreConfig) -> StorageResult<()> {
-    validate_optional_secret("S3 access_key_id", config.access_key_id.as_ref())?;
-    validate_optional_secret(
-        "S3 secret_access_key",
-        config.secret_access_key.as_ref(),
-    )?;
-    validate_optional_secret("S3 token", config.token.as_ref())?;
-    Ok(())
-}
-
-fn validate_s3_compatible(config: &S3CompatibleStoreConfig) -> StorageResult<()> {
-    validate_non_empty("S3-compatible endpoint", &config.endpoint)?;
-    validate_optional_secret(
-        "S3-compatible access_key_id",
-        config.access_key_id.as_ref(),
-    )?;
-    validate_optional_secret(
-        "S3-compatible secret_access_key",
-        config.secret_access_key.as_ref(),
-    )?;
-    validate_optional_secret("S3-compatible token", config.token.as_ref())?;
-    Ok(())
-}
-
-fn validate_gcs(config: &GcsStoreConfig) -> StorageResult<()> {
-    validate_optional_secret(
-        "GCS service_account_key",
-        config.service_account_key.as_ref(),
-    )?;
-    let credential_sources = usize::from(config.service_account_path.is_some())
-        + usize::from(config.service_account_key.is_some())
-        + usize::from(config.application_credentials_path.is_some());
-    if credential_sources > 1 {
-        return Err(StorageError::configuration(
-            "GCS config must use at most one credential source: service_account_path, service_account_key or application_credentials_path",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_azure(config: &AzureStoreConfig) -> StorageResult<()> {
-    validate_optional_secret("Azure access_key", config.access_key.as_ref())?;
-    validate_optional_secret("Azure bearer_token", config.bearer_token.as_ref())?;
-    validate_optional_secret("Azure client_secret", config.client_secret.as_ref())?;
-    let client_secret_fields = usize::from(config.client_id.is_some())
-        + usize::from(config.client_secret.is_some())
-        + usize::from(config.tenant_id.is_some());
-    if client_secret_fields != 0 && client_secret_fields != 3 {
-        return Err(StorageError::configuration(
-            "Azure client secret auth requires client_id, client_secret and tenant_id",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_non_empty(name: &str, value: &str) -> StorageResult<()> {
+pub(super) fn validate_non_empty(name: &str, value: &str) -> StorageResult<()> {
     if value.trim().is_empty() {
         return Err(StorageError::configuration(format!(
             "{name} must not be empty"
@@ -177,11 +119,55 @@ fn validate_non_empty(name: &str, value: &str) -> StorageResult<()> {
     Ok(())
 }
 
-fn validate_optional_secret(
+pub(super) fn validate_optional_non_empty(
+    name: &str,
+    value: Option<&str>,
+) -> StorageResult<()> {
+    if let Some(value) = value {
+        validate_non_empty(name, value)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_endpoint(
+    name: &str,
+    value: &str,
+    allow_http: bool,
+) -> StorageResult<()> {
+    validate_non_empty(name, value)?;
+    let parsed = url::Url::parse(value).map_err(|error| {
+        StorageError::configuration(format!("{name} is not a valid URL: {error}"))
+    })?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if allow_http => {}
+        "http" => {
+            return Err(StorageError::configuration(format!(
+                "{name} uses HTTP but allow_http is false"
+            )));
+        }
+        scheme => {
+            return Err(StorageError::configuration(format!(
+                "{name} uses unsupported URL scheme {scheme}"
+            )));
+        }
+    }
+    if parsed.host_str().is_none() {
+        return Err(StorageError::configuration(format!(
+            "{name} must include a host"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_optional_secret(
     name: &str,
     value: Option<&SecretString>,
 ) -> StorageResult<()> {
-    if matches!(value.map(SecretString::expose_secret), Some("")) {
+    if value
+        .map(SecretString::expose_secret)
+        .is_some_and(|secret| secret.trim().is_empty())
+    {
         return Err(StorageError::configuration(format!(
             "{name} must not be empty"
         )));
@@ -189,11 +175,7 @@ fn validate_optional_secret(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Builders
-// ---------------------------------------------------------------------------
-
-fn finish_store_build<O: ObjectStore>(
+pub(super) fn finish_store_build<O: ObjectStore>(
     result: object_store::Result<O>,
     provider: &str,
     resource_label: &str,
@@ -202,252 +184,6 @@ fn finish_store_build<O: ObjectStore>(
     result
         .map(|store| Arc::new(store) as Arc<dyn ObjectStore>)
         .map_err(|error| StorageError::configuration(format!("failed to build {provider} store for {resource_label} {resource_name}: {error}")))
-}
-
-fn build_s3_store(
-    config: &S3StoreConfig,
-    bucket: &str,
-) -> StorageResult<Arc<dyn ObjectStore>> {
-    let mut builder = AmazonS3Builder::new().with_bucket_name(bucket.to_string());
-    if let Some(region) = &config.region {
-        builder = builder.with_region(region);
-    }
-    if let Some(endpoint) = &config.endpoint {
-        builder = builder.with_endpoint(endpoint);
-    }
-    if let Some(access_key_id) = &config.access_key_id {
-        builder = builder.with_access_key_id(access_key_id.expose_secret());
-    }
-    if let Some(secret_access_key) = &config.secret_access_key {
-        builder = builder.with_secret_access_key(secret_access_key.expose_secret());
-    }
-    if let Some(token) = &config.token {
-        builder = builder.with_token(token.expose_secret());
-    }
-    if config.allow_http {
-        builder = builder.with_allow_http(true);
-    }
-    if config.virtual_hosted_style_request {
-        builder = builder.with_virtual_hosted_style_request(true);
-    }
-    if config.skip_signature {
-        builder = builder.with_skip_signature(true);
-    }
-    finish_store_build(builder.build(), "S3", "bucket", bucket)
-}
-
-fn build_s3_compatible_store(
-    config: &S3CompatibleStoreConfig,
-    bucket: &str,
-) -> StorageResult<Arc<dyn ObjectStore>> {
-    let mut builder = AmazonS3Builder::new()
-        .with_bucket_name(bucket.to_string())
-        .with_endpoint(&config.endpoint);
-    if let Some(region) = &config.region {
-        builder = builder.with_region(region);
-    }
-    if let Some(access_key_id) = &config.access_key_id {
-        builder = builder.with_access_key_id(access_key_id.expose_secret());
-    }
-    if let Some(secret_access_key) = &config.secret_access_key {
-        builder = builder.with_secret_access_key(secret_access_key.expose_secret());
-    }
-    if let Some(token) = &config.token {
-        builder = builder.with_token(token.expose_secret());
-    }
-    if config.allow_http {
-        builder = builder.with_allow_http(true);
-    }
-    if config.virtual_hosted_style_request {
-        builder = builder.with_virtual_hosted_style_request(true);
-    }
-    if config.skip_signature {
-        builder = builder.with_skip_signature(true);
-    }
-    finish_store_build(builder.build(), "S3-compatible", "bucket", bucket)
-}
-
-fn build_gcs_store(
-    config: &GcsStoreConfig,
-    bucket: &str,
-) -> StorageResult<Arc<dyn ObjectStore>> {
-    let mut builder =
-        GoogleCloudStorageBuilder::new().with_bucket_name(bucket.to_string());
-    if let Some(base_url) = &config.base_url {
-        builder = builder.with_base_url(base_url);
-    }
-    if let Some(service_account_path) = &config.service_account_path {
-        builder = builder.with_service_account_path(service_account_path);
-    }
-    if let Some(service_account_key) = &config.service_account_key {
-        builder =
-            builder.with_service_account_key(service_account_key.expose_secret());
-    }
-    if let Some(application_credentials_path) = &config.application_credentials_path {
-        builder = builder.with_application_credentials(application_credentials_path);
-    }
-    if config.skip_signature {
-        builder = builder.with_skip_signature(true);
-    }
-    finish_store_build(builder.build(), "GCS", "bucket", bucket)
-}
-
-fn build_azure_store(
-    config: &AzureStoreConfig,
-    bucket: &str,
-) -> StorageResult<Arc<dyn ObjectStore>> {
-    let mut builder =
-        MicrosoftAzureBuilder::new().with_container_name(bucket.to_string());
-    if let Some(account) = &config.account {
-        builder = builder.with_account(account);
-    }
-    if let Some(endpoint) = &config.endpoint {
-        builder = builder.with_endpoint(endpoint.clone());
-    }
-    if let Some(access_key) = &config.access_key {
-        builder = builder.with_access_key(access_key.expose_secret());
-    }
-    if let Some(bearer_token) = &config.bearer_token {
-        builder =
-            builder.with_bearer_token_authorization(bearer_token.expose_secret());
-    }
-    if let (Some(client_id), Some(client_secret), Some(tenant_id)) =
-        (&config.client_id, &config.client_secret, &config.tenant_id)
-    {
-        builder = builder.with_client_secret_authorization(
-            client_id,
-            client_secret.expose_secret(),
-            tenant_id,
-        );
-    }
-    if config.allow_http {
-        builder = builder.with_allow_http(true);
-    }
-    if config.use_emulator {
-        builder = builder.with_use_emulator(true);
-    }
-    finish_store_build(builder.build(), "Azure", "container", bucket)
-}
-
-// ---------------------------------------------------------------------------
-// Lazy per-bucket backend
-// ---------------------------------------------------------------------------
-
-/// Backend that lazily materialises a per-bucket [`ObjectStore`] client from a [`StoreConfig`].
-///
-/// Clients are cached by bucket name so repeated reads against the same bucket share connection
-/// state and credential loading.
-pub struct ConfiguredObjectBackend {
-    config: StoreConfig,
-    stores: RwLock<HashMap<String, Arc<dyn ObjectStore>>>,
-}
-
-impl ConfiguredObjectBackend {
-    pub fn new(config: StoreConfig) -> Self {
-        Self {
-            config,
-            stores: RwLock::new(HashMap::new()),
-        }
-    }
-
-    fn store_for_bucket(&self, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
-        if let Some(store) = self
-            .stores
-            .read()
-            .expect("configured object backend rwlock poisoned; bucket clients are no longer trustworthy")
-            .get(bucket)
-            .cloned()
-        {
-            return Ok(store);
-        }
-
-        let store = self.config.build_store(bucket)?;
-        let mut stores = self
-            .stores
-            .write()
-            .expect("configured object backend rwlock poisoned; bucket clients are no longer trustworthy");
-        if let Some(existing) = stores.get(bucket).cloned() {
-            return Ok(existing);
-        }
-        stores.insert(bucket.to_string(), store.clone());
-        Ok(store)
-    }
-}
-
-#[async_trait]
-impl ObjectBackend for ConfiguredObjectBackend {
-    async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
-            .head(key)
-            .await
-    }
-
-    async fn get_range(
-        &self,
-        key: &ObjectLocation,
-        range: Range<u64>,
-    ) -> StorageResult<bytes::Bytes> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
-            .get_range(key, range)
-            .await
-    }
-
-    async fn put_from_file(
-        &self,
-        key: &ObjectLocation,
-        path: &std::path::Path,
-        len: u64,
-    ) -> StorageResult<ObjectInfo> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
-            .put_from_file(key, path, len)
-            .await
-    }
-
-    fn list(
-        &self,
-        store_id: &str,
-        bucket: &str,
-        prefix: Option<&str>,
-    ) -> BoxStream<'static, StorageResult<ListEntry>> {
-        match self.store_for_bucket(bucket) {
-            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket)
-                .list(store_id, bucket, prefix),
-            Err(error) => stream::once(async move { Err(error) }).boxed(),
-        }
-    }
-
-    async fn delete(&self, key: &ObjectLocation) -> StorageResult<()> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
-            .delete(key)
-            .await
-    }
-
-    fn delete_stream(
-        &self,
-        store_id: &str,
-        bucket: &str,
-        keys: BoxStream<'static, StorageResult<String>>,
-    ) -> BoxStream<'static, StorageResult<String>> {
-        match self.store_for_bucket(bucket) {
-            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket)
-                .delete_stream(store_id, bucket, keys),
-            Err(error) => {
-                // The bucket cannot be reached at all (build error). Drain the input stream as
-                // failures so callers see a deterministic error per attempted key.
-                let template = error.to_string();
-                keys.map(move |item| {
-                    item.and_then(|_| {
-                        Err(StorageError::configuration(template.clone()))
-                    })
-                })
-                .boxed()
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -523,5 +259,25 @@ mod tests {
                 .wire_message()
                 .contains("requires client_id, client_secret and tenant_id")
         );
+    }
+
+    #[test]
+    fn bucket_validation_rejects_credentials_the_static_checks_cannot_parse() {
+        let gcs = StoreConfig::Gcs(GcsStoreConfig {
+            service_account_key: Some(SecretString::new(
+                r#"{"type":"service_account"}"#,
+            )),
+            ..GcsStoreConfig::default()
+        });
+        let azure = StoreConfig::Azure(AzureStoreConfig {
+            account: Some("account".to_owned()),
+            access_key: Some(SecretString::new("not-base64")),
+            ..AzureStoreConfig::default()
+        });
+
+        assert!(gcs.validate().is_ok());
+        assert!(gcs.validate_for_bucket("bucket").is_err());
+        assert!(azure.validate().is_ok());
+        assert!(azure.validate_for_bucket("container").is_err());
     }
 }

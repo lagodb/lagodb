@@ -4137,6 +4137,7 @@ dependencies = [
  "pgrx-pg-config",
  "pgrx-tests",
  "proptest",
+ "serde",
  "thiserror 1.0.69",
  "uuid",
 ]
@@ -4161,6 +4162,8 @@ dependencies = [
  "pgrx",
  "pgrx-pg-config",
  "pgrx-tests",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -4187,6 +4190,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

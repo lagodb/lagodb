@@ -31,15 +31,8 @@ static MAX_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(1024);
 
 static MAX_READ_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1024 * 1024);
 
-/// Periodic full-resync interval for the distributed tablespace store
-/// reconciler, in milliseconds.
-///
-/// Syscache invalidation already wakes the reconciler on every
-/// `pg_tablespace` change. The periodic resync exists only as a safety net
-/// against missed invalidation messages or future bugs; setting it to `0`
-/// disables periodic resync and relies entirely on syscache wake-ups.
-static TABLESPACE_RECONCILE_INTERVAL_MS: GucSetting<i32> =
-    GucSetting::<i32>::new(30_000);
+/// Periodic full-resync interval for the machine-managed volume config.
+static VOLUME_RECONCILE_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
 
 // --- Cache runtime GUCs (Sighup-reloadable) ---
 
@@ -142,10 +135,10 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server_tablespace_reconcile_interval_ms",
-        c"Periodic full-resync interval for the distributed tablespace store reconciler",
-        c"How often the storage worker rescans pg_tablespace as a safety net behind syscache invalidation. 0 disables the periodic resync; syscache wake-ups still apply.",
-        &TABLESPACE_RECONCILE_INTERVAL_MS,
+        c"pg_lakebase.storage_server_volume_reconcile_interval_ms",
+        c"Periodic full-resync interval for storage volume configuration",
+        c"How often the storage worker rereads the complete machine-managed volume snapshot. 0 disables the periodic safety net.",
+        &VOLUME_RECONCILE_INTERVAL_MS,
         0,
         3_600_000,
         GucContext::Sighup,
@@ -278,9 +271,9 @@ pub fn max_read_size() -> u32 {
 }
 
 /// Periodic full-resync interval as `Some(Duration)`, or `None` when
-/// `pg_lakebase.storage_server_tablespace_reconcile_interval_ms` is `0`.
-pub fn tablespace_reconcile_interval() -> Option<std::time::Duration> {
-    let raw = TABLESPACE_RECONCILE_INTERVAL_MS.get();
+/// `pg_lakebase.storage_server_volume_reconcile_interval_ms` is `0`.
+pub fn volume_reconcile_interval() -> Option<std::time::Duration> {
+    let raw = VOLUME_RECONCILE_INTERVAL_MS.get();
     if raw <= 0 {
         None
     } else {

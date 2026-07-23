@@ -17,6 +17,8 @@ pub use table::{
     AmCacheable, TableOptionAlterations, TableOptionError, TableOptions,
 };
 pub use tablespace::{
-    CachedTablespaceOpts, TablespaceCacheError, TablespaceError, TablespaceOptions,
-    TablespaceStorageError, get_tablespace, is_distributed_tablespace,
+    CachedTablespaceOpts, CreateTablespaceStorageOptions,
+    INTERNAL_STORAGE_VOLUME_ID_OPTION, PUBLIC_STORAGE_VOLUME_OPTION,
+    TablespaceBinding, TablespaceCacheError, TablespaceError, get_tablespace,
+    is_distributed_tablespace, is_lakebase_tablespace_option,
 };

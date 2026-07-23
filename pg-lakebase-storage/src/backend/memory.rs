@@ -1,6 +1,7 @@
 //! In-memory [`ObjectBackend`] used by tests and local embedding.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -97,6 +98,23 @@ impl ObjectBackend for MemoryObjectBackend {
             size: len,
             etag: None,
         })
+    }
+
+    async fn put_if_absent(
+        &self,
+        key: &ObjectLocation,
+        data: bytes::Bytes,
+    ) -> StorageResult<ObjectInfo> {
+        let size = data.len() as u64;
+        match self.lock_objects().entry(key.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(data.to_vec());
+                Ok(ObjectInfo { size, etag: None })
+            }
+            Entry::Occupied(_) => {
+                Err(StorageError::busy(format!("object {key} already exists")))
+            }
+        }
     }
 
     fn list(

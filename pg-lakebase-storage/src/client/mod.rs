@@ -21,7 +21,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::backend::StoreConfig;
+use crate::backend::{StorageProbeResult, StoreConfig};
 use crate::error::{StorageError, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::object::ObjectInfo;
@@ -321,6 +321,28 @@ impl StorageClient {
         match response {
             WireResponsePayload::PurgeStoreCache => Ok(()),
             other => Err(unexpected_response("purge-store-cache", &other)),
+        }
+    }
+
+    /// Runs an explicit end-to-end probe against an already-registered backend.
+    ///
+    /// The server checks listing, a create-only temporary write, metadata/read-back, and
+    /// deletion under `root_prefix`. Backend operation failures are returned in the structured
+    /// result; request/protocol failures remain [`StorageError`] values.
+    pub fn probe_store(
+        &self,
+        store_id: impl Into<String>,
+        bucket: impl Into<String>,
+        root_prefix: impl Into<String>,
+    ) -> StorageResult<StorageProbeResult> {
+        let (response, _) = self.request(WireRequestPayload::ProbeStore {
+            store_id: store_id.into(),
+            bucket: bucket.into(),
+            root_prefix: root_prefix.into(),
+        })?;
+        match response {
+            WireResponsePayload::ProbeStore { result } => Ok(result),
+            other => Err(unexpected_response("probe-store", &other)),
         }
     }
 

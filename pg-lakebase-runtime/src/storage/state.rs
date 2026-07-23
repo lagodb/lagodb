@@ -46,14 +46,20 @@ pub(crate) struct StorageSharedState {
     struct_size: u32,
     pid: i32,
     state: u8,
-    _padding: [u8; 3],
+    reload_requested: u8,
+    force_default_chain_reload: u8,
+    _padding: [u8; 1],
     last_start_ms: i64,
     last_stop_ms: i64,
-    last_reconcile_at_ms: i64,
-    last_reconcile_added: u32,
-    last_reconcile_removed: u32,
-    last_reconcile_replaced: u32,
-    last_reconcile_unchanged: u32,
+    last_reload_at_ms: i64,
+    last_reload_added: u32,
+    last_reload_removed: u32,
+    last_reload_replaced: u32,
+    last_reload_unchanged: u32,
+    desired_volume_count: u32,
+    loaded_volume_count: u32,
+    stale_volume_count: u32,
+    unavailable_volume_count: u32,
     last_error_at_ms: i64,
     last_error_len: u16,
     _error_padding: [u8; 6],
@@ -68,14 +74,20 @@ impl Default for StorageSharedState {
                 .expect("storage shared state exceeds u32"),
             pid: 0,
             state: StorageProcessState::Stopped as u8,
-            _padding: [0; 3],
+            reload_requested: 0,
+            force_default_chain_reload: 0,
+            _padding: [0; 1],
             last_start_ms: 0,
             last_stop_ms: 0,
-            last_reconcile_at_ms: 0,
-            last_reconcile_added: 0,
-            last_reconcile_removed: 0,
-            last_reconcile_replaced: 0,
-            last_reconcile_unchanged: 0,
+            last_reload_at_ms: 0,
+            last_reload_added: 0,
+            last_reload_removed: 0,
+            last_reload_replaced: 0,
+            last_reload_unchanged: 0,
+            desired_volume_count: 0,
+            loaded_volume_count: 0,
+            stale_volume_count: 0,
+            unavailable_volume_count: 0,
             last_error_at_ms: 0,
             last_error_len: 0,
             _error_padding: [0; 6],
@@ -103,6 +115,11 @@ impl StorageSharedState {
 
     fn set_error(&mut self, message: &str) {
         self.set_error_at(message, timestamp_ms());
+    }
+
+    fn clear_error(&mut self) {
+        self.last_error_len = 0;
+        self.last_error_at_ms = 0;
     }
 
     fn set_error_at(&mut self, message: &str, error_at_ms: i64) {
@@ -161,6 +178,8 @@ impl StorageStatusStore {
         let mut state = STORAGE_STATE.exclusive();
         state.reset_if_invalid();
         state.pid = pid;
+        state.reload_requested = 0;
+        state.force_default_chain_reload = 0;
         state.last_start_ms = timestamp_ms();
         state.set_state(StorageProcessState::Starting);
         state.last_error_len = 0;
@@ -173,14 +192,28 @@ impl StorageStatusStore {
         state.set_state(StorageProcessState::Running);
     }
 
-    pub(super) fn mark_reconcile(&self, report: &ReconcileReport) {
+    pub(super) fn mark_reload(&self, report: &ReconcileReport) {
         let mut state = STORAGE_STATE.exclusive();
         state.reset_if_invalid();
-        state.last_reconcile_at_ms = timestamp_ms();
-        state.last_reconcile_added = count_to_u32(report.added);
-        state.last_reconcile_removed = count_to_u32(report.removed);
-        state.last_reconcile_replaced = count_to_u32(report.replaced);
-        state.last_reconcile_unchanged = count_to_u32(report.unchanged);
+        state.last_reload_at_ms = timestamp_ms();
+        state.last_reload_added = count_to_u32(report.added);
+        state.last_reload_removed = count_to_u32(report.removed);
+        state.last_reload_replaced = count_to_u32(report.replaced);
+        state.last_reload_unchanged = count_to_u32(report.unchanged);
+        state.desired_volume_count = count_to_u32(report.desired);
+        state.loaded_volume_count = count_to_u32(report.loaded);
+        state.stale_volume_count = count_to_u32(report.stale);
+        state.unavailable_volume_count = count_to_u32(report.unavailable);
+        if let Some(failure) = report.failures.first() {
+            state.set_error(&format!(
+                "storage volume store {} is {}: {}",
+                failure.store_id,
+                failure.state.as_str(),
+                failure.message,
+            ));
+        } else if report.stale == 0 && report.unavailable == 0 {
+            state.clear_error();
+        }
     }
 
     pub(super) fn record_error(&self, message: &str) {
@@ -207,6 +240,40 @@ impl StorageStatusStore {
         state.reset_if_invalid();
         state.finish_process(pid, code, timestamp_ms());
     }
+
+    pub(super) fn take_reload_request(&self) -> Option<bool> {
+        let mut state = STORAGE_STATE.exclusive();
+        state.reset_if_invalid();
+        let requested = state.reload_requested != 0;
+        let force_default_chain = state.force_default_chain_reload != 0;
+        state.reload_requested = 0;
+        state.force_default_chain_reload = 0;
+        requested.then_some(force_default_chain)
+    }
+}
+
+pub(crate) fn request_reload(force_default_chain: bool) {
+    let pid = {
+        let mut state = STORAGE_STATE.exclusive();
+        state.reset_if_invalid();
+        state.reload_requested = 1;
+        if force_default_chain {
+            state.force_default_chain_reload = 1;
+        }
+        state.pid
+    };
+    if pid <= 0 {
+        return;
+    }
+    // SAFETY: BackendPidGetProc returns either null or a shared PGPROC whose
+    // procLatch has postmaster lifetime. A PID race can at worst produce an
+    // extra wakeup; the config file remains the source of truth.
+    unsafe {
+        let process = pgrx::pg_sys::BackendPidGetProc(pid);
+        if !process.is_null() {
+            pgrx::pg_sys::SetLatch(&raw mut (*process).procLatch);
+        }
+    }
 }
 
 pub(crate) struct StorageRuntimeStatus {
@@ -217,11 +284,15 @@ pub(crate) struct StorageRuntimeStatus {
     pub(crate) cache_dir: String,
     pub(crate) last_start_ms: Option<i64>,
     pub(crate) last_stop_ms: Option<i64>,
-    pub(crate) last_reconcile_at_ms: Option<i64>,
-    pub(crate) last_reconcile_added: i64,
-    pub(crate) last_reconcile_removed: i64,
-    pub(crate) last_reconcile_replaced: i64,
-    pub(crate) last_reconcile_unchanged: i64,
+    pub(crate) last_reload_at_ms: Option<i64>,
+    pub(crate) last_reload_added: i64,
+    pub(crate) last_reload_removed: i64,
+    pub(crate) last_reload_replaced: i64,
+    pub(crate) last_reload_unchanged: i64,
+    pub(crate) desired_volume_count: i64,
+    pub(crate) loaded_volume_count: i64,
+    pub(crate) stale_volume_count: i64,
+    pub(crate) unavailable_volume_count: i64,
     pub(crate) last_error_at_ms: Option<i64>,
     pub(crate) last_error: Option<String>,
 }
@@ -251,11 +322,15 @@ pub(crate) fn snapshot(
         cache_dir: cache_dir.display().to_string(),
         last_start_ms: positive_timestamp(state.last_start_ms),
         last_stop_ms: positive_timestamp(state.last_stop_ms),
-        last_reconcile_at_ms: positive_timestamp(state.last_reconcile_at_ms),
-        last_reconcile_added: i64::from(state.last_reconcile_added),
-        last_reconcile_removed: i64::from(state.last_reconcile_removed),
-        last_reconcile_replaced: i64::from(state.last_reconcile_replaced),
-        last_reconcile_unchanged: i64::from(state.last_reconcile_unchanged),
+        last_reload_at_ms: positive_timestamp(state.last_reload_at_ms),
+        last_reload_added: i64::from(state.last_reload_added),
+        last_reload_removed: i64::from(state.last_reload_removed),
+        last_reload_replaced: i64::from(state.last_reload_replaced),
+        last_reload_unchanged: i64::from(state.last_reload_unchanged),
+        desired_volume_count: i64::from(state.desired_volume_count),
+        loaded_volume_count: i64::from(state.loaded_volume_count),
+        stale_volume_count: i64::from(state.stale_volume_count),
+        unavailable_volume_count: i64::from(state.unavailable_volume_count),
         last_error_at_ms: positive_timestamp(state.last_error_at_ms),
         last_error: last_error(&state),
     }

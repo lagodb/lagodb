@@ -59,7 +59,7 @@ WITH observations AS (
            stats.retained_data_objects
     FROM object_matrix_roots AS roots
     CROSS JOIN LATERAL lakebase.observe_object_tree(
-        'regress_vacuum_object_matrix',
+        :'store_id',
         :'lakebase_regress_bucket',
         roots.prefix
     ) AS observed

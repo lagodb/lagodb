@@ -25,7 +25,7 @@ use crate::protocol::WireListEntry;
 use crate::service::command::{
     CloseCommand, CloseListCommand, DeleteCommand, DeleteObjectsCommand,
     DeletePrefixCommand, HeadCommand, InvalidateObjectCacheCommand, ListCommand,
-    PurgeStoreCacheCommand, RegisterStoreCommand, StorageCommand,
+    ProbeStoreCommand, PurgeStoreCacheCommand, RegisterStoreCommand, StorageCommand,
     UnregisterStoreCommand, UploadCommand,
 };
 use crate::service::list_session::{
@@ -134,6 +134,9 @@ impl<I: CacheIndex + 'static> StorageService<I> {
             }
             StorageCommand::PurgeStoreCache(command) => {
                 self.handle_purge_store_cache(command).await
+            }
+            StorageCommand::ProbeStore(command) => {
+                self.handle_probe_store(command).await
             }
             StorageCommand::InvalidateObjectCache(command) => {
                 self.handle_invalidate_object_cache(command).await
@@ -269,6 +272,16 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         Ok(ServiceReply::new(CommandOutput::UnregisterStore(
             UnregisterStoreOutput { removed },
         )))
+    }
+
+    async fn handle_probe_store(
+        &self,
+        command: ProbeStoreCommand,
+    ) -> StorageResult<ServiceReply> {
+        let store_id = StoreId::new(command.store_id)?;
+        let store = self.registry.resolve(&store_id)?;
+        let result = store.probe(&command.bucket, &command.root_prefix).await?;
+        Ok(ServiceReply::new(CommandOutput::ProbeStore(result)))
     }
 
     async fn handle_purge_store_cache(

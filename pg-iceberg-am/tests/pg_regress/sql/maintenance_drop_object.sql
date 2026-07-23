@@ -1,3 +1,4 @@
+\set ECHO none
 -- End-to-end asynchronous remote DROP. 000_object_storage_setup provisions
 -- the MinIO fixture and records its connection details in the test database.
 
@@ -25,30 +26,54 @@ RESET client_min_messages;
 \! mkdir -p /tmp/iceberg_regress_object
 \! rm -rf /tmp/iceberg_regress_object/*
 
+SELECT 'regress-object-' || gen_random_uuid() AS volume_name \gset
+SELECT lakebase.create_storage_volume(
+    :'volume_name',
+    format('s3://%s', :'lakebase_regress_bucket'),
+    jsonb_build_object(
+        'type', 's3_access_key',
+        'access_key_id', :'lakebase_regress_access_key_id',
+        'secret_access_key', :'lakebase_regress_secret_access_key'
+    ),
+    jsonb_build_object(
+        'region', :'lakebase_regress_region',
+        'endpoint', :'lakebase_regress_endpoint',
+        'allow_http', true
+    )
+) AS created_volume \gset
+
 CREATE TABLESPACE regress_object
 LOCATION '/tmp/iceberg_regress_object'
-WITH (
-    protocol = 's3',
-    bucket = :'lakebase_regress_bucket',
-    region = :'lakebase_regress_region',
-    endpoint = :'lakebase_regress_endpoint',
-    allow_http = true,
-    access_key_id = :'lakebase_regress_access_key_id',
-    secret_access_key = :'lakebase_regress_secret_access_key'
-);
+WITH (lakebase_storage_volume = :'volume_name');
 
-\setenv LAKEBASE_REGRESS_STORE_ID regress_object
+SELECT internal_store_id AS store_id,
+       regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
+FROM lakebase.storage_volumes
+WHERE storage_volume_name = :'volume_name'
+\gset
+
+\setenv LAKEBASE_REGRESS_STORE_ID :store_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :lakebase_regress_bucket
 \! bin/wait_for_object_store 30
+
+\set ECHO all
+SELECT list_succeeded
+       AND write_succeeded
+       AND read_succeeded
+       AND delete_succeeded
+       AND succeeded
+       AND error IS NULL AS storage_volume_probe_ok
+FROM lakebase.probe_storage_volume(:'volume_name');
 
 CREATE TABLE maintenance_remote_drop (id integer)
 USING iceberg TABLESPACE regress_object;
 INSERT INTO maintenance_remote_drop
 SELECT generate_series(1, 1000);
 
-SELECT 'regress_object' AS store_id,
+SELECT :'store_id' AS store_id,
        :'lakebase_regress_bucket' AS object_namespace,
-       (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
+       :'effective_root' || '/'
+       || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
        || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
        || '/' || pg_relation_filenode('maintenance_remote_drop')::text
        || '_iceberg/' AS object_path
@@ -89,9 +114,10 @@ ROLLBACK;
 SELECT array_agg(id ORDER BY id) AS rows_after_drop_rollback
 FROM maintenance_remote_rollback;
 
-SELECT 'regress_object' AS store_id,
+SELECT :'store_id' AS store_id,
        :'lakebase_regress_bucket' AS object_namespace,
-       (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
+       :'effective_root' || '/'
+       || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
        || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
        || '/' || pg_relation_filenode('maintenance_remote_rollback')::text
        || '_iceberg/' AS object_path

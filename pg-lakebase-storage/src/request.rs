@@ -142,6 +142,7 @@ impl OperationMeta for WireRequestPayload {
             Self::RegisterStore { .. } => "register_store",
             Self::UnregisterStore { .. } => "unregister_store",
             Self::PurgeStoreCache { .. } => "purge_store_cache",
+            Self::ProbeStore { .. } => "probe_store",
             Self::InvalidateObjectCache { .. } => "invalidate_object_cache",
             Self::Delete { .. } => "delete",
             Self::DeletePrefix { .. } => "delete_prefix",

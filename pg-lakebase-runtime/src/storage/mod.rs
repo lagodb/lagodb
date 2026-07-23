@@ -10,8 +10,10 @@ mod config;
 pub(crate) mod gucs;
 pub(crate) mod logging;
 mod reconciler;
+mod reload;
 mod state;
 mod supervisor;
+pub(crate) mod volume_config;
 
 use std::path::PathBuf;
 
@@ -54,9 +56,8 @@ pub(crate) fn init() {
         .set_library(LIBRARY_NAME)
         .set_function(WORKER_FUNCTION)
         // `enable_spi_access` sets BGWORKER_BACKEND_DATABASE_CONNECTION and
-        // forces start time to RecoveryFinished, which is what we need so the
-        // tablespace catalog reconciler can scan `pg_tablespace` (a shared
-        // catalog) before the storage server starts accepting requests.
+        // forces start time to RecoveryFinished, which supplies the normal
+        // backend environment used by GUC reload and shared status reporting.
         .enable_spi_access()
         .set_restart_time(Some(std::time::Duration::from_secs(5)))
         .load();

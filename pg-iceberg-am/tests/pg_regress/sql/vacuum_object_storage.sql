@@ -1,3 +1,4 @@
+\set ECHO none
 -- Object-backed VACUUM FULL must preserve visible data while asynchronously
 -- reclaiming superseded data/delete/metadata objects.
 \setenv PGDATABASE :DBNAME
@@ -19,22 +20,37 @@ RESET client_min_messages;
 \! mkdir -p /tmp/iceberg_regress_vacuum_object
 \! rm -rf /tmp/iceberg_regress_vacuum_object/*
 
+SELECT 'regress-vacuum-' || gen_random_uuid() AS volume_name \gset
+SELECT lakebase.create_storage_volume(
+    :'volume_name',
+    format('s3://%s', :'lakebase_regress_bucket'),
+    jsonb_build_object(
+        'type', 's3_access_key',
+        'access_key_id', :'lakebase_regress_access_key_id',
+        'secret_access_key', :'lakebase_regress_secret_access_key'
+    ),
+    jsonb_build_object(
+        'region', :'lakebase_regress_region',
+        'endpoint', :'lakebase_regress_endpoint',
+        'allow_http', true
+    )
+) AS created_volume \gset
+
 CREATE TABLESPACE regress_vacuum_object
 LOCATION '/tmp/iceberg_regress_vacuum_object'
-WITH (
-    protocol = 's3',
-    bucket = :'lakebase_regress_bucket',
-    region = :'lakebase_regress_region',
-    endpoint = :'lakebase_regress_endpoint',
-    allow_http = true,
-    access_key_id = :'lakebase_regress_access_key_id',
-    secret_access_key = :'lakebase_regress_secret_access_key'
-);
+WITH (lakebase_storage_volume = :'volume_name');
 
-\setenv LAKEBASE_REGRESS_STORE_ID regress_vacuum_object
+SELECT internal_store_id AS store_id,
+       regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
+FROM lakebase.storage_volumes
+WHERE storage_volume_name = :'volume_name'
+\gset
+
+\setenv LAKEBASE_REGRESS_STORE_ID :store_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :lakebase_regress_bucket
 \! bin/wait_for_object_store 30
 
+\set ECHO all
 CREATE TABLE vacuum_object_t (id integer, payload text)
 USING iceberg
 WITH (
@@ -57,9 +73,10 @@ SELECT count(*) AS rows_before,
 FROM vacuum_object_t
 \gset
 
-SELECT 'regress_vacuum_object' AS store_id,
+SELECT :'store_id' AS store_id,
        :'lakebase_regress_bucket' AS object_namespace,
-       (SELECT oid::text FROM pg_tablespace
+       :'effective_root' || '/'
+       || (SELECT oid::text FROM pg_tablespace
         WHERE spcname = 'regress_vacuum_object')
        || '/' || (SELECT oid::text FROM pg_database
                   WHERE datname = current_database())

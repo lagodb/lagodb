@@ -11,9 +11,10 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use futures::stream::BoxStream;
 use object_store::ObjectStore;
 
-use super::ObjectBackend;
-use super::config::{ConfiguredObjectBackend, StoreConfig};
+use super::config::StoreConfig;
 use super::object_store::ObjectStoreBackend;
+use super::probe::BackendProbe;
+use super::{ConfiguredObjectBackend, ObjectBackend, StorageProbeResult};
 use crate::error::{StorageError, StorageResult};
 use crate::object::{ListEntry, ObjectInfo, ObjectLocation, StoreId};
 
@@ -202,6 +203,23 @@ impl RegisteredStore {
         len: u64,
     ) -> StorageResult<ObjectInfo> {
         self.backend.put_from_file(key, path, len).await
+    }
+
+    /// Exercises list, create-only write, metadata/read-back, and delete against this registered
+    /// backend. The probe bypasses local cache and staging state.
+    pub async fn probe(
+        &self,
+        bucket: &str,
+        root_prefix: &str,
+    ) -> StorageResult<StorageProbeResult> {
+        Ok(BackendProbe::new(
+            self.backend.as_ref(),
+            self.id.as_str(),
+            bucket,
+            root_prefix,
+        )?
+        .run()
+        .await)
     }
 
     pub fn list(

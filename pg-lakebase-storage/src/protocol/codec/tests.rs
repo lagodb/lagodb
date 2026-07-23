@@ -41,14 +41,14 @@ fn decode_rejects_previous_protocol_version() {
         },
     })
     .unwrap();
-    frame[4..6].copy_from_slice(&3_u16.to_be_bytes());
+    frame[4..6].copy_from_slice(&4_u16.to_be_bytes());
 
     let error = decode_request(&frame).unwrap_err();
 
     assert!(
         error
             .wire_message()
-            .contains("unsupported protocol version 3")
+            .contains("unsupported protocol version 4")
     );
 }
 
@@ -153,6 +153,11 @@ fn request_payloads_roundtrip() {
         WireRequestPayload::PurgeStoreCache {
             store_id: "store-a".to_string(),
         },
+        WireRequestPayload::ProbeStore {
+            store_id: "store-a".to_string(),
+            bucket: "bucket".to_string(),
+            root_prefix: "root/lakebase/store-a".to_string(),
+        },
         WireRequestPayload::InvalidateObjectCache {
             store_id: "store-a".to_string(),
             bucket: "bucket".to_string(),
@@ -226,6 +231,11 @@ fn response_payloads_roundtrip() {
         WireResponsePayload::RegisterStore { replaced: true },
         WireResponsePayload::UnregisterStore { removed: true },
         WireResponsePayload::PurgeStoreCache,
+        WireResponsePayload::ProbeStore {
+            result: crate::backend::StorageProbeResult::from_wire(
+                true, true, true, true, None,
+            ),
+        },
         WireResponsePayload::InvalidateObjectCache { removed: true },
         WireResponsePayload::Delete,
         WireResponsePayload::DeletePrefix { deleted: 7 },
@@ -347,7 +357,7 @@ fn request_open_golden_frame() {
         encode_request(&request).unwrap(),
         vec![
             0x53, 0x54, 0x47, 0x31, // magic
-            0x00, 0x04, // version
+            0x00, 0x05, // version
             0x01, // request kind
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a, // request id
             0x00, 0x01, // open op
@@ -376,7 +386,7 @@ fn request_read_golden_frame() {
     assert_eq!(
         encode_request(&request).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00,
             0x0d,
@@ -415,7 +425,7 @@ fn response_open_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x05, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x01,
         ]
@@ -435,7 +445,7 @@ fn response_read_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x05, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x03, b'a', b'b',
             b'c',
         ]
@@ -474,7 +484,7 @@ fn response_error_golden_frame() {
     assert_eq!(
         encode_response(&response).unwrap(),
         vec![
-            0x53, 0x54, 0x47, 0x31, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x53, 0x54, 0x47, 0x31, 0x00, 0x05, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x2a, 0x03, 0xe8, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0e, b'm',
             b'i', b's', b's', b'i', b'n', b'g', b' ', b'b', b'u', b'c', b'k', b'e',
             b't',

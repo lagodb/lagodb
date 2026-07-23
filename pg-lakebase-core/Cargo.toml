@@ -28,6 +28,7 @@ pg-lakebase-macros = { version = "0.1.0", path = "../pg-lakebase-macros" }
 pg-lakebase-storage = { path = "../pg-lakebase-storage" }
 bytes = "1.10"
 uuid = { version = "1.16", features = ["v7"] }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 pgrx-tests = { workspace = true }

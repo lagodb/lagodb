@@ -8,8 +8,8 @@ use pg_lakebase_core::options::{TableOptions, get_tablespace};
 
 use super::metadata_table::IcebergMetadata;
 use super::metadata_tracker::TxMetadata;
-use super::table_lifecycle::compute_table_location;
-use crate::error::{IcebergError, IcebergResult};
+use super::table_lifecycle::{compute_table_location, distributed_table_key};
+use crate::error::IcebergResult;
 use crate::storage::StorageContext;
 use crate::storage::transaction_resources::register_local_table_root_dropped;
 
@@ -24,18 +24,11 @@ enum TableRootCleanup {
 impl TableRootCleanup {
     fn resolve(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
         if let Some(opts) = get_tablespace(rel.tablespace_oid())? {
-            let base = opts.base_url();
-            let location = compute_table_location(rel, &base, true);
-            let key = location
-                .strip_prefix(&base)
-                .and_then(|suffix| suffix.strip_prefix('/'))
-                .ok_or(IcebergError::InvariantViolated(
-                    "remote DROP target escaped its tablespace base URL",
-                ))?;
+            let object_path = opts.rooted_object_key(&distributed_table_key(rel));
             return Ok(Self::Remote(ObjectTreeTarget::new(
-                opts.store_id(),
+                opts.store_id().as_str(),
                 opts.object_namespace(),
-                key,
+                object_path,
             )?));
         }
 

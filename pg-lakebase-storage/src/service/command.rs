@@ -18,6 +18,7 @@ pub(crate) enum StorageCommand {
     RegisterStore(RegisterStoreCommand),
     UnregisterStore(UnregisterStoreCommand),
     PurgeStoreCache(PurgeStoreCacheCommand),
+    ProbeStore(ProbeStoreCommand),
     InvalidateObjectCache(InvalidateObjectCacheCommand),
     Delete(DeleteCommand),
     DeletePrefix(DeletePrefixCommand),
@@ -55,6 +56,13 @@ pub(crate) struct UnregisterStoreCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PurgeStoreCacheCommand {
     pub store_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProbeStoreCommand {
+    pub store_id: String,
+    pub bucket: String,
+    pub root_prefix: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -22,7 +22,7 @@ pub mod transport;
 pub use backend::{
     AzureStoreConfig, ConfiguredObjectBackend, GcsStoreConfig, MemoryObjectBackend,
     ObjectBackend, ObjectStoreBackend, RegisteredStore, S3CompatibleStoreConfig,
-    S3StoreConfig, SecretString, StoreConfig, StoreRegistry,
+    S3StoreConfig, SecretString, StorageProbeResult, StoreConfig, StoreRegistry,
 };
 pub use builder::StorageServerBuilder;
 pub use cache::{

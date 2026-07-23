@@ -59,6 +59,7 @@ pub(crate) enum CommandOutput {
     RegisterStore(RegisterStoreOutput),
     UnregisterStore(UnregisterStoreOutput),
     PurgeStoreCache,
+    ProbeStore(crate::backend::StorageProbeResult),
     InvalidateObjectCache(InvalidateObjectCacheOutput),
     Delete,
     DeletePrefix(DeletePrefixOutput),

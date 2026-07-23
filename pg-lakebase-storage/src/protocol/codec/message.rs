@@ -78,6 +78,16 @@ impl WireEncode for WireRequestPayload {
                 out.put_u16(WireOp::PurgeStoreCache.code());
                 store_id.encode(out)
             }
+            Self::ProbeStore {
+                store_id,
+                bucket,
+                root_prefix,
+            } => {
+                out.put_u16(WireOp::ProbeStore.code());
+                store_id.encode(out)?;
+                bucket.encode(out)?;
+                root_prefix.encode(out)
+            }
             Self::InvalidateObjectCache {
                 store_id,
                 bucket,
@@ -177,6 +187,11 @@ impl WireDecode for WireRequestPayload {
             },
             WireOp::PurgeStoreCache => Self::PurgeStoreCache {
                 store_id: WireDecode::decode(input)?,
+            },
+            WireOp::ProbeStore => Self::ProbeStore {
+                store_id: WireDecode::decode(input)?,
+                bucket: WireDecode::decode(input)?,
+                root_prefix: WireDecode::decode(input)?,
             },
             WireOp::InvalidateObjectCache => Self::InvalidateObjectCache {
                 store_id: WireDecode::decode(input)?,
@@ -278,6 +293,14 @@ impl WireEncode for WireResponsePayload {
                 out.put_u16(WireOp::PurgeStoreCache.code());
                 Ok(())
             }
+            Self::ProbeStore { result } => {
+                out.put_u16(WireOp::ProbeStore.code());
+                result.list_succeeded().encode(out)?;
+                result.write_succeeded().encode(out)?;
+                result.read_succeeded().encode(out)?;
+                result.delete_succeeded().encode(out)?;
+                result.error().map(str::to_owned).encode(out)
+            }
             Self::InvalidateObjectCache { removed } => {
                 out.put_u16(WireOp::InvalidateObjectCache.code());
                 removed.encode(out)
@@ -344,6 +367,15 @@ impl WireDecode for WireResponsePayload {
                 removed: WireDecode::decode(input)?,
             },
             WireOp::PurgeStoreCache => Self::PurgeStoreCache,
+            WireOp::ProbeStore => Self::ProbeStore {
+                result: crate::backend::StorageProbeResult::from_wire(
+                    WireDecode::decode(input)?,
+                    WireDecode::decode(input)?,
+                    WireDecode::decode(input)?,
+                    WireDecode::decode(input)?,
+                    WireDecode::decode(input)?,
+                ),
+            },
             WireOp::InvalidateObjectCache => Self::InvalidateObjectCache {
                 removed: WireDecode::decode(input)?,
             },

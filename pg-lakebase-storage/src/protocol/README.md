@@ -38,7 +38,7 @@ control is filesystem permissions on the socket path.
 
   Header:
     magic     u32   0x53544731  ("STG1")
-    version   u16   3
+    version   u16   5
     kind      u8    1 = request, 2 = response
     req_id    u64   correlates request/response pairs
 ```
@@ -68,6 +68,9 @@ ordering assumptions.
     10   DeletePrefix             request / response
     11   List                     request / response
     12   Head                     request / response
+    13   DeleteObjects            request / response
+    14   CloseList                request / response
+    15   ProbeStore               request / response
   1000   Error                    response only
 ```
 

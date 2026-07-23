@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path as ObjectPath;
 use object_store::{
-    Error as ObjectStoreError, MultipartUpload, ObjectStore, ObjectStoreExt,
+    Error as ObjectStoreError, MultipartUpload, ObjectStore, ObjectStoreExt, PutMode,
+    PutOptions,
 };
 use tokio::io::AsyncReadExt;
 
@@ -141,6 +142,39 @@ impl ObjectBackend for ObjectStoreBackend {
 
         Ok(ObjectInfo {
             size: len,
+            etag: result.e_tag,
+        })
+    }
+
+    async fn put_if_absent(
+        &self,
+        key: &ObjectLocation,
+        data: bytes::Bytes,
+    ) -> StorageResult<ObjectInfo> {
+        let location = self.location(key)?;
+        let size = data.len() as u64;
+        let result = self
+            .store
+            .put_opts(
+                &location,
+                data.into(),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..PutOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                ObjectStoreError::AlreadyExists { .. } => {
+                    StorageError::busy(format!("object {key} already exists"))
+                }
+                error => StorageError::backend_source(
+                    format!("create object {key} without overwrite"),
+                    error,
+                ),
+            })?;
+        Ok(ObjectInfo {
+            size,
             etag: result.e_tag,
         })
     }

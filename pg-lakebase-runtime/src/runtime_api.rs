@@ -1,5 +1,7 @@
 //! Publisher of the unified runtime API and owner of the provider directory.
 
+mod storage_volume;
+
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 
@@ -14,6 +16,8 @@ use pg_lakebase_core::runtime_api::{
     provider_name, rendezvous_slot,
 };
 use pgrx::pg_sys;
+
+use storage_volume::resolve_storage_volume_route;
 
 thread_local! {
     static PROVIDERS: RefCell<ProviderDirectory> =
@@ -410,6 +414,7 @@ static RUNTIME_API: RuntimeApiV1 = RuntimeApiV1 {
     customscan_mode,
     maintenance_config,
     stage_worker_wakeup,
+    resolve_storage_volume_route,
 };
 
 pub(crate) fn init() {

@@ -46,16 +46,12 @@ impl<'a> IcebergTableLifecycle<'a> {
     /// availability and is owned by `IcebergTableDrop`.
     pub(crate) fn new(rel: &'a RelationHandle<'a>) -> IcebergResult<Self> {
         if let Some(opts) = get_tablespace(rel.tablespace_oid())? {
-            let base = opts.base_url();
-            let location = compute_table_location(rel, &base, true);
-            let key = location
-                .strip_prefix(&base)
-                .and_then(|suffix| suffix.strip_prefix('/'))
-                .ok_or(IcebergError::InvariantViolated(
-                    "remote table location escaped its tablespace base URL",
-                ))?;
-            let target =
-                ObjectTreeTarget::new(opts.store_id(), opts.object_namespace(), key)?;
+            let object_path = opts.rooted_object_key(&distributed_table_key(rel));
+            let target = ObjectTreeTarget::new(
+                opts.store_id().as_str(),
+                opts.object_namespace(),
+                object_path,
+            )?;
             if MaintenanceQueue::has_tree_target(&target)? {
                 return Err(IcebergError::ActiveMaintenanceTarget);
             }
@@ -143,7 +139,7 @@ pub(crate) fn compute_table_location(
 
         if is_distributed {
             let base = base_path.trim_end_matches('/');
-            return format!("{}/{}/{}/{}_iceberg", base, spc_oid, db_oid, rel_num);
+            return format!("{}/{}", base, distributed_table_key(rel));
         }
 
         // Local storage: relative paths from DataDir, mirroring PG layout.
@@ -173,6 +169,17 @@ pub(crate) fn compute_table_location(
             )
         }
     }
+}
+
+/// Stable table path relative to a storage volume's immutable effective root.
+pub(crate) fn distributed_table_key(rel: &RelationHandle<'_>) -> String {
+    let locator = unsafe { &(*rel.as_raw()).rd_locator };
+    format!(
+        "{}/{}/{}_iceberg",
+        u32::from(locator.spcOid),
+        u32::from(locator.dbOid),
+        locator.relNumber
+    )
 }
 
 /// `PG_<major>_<catalog_version>` directory name used inside `pg_tblspc/`.

@@ -1,4 +1,4 @@
-use crate::backend::StoreConfig;
+use crate::backend::{StorageProbeResult, StoreConfig};
 use crate::error::{StorageError, StorageErrorKind, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
 
@@ -81,6 +81,12 @@ pub enum WireRequestPayload {
     PurgeStoreCache {
         store_id: String,
     },
+    /// Exercises the registered backend under `root_prefix` without involving cache or staging.
+    ProbeStore {
+        store_id: String,
+        bucket: String,
+        root_prefix: String,
+    },
     InvalidateObjectCache {
         store_id: String,
         bucket: String,
@@ -161,6 +167,9 @@ pub enum WireResponsePayload {
         removed: bool,
     },
     PurgeStoreCache,
+    ProbeStore {
+        result: StorageProbeResult,
+    },
     InvalidateObjectCache {
         removed: bool,
     },

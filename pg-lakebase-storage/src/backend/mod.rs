@@ -21,21 +21,25 @@ use std::path::Path;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
-use crate::error::StorageResult;
+use crate::error::{StorageError, StorageResult};
 use crate::object::{ListEntry, ObjectInfo, ObjectLocation};
 
 mod config;
+mod configured;
 mod memory;
 mod object_store;
+mod probe;
 mod registry;
 mod secret;
 
 pub use config::{
-    AzureStoreConfig, ConfiguredObjectBackend, GcsStoreConfig,
-    S3CompatibleStoreConfig, S3StoreConfig, StoreConfig,
+    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig,
+    StoreConfig,
 };
+pub use configured::ConfiguredObjectBackend;
 pub use memory::MemoryObjectBackend;
 pub use object_store::ObjectStoreBackend;
+pub use probe::StorageProbeResult;
 pub use registry::{RegisteredStore, StoreRegistry};
 pub use secret::SecretString;
 
@@ -69,6 +73,20 @@ pub trait ObjectBackend: Send + Sync {
         path: &Path,
         len: u64,
     ) -> StorageResult<ObjectInfo>;
+
+    /// Creates a small in-memory object without overwriting an existing key.
+    ///
+    /// This is the write primitive used by the explicit connectivity probe. Create-only
+    /// semantics ensure that a probe-key collision cannot overwrite user data.
+    async fn put_if_absent(
+        &self,
+        _key: &ObjectLocation,
+        _data: bytes::Bytes,
+    ) -> StorageResult<ObjectInfo> {
+        Err(StorageError::unsupported(
+            "create-only in-memory upload is not supported by this backend",
+        ))
+    }
 
     /// Lists objects under `(store_id, bucket)` whose key starts with `prefix` (or the whole
     /// bucket when `prefix` is `None`). Listing is recursive: an object at `foo/bar/baz`

@@ -2,7 +2,7 @@ use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
 use pg_lakebase_storage::{
     ObjectLocation, StagingFile, StagingPathResolver, StorageClient, StorageError,
-    StorageFile, StorageResult, StoreId,
+    StorageFile, StoreId,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -11,6 +11,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::storage::object_uri::resolve_object_uri;
 use crate::storage::transaction_resources::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
 };
@@ -33,7 +34,7 @@ fn storage_err(e: StorageError) -> Error {
 
 #[derive(Clone)]
 pub struct ObjectStorage {
-    scheme: Arc<str>,
+    effective_base_uri: Arc<str>,
     store_id: Arc<StoreId>,
     bucket: Arc<str>,
     client: StorageClient,
@@ -43,7 +44,7 @@ pub struct ObjectStorage {
 impl fmt::Debug for ObjectStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ObjectStorage")
-            .field("scheme", &self.scheme)
+            .field("scheme", &self.scheme())
             .field("store_id", &self.store_id)
             .field("bucket", &self.bucket)
             .finish()
@@ -52,29 +53,28 @@ impl fmt::Debug for ObjectStorage {
 
 impl ObjectStorage {
     pub fn new(
-        scheme: impl Into<String>,
-        store_id: impl Into<String>,
+        effective_base_uri: impl Into<String>,
+        store_id: StoreId,
         bucket: impl Into<String>,
         client: StorageClient,
         staging_resolver: StagingPathResolver,
-    ) -> StorageResult<Self> {
-        let scheme = scheme.into();
+    ) -> Self {
+        let effective_base_uri = effective_base_uri.into();
         let bucket = bucket.into();
-
-        Ok(Self {
-            scheme: Arc::from(scheme.into_boxed_str()),
-            store_id: Arc::new(StoreId::new(store_id)?),
+        Self {
+            effective_base_uri: Arc::from(effective_base_uri.into_boxed_str()),
+            store_id: Arc::new(store_id),
             bucket: Arc::from(bucket.into_boxed_str()),
             client,
             staging_resolver,
-        })
+        }
     }
 
     pub(crate) fn maintenance_target_owned(
         &self,
         mut uri: String,
     ) -> Result<pg_lakebase_core::maintenance::ObjectTarget> {
-        let relative_path_pos = resolve_object_uri(&self.scheme, &self.bucket, &uri)?;
+        let relative_path_pos = resolve_object_uri(&self.effective_base_uri, &uri)?;
         let path = uri.split_off(relative_path_pos);
         pg_lakebase_core::maintenance::ObjectTarget::new(
             self.store_id.as_str(),
@@ -89,10 +89,10 @@ impl ObjectStorage {
         table_location: &str,
         cutoff_ms: i64,
     ) -> Result<std::collections::HashSet<String>> {
-        let relative =
-            resolve_object_uri(&self.scheme, &self.bucket, table_location)?;
+        let relative = resolve_object_uri(&self.effective_base_uri, table_location)?;
         let prefix = format!("{}/", table_location[relative..].trim_end_matches('/'));
         let uses_absolute_uris = table_location.contains("://");
+        let scheme = self.scheme();
         let mut paths = std::collections::HashSet::new();
         for entry in self.client.list(
             self.store_id.as_str(),
@@ -107,7 +107,7 @@ impl ObjectStorage {
                 if uses_absolute_uris {
                     paths.insert(format!(
                         "{}://{}/{}",
-                        self.scheme, self.bucket, entry.key
+                        scheme, self.bucket, entry.key
                     ));
                 } else {
                     paths.insert(entry.key);
@@ -118,64 +118,9 @@ impl ObjectStorage {
     }
 }
 
-fn resolve_object_uri(scheme: &str, bucket: &str, uri: &str) -> Result<usize> {
-    let scheme_prefix = format!("{}://", scheme);
-    if uri.starts_with(&scheme_prefix) {
-        let after_scheme = &uri[scheme_prefix.len()..];
-        if let Some(rest) = after_scheme.strip_prefix(bucket) {
-            // Ensure the bucket name matched completely (followed by '/' or end of string),
-            // not just a prefix overlap (e.g., bucket "my-lake" inside "my-lakehouse").
-            if rest.is_empty() || rest.starts_with('/') {
-                match rest.strip_prefix('/') {
-                    Some(key) if !key.is_empty() => {
-                        return Ok(uri.len() - key.len());
-                    }
-                    _ => {
-                        return Err(Error::new(
-                            ErrorKind::DataInvalid,
-                            format!(
-                                "object path {:?} points at bucket root, not an object",
-                                uri
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-        let foreign = after_scheme.split('/').next().unwrap_or("");
-        return Err(Error::new(
-            ErrorKind::DataInvalid,
-            format!(
-                "namespace mismatch: URI targets bucket {:?} but storage is bound to {:?}",
-                foreign, bucket
-            ),
-        ));
-    }
-
-    if uri.contains("://") {
-        return Err(Error::new(
-            ErrorKind::DataInvalid,
-            format!(
-                "scheme mismatch: expected {:?}, got {:?}",
-                format!("{}://", scheme),
-                uri
-            ),
-        ));
-    }
-
-    if uri.is_empty() {
-        return Err(Error::new(
-            ErrorKind::DataInvalid,
-            "object path must include an object key",
-        ));
-    }
-
-    Ok(0)
-}
-
 impl Storage for ObjectStorage {
     fn resolve_uri(&self, uri: &str) -> Result<usize> {
-        resolve_object_uri(&self.scheme, &self.bucket, uri)
+        resolve_object_uri(&self.effective_base_uri, uri)
     }
 
     fn delete(&self, path: &str) -> Result<()> {
@@ -277,7 +222,10 @@ impl Storage for ObjectStorage {
     }
 
     fn scheme(&self) -> &str {
-        &self.scheme
+        self.effective_base_uri
+            .split_once("://")
+            .expect("tablespace binding validated the effective base URI")
+            .0
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -491,82 +439,5 @@ impl FileWrite for ObjectWriter {
         // would add latency without improving the committed object-store state.
         self.staging.take();
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_uri_strips_scheme_and_bucket() {
-        let uri = "s3://my-lake/metadata/v1.json";
-        let offset = resolve_object_uri("s3", "my-lake", uri).unwrap();
-        assert_eq!(&uri[offset..], "metadata/v1.json");
-    }
-
-    #[test]
-    fn resolve_uri_strips_scheme_and_bucket_nested_path() {
-        let uri = "s3://my-lake/data/dir/file.parquet";
-        let offset = resolve_object_uri("s3", "my-lake", uri).unwrap();
-        assert_eq!(&uri[offset..], "data/dir/file.parquet");
-    }
-
-    #[test]
-    fn resolve_uri_rejects_bucket_root() {
-        assert!(resolve_object_uri("s3", "my-lake", "s3://my-lake").is_err());
-        assert!(resolve_object_uri("s3", "my-lake", "s3://my-lake/").is_err());
-    }
-
-    #[test]
-    fn resolve_uri_rejects_namespace_mismatch() {
-        let err = resolve_object_uri("s3", "my-lake", "s3://other-bucket/a.parquet")
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("namespace mismatch"), "got: {msg}");
-        assert!(msg.contains("other-bucket"), "got: {msg}");
-    }
-
-    #[test]
-    fn resolve_uri_rejects_scheme_mismatch() {
-        let err = resolve_object_uri("s3", "my-lake", "gs://my-lake/file.parquet")
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("scheme mismatch"), "got: {msg}");
-    }
-
-    #[test]
-    fn resolve_uri_accepts_relative_key() {
-        let key = "metadata/v1.json";
-        let offset = resolve_object_uri("s3", "my-lake", key).unwrap();
-        assert_eq!(offset, 0);
-        assert_eq!(&key[offset..], "metadata/v1.json");
-    }
-
-    #[test]
-    fn resolve_uri_rejects_empty_path() {
-        assert!(resolve_object_uri("s3", "my-lake", "").is_err());
-    }
-
-    #[test]
-    fn resolve_uri_works_for_gcs() {
-        let uri = "gs://my-bucket/data/file.parquet";
-        let offset = resolve_object_uri("gs", "my-bucket", uri).unwrap();
-        assert_eq!(&uri[offset..], "data/file.parquet");
-    }
-
-    #[test]
-    fn resolve_uri_works_for_azure() {
-        let uri = "az://my-container/data/file.parquet";
-        let offset = resolve_object_uri("az", "my-container", uri).unwrap();
-        assert_eq!(&uri[offset..], "data/file.parquet");
-    }
-
-    #[test]
-    fn resolve_uri_rejects_bucket_name_prefix_overlap() {
-        let err = resolve_object_uri("s3", "my-lake", "s3://my-lakehouse/file")
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("namespace mismatch"), "got: {msg}");
     }
 }

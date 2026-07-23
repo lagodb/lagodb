@@ -16,8 +16,8 @@ use crate::request::{RequestContext, RequestOutcome};
 use crate::service::command::{
     CloseCommand, CloseListCommand, DeleteCommand, DeleteObjectsCommand,
     DeletePrefixCommand, HeadCommand, InvalidateObjectCacheCommand, ListCommand,
-    OpenCommand, PurgeStoreCacheCommand, ReadCommand, RegisterStoreCommand,
-    StorageCommand, UnregisterStoreCommand, UploadCommand,
+    OpenCommand, ProbeStoreCommand, PurgeStoreCacheCommand, ReadCommand,
+    RegisterStoreCommand, StorageCommand, UnregisterStoreCommand, UploadCommand,
 };
 use crate::service::reply::{
     CommandOutput, ReadBody, ResponseAttachment, ServiceReply,
@@ -268,6 +268,15 @@ impl From<WireRequestPayload> for StorageCommand {
             WireRequestPayload::PurgeStoreCache { store_id } => {
                 Self::PurgeStoreCache(PurgeStoreCacheCommand { store_id })
             }
+            WireRequestPayload::ProbeStore {
+                store_id,
+                bucket,
+                root_prefix,
+            } => Self::ProbeStore(ProbeStoreCommand {
+                store_id,
+                bucket,
+                root_prefix,
+            }),
             WireRequestPayload::InvalidateObjectCache {
                 store_id,
                 bucket,
@@ -359,6 +368,9 @@ impl From<CommandOutput> for StorageHandlerPayload {
             }
             CommandOutput::PurgeStoreCache => {
                 Self::Wire(WireResponsePayload::PurgeStoreCache)
+            }
+            CommandOutput::ProbeStore(result) => {
+                Self::Wire(WireResponsePayload::ProbeStore { result })
             }
             CommandOutput::InvalidateObjectCache(output) => {
                 Self::Wire(WireResponsePayload::InvalidateObjectCache {

@@ -30,6 +30,13 @@ use crate::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
     TableMaintenanceOptions, TableMaintenanceReport, TableMaintenanceStats,
 };
+mod storage_volume;
+
+pub use storage_volume::{
+    ResolveStorageVolumeRouteCallback, StorageVolumeRouteLookupError,
+    StorageVolumeRouteV1, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
+    VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
+};
 
 pub const RUNTIME_API_VERSION: u32 = 1;
 pub const RUNTIME_API_RENDEZVOUS: &CStr = c"pg_lakebase.runtime_api.v1";
@@ -467,6 +474,7 @@ pub struct RuntimeApiV1 {
     pub maintenance_config:
         unsafe extern "C-unwind" fn(*mut RuntimeMaintenanceConfigV1),
     pub stage_worker_wakeup: StageWorkerWakeupCallback,
+    pub resolve_storage_volume_route: ResolveStorageVolumeRouteCallback,
 }
 
 unsafe extern "C" {

@@ -1,31 +1,51 @@
-DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+\set ECHO none
 
--- Load the extension to register the hook
-CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
-
--- Create a directory for the tablespace using psql's shell escape
 \! mkdir -p /tmp/pg_iceberg_am_regress_spc
--- Ensure it's empty (in case a previous run failed)
 \! rm -rf /tmp/pg_iceberg_am_regress_spc/*
-
--- Clean up just in case
 SET client_min_messages = warning;
-DROP TABLESPACE IF EXISTS iceberg_s3_test;
+DROP TABLESPACE IF EXISTS iceberg_volume_test;
 RESET client_min_messages;
 
--- Create tablespace with iceberg options
-CREATE TABLESPACE iceberg_s3_test LOCATION '/tmp/pg_iceberg_am_regress_spc' WITH (
-    protocol = 's3',
-    bucket = 'my-lake-bucket',
-    region = 'us-east-1'
-);
+SELECT 'regress-tablespace-' || gen_random_uuid() AS volume_name
+\gset
+SELECT lakebase.create_storage_volume(
+    :'volume_name',
+    's3://tablespace-option-regress/root',
+    '{"type":"anonymous"}'::jsonb,
+    '{"region":"us-east-1"}'::jsonb
+) AS ignored
+\gset
 
--- Verify options are stored correctly. 
--- Note: We cast to text to make the output output stable and readable.
--- The order of options in the array depends on how we constructed the vector in Rust.
--- Since our Rust implementation uses a simple Vec push, the order should be consistent with the AST traversal, 
--- which usually follows the order in the SQL statement.
-SELECT spcname, spcoptions FROM pg_tablespace WHERE spcname = 'iceberg_s3_test';
+CREATE TABLESPACE iceberg_volume_test
+LOCATION '/tmp/pg_iceberg_am_regress_spc'
+WITH (lakebase_storage_volume = :'volume_name');
 
--- Clean up
-DROP TABLESPACE iceberg_s3_test;
+SELECT array_length(spcoptions, 1) = 1
+       AND (SELECT count(*) FROM unnest(spcoptions) AS option
+            WHERE option LIKE 'lakebase_volume_id=%') = 1
+       AND NOT EXISTS (
+           SELECT 1 FROM unnest(spcoptions) AS option
+           WHERE option LIKE 'lakebase_storage_volume=%'
+       ) AS internal_id_only
+FROM pg_tablespace
+WHERE spcname = 'iceberg_volume_test'
+\gset
+\echo internal_id_only: :internal_id_only
+
+SELECT count(*) = 1 AS binding_visible
+FROM lakebase.storage_volumes AS volume
+JOIN pg_tablespace AS tablespace
+  ON tablespace.oid = volume.bound_tablespace_oid
+WHERE volume.storage_volume_name = :'volume_name'
+  AND tablespace.spcname = 'iceberg_volume_test'
+\gset
+\echo binding_visible: :binding_visible
+
+DROP TABLESPACE iceberg_volume_test;
+SELECT count(*) = 1 AS binding_retained_after_drop
+FROM lakebase.storage_volumes
+WHERE storage_volume_name = :'volume_name'
+  AND bound_tablespace_oid IS NOT NULL
+  AND bound_tablespace_name IS NULL
+\gset
+\echo binding_retained_after_drop: :binding_retained_after_drop

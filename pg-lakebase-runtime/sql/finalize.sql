@@ -11,6 +11,16 @@ REVOKE ALL ON FUNCTION lakebase.deregister_worker(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION lakebase.worker_runtime_status() FROM PUBLIC;
 REVOKE ALL ON FUNCTION lakebase.process_runtime_status() FROM PUBLIC;
 REVOKE ALL ON FUNCTION lakebase.storage_runtime_status() FROM PUBLIC;
+REVOKE ALL ON FUNCTION lakebase.create_storage_volume(text, text, jsonb, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION lakebase.rename_storage_volume(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION lakebase.update_storage_volume_credentials(text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION lakebase.probe_storage_volume(text) FROM PUBLIC;
+COMMENT ON FUNCTION lakebase.create_storage_volume(text, text, jsonb, jsonb) IS 'Nontransactional administration operation. Invoke as the only expression in a standalone top-level SELECT; do not call from a function, procedure, trigger, DO block, CTE, subquery, or pipelined batch. A durable config-file replacement is not rolled back if the surrounding statement later fails.';
+COMMENT ON FUNCTION lakebase.rename_storage_volume(text, text) IS 'Nontransactional administration operation. Invoke as the only expression in a standalone top-level SELECT; do not call from a function, procedure, trigger, DO block, CTE, subquery, or pipelined batch. A durable config-file replacement is not rolled back if the surrounding statement later fails.';
+COMMENT ON FUNCTION lakebase.update_storage_volume_credentials(text, jsonb) IS 'Nontransactional administration operation. Invoke as the only expression in a standalone top-level SELECT; do not call from a function, procedure, trigger, DO block, CTE, subquery, or pipelined batch. A durable config-file replacement is not rolled back if the surrounding statement later fails.';
+COMMENT ON FUNCTION lakebase.probe_storage_volume(text) IS 'Explicit nontransactional diagnostic. Uses the worker registered backend to list and create, read back, then delete a unique create-only object under the Volume root. Returns one structured result row; it does not modify the durable Volume configuration.';
+REVOKE ALL ON FUNCTION lakebase.reload_storage_volumes() FROM PUBLIC;
+REVOKE ALL ON FUNCTION lakebase.storage_volumes_internal() FROM PUBLIC;
 REVOKE ALL ON FUNCTION lakebase.retry_maintenance_item(uuid) FROM PUBLIC;
 
 -- Table owners must be able to publish committed maintenance wakeups without
@@ -55,6 +65,11 @@ CREATE VIEW lakebase.storage_runtime_status
 WITH (security_invoker = true) AS
 SELECT * FROM lakebase.storage_runtime_status();
 REVOKE ALL ON TABLE lakebase.storage_runtime_status FROM PUBLIC;
+
+CREATE VIEW lakebase.storage_volumes
+WITH (security_invoker = true) AS
+SELECT * FROM lakebase.storage_volumes_internal();
+REVOKE ALL ON TABLE lakebase.storage_volumes FROM PUBLIC;
 
 SELECT lakebase.register_worker(
     'maintenance',
