@@ -1,50 +1,36 @@
 # pg-lakebase-core
 
-[![Rust](https://img.shields.io/badge/rust-1.95.0%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.96.0%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
-**Rust framework primitives for PostgreSQL Table Access Methods.**
+**A reusable Rust framework for PostgreSQL-native lake-table access methods.**
 
-`pg-lakebase-core` is the framework crate used by PostgreSQL storage
-extensions in this workspace. Its central job is to **own the FFI boundary**:
-PostgreSQL's access-method and planner integration is a large surface of C
-callbacks over raw pointers, manual memory contexts, and error paths that bypass
-normal Rust control flow. This crate concentrates that unsafe glue in one
-reviewed place — behind Rust traits, typed handles, and lifecycle helpers — so a
-storage provider writes its logic in **safe Rust**, the correctness-critical
-parts are implemented once instead of by every provider, and a provider bug
-stays confined to that provider's business logic.
+`pg-lakebase-core` is the framework layer between PostgreSQL's C callback
+interfaces and a concrete table-format implementation. It concentrates the
+unsafe FFI, planner/executor lifecycle, PostgreSQL memory ownership, and error
+boundaries in one place. A provider implements format-specific storage logic
+behind Rust traits instead of rebuilding those boundaries in every extension.
 
-On top of that boundary, the crate exposes two pluggable frameworks a provider
-implements:
+## Framework at a glance
 
-- A **Table Access Method (TAM)** framework that models PostgreSQL's scan,
-  relation, index, DML, and DDL callbacks as Rust traits, and adapts the raw C
-  entry points to them.
-- A generic **CustomScan filter-pushdown** framework that lets a storage
-  provider push SQL `WHERE` predicates down into its own scan, so it can prune
-  data files and filter rows before they reach the executor.
-
-These rest on a broader set of supporting facilities the crate also owns: a
-row/column tuple-value substrate (`Cell`/`Row`, zero-copy slot and datum views,
-columnar batch buffers) so providers can materialize rows or consume columns
-directly; typed handles wrapping PostgreSQL-owned objects (relations, snapshots,
-scan keys, slots); a typed `Expr` layer with walkers and classification that
-backs predicate pushdown; catalog scan/update helpers and table/tablespace
-option parsing with caching; a custom WAL resource-manager registration path for
-crash recovery; PostgreSQL hook helpers, error reporting/diagnostics, and
-background-worker scaffolding; and two distinct cleanup mechanisms —
-`ResourceOwner`-scoped and transaction-scoped — for the ERROR, abort, and
-rollback paths normal Rust returns cannot observe. The
-["What the Framework Provides"](#what-the-framework-provides) section breaks
-these down.
-
-FDW support is a workspace-level direction, but it is not part of this crate's
-current public API.
+| Provider needs to... | `pg-lakebase-core` provides... |
+|---|---|
+| Implement a PostgreSQL table access method | TAM traits and callback adapters for scans, relations, indexes, DML, DDL, and COPY |
+| Push safe predicates into a lake-table scan | A CustomScan planner/executor framework with classification, cost gates, residual quals, and runtime translation |
+| Move values between PostgreSQL and a storage writer | Typed datum/slot views, owned `Cell`/`Row` values, and columnar batch abstractions |
+| Survive PostgreSQL ERROR, abort, and commit boundaries | Typed handles, `ResourceOwner` cleanup, transaction/subtransaction callbacks, and lifecycle state |
+| Integrate storage-specific PostgreSQL facilities | Catalog/options helpers, hooks, WAL registration, background-worker scaffolding, and diagnostics |
 
 The reference consumer is [pg-iceberg-am](../pg-iceberg-am), which implements
 an Apache Iceberg TAM and CustomScan provider on top of these frameworks.
+
+## What this crate is—and is not
+
+`pg-lakebase-core` is a framework layer, not a storage-format implementation.
+It does not read or write Iceberg, Delta Lake, or Hudi metadata itself. FDW
+support is a workspace-level direction and is not part of this crate's current
+public API.
 
 ## Architecture
 
@@ -73,10 +59,43 @@ Two seams connect a provider to PostgreSQL:
   executor. It is independent of the TableAM callbacks and is what carries
   predicate pushdown.
 
-## What the Framework Provides
+## Provider API shape
 
-Rather than expose ad hoc helpers, the crate is organized around the
-PostgreSQL lifecycle boundaries a storage extension has to respect.
+Most providers import the prelude, define an AM identity type, implement the
+associated operation sessions, and optionally register a CustomScan provider:
+
+The following is an incomplete API sketch. The provider-defined session types
+and trait implementations are omitted, so it is not a standalone compilable
+provider.
+
+```rust
+use pg_lakebase_core::prelude::*;
+
+#[pg_table_am(
+    version = "0.1.0",
+    author = "Example",
+    website = "https://example.com"
+)]
+pub struct MyTableAm;
+
+impl TableAccessMethod for MyTableAm {
+    type ScanSession = MyScanSession;
+    type IndexFetchSession = MyIndexFetchSession;
+    type ModifyQueryState = MyModifyQueryState;
+    type ModifyState = MyModifyState;
+    type CopySession = MyCopySession;
+}
+```
+
+The AM type implements the stateless facet traits, while the associated session
+types implement their operation lifecycles. A provider that needs predicate
+pushdown implements the CustomScan provider trait and registers it from
+`_PG_init`. See [pg-iceberg-am](../pg-iceberg-am) for a complete consumer.
+
+## What the framework provides
+
+The public surface follows the PostgreSQL lifecycle boundaries a storage
+extension has to respect.
 
 **Table access.** A trait-based surface mirrors PostgreSQL's `TableAmRoutine`.
 Stateless behavior (relation sizing, index callbacks, DDL) is implemented on
@@ -125,12 +144,13 @@ PostgreSQL's exception stack.
 
 The C compatibility adapter records PostgreSQL 18's two-argument injection
 point ABI, but this does not enable PG18 framework support. There is no `pg18`
-Cargo feature, and the shared compatibility gate continues to reject PG18
-until every Lakebase C fork has been ported and tested for that major line.
+Cargo feature for this crate, and the shared compatibility gate continues to
+reject PG18 until every Lakebase C fork has been ported and tested for that
+major line.
 
 Lakebase deliberately does not expose a production attach/detach API. Tests
 install and use PostgreSQL's upstream `injection_points` test extension; see
-the workspace [testing instructions](../README.md#testing).
+the workspace [testing instructions](../CONTRIBUTING.md#test-the-workspace).
 
 Internal PostgreSQL wrapper modules are intentionally not public API.
 
@@ -186,7 +206,7 @@ methods and append datum references directly into format-specific column
 builders. Core does not depend on Arrow, Parquet, Iceberg, or any other
 concrete batch representation.
 
-See [access/dml/README.md](src/access/dml/README.md) for the lifecycle
+See [access/mutation/README.md](src/access/mutation/README.md) for the lifecycle
 principles.
 
 ## Filter Pushdown (CustomScan)
@@ -247,41 +267,11 @@ the framework's `init` to install the planner hook). The full design rationale,
 including the PostgreSQL-internals facts it relies on, lives in
 [src/customscan/README.md](src/customscan/README.md).
 
-## Quick Start
-
-Most users import the prelude and register an AM with the re-exported
-`#[pg_table_am]` macro:
-
-```rust
-use pg_lakebase_core::prelude::*;
-
-#[pg_table_am(
-    version = "0.1.0",
-    author = "Example",
-    website = "https://example.com"
-)]
-pub struct MyTableAm;
-
-impl TableAccessMethod for MyTableAm {
-    type ScanSession = MyScanSession;
-    type IndexFetchSession = MyIndexFetchSession;
-    type ModifyQueryState = MyModifyQueryState;
-    type ModifyState = MyModifyState;
-    type CopySession = MyCopySession;
-}
-```
-
-The AM type also implements the stateless facet traits, while the associated
-session types implement their corresponding lifecycle traits. To add predicate
-pushdown, implement the CustomScan provider trait and register it from
-`_PG_init`. See [pg-iceberg-am](../pg-iceberg-am) for a complete implementation
-of both the TAM and the CustomScan provider.
-
 ## Requirements
 
 - Rust 1.96.0 or later
 - PostgreSQL 16 or 17
-- pgrx 0.18.x
+- pgrx 0.18.1
 
 ## Testing
 
@@ -304,9 +294,15 @@ backend. Because `pg-lakebase-core` is a plain library (`rlib`) and not a
 loadable extension, its `#[pg_test]` tests cannot run from inside this crate.
 They live in the workspace's shared backend-test extension
 [`pg-backend-tests`](../pg-backend-tests), which aggregates the `#[pg_test]`
-tests for every framework library crate, and are run with:
+tests for every framework library crate. The backend-test extension preloads
+`pg_lakebase_runtime`; install that runtime into the target pgrx PostgreSQL
+installation before running the test:
 
 ```bash
+cargo pgrx install \
+  --package pg-lakebase-runtime \
+  --pg-config "$(cargo pgrx info pg-config pg17)"
+
 cargo pgrx test pg17 --package pg-backend-tests
 ```
 
@@ -318,16 +314,25 @@ tests are aggregated in one crate and how to add new modules.
 
 #### Prerequisites
 
-Initialize pgrx with the target PostgreSQL installation:
+The commands above use PostgreSQL 17. Initialize the matching pgrx installation
+first. A standard PostgreSQL 17 build is sufficient for the shared backend-test
+command:
+
+```bash
+cargo pgrx init --pg17=download
+```
+
+The full workspace fault-injection suite requires an injection-enabled build;
+use this form instead when running `cargo xtask test-all pg17`:
 
 ```bash
 cargo pgrx init --pg17=download \
   --configure-flag=--enable-injection-points
 ```
 
-The flag is required by the workspace's native fault-injection tests.
-`cargo xtask test-all pg17` validates the capability and installs the upstream
-PostgreSQL test extension used to attach callbacks.
+The full command validates that capability and installs the upstream
+PostgreSQL test extension used to attach callbacks; the shared
+`pg-backend-tests` command above does not run those fault-injection tests.
 
 ## Building
 

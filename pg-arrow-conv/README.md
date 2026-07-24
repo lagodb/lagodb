@@ -1,6 +1,6 @@
 # pg-arrow-conv
 
-[![Rust](https://img.shields.io/badge/rust-1.95.0%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.96.0%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
@@ -104,7 +104,7 @@ workspace is layered.
 
 - Rust 1.96.0 or later
 - PostgreSQL 16 or 17
-- pgrx 0.18.x
+- pgrx 0.18.1
 
 Dependencies are limited to `pgrx`, `pg-lakebase-core`, the `arrow-*` crates, and
 `uuid`. The crate deliberately does **not** depend on any table-format crate.
@@ -123,7 +123,14 @@ slots, encoder/decoder equivalence, buffer/flush behavior, and toast detoast —
 are `#[pg_test]` tests hosted in the aggregator crate
 [pg-backend-tests](../pg-backend-tests):
 
+The aggregator preloads `pg_lakebase_runtime`. Install that runtime into the
+target pgrx PostgreSQL installation before running the test:
+
 ```bash
+cargo pgrx install \
+  --package pg-lakebase-runtime \
+  --pg-config "$(cargo pgrx info pg-config pg17)"
+
 cargo pgrx test pg17 --package pg-backend-tests
 ```
 

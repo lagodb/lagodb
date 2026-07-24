@@ -346,6 +346,16 @@ cargo test -p pg-iceberg-am --lib
 
 Run pgrx tests with PostgreSQL:
 
+The test server must already have `pg_lakebase_runtime` installed because
+`pg-iceberg-am` declares it as a PostgreSQL extension dependency. Install the
+runtime into the pgrx PostgreSQL 17 installation before running the AM test:
+
+```bash
+cargo pgrx install \
+  --package pg-lakebase-runtime \
+  --pg-config "$(cargo pgrx info pg-config pg17)"
+```
+
 ```bash
 cargo pgrx test pg17 --package pg-iceberg-am
 ```

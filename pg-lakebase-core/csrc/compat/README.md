@@ -18,9 +18,9 @@ boundaries.
 fork. It records the known API difference between PostgreSQL 17's
 `INJECTION_POINT(name)` and PostgreSQL 18's `INJECTION_POINT(name, arg)`, and
 maps older versions to a no-op. This PG18 branch is compatibility scaffolding,
-not a declaration of framework support: the workspace has no `pg18` Cargo
-feature and the shared PG17-only support gate rejects a PG18 build. The Rust
-facade also checks the target installation's `pg_config.h`: standard
+not a declaration of framework support: the workspace has no complete `pg18`
+Cargo feature path and the shared PG17-only support gate rejects a PG18 build.
+The Rust facade also checks the target installation's `pg_config.h`: standard
 PostgreSQL builds that do not define `USE_INJECTION_POINTS` compile Rust call
 sites to an inline no-op and do not retain an FFI call.
 
