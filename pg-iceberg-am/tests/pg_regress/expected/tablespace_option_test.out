@@ -1,4 +1,0 @@
-\set ECHO none
-internal_id_only: t
-binding_visible: t
-binding_retained_after_drop: t

@@ -1,0 +1,1926 @@
+-- customscan_planning.sql
+-- Path gates, projection layout, and plan-reference remapping.
+-- ============================================================================
+-- Section: DML, rowmark, and system-column gates
+-- ============================================================================
+-- Path-stage rejects DML targets, rowmarks, and sysattrs.
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
+-- ============================================================================
+-- Setup: an Iceberg `lake` table with `int4` `k` and `int4` `v`
+-- columns. The classifier promotes `k = <int4 literal>` (opno 96,
+-- int4eq) to `Exact` via the `EXACT_ALLOWLIST` in
+-- `pg-iceberg-am/src/customscan/classifier.rs`, so any leakproof
+-- `WHERE k = N` predicate that does survive the path-stage gates
+-- shows up as a `Pushed Filter: (k = N)` line (default TEXT) on the
+-- CustomScan node, with no local residual `Filter:` line.
+-- Three rows so the supported-system-column queries below have
+-- something non-trivial to project.
+-- A heap `other` companion table for the
+-- `UPDATE other ... FROM lake` cross-relation case from the task
+-- brief — `other` is heap so the test's diagnostic value isolates
+-- the rowmark gate that fires on the `lake` source-side rel; if
+-- `other` were also Iceberg the gate decision on `lake` would still
+-- be the same, but we'd be exercising two unrelated AM
+-- implementations at once.
+-- ============================================================================
+CREATE TABLE customscan_dml_lake (
+    k integer,
+    v integer
+) USING iceberg;
+INSERT INTO customscan_dml_lake VALUES (1, 100);
+INSERT INTO customscan_dml_lake VALUES (2, 200);
+INSERT INTO customscan_dml_lake VALUES (3, 300);
+CREATE TABLE customscan_dml_other (
+    k integer,
+    v integer
+);
+INSERT INTO customscan_dml_other VALUES (1, 0);
+INSERT INTO customscan_dml_other VALUES (2, 0);
+SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
+ lake_rows 
+-----------
+         3
+(1 row)
+
+-- ============================================================================
+-- Block A: DML target gate
+-- ============================================================================
+-- For `UPDATE lake` / `DELETE FROM lake` / `MERGE INTO lake ...`,
+-- PG sets `root->parse->commandType` to `CMD_UPDATE` /
+-- `CMD_DELETE` / `CMD_MERGE` and records the `lake` rel in
+-- `root->all_result_relids`. The framework classifies that base scan as
+-- `ScanPurpose::Modify`. Modify-purpose CustomScan is mandatory correctness
+-- infrastructure, so both `force` and `off` select it; the GUC only controls
+-- Query-purpose scans. PG17 DML wraps the input with LakebaseModifyTable.
+-- A.1 UPDATE lake
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (LakebaseModifyTable)
+   Executor: PG17 Lakebase ModifyTable fork
+   ->  Update on customscan_dml_lake
+         ->  Custom Scan (pg-iceberg-am) on customscan_dml_lake
+               Scan Purpose: Modify
+               Pushed Filter: (k = 1)
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (LakebaseModifyTable)
+   Executor: PG17 Lakebase ModifyTable fork
+   ->  Update on customscan_dml_lake
+         ->  Custom Scan (pg-iceberg-am) on customscan_dml_lake
+               Scan Purpose: Modify
+               Pushed Filter: (k = 1)
+(6 rows)
+
+-- A.2 DELETE FROM lake
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+DELETE FROM customscan_dml_lake WHERE k = 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (LakebaseModifyTable)
+   Executor: PG17 Lakebase ModifyTable fork
+   ->  Delete on customscan_dml_lake
+         ->  Custom Scan (pg-iceberg-am) on customscan_dml_lake
+               Scan Purpose: Modify
+               Pushed Filter: (k = 1)
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+DELETE FROM customscan_dml_lake WHERE k = 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (LakebaseModifyTable)
+   Executor: PG17 Lakebase ModifyTable fork
+   ->  Delete on customscan_dml_lake
+         ->  Custom Scan (pg-iceberg-am) on customscan_dml_lake
+               Scan Purpose: Modify
+               Pushed Filter: (k = 1)
+(6 rows)
+
+-- A.3 MERGE INTO lake
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+MERGE INTO customscan_dml_lake AS t
+USING (VALUES (1, 999)) AS s(k, v)
+ON t.k = s.k
+WHEN MATCHED THEN UPDATE SET v = s.v;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (LakebaseModifyTable)
+   Executor: PG17 Lakebase ModifyTable fork
+   ->  Merge on customscan_dml_lake t
+         ->  Custom Scan (pg-iceberg-am) on customscan_dml_lake t
+               Scan Purpose: Modify
+               Pushed Filter: (k = 1)
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+MERGE INTO customscan_dml_lake AS t
+USING (VALUES (1, 999)) AS s(k, v)
+ON t.k = s.k
+WHEN MATCHED THEN UPDATE SET v = s.v;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (LakebaseModifyTable)
+   Executor: PG17 Lakebase ModifyTable fork
+   ->  Merge on customscan_dml_lake t
+         ->  Custom Scan (pg-iceberg-am) on customscan_dml_lake t
+               Scan Purpose: Modify
+               Pushed Filter: (k = 1)
+(6 rows)
+
+-- ============================================================================
+-- Block B: Rowmark gate triggered by sibling DML
+-- ============================================================================
+-- For `UPDATE other SET v = lake.v FROM lake WHERE other.k = lake.k`
+-- the `lake` rel is an `RTE_RELATION` *source*, not the result rel.
+-- `bms_is_member(lake_rti, root->all_result_relids)` is FALSE on
+-- `lake`, so it is classified as `ScanPurpose::Query`, not `Modify`.
+-- The active rejection is the rowmark gate: `preprocess_rowmarks`
+-- (PG17 `planner.c:2295`) adds a `PlanRowMark` for every
+-- non-target base rel in any UPDATE/DELETE/MERGE plan, so
+-- `get_plan_rowmark(root->rowMarks, lake_rti) != NULL` and the
+-- rowmark gate refuses the CustomPath. Block A verifies mandatory Modify
+-- scans; this block independently verifies unsupported source-side rowmarks.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+UPDATE customscan_dml_other AS o
+SET v = l.v
+FROM customscan_dml_lake AS l
+WHERE o.k = l.k;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Update on customscan_dml_other o
+   ->  Hash Join
+         Hash Cond: (o.k = l.k)
+         ->  Seq Scan on customscan_dml_other o
+         ->  Hash
+               ->  Seq Scan on customscan_dml_lake l
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+UPDATE customscan_dml_other AS o
+SET v = l.v
+FROM customscan_dml_lake AS l
+WHERE o.k = l.k;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Update on customscan_dml_other o
+   ->  Hash Join
+         Hash Cond: (o.k = l.k)
+         ->  Seq Scan on customscan_dml_other o
+         ->  Hash
+               ->  Seq Scan on customscan_dml_lake l
+(6 rows)
+
+-- ============================================================================
+-- Block C: Rowmark gate triggered by FOR UPDATE / FOR SHARE
+-- ============================================================================
+-- `SELECT ... FOR UPDATE` / `FOR SHARE` is a top-level SELECT
+-- (`commandType == CMD_SELECT`), so the scan purpose is Query. The active
+-- rejection is again the rowmark gate: PG attaches
+-- a `PlanRowMark { rti = lake_rti, markType = ROW_MARK_REFERENCE
+-- (or LockRows-related) }` for the FOR UPDATE/SHARE locking clause,
+-- and `path_stage_gates` rejects any rel for which
+-- `get_plan_rowmark` returns non-NULL. The plan therefore wraps a
+-- `LockRows` / `Seq Scan` pair around `customscan_dml_lake`, never
+-- a CustomScan.
+-- C.1 FOR UPDATE
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR UPDATE;
+              QUERY PLAN               
+---------------------------------------
+ LockRows
+   ->  Seq Scan on customscan_dml_lake
+         Filter: (k = 1)
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR UPDATE;
+              QUERY PLAN               
+---------------------------------------
+ LockRows
+   ->  Seq Scan on customscan_dml_lake
+         Filter: (k = 1)
+(3 rows)
+
+-- C.2 FOR SHARE
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR SHARE;
+              QUERY PLAN               
+---------------------------------------
+ LockRows
+   ->  Seq Scan on customscan_dml_lake
+         Filter: (k = 1)
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR SHARE;
+              QUERY PLAN               
+---------------------------------------
+ LockRows
+   ->  Seq Scan on customscan_dml_lake
+         Filter: (k = 1)
+(3 rows)
+
+-- ============================================================================
+-- Block D: System-column reference gate
+-- ============================================================================
+-- `ctid`, `xmin`, `xmax`, `cmin`, `cmax` are the rejected system
+-- attno set in `is_rejected_system_attno`
+-- (`pg-lakebase-core/src/customscan/hook.rs`). The path-stage gate
+-- walks `rel->reltarget->exprs`, `baserestrictinfo`, and
+-- `joininfo` for any `Var` whose `varattno` matches one of those
+-- five negative attno values; the first hit triggers
+-- `PathStageRejection::SystemColumnReference` and the framework
+-- refuses the CustomPath. The lake AM has no `ctid` row identity
+-- and no MVCC visibility surface, so projecting these columns is
+-- only meaningful through PG's heap-shaped scan path — which is
+-- exactly what the gate forces.
+-- `tableoid` is NOT in the rejected set: see Block F.
+-- D.1 ctid
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT ctid FROM customscan_dml_lake WHERE k = 1;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on customscan_dml_lake
+   Filter: (k = 1)
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT ctid FROM customscan_dml_lake WHERE k = 1;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on customscan_dml_lake
+   Filter: (k = 1)
+(2 rows)
+
+-- D.2 xmin / xmax
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT xmin, xmax FROM customscan_dml_lake WHERE k = 1;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on customscan_dml_lake
+   Filter: (k = 1)
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT xmin, xmax FROM customscan_dml_lake WHERE k = 1;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on customscan_dml_lake
+   Filter: (k = 1)
+(2 rows)
+
+-- ============================================================================
+-- Block E: tableoid IS supported — CustomScan SHALL plan
+-- ============================================================================
+-- `tableoid` (`TableOidAttributeNumber`) is explicitly excluded
+-- from `is_rejected_system_attno` because the next_slot wrapper
+-- sets `slot->tts_tableOid = RelationGetRelid(scan_rel)` on every
+-- non-empty returned slot (
+-- `pg-lakebase-core/src/customscan/exec.rs::next_slot_wrapper`).
+-- PG's `ExecEvalSysVar` resolves `tableoid` straight out of
+-- `slot->tts_tableOid`, so projecting `tableoid` does not require
+-- any lake-AM-side support beyond the wrapper's tts_tableOid stamp.
+-- The rest of the query (`WHERE k = 1`) is pushable Exact
+-- (int4eq, opcollid=0, inputcollid=0 — see `EXACT_ALLOWLIST`),
+-- so the framework emits a CustomPath. EXPLAIN under `force`
+-- shows a `Pushed Filter: (k = 1)` line on the CustomScan node
+-- (no local residual `Filter:` line). EXPLAIN under
+-- `off` shows the SeqScan baseline.
+-- Result-set parity asserts that the projected `tableoid` value
+-- (which equals `'customscan_dml_lake'::regclass::oid`) is
+-- identical on both sides, so the wrapper's tts_tableOid stamp
+-- agrees with PG's heap-side `tableoid` resolution.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT tableoid::regclass AS tableoid, k, v
+FROM customscan_dml_lake
+WHERE k = 1
+ORDER BY k;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (pg-iceberg-am) on customscan_dml_lake
+   Pushed Filter: (k = 1)
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT tableoid::regclass AS tableoid, k, v
+FROM customscan_dml_lake
+WHERE k = 1
+ORDER BY k;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on customscan_dml_lake
+   Filter: (k = 1)
+(2 rows)
+
+-- Result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tableoid, k, v
+FROM customscan_dml_lake
+WHERE k = 1
+ORDER BY k;
+      tableoid       | k |  v  
+---------------------+---+-----
+ customscan_dml_lake | 1 | 100
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tableoid, k, v
+FROM customscan_dml_lake
+WHERE k = 1
+ORDER BY k;
+      tableoid       | k |  v  
+---------------------+---+-----
+ customscan_dml_lake | 1 | 100
+(1 row)
+
+-- ============================================================================
+-- Block F: Whole-row Var IS supported — CustomScan SHALL plan
+-- ============================================================================
+-- `SELECT lake FROM lake` produces a whole-row `Var` with
+-- `varattno == 0` against the lake rel. `PathStageGate::collect_usage`
+-- detects it and confirms that the provider contract can materialize all
+-- user attributes. `BaseScanTuplePlanner` then emits a relation-shaped tuple
+-- with `NeededColumns::All`. PG's
+-- `ExecEvalWholeRowVar` (`execExprInterp.c:4946`) then builds the
+-- composite straight out of `tts_values` / `tts_isnull`, so
+-- whole-row Var works natively against the framework's slot
+-- contract.
+-- The rest of the query (`WHERE k = 1`) is pushable Exact, so
+-- EXPLAIN under `force` shows a `Pushed Filter: (k = 1)` line on
+-- the CustomScan node (no local residual `Filter:` line) and the
+-- whole-row column appears in the targetlist as a composite-typed
+-- output. EXPLAIN under `off` shows the SeqScan baseline.
+-- Result-set parity asserts that the composite row value is
+-- identical on both sides — every user attribute is materialized
+-- as its real value (no pruning-induced NULL leaks into the
+-- composite).
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT customscan_dml_lake FROM customscan_dml_lake WHERE k = 1 ORDER BY k;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (pg-iceberg-am) on customscan_dml_lake
+   Pushed Filter: (k = 1)
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT customscan_dml_lake FROM customscan_dml_lake WHERE k = 1 ORDER BY k;
+           QUERY PLAN            
+---------------------------------
+ Seq Scan on customscan_dml_lake
+   Filter: (k = 1)
+(2 rows)
+
+-- Result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT customscan_dml_lake FROM customscan_dml_lake WHERE k = 1 ORDER BY k;
+ customscan_dml_lake 
+---------------------
+ (1,100)
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT customscan_dml_lake FROM customscan_dml_lake WHERE k = 1 ORDER BY k;
+ customscan_dml_lake 
+---------------------
+ (1,100)
+(1 row)
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_dml_lake;
+DROP TABLE customscan_dml_other;
+-- Section: Security and join-movability gates
+-- Security and join-movability gates for pushdown and variants.
+-- ============================================================================
+-- Setup
+-- ============================================================================
+-- A non-leakproof IMMUTABLE function and a custom comparison operator
+-- backed by it. We need:
+--   - IMMUTABLE so the framework's volatile/SubPlan gate
+--     (`expr::walker::subtree_is_unsafe_to_push`
+--     does NOT pre-empt the security gate. If the volatile gate
+--     fired the clause would land in residual for a different
+--     reason (volatility, not security), and Scenario 1 would lose
+--     its diagnostic value.
+--   - NOT marked LEAKPROOF so PG considers it a "potentially leaky"
+--     comparison. The classifier would otherwise classify
+--     `column === literal` as `ConservativePruning` (the
+--     operator's `(opno, opcollid, inputcollid)` triple is NOT in
+--     `IcebergPredicateClassifier::EXACT_ALLOWLIST`, since that
+--     list only seeds the int4/int8 built-in comparators), so
+--     without the security gate the clause WOULD be pushed as an
+--     ConservativePruning (remote) predicate, appearing on the CustomScan's
+--     `Pushed Filter:` line (and, under VERBOSE, on the
+--     `Pushed Filter Conservative Pruning:` labeled line). The gate is the
+--     active mechanism that keeps it out.
+--   - LANGUAGE plpgsql, NOT LANGUAGE sql. PG's planner inlines
+--     simple `LANGUAGE sql` function bodies via `inline_function`
+--     in `simplify_function`, which would expand `customscan_sm_secret_eq(k, 1)`
+--     into the bare leakproof int4eq form `(k = 1)` and erase the
+--     non-leakproof property — defeating the whole point of this
+--     test. plpgsql function bodies are never inlined; the OpExpr
+--     stays opaque to the planner with `opfuncid = customscan_sm_secret_eq`,
+--     and `restriction_is_securely_promotable` correctly sees a
+--     non-leakproof comparator at an elevated `security_level`.
+CREATE FUNCTION customscan_sm_secret_eq(int, int) RETURNS bool
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$ BEGIN RETURN $1 = $2; END $$;
+CREATE OPERATOR === (
+    LEFTARG = int4,
+    RIGHTARG = int4,
+    FUNCTION = customscan_sm_secret_eq
+);
+-- The lake under test. `int` (int4) keys so the int4 ops in
+-- `IcebergPredicateClassifier::EXACT_ALLOWLIST` (opno 96 int4eq, 525
+-- int4ge, etc.) can promote the leakproof `k = 1` / `k >= 0`
+-- comparisons to Exact when they DO survive the gates.
+CREATE TABLE customscan_sm_lake (k integer, payload text) USING iceberg;
+INSERT INTO customscan_sm_lake VALUES
+    (1, 'one'),
+    (2, 'two'),
+    (3, 'three'),
+    (4, 'four'),
+    (5, 'five');
+-- Companion Iceberg table for Scenario 2's LEFT JOIN. Iceberg, not
+-- heap, because the brief calls out "other is also an Iceberg table
+-- so the framework would otherwise consider JoinParameterized
+-- variants on it" — the test's diagnostic value depends on the
+-- framework refusing to emit a parameterized CustomPath that it
+-- WOULD have considered for an Iceberg rel.
+CREATE TABLE customscan_sm_other (k integer, v integer) USING iceberg;
+INSERT INTO customscan_sm_other VALUES
+    (1, 100),
+    (3, 300),
+    (5, 500);
+-- ============================================================================
+-- Block A: security gate — non-leakproof clause at higher security_level
+-- ============================================================================
+-- We layer the lake under a `security_barrier` view that contains a
+-- leakproof inner predicate (`k >= 0`, security_level 0) and apply
+-- a non-leakproof outer qual (`k === 1`, security_level 1) on top of
+-- the view. Per PG's planner contract for `security_barrier` views,
+-- the outer non-leakproof qual cannot be moved past the barrier
+-- without leakproofness — `restriction_is_securely_promotable`
+-- returns false because `security_level (1) > baserestrict_min_security
+-- (0)` AND `!leakproof`. The framework's
+-- `PlannerClauseGate::is_securely_promotable` forwards that decision.
+-- PG handles the barrier in one of two ways depending on planner
+-- decisions:
+--   (a) The view is materialized as a SubqueryScan and the outer
+--       non-leakproof qual stays on the SubqueryScan as a `Filter:`
+--       above the inner CustomScan. The CustomScan only sees
+--       `k >= 0` and pushes it Exact (shown as `Pushed Filter:
+--       (k >= 0)`).
+--   (b) The view is flattened and both quals land in the lake rel's
+--       baserestrictinfo at different security levels. The security
+--       gate then rejects `k === 1` and routes it to the local
+--       residual; the CustomScan shows `Pushed Filter: (k >= 0)`
+--       (the pushed/remote predicate) with `k === 1` shown only as
+--       the standard residual `Filter:` line.
+-- Either outcome validates
+-- qual NEVER appears as a pushed (remote) predicate — neither on
+-- the default `Pushed Filter:` line nor on VERBOSE's
+-- `Pushed Filter Exact:` / `Pushed Filter Conservative Pruning:` labeled lines.
+-- The brief explicitly accepts both shapes ("It surfaces as
+-- a residual `Filter:` on the CustomScan or as a SubqueryScan
+-- filter wrapping it"). The expected `.out` file pins whichever
+-- shape PG actually chose.
+CREATE VIEW customscan_sm_secure_view
+    WITH (security_barrier = true)
+    AS SELECT k, payload FROM customscan_sm_lake WHERE k >= 0;
+-- A.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT k, payload FROM customscan_sm_secure_view
+WHERE k === 1
+ORDER BY k, payload;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Sort
+   Sort Key: customscan_sm_secure_view.k, customscan_sm_secure_view.payload
+   ->  Subquery Scan on customscan_sm_secure_view
+         Filter: (customscan_sm_secure_view.k === 1)
+         ->  Custom Scan (pg-iceberg-am) on customscan_sm_lake
+               Pushed Filter: (k >= 0)
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT k, payload FROM customscan_sm_secure_view
+WHERE k === 1
+ORDER BY k, payload;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Sort
+   Sort Key: customscan_sm_secure_view.k, customscan_sm_secure_view.payload
+   ->  Subquery Scan on customscan_sm_secure_view
+         Filter: (customscan_sm_secure_view.k === 1)
+         ->  Seq Scan on customscan_sm_lake
+               Filter: (k >= 0)
+(6 rows)
+
+-- A.2 result-set parity. `k === 1` matches exactly one row (k = 1,
+-- payload = 'one'); `k >= 0` is satisfied by every row. Both modes
+-- must return the same single-row set. A regression where the
+-- security gate failed to reject `k === 1` and the framework pushed
+-- it as an Iceberg predicate — but with the operator's user-defined
+-- function evaluated by an Iceberg-side path that bypasses PG's
+-- residual recheck — could in principle return a different row set,
+-- which this parity check catches.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT k, payload FROM customscan_sm_secure_view
+WHERE k === 1
+ORDER BY k, payload;
+ k | payload 
+---+---------
+ 1 | one
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT k, payload FROM customscan_sm_secure_view
+WHERE k === 1
+ORDER BY k, payload;
+ k | payload 
+---+---------
+ 1 | one
+(1 row)
+
+-- ============================================================================
+-- Block B: movability gate — LEFT JOIN with lake on the non-nullable side
+-- ============================================================================
+-- `lake LEFT JOIN other ON other.k = lake.k`:
+--   - `lake` is the LEFT (non-nullable) side.
+--   - `other` is the RIGHT (nullable) side.
+--   - The ON clause `other.k = lake.k` is an outer-join clause that
+--     PG attaches to the join apparatus.
+-- For the parameterized-path enumerator on `baserel = other`,
+-- `PlannerClauseGate::is_movable_to_relation` calls
+-- `join_clause_is_movable_to(rinfo, other)`. PG checks
+-- `bms_overlap(rinfo->clause_relids, other->nulling_relids)`:
+-- because the `other.k` Var carries `varnullingrels = {lj_oj}` for
+-- the LEFT JOIN's phantom OJ relid, `clause_relids` includes
+-- `lj_oj`; and `other.nulling_relids = {lj_oj}` because the LEFT
+-- JOIN nulls `other`. The overlap returns true and the gate fails
+-- — pushing the clause down to `other` would change semantics
+-- (rows that should be null-extended would be suppressed).
+-- The framework's `enumerate_param_path_groups` therefore does NOT
+-- enumerate a JoinParameterized variant on `other` carrying the
+-- equality, and the Iceberg provider declines an empty Plain
+-- variant on `other` (no pushable baserestrict). EXPLAIN under
+-- `force` shows the join equality at the join-node level (a Hash
+-- Cond / Merge Cond / Nested Loop join filter), not as a pushed
+-- (remote) predicate on any inner CustomScan's `Pushed Filter:`
+-- line. We don't pin
+-- planner GUCs here — both modes are free to pick whichever join
+-- algorithm cost-dominates — because the structural assertion is
+-- "the join clause does not appear inside any CustomScan's pushed
+-- list", which is invariant across join algorithms.
+-- B.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT lake.k AS lk, lake.payload, other.k AS ok, other.v
+FROM customscan_sm_lake lake
+LEFT JOIN customscan_sm_other other ON other.k = lake.k
+ORDER BY lake.k, other.k;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Sort
+   Sort Key: lake.k, other.k
+   ->  Hash Left Join
+         Hash Cond: (lake.k = other.k)
+         ->  Seq Scan on customscan_sm_lake lake
+         ->  Hash
+               ->  Seq Scan on customscan_sm_other other
+(7 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT lake.k AS lk, lake.payload, other.k AS ok, other.v
+FROM customscan_sm_lake lake
+LEFT JOIN customscan_sm_other other ON other.k = lake.k
+ORDER BY lake.k, other.k;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Sort
+   Sort Key: lake.k, other.k
+   ->  Hash Left Join
+         Hash Cond: (lake.k = other.k)
+         ->  Seq Scan on customscan_sm_lake lake
+         ->  Hash
+               ->  Seq Scan on customscan_sm_other other
+(7 rows)
+
+-- B.2 result-set parity. lake has 5 rows (k = 1..5); other has
+-- 3 rows (k ∈ {1, 3, 5}). The LEFT JOIN preserves every lake row
+-- and null-extends the unmatched ones (lake.k ∈ {2, 4}). A
+-- regression where the framework pushed the join clause as a
+-- baserestrict on `other` (bypassing the LEFT JOIN semantics) would
+-- silently drop the null-extended rows.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT lake.k AS lk, lake.payload, other.k AS ok, other.v
+FROM customscan_sm_lake lake
+LEFT JOIN customscan_sm_other other ON other.k = lake.k
+ORDER BY lake.k, other.k;
+ lk | payload | ok |  v  
+----+---------+----+-----
+  1 | one     |  1 | 100
+  2 | two     |    |    
+  3 | three   |  3 | 300
+  4 | four    |    |    
+  5 | five    |  5 | 500
+(5 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT lake.k AS lk, lake.payload, other.k AS ok, other.v
+FROM customscan_sm_lake lake
+LEFT JOIN customscan_sm_other other ON other.k = lake.k
+ORDER BY lake.k, other.k;
+ lk | payload | ok |  v  
+----+---------+----+-----
+  1 | one     |  1 | 100
+  2 | two     |    |    
+  3 | three   |  3 | 300
+  4 | four    |    |    
+  5 | five    |  5 | 500
+(5 rows)
+
+-- ============================================================================
+-- Block C: movability gate — LATERAL back-reference into the lake rel
+-- ============================================================================
+-- The lateral subquery
+--   FROM customscan_sm_lake l,
+--   LATERAL (
+--       SELECT v FROM customscan_sm_other o WHERE o.k = l.k
+--       OFFSET 0
+--   ) sub
+--   WHERE l.k >= 0 AND l.k = sub.v
+-- creates a LATERAL chain where `sub` references `l.k`. The
+-- `OFFSET 0` extension to the subquery prevents PG's planner from
+-- flattening it (matches the pattern in
+-- `customscan_planning.sql` and
+-- `customscan_planning.sql`); without the
+-- anti-flatten, PG would inline `sub` and `lake.lateral_referencers`
+-- would not be set, defeating the gate we're testing.
+-- After planning:
+--   - `lake.lateral_referencers = {sub}` because `sub` laterally
+--     refers to `l`.
+--   - The WHERE clause `l.k = sub.v` lands in `lake.joininfo` with
+--     `clause_relids = {lake, sub}`.
+--   - `PlannerClauseGate::is_movable_to_relation` for `baserel = lake`
+--     calls `join_clause_is_movable_to`, which evaluates
+--     `bms_overlap(lake.lateral_referencers = {sub},
+--     clause_relids = {lake, sub})` → true → returns false.
+-- The framework's `enumerate_param_path_groups` therefore skips this
+-- clause and does NOT emit a JoinParameterized variant on `lake`
+-- whose `outer_relids` include `sub`. The Plain CustomPath survives
+-- and pushes the leakproof baserestrict `l.k >= 0` Exact (operator
+-- 525 int4ge is in `EXACT_ALLOWLIST`); the join equality
+-- `l.k = sub.v` surfaces above the lake's CustomScan at the
+-- nestloop-join level (or as the outer-side filter PG attaches to
+-- the SubqueryScan above `sub`), never as a pushed (remote)
+-- predicate on the inner CustomScan's `Pushed Filter:` line.
+-- We pin planner GUCs to force a deterministic nestloop topology
+-- (matches `customscan_planning.sql`) so the
+-- EXPLAIN shape is stable across PG versions. These GUCs apply
+-- equally to `force` and `off`, so the executor topology is
+-- identical on both sides; the only variable is whether the inner
+-- plan node on `lake` is a CustomScan or a Seq Scan.
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+SET enable_nestloop = on;
+-- C.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT l.k, l.payload, sub.v
+FROM customscan_sm_lake l,
+LATERAL (
+    SELECT v FROM customscan_sm_other o
+    WHERE o.k = l.k
+    OFFSET 0
+) sub
+WHERE l.k >= 0
+  AND l.k = sub.v
+ORDER BY l.k, sub.v;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Sort
+   Sort Key: l.k
+   ->  Nested Loop
+         ->  Custom Scan (pg-iceberg-am) on customscan_sm_lake l
+               Pushed Filter: (k >= 0)
+         ->  Subquery Scan on sub
+               Filter: (l.k = sub.v)
+               ->  Custom Scan (pg-iceberg-am) on customscan_sm_other o
+                     Pushed Filter: (k = l.k)
+(9 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT l.k, l.payload, sub.v
+FROM customscan_sm_lake l,
+LATERAL (
+    SELECT v FROM customscan_sm_other o
+    WHERE o.k = l.k
+    OFFSET 0
+) sub
+WHERE l.k >= 0
+  AND l.k = sub.v
+ORDER BY l.k, sub.v;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Sort
+   Sort Key: l.k
+   ->  Nested Loop
+         ->  Seq Scan on customscan_sm_lake l
+               Filter: (k >= 0)
+         ->  Subquery Scan on sub
+               Filter: (l.k = sub.v)
+               ->  Seq Scan on customscan_sm_other o
+                     Filter: (k = l.k)
+(9 rows)
+
+-- C.2 result-set parity. With our seed data, no `(l.k, sub.v)`
+-- pair satisfies both `o.k = l.k` (the LATERAL inner equality) and
+-- `l.k = sub.v` (the outer equality) simultaneously, because
+-- `other.v` values (100, 300, 500) are all >= 100 while `lake.k`
+-- values are 1..5 — so the result set is empty. An empty result
+-- set is fine for the parity check: the assertion is that BOTH
+-- modes produce the same row set. A regression where the framework
+-- pushed `l.k = sub.v` as an Iceberg predicate against `lake`
+-- (treating `sub.v` as a runtime parameter) might return spurious
+-- matches via the parameterized inner scan, which this empty-set
+-- parity catches.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT l.k, l.payload, sub.v
+FROM customscan_sm_lake l,
+LATERAL (
+    SELECT v FROM customscan_sm_other o
+    WHERE o.k = l.k
+    OFFSET 0
+) sub
+WHERE l.k >= 0
+  AND l.k = sub.v
+ORDER BY l.k, sub.v;
+ k | payload | v 
+---+---------+---
+(0 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT l.k, l.payload, sub.v
+FROM customscan_sm_lake l,
+LATERAL (
+    SELECT v FROM customscan_sm_other o
+    WHERE o.k = l.k
+    OFFSET 0
+) sub
+WHERE l.k >= 0
+  AND l.k = sub.v
+ORDER BY l.k, sub.v;
+ k | payload | v 
+---+---------+---
+(0 rows)
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+RESET enable_nestloop;
+RESET pg_lakebase.customscan_mode;
+DROP VIEW customscan_sm_secure_view;
+DROP TABLE customscan_sm_lake;
+DROP TABLE customscan_sm_other;
+DROP OPERATOR === (int4, int4);
+DROP FUNCTION customscan_sm_secret_eq(int, int);
+-- ============================================================================
+-- Section: Projection layout and dependencies
+-- ============================================================================
+-- Needed-column projection from targetlist/qual/recheck.
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
+-- ============================================================================
+-- Part A: dropped-column table (the key correctness fixture)
+-- Create a 4-column table, then drop a MIDDLE column (`b`). The surviving
+-- live columns are id (attno 1), label (attno 3), amount (attno 4); attno 2
+-- becomes a dropped gap. The Iceberg metadata schema still carries the field
+-- for the dropped `b`, so the live PG columns are narrower than the Iceberg
+-- field list — the exact divergence the dropped-column alignment fix
+-- addresses.
+-- ============================================================================
+CREATE TABLE customscan_proj_dropcol (
+    id integer,
+    b integer,
+    label text,
+    amount integer
+) USING iceberg;
+INSERT INTO customscan_proj_dropcol VALUES (1, 100, 'one', 11);
+INSERT INTO customscan_proj_dropcol VALUES (2, 200, 'two', 22);
+INSERT INTO customscan_proj_dropcol VALUES (3, 300, 'three', 33);
+-- Drop the middle column. attno 2 is now a dropped gap; label stays attno 3
+-- and amount stays attno 4 in the live TupleDesc.
+ALTER TABLE customscan_proj_dropcol DROP COLUMN b;
+-- Confirm the dropped-attno gap is present in the live descriptor.
+SELECT attname, attnum, attisdropped
+FROM pg_attribute
+WHERE attrelid = 'customscan_proj_dropcol'::regclass AND attnum > 0
+ORDER BY attnum;
+           attname            | attnum | attisdropped 
+------------------------------+--------+--------------
+ id                           |      1 | f
+ ........pg.dropped.2........ |      2 | t
+ label                        |      3 | f
+ amount                       |      4 | f
+(4 rows)
+
+-- --- A.1 plan guard: a pushable predicate selects the CustomScan path ------
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_proj_dropcol WHERE id >= 1;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Custom Scan (pg-iceberg-am) on customscan_proj_dropcol
+   Pushed Filter: (id >= 1)
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_proj_dropcol WHERE id >= 1;
+             QUERY PLAN              
+-------------------------------------
+ Seq Scan on customscan_proj_dropcol
+   Filter: (id >= 1)
+(2 rows)
+
+-- --- A.2 SELECT <subset> across a dropped column ---------------------------
+-- Projecting id (attno 1) + amount (attno 4) skips the dropped attno-2 gap
+-- AND the live label column. Each value must land at its own attno-1 slot.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, amount FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
+ id | amount 
+----+--------
+  1 |     11
+  2 |     22
+  3 |     33
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, amount FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
+ id | amount 
+----+--------
+  1 |     11
+  2 |     22
+  3 |     33
+(3 rows)
+
+-- --- A.3 SELECT <subset>: a single column past the dropped gap -------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT label FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY label;
+ label 
+-------
+ one
+ three
+ two
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT label FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY label;
+ label 
+-------
+ one
+ three
+ two
+(3 rows)
+
+-- --- A.4 SELECT * over a dropped column ------------------------------------
+-- The dropped column must NOT appear; surviving columns keep their values
+-- (no shift into the dropped position).
+SET pg_lakebase.customscan_mode = 'force';
+SELECT * FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
+ id | label | amount 
+----+-------+--------
+  1 | one   |     11
+  2 | two   |     22
+  3 | three |     33
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT * FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
+ id | label | amount 
+----+-------+--------
+  1 | one   |     11
+  2 | two   |     22
+  3 | three |     33
+(3 rows)
+
+-- --- A.5 SELECT count(*) ----------------------------------------------------
+-- count(*) references no user column. Core adds one live resjunk dependency
+-- so the projected scan tuple and storage request remain non-empty; the count
+-- must match the baseline.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT count(*) FROM customscan_proj_dropcol WHERE id >= 1;
+ count 
+-------
+     3
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT count(*) FROM customscan_proj_dropcol WHERE id >= 1;
+ count 
+-------
+     3
+(1 row)
+
+-- --- A.6 WHERE references a NON-projected column ----------------------------
+-- The output list is just `id`, but the qual filters on `label` (not in the
+-- select list). `label` is not pushable, so it stays a residual the executor
+-- applies above the scan — which means the scan must still decode `label`
+-- even though it is not projected into the output. The pushable `id >= 1`
+-- selects the CustomScan path; the non-projected `label` filter must produce
+-- identical rows on both paths.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id FROM customscan_proj_dropcol WHERE id >= 1 AND label = 'two' ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id FROM customscan_proj_dropcol WHERE id >= 1 AND label = 'two' ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+-- --- A.7 WHERE on a non-projected column, exact-id pushdown -----------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT amount FROM customscan_proj_dropcol WHERE id = 3 ORDER BY amount;
+ amount 
+--------
+     33
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT amount FROM customscan_proj_dropcol WHERE id = 3 ORDER BY amount;
+ amount 
+--------
+     33
+(1 row)
+
+-- --- A.8 targetlist expression references a non-filter column --------------
+-- `label` is hidden under FuncExpr.  The pushable `id = 2` predicate selects
+-- the CustomScan path, so projection must still read `label` for the upper
+-- projection node.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT lower(label) AS lowered FROM customscan_proj_dropcol WHERE id = 2 ORDER BY lowered;
+ lowered 
+---------
+ two
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT lower(label) AS lowered FROM customscan_proj_dropcol WHERE id = 2 ORDER BY lowered;
+ lowered 
+---------
+ two
+(1 row)
+
+-- --- A.9 residual qual expression references a non-projected column --------
+-- `lower(label)` is not pushable, but it remains a PG residual qual above the
+-- scan.  The scan must decode `label` even though the output list is just `id`.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id FROM customscan_proj_dropcol WHERE id >= 1 AND lower(label) = 'three' ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id FROM customscan_proj_dropcol WHERE id >= 1 AND lower(label) = 'three' ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+-- ============================================================================
+-- Part B: clean table (no dropped columns) — full-table equivalence guard
+-- relation with NO dropped columns behave exactly as the positional reader.
+-- Same force/off parity discipline.
+-- ============================================================================
+CREATE TABLE customscan_proj_clean (
+    id integer,
+    label text,
+    amount integer
+) USING iceberg;
+INSERT INTO customscan_proj_clean VALUES (1, 'alpha', 10);
+INSERT INTO customscan_proj_clean VALUES (2, 'beta', 20);
+INSERT INTO customscan_proj_clean VALUES (3, 'gamma', 30);
+INSERT INTO customscan_proj_clean VALUES (4, 'delta', 40);
+-- --- B.1 SELECT * (select-all equivalence) ---------------------------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT * FROM customscan_proj_clean WHERE id >= 1 ORDER BY id;
+ id | label | amount 
+----+-------+--------
+  1 | alpha |     10
+  2 | beta  |     20
+  3 | gamma |     30
+  4 | delta |     40
+(4 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT * FROM customscan_proj_clean WHERE id >= 1 ORDER BY id;
+ id | label | amount 
+----+-------+--------
+  1 | alpha |     10
+  2 | beta  |     20
+  3 | gamma |     30
+  4 | delta |     40
+(4 rows)
+
+-- --- B.2 SELECT <subset> ---------------------------------------------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT amount, id FROM customscan_proj_clean WHERE id <= 3 ORDER BY id;
+ amount | id 
+--------+----
+     10 |  1
+     20 |  2
+     30 |  3
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT amount, id FROM customscan_proj_clean WHERE id <= 3 ORDER BY id;
+ amount | id 
+--------+----
+     10 |  1
+     20 |  2
+     30 |  3
+(3 rows)
+
+-- --- B.3 SELECT count(*) ---------------------------------------------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT count(*) FROM customscan_proj_clean WHERE id >= 1;
+ count 
+-------
+     4
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT count(*) FROM customscan_proj_clean WHERE id >= 1;
+ count 
+-------
+     4
+(1 row)
+
+-- --- B.4 WHERE references a non-projected column ----------------------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id FROM customscan_proj_clean WHERE id >= 1 AND label = 'gamma' ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id FROM customscan_proj_clean WHERE id >= 1 AND label = 'gamma' ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+-- --- B.5 targetlist CoalesceExpr references a non-filter column ------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT coalesce(label, '') AS safe_label FROM customscan_proj_clean WHERE id = 4 ORDER BY safe_label;
+ safe_label 
+------------
+ delta
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT coalesce(label, '') AS safe_label FROM customscan_proj_clean WHERE id = 4 ORDER BY safe_label;
+ safe_label 
+------------
+ delta
+(1 row)
+
+-- --- B.6 residual CaseExpr references a non-projected column ---------------
+SET pg_lakebase.customscan_mode = 'force';
+SELECT amount FROM customscan_proj_clean
+WHERE id >= 1
+  AND CASE WHEN amount >= 0 THEN lower(label) ELSE '' END = 'alpha'
+ORDER BY amount;
+ amount 
+--------
+     10
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT amount FROM customscan_proj_clean
+WHERE id >= 1
+  AND CASE WHEN amount >= 0 THEN lower(label) ELSE '' END = 'alpha'
+ORDER BY amount;
+ amount 
+--------
+     10
+(1 row)
+
+-- ============================================================================
+-- Part C: tableoid + column subset — storage pruning under Relation layout
+--
+-- When `tableoid` is in the targetlist the tuple shape must stay full-width
+-- (Relation layout) because `tableoid` is a system column resolved by
+-- PG's ExecEvalSysVar from slot->tts_tableOid, not from provider-read data.
+-- However the *storage* layer should still prune: only the user columns
+-- actually referenced in the targetlist and quals need to be read from
+-- Iceberg.  The decoupled "tuple shape vs storage columns" design carries
+-- the referenced user attnos as a storage hint inside the Relation layout,
+-- allowing the provider to read a Subset instead of All.
+--
+-- This Part exercises the happy-path parity: a multi-column table where
+-- only a subset of user columns is selected alongside tableoid.  Result-set
+-- parity between `force` (CustomScan) and `off` (SeqScan) asserts
+-- correctness — the pruning must not cause any column to silently become
+-- NULL or shift position.
+-- ============================================================================
+CREATE TABLE customscan_proj_tableoid (
+    id integer,
+    label text,
+    amount integer,
+    tag text,
+    score integer
+) USING iceberg;
+INSERT INTO customscan_proj_tableoid VALUES (1, 'alpha', 10, 'a', 100);
+INSERT INTO customscan_proj_tableoid VALUES (2, 'beta', 20, 'b', 200);
+INSERT INTO customscan_proj_tableoid VALUES (3, 'gamma', 30, 'c', 300);
+-- C.1 plan guard: CustomScan must be chosen (tableoid is supported).
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (pg-iceberg-am) on customscan_proj_tableoid
+         Pushed Filter: (id >= 1)
+(4 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+                 QUERY PLAN                 
+--------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Seq Scan on customscan_proj_tableoid
+         Filter: (id >= 1)
+(4 rows)
+
+-- C.2 result-set parity: tableoid + column subset (id, amount).
+-- `label`, `tag`, `score` are NOT in the select list or the qual,
+-- so the storage layer should prune them.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+           tbl            | id | amount 
+--------------------------+----+--------
+ customscan_proj_tableoid |  1 |     10
+ customscan_proj_tableoid |  2 |     20
+ customscan_proj_tableoid |  3 |     30
+(3 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, id, amount
+FROM customscan_proj_tableoid
+WHERE id >= 1
+ORDER BY id;
+           tbl            | id | amount 
+--------------------------+----+--------
+ customscan_proj_tableoid |  1 |     10
+ customscan_proj_tableoid |  2 |     20
+ customscan_proj_tableoid |  3 |     30
+(3 rows)
+
+-- C.3 result-set parity: tableoid + single column.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, label
+FROM customscan_proj_tableoid
+WHERE id = 2
+ORDER BY label;
+           tbl            | label 
+--------------------------+-------
+ customscan_proj_tableoid | beta
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, label
+FROM customscan_proj_tableoid
+WHERE id = 2
+ORDER BY label;
+           tbl            | label 
+--------------------------+-------
+ customscan_proj_tableoid | beta
+(1 row)
+
+-- C.4 result-set parity: tableoid + non-projected qual column.
+-- The select list is (tableoid, id), but the qual references `amount`
+-- which is not in the output.  Storage must still read both `id` and
+-- `amount`.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, id
+FROM customscan_proj_tableoid
+WHERE id >= 1 AND amount > 15
+ORDER BY id;
+           tbl            | id 
+--------------------------+----
+ customscan_proj_tableoid |  2
+ customscan_proj_tableoid |  3
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, id
+FROM customscan_proj_tableoid
+WHERE id >= 1 AND amount > 15
+ORDER BY id;
+           tbl            | id 
+--------------------------+----
+ customscan_proj_tableoid |  2
+ customscan_proj_tableoid |  3
+(2 rows)
+
+-- ============================================================================
+-- Part D: SubPlan + narrow scan tuple — NOT IN keeps a planned SubPlan
+--
+-- PostgreSQL's set_customscan_references() rewrites plan.qual against
+-- custom_scan_tlist through fix_upper_expr(), whose expression mutator enters
+-- SubPlan.testexpr and SubPlan.args. Relation-local Vars in those fields can
+-- therefore use the same compact INDEX_VAR mapping as ordinary residual quals.
+--
+-- NOT IN is used deliberately: unlike a simple IN, PostgreSQL retains this
+-- shape as a hashed SubPlan because of its NULL semantics. Every query also
+-- has an independent pushable predicate so `force` selects a real CustomPath.
+-- ============================================================================
+CREATE TABLE customscan_proj_subplan_helper (
+    x integer
+);
+INSERT INTO customscan_proj_subplan_helper VALUES (1);
+INSERT INTO customscan_proj_subplan_helper VALUES (3);
+-- D.1 result-set parity: NOT IN generates a SubPlan in the qual.
+-- Only `id` and `label` are referenced; `amount`, `tag`, `score` should
+-- be pruned from storage.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id | label 
+----+-------
+  2 | beta
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id | label 
+----+-------
+  2 | beta
+(1 row)
+
+-- D.2 result-set parity: SubPlan + pushable predicate + non-projected qual.
+-- The pushable `id >= 1` selects the CustomScan path; the SubPlan qual
+-- `amount NOT IN (...)` references `amount` which is not in the select list.
+-- Storage must read both `id` and `amount`.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND amount NOT IN (SELECT x * 10 FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND amount NOT IN (SELECT x * 10 FROM customscan_proj_subplan_helper)
+ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+-- D.3 result-set parity: SubPlan + tableoid combined.
+-- Both SubPlan and tableoid are present; tuple shape is Relation but
+-- storage should still prune to only `id` and `label`.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT tableoid::regclass AS tbl, id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+           tbl            | id | label 
+--------------------------+----+-------
+ customscan_proj_tableoid |  2 | beta
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT tableoid::regclass AS tbl, id, label
+FROM customscan_proj_tableoid
+WHERE id >= 1
+  AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
+ORDER BY id;
+           tbl            | id | label 
+--------------------------+----+-------
+ customscan_proj_tableoid |  2 | beta
+(1 row)
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_proj_dropcol;
+DROP TABLE customscan_proj_clean;
+DROP TABLE customscan_proj_tableoid;
+DROP TABLE customscan_proj_subplan_helper;
+-- ============================================================================
+-- Section: Plan-reference remapping
+-- ============================================================================
+-- RTI remapping after setrefs does not break Var resolution.
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
+-- ============================================================================
+-- Setup: an Iceberg `lake` table with `int4` `k` and `payload`
+-- columns. The classifier promotes `k = <int4 literal>` (opno 96,
+-- int4eq) to `Exact` via the `EXACT_ALLOWLIST` in
+-- `pg-iceberg-am/src/customscan/classifier.rs`.
+-- Multi-file layout: each INSERT opens a fresh DML session and
+-- finalizes one Parquet file with bounded `lower_bounds[k]` /
+-- `upper_bounds[k]` statistics. Two files give us two scan-relation
+-- Var resolution shapes (one per file boundary) and ensure the
+-- pushed predicate actually drives manifest-level pruning even when
+-- the lake is wrapped in a subplan with non-zero `rtoffset`.
+-- ============================================================================
+CREATE TABLE customscan_rto_lake (
+    k integer,
+    payload text
+) USING iceberg;
+-- File 1: k ∈ [1, 5]
+INSERT INTO customscan_rto_lake
+SELECT g, 'lake_' || g
+FROM generate_series(1, 5) AS g;
+-- File 2: k ∈ [100, 105]
+INSERT INTO customscan_rto_lake
+SELECT g, 'lake_' || g
+FROM generate_series(100, 105) AS g;
+SELECT COUNT(*) AS lake_total_rows FROM customscan_rto_lake;
+ lake_total_rows 
+-----------------
+              11
+(1 row)
+
+-- ============================================================================
+-- Block 0: baseline — `WHERE k = N` against the bare lake.
+-- This is the row set the wrapped-query blocks below MUST also
+-- produce (modulo subquery-introduced columns). Pinning it here
+-- makes the diagnostic value of each wrapper concrete: a regression
+-- where the runtime walker misidentified scan-relation Vars after
+-- `rtoffset` shifted them would produce a different row set in the
+-- wrapped blocks while the bare baseline below still passes.
+-- ============================================================================
+-- 0.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Sort
+   Sort Key: payload
+   ->  Custom Scan (pg-iceberg-am) on customscan_rto_lake
+         Pushed Filter: (k = 3)
+(4 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
+              QUERY PLAN               
+---------------------------------------
+ Sort
+   Sort Key: payload
+   ->  Seq Scan on customscan_rto_lake
+         Filter: (k = 3)
+(4 rows)
+
+-- 0.2 result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+-- ============================================================================
+-- Block A: subquery wrapper.
+--   SELECT ... FROM (SELECT k, payload FROM lake WHERE k = N) sub;
+-- The subquery is NOT flattenable — it has its own `targetlist` that
+-- the parent SELECT projects on top of, so PG plans a `SubqueryScan`
+-- above the lake's CustomScan. The lake's RTI inside the subplan's
+-- private range table is `1` (or whatever the planner chooses);
+-- after `set_plan_references` runs on the parent, the subplan is
+-- recursed with a non-zero `rtoffset` and the lake's CustomScan
+-- ends up with `cscan->scan.scanrelid > 1` after rtoffset adjustment
+-- (verifiable indirectly: if the framework had cached the
+-- pre-`rtoffset` RTI, the runtime translator would now resolve
+-- `Var.varno = pre_rtoffset_rti = 1` to "is scan column" but the
+-- post-`rtoffset` `cscan->scan.scanrelid = 2` would mean every
+-- runtime check would say "no scan-relation Var" and the predicate
+-- would be empty, which would break parity below).
+-- Wrapping in a subquery does NOT introduce an outer-relation Var
+-- inside the lake's pushed predicate, so `column_refs[]` is still
+-- `[Var(k)]`. The Block 0 baseline is the row set this block must
+-- match.
+-- We disable subquery-flattening via `OFFSET 0` only when needed to
+-- block flattening; a plain trivial-subquery `SELECT k, payload
+-- FROM lake WHERE k = 3` is already non-flattenable enough for
+-- PG (the parent has its own targetlist that aliases `sub`).
+-- However, PG MAY still inline a single-rel trivial subquery via
+-- `pull_up_simple_subquery`. To guarantee an opaque subquery —
+-- and thus a non-zero `rtoffset` on the inner — we add an
+-- `OFFSET 0` clause inside (matches
+-- `customscan_planning.sql` Block C and
+-- `customscan_planning.sql` Block A patterns).
+-- ============================================================================
+-- A.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT sub.k, sub.payload
+FROM (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = 3
+    OFFSET 0
+) sub
+ORDER BY sub.k, sub.payload;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Sort
+   Sort Key: customscan_rto_lake.k, customscan_rto_lake.payload
+   ->  Custom Scan (pg-iceberg-am) on customscan_rto_lake
+         Pushed Filter: (k = 3)
+(4 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT sub.k, sub.payload
+FROM (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = 3
+    OFFSET 0
+) sub
+ORDER BY sub.k, sub.payload;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Sort
+   Sort Key: customscan_rto_lake.k, customscan_rto_lake.payload
+   ->  Seq Scan on customscan_rto_lake
+         Filter: (k = 3)
+(4 rows)
+
+-- A.2 result-set parity. Must equal Block 0's row set.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT sub.k, sub.payload
+FROM (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = 3
+    OFFSET 0
+) sub
+ORDER BY sub.k, sub.payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT sub.k, sub.payload
+FROM (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = 3
+    OFFSET 0
+) sub
+ORDER BY sub.k, sub.payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+-- A.3 cross-file parity: same wrapper, value in the other data
+-- file. Validates that pruning + Var resolution survive
+-- `rtoffset` regardless of which file the matching row lives in.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT sub.k, sub.payload
+FROM (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = 102
+    OFFSET 0
+) sub
+ORDER BY sub.k, sub.payload;
+  k  | payload  
+-----+----------
+ 102 | lake_102
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT sub.k, sub.payload
+FROM (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = 102
+    OFFSET 0
+) sub
+ORDER BY sub.k, sub.payload;
+  k  | payload  
+-----+----------
+ 102 | lake_102
+(1 row)
+
+-- ============================================================================
+-- Block B: CTE wrapper (`WITH ... AS MATERIALIZED`).
+--   WITH lake_cte AS MATERIALIZED (SELECT ... FROM lake WHERE k = N)
+--   SELECT ... FROM lake_cte;
+-- The `MATERIALIZED` keyword (PG12+) opts the CTE out of inlining
+-- via `inline_cte_walker` / `pull_up_simple_subquery`, so the CTE
+-- is planned as a separate `InitPlan` / `CteScan` subplan whose
+-- private range table is offset from the parent's. After
+-- `set_plan_references_recurse` runs on the CTE subplan, the
+-- lake's `CustomScan.scan.scanrelid` reflects the post-`rtoffset`
+-- value, and the runtime walker MUST identify scan-relation Vars
+-- from that post-rtoffset value.
+-- Like Block A, the CTE does not introduce an outer-relation Var
+-- into the lake's pushed predicate — it just flows the lake's
+-- output up through a `CteScan` node. The result-set parity
+-- against Block 0 is the assertion.
+-- ============================================================================
+-- B.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+WITH lake_cte AS MATERIALIZED (
+    SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+)
+SELECT k, payload FROM lake_cte ORDER BY k, payload;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Sort
+   Sort Key: lake_cte.k, lake_cte.payload
+   CTE lake_cte
+     ->  Custom Scan (pg-iceberg-am) on customscan_rto_lake
+           Pushed Filter: (k = 3)
+   ->  CTE Scan on lake_cte
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+WITH lake_cte AS MATERIALIZED (
+    SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+)
+SELECT k, payload FROM lake_cte ORDER BY k, payload;
+                QUERY PLAN                
+------------------------------------------
+ Sort
+   Sort Key: lake_cte.k, lake_cte.payload
+   CTE lake_cte
+     ->  Seq Scan on customscan_rto_lake
+           Filter: (k = 3)
+   ->  CTE Scan on lake_cte
+(6 rows)
+
+-- B.2 result-set parity. Must equal Block 0's row set.
+SET pg_lakebase.customscan_mode = 'force';
+WITH lake_cte AS MATERIALIZED (
+    SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+)
+SELECT k, payload FROM lake_cte ORDER BY k, payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+WITH lake_cte AS MATERIALIZED (
+    SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+)
+SELECT k, payload FROM lake_cte ORDER BY k, payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+-- B.3 cross-file parity from the CTE wrapper.
+SET pg_lakebase.customscan_mode = 'force';
+WITH lake_cte AS MATERIALIZED (
+    SELECT k, payload FROM customscan_rto_lake WHERE k = 102
+)
+SELECT k, payload FROM lake_cte ORDER BY k, payload;
+  k  | payload  
+-----+----------
+ 102 | lake_102
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+WITH lake_cte AS MATERIALIZED (
+    SELECT k, payload FROM customscan_rto_lake WHERE k = 102
+)
+SELECT k, payload FROM lake_cte ORDER BY k, payload;
+  k  | payload  
+-----+----------
+ 102 | lake_102
+(1 row)
+
+-- ============================================================================
+-- Block C: LATERAL derived table wrapper, with an outer-relation
+-- reference inside the LATERAL.
+--   SELECT o.id, sub.k, sub.payload
+--   FROM customscan_rto_outer o,
+--   LATERAL (
+--       SELECT k, payload FROM lake WHERE k = o.id
+--       OFFSET 0
+--   ) sub;
+-- This is the most aggressive of the three wrappers because:
+--   1. The LATERAL subquery has its own range table that PG offsets
+--      via `rtoffset` when flattening it into the parent plan tree.
+--      The lake's `CustomScan.scan.scanrelid` post-rtoffset
+--      reflects the parent's flattened range-table layout.
+--   2. `replace_nestloop_params` rewrites the outer-relation `o.id`
+--      Var inside the lake's pushed predicate into a `PARAM_EXEC`
+--      `Param` node. Runtime translation MUST identify
+--      the remaining `Var(k)` as a scan-relation Var via
+--      `Var.varno == cscan->scan.scanrelid` (the post-`rtoffset`
+--      value) — not via any cached RTI in `custom_private`.
+--   3. The pushed predicate `Var(k) = Param(o.id)` walks once at
+--      plan time and once at runtime; the runtime
+--      `(expr_index = 0, attno = 1)` lookup MUST resolve to
+--      `column_refs[(0, 1)] = { rel_oid = lake oid, attno = 1,
+--      atttypid = int4, attcollation = 0 }` on both plan and runtime
+--      sides. A regression that uses a cached pre-rtoffset RTI or
+--      treats the rewritten Param as a column would break the rebuilt
+--      predicate, surfacing as wrong rows below.
+-- We pin planner GUCs (matches `customscan_planning.sql`
+-- Block C and `customscan_planning.sql` Block B) to force
+-- a deterministic nestloop topology where the LATERAL subplan is
+-- the inner side of a `Nested Loop`. These GUCs apply equally to
+-- `force` and `off`, so the executor topology is identical on
+-- both sides; the only variable across the parity assertion is
+-- whether the inner plan node is a CustomScan or a Seq Scan.
+-- ============================================================================
+-- A small heap outer relation. Three rows so the LATERAL drives
+-- three nestloop rescans of the lake CustomScan. Two of `o.id`
+-- (3 and 102) live in the lake; one (50) does not — exercising
+-- both "match" and "no-match" rescan branches.
+CREATE TABLE customscan_rto_outer (id integer);
+INSERT INTO customscan_rto_outer VALUES (3), (50), (102);
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+SET enable_nestloop = on;
+-- C.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT o.id, sub.k, sub.payload
+FROM customscan_rto_outer o,
+LATERAL (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = o.id
+    OFFSET 0
+) sub
+ORDER BY o.id, sub.k, sub.payload;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Sort
+   Sort Key: o.id, customscan_rto_lake.k, customscan_rto_lake.payload
+   ->  Nested Loop
+         ->  Seq Scan on customscan_rto_outer o
+         ->  Custom Scan (pg-iceberg-am) on customscan_rto_lake
+               Pushed Filter: (k = o.id)
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT o.id, sub.k, sub.payload
+FROM customscan_rto_outer o,
+LATERAL (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = o.id
+    OFFSET 0
+) sub
+ORDER BY o.id, sub.k, sub.payload;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Sort
+   Sort Key: o.id, customscan_rto_lake.k, customscan_rto_lake.payload
+   ->  Nested Loop
+         ->  Seq Scan on customscan_rto_outer o
+         ->  Seq Scan on customscan_rto_lake
+               Filter: (k = o.id)
+(6 rows)
+
+-- C.2 result-set parity. With outer.id ∈ {3, 50, 102}:
+--   - o.id = 3   → lake.k = 3   → (3, 'lake_3')
+--   - o.id = 50  → no match     → (no row)
+--   - o.id = 102 → lake.k = 102 → (102, 'lake_102')
+-- The "modulo subquery-introduced Vars" disclaimer in the task
+-- brief is concrete here: the wrapper introduces `o.id` into the
+-- result rows alongside `sub.k` / `sub.payload`. Strip `o.id` and
+-- the lake-side rows (`sub.k`, `sub.payload`) exactly equal the
+-- union of Block 0 (k = 3) and Block A.3 / B.3 (k = 102) — which
+-- is the sense in which Block C's row set "matches the same query
+-- without the enclosing subquery (modulo subquery-introduced
+-- Vars)".
+SET pg_lakebase.customscan_mode = 'force';
+SELECT o.id, sub.k, sub.payload
+FROM customscan_rto_outer o,
+LATERAL (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = o.id
+    OFFSET 0
+) sub
+ORDER BY o.id, sub.k, sub.payload;
+ id  |  k  | payload  
+-----+-----+----------
+   3 |   3 | lake_3
+ 102 | 102 | lake_102
+(2 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT o.id, sub.k, sub.payload
+FROM customscan_rto_outer o,
+LATERAL (
+    SELECT k, payload
+    FROM customscan_rto_lake
+    WHERE k = o.id
+    OFFSET 0
+) sub
+ORDER BY o.id, sub.k, sub.payload;
+ id  |  k  | payload  
+-----+-----+----------
+   3 |   3 | lake_3
+ 102 | 102 | lake_102
+(2 rows)
+
+-- ============================================================================
+-- Block D: nested wrapper — subquery containing a CTE containing the
+-- lake. Two `rtoffset` shifts compose, exercising the runtime
+-- walker's resilience under deeper plan-tree rewrites.
+--   SELECT outer_sub.k FROM (
+--       WITH inner_cte AS MATERIALIZED (
+--           SELECT k, payload FROM lake WHERE k = N
+--       )
+--       SELECT k, payload FROM inner_cte OFFSET 0
+--   ) outer_sub;
+-- Both wrappers are non-inlinable (the `MATERIALIZED` CTE blocks
+-- `inline_cte_walker`; the `OFFSET 0` outer subquery blocks
+-- `pull_up_simple_subquery`). The lake's CustomScan ends up
+-- nested two layers deep, so its `scan.scanrelid` is offset
+-- twice. If the framework cached any RTI in `custom_private`, it
+-- would diverge from the post-rtoffset `cscan->scan.scanrelid`
+-- by the cumulative offset, and the runtime walker would
+-- misidentify every scan-relation `Var`.
+-- ============================================================================
+-- D.1 plan guard.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT outer_sub.k, outer_sub.payload
+FROM (
+    WITH inner_cte AS MATERIALIZED (
+        SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+    )
+    SELECT k, payload FROM inner_cte
+    OFFSET 0
+) outer_sub
+ORDER BY outer_sub.k, outer_sub.payload;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Sort
+   Sort Key: inner_cte.k, inner_cte.payload
+   ->  CTE Scan on inner_cte
+         CTE inner_cte
+           ->  Custom Scan (pg-iceberg-am) on customscan_rto_lake
+                 Pushed Filter: (k = 3)
+(6 rows)
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT outer_sub.k, outer_sub.payload
+FROM (
+    WITH inner_cte AS MATERIALIZED (
+        SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+    )
+    SELECT k, payload FROM inner_cte
+    OFFSET 0
+) outer_sub
+ORDER BY outer_sub.k, outer_sub.payload;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Sort
+   Sort Key: inner_cte.k, inner_cte.payload
+   ->  CTE Scan on inner_cte
+         CTE inner_cte
+           ->  Seq Scan on customscan_rto_lake
+                 Filter: (k = 3)
+(6 rows)
+
+-- D.2 result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT outer_sub.k, outer_sub.payload
+FROM (
+    WITH inner_cte AS MATERIALIZED (
+        SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+    )
+    SELECT k, payload FROM inner_cte
+    OFFSET 0
+) outer_sub
+ORDER BY outer_sub.k, outer_sub.payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT outer_sub.k, outer_sub.payload
+FROM (
+    WITH inner_cte AS MATERIALIZED (
+        SELECT k, payload FROM customscan_rto_lake WHERE k = 3
+    )
+    SELECT k, payload FROM inner_cte
+    OFFSET 0
+) outer_sub
+ORDER BY outer_sub.k, outer_sub.payload;
+ k | payload 
+---+---------
+ 3 | lake_3
+(1 row)
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+RESET enable_nestloop;
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_rto_outer;
+DROP TABLE customscan_rto_lake;

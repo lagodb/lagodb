@@ -1,0 +1,10 @@
+\set ECHO none
+rename_allowed: t
+public_binding_alter_rejected: t
+internal_binding_alter_rejected: t
+native_alter_rejected: t
+native_reset_rejected: t
+internal_id_unchanged: t
+internal_id_only: t
+binding_visible: t
+binding_retained_after_drop: t

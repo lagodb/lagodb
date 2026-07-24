@@ -1,0 +1,211 @@
+-- Partitioned INSERT, UPDATE, DELETE, MERGE, and COPY semantics.
+DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
+CREATE SCHEMA dml_lifecycle;
+-- COPY into a partitioned table uses an independent COPY lifecycle with
+-- multiple relation sessions.
+CREATE TABLE dml_lifecycle.part_t (
+    id integer
+) PARTITION BY RANGE (id) USING iceberg;
+CREATE TABLE dml_lifecycle.part_t_a
+PARTITION OF dml_lifecycle.part_t
+FOR VALUES FROM (0) TO (100) USING iceberg;
+CREATE TABLE dml_lifecycle.part_t_b
+PARTITION OF dml_lifecycle.part_t
+FOR VALUES FROM (100) TO (200) USING iceberg;
+COPY dml_lifecycle.part_t FROM stdin;
+SELECT * FROM dml_lifecycle.part_t ORDER BY id;
+ id  
+-----
+  10
+  20
+ 150
+(3 rows)
+
+-- INSERT into a partitioned table owns multiple stable relation states.
+INSERT INTO dml_lifecycle.part_t VALUES (30), (170), (40);
+SELECT * FROM dml_lifecycle.part_t ORDER BY id;
+ id  
+-----
+  10
+  20
+  30
+  40
+ 150
+ 170
+(6 rows)
+
+-- Alternating partition routing (a -> b -> a) must land each row in its own
+-- relation-local state. Reading each leaf exposes a mis-routed row.
+SELECT * FROM dml_lifecycle.part_t_a ORDER BY id;
+ id 
+----
+ 10
+ 20
+ 30
+ 40
+(4 rows)
+
+SELECT * FROM dml_lifecycle.part_t_b ORDER BY id;
+ id  
+-----
+ 150
+ 170
+(2 rows)
+
+-- A gating Result node between ModifyTable and a partition append must have
+-- planner-only ROWID_VAR entries resolved before PostgreSQL setrefs runs.
+CREATE TABLE dml_lifecycle.result_gate_t (
+    id integer,
+    label text
+) PARTITION BY RANGE (id) USING iceberg;
+CREATE TABLE dml_lifecycle.result_gate_t_a
+PARTITION OF dml_lifecycle.result_gate_t
+FOR VALUES FROM (0) TO (10) USING iceberg;
+CREATE TABLE dml_lifecycle.result_gate_t_b
+PARTITION OF dml_lifecycle.result_gate_t
+FOR VALUES FROM (10) TO (20) USING iceberg;
+INSERT INTO dml_lifecycle.result_gate_t VALUES (1, 'a'), (11, 'b');
+UPDATE dml_lifecycle.result_gate_t
+SET label = label || '_exists'
+WHERE EXISTS (SELECT 1);
+DELETE FROM dml_lifecycle.result_gate_t
+WHERE id = 11 AND EXISTS (SELECT 1);
+COPY (
+    SELECT id, label FROM dml_lifecycle.result_gate_t ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+1,a_exists
+-- Partitioned row-level UPDATE/DELETE: each leaf partition is its own result
+-- relation, so its scan carries identity and routes position
+-- deletes plus appended rows to the correct leaf.
+CREATE TABLE dml_lifecycle.part_dml (
+    id integer,
+    label text
+) PARTITION BY RANGE (id) USING iceberg;
+CREATE TABLE dml_lifecycle.part_dml_a
+PARTITION OF dml_lifecycle.part_dml
+FOR VALUES FROM (0) TO (100) USING iceberg;
+CREATE TABLE dml_lifecycle.part_dml_b
+PARTITION OF dml_lifecycle.part_dml
+FOR VALUES FROM (100) TO (200) USING iceberg;
+INSERT INTO dml_lifecycle.part_dml VALUES
+    (10, 'a10'), (20, 'a20'), (110, 'b110'), (120, 'b120');
+UPDATE dml_lifecycle.part_dml
+SET label = label || '_upd'
+WHERE id IN (20, 110);
+COPY (
+    SELECT id, label FROM dml_lifecycle.part_dml ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+10,a10
+20,a20_upd
+110,b110_upd
+120,b120
+DELETE FROM dml_lifecycle.part_dml
+WHERE id IN (10, 120);
+COPY (
+    SELECT id, label FROM dml_lifecycle.part_dml ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+20,a20_upd
+110,b110_upd
+-- A row DELETE trigger defined only on a leaf still requires OLD when the
+-- nominal partitioned root has no row triggers.
+CREATE TABLE dml_lifecycle.leaf_delete_audit (
+    id integer,
+    old_label text
+);
+CREATE FUNCTION dml_lifecycle.audit_leaf_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO dml_lifecycle.leaf_delete_audit VALUES (OLD.id, OLD.label);
+    RETURN OLD;
+END;
+$$;
+CREATE TRIGGER part_dml_a_ad
+AFTER DELETE ON dml_lifecycle.part_dml_a
+FOR EACH ROW
+EXECUTE FUNCTION dml_lifecycle.audit_leaf_delete();
+INSERT INTO dml_lifecycle.part_dml VALUES (30, 'leaf_trigger');
+DELETE FROM dml_lifecycle.part_dml WHERE id = 30;
+SELECT * FROM dml_lifecycle.leaf_delete_audit;
+ id |  old_label   
+----+--------------
+ 30 | leaf_trigger
+(1 row)
+
+-- Only matching result relations get an Iceberg ModifyState. The indexed heap
+-- leaf must retain PostgreSQL's native mutation path.
+CREATE TABLE dml_lifecycle.mixed_am (
+    id integer,
+    label text
+) PARTITION BY RANGE (id) USING iceberg;
+CREATE TABLE dml_lifecycle.mixed_am_iceberg
+PARTITION OF dml_lifecycle.mixed_am
+FOR VALUES FROM (0) TO (100) USING iceberg;
+CREATE TABLE dml_lifecycle.mixed_am_heap
+PARTITION OF dml_lifecycle.mixed_am
+FOR VALUES FROM (100) TO (200) USING heap;
+CREATE INDEX mixed_am_heap_id_idx ON dml_lifecycle.mixed_am_heap (id);
+INSERT INTO dml_lifecycle.mixed_am VALUES (10, 'iceberg'), (110, 'heap');
+UPDATE dml_lifecycle.mixed_am SET label = label || '_updated';
+SELECT id, label, tableoid::regclass FROM dml_lifecycle.mixed_am ORDER BY id;
+ id  |      label      |            tableoid            
+-----+-----------------+--------------------------------
+  10 | iceberg_updated | dml_lifecycle.mixed_am_iceberg
+ 110 | heap_updated    | dml_lifecycle.mixed_am_heap
+(2 rows)
+
+DELETE FROM dml_lifecycle.mixed_am WHERE id IN (10, 110);
+SELECT count(*) AS mixed_rows_after_delete FROM dml_lifecycle.mixed_am;
+ mixed_rows_after_delete 
+-------------------------
+                       0
+(1 row)
+
+-- Cross-partition UPDATE may route the destination INSERT before that leaf's
+-- target scan executes; relation snapshot context is pinned at outer binding.
+SET pg_lakebase.customscan_mode = 'off';
+UPDATE dml_lifecycle.part_dml
+SET id = 130, label = label || '_moved'
+WHERE id = 20
+RETURNING id, label;
+ id  |     label     
+-----+---------------
+ 130 | a20_upd_moved
+(1 row)
+
+RESET pg_lakebase.customscan_mode;
+COPY (
+    SELECT id, label, tableoid::regclass
+    FROM dml_lifecycle.part_dml
+    ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+110,b110_upd,dml_lifecycle.part_dml_b
+130,a20_upd_moved,dml_lifecycle.part_dml_b
+-- Partitioned MERGE mixes DELETE, cross-partition UPDATE, and INSERT. Matched
+-- actions must decode the source leaf's synthetic ctid; the destination action
+-- remains normal PostgreSQL partition routing.
+MERGE INTO dml_lifecycle.part_dml AS target
+USING (VALUES
+    (110, 110, 'delete'),
+    (130, 30, 'merge_moved'),
+    (150, 150, 'merge_inserted')
+) AS source(old_id, new_id, label)
+ON target.id = source.old_id
+WHEN MATCHED AND source.label = 'delete' THEN
+    DELETE
+WHEN MATCHED THEN
+    UPDATE SET id = source.new_id, label = source.label
+WHEN NOT MATCHED THEN
+    INSERT (id, label) VALUES (source.new_id, source.label);
+COPY (
+    SELECT id, label, tableoid::regclass
+    FROM dml_lifecycle.part_dml
+    ORDER BY id
+) TO STDOUT WITH (FORMAT csv);
+30,merge_moved,dml_lifecycle.part_dml_a
+150,merge_inserted,dml_lifecycle.part_dml_b
+SET client_min_messages = warning;
+DROP SCHEMA dml_lifecycle CASCADE;
+RESET client_min_messages;
