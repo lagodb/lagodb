@@ -12,7 +12,7 @@ use super::options::{TablespaceBinding, TablespaceError, parse_catalog_binding};
 use crate::catalog::{SysCacheTuple, search_syscache1};
 use crate::diag::{PgError, SqlStateError};
 use crate::runtime_api::{RuntimeClient, StorageVolumeRouteLookupError};
-use crate::storage_volume::{StorageVolumeId, StorageVolumeRoute};
+use crate::storage::volume::{StorageVolumeId, StorageVolumeRoute};
 use crate::wrapper::CacheRegisterSyscacheCallback;
 use pg_lakebase_storage::StoreId;
 

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use pg_lakebase_core::options::TablespaceBinding;
-use pg_lakebase_core::storage_volume::{StorageVolumeId, StorageVolumeRoute};
+use pg_lakebase_core::storage::volume::{StorageVolumeId, StorageVolumeRoute};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

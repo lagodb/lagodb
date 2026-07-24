@@ -1,4 +1,4 @@
-//! PostgreSQL latch integration for storage socket readiness waits.
+//! PostgreSQL latch integration for storage-service socket readiness waits.
 
 use std::ffi::{c_int, c_long};
 use std::io;

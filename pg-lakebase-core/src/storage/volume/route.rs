@@ -1,3 +1,5 @@
+//! Immutable object-routing descriptors for storage volumes.
+
 use thiserror::Error;
 
 /// Immutable object-routing descriptor resolved from the Volume config.

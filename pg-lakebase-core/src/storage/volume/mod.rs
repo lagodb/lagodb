@@ -1,4 +1,4 @@
-//! Stable storage-volume identity shared by catalog and data-plane boundaries.
+//! Storage-volume identity and object-routing types.
 
 mod id;
 mod route;

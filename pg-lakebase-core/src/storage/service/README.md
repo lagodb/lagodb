@@ -1,6 +1,6 @@
 # Storage Consumer API
 
-`pg-lakebase-core::storage_service` is a consumer-facing module. It does not
+`pg-lakebase-core::storage::service` is a consumer-facing module. It does not
 own storage-service GUC backing statics, does not register a background worker,
 and does not export a bgworker entry point.
 

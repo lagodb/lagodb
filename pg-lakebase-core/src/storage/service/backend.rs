@@ -1,4 +1,4 @@
-//! PostgreSQL-backend-local access to the storage service.
+//! PostgreSQL-backend-local access to the runtime storage service.
 //!
 //! A backend uses one healthy foreground connection generation for every
 //! distributed tablespace. Object identity remains request-local; the socket

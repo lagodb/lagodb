@@ -1,4 +1,4 @@
-//! Errors at the format-neutral maintenance framework boundary.
+//! Errors at the format-neutral object-cleanup boundary.
 
 use std::fmt;
 
@@ -6,7 +6,7 @@ use crate::diag::{PgError, SqlStateError};
 use pgrx::prelude::PgSqlErrorCode;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MaintenanceCatalogOperation {
+pub enum ObjectCleanupCatalogOperation {
     Resolve,
     Open,
     Scan,
@@ -15,7 +15,7 @@ pub enum MaintenanceCatalogOperation {
     Delete,
 }
 
-impl fmt::Display for MaintenanceCatalogOperation {
+impl fmt::Display for ObjectCleanupCatalogOperation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Resolve => "resolve",
@@ -29,13 +29,13 @@ impl fmt::Display for MaintenanceCatalogOperation {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum MaintenanceError {
+pub enum ObjectCleanupError {
     #[error("invalid maintenance target: {0}")]
     InvalidTarget(#[from] pg_lakebase_storage::StorageError),
 
     #[error("failed to {operation} maintenance queue catalog: {source}")]
     Catalog {
-        operation: MaintenanceCatalogOperation,
+        operation: ObjectCleanupCatalogOperation,
         #[source]
         source: PgError,
     },
@@ -59,16 +59,16 @@ pub enum MaintenanceError {
     BatchTooLarge(usize),
 }
 
-impl MaintenanceError {
+impl ObjectCleanupError {
     pub(crate) fn catalog(
-        operation: MaintenanceCatalogOperation,
+        operation: ObjectCleanupCatalogOperation,
         source: PgError,
     ) -> Self {
         Self::Catalog { operation, source }
     }
 }
 
-impl SqlStateError for MaintenanceError {
+impl SqlStateError for ObjectCleanupError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
             Self::InvalidTarget(_)

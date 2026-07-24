@@ -7,7 +7,7 @@ use pg_lakebase_core::options::{
     CreateTablespaceStorageOptions, TablespaceBinding, TablespaceCacheError,
     TablespaceError, is_distributed_tablespace,
 };
-use pg_lakebase_core::storage_volume::StorageVolumeId;
+use pg_lakebase_core::storage::volume::StorageVolumeId;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 

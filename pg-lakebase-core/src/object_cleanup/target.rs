@@ -1,4 +1,4 @@
-//! Validated physical storage targets consumed by the maintenance executor.
+//! Validated physical storage targets consumed by the cleanup executor.
 
 use pg_lakebase_storage::{ObjectLocation, StorageError, StoreId};
 

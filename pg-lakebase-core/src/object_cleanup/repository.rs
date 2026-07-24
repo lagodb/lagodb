@@ -1,4 +1,4 @@
-//! Direct PostgreSQL catalog access for `lakebase.maintenance_queue`.
+//! Direct PostgreSQL catalog access for the object-cleanup queue.
 
 use std::collections::HashSet;
 
@@ -7,14 +7,14 @@ use crate::catalog::{
     MaintenanceCatalogIds, get_maintenance_catalog_ids,
 };
 use crate::handles::{HeapTupleGuard, HeapTupleRef};
+use crate::maintenance_config::MaintenanceSettings;
 use pgrx::prelude::TimestampWithTimeZone;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
-use super::error::{MaintenanceCatalogOperation, MaintenanceError};
-use super::gucs;
+use super::error::{ObjectCleanupCatalogOperation, ObjectCleanupError};
 use super::item::{
-    MaintenanceItem, MaintenanceItemId, MaintenanceItemRef, MaintenanceOperation,
-    MaintenanceTarget,
+    ObjectCleanupItem, ObjectCleanupItemId, ObjectCleanupItemRef,
+    ObjectCleanupOperation, ObjectCleanupTarget,
 };
 use super::target::ObjectTreeTarget;
 
@@ -40,17 +40,17 @@ mod column {
     pub const CREATED_AT: i16 = 14;
 }
 
-pub struct MaintenanceQueue;
+pub struct ObjectCleanupQueue;
 
-impl MaintenanceQueue {
+impl ObjectCleanupQueue {
     /// Return whether the queue contains any unresolved cleanup obligation.
     ///
     /// This deliberately includes permanently failed items: they are no longer
     /// runnable by the worker, but still require operator resolution or an
     /// explicit decision to discard the cleanup obligation.
-    pub fn has_unresolved_items() -> Result<bool, MaintenanceError> {
+    pub fn has_unresolved_items() -> Result<bool, ObjectCleanupError> {
         let catalog =
-            MaintenanceQueueCatalog::open_required(pg_sys::AccessShareLock as _)?;
+            ObjectCleanupQueueCatalog::open_required(pg_sys::AccessShareLock as _)?;
         let mut scan = catalog
             .relation
             .begin_scan(
@@ -60,37 +60,43 @@ impl MaintenanceQueue {
                 std::iter::empty(),
             )
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?;
         Ok(scan
             .get_next()
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?
             .is_some())
     }
 
     pub fn enqueue(
-        item: MaintenanceItemRef<'_>,
-    ) -> Result<MaintenanceItemId, MaintenanceError> {
+        item: ObjectCleanupItemRef<'_>,
+    ) -> Result<ObjectCleanupItemId, ObjectCleanupError> {
         validate_context(&item)?;
         let catalog =
-            MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
+            ObjectCleanupQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
         let row = QueueRow::new(&item);
         let tuple = row.encode(catalog.relation.as_handle().tuple_desc());
         catalog.relation.catalog_insert(&tuple).map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Insert, source)
+            ObjectCleanupError::catalog(ObjectCleanupCatalogOperation::Insert, source)
         })?;
         notify_worker()?;
         Ok(row.id)
     }
 
     pub fn enqueue_batch(
-        items: &[MaintenanceItemRef<'_>],
-    ) -> Result<usize, MaintenanceError> {
-        let limit = gucs::batch_items();
+        items: &[ObjectCleanupItemRef<'_>],
+    ) -> Result<usize, ObjectCleanupError> {
+        let limit = MaintenanceSettings::load().batch_items();
         if items.len() > limit {
-            return Err(MaintenanceError::BatchTooLarge(limit));
+            return Err(ObjectCleanupError::BatchTooLarge(limit));
         }
         for item in items {
             validate_context(item)?;
@@ -100,15 +106,18 @@ impl MaintenanceQueue {
         }
 
         let catalog =
-            MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
+            ObjectCleanupQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
         let tuple_desc = catalog.relation.as_handle().tuple_desc();
         let mut writer = catalog.relation.writer().map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Insert, source)
+            ObjectCleanupError::catalog(ObjectCleanupCatalogOperation::Insert, source)
         })?;
         for item in items {
             let tuple = QueueRow::new(item).encode(tuple_desc);
             writer.insert(&tuple).map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Insert, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Insert,
+                    source,
+                )
             })?;
         }
         notify_worker()?;
@@ -117,9 +126,10 @@ impl MaintenanceQueue {
 
     pub fn has_tree_target(
         target: &ObjectTreeTarget,
-    ) -> Result<bool, MaintenanceError> {
-        let Some(catalog) =
-            MaintenanceQueueCatalog::open_if_available(pg_sys::AccessShareLock as _)?
+    ) -> Result<bool, ObjectCleanupError> {
+        let Some(catalog) = ObjectCleanupQueueCatalog::open_if_available(
+            pg_sys::AccessShareLock as _,
+        )?
         else {
             return Ok(false);
         };
@@ -130,37 +140,43 @@ impl MaintenanceQueue {
                 true,
                 CatalogSnapshot::Default,
                 target_keys(
-                    MaintenanceOperation::DeleteTree,
+                    ObjectCleanupOperation::DeleteTree,
                     target.store_id().as_str(),
                     target.namespace(),
                     target.prefix(),
                 ),
             )
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?;
         Ok(scan
             .get_next()
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?
             .is_some())
     }
 
     pub fn retry_failed(
-        item_id: MaintenanceItemId,
-    ) -> Result<bool, MaintenanceError> {
-        MaintenanceRepository::retry_failed(item_id)
+        item_id: ObjectCleanupItemId,
+    ) -> Result<bool, ObjectCleanupError> {
+        ObjectCleanupRepository::retry_failed(item_id)
     }
 }
 
 pub(crate) struct InvalidMaintenanceRecord {
-    pub(crate) id: MaintenanceItemId,
+    pub(crate) id: ObjectCleanupItemId,
     pub(crate) error: String,
 }
 
 pub(crate) struct ReadyMaintenanceBatch {
-    pub(crate) tasks: Vec<MaintenanceItem>,
+    pub(crate) tasks: Vec<ObjectCleanupItem>,
     pub(crate) invalid: Vec<InvalidMaintenanceRecord>,
 }
 
@@ -169,15 +185,16 @@ pub(crate) enum QueuePoll {
     Ready(ReadyMaintenanceBatch),
 }
 
-pub(crate) struct MaintenanceRepository;
+pub(crate) struct ObjectCleanupRepository;
 
-impl MaintenanceRepository {
+impl ObjectCleanupRepository {
     pub(crate) fn fetch_ready_batch(
         limit: usize,
-        in_flight: &HashSet<MaintenanceItemId>,
-    ) -> Result<QueuePoll, MaintenanceError> {
-        let Some(catalog) =
-            MaintenanceQueueCatalog::open_if_available(pg_sys::AccessShareLock as _)?
+        in_flight: &HashSet<ObjectCleanupItemId>,
+    ) -> Result<QueuePoll, ObjectCleanupError> {
+        let Some(catalog) = ObjectCleanupQueueCatalog::open_if_available(
+            pg_sys::AccessShareLock as _,
+        )?
         else {
             return Ok(QueuePoll::Unavailable);
         };
@@ -200,20 +217,26 @@ impl MaintenanceRepository {
                 ],
             )
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?;
         let tuple_desc = catalog.relation.as_handle().tuple_desc();
         let max_examined = limit.saturating_add(in_flight.len());
         let mut examined = 0_usize;
         while examined < max_examined && batch.tasks.len() < limit {
             let Some(tuple) = scan.get_next().map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?
             else {
                 break;
             };
             examined = examined.saturating_add(1);
-            let id = MaintenanceItemId(unsafe {
+            let id = ObjectCleanupItemId(unsafe {
                 required_attr(tuple.as_raw(), tuple_desc, column::ITEM_ID, "item_id")?
             });
             if in_flight.contains(&id) {
@@ -233,9 +256,10 @@ impl MaintenanceRepository {
     }
 
     pub(crate) fn next_pending_at()
-    -> Result<Option<pg_sys::TimestampTz>, MaintenanceError> {
-        let Some(catalog) =
-            MaintenanceQueueCatalog::open_if_available(pg_sys::AccessShareLock as _)?
+    -> Result<Option<pg_sys::TimestampTz>, ObjectCleanupError> {
+        let Some(catalog) = ObjectCleanupQueueCatalog::open_if_available(
+            pg_sys::AccessShareLock as _,
+        )?
         else {
             return Ok(None);
         };
@@ -247,10 +271,13 @@ impl MaintenanceRepository {
                 [CatalogScanKey::bool_eq(column::FAILED as _, false)],
             )
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?;
         let Some(tuple) = scan.get_next().map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            ObjectCleanupError::catalog(ObjectCleanupCatalogOperation::Scan, source)
         })?
         else {
             return Ok(None);
@@ -266,28 +293,32 @@ impl MaintenanceRepository {
         Ok(Some(timestamp))
     }
 
-    pub(crate) fn complete(item: &MaintenanceItem) -> Result<(), MaintenanceError> {
+    pub(crate) fn complete(
+        item: &ObjectCleanupItem,
+    ) -> Result<(), ObjectCleanupError> {
         // A queue item's physical target is immutable after insertion. A
         // successful idempotent delete therefore dominates any stale retry or
         // failure result, regardless of the revision that was dispatched.
         let catalog =
-            MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
+            ObjectCleanupQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
         catalog.delete_if_exists(item.id)
     }
 
     pub(crate) fn retry(
-        item: &MaintenanceItem,
+        item: &ObjectCleanupItem,
         error: &str,
-    ) -> Result<(), MaintenanceError> {
+    ) -> Result<(), ObjectCleanupError> {
         let attempt = item.attempt_count.saturating_add(1);
-        if attempt >= gucs::retry_max_attempts() {
+        let settings = MaintenanceSettings::load();
+        if attempt >= settings.retry_max_attempts() {
             return Self::fail_with_attempt(item, attempt, error);
         }
         let exponent =
             u32::try_from(attempt.saturating_sub(1).clamp(0, 30)).unwrap_or(30);
-        let delay_ms = gucs::retry_base_ms()
+        let delay_ms = settings
+            .retry_base_ms()
             .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
-            .min(gucs::retry_max_ms());
+            .min(settings.retry_max_ms());
         let error = bounded_error(error);
         Self::update_if_current(item, |row| {
             row.attempt_count = attempt;
@@ -298,27 +329,27 @@ impl MaintenanceRepository {
     }
 
     pub(crate) fn fail(
-        item: &MaintenanceItem,
+        item: &ObjectCleanupItem,
         error: &str,
-    ) -> Result<(), MaintenanceError> {
+    ) -> Result<(), ObjectCleanupError> {
         Self::fail_with_attempt(item, item.attempt_count, error)
     }
 
     pub(crate) fn fail_invalid(
-        item_id: MaintenanceItemId,
+        item_id: ObjectCleanupItemId,
         error: &str,
-    ) -> Result<(), MaintenanceError> {
+    ) -> Result<(), ObjectCleanupError> {
         let catalog =
-            MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
+            ObjectCleanupQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
         catalog.quarantine_invalid(item_id, bounded_error(error))?;
         Ok(())
     }
 
     fn fail_with_attempt(
-        item: &MaintenanceItem,
+        item: &ObjectCleanupItem,
         attempt: i32,
         error: &str,
-    ) -> Result<(), MaintenanceError> {
+    ) -> Result<(), ObjectCleanupError> {
         let error = bounded_error(error);
         Self::update_if_current(item, |row| {
             row.attempt_count = attempt;
@@ -327,9 +358,11 @@ impl MaintenanceRepository {
         })
     }
 
-    fn retry_failed(item_id: MaintenanceItemId) -> Result<bool, MaintenanceError> {
+    fn retry_failed(
+        item_id: ObjectCleanupItemId,
+    ) -> Result<bool, ObjectCleanupError> {
         let catalog =
-            MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
+            ObjectCleanupQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
         let Some(updated) = catalog.mutate_row(item_id, |row| {
             if !row.failed {
                 return false;
@@ -351,11 +384,11 @@ impl MaintenanceRepository {
     }
 
     fn update_if_current(
-        item: &MaintenanceItem,
+        item: &ObjectCleanupItem,
         mutate: impl FnOnce(&mut QueueRow),
-    ) -> Result<(), MaintenanceError> {
+    ) -> Result<(), ObjectCleanupError> {
         let catalog =
-            MaintenanceQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
+            ObjectCleanupQueueCatalog::open_required(pg_sys::RowExclusiveLock as _)?;
         // Missing rows, a newer revision, and optimistic tuple conflicts all
         // mean another at-least-once consumer has already advanced the same
         // obligation. They are successful supersession, not persistence loss.
@@ -374,7 +407,7 @@ impl MaintenanceRepository {
     }
 }
 
-fn notify_worker() -> Result<(), MaintenanceError> {
+fn notify_worker() -> Result<(), ObjectCleanupError> {
     const NOTIFIER: crate::extension_worker::WorkerNotifier =
         crate::extension_worker::WorkerNotifier::new(
             crate::extension_worker::WorkerIdentity::new(
@@ -384,40 +417,49 @@ fn notify_worker() -> Result<(), MaintenanceError> {
         );
     NOTIFIER
         .stage_wakeup()
-        .map_err(MaintenanceError::WorkerNotification)
+        .map_err(ObjectCleanupError::WorkerNotification)
 }
 
-struct MaintenanceQueueCatalog {
+struct ObjectCleanupQueueCatalog {
     relation: CatalogRelation,
     ids: MaintenanceCatalogIds,
 }
 
-impl MaintenanceQueueCatalog {
+impl ObjectCleanupQueueCatalog {
     fn open_if_available(
         lock_mode: pg_sys::LOCKMODE,
-    ) -> Result<Option<Self>, MaintenanceError> {
+    ) -> Result<Option<Self>, ObjectCleanupError> {
         let Some(ids) = get_maintenance_catalog_ids().map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Resolve, source)
+            ObjectCleanupError::catalog(
+                ObjectCleanupCatalogOperation::Resolve,
+                source,
+            )
         })?
         else {
             return Ok(None);
         };
         let relation =
             CatalogRelation::open(ids.table, lock_mode).map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Open, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Open,
+                    source,
+                )
             })?;
         Ok(Some(Self { relation, ids }))
     }
 
-    fn open_required(lock_mode: pg_sys::LOCKMODE) -> Result<Self, MaintenanceError> {
-        Self::open_if_available(lock_mode)?.ok_or(MaintenanceError::QueueUnavailable)
+    fn open_required(
+        lock_mode: pg_sys::LOCKMODE,
+    ) -> Result<Self, ObjectCleanupError> {
+        Self::open_if_available(lock_mode)?
+            .ok_or(ObjectCleanupError::QueueUnavailable)
     }
 
     fn mutate_row(
         &self,
-        item_id: MaintenanceItemId,
+        item_id: ObjectCleanupItemId,
         mutate: impl FnOnce(&mut QueueRow) -> bool,
-    ) -> Result<Option<bool>, MaintenanceError> {
+    ) -> Result<Option<bool>, ObjectCleanupError> {
         let mut scan = self
             .relation
             .begin_scan(
@@ -427,10 +469,13 @@ impl MaintenanceQueueCatalog {
                 [CatalogScanKey::uuid_eq(column::ITEM_ID as _, item_id.0)],
             )
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?;
         let Some(old_tuple) = scan.get_next().map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            ObjectCleanupError::catalog(ObjectCleanupCatalogOperation::Scan, source)
         })?
         else {
             return Ok(None);
@@ -450,9 +495,9 @@ impl MaintenanceQueueCatalog {
 
     fn quarantine_invalid(
         &self,
-        item_id: MaintenanceItemId,
+        item_id: ObjectCleanupItemId,
         error: String,
-    ) -> Result<bool, MaintenanceError> {
+    ) -> Result<bool, ObjectCleanupError> {
         let mut scan = self
             .relation
             .begin_scan(
@@ -462,10 +507,13 @@ impl MaintenanceQueueCatalog {
                 [CatalogScanKey::uuid_eq(column::ITEM_ID as _, item_id.0)],
             )
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?;
         let Some(old_tuple) = scan.get_next().map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            ObjectCleanupError::catalog(ObjectCleanupCatalogOperation::Scan, source)
         })?
         else {
             return Ok(false);
@@ -495,13 +543,16 @@ impl MaintenanceQueueCatalog {
         &self,
         old_tuple: HeapTupleRef<'_>,
         row: &QueueRow,
-    ) -> Result<bool, MaintenanceError> {
+    ) -> Result<bool, ObjectCleanupError> {
         let new_tuple = row.encode(self.relation.as_handle().tuple_desc());
         match self
             .relation
             .catalog_update_optimistic(old_tuple, &new_tuple)
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Update, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Update,
+                    source,
+                )
             })? {
             CatalogUpdateResult::Success => Ok(true),
             CatalogUpdateResult::Conflict => Ok(false),
@@ -510,8 +561,8 @@ impl MaintenanceQueueCatalog {
 
     fn delete_if_exists(
         &self,
-        item_id: MaintenanceItemId,
-    ) -> Result<(), MaintenanceError> {
+        item_id: ObjectCleanupItemId,
+    ) -> Result<(), ObjectCleanupError> {
         let mut scan = self
             .relation
             .begin_scan(
@@ -521,16 +572,19 @@ impl MaintenanceQueueCatalog {
                 [CatalogScanKey::uuid_eq(column::ITEM_ID as _, item_id.0)],
             )
             .map_err(|source| {
-                MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+                ObjectCleanupError::catalog(
+                    ObjectCleanupCatalogOperation::Scan,
+                    source,
+                )
             })?;
         let Some(tuple) = scan.get_next().map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Scan, source)
+            ObjectCleanupError::catalog(ObjectCleanupCatalogOperation::Scan, source)
         })?
         else {
             return Ok(());
         };
         self.relation.catalog_delete(tuple).map_err(|source| {
-            MaintenanceError::catalog(MaintenanceCatalogOperation::Delete, source)
+            ObjectCleanupError::catalog(ObjectCleanupCatalogOperation::Delete, source)
         })?;
         Ok(())
     }
@@ -538,7 +592,7 @@ impl MaintenanceQueueCatalog {
 
 #[derive(Debug)]
 struct QueueRow {
-    id: MaintenanceItemId,
+    id: ObjectCleanupItemId,
     operation: i16,
     store_id: String,
     namespace: String,
@@ -555,11 +609,11 @@ struct QueueRow {
 }
 
 impl QueueRow {
-    fn new(item: &MaintenanceItemRef<'_>) -> Self {
+    fn new(item: &ObjectCleanupItemRef<'_>) -> Self {
         let (store_id, namespace, path, context) = item.fields();
         let now = current_timestamp();
         Self {
-            id: MaintenanceItemId::new(),
+            id: ObjectCleanupItemId::new(),
             operation: item.operation() as i16,
             store_id: store_id.to_owned(),
             namespace: namespace.to_owned(),
@@ -576,7 +630,7 @@ impl QueueRow {
         }
     }
 
-    fn quarantined(id: MaintenanceItemId, error: String) -> Self {
+    fn quarantined(id: ObjectCleanupItemId, error: String) -> Self {
         const QUARANTINED_VALUE: &str = "<quarantined>";
         const QUARANTINED_PRODUCER: &str = "runtime-quarantine";
         const INVALID_OPERATION: i16 = 0;
@@ -630,8 +684,8 @@ impl QueueRow {
     unsafe fn decode(
         tuple: pg_sys::HeapTuple,
         tuple_desc: pg_sys::TupleDesc,
-        id: MaintenanceItemId,
-    ) -> Result<Self, MaintenanceError> {
+        id: ObjectCleanupItemId,
+    ) -> Result<Self, ObjectCleanupError> {
         let not_before: TimestampWithTimeZone = unsafe {
             required_attr(tuple, tuple_desc, column::NOT_BEFORE, "not_before")?
         };
@@ -688,19 +742,19 @@ impl QueueRow {
         })
     }
 
-    fn into_item(self) -> Result<MaintenanceItem, MaintenanceError> {
+    fn into_item(self) -> Result<ObjectCleanupItem, ObjectCleanupError> {
         if self.attempt_count < 0 {
-            return Err(MaintenanceError::InvalidRecord(
+            return Err(ObjectCleanupError::InvalidRecord(
                 "maintenance attempt count is negative".to_owned(),
             ));
         }
         if self.revision < 0 {
-            return Err(MaintenanceError::InvalidRecord(
+            return Err(ObjectCleanupError::InvalidRecord(
                 "maintenance revision is negative".to_owned(),
             ));
         }
         if self.producer.is_empty() || self.producer.len() > MAX_PRODUCER_BYTES {
-            return Err(MaintenanceError::InvalidRecord(
+            return Err(ObjectCleanupError::InvalidRecord(
                 "maintenance producer is invalid".to_owned(),
             ));
         }
@@ -709,41 +763,41 @@ impl QueueRow {
             .as_ref()
             .is_some_and(|name| name.len() > MAX_SOURCE_NAME_BYTES)
         {
-            return Err(MaintenanceError::InvalidRecord(
+            return Err(ObjectCleanupError::InvalidRecord(
                 "maintenance source name is too long".to_owned(),
             ));
         }
         let operation =
-            MaintenanceOperation::try_from(self.operation).map_err(|raw| {
-                MaintenanceError::InvalidRecord(format!(
+            ObjectCleanupOperation::try_from(self.operation).map_err(|raw| {
+                ObjectCleanupError::InvalidRecord(format!(
                     "unknown maintenance operation {raw}"
                 ))
             })?;
         let target = match operation {
-            MaintenanceOperation::DeleteObject => MaintenanceTarget::Object {
+            ObjectCleanupOperation::DeleteObject => ObjectCleanupTarget::Object {
                 store_id: self.store_id,
                 namespace: self.namespace,
                 path: self.path,
             },
-            MaintenanceOperation::DeleteTree => {
+            ObjectCleanupOperation::DeleteTree => {
                 if self.path.is_empty()
                     || self.path == "/"
                     || self.path.starts_with('/')
                     || !self.path.ends_with('/')
                 {
-                    return Err(MaintenanceError::InvalidRecord(
+                    return Err(ObjectCleanupError::InvalidRecord(
                         "maintenance tree prefix is not a scoped normalized root"
                             .to_owned(),
                     ));
                 }
-                MaintenanceTarget::Tree {
+                ObjectCleanupTarget::Tree {
                     store_id: self.store_id,
                     namespace: self.namespace,
                     prefix: self.path,
                 }
             }
         };
-        Ok(MaintenanceItem {
+        Ok(ObjectCleanupItem {
             id: self.id,
             target,
             attempt_count: self.attempt_count,
@@ -778,7 +832,7 @@ impl TupleFields {
 }
 
 fn target_keys(
-    operation: MaintenanceOperation,
+    operation: ObjectCleanupOperation,
     store_id: &str,
     namespace: &str,
     path: &str,
@@ -791,16 +845,18 @@ fn target_keys(
     ]
 }
 
-fn validate_context(item: &MaintenanceItemRef<'_>) -> Result<(), MaintenanceError> {
+fn validate_context(
+    item: &ObjectCleanupItemRef<'_>,
+) -> Result<(), ObjectCleanupError> {
     let context = item.fields().3;
     if context.producer.is_empty() || context.producer.len() > MAX_PRODUCER_BYTES {
-        return Err(MaintenanceError::InvalidProducer);
+        return Err(ObjectCleanupError::InvalidProducer);
     }
     if context
         .source_name
         .is_some_and(|name| name.len() > MAX_SOURCE_NAME_BYTES)
     {
-        return Err(MaintenanceError::InvalidSourceName);
+        return Err(ObjectCleanupError::InvalidSourceName);
     }
     Ok(())
 }
@@ -841,9 +897,9 @@ unsafe fn required_attr<T: FromDatum>(
     tuple_desc: pg_sys::TupleDesc,
     attno: i16,
     name: &'static str,
-) -> Result<T, MaintenanceError> {
+) -> Result<T, ObjectCleanupError> {
     unsafe { optional_attr(tuple, tuple_desc, attno) }.ok_or_else(|| {
-        MaintenanceError::InvalidRecord(format!(
+        ObjectCleanupError::InvalidRecord(format!(
             "maintenance queue column {name} is null or invalid"
         ))
     })

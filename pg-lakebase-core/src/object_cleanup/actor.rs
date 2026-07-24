@@ -1,4 +1,4 @@
-//! Bounded storage actor pool for maintenance execution.
+//! Bounded storage actor pool for object cleanup execution.
 
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use pg_lakebase_storage::{StorageClient, StorageError};
 
-use super::item::{MaintenanceItem, MaintenanceItemId};
+use super::item::{ObjectCleanupItem, ObjectCleanupItemId};
 use super::runner::{
-    MaintenanceExecutionError, MaintenanceExecutionOutcome, MaintenanceExecutor,
+    ObjectCleanupExecutionError, ObjectCleanupExecutionOutcome, ObjectCleanupExecutor,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,14 +22,14 @@ pub(crate) struct ActorRuntimeConfig {
 }
 
 enum ActorCommand {
-    Execute(Arc<MaintenanceItem>),
+    Execute(Arc<ObjectCleanupItem>),
     Shutdown,
 }
 
 pub(crate) struct ActorResult {
     pub(crate) actor_id: usize,
-    pub(crate) item_id: MaintenanceItemId,
-    pub(crate) outcome: MaintenanceExecutionOutcome,
+    pub(crate) item_id: ObjectCleanupItemId,
+    pub(crate) outcome: ObjectCleanupExecutionOutcome,
 }
 
 struct ActorHandle {
@@ -38,14 +38,14 @@ struct ActorHandle {
     busy: bool,
 }
 
-pub(crate) struct MaintenanceActorPool {
+pub(crate) struct ObjectCleanupActorPool {
     actors: Vec<ActorHandle>,
     results: mpsc::Receiver<ActorResult>,
     shutdown: Arc<AtomicBool>,
     runtime_config: Arc<RwLock<ActorRuntimeConfig>>,
 }
 
-impl MaintenanceActorPool {
+impl ObjectCleanupActorPool {
     pub(crate) fn start(
         actor_count: usize,
         socket_path: PathBuf,
@@ -94,8 +94,8 @@ impl MaintenanceActorPool {
 
     pub(crate) fn dispatch(
         &mut self,
-        item: Arc<MaintenanceItem>,
-    ) -> Result<usize, Arc<MaintenanceItem>> {
+        item: Arc<ObjectCleanupItem>,
+    ) -> Result<usize, Arc<ObjectCleanupItem>> {
         let Some((actor_id, actor)) = self
             .actors
             .iter_mut()
@@ -197,8 +197,8 @@ fn actor_loop(
                             let _ = results.send(ActorResult {
                                 actor_id,
                                 item_id,
-                                outcome: MaintenanceExecutionOutcome::Retryable(
-                                    MaintenanceExecutionError::new(error),
+                                outcome: ObjectCleanupExecutionOutcome::Retryable(
+                                    ObjectCleanupExecutionError::new(error),
                                 ),
                             });
                             continue;
@@ -208,15 +208,15 @@ fn actor_loop(
 
                 let outcome = match client.as_ref() {
                     Some((_, client)) => {
-                        let executor = MaintenanceExecutor::new(config.page_size);
+                        let executor = ObjectCleanupExecutor::new(config.page_size);
                         match panic::catch_unwind(AssertUnwindSafe(|| {
                             executor.execute(client, item.as_ref(), &shutdown)
                         })) {
                             Ok(outcome) => outcome,
                             Err(payload) => {
                                 let message = panic_payload_message(payload.as_ref());
-                                MaintenanceExecutionOutcome::Permanent(
-                                    MaintenanceExecutionError::new(
+                                ObjectCleanupExecutionOutcome::Permanent(
+                                    ObjectCleanupExecutionError::new(
                                         StorageError::backend(format!(
                                             "maintenance actor panicked while processing item {item_id}: {message}",
                                         )),
@@ -225,12 +225,12 @@ fn actor_loop(
                             }
                         }
                     }
-                    None => MaintenanceExecutionOutcome::Cancelled,
+                    None => ObjectCleanupExecutionOutcome::Cancelled,
                 };
                 if matches!(
                     &outcome,
-                    MaintenanceExecutionOutcome::Retryable(_)
-                        | MaintenanceExecutionOutcome::Permanent(_)
+                    ObjectCleanupExecutionOutcome::Retryable(_)
+                        | ObjectCleanupExecutionOutcome::Permanent(_)
                 ) {
                     client = None;
                 }

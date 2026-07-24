@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use pg_lakebase_core::diag::{SqlStateError, error_source_chain_detail};
-use pg_lakebase_core::storage_volume::StorageVolumeId;
+use pg_lakebase_core::storage::volume::StorageVolumeId;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 

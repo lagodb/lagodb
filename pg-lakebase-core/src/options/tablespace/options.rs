@@ -9,7 +9,7 @@ use super::defs::{
 use crate::catalog::{CatalogRelation, search_syscache_copy};
 use crate::diag::{PgError, SqlStateError};
 use crate::options::schema::OptionSchemaError;
-use crate::storage_volume::{StorageVolumeId, StorageVolumeIdError};
+use crate::storage::volume::{StorageVolumeId, StorageVolumeIdError};
 
 #[derive(Debug, Error)]
 pub enum TablespaceError {

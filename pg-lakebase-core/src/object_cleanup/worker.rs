@@ -1,4 +1,4 @@
-//! Database-local, on-demand maintenance worker supervisor.
+//! Database-local, on-demand object-cleanup worker supervisor.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
@@ -10,21 +10,24 @@ use pg_lakebase_storage::{StorageClient, StorageError};
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
-use super::actor::{ActorResult, ActorRuntimeConfig, MaintenanceActorPool};
-use super::gucs;
-use super::item::{MaintenanceItem, MaintenanceItemId};
-use super::repository::{MaintenanceRepository, QueuePoll};
-use super::runner::MaintenanceExecutionOutcome;
-use crate::bgworker::BackendLatch;
+use super::actor::{ActorResult, ActorRuntimeConfig, ObjectCleanupActorPool};
+use super::item::{ObjectCleanupItem, ObjectCleanupItemId};
+use super::repository::{ObjectCleanupRepository, QueuePoll};
+use super::runner::ObjectCleanupExecutionOutcome;
 use crate::extension_worker::{WorkerContext, WorkerDirective};
-use crate::storage_service::StorageEndpoint;
+use crate::maintenance_config::MaintenanceSettings;
+use crate::pg_latch::BackendLatch;
+use crate::storage::service::StorageEndpoint;
 
 const RESULT_PERSISTENCE_RETRY: Duration = Duration::from_secs(5);
 
-/// Drain maintenance work in the worker's already-connected database.
-pub fn run_database_worker(worker_context: &WorkerContext<'_>) -> WorkerDirective {
+/// Drain object-cleanup work in the worker's already-connected database.
+pub fn run_object_cleanup_worker(
+    worker_context: &WorkerContext<'_>,
+) -> WorkerDirective {
     worker_context.process_config_reload_if_pending();
-    if !gucs::enabled() {
+    let settings = MaintenanceSettings::load();
+    if !settings.enabled() {
         return WorkerDirective::Idle;
     }
 
@@ -36,12 +39,13 @@ pub fn run_database_worker(worker_context: &WorkerContext<'_>) -> WorkerDirectiv
         Schedule::Ready => {}
     }
 
-    let mut supervisor = match MaintenanceWorkerSupervisor::from_gucs() {
-        Ok(supervisor) => supervisor,
-        Err(error) => {
-            return error.worker_directive();
-        }
-    };
+    let mut supervisor =
+        match ObjectCleanupWorkerSupervisor::from_runtime_settings(settings) {
+            Ok(supervisor) => supervisor,
+            Err(error) => {
+                return error.worker_directive();
+            }
+        };
     crate::diag::report_info("database-local maintenance worker started");
     let directive = supervisor.run_until_idle(worker_context);
     supervisor.shutdown();
@@ -57,7 +61,7 @@ enum Schedule {
 
 fn current_schedule() -> Schedule {
     let poll = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-        MaintenanceRepository::fetch_ready_batch(1, &HashSet::new())
+        ObjectCleanupRepository::fetch_ready_batch(1, &HashSet::new())
     }));
     match poll {
         Ok(QueuePoll::Ready(batch))
@@ -78,7 +82,7 @@ fn current_schedule() -> Schedule {
 
 fn next_schedule() -> Schedule {
     let next = BackgroundWorker::transaction(AssertUnwindSafe(
-        MaintenanceRepository::next_pending_at,
+        ObjectCleanupRepository::next_pending_at,
     ));
     match next {
         Ok(Some(timestamp)) => {
@@ -101,9 +105,9 @@ fn next_schedule() -> Schedule {
     }
 }
 
-struct MaintenanceWorkerSupervisor {
-    actors: MaintenanceActorPool,
-    in_flight: HashMap<MaintenanceItemId, Arc<MaintenanceItem>>,
+struct ObjectCleanupWorkerSupervisor {
+    actors: ObjectCleanupActorPool,
+    in_flight: HashMap<ObjectCleanupItemId, Arc<ObjectCleanupItem>>,
     pending_results: VecDeque<ActorResult>,
     persistence_warning_emitted: bool,
 }
@@ -115,7 +119,7 @@ enum PersistenceStatus {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum MaintenanceWorkerStartupError {
+enum ObjectCleanupWorkerStartupError {
     #[error("failed to start maintenance actor pool: {0}")]
     ActorPool(#[source] std::io::Error),
 
@@ -133,7 +137,7 @@ enum MaintenanceWorkerStartupError {
     },
 }
 
-impl MaintenanceWorkerStartupError {
+impl ObjectCleanupWorkerStartupError {
     fn worker_directive(&self) -> WorkerDirective {
         match self {
             Self::StorageDisabled => {
@@ -158,32 +162,34 @@ impl MaintenanceWorkerStartupError {
     }
 }
 
-impl MaintenanceWorkerSupervisor {
-    fn from_gucs() -> Result<Self, MaintenanceWorkerStartupError> {
+impl ObjectCleanupWorkerSupervisor {
+    fn from_runtime_settings(
+        settings: MaintenanceSettings,
+    ) -> Result<Self, ObjectCleanupWorkerStartupError> {
         let endpoint = StorageEndpoint::from_pg_gucs()
-            .map_err(MaintenanceWorkerStartupError::StorageConfig)?;
+            .map_err(ObjectCleanupWorkerStartupError::StorageConfig)?;
         if !endpoint.is_enabled() {
-            return Err(MaintenanceWorkerStartupError::StorageDisabled);
+            return Err(ObjectCleanupWorkerStartupError::StorageDisabled);
         }
 
-        let runtime_config = actor_runtime_config();
+        let runtime_config = actor_runtime_config(settings);
         StorageClient::connect_with_timeout(
             endpoint.socket_path(),
             runtime_config.request_timeout,
         )
         .map_err(|source| {
-            MaintenanceWorkerStartupError::StorageUnavailable {
+            ObjectCleanupWorkerStartupError::StorageUnavailable {
                 socket_path: endpoint.socket_path().to_path_buf(),
                 source,
             }
         })?;
 
-        let actors = MaintenanceActorPool::start(
-            gucs::actor_threads(),
+        let actors = ObjectCleanupActorPool::start(
+            settings.actor_threads(),
             endpoint.socket_path().to_path_buf(),
             runtime_config,
         )
-        .map_err(MaintenanceWorkerStartupError::ActorPool)?;
+        .map_err(ObjectCleanupWorkerStartupError::ActorPool)?;
         Ok(Self {
             actors,
             in_flight: HashMap::new(),
@@ -225,7 +231,8 @@ impl MaintenanceWorkerSupervisor {
                 return WorkerDirective::Idle;
             }
             if worker_context.process_config_reload_if_pending() {
-                self.actors.reload(actor_runtime_config());
+                self.actors
+                    .reload(actor_runtime_config(MaintenanceSettings::load()));
             }
         }
     }
@@ -242,7 +249,7 @@ impl MaintenanceWorkerSupervisor {
                 self.pending_results.pop_front();
                 continue;
             };
-            if matches!(&result.outcome, MaintenanceExecutionOutcome::Cancelled) {
+            if matches!(&result.outcome, ObjectCleanupExecutionOutcome::Cancelled) {
                 let item_id = result.item_id;
                 self.pending_results.pop_front();
                 self.in_flight.remove(&item_id);
@@ -251,19 +258,22 @@ impl MaintenanceWorkerSupervisor {
 
             let update = BackgroundWorker::transaction(AssertUnwindSafe(|| {
                 match &result.outcome {
-                    MaintenanceExecutionOutcome::Complete => {
-                        MaintenanceRepository::complete(item.as_ref())
+                    ObjectCleanupExecutionOutcome::Complete => {
+                        ObjectCleanupRepository::complete(item.as_ref())
                     }
-                    MaintenanceExecutionOutcome::Retryable(error) => {
-                        MaintenanceRepository::retry(
+                    ObjectCleanupExecutionOutcome::Retryable(error) => {
+                        ObjectCleanupRepository::retry(
                             item.as_ref(),
                             &error.to_string(),
                         )
                     }
-                    MaintenanceExecutionOutcome::Permanent(error) => {
-                        MaintenanceRepository::fail(item.as_ref(), &error.to_string())
+                    ObjectCleanupExecutionOutcome::Permanent(error) => {
+                        ObjectCleanupRepository::fail(
+                            item.as_ref(),
+                            &error.to_string(),
+                        )
                     }
-                    MaintenanceExecutionOutcome::Cancelled => unreachable!(),
+                    ObjectCleanupExecutionOutcome::Cancelled => unreachable!(),
                 }
             }));
             if let Err(error) = update {
@@ -290,7 +300,7 @@ impl MaintenanceWorkerSupervisor {
         }
         let in_flight: HashSet<_> = self.in_flight.keys().copied().collect();
         let poll = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-            MaintenanceRepository::fetch_ready_batch(capacity, &in_flight)
+            ObjectCleanupRepository::fetch_ready_batch(capacity, &in_flight)
         }));
         let Ok(QueuePoll::Ready(batch)) = poll else {
             return PersistenceStatus::Complete;
@@ -299,7 +309,7 @@ impl MaintenanceWorkerSupervisor {
         for invalid in batch.invalid {
             if let Err(error) =
                 BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                    MaintenanceRepository::fail_invalid(invalid.id, &invalid.error)
+                    ObjectCleanupRepository::fail_invalid(invalid.id, &invalid.error)
                 }))
             {
                 if !self.persistence_warning_emitted {
@@ -329,7 +339,8 @@ impl MaintenanceWorkerSupervisor {
 
     fn shutdown(&mut self) {
         self.actors.request_shutdown();
-        let deadline = Instant::now() + gucs::shutdown_timeout();
+        let deadline =
+            Instant::now() + MaintenanceSettings::load().shutdown_timeout();
         let mut persistence_failed = false;
         while Instant::now() < deadline && !self.actors.all_finished() {
             self.collect_actor_results();
@@ -354,9 +365,9 @@ impl MaintenanceWorkerSupervisor {
     }
 }
 
-fn actor_runtime_config() -> ActorRuntimeConfig {
+fn actor_runtime_config(settings: MaintenanceSettings) -> ActorRuntimeConfig {
     ActorRuntimeConfig {
-        page_size: gucs::batch_items(),
-        request_timeout: gucs::request_timeout(),
+        page_size: settings.batch_items(),
+        request_timeout: settings.request_timeout(),
     }
 }

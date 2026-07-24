@@ -1,8 +1,10 @@
+//! Observes storage objects that belong to a cleanup tree.
+
 use std::time::Duration;
 
 use pg_lakebase_storage::{StorageClient, StorageResult};
 
-use crate::storage_service::StorageEndpoint;
+use crate::storage::service::StorageEndpoint;
 
 use super::ObjectTreeTarget;
 

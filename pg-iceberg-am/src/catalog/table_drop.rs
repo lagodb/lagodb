@@ -1,8 +1,8 @@
 //! Transactional Iceberg DROP TABLE orchestration.
 
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::maintenance::{
-    MaintenanceContext, MaintenanceItemRef, MaintenanceQueue, ObjectTreeTarget,
+use pg_lakebase_core::object_cleanup::{
+    ObjectCleanupContext, ObjectCleanupItemRef, ObjectCleanupQueue, ObjectTreeTarget,
 };
 use pg_lakebase_core::options::{TableOptions, get_tablespace};
 
@@ -63,14 +63,15 @@ impl<'a> IcebergTableDrop<'a> {
             }
             TableRootCleanup::Remote(target) => {
                 let source_name = self.rel.relation_name();
-                let _ = MaintenanceQueue::enqueue(MaintenanceItemRef::DeleteTree {
-                    target: &target,
-                    context: MaintenanceContext {
-                        producer: "iceberg-drop",
-                        source_relid: Some(self.rel.oid()),
-                        source_name: Some(&source_name),
-                    },
-                })?;
+                let _ =
+                    ObjectCleanupQueue::enqueue(ObjectCleanupItemRef::DeleteTree {
+                        target: &target,
+                        context: ObjectCleanupContext {
+                            producer: "iceberg-drop",
+                            source_relid: Some(self.rel.oid()),
+                            source_name: Some(&source_name),
+                        },
+                    })?;
             }
         }
 

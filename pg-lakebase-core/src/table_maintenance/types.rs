@@ -3,6 +3,7 @@ use std::ffi::CStr;
 use pgrx::pg_sys;
 
 use crate::handles::VacuumParamsHandle;
+use crate::maintenance_config::MaintenanceSettings;
 
 /// PostgreSQL command intensity and locking profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +44,13 @@ pub struct TableMaintenanceBudget {
 
 impl TableMaintenanceBudget {
     pub fn configured() -> Self {
-        crate::maintenance::table_maintenance_budget()
+        let budget = MaintenanceSettings::load().vacuum_budget();
+        Self {
+            max_input_objects: budget.max_input_objects,
+            max_input_bytes: budget.max_input_bytes,
+            max_group_objects: budget.max_group_objects,
+            max_group_bytes: budget.max_group_bytes,
+        }
     }
 
     pub fn without_soft_limit(self, mode: TableMaintenanceMode) -> Self {

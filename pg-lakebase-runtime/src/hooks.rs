@@ -4,7 +4,7 @@ use std::ffi::CStr;
 use pg_lakebase_core::catalog::{
     self, CatalogRelation, CatalogScanKey, CatalogSnapshot,
 };
-use pg_lakebase_core::maintenance::MaintenanceQueue;
+use pg_lakebase_core::object_cleanup::ObjectCleanupQueue;
 use pgrx::prelude::*;
 
 use crate::{error::LakebaseError, lifecycle, registry, runtime};
@@ -235,7 +235,7 @@ fn prepare_extension_drop(extension_oid: pg_sys::Oid, extension_name: &CStr) {
         runtime::DatabaseLifecycleLock::new(database_oid).acquire_drop();
         lifecycle::request_database_reconcile();
         runtime::stop_database(database_oid).unwrap_or_else(|error| error.report());
-        let has_unresolved_items = MaintenanceQueue::has_unresolved_items()
+        let has_unresolved_items = ObjectCleanupQueue::has_unresolved_items()
             .map_err(|source| LakebaseError::MaintenanceQueueInspection { source })
             .unwrap_or_else(|error| error.report());
         if has_unresolved_items {

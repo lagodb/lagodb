@@ -1,3 +1,5 @@
+//! Stable identifiers for configured storage volumes.
+
 use std::fmt;
 use std::num::NonZeroU64;
 

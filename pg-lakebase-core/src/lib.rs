@@ -70,8 +70,11 @@ pub mod runtime_api;
 /// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.
 pub mod transaction;
 
-/// Format-neutral durable maintenance queue and worker framework.
-pub mod maintenance;
+/// Format-neutral durable physical object-cleanup queue and worker framework.
+pub mod object_cleanup;
+
+/// Runtime-backed settings shared by maintenance domains.
+pub(crate) mod maintenance_config;
 
 /// Format-neutral logical table-maintenance provider SPI and VACUUM routing.
 pub mod table_maintenance;
@@ -85,8 +88,8 @@ mod wrapper;
 /// Catalog access and caching
 pub mod catalog;
 
-/// PostgreSQL bgworker/backend process primitives.
-pub mod bgworker;
+/// PostgreSQL backend latch primitives.
+pub mod pg_latch;
 
 /// Typed PostgreSQL injection points with version-compatible no-op fallback.
 pub mod injection_point;
@@ -94,9 +97,8 @@ pub mod injection_point;
 /// Database-local extension worker protocol.
 pub mod extension_worker;
 
-/// Consumer API for the runtime-owned storage service.
-pub mod storage_service;
-pub mod storage_volume;
+/// Storage service and storage-volume APIs.
+pub mod storage;
 
 /// The prelude includes all necessary imports to make pg_lakebase_core work
 pub mod prelude {

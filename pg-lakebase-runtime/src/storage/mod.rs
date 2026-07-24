@@ -17,7 +17,7 @@ pub(crate) mod volume_config;
 
 use std::path::PathBuf;
 
-use pg_lakebase_core::storage_service::StorageEndpoint;
+use pg_lakebase_core::storage::service::StorageEndpoint;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 

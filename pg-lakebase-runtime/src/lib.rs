@@ -1,4 +1,8 @@
-use pg_lakebase_core::maintenance::{MaintenanceItemId, MaintenanceQueue};
+use pg_lakebase_core::object_cleanup::{
+    ObjectCleanupItemId, ObjectCleanupQueue, ObjectTreeObserver,
+    run_object_cleanup_worker,
+};
+use pg_lakebase_core::table_maintenance::TableMaintenanceRouter;
 use pgrx::PgRelation;
 use pgrx::datum::{Internal, Uuid};
 use pgrx::prelude::*;
@@ -73,10 +77,7 @@ mod lakebase {
         )
         .map_err(PgReportError::from_domain_error)
         .report_unwrap();
-        let stats =
-            pg_lakebase_core::table_maintenance::TableMaintenanceRouter::inspect(
-                &relation.as_handle(),
-            )
+        let stats = TableMaintenanceRouter::inspect(&relation.as_handle())
             .map_err(PgReportError::from_domain_error)
             .report_unwrap();
         let sql_i64 = |value: u64, metric: &'static str| {
@@ -116,17 +117,15 @@ mod lakebase {
         prefix: &str,
     ) -> TableIterator<'static, (name!(objects, i64), name!(bytes, i64))> {
         use pg_lakebase_core::diag::PgReportError;
-        let stats = pg_lakebase_core::maintenance::ObjectTreeObserver::connect(
-            std::time::Duration::from_secs(5),
-        )
-        .and_then(|observer| observer.observe(store_id, namespace, prefix))
-        .unwrap_or_else(|error| {
-            PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                format!("failed to observe object tree: {error}"),
-            )
-            .report()
-        });
+        let stats = ObjectTreeObserver::connect(std::time::Duration::from_secs(5))
+            .and_then(|observer| observer.observe(store_id, namespace, prefix))
+            .unwrap_or_else(|error| {
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    format!("failed to observe object tree: {error}"),
+                )
+                .report()
+            });
         let sql_i64 = |value: u64, metric: &'static str| {
             i64::try_from(value).unwrap_or_else(|_| {
                 PgReportError::from_message(
@@ -308,13 +307,13 @@ mod lakebase {
         let worker_context = worker_context
             .map_err(|source| error::LakebaseError::WorkerContext { source })
             .unwrap_or_else(|error| error.report());
-        pg_lakebase_core::maintenance::run_database_worker(&worker_context).encode()
+        run_object_cleanup_worker(&worker_context).encode()
     }
 
     #[pg_extern]
     fn retry_maintenance_item(target_item_id: Uuid) -> bool {
         ensure_runtime_preloaded();
-        MaintenanceQueue::retry_failed(MaintenanceItemId::from_pg_uuid(
+        ObjectCleanupQueue::retry_failed(ObjectCleanupItemId::from_pg_uuid(
             target_item_id,
         ))
         .map_err(|source| error::LakebaseError::RetryMaintenanceItem { source })

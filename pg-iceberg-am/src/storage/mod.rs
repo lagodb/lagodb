@@ -16,7 +16,7 @@ use crate::error::IcebergResult;
 use iceberg_lite::io::FileIO;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::options::get_tablespace;
-use pg_lakebase_core::storage_service::{BackendStorageService, StorageEndpoint};
+use pg_lakebase_core::storage::service::{BackendStorageService, StorageEndpoint};
 use pg_lakebase_storage::StagingPathResolver;
 use pgrx::pg_sys;
 use std::ffi::CStr;

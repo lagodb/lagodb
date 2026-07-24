@@ -4,7 +4,7 @@ use pg_lakebase_core::runtime_api::{
     StorageVolumeRouteV1, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
-use pg_lakebase_core::storage_volume::StorageVolumeId;
+use pg_lakebase_core::storage::volume::StorageVolumeId;
 use pgrx::PgMemoryContexts;
 
 #[pgrx::pg_guard]

@@ -14,7 +14,7 @@ use pgrx::bgworkers::BackgroundWorker;
 use pgrx::pg_sys;
 use tokio_util::sync::CancellationToken;
 
-use pg_lakebase_core::bgworker::BackendLatch;
+use pg_lakebase_core::pg_latch::BackendLatch;
 use pg_lakebase_storage::{StorageRuntime, StoreRegistry};
 
 use super::catalog::VolumeConfigSource;

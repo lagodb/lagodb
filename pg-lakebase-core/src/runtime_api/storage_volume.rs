@@ -2,7 +2,7 @@
 
 use std::ffi::{CStr, c_char};
 
-use crate::storage_volume::{
+use crate::storage::volume::{
     StorageVolumeId, StorageVolumeRoute, StorageVolumeRouteError,
 };
 

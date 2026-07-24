@@ -7,7 +7,7 @@ use crate::storage::transaction_resources::register_table_dir_created;
 use iceberg_lite::catalog::TableCreation;
 use iceberg_lite::spec::{SortOrder, UnboundPartitionSpec};
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::maintenance::{MaintenanceQueue, ObjectTreeTarget};
+use pg_lakebase_core::object_cleanup::{ObjectCleanupQueue, ObjectTreeTarget};
 use pg_lakebase_core::options::get_tablespace;
 use pgrx::pg_sys;
 use std::sync::OnceLock;
@@ -52,7 +52,7 @@ impl<'a> IcebergTableLifecycle<'a> {
                 opts.object_namespace(),
                 object_path,
             )?;
-            if MaintenanceQueue::has_tree_target(&target)? {
+            if ObjectCleanupQueue::has_tree_target(&target)? {
                 return Err(IcebergError::ActiveMaintenanceTarget);
             }
         }

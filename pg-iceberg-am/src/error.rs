@@ -15,7 +15,7 @@
 
 use pg_lakebase_core::diag::{PgError, SqlStateError, domain_error_report};
 use pg_lakebase_core::extension_worker::WorkerNotificationError;
-use pg_lakebase_core::maintenance::MaintenanceError;
+use pg_lakebase_core::object_cleanup::ObjectCleanupError;
 use pg_lakebase_core::options::TablespaceError;
 use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
 use pg_lakebase_storage::{StorageError, StorageErrorKind};
@@ -154,7 +154,7 @@ pub enum IcebergError {
     StorageError(#[from] pg_lakebase_storage::StorageError),
 
     #[error("maintenance error: {0}")]
-    MaintenanceError(#[from] MaintenanceError),
+    ObjectCleanupError(#[from] ObjectCleanupError),
 
     #[error("failed to schedule Iceberg automatic maintenance: {source}")]
     AutomaticMaintenanceNotification {
@@ -279,7 +279,7 @@ impl SqlStateError for IcebergError {
 
             IcebergError::StorageError(error) => storage_sql_error_code(error),
 
-            IcebergError::MaintenanceError(error) => error.sql_error_code(),
+            IcebergError::ObjectCleanupError(error) => error.sql_error_code(),
 
             IcebergError::AutomaticMaintenanceNotification { .. } => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE

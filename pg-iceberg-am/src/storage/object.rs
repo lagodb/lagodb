@@ -1,6 +1,7 @@
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
-use pg_lakebase_core::storage_service::BackendStorageService;
+use pg_lakebase_core::object_cleanup::ObjectTarget;
+use pg_lakebase_core::storage::service::BackendStorageService;
 use pg_lakebase_storage::{
     ListCursor, ObjectLocation, StagingFile, StagingPathResolver, StorageError,
     StorageFile, StoreId,
@@ -75,15 +76,11 @@ impl ObjectStorage {
     pub(crate) fn maintenance_target_owned(
         &self,
         mut uri: String,
-    ) -> Result<pg_lakebase_core::maintenance::ObjectTarget> {
+    ) -> Result<ObjectTarget> {
         let relative_path_pos = resolve_object_uri(&self.effective_base_uri, &uri)?;
         let path = uri.split_off(relative_path_pos);
-        pg_lakebase_core::maintenance::ObjectTarget::new(
-            self.store_id.as_str(),
-            self.bucket.as_ref(),
-            path,
-        )
-        .map_err(storage_err)
+        ObjectTarget::new(self.store_id.as_str(), self.bucket.as_ref(), path)
+            .map_err(storage_err)
     }
 
     pub(crate) fn list_older_than(

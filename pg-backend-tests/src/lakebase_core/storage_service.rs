@@ -1,4 +1,4 @@
-//! Backend `#[pg_test]` coverage for `pg_lakebase_core::storage_service`.
+//! Backend `#[pg_test]` coverage for `pg_lakebase_core::storage::service`.
 //!
 //! `StorageEndpoint::from_config` (and `from_pg_gucs`) resolve default paths
 //! through `pg_sys::DataDir`, a PostgreSQL backend data symbol. Per
@@ -12,7 +12,7 @@
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use pg_lakebase_core::storage_service::StorageEndpoint;
+    use pg_lakebase_core::storage::service::StorageEndpoint;
     use pgrx::pg_test;
 
     #[pg_test]

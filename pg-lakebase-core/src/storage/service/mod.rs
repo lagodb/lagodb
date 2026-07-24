@@ -1,4 +1,4 @@
-//! Consumer-side access to the runtime-owned storage service.
+//! Consumer-side API for the runtime-owned storage service.
 //!
 //! The `pg_lakebase` runtime extension is the only crate that registers storage
 //! GUC backing statics and the static storage background worker. Access-method

@@ -1,3 +1,5 @@
+//! Storage-service injection points.
+
 use crate::injection_point::InjectionPoint;
 
 /// Storage-client injection points at coarse foreground lifecycle boundaries.

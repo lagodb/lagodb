@@ -2,7 +2,7 @@ use std::fmt;
 
 use pg_lakebase_core::diag::{PgError, PgReportError, SqlStateError};
 use pg_lakebase_core::extension_worker::WorkerContextError;
-use pg_lakebase_core::maintenance::MaintenanceError;
+use pg_lakebase_core::object_cleanup::ObjectCleanupError;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -145,7 +145,7 @@ pub(crate) enum LakebaseError {
     #[error("failed to inspect maintenance queue before DROP EXTENSION: {source}")]
     MaintenanceQueueInspection {
         #[source]
-        source: MaintenanceError,
+        source: ObjectCleanupError,
     },
 
     #[error(
@@ -162,7 +162,7 @@ pub(crate) enum LakebaseError {
     #[error("failed to retry maintenance item: {source}")]
     RetryMaintenanceItem {
         #[source]
-        source: MaintenanceError,
+        source: ObjectCleanupError,
     },
 }
 

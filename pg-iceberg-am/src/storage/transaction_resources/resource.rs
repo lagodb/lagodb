@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use iceberg_lite::io::FileIO;
-use pg_lakebase_core::storage_service::BackendStorageService;
+use pg_lakebase_core::storage::service::BackendStorageService;
 use pg_lakebase_core::wal::flush_wal;
 use pg_lakebase_storage::{ObjectLocation, StorageErrorKind};
 

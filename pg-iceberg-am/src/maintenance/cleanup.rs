@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 
 use iceberg_lite::io::FileIO;
-use pg_lakebase_core::maintenance::{
-    MaintenanceContext, MaintenanceItemRef, MaintenanceQueue,
+use pg_lakebase_core::object_cleanup::{
+    ObjectCleanupContext, ObjectCleanupItemRef, ObjectCleanupQueue,
+    object_cleanup_batch_items,
 };
+use pg_lakebase_core::table_maintenance::TableMaintenanceReport;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
@@ -24,7 +26,7 @@ pub(crate) struct VacuumCleanupRegistration {
 impl VacuumCleanupRegistration {
     pub(crate) fn record(
         self,
-        report: &mut pg_lakebase_core::table_maintenance::TableMaintenanceReport,
+        report: &mut TableMaintenanceReport,
     ) -> IcebergResult<()> {
         record_metric(report, c"local_pending_paths", self.local_pending_paths)?;
         record_metric(report, c"local_wal_batches", self.local_wal_batches)?;
@@ -127,40 +129,40 @@ impl VacuumCleanup {
         if let Some(object) =
             file_io.storage().as_any().downcast_ref::<ObjectStorage>()
         {
-            let batch_size = pg_lakebase_core::maintenance::producer_batch_items();
+            let batch_size = object_cleanup_batch_items();
             let mut targets = Vec::with_capacity(batch_size);
             for path in candidates {
                 targets.push(object.maintenance_target_owned(path)?);
                 if targets.len() < batch_size {
                     continue;
                 }
-                let items: Vec<MaintenanceItemRef<'_>> = targets
+                let items: Vec<ObjectCleanupItemRef<'_>> = targets
                     .iter()
-                    .map(|target| MaintenanceItemRef::DeleteObject {
+                    .map(|target| ObjectCleanupItemRef::DeleteObject {
                         target,
-                        context: MaintenanceContext {
+                        context: ObjectCleanupContext {
                             producer: "pg_iceberg_am.vacuum",
                             source_relid: Some(relid),
                             source_name: None,
                         },
                     })
                     .collect();
-                MaintenanceQueue::enqueue_batch(&items)?;
+                ObjectCleanupQueue::enqueue_batch(&items)?;
                 targets.clear();
             }
             if !targets.is_empty() {
-                let items: Vec<MaintenanceItemRef<'_>> = targets
+                let items: Vec<ObjectCleanupItemRef<'_>> = targets
                     .iter()
-                    .map(|target| MaintenanceItemRef::DeleteObject {
+                    .map(|target| ObjectCleanupItemRef::DeleteObject {
                         target,
-                        context: MaintenanceContext {
+                        context: ObjectCleanupContext {
                             producer: "pg_iceberg_am.vacuum",
                             source_relid: Some(relid),
                             source_name: None,
                         },
                     })
                     .collect();
-                MaintenanceQueue::enqueue_batch(&items)?;
+                ObjectCleanupQueue::enqueue_batch(&items)?;
             }
             return Ok(VacuumCleanupRegistration {
                 objects: count,

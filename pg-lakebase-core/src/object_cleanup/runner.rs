@@ -1,4 +1,4 @@
-//! Format-neutral physical maintenance execution.
+//! Format-neutral physical object-cleanup execution.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -6,33 +6,33 @@ use pg_lakebase_storage::{
     ListCursor, StorageClient, StorageError, StorageErrorKind,
 };
 
-use super::item::{MaintenanceItem, MaintenanceTarget};
+use super::item::{ObjectCleanupItem, ObjectCleanupTarget};
 
 #[derive(Debug, thiserror::Error)]
 #[error("maintenance storage operation failed: {source}")]
-pub(crate) struct MaintenanceExecutionError {
+pub(crate) struct ObjectCleanupExecutionError {
     #[source]
     source: StorageError,
 }
 
-impl MaintenanceExecutionError {
+impl ObjectCleanupExecutionError {
     pub(crate) fn new(source: StorageError) -> Self {
         Self { source }
     }
 }
 
-pub(crate) enum MaintenanceExecutionOutcome {
+pub(crate) enum ObjectCleanupExecutionOutcome {
     Complete,
-    Retryable(MaintenanceExecutionError),
-    Permanent(MaintenanceExecutionError),
+    Retryable(ObjectCleanupExecutionError),
+    Permanent(ObjectCleanupExecutionError),
     Cancelled,
 }
 
-pub(crate) struct MaintenanceExecutor {
+pub(crate) struct ObjectCleanupExecutor {
     page_size: u32,
 }
 
-impl MaintenanceExecutor {
+impl ObjectCleanupExecutor {
     pub(crate) fn new(page_size: usize) -> Self {
         Self {
             page_size: u32::try_from(page_size).unwrap_or(u32::MAX),
@@ -42,28 +42,28 @@ impl MaintenanceExecutor {
     pub(crate) fn execute(
         &self,
         client: &StorageClient,
-        item: &MaintenanceItem,
+        item: &ObjectCleanupItem,
         cancelled: &AtomicBool,
-    ) -> MaintenanceExecutionOutcome {
+    ) -> ObjectCleanupExecutionOutcome {
         match &item.target {
-            MaintenanceTarget::Object {
+            ObjectCleanupTarget::Object {
                 store_id,
                 namespace,
                 path,
             } => {
                 if cancelled.load(Ordering::Acquire) {
-                    return MaintenanceExecutionOutcome::Cancelled;
+                    return ObjectCleanupExecutionOutcome::Cancelled;
                 }
                 match client.delete(
                     store_id.as_str(),
                     namespace.as_str(),
                     path.as_str(),
                 ) {
-                    Ok(()) => MaintenanceExecutionOutcome::Complete,
+                    Ok(()) => ObjectCleanupExecutionOutcome::Complete,
                     Err(error) => classify(error),
                 }
             }
-            MaintenanceTarget::Tree {
+            ObjectCleanupTarget::Tree {
                 store_id,
                 namespace,
                 prefix,
@@ -78,12 +78,12 @@ impl MaintenanceExecutor {
         namespace: &str,
         prefix: &str,
         cancelled: &AtomicBool,
-    ) -> MaintenanceExecutionOutcome {
+    ) -> ObjectCleanupExecutionOutcome {
         let mut cursor: Option<ListCursor> = None;
         loop {
             if cancelled.load(Ordering::Acquire) {
                 close_cursor(client, cursor);
-                return MaintenanceExecutionOutcome::Cancelled;
+                return ObjectCleanupExecutionOutcome::Cancelled;
             }
 
             let request_cursor = cursor.clone();
@@ -104,7 +104,7 @@ impl MaintenanceExecutor {
 
             if cancelled.load(Ordering::Acquire) {
                 close_cursor(client, cursor);
-                return MaintenanceExecutionOutcome::Cancelled;
+                return ObjectCleanupExecutionOutcome::Cancelled;
             }
 
             if !page.entries.is_empty() {
@@ -127,7 +127,7 @@ impl MaintenanceExecutor {
             }
 
             if cursor.is_none() {
-                return MaintenanceExecutionOutcome::Complete;
+                return ObjectCleanupExecutionOutcome::Complete;
             }
         }
     }
@@ -139,17 +139,17 @@ fn close_cursor(client: &StorageClient, cursor: Option<ListCursor>) {
     }
 }
 
-fn classify(error: StorageError) -> MaintenanceExecutionOutcome {
+fn classify(error: StorageError) -> ObjectCleanupExecutionOutcome {
     // Expired list cursors are retryable: DeleteTree can restart listing from the
     // root and deletion is idempotent.
     let permanent = matches!(
         error.kind(),
         StorageErrorKind::InvalidPath | StorageErrorKind::Unsupported
     );
-    let error = MaintenanceExecutionError::new(error);
+    let error = ObjectCleanupExecutionError::new(error);
     if permanent {
-        MaintenanceExecutionOutcome::Permanent(error)
+        ObjectCleanupExecutionOutcome::Permanent(error)
     } else {
-        MaintenanceExecutionOutcome::Retryable(error)
+        ObjectCleanupExecutionOutcome::Retryable(error)
     }
 }

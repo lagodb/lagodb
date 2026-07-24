@@ -1,4 +1,4 @@
-//! Maintenance queue domain types.
+//! Object-cleanup queue domain types.
 
 use pgrx::datum::Uuid as PgUuid;
 use pgrx::pg_sys;
@@ -7,12 +7,12 @@ use super::target::{ObjectTarget, ObjectTreeTarget};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i16)]
-pub enum MaintenanceOperation {
+pub enum ObjectCleanupOperation {
     DeleteObject = 1,
     DeleteTree = 2,
 }
 
-impl TryFrom<i16> for MaintenanceOperation {
+impl TryFrom<i16> for ObjectCleanupOperation {
     type Error = i16;
 
     fn try_from(value: i16) -> Result<Self, Self::Error> {
@@ -25,9 +25,9 @@ impl TryFrom<i16> for MaintenanceOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct MaintenanceItemId(pub(crate) PgUuid);
+pub struct ObjectCleanupItemId(pub(crate) PgUuid);
 
-impl MaintenanceItemId {
+impl ObjectCleanupItemId {
     pub(crate) fn new() -> Self {
         Self(PgUuid::from_bytes(*uuid::Uuid::now_v7().as_bytes()))
     }
@@ -41,39 +41,39 @@ impl MaintenanceItemId {
     }
 }
 
-impl std::fmt::Display for MaintenanceItemId {
+impl std::fmt::Display for ObjectCleanupItemId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct MaintenanceContext<'a> {
+pub struct ObjectCleanupContext<'a> {
     pub producer: &'a str,
     pub source_relid: Option<pg_sys::Oid>,
     pub source_name: Option<&'a str>,
 }
 
-pub enum MaintenanceItemRef<'a> {
+pub enum ObjectCleanupItemRef<'a> {
     DeleteObject {
         target: &'a ObjectTarget,
-        context: MaintenanceContext<'a>,
+        context: ObjectCleanupContext<'a>,
     },
     DeleteTree {
         target: &'a ObjectTreeTarget,
-        context: MaintenanceContext<'a>,
+        context: ObjectCleanupContext<'a>,
     },
 }
 
-impl MaintenanceItemRef<'_> {
-    pub(crate) fn operation(&self) -> MaintenanceOperation {
+impl ObjectCleanupItemRef<'_> {
+    pub(crate) fn operation(&self) -> ObjectCleanupOperation {
         match self {
-            Self::DeleteObject { .. } => MaintenanceOperation::DeleteObject,
-            Self::DeleteTree { .. } => MaintenanceOperation::DeleteTree,
+            Self::DeleteObject { .. } => ObjectCleanupOperation::DeleteObject,
+            Self::DeleteTree { .. } => ObjectCleanupOperation::DeleteTree,
         }
     }
 
-    pub(crate) fn fields(&self) -> (&str, &str, &str, &MaintenanceContext<'_>) {
+    pub(crate) fn fields(&self) -> (&str, &str, &str, &ObjectCleanupContext<'_>) {
         match self {
             Self::DeleteObject { target, context } => (
                 target.store_id().as_str(),
@@ -92,15 +92,15 @@ impl MaintenanceItemRef<'_> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct MaintenanceItem {
-    pub(crate) id: MaintenanceItemId,
-    pub(crate) target: MaintenanceTarget,
+pub(crate) struct ObjectCleanupItem {
+    pub(crate) id: ObjectCleanupItemId,
+    pub(crate) target: ObjectCleanupTarget,
     pub(crate) attempt_count: i32,
     pub(crate) revision: i64,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum MaintenanceTarget {
+pub(crate) enum ObjectCleanupTarget {
     Object {
         store_id: String,
         namespace: String,
