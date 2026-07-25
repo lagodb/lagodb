@@ -1,3 +1,5 @@
+use core::num::NonZeroU16;
+
 use super::borrowed::PgBorrowed;
 use pgrx::pg_sys;
 
@@ -24,7 +26,11 @@ impl<'a> TupleTableSlotHandle<'a> {
     }
 }
 
-/// Safe wrapper for PostgreSQL ItemPointer (TID).
+/// Safe value wrapper for PostgreSQL ItemPointer (TID).
+///
+/// Some PostgreSQL APIs deliberately use offset zero as a range bound or pass
+/// arbitrary user input to an AM validity callback, so this general value type
+/// also represents invalid physical identities.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ItemPointer {
     pub block_number: u32,
@@ -48,7 +54,9 @@ impl ItemPointer {
         }
     }
 
+    /// Convert this value to PostgreSQL's C representation.
     #[inline]
+    #[must_use]
     pub fn to_pg_sys(&self) -> pg_sys::ItemPointerData {
         pg_sys::ItemPointerData {
             ip_blkid: pg_sys::BlockIdData {
@@ -68,6 +76,82 @@ impl ItemPointer {
         unsafe {
             *ptr = self.to_pg_sys();
         }
+    }
+}
+
+/// PostgreSQL ItemPointer proven suitable for use as a physical row identity.
+///
+/// PostgreSQL's `ItemPointerIsValid` contract requires a nonzero item offset.
+/// FDW scan and modify writers accept this type so they do not repeat the same
+/// validity check for every returned row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ValidItemPointer {
+    block_number: u32,
+    offset: NonZeroU16,
+}
+
+impl ValidItemPointer {
+    /// Construct a valid identity from its block number and nonzero offset.
+    #[inline]
+    #[must_use]
+    pub const fn new(block_number: u32, offset: NonZeroU16) -> Self {
+        Self {
+            block_number,
+            offset,
+        }
+    }
+
+    /// Construct an identity from an offset already proven to be nonzero.
+    ///
+    /// # Safety
+    ///
+    /// `offset` must not be zero.
+    #[inline]
+    #[must_use]
+    pub const unsafe fn new_unchecked(block_number: u32, offset: u16) -> Self {
+        Self {
+            block_number,
+            // SAFETY: upheld by the caller.
+            offset: unsafe { NonZeroU16::new_unchecked(offset) },
+        }
+    }
+
+    /// Copy a PostgreSQL ItemPointer already proven valid.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null and satisfy PostgreSQL's
+    /// `ItemPointerIsValid` contract.
+    #[inline]
+    pub unsafe fn from_raw(ptr: pg_sys::ItemPointer) -> Self {
+        let value = unsafe { ItemPointer::from_raw(ptr) };
+        // SAFETY: the caller guarantees a nonzero offset.
+        unsafe { Self::new_unchecked(value.block_number, value.offset) }
+    }
+
+    /// Return the PostgreSQL block number.
+    #[inline]
+    #[must_use]
+    pub const fn block_number(self) -> u32 {
+        self.block_number
+    }
+
+    /// Return the one-based PostgreSQL item offset.
+    #[inline]
+    #[must_use]
+    pub const fn offset(self) -> u16 {
+        self.offset.get()
+    }
+
+    /// Convert this identity to PostgreSQL's C representation.
+    #[inline]
+    #[must_use]
+    pub fn to_pg_sys(self) -> pg_sys::ItemPointerData {
+        ItemPointer {
+            block_number: self.block_number,
+            offset: self.offset.get(),
+        }
+        .to_pg_sys()
     }
 }
 

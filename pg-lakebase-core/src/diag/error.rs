@@ -301,6 +301,18 @@ impl PgError {
     }
 }
 
+/// Convert a PostgreSQL error captured by `PgTryBuilder` into the structured
+/// domain error used below PostgreSQL callback boundaries.
+///
+/// The report constructor remains private; dependent crates only need this
+/// stable diagnostic bridge and must not construct or reclassify reports.
+impl From<CaughtError> for PgError {
+    #[inline]
+    fn from(err: CaughtError) -> Self {
+        Self::from_caught(err)
+    }
+}
+
 impl SqlStateError for PgError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {

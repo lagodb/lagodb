@@ -9,11 +9,11 @@
 //!
 //! Two write worlds, deliberately split by how the source row is owned:
 //!
-//! - **Column world (hot path):** [`SlotColumnarBatchBuffer`] consumes
-//!   `TupleSlotRow` / `PgDatumRef` views *during* the callback and copies what
-//!   it needs straight into its column builders. This is what columnar AMs (the
-//!   in-tree Iceberg AM) use; the Arrow implementation is `pg-arrow-conv`'s
-//!   `SlotRecordBatchBuffer`.
+//! - **Column world (hot path):** a provider-owned relation-bound writer
+//!   consumes `TupleSlotRow` views *during* the callback and copies what it
+//!   needs straight into its column builders. `pg-arrow-conv` provides the
+//!   `BoundWriteBuffer` implementation, which validates source codecs during
+//!   planning.
 //! - **Row world:** [`RowBatchBuffer`] owns [`Row`] values that are safe across
 //!   callback boundaries — the buffering half of the row-mode / FDW write path,
 //!   paired with `pg-arrow-conv`'s `ColumnRule::build(&[Row], ..)`. Not on the
@@ -30,14 +30,14 @@
 
 use std::convert::Infallible;
 
-use crate::tuple::{PgDatumRef, Row, TupleSlotRow};
+use crate::handles::ScanDirection;
+use crate::tuple::{DatumConversionError, Row, RowDatumCodec, TupleSlotRow};
 
 /// Common lifecycle for buffering AM-specific batches.
 ///
-/// This trait intentionally does not define an append method. Row buffers,
-/// slot/datum columnar buffers, and future batch strategies have different
-/// source ownership rules, but they share flush, clear, length, and memory
-/// accounting behavior.
+/// This trait intentionally does not define an append method. Row buffers and
+/// provider-owned columnar buffers have different source ownership rules, but
+/// they share flush, clear, length, and memory accounting behavior.
 pub trait BatchBuffer {
     /// The completed batch type consumed by the writer.
     type Batch;
@@ -75,84 +75,6 @@ pub trait BatchBuffer {
     }
 }
 
-/// Per-column encoder for direct PostgreSQL datum sources.
-///
-/// This is the fast path for Arrow-backed mutation buffers: the concrete appender
-/// can inspect PostgreSQL type metadata and append directly into its physical
-/// builder without first allocating a materialized cell. Target-format
-/// decisions such as Iceberg decimal scale, fixed-width binary length,
-/// timestamp representation, JSON encoding, and list nullability live in the
-/// concrete appender.
-pub trait DatumColumnAppender {
-    /// Finished physical column, such as an Arrow `ArrayRef`.
-    type Column;
-    /// Error raised while encoding or finishing this column.
-    type Error;
-
-    /// Append one PostgreSQL datum view to this output column, returning the
-    /// number of bytes it added to the column's in-memory footprint.
-    ///
-    /// `None` represents a missing value for this column index. SQL NULL values
-    /// are represented by `Some(value)` where `value.is_null()` is true. A
-    /// missing or NULL value adds `0` bytes.
-    ///
-    /// The returned size lets the owning buffer keep a running memory estimate
-    /// in O(1) per append, without re-summing every column.
-    fn append_datum(
-        &mut self,
-        value: Option<PgDatumRef<'_>>,
-    ) -> Result<usize, Self::Error>;
-
-    /// Finish the current column values and reset the appender for reuse.
-    fn finish(&mut self) -> Result<Self::Column, Self::Error>;
-
-    /// Drop buffered values from the current in-progress batch.
-    fn clear(&mut self);
-
-    /// Number of values appended for the current batch.
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-/// Extension point for AM-owned columnar buffers fed directly from PostgreSQL
-/// tuple slots.
-///
-/// This is the abstraction a future Arrow companion crate should implement for
-/// the mutation hot path. It keeps core independent of Arrow while avoiding the
-/// intermediate row/cell allocation layer.
-pub trait SlotColumnarBatchBuffer: BatchBuffer {
-    /// Finished physical column type.
-    type Column;
-
-    /// Number of physical columns in the target batch.
-    fn column_count(&self) -> usize;
-
-    /// Append one PostgreSQL datum view to the column at `column_index`.
-    fn append_datum_to_column(
-        &mut self,
-        column_index: usize,
-        value: Option<PgDatumRef<'_>>,
-    ) -> Result<(), Self::Error>;
-
-    /// Complete the current logical row after all column datums were appended.
-    fn finish_row(&mut self) -> Result<(), Self::Error>;
-
-    /// Finish all columns for the current batch.
-    fn finish_columns(&mut self) -> Result<Vec<Self::Column>, Self::Error>;
-
-    /// Append a PostgreSQL tuple-slot row through the datum interface.
-    fn append_slot_row(&mut self, row: TupleSlotRow<'_>) -> Result<(), Self::Error> {
-        let datums = row.datums();
-        for column_index in 0..self.column_count() {
-            self.append_datum_to_column(column_index, datums.datum_at(column_index))?;
-        }
-        self.finish_row()
-    }
-}
-
 /// Row-oriented batch buffer backed by owned [`Row`] values.
 ///
 /// # Role: the buffering half of the row-world write path
@@ -164,14 +86,14 @@ pub trait SlotColumnarBatchBuffer: BatchBuffer {
 /// converts the buffered `&[Row]` to a columnar batch.
 ///
 /// It is deliberately **not** on the columnar hot path. Columnar AMs (the
-/// in-tree Iceberg AM) append tuple slots directly into a
-/// [`SlotColumnarBatchBuffer`] (e.g. `pg-arrow-conv`'s `SlotRecordBatchBuffer`),
-/// which skips the owned-`Row` materialization this type does. As a result the
-/// in-tree code base does not drive `RowBatchBuffer` today — it is exercised by
-/// unit tests and retained as the row-world buffering primitive a future
-/// row-mode FDW will use. It is **not** dead/legacy code: removing it would
-/// leave the row-world write path (which keeps `ColumnRule::build`) without its
-/// buffering half. See the columnar-datapath-refactor design, goal #3 / §3.1.
+/// in-tree Iceberg AM) append tuple slots directly into a provider-owned
+/// relation-bound buffer such as `pg-arrow-conv`'s `BoundWriteBuffer`, which
+/// skips the owned-`Row` materialization this type does. As a result the in-tree code
+/// base does not drive `RowBatchBuffer` today — it is exercised by unit tests
+/// and retained as the row-world buffering primitive a future row-mode FDW
+/// will use. It is **not** dead/legacy code: removing it would leave the
+/// row-world write path (which keeps `ColumnRule::build`) without its buffering
+/// half. See the columnar-datapath-refactor design, goal #3 / §3.1.
 ///
 /// Use [`Self::push_row`] when ownership is already available. [`Self::copy_row`]
 /// is intentionally named to make deep row copies explicit in hot paths.
@@ -206,8 +128,17 @@ impl RowBatchBuffer {
         self.push_row(row.clone());
     }
 
-    pub fn push_slot_row(&mut self, row: TupleSlotRow<'_>) {
-        self.push_row(row.to_owned_row());
+    /// # Safety
+    ///
+    /// `codec` must be bound to the same tuple descriptor as `row`'s slot.
+    /// The slot must remain valid for the duration of materialization.
+    pub unsafe fn push_slot_row(
+        &mut self,
+        row: TupleSlotRow<'_>,
+        codec: &RowDatumCodec,
+    ) -> Result<(), DatumConversionError> {
+        self.push_row(unsafe { row.to_owned_row(codec) }?);
+        Ok(())
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -348,6 +279,10 @@ pub trait BatchRowDecoder {
 
     fn num_rows(&self, bound: &Self::Bound) -> usize;
 
+    /// Write one row through a safe slot API. Implementations must not rely on
+    /// an unexpressed relationship between `bound`/decoder destinations and
+    /// the caller-supplied slot; a provider-specific unchecked path must make
+    /// that relationship an explicit unsafe contract instead.
     fn write_row(
         &self,
         bound: &Self::Bound,
@@ -360,7 +295,16 @@ pub trait BatchRowDecoder {
 /// Kept object-safe-free: the session holds a concrete type, so the per-row
 /// call monomorphizes.
 pub trait ScanBatchDriver {
-    fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool>;
+    /// Fetch one row in PostgreSQL's requested direction.
+    ///
+    /// Implementations must not silently treat an unsupported direction as
+    /// [`ScanDirection::Forward`]. A forward-only provider should return
+    /// `FEATURE_NOT_SUPPORTED` for other directions.
+    fn next_into_slot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotColumns<'_>,
+    ) -> AmResult<bool>;
 }
 
 /// Core-provided adapter pairing a batch source with a row decoder and exposing
@@ -395,7 +339,14 @@ where
         }
     }
 
-    pub fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+    pub fn next_into_slot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotColumns<'_>,
+    ) -> AmResult<bool> {
+        if direction != ScanDirection::Forward {
+            return crate::api::unsupported_callback("non-forward batch scan");
+        }
         loop {
             if let Some(bound) = self.current.as_ref()
                 && self.row_idx < self.decoder.num_rows(bound)
@@ -430,8 +381,12 @@ where
     S: AmScanBatchSource,
     D: BatchRowDecoder<Batch = S::Batch>,
 {
-    fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
-        BatchRowCursor::next_into_slot(self, out)
+    fn next_into_slot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotColumns<'_>,
+    ) -> AmResult<bool> {
+        BatchRowCursor::next_into_slot(self, direction, out)
     }
 }
 
@@ -565,7 +520,10 @@ mod read_tests {
         let mut produced = Vec::new();
         loop {
             let mut cols = host.columns();
-            if !cursor.next_into_slot(&mut cols).unwrap() {
+            if !cursor
+                .next_into_slot(ScanDirection::Forward, &mut cols)
+                .unwrap()
+            {
                 break;
             }
             produced
@@ -594,7 +552,10 @@ mod read_tests {
         let mut trues = 0;
         loop {
             let mut cols = host.columns();
-            if cursor.next_into_slot(&mut cols).unwrap() {
+            if cursor
+                .next_into_slot(ScanDirection::Forward, &mut cols)
+                .unwrap()
+            {
                 trues += 1;
             } else {
                 break;
@@ -604,7 +565,34 @@ mod read_tests {
 
         // End-of-scan stays terminal on repeated calls.
         let mut cols = host.columns();
-        assert!(!cursor.next_into_slot(&mut cols).unwrap());
+        assert!(
+            !cursor
+                .next_into_slot(ScanDirection::Forward, &mut cols)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn forward_only_cursor_rejects_backward_without_consuming_input() {
+        let source = FakeSource {
+            batches: vec![vec![vec![Some(7)]]].into_iter(),
+            live: Rc::new(StdCell::new(0)),
+            max_live: Rc::new(StdCell::new(0)),
+        };
+        let mut cursor = BatchRowCursor::new(source, FakeDecoder);
+        let mut host = HostSlot::new(1);
+
+        assert!(
+            cursor
+                .next_into_slot(ScanDirection::Backward, &mut host.columns())
+                .is_err()
+        );
+        assert!(
+            cursor
+                .next_into_slot(ScanDirection::Forward, &mut host.columns())
+                .unwrap()
+        );
+        assert_eq!(host.values[0].value() as i64, 7);
     }
 
     #[test]

@@ -47,4 +47,6 @@ pub use scan::{
     SampleScanStateHandle, ScanDirection, ScanKeyEntry, ScanKeyIter,
     TBMIterateResultHandle, TableScanDescHandle,
 };
-pub use tuple::{HeapTupleGuard, HeapTupleRef, ItemPointer, TupleTableSlotHandle};
+pub use tuple::{
+    HeapTupleGuard, HeapTupleRef, ItemPointer, TupleTableSlotHandle, ValidItemPointer,
+};

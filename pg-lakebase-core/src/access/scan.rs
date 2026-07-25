@@ -12,7 +12,7 @@ use crate::handles::{
     RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
     TBMIterateResultHandle,
 };
-use crate::tuple::{Row, SlotColumns};
+use crate::tuple::{Row, RowDatumCodec, SlotColumns};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::*;
 use std::sync::OnceLock;
@@ -63,6 +63,9 @@ struct TableScanState<T> {
     scan_keys: OwnedScanKeys,
     row: Row,
     tmp_ctx: pg_sys::MemoryContext,
+    /// Bound only if this scan uses one of the Row-returning callbacks. The
+    /// normal `scan_getnextslot` path may be slot-first and provider-physical.
+    row_codec: Option<RowDatumCodec>,
 }
 
 type TableAmScanDesc<T> = FfiContainer<pg_sys::TableScanDescData, TableScanState<T>>;
@@ -78,6 +81,7 @@ impl<T> TableScanState<T> {
             scan_keys,
             row: Row::new(),
             tmp_ctx,
+            row_codec: None,
         }
     }
 
@@ -89,8 +93,27 @@ impl<T> TableScanState<T> {
         &mut self,
         slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<(), PgReportError> {
+        // Do not bind this at scan_begin: the ordinary scan_getnextslot path
+        // can fill the slot through a provider physical codec without ever
+        // materializing a semantic Row.
+        if self.row_codec.is_none() {
+            self.row_codec = Some(
+                // SAFETY: the executor passes an initialized slot whose tuple
+                // descriptor remains valid for this fetch callback.
+                unsafe { RowDatumCodec::from_slot(slot) }
+                    .map_err(PgReportError::from_domain_error)
+                    .report_unwrap(),
+            );
+        }
         let mut columns = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
-        columns.fill_from_row(&mut self.row)
+        unsafe {
+            columns.fill_from_row(
+                &mut self.row,
+                self.row_codec
+                    .as_ref()
+                    .expect("row codec initialized before row write"),
+            )
+        }
     }
 }
 
@@ -277,10 +300,7 @@ where
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
 
-        // Validate the requested direction even though the slot-filling driver
-        // scans forward-only; an unrecognized raw direction is still a hard
-        // error rather than a silently ignored value.
-        ScanDirection::try_from_raw(direction).report_unwrap();
+        let direction = ScanDirection::try_from_raw(direction).report_unwrap();
 
         // Copied out before borrowing `am_instance`: the slot-fill path needs
         // both the session's context/width and a `&mut` driver at once.
@@ -293,7 +313,10 @@ where
         let found = PgMemoryContexts::For(tmp_ctx)
             .switch_to(|_| {
                 let mut cols = SlotColumns::new(slot, tmp_ctx);
-                state.am_instance.scan_driver().next_into_slot(&mut cols)
+                state
+                    .am_instance
+                    .scan_driver()
+                    .next_into_slot(direction, &mut cols)
             })
             .report_unwrap();
 

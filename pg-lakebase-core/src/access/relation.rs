@@ -4,12 +4,12 @@
 //! All unsafe operations are handled here, keeping the AmRelation trait implementation safe.
 
 use crate::api::TableAccessMethod;
-use crate::diag::ReportableError;
+use crate::diag::{PgReportError, ReportableError};
 use crate::handles::{
     AttrWidthsHandle, BufferAccessStrategyHandle, ItemPointer, RelationHandle,
     SnapshotHandle, TupleTableSlotHandle, VacuumParamsHandle, VarlenaHandle,
 };
-use crate::tuple::{Row, TupleSlotWriter};
+use crate::tuple::{Row, RowDatumCodec, TupleSlotWriter};
 use pgrx::prelude::*;
 
 #[pg_guard]
@@ -142,7 +142,10 @@ where
             return false;
         }
 
-        TupleSlotWriter::new(slot, (*slot).tts_mcxt)
+        let row_codec = RowDatumCodec::from_relation(rel)
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
+        TupleSlotWriter::new(slot, (*slot).tts_mcxt, &row_codec)
             .write_row(&mut row)
             .report_unwrap();
         (*slot).tts_tid = tid.to_pg_sys();

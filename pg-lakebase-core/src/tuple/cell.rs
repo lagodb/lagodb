@@ -7,13 +7,14 @@
 use bytes::Bytes;
 use pgrx::pg_sys::{self, Datum, Oid, bytea};
 use pgrx::prelude::{Date, Interval, Time, Timestamp, TimestampWithTimeZone};
-use pgrx::{
-    AnyNumeric, FromDatum, IntoDatum, PgBuiltInOids, PgOid, datum::Uuid, fcinfo,
-};
-use std::ffi::{CStr, CString};
+use pgrx::{AnyNumeric, FromDatum, IntoDatum, PgBuiltInOids, PgOid, datum::Uuid};
+use std::ffi::CStr;
 use std::fmt;
 
-use crate::wrapper::{PgOutputCString, PgWrapper};
+use crate::wrapper::PgOutputCString;
+
+use super::datum::DatumConversionError;
+use super::json::{JsonText, JsonbValue};
 
 /// A non-owning view into UTF-8 string data.
 ///
@@ -34,11 +35,21 @@ use crate::wrapper::{PgOutputCString, PgWrapper};
 /// thread-affine makes the borrowing contract visible to the type system.
 #[derive(Debug, Clone, Copy)]
 pub struct StringView {
-    pub ptr: *const u8,
-    pub len: usize,
+    ptr: *const u8,
+    len: usize,
 }
 
 impl StringView {
+    /// Construct a view over caller-owned bytes.
+    ///
+    /// # Safety
+    ///
+    /// ptr must point to len bytes of valid UTF-8 that remain live for every
+    /// use of the returned view.
+    pub unsafe fn from_raw_parts(ptr: *const u8, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
     /// # Safety
     /// Caller must ensure that the pointer is valid and points to valid UTF-8 data
     /// for the lifetime of the return value.
@@ -57,11 +68,20 @@ impl StringView {
 /// allocation alive while the view is used.
 #[derive(Debug, Clone, Copy)]
 pub struct ByteaView {
-    pub ptr: *const u8,
-    pub len: usize,
+    ptr: *const u8,
+    len: usize,
 }
 
 impl ByteaView {
+    /// Construct a view over caller-owned bytes.
+    ///
+    /// # Safety
+    ///
+    /// ptr must point to len live bytes for every use of the returned view.
+    pub unsafe fn from_raw_parts(ptr: *const u8, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
     /// # Safety
     /// Caller must ensure that the pointer is valid and points to valid data
     /// for the lifetime of the return value.
@@ -87,7 +107,11 @@ pub enum Cell {
     Timestamp(Timestamp),
     Timestamptz(TimestampWithTimeZone),
     Interval(Interval),
-    Json(Bytes),
+    /// Semantic PostgreSQL `json` value retaining its validated input text.
+    Json(JsonText),
+    /// Semantic PostgreSQL `jsonb` value represented by PostgreSQL output text.
+    /// This is not PostgreSQL's internal varlena representation.
+    Jsonb(JsonbValue),
     Bytea(Bytes),
     ByteaView(ByteaView),
     Uuid(Uuid),
@@ -101,6 +125,143 @@ pub enum Cell {
 }
 
 impl Cell {
+    /// Checked semantic Datum conversion used by [`super::row_codec::RowDatumCodec`].
+    ///
+    /// The row codec validates the server encoding once before calling this
+    /// method and keeps non-NULL conversion failures distinct from SQL NULL.
+    pub(crate) unsafe fn from_polymorphic_datum_checked(
+        datum: Datum,
+        is_null: bool,
+        typoid: Oid,
+    ) -> Result<Option<Self>, DatumConversionError> {
+        if is_null {
+            return Ok(None);
+        }
+        let cell = match typoid {
+            pg_sys::JSONOID => unsafe { JsonText::from_datum(datum, false) }
+                .map(|value| value.map(Cell::Json))?,
+            pg_sys::JSONBOID => unsafe { JsonbValue::from_datum(datum, false) }
+                .map(|value| value.map(Cell::Jsonb))?,
+            _ => unsafe { Self::from_standard_datum(datum, false, typoid) }
+                .ok_or(DatumConversionError::InvalidInput { target: typoid })
+                .map(Some)?,
+        };
+        Ok(cell)
+    }
+
+    /// Convert a non-JSON PostgreSQL datum using the native pgrx datum
+    /// implementations.
+    ///
+    /// JSON and JSONB are intentionally handled by
+    /// [`Self::from_polymorphic_datum_checked`], because their conversions
+    /// have a structured error path and require the row codec's encoding
+    /// capability check.
+    unsafe fn from_standard_datum(
+        datum: Datum,
+        is_null: bool,
+        typoid: Oid,
+    ) -> Option<Self> {
+        if is_null {
+            return None;
+        }
+
+        unsafe {
+            let oid = PgOid::from(typoid);
+            match oid {
+                PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
+                    bool::from_datum(datum, false).map(Cell::Bool)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::CHAROID) => {
+                    i8::from_datum(datum, false).map(Cell::I8)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::INT2OID) => {
+                    i16::from_datum(datum, false).map(Cell::I16)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID) => {
+                    f32::from_datum(datum, false).map(Cell::F32)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::INT4OID) => {
+                    i32::from_datum(datum, false).map(Cell::I32)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID) => {
+                    f64::from_datum(datum, false).map(Cell::F64)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::INT8OID) => {
+                    i64::from_datum(datum, false).map(Cell::I64)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
+                    AnyNumeric::from_datum(datum, false).map(Cell::Numeric)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::TEXTOID)
+                | PgOid::BuiltIn(PgBuiltInOids::VARCHAROID)
+                | PgOid::BuiltIn(PgBuiltInOids::BPCHAROID) => {
+                    String::from_datum(datum, false).map(Cell::String)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::JSONOID)
+                | PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => None,
+                PgOid::BuiltIn(PgBuiltInOids::NAMEOID) => {
+                    let name_ptr = datum.cast_mut_ptr::<pg_sys::NameData>();
+                    let c_str = CStr::from_ptr((*name_ptr).data.as_ptr());
+                    Some(Cell::String(c_str.to_string_lossy().into_owned()))
+                }
+                PgOid::BuiltIn(PgBuiltInOids::DATEOID) => {
+                    Date::from_datum(datum, false).map(Cell::Date)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::TIMEOID) => {
+                    Time::from_datum(datum, false).map(Cell::Time)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => {
+                    Timestamp::from_datum(datum, false).map(Cell::Timestamp)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
+                    TimestampWithTimeZone::from_datum(datum, false)
+                        .map(Cell::Timestamptz)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::INTERVALOID) => {
+                    Interval::from_datum(datum, false).map(Cell::Interval)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => {
+                    let ptr = datum.cast_mut_ptr::<bytea>();
+                    // SAFETY: ptr is valid for a BYTEAOID datum supplied by
+                    // PostgreSQL, and this copy completes before the source
+                    // slot can be reused.
+                    let slice = pgrx::varlena::varlena_to_byte_slice(ptr);
+                    Some(Cell::Bytea(Bytes::copy_from_slice(slice)))
+                }
+                PgOid::BuiltIn(PgBuiltInOids::UUIDOID) => {
+                    Uuid::from_datum(datum, false).map(Cell::Uuid)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::BOOLARRAYOID) => {
+                    Vec::<Option<bool>>::from_datum(datum, false).map(Cell::BoolArray)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::INT2ARRAYOID) => {
+                    Vec::<Option<i16>>::from_datum(datum, false).map(Cell::I16Array)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::INT4ARRAYOID) => {
+                    Vec::<Option<i32>>::from_datum(datum, false).map(Cell::I32Array)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID) => {
+                    Vec::<Option<i64>>::from_datum(datum, false).map(Cell::I64Array)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4ARRAYOID) => {
+                    Vec::<Option<f32>>::from_datum(datum, false).map(Cell::F32Array)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8ARRAYOID) => {
+                    Vec::<Option<f64>>::from_datum(datum, false).map(Cell::F64Array)
+                }
+                PgOid::BuiltIn(PgBuiltInOids::TEXTARRAYOID)
+                | PgOid::BuiltIn(PgBuiltInOids::VARCHARARRAYOID)
+                | PgOid::BuiltIn(PgBuiltInOids::BPCHARARRAYOID)
+                | PgOid::BuiltIn(PgBuiltInOids::NAMEARRAYOID)
+                | PgOid::BuiltIn(PgBuiltInOids::JSONARRAYOID) => {
+                    Vec::<Option<String>>::from_datum(datum, false)
+                        .map(Cell::StringArray)
+                }
+                _ => None,
+            }
+        }
+    }
+
     /// Convert any borrowed view variant into an owned cell.
     ///
     /// Arrow/slot readers may use `StringView` and `ByteaView` for hot-path
@@ -154,7 +315,8 @@ impl Cell {
             Cell::Timestamp(_) => std::mem::size_of::<Timestamp>(),
             Cell::Timestamptz(_) => std::mem::size_of::<TimestampWithTimeZone>(),
             Cell::Interval(_) => std::mem::size_of::<Interval>(),
-            Cell::Json(b) => std::mem::size_of::<Bytes>() + b.len(),
+            Cell::Json(value) => value.mem_size(),
+            Cell::Jsonb(value) => value.mem_size(),
             Cell::Bytea(b) => std::mem::size_of::<Bytes>() + b.len(),
             Cell::ByteaView(_) => std::mem::size_of::<ByteaView>(),
             Cell::Uuid(_) => std::mem::size_of::<Uuid>(),
@@ -301,16 +463,8 @@ impl fmt::Display for Cell {
                     false,
                 )
             },
-            Cell::Json(b) => unsafe {
-                let datum = Datum::from(b.as_ptr());
-                write_pg_output(
-                    f,
-                    pg_sys::jsonb_out,
-                    Some(datum),
-                    "jsonb_out failed",
-                    false,
-                )
-            },
+            Cell::Json(value) => write!(f, "{value}"),
+            Cell::Jsonb(value) => write!(f, "{value}"),
             Cell::Bytea(v) => write_hex_bytes!(v),
             Cell::ByteaView(v) => {
                 let slice = unsafe { v.as_slice() };
@@ -324,339 +478,6 @@ impl fmt::Display for Cell {
             Cell::F32Array(v) => write_array(v, f),
             Cell::F64Array(v) => write_array(v, f),
             Cell::StringArray(v) => write_array(v, f),
-        }
-    }
-}
-
-/// The PostgreSQL-target-specific datum construction for a [`Cell`], resolved
-/// once from the destination column's type OID rather than re-derived per value.
-///
-/// Most columns are [`Plain`](Self::Plain) — the `Cell`'s natural [`IntoDatum`].
-/// The other variants capture the cases where one Arrow/`Cell` shape backs
-/// several PostgreSQL types whose datum form differs (`text`/`json`/`name`,
-/// `bytea`/`jsonb`) or needs integer narrowing (`int2`/`int4`). Resolving this
-/// at batch-bind time keeps the per-value decode off the builtin-OID lookup
-/// `PgOid::from` performs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatumTarget {
-    /// Use the `Cell`'s natural `IntoDatum` mapping.
-    Plain,
-    /// `json`: parse a `StringView` through `json_in`.
-    Json,
-    /// `jsonb`: parse a `ByteaView` through `jsonb_in`.
-    Jsonb,
-    /// `name`: build a fixed `NameData` from a `StringView`.
-    Name,
-    /// `int2`: narrow an integer cell to `i16`.
-    Int2,
-    /// `int4`: widen/narrow an integer cell to `i32`.
-    Int4,
-}
-
-impl DatumTarget {
-    /// Classify a destination type OID once (e.g. at batch bind) so the
-    /// per-value path dispatches on this small enum instead of re-running the
-    /// 200+-arm builtin-OID lookup behind `PgOid::from` for every row.
-    pub fn from_oid(oid: Oid) -> Self {
-        if oid == pg_sys::JSONBOID {
-            Self::Jsonb
-        } else if oid == pg_sys::JSONOID {
-            Self::Json
-        } else if oid == pg_sys::NAMEOID {
-            Self::Name
-        } else if oid == pg_sys::INT2OID {
-            Self::Int2
-        } else if oid == pg_sys::INT4OID {
-            Self::Int4
-        } else {
-            Self::Plain
-        }
-    }
-}
-
-impl Cell {
-    /// Convert cell to datum for a destination type OID.
-    ///
-    /// Thin compatibility wrapper over [`Self::into_datum_for`] for callers that
-    /// only have the target OID (the row-world write path and per-element list
-    /// construction). The columnar scan path resolves the [`DatumTarget`] once
-    /// at bind and calls `into_datum_for` directly.
-    ///
-    /// # Safety
-    /// This function is unsafe because it calls PostgreSQL internal functions.
-    pub unsafe fn into_datum_typed(self, typoid: Oid, _typmod: i32) -> Option<Datum> {
-        unsafe { self.into_datum_for(DatumTarget::from_oid(typoid)) }
-    }
-
-    /// Convert cell to datum for a pre-resolved [`DatumTarget`].
-    ///
-    /// The target captures the OID-specific datum form (`json`/`jsonb`/`name`,
-    /// integer narrowing) so this dispatch is a small enum match with no
-    /// per-value OID lookup.
-    ///
-    /// # Safety
-    /// This function is unsafe because it calls PostgreSQL internal functions.
-    pub unsafe fn into_datum_for(self, target: DatumTarget) -> Option<Datum> {
-        match target {
-            DatumTarget::Jsonb => match self {
-                Cell::ByteaView(v) => unsafe {
-                    PgWrapper::jsonb_in_from_bytes(v.ptr, v.len).ok()
-                },
-                Cell::Bytea(v) => unsafe {
-                    PgWrapper::jsonb_in_from_bytes(v.as_ptr(), v.len()).ok()
-                },
-                _ => None,
-            },
-            DatumTarget::Json => match self {
-                Cell::StringView(v) => unsafe {
-                    PgWrapper::json_in_from_bytes(v.ptr, v.len).ok()
-                },
-                Cell::String(v) => unsafe {
-                    PgWrapper::json_in_from_bytes(v.as_ptr(), v.len()).ok()
-                },
-                _ => None,
-            },
-            DatumTarget::Name => match self {
-                Cell::StringView(v) => unsafe {
-                    let c_str = CString::new(v.as_str()).ok()?;
-                    fcinfo::direct_function_call_as_datum(
-                        pg_sys::namein,
-                        &[Some(Datum::from(c_str.as_ptr()))],
-                    )
-                },
-                Cell::String(v) => unsafe {
-                    let c_str = CString::new(v).ok()?;
-                    fcinfo::direct_function_call_as_datum(
-                        pg_sys::namein,
-                        &[Some(Datum::from(c_str.as_ptr()))],
-                    )
-                },
-                _ => None,
-            },
-            DatumTarget::Int2 => match self {
-                Cell::I16(v) => v.into_datum(),
-                Cell::I32(v) => i16::try_from(v).ok().and_then(|v| v.into_datum()),
-                Cell::I64(v) => i16::try_from(v).ok().and_then(|v| v.into_datum()),
-                _ => self.into_datum(),
-            },
-            DatumTarget::Int4 => match self {
-                Cell::I16(v) => (v as i32).into_datum(),
-                Cell::I32(v) => v.into_datum(),
-                Cell::I64(v) => i32::try_from(v).ok().and_then(|v| v.into_datum()),
-                _ => self.into_datum(),
-            },
-            // TODO(row-world-list-narrowing): the array `Cell` variants
-            // (`I16Array`/`I32Array`/...) fall through to `into_datum` here and
-            // are emitted at their physical element width, so a list column
-            // widened on write reads back at the wrong PG element type in the
-            // row path (e.g. `int2[]` -> `int4[]`). See the matching TODO on
-            // `ListValues::into_cell` in pg-arrow-conv list.rs; the slot-first
-            // `into_array_datum` already retargets per element OID. Closing this
-            // means adding array-aware targets that retarget each element.
-            DatumTarget::Plain => self.into_datum(),
-        }
-    }
-}
-
-impl IntoDatum for Cell {
-    fn into_datum(self) -> Option<Datum> {
-        match self {
-            Cell::Bool(v) => v.into_datum(),
-            Cell::I8(v) => v.into_datum(),
-            Cell::I16(v) => v.into_datum(),
-            Cell::F32(v) => v.into_datum(),
-            Cell::I32(v) => v.into_datum(),
-            Cell::F64(v) => v.into_datum(),
-            Cell::I64(v) => v.into_datum(),
-            Cell::Numeric(v) => v.into_datum(),
-            Cell::String(v) => v.into_datum(),
-            Cell::StringView(v) => {
-                let s = unsafe { v.as_str() };
-                s.into_datum()
-            }
-            Cell::Date(v) => v.into_datum(),
-            Cell::Time(v) => v.into_datum(),
-            Cell::Timestamp(v) => v.into_datum(),
-            Cell::Timestamptz(v) => v.into_datum(),
-            Cell::Interval(v) => v.into_datum(),
-            Cell::Json(v) => v.into_datum(),
-            Cell::Bytea(v) => v.as_ref().into_datum(),
-            Cell::ByteaView(v) => {
-                let slice = unsafe { v.as_slice() };
-                slice.into_datum()
-            }
-            Cell::Uuid(v) => v.into_datum(),
-            Cell::BoolArray(v) => v.into_datum(),
-            Cell::I16Array(v) => v.into_datum(),
-            Cell::I32Array(v) => v.into_datum(),
-            Cell::I64Array(v) => v.into_datum(),
-            Cell::F32Array(v) => v.into_datum(),
-            Cell::F64Array(v) => v.into_datum(),
-            Cell::StringArray(v) => v.into_datum(),
-        }
-    }
-
-    fn type_oid() -> Oid {
-        Oid::INVALID
-    }
-
-    fn is_compatible_with(other: Oid) -> bool {
-        Self::type_oid() == other
-            || other == pg_sys::BOOLOID
-            || other == pg_sys::CHAROID
-            || other == pg_sys::INT2OID
-            || other == pg_sys::FLOAT4OID
-            || other == pg_sys::INT4OID
-            || other == pg_sys::FLOAT8OID
-            || other == pg_sys::INT8OID
-            || other == pg_sys::NUMERICOID
-            || other == pg_sys::TEXTOID
-            || other == pg_sys::VARCHAROID
-            || other == pg_sys::BPCHAROID
-            || other == pg_sys::NAMEOID
-            || other == pg_sys::JSONOID
-            || other == pg_sys::DATEOID
-            || other == pg_sys::TIMEOID
-            || other == pg_sys::TIMESTAMPOID
-            || other == pg_sys::TIMESTAMPTZOID
-            || other == pg_sys::INTERVALOID
-            || other == pg_sys::JSONBOID
-            || other == pg_sys::BYTEAOID
-            || other == pg_sys::UUIDOID
-            || other == pg_sys::BOOLARRAYOID
-            || other == pg_sys::INT2ARRAYOID
-            || other == pg_sys::INT4ARRAYOID
-            || other == pg_sys::INT8ARRAYOID
-            || other == pg_sys::FLOAT4ARRAYOID
-            || other == pg_sys::FLOAT8ARRAYOID
-            || other == pg_sys::TEXTARRAYOID
-            || other == pg_sys::VARCHARARRAYOID
-            || other == pg_sys::BPCHARARRAYOID
-            || other == pg_sys::NAMEARRAYOID
-            || other == pg_sys::JSONARRAYOID
-    }
-}
-
-impl FromDatum for Cell {
-    unsafe fn from_polymorphic_datum(
-        datum: Datum,
-        is_null: bool,
-        typoid: Oid,
-    ) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        unsafe {
-            let oid = PgOid::from(typoid);
-            match oid {
-                PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
-                    bool::from_datum(datum, is_null).map(Cell::Bool)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::CHAROID) => {
-                    i8::from_datum(datum, is_null).map(Cell::I8)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID) => {
-                    i16::from_datum(datum, is_null).map(Cell::I16)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID) => {
-                    f32::from_datum(datum, is_null).map(Cell::F32)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID) => {
-                    i32::from_datum(datum, is_null).map(Cell::I32)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID) => {
-                    f64::from_datum(datum, is_null).map(Cell::F64)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID) => {
-                    i64::from_datum(datum, is_null).map(Cell::I64)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
-                    AnyNumeric::from_datum(datum, is_null).map(Cell::Numeric)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::TEXTOID)
-                | PgOid::BuiltIn(PgBuiltInOids::VARCHAROID)
-                | PgOid::BuiltIn(PgBuiltInOids::BPCHAROID)
-                | PgOid::BuiltIn(PgBuiltInOids::JSONOID) => {
-                    String::from_datum(datum, is_null).map(Cell::String)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::NAMEOID) => {
-                    if is_null {
-                        None
-                    } else {
-                        let name_ptr = datum.cast_mut_ptr::<pg_sys::NameData>();
-                        let c_str = CStr::from_ptr((*name_ptr).data.as_ptr());
-                        Some(Cell::String(c_str.to_string_lossy().into_owned()))
-                    }
-                }
-                PgOid::BuiltIn(PgBuiltInOids::DATEOID) => {
-                    Date::from_datum(datum, is_null).map(Cell::Date)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::TIMEOID) => {
-                    Time::from_datum(datum, is_null).map(Cell::Time)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => {
-                    Timestamp::from_datum(datum, is_null).map(Cell::Timestamp)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
-                    TimestampWithTimeZone::from_datum(datum, is_null)
-                        .map(Cell::Timestamptz)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::INTERVALOID) => {
-                    Interval::from_datum(datum, is_null).map(Cell::Interval)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => {
-                    if is_null {
-                        None
-                    } else {
-                        // Extract raw varlena bytes including header
-                        let ptr = datum.cast_mut_ptr::<pg_sys::varlena>();
-                        let varsize = pgrx::varlena::varsize(ptr);
-                        let slice =
-                            std::slice::from_raw_parts(ptr as *const u8, varsize);
-                        Some(Cell::Json(Bytes::copy_from_slice(slice)))
-                    }
-                }
-                PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => {
-                    if is_null {
-                        None
-                    } else {
-                        let ptr = datum.cast_mut_ptr::<bytea>();
-                        // SAFETY: ptr is a valid pointer to varlena because it comes from a Datum of type BYTEAOID
-                        let slice = pgrx::varlena::varlena_to_byte_slice(ptr);
-                        Some(Cell::Bytea(Bytes::copy_from_slice(slice)))
-                    }
-                }
-                PgOid::BuiltIn(PgBuiltInOids::UUIDOID) => {
-                    Uuid::from_datum(datum, is_null).map(Cell::Uuid)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::BOOLARRAYOID) => {
-                    Vec::<Option<bool>>::from_datum(datum, false).map(Cell::BoolArray)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::INT2ARRAYOID) => {
-                    Vec::<Option<i16>>::from_datum(datum, false).map(Cell::I16Array)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::INT4ARRAYOID) => {
-                    Vec::<Option<i32>>::from_datum(datum, false).map(Cell::I32Array)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID) => {
-                    Vec::<Option<i64>>::from_datum(datum, false).map(Cell::I64Array)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::FLOAT4ARRAYOID) => {
-                    Vec::<Option<f32>>::from_datum(datum, false).map(Cell::F32Array)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::FLOAT8ARRAYOID) => {
-                    Vec::<Option<f64>>::from_datum(datum, false).map(Cell::F64Array)
-                }
-                PgOid::BuiltIn(PgBuiltInOids::TEXTARRAYOID)
-                | PgOid::BuiltIn(PgBuiltInOids::VARCHARARRAYOID)
-                | PgOid::BuiltIn(PgBuiltInOids::BPCHARARRAYOID)
-                | PgOid::BuiltIn(PgBuiltInOids::NAMEARRAYOID)
-                | PgOid::BuiltIn(PgBuiltInOids::JSONARRAYOID) => {
-                    Vec::<Option<String>>::from_datum(datum, false)
-                        .map(Cell::StringArray)
-                }
-                _ => None,
-            }
         }
     }
 }

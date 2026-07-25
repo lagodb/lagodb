@@ -12,13 +12,16 @@ use crate::handles::{
     RelationHandle, SnapshotHandle, TMIndexDeleteOpHandle, TableScanDescHandle,
     ValidateIndexStateHandle,
 };
-use crate::tuple::{Row, SlotColumns};
+use crate::tuple::{Row, RowDatumCodec, SlotColumns};
 use pgrx::prelude::*;
 
 struct IndexFetchState<T> {
     am_instance: T,
     row: Row,
     tmp_ctx: pg_sys::MemoryContext,
+    /// Bound only when the index callback returns an owned Row. Keeping this
+    /// lazy avoids imposing semantic UTF-8 requirements on unrelated paths.
+    row_codec: Option<RowDatumCodec>,
 }
 
 type CustomIndexFetchData<T> =
@@ -30,6 +33,7 @@ impl<T> IndexFetchState<T> {
             am_instance,
             row: Row::with_capacity(natts),
             tmp_ctx,
+            row_codec: None,
         }
     }
 
@@ -41,8 +45,26 @@ impl<T> IndexFetchState<T> {
         &mut self,
         slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<(), PgReportError> {
+        // Index fetch is a Row-returning path; bind only when it actually
+        // produces a row, rather than during the common begin callback.
+        if self.row_codec.is_none() {
+            self.row_codec = Some(
+                // SAFETY: the executor passes an initialized slot whose tuple
+                // descriptor remains valid for this fetch callback.
+                unsafe { RowDatumCodec::from_slot(slot) }
+                    .map_err(PgReportError::from_domain_error)
+                    .report_unwrap(),
+            );
+        }
         let mut columns = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
-        columns.fill_from_row(&mut self.row)
+        unsafe {
+            columns.fill_from_row(
+                &mut self.row,
+                self.row_codec
+                    .as_ref()
+                    .expect("row codec initialized before row write"),
+            )
+        }
     }
 }
 
