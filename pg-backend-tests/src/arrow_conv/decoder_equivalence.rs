@@ -1,10 +1,10 @@
 //! Backend tests for the row-world `Cell` read path
-//! (`ColumnReader::bind` + `read_cell`, `Arrow → Cell`) and the encoder
+//! (`ColumnReader::bind` + `read_cell_unchecked`, `Arrow → Cell`) and the encoder
 //! NULL-append path.
 //!
-//! These cannot run as host `#[test]`s: `read_cell` dispatches over every
-//! column rule, so its compiled body references the numeric decode
-//! (`numeric_recv`) and `ArrowColumnEncoder::append_datum` references
+//! These cannot run as host `#[test]`s: `read_cell_unchecked` dispatches over
+//! every column rule, so its compiled body references the numeric decode
+//! (`numeric_recv`) and the bound writer's PostgreSQL datum references
 //! `Decimal128Encoder`'s numeric encode path (`numeric_mul`, `numeric_floor`,
 //! `pg_detoast_datum`, ...). Linking those into an ordinary Linux test binary
 //! fails with `undefined symbol: PG_exception_stack` (and friends), so the
@@ -270,11 +270,12 @@ mod tests {
             // `Cell` (no text/binary types), so the returned `Cell` is owned and
             // outlives `reader` safely; for any view it would, the `reader`
             // outlives every use within this loop.
-            let cell = unsafe { reader.read_cell(row_idx) }.map_err(|e| {
-                TestCaseError::fail(format!(
-                    "read_cell error at row {row_idx}: {e:?}"
-                ))
-            })?;
+            let cell =
+                unsafe { reader.read_cell_unchecked(row_idx) }.map_err(|e| {
+                    TestCaseError::fail(format!(
+                        "read_cell error at row {row_idx}: {e:?}"
+                    ))
+                })?;
             match (expected, cell) {
                 (None, None) => {}
                 (Some(exp), Some(cell)) => prop_assert!(
@@ -297,8 +298,8 @@ mod tests {
         Ok(())
     }
 
-    // The slot-first read path (`read_datum`) and the row-world `read_cell`
-    // share one bound `ColumnReader`, so this pins that shared decode logic
+    // The slot-first datum path and row-world `read_cell_unchecked` share the
+    // same concrete-array binding logic, so this pins that shared decode logic
     // across all supported scalar types and random nullability.
     #[pg_test]
     fn extract_produces_expected_cell() {
@@ -315,8 +316,9 @@ mod tests {
 
     /// Resolve the rule for a list column from the built array's own Arrow type,
     /// pairing it with the canonical PG element OID for that element kind (the
-    /// row-world `read_cell` output ignores the OID — it keeps the physical
-    /// width — but resolution validates the element kind against the OID).
+    /// row-world `read_cell_unchecked` output ignores the OID — it keeps the
+    /// physical width — but resolution validates the element kind against the
+    /// OID).
     fn list_rule(array: &ArrayRef) -> ColumnRule {
         use arrow_schema::DataType;
         let elem_oid = match array.data_type() {
@@ -337,8 +339,8 @@ mod tests {
 
     // These pin `ListValues::into_cell`: the populated cell carries an interior
     // NULL element, and a present-but-empty cell yields an empty `Vec` (not a
-    // NULL row). `read_cell` returns `None` for a null row, so only non-null
-    // rows produce a cell here.
+    // NULL row). `read_cell_unchecked` returns `None` for a null row, so only
+    // non-null rows produce a cell here.
     #[pg_test]
     fn extract_int4_list_keeps_values_and_interior_null() {
         let array: ArrayRef =
@@ -351,11 +353,11 @@ mod tests {
 
         // SAFETY: list cells are owned (`Cell::*Array`), so they carry no borrow
         // of the reader.
-        match unsafe { reader.read_cell(0) }.unwrap().unwrap() {
+        match unsafe { reader.read_cell_unchecked(0) }.unwrap().unwrap() {
             Cell::I32Array(v) => assert_eq!(v, vec![Some(1), None, Some(3)]),
             other => panic!("expected I32Array, got {other:?}"),
         }
-        match unsafe { reader.read_cell(1) }.unwrap().unwrap() {
+        match unsafe { reader.read_cell_unchecked(1) }.unwrap().unwrap() {
             Cell::I32Array(v) => assert_eq!(v, Vec::<Option<i32>>::new()),
             other => panic!("expected empty I32Array, got {other:?}"),
         }
@@ -381,7 +383,7 @@ mod tests {
         let reader = ColumnReader::bind(&rule, array.as_ref()).expect("bind");
 
         // SAFETY: list cells are owned (`Cell::I16Array`), no borrow of reader.
-        match unsafe { reader.read_cell(0) }.unwrap().unwrap() {
+        match unsafe { reader.read_cell_unchecked(0) }.unwrap().unwrap() {
             Cell::I16Array(v) => assert_eq!(v, vec![Some(7), None, Some(9)]),
             other => panic!("expected I16Array, got {other:?}"),
         }
@@ -399,7 +401,10 @@ mod tests {
             ColumnReader::bind(&bool_rule, bool_array.as_ref()).expect("bind");
         // SAFETY: list cells are owned (`Cell::BoolArray`/`StringArray`), no
         // borrow of the reader.
-        match unsafe { bool_reader.read_cell(0) }.unwrap().unwrap() {
+        match unsafe { bool_reader.read_cell_unchecked(0) }
+            .unwrap()
+            .unwrap()
+        {
             Cell::BoolArray(v) => assert_eq!(v, vec![Some(true), None]),
             other => panic!("expected BoolArray, got {other:?}"),
         }
@@ -413,7 +418,10 @@ mod tests {
         let str_rule = list_rule(&str_array);
         let str_reader =
             ColumnReader::bind(&str_rule, str_array.as_ref()).expect("bind");
-        match unsafe { str_reader.read_cell(0) }.unwrap().unwrap() {
+        match unsafe { str_reader.read_cell_unchecked(0) }
+            .unwrap()
+            .unwrap()
+        {
             Cell::StringArray(v) => {
                 assert_eq!(
                     v,
@@ -424,19 +432,16 @@ mod tests {
         }
     }
 
-    // The NULL path of `ArrowColumnEncoder::append_datum` appends one slot
-    // without reading a datum. It lives here (not as a host test) because the
-    // `Some` dispatch arm references `Decimal128Encoder::append_datum`'s numeric
-    // encode path, which pulls backend symbols into the test binary.
+    // The NULL path of `ArrowColumnEncoder::append_null` appends one slot
+    // without reading a datum. It lives here because the bound datum path is
+    // backed by PostgreSQL `FromDatum` implementations.
     #[pg_test]
     fn null_append_adds_one_slot_per_call() {
         use arrow_array::Array;
         use pg_arrow_conv::ArrowColumnEncoder;
-        use pg_lakebase_core::batch::DatumColumnAppender;
-
         let mut encoder = ArrowColumnEncoder::new(&ColumnRule::I32, 4);
-        encoder.append_datum(None).expect("null");
-        encoder.append_datum(None).expect("null");
+        encoder.append_null();
+        encoder.append_null();
         assert_eq!(encoder.len(), 2);
         let array = encoder.finish().expect("finish");
         assert_eq!(array.len(), 2);

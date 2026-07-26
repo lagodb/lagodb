@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
-use pg_lakebase_core::tuple::{Cell, PgDatumRef};
+use pg_lakebase_core::tuple::Cell;
 use pgrx::prelude::AnyNumeric;
 use pgrx::{FromDatum, pg_sys};
 
-use super::{ColumnAppend, cell_type_mismatch, read_oid};
-use crate::error::{ConvError, ConvResult};
+use super::{ColumnAppend, cell_type_mismatch, read_bound};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
 
 // ---------------------------------------------------------------------------
 // Codec
@@ -27,7 +27,7 @@ impl DecimalCodec {
         Self { precision, scale }
     }
 
-    pub(crate) fn encode(&self, value: &AnyNumeric) -> ConvResult<i128> {
+    pub(crate) fn encode(&self, value: &AnyNumeric) -> ArrowConversionResult<i128> {
         let scaled = value.clone() * 10_i128.pow(self.scale);
         let integral = scaled.floor();
 
@@ -53,8 +53,12 @@ impl DecimalCodec {
         (-limit..=limit).contains(&value)
     }
 
-    fn error(&self, value: &AnyNumeric, reason: impl Into<String>) -> ConvError {
-        ConvError::IncompatibleColumnType(
+    fn error(
+        &self,
+        value: &AnyNumeric,
+        reason: impl Into<String>,
+    ) -> ArrowConversionError {
+        ArrowConversionError::IncompatibleColumnType(
             format!("decimal({}, {})", self.precision, self.scale),
             format!("numeric value '{}' {}", value, reason.into()),
         )
@@ -82,27 +86,33 @@ impl Decimal128Encoder {
         }
     }
 
-    fn append_scaled(&mut self, value: &AnyNumeric) -> ConvResult<()> {
+    fn append_scaled(&mut self, value: &AnyNumeric) -> ArrowConversionResult<()> {
         self.builder.append_value(self.codec.encode(value)?);
         Ok(())
+    }
+
+    /// Append a non-NULL PostgreSQL `numeric` datum after encoding its scale.
+    ///
+    /// # Safety
+    /// `datum` must be a valid, non-NULL PostgreSQL `numeric` Datum.
+    pub(super) unsafe fn append_bound(
+        &mut self,
+        datum: pg_sys::Datum,
+    ) -> ArrowConversionResult<usize> {
+        let numeric = unsafe {
+            read_bound(
+                datum,
+                AnyNumeric::from_datum,
+                "Decimal128 encoder: present numeric datum read as null",
+            )
+        }?;
+        self.append_scaled(&numeric)?;
+        Ok(std::mem::size_of::<i128>())
     }
 }
 
 impl ColumnAppend for Decimal128Encoder {
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize> {
-        let n = unsafe {
-            read_oid(
-                datum,
-                pg_sys::NUMERICOID,
-                AnyNumeric::from_datum,
-                "Decimal128 encoder: datum source type is not numeric",
-            )
-        }?;
-        self.append_scaled(&n)?;
-        Ok(std::mem::size_of::<i128>())
-    }
-
-    fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
+    fn append_cell(&mut self, cell: &Cell) -> ArrowConversionResult<()> {
         let Cell::Numeric(n) = cell else {
             return Err(cell_type_mismatch("numeric"));
         };
@@ -113,7 +123,7 @@ impl ColumnAppend for Decimal128Encoder {
         self.builder.append_null();
     }
 
-    fn finish(&mut self) -> ConvResult<ArrayRef> {
+    fn finish(&mut self) -> ArrowConversionResult<ArrayRef> {
         // The builder is untyped; the precision/scale tag must be applied to the
         // finished array.
         Ok(Arc::new(self.builder.finish().with_precision_and_scale(

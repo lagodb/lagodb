@@ -2,20 +2,20 @@
 //! iff every column resolves, and otherwise returns the lowest-positioned
 //! failing column's error variant. A zero-column schema is accepted. Host
 //! tests; the harness only builds schemas from `DataType`s, never arrays, so it
-//! also confirms the validator consults types only. `ConvError` is not
+//! also confirms the validator consults types only. `ArrowConversionError` is not
 //! `PartialEq`, so error identity is compared via a discriminant tag.
 
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use pg_arrow_conv::{
-    ConvError, PgColumnType, resolve_column_rule, validate_supported,
+    ArrowConversionError, PgColumnType, resolve_column_rule, validate_supported,
 };
 use pgrx::pg_sys;
 use proptest::prelude::*;
 
-/// Discriminant tag for `ConvError`, used to compare error *variants* without a
-/// `PartialEq` impl on `ConvError` itself.
+/// Discriminant tag for `ArrowConversionError`, used to compare error *variants* without a
+/// `PartialEq` impl on `ArrowConversionError` itself.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ErrTag {
     Unsupported,
@@ -23,27 +23,29 @@ enum ErrTag {
     ArrowTypeMismatch,
     ArrowError,
     DatumConversion,
-    InvalidUtf8,
+    Postgres,
     InvariantViolated,
-    DecimalCodecBug,
+    DecimalCodec,
     Datetime,
     Numeric,
     Uuid,
 }
 
-fn tag(e: &ConvError) -> ErrTag {
+fn tag(e: &ArrowConversionError) -> ErrTag {
     match e {
-        ConvError::UnsupportedColumnType(_) => ErrTag::Unsupported,
-        ConvError::IncompatibleColumnType(_, _) => ErrTag::Incompatible,
-        ConvError::ArrowTypeMismatch(_) => ErrTag::ArrowTypeMismatch,
-        ConvError::ArrowError(_) => ErrTag::ArrowError,
-        ConvError::DatumConversionError(_) => ErrTag::DatumConversion,
-        ConvError::InvalidUtf8(_) => ErrTag::InvalidUtf8,
-        ConvError::InvariantViolated(_) => ErrTag::InvariantViolated,
-        ConvError::DecimalCodecBug(_) => ErrTag::DecimalCodecBug,
-        ConvError::DatetimeConversionError(_) => ErrTag::Datetime,
-        ConvError::NumericError(_) => ErrTag::Numeric,
-        ConvError::UuidConversionError(_) => ErrTag::Uuid,
+        ArrowConversionError::UnsupportedColumnType(_) => ErrTag::Unsupported,
+        ArrowConversionError::IncompatibleColumnType(_, _) => ErrTag::Incompatible,
+        ArrowConversionError::ArrowTypeMismatch(_) => ErrTag::ArrowTypeMismatch,
+        ArrowConversionError::ArrowError(_) => ErrTag::ArrowError,
+        ArrowConversionError::DatumConversion(_) => ErrTag::DatumConversion,
+        ArrowConversionError::InvalidInput(_)
+        | ArrowConversionError::ValueOutOfRange(_) => ErrTag::DatumConversion,
+        ArrowConversionError::Postgres(_) => ErrTag::Postgres,
+        ArrowConversionError::InvariantViolated(_) => ErrTag::InvariantViolated,
+        ArrowConversionError::DecimalCodec(_) => ErrTag::DecimalCodec,
+        ArrowConversionError::DatetimeConversionError(_) => ErrTag::Datetime,
+        ArrowConversionError::NumericError(_) => ErrTag::Numeric,
+        ArrowConversionError::UuidConversionError(_) => ErrTag::Uuid,
     }
 }
 
@@ -65,7 +67,7 @@ fn pg_types_from(columns: &[(DataType, PgColumnType)]) -> Vec<PgColumnType> {
 }
 
 /// Oracle: the lowest-positioned column whose `(DataType, PgColumnType)` pair
-/// fails to resolve, paired with the tag of the `ConvError` it produces. `None`
+/// fails to resolve, paired with the tag of the `ArrowConversionError` it produces. `None`
 /// when every column resolves.
 fn first_failing(columns: &[(DataType, PgColumnType)]) -> Option<(usize, ErrTag)> {
     columns.iter().enumerate().find_map(|(i, (dt, pg))| {
@@ -154,6 +156,7 @@ fn arb_pg_type() -> impl Strategy<Value = PgColumnType> {
         Just(PgColumnType::Float8),
         Just(PgColumnType::Text),
         Just(PgColumnType::Bytea),
+        Just(PgColumnType::Jsonb),
         Just(PgColumnType::Uuid),
         Just(PgColumnType::Numeric),
         Just(PgColumnType::Date),
@@ -181,7 +184,7 @@ fn arb_columns() -> impl Strategy<Value = Vec<(DataType, PgColumnType)>> {
 proptest! {
     /// `validate_supported` returns `Ok(())` iff
     /// `resolve_column_rule` resolves every column, and when it
-    /// rejects, it returns the same `ConvError` variant as the lowest-positioned
+    /// rejects, it returns the same `ArrowConversionError` variant as the lowest-positioned
     /// failing column. The harness only ever builds a `Schema` from `DataType`s
     /// and never an array (types only, never values).
     #[test]

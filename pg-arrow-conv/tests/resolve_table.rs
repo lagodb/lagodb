@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, TimeUnit};
 use pg_arrow_conv::{
-    ColumnRule, ConvError, ListElementRule, PgColumnType, resolve_column_rule,
+    ArrowConversionError, ColumnRule, ListElementRule, PgColumnType,
+    resolve_column_rule,
 };
 use pgrx::pg_sys;
 use proptest::prelude::*;
@@ -67,6 +68,21 @@ fn binary_variants_resolve_to_binary() {
     assert!(matches!(
         resolve_column_rule(&DataType::LargeBinary, PgColumnType::Bytea).unwrap(),
         ColumnRule::Binary
+    ));
+}
+
+/// The format-neutral resolver does not select an Iceberg-private JSONB
+/// representation from the target OID. The provider must bind that rule at its
+/// own planning boundary.
+#[test]
+fn binary_variants_do_not_infer_jsonb_codec() {
+    assert!(matches!(
+        resolve_column_rule(&DataType::Binary, PgColumnType::Jsonb),
+        Err(ArrowConversionError::IncompatibleColumnType(_, _))
+    ));
+    assert!(matches!(
+        resolve_column_rule(&DataType::LargeBinary, PgColumnType::Jsonb),
+        Err(ArrowConversionError::IncompatibleColumnType(_, _))
     ));
 }
 
@@ -202,7 +218,7 @@ fn fixed16_wrong_pg_type_is_incompatible() {
         let err = resolve_column_rule(&DataType::FixedSizeBinary(16), pg)
             .expect_err("FixedSizeBinary(16) with wrong PG type must be rejected");
         assert!(
-            matches!(err, ConvError::IncompatibleColumnType(_, _)),
+            matches!(err, ArrowConversionError::IncompatibleColumnType(_, _)),
             "expected IncompatibleColumnType for pg={pg:?}, got {err:?}"
         );
     }
@@ -260,7 +276,7 @@ fn list_elements_resolve_to_matching_element_rule() {
 // ---------------------------------------------------------------------------
 
 /// Recognized-but-unmappable Arrow `DataType`s resolve to
-/// `ConvError::UnsupportedColumnType`.
+/// `ArrowConversionError::UnsupportedColumnType`.
 #[test]
 fn unsupported_data_types_are_rejected() {
     // Decimal256 is not handled by the layer.
@@ -268,7 +284,7 @@ fn unsupported_data_types_are_rejected() {
         resolve_column_rule(&DataType::Decimal256(20, 4), PgColumnType::Numeric)
             .expect_err("Decimal256 must be unsupported");
     assert!(
-        matches!(err, ConvError::UnsupportedColumnType(_)),
+        matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
         "Decimal256: {err:?}"
     );
 
@@ -276,7 +292,7 @@ fn unsupported_data_types_are_rejected() {
     let err = resolve_column_rule(&DataType::Float16, PgColumnType::Float4)
         .expect_err("Float16 must be unsupported");
     assert!(
-        matches!(err, ConvError::UnsupportedColumnType(_)),
+        matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
         "Float16: {err:?}"
     );
 
@@ -285,7 +301,7 @@ fn unsupported_data_types_are_rejected() {
     let err = resolve_column_rule(&nested, PgColumnType::Array(pg_sys::INT4OID))
         .expect_err("nested List must be unsupported");
     assert!(
-        matches!(err, ConvError::UnsupportedColumnType(_)),
+        matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
         "nested List: {err:?}"
     );
 
@@ -295,7 +311,7 @@ fn unsupported_data_types_are_rejected() {
     let err = resolve_column_rule(&strukt, PgColumnType::Array(pg_sys::INT4OID))
         .expect_err("Struct must be unsupported");
     assert!(
-        matches!(err, ConvError::UnsupportedColumnType(_)),
+        matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
         "Struct: {err:?}"
     );
 }

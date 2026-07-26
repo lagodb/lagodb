@@ -1,68 +1,66 @@
 //! Per-type-family conversion modules and the central column-encoder dispatch.
 //!
 //! Each submodule owns one logical column type's **write** vertical slice — its
-//! value math (codec) and its write path (datum / `Cell` → Arrow builder) — plus
+//! value math (codec) and its write path (bound datum / `Cell` → Arrow builder) — plus
 //! any value helpers the read path reuses (epoch math, decimal codec,
 //! `list::cell_at`). The per-value **read** dispatch is not here: it lives in
 //! the bound [`ColumnReader`](crate::read), which downcasts a column once per
 //! batch and reads values without a per-value downcast.
 //!
 //! This module hosts the cross-cutting write dispatch that ties them together:
-//! the [`ColumnAppend`] contract every per-type encoder implements, the
-//! [`ArrowColumnEncoder`] enum that stores one concrete encoder per column
-//! (heterogeneous, but `dyn`-free so the per-row append monomorphizes), and the
-//! small set of helpers shared across the type modules (`read_oid`,
-//! `detoasted_payload`, `downcast`, `cell_type_mismatch`). The row-world `Cell`
-//! **write** dispatch (`ColumnRule::build`) lives in [`convert`](crate::convert).
+//! the [`ColumnAppend`] contract every row-world encoder implements, the
+//! [`ArrowColumnEncoder`] enum that stores one concrete encoder per column,
+//! and the relation-bound [`BoundColumnEncoder`] whose source codec is selected
+//! once during plan construction. The small set of helpers shared across the
+//! type modules (`read_bound`, `detoasted_payload`, `downcast`,
+//! `cell_type_mismatch`) stays here. The row-world `Cell` **write** dispatch
+//! (`ColumnRule::build`) lives in [`convert`](crate::convert).
 
 use std::borrow::Cow;
 
 use arrow_array::{Array, ArrayRef};
-use pg_lakebase_core::batch::DatumColumnAppender;
-use pg_lakebase_core::tuple::{Cell, PgDatumRef};
+use pg_lakebase_core::tuple::Cell;
 use pgrx::{pg_sys, varlena};
 
-use crate::error::{ConvError, ConvResult};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
 use crate::rule::ColumnRule;
 
 pub(crate) mod binary;
+pub(crate) mod bound;
+pub(crate) mod bound_list;
 pub(crate) mod decimal;
 pub(crate) mod list;
 pub(crate) mod primitive;
 pub(crate) mod string;
 pub(crate) mod temporal;
+pub(crate) mod timestamp;
 
 pub use temporal::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 
-use binary::{BinaryEncoder, FixedBinaryEncoder, UuidEncoder};
+pub(crate) use bound::{BoundColumnEncoder, BoundEncoderPlan};
+
+use binary::{BinaryEncoder, BinaryKind, FixedBinaryEncoder, UuidEncoder};
 use decimal::Decimal128Encoder;
 use list::ListEncoder;
 use primitive::{BoolEncoder, F32Conv, F64Conv, I32Conv, I64Conv, PrimitiveEncoder};
 use string::Utf8Encoder;
-use temporal::{Date32Conv, Time64Conv, TimestampEncoder};
+use temporal::{Date32Conv, Time64Conv};
+use timestamp::TimestampEncoder;
 
 /// The append contract every per-type Arrow encoder implements. The two write
 /// sources — a live PostgreSQL datum (columnar hot path) and a buffered [`Cell`]
 /// (row-world / FDW path) — feed the *same* builder, `finish`, NULL append, and
 /// byte accounting, so a type's write logic is written once per type.
 pub(crate) trait ColumnAppend {
-    /// Append a present, non-null datum (columnar path), returning the number
-    /// of bytes it added to the builder's in-memory footprint.
-    ///
-    /// # Safety
-    ///
-    /// `datum` must be a valid, non-null datum of this column's source type.
-    unsafe fn append_datum(&mut self, datum: PgDatumRef<'_>) -> ConvResult<usize>;
-
     /// Append a present, non-null buffered [`Cell`] (row-world path). A cell
     /// whose variant does not match the column is rejected.
-    fn append_cell(&mut self, cell: &Cell) -> ConvResult<()>;
+    fn append_cell(&mut self, cell: &Cell) -> ArrowConversionResult<()>;
 
     /// Append a SQL NULL.
     fn append_null(&mut self);
 
     /// Finish the current column and reset the builder for reuse.
-    fn finish(&mut self) -> ConvResult<ArrayRef>;
+    fn finish(&mut self) -> ArrowConversionResult<ArrayRef>;
 
     /// Number of values appended for the current batch.
     fn len(&self) -> usize;
@@ -74,8 +72,9 @@ pub(crate) trait ColumnAppend {
 ///
 /// This is a thin public wrapper over the private [`Encoder`] enum: the variant
 /// set and the per-type encoder structs are implementation details, so the
-/// public surface is just `new` + the [`DatumColumnAppender`] impl +
-/// `append_cell` / `append_null`.
+/// public surface is `new` and the `Cell`/lifecycle methods used by the
+/// row-world path. Relation-bound PostgreSQL datum writes use
+/// [`BoundColumnEncoder`] so their source codec is fixed at construction.
 pub struct ArrowColumnEncoder(Encoder);
 
 enum Encoder {
@@ -97,9 +96,9 @@ enum Encoder {
 
 /// Expand `$body` once per [`Encoder`] variant, binding the active variant's
 /// inner encoder to `$e`. The 14-variant list lives here and nowhere else, so
-/// every uniform dispatch (`append_datum`, `append_cell`, null append,
-/// `finish`, `len`, byte accounting) is written once and a newly added variant
-/// cannot be silently omitted from one of them.
+/// every uniform dispatch (`append_cell`, null append, `finish`, and `len`) is
+/// written once and a newly added variant cannot be silently omitted from one
+/// of them.
 macro_rules! dispatch_encoder {
     ($self:expr, $e:ident => $body:expr) => {
         match $self {
@@ -140,8 +139,15 @@ impl ArrowColumnEncoder {
                 Encoder::F64(PrimitiveEncoder::with_capacity(capacity))
             }
             ColumnRule::Utf8 => Encoder::Utf8(Utf8Encoder::with_capacity(capacity)),
-            ColumnRule::Binary => {
-                Encoder::Binary(BinaryEncoder::with_capacity(capacity))
+            ColumnRule::Binary => Encoder::Binary(BinaryEncoder::with_capacity(
+                capacity,
+                BinaryKind::Bytea,
+            )),
+            ColumnRule::PostgresJsonbVarlena => {
+                Encoder::Binary(BinaryEncoder::with_capacity(
+                    capacity,
+                    BinaryKind::PostgresJsonbVarlena,
+                ))
             }
             ColumnRule::FixedBinary { len } => Encoder::FixedBinary(
                 FixedBinaryEncoder::with_capacity(capacity, *len),
@@ -167,7 +173,7 @@ impl ArrowColumnEncoder {
     }
 
     /// Row-world write: append one buffered [`Cell`] to the active variant.
-    pub fn append_cell(&mut self, cell: &Cell) -> ConvResult<()> {
+    pub fn append_cell(&mut self, cell: &Cell) -> ArrowConversionResult<()> {
         dispatch_encoder!(&mut self.0, e => e.append_cell(cell))
     }
 
@@ -178,29 +184,12 @@ impl ArrowColumnEncoder {
     }
 }
 
-impl DatumColumnAppender for ArrowColumnEncoder {
-    type Column = ArrayRef;
-    type Error = ConvError;
-
-    fn append_datum(&mut self, value: Option<PgDatumRef<'_>>) -> ConvResult<usize> {
-        // One slot is appended either way; the null path never reads the datum
-        // and adds no bytes.
-        match value {
-            Some(v) if !v.is_null() => {
-                dispatch_encoder!(&mut self.0, e => unsafe { e.append_datum(v) })
-            }
-            _ => {
-                dispatch_encoder!(&mut self.0, e => e.append_null());
-                Ok(0)
-            }
-        }
-    }
-
-    fn finish(&mut self) -> ConvResult<ArrayRef> {
+impl ArrowColumnEncoder {
+    pub fn finish(&mut self) -> ArrowConversionResult<ArrayRef> {
         dispatch_encoder!(&mut self.0, e => e.finish())
     }
 
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         // Arrow builders have no separate reset entry point: `finish` is what
         // resets their internal buffers, so calling it and discarding the
         // produced array is the idiomatic way to clear in-progress contents.
@@ -214,8 +203,12 @@ impl DatumColumnAppender for ArrowColumnEncoder {
         let _ = self.finish();
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         dispatch_encoder!(&self.0, e => e.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -224,50 +217,38 @@ impl DatumColumnAppender for ArrowColumnEncoder {
 // ---------------------------------------------------------------------------
 
 /// Downcast an Arrow array to a concrete type, mapping a mismatch to
-/// [`ConvError::ArrowTypeMismatch`] naming the expected type.
+/// [`ArrowConversionError::ArrowTypeMismatch`] naming the expected type.
 pub(crate) fn downcast<'a, A: Array + 'static>(
     column: &'a dyn Array,
     expected: &'static str,
-) -> ConvResult<&'a A> {
-    column
-        .as_any()
-        .downcast_ref::<A>()
-        .ok_or(ConvError::ArrowTypeMismatch(Cow::Borrowed(expected)))
+) -> ArrowConversionResult<&'a A> {
+    column.as_any().downcast_ref::<A>().ok_or(
+        ArrowConversionError::ArrowTypeMismatch(Cow::Borrowed(expected)),
+    )
 }
 
 /// The error returned when a buffered row `Cell`'s variant does not match the
 /// column it is being appended to. `column` names the target column type.
-pub(crate) fn cell_type_mismatch(column: &str) -> ConvError {
-    ConvError::IncompatibleColumnType(
+pub(crate) fn cell_type_mismatch(column: &str) -> ArrowConversionError {
+    ArrowConversionError::IncompatibleColumnType(
         column.to_string(),
         "buffered row cell variant does not match the column type".to_string(),
     )
 }
 
-/// Read a present `datum` as `T`, requiring its source OID to be `expected`.
-///
-/// Reaching this with a mismatched OID, or with `from` yielding `None` for a
-/// datum already established as present and non-null, is a broken invariant:
-/// the schema validator resolved this column's rule from the same source type,
-/// so the encoder should never see a datum it cannot read. Both cases surface
-/// as [`ConvError::InvariantViolated`] rather than being silently coerced to
-/// SQL NULL, which would lose data on a schema/`TupleDesc` drift.
+/// Read a present datum with a source codec selected during plan binding.
+/// The source codec intentionally performs no per-value type-OID comparison.
 ///
 /// # Safety
 ///
-/// `datum` must be a valid, non-null datum; `from` must be the `FromDatum`
-/// reader for `expected`.
-pub(crate) unsafe fn read_oid<T>(
-    datum: PgDatumRef<'_>,
-    expected: pg_sys::Oid,
+/// `datum` must be a valid, non-NULL datum of the type represented by `from`.
+pub(crate) unsafe fn read_bound<T>(
+    datum: pg_sys::Datum,
     from: unsafe fn(pg_sys::Datum, bool) -> Option<T>,
     invariant: &'static str,
-) -> ConvResult<T> {
-    if datum.type_oid() != expected {
-        return Err(ConvError::InvariantViolated(invariant));
-    }
-    unsafe { from(datum.datum(), false) }
-        .ok_or(ConvError::InvariantViolated(invariant))
+) -> ArrowConversionResult<T> {
+    unsafe { from(datum, false) }
+        .ok_or(ArrowConversionError::InvariantViolated(invariant))
 }
 
 /// RAII view over a detoasted varlena payload, shared by the varlena encoders.
@@ -307,10 +288,9 @@ impl DetoastGuard {
         unsafe { std::slice::from_raw_parts(self.data, self.len) }
     }
 
-    /// The complete detoasted varlena, including its header. `jsonb` is stored
-    /// in PostgreSQL's internal varlena form (the read side copies the bytes
-    /// back verbatim and expects the header present), so its encoder must keep
-    /// the header that [`bytes`](Self::bytes) strips off.
+    /// The complete detoasted varlena, including its header. The explicit
+    /// JSONB-internal provider codec uses this form; ordinary varlena codecs
+    /// should use [`bytes`](Self::bytes), which strips the header.
     pub(crate) fn full_varlena_bytes(&self) -> &[u8] {
         unsafe {
             let len = varlena::varsize_any(self.detoasted);
@@ -378,11 +358,4 @@ mod tests {
             }
         }
     }
-
-    // NOTE: the null path of `append_datum` (`ArrowColumnEncoder::append_datum`)
-    // cannot be exercised here: its `Some` dispatch arm references every
-    // variant's `append_datum`, including `Decimal128Encoder`'s numeric encode
-    // path, which pulls PostgreSQL backend symbols into a host test binary and
-    // fails to link on Linux. That coverage lives as a `#[pg_test]` in
-    // `pg-backend-tests` (see `arrow_conv::decoder_equivalence`).
 }

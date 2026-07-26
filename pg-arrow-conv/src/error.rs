@@ -2,15 +2,15 @@
 
 use std::borrow::Cow;
 
-use pg_lakebase_core::diag::SqlStateError;
-use pg_lakebase_core::tuple::DecimalCodecError;
+use pg_lakebase_core::diag::{PgError, SqlStateError};
+use pg_lakebase_core::tuple::{DatumConversionError, DecimalCodecError};
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
 /// Format-neutral conversion error, classified for SQLSTATE reporting through
 /// [`SqlStateError`].
 #[derive(Error, Debug)]
-pub enum ConvError {
+pub enum ArrowConversionError {
     /// The column's Arrow `DataType` is not one this layer can materialize.
     #[error("column data type is not supported: {0}")]
     UnsupportedColumnType(String),
@@ -30,14 +30,22 @@ pub enum ConvError {
 
     /// A value could not be converted to/from its PostgreSQL datum form.
     #[error("datum conversion error: {0}")]
-    DatumConversionError(String),
+    DatumConversion(#[source] DatumConversionError),
 
-    /// A text/name datum's bytes were not valid UTF-8. Reachable on a database
-    /// whose server encoding is not UTF-8, so it is user/data-level, not an
-    /// invariant: the typed [`std::str::Utf8Error`] is kept as the `source` so
-    /// the offending byte offset survives into the report's DETAIL.
-    #[error("text datum is not valid UTF-8: {0}")]
-    InvalidUtf8(#[from] std::str::Utf8Error),
+    /// Arrow or PostgreSQL input rejected a semantic value.
+    #[error("invalid conversion input: {0}")]
+    InvalidInput(String),
+
+    /// A value exceeded a conversion range without a more specific domain
+    /// error. Numeric codec ranges use [`Self::DecimalCodec`] so they can
+    /// retain PostgreSQL's numeric SQLSTATE.
+    #[error("conversion value is out of range: {0}")]
+    ValueOutOfRange(String),
+
+    /// A PostgreSQL ERROR raised while allocating or constructing a Datum.
+    /// Preserve its SQLSTATE for the callback boundary.
+    #[error("PostgreSQL error: {0}")]
+    Postgres(#[from] PgError),
 
     /// A conversion-layer invariant violation. Used for "cannot happen"
     /// branches where a runtime guard remains because the type system does not
@@ -52,10 +60,10 @@ pub enum ConvError {
     #[error("invariant violation in pg-arrow-conv: {0}")]
     InvariantViolated(&'static str),
 
-    /// The NUMERIC codec produced bytes PostgreSQL rejected as malformed — a
-    /// bug in the codec, not a user error.
-    #[error("internal codec error in pg-arrow-conv: {0}")]
-    DecimalCodecBug(String),
+    /// A NUMERIC codec error. Its SQLSTATE is selected from the structured
+    /// error rather than from a formatted message.
+    #[error("decimal codec error: {0}")]
+    DecimalCodec(#[source] DecimalCodecError),
 
     /// A date/time value fell outside the range PostgreSQL can represent.
     #[error("datetime conversion error: {0}")]
@@ -73,53 +81,77 @@ pub enum ConvError {
 }
 
 /// Result alias for the conversion surface.
-pub type ConvResult<T> = Result<T, ConvError>;
+pub type ArrowConversionResult<T> = Result<T, ArrowConversionError>;
 
-impl SqlStateError for ConvError {
+impl SqlStateError for ArrowConversionError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            ConvError::UnsupportedColumnType(_)
-            | ConvError::IncompatibleColumnType(_, _)
-            | ConvError::ArrowTypeMismatch(_) => {
+            ArrowConversionError::UnsupportedColumnType(_)
+            | ArrowConversionError::IncompatibleColumnType(_, _)
+            | ArrowConversionError::ArrowTypeMismatch(_) => {
                 PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
             }
-            ConvError::DatumConversionError(_)
-            | ConvError::InvalidUtf8(_)
-            | ConvError::NumericError(_)
-            | ConvError::DatetimeConversionError(_)
-            | ConvError::UuidConversionError(_) => {
+            ArrowConversionError::DatumConversion(source) => source.sql_error_code(),
+            ArrowConversionError::InvalidInput(_) => {
+                PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION
+            }
+            ArrowConversionError::ValueOutOfRange(_) => {
                 PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
             }
-            ConvError::ArrowError(_)
-            | ConvError::InvariantViolated(_)
-            | ConvError::DecimalCodecBug(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            ArrowConversionError::NumericError(_)
+            | ArrowConversionError::DatetimeConversionError(_)
+            | ArrowConversionError::UuidConversionError(_) => {
+                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
+            }
+            ArrowConversionError::Postgres(error) => error.sql_error_code(),
+            ArrowConversionError::ArrowError(_)
+            | ArrowConversionError::InvariantViolated(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
+            ArrowConversionError::DecimalCodec(error) => match error {
+                DecimalCodecError::ValueOutOfRange { .. } => {
+                    PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
+                }
+                DecimalCodecError::InvalidBinaryRepresentation { .. } => {
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+                }
+                DecimalCodecError::PrecisionOutOfRange { .. }
+                | DecimalCodecError::ScaleOutOfRange { .. } => {
+                    PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
+                }
+            },
         }
     }
 }
 
+impl From<DatumConversionError> for ArrowConversionError {
+    fn from(error: DatumConversionError) -> Self {
+        Self::DatumConversion(error)
+    }
+}
+
 /// Routes a [`DecimalCodecError`] to the conversion layer that matches its
-/// cause: an unmappable column shape becomes a datatype mismatch, out-of-range
-/// user data a data exception, and malformed wire bytes a codec bug.
-impl From<DecimalCodecError> for ConvError {
+/// cause: an unmappable column shape becomes a datatype mismatch, numeric
+/// out-of-range data retains the numeric SQLSTATE, and malformed wire bytes
+/// remain a codec error.
+impl From<DecimalCodecError> for ArrowConversionError {
     fn from(err: DecimalCodecError) -> Self {
         match err {
-            DecimalCodecError::PrecisionOutOfRange { precision } => {
-                ConvError::IncompatibleColumnType(
+            error @ DecimalCodecError::PrecisionOutOfRange { precision } => {
+                ArrowConversionError::IncompatibleColumnType(
                     format!("decimal(precision={precision})"),
-                    err.to_string(),
+                    error.to_string(),
                 )
             }
-            DecimalCodecError::ScaleOutOfRange { precision, scale } => {
-                ConvError::IncompatibleColumnType(
+            error @ DecimalCodecError::ScaleOutOfRange { precision, scale } => {
+                ArrowConversionError::IncompatibleColumnType(
                     format!("decimal({precision}, {scale})"),
-                    err.to_string(),
+                    error.to_string(),
                 )
             }
-            DecimalCodecError::ValueOutOfRange { .. } => {
-                ConvError::DatumConversionError(err.to_string())
-            }
-            DecimalCodecError::InvalidBinaryRepresentation { .. } => {
-                ConvError::DecimalCodecBug(err.to_string())
+            error @ (DecimalCodecError::ValueOutOfRange { .. }
+            | DecimalCodecError::InvalidBinaryRepresentation { .. }) => {
+                ArrowConversionError::DecimalCodec(error)
             }
         }
     }

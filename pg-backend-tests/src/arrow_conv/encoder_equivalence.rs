@@ -18,9 +18,12 @@ mod tests {
     use std::ops::Range;
 
     use arrow_array::Array;
-    use pg_arrow_conv::{ArrowColumnEncoder, ColumnRule};
-    use pg_lakebase_core::batch::DatumColumnAppender;
-    use pg_lakebase_core::tuple::{PgDatumRef, Row, TupleSlotRow};
+    use arrow_schema::{Field, Schema};
+    use pg_arrow_conv::{
+        ArrowColumnEncoder, BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule,
+    };
+    use pg_lakebase_core::batch::BatchBuffer;
+    use pg_lakebase_core::tuple::{Row, RowDatumCodec, TupleSlotRow};
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
     use proptest::prelude::*;
@@ -60,8 +63,12 @@ mod tests {
         /// `name` is a fixed `NameData` cstring, not a varlena, and maps to an
         /// Iceberg string (`ColumnRule::Utf8`).
         Name(Vec<Option<String>>),
+        /// `json` keeps its validated input text and maps to an Iceberg string
+        /// (`ColumnRule::Utf8`).
+        Json(Vec<Option<String>>),
         /// `jsonb` is stored as Iceberg binary holding PostgreSQL's internal
-        /// varlena verbatim (header included), so it maps to `ColumnRule::Binary`.
+        /// varlena verbatim (header included), so it maps to the explicit
+        /// `ColumnRule::PostgresJsonbVarlena` codec.
         Jsonb(Vec<Option<String>>),
     }
 
@@ -166,8 +173,13 @@ mod tests {
                 pg_sys::NAMEOID,
                 conv(v, |s| unsafe { name_datum(&s) }),
             ),
+            Case::Json(v) => (
+                ColumnRule::Utf8,
+                pg_sys::JSONOID,
+                conv(v, |s| unsafe { json_datum(&s) }),
+            ),
             Case::Jsonb(v) => (
-                ColumnRule::Binary,
+                ColumnRule::PostgresJsonbVarlena,
                 pg_sys::JSONBOID,
                 conv(v, |s| unsafe { jsonb_datum(&s) }),
             ),
@@ -192,6 +204,17 @@ mod tests {
         unsafe {
             pgrx::fcinfo::direct_function_call_as_datum(
                 pg_sys::jsonb_in,
+                &[Some(pg_sys::Datum::from(c.as_ptr()))],
+            )
+        }
+    }
+
+    /// Build a `json` datum from JSON text via `json_in`.
+    unsafe fn json_datum(s: &str) -> Option<pg_sys::Datum> {
+        let c = std::ffi::CString::new(s).expect("json has no interior NUL");
+        unsafe {
+            pgrx::fcinfo::direct_function_call_as_datum(
+                pg_sys::json_in,
                 &[Some(pg_sys::Datum::from(c.as_ptr()))],
             )
         }
@@ -264,25 +287,58 @@ mod tests {
         let (rule, oid, datums) = into_parts(case);
         unsafe {
             let slot = make_slot(oid);
-            let mut encoder = ArrowColumnEncoder::new(&rule, datums.len().max(1));
+            let row_codec = RowDatumCodec::from_slot(slot)
+                .expect("test slot must produce a row datum codec");
+            let mut type_encoder = ArrowColumnEncoder::new(&rule, 0);
+            let data_type = type_encoder
+                .finish()
+                .map_err(|e| {
+                    TestCaseError::fail(format!("type finish failed: {e:?}"))
+                })?
+                .data_type()
+                .clone();
+            let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+                "c", data_type, true,
+            )]));
+            let plan =
+                BoundWriteColumnPlan::bind(rule.clone(), Some(0), Some(oid), 1)
+                    .map_err(|e| {
+                        TestCaseError::fail(format!("bind failed: {e:?}"))
+                    })?;
+            let mut buffer =
+                BoundWriteBuffer::new(schema, vec![plan].into_boxed_slice())
+                    .map_err(|e| {
+                        TestCaseError::fail(format!("buffer bind failed: {e:?}"))
+                    })?;
             let mut rows: Vec<Row> = Vec::with_capacity(datums.len());
 
             for datum in datums {
                 store_datum(slot, datum);
-                let view = TupleSlotRow::from_raw(slot).datum_at(0);
-                encoder.append_datum(view).map_err(|e| {
+                let row = TupleSlotRow::from_raw(slot);
+                buffer.append_slot_row(row).map_err(|e| {
                     TestCaseError::fail(format!("encoder append failed: {e:?}"))
                 })?;
-                let cell =
-                    view.filter(|v| !v.is_null()).and_then(PgDatumRef::to_cell);
+                let view = row.datum_at(0);
+                let cell = match view.filter(|v| !v.is_null()) {
+                    Some(value) => value.to_cell(&row_codec).map_err(|error| {
+                        TestCaseError::fail(format!(
+                            "cell conversion failed: {error}"
+                        ))
+                    })?,
+                    None => None,
+                };
                 let mut row = Row::with_capacity(1);
                 row.set_cell(0, cell);
                 rows.push(row);
             }
 
-            let encoded = encoder.finish().map_err(|e| {
-                TestCaseError::fail(format!("encoder finish failed: {e:?}"))
-            })?;
+            let encoded = buffer
+                .finish_batch()
+                .map_err(|e| {
+                    TestCaseError::fail(format!("encoder finish failed: {e:?}"))
+                })?
+                .column(0)
+                .clone();
             let reference = rule
                 .build(&rows, 0)
                 .map_err(|e| TestCaseError::fail(format!("build failed: {e:?}")))?;
@@ -414,8 +470,8 @@ mod tests {
             .expect("encoder output must match ColumnRule::build");
     }
 
-    // `name` and `jsonb` are not in the proptest generator (their datums are
-    // built via input functions, not `IntoDatum`), so they get deterministic
+    // `name`, `json`, and `jsonb` are not in the proptest generator (their
+    // datums are built via input functions, not `IntoDatum`), so they get deterministic
     // equivalence checks. Both encoders previously diverged from `build`:
     // `name` was dropped to NULL (not a varlena) and `jsonb` had its varlena
     // header stripped (crashing the backend on read).
@@ -428,6 +484,16 @@ mod tests {
             Some("another_name".to_string()),
         ]))
         .expect("name encoder output must match ColumnRule::build");
+    }
+
+    #[pg_test]
+    fn encoder_output_matches_build_for_json() {
+        run_case(Case::Json(vec![
+            Some(r#"{ "json_key": 1, "json_key": 2 }"#.to_string()),
+            None,
+            Some("[true, null]".to_string()),
+        ]))
+        .expect("json encoder output must match ColumnRule::build");
     }
 
     #[pg_test]

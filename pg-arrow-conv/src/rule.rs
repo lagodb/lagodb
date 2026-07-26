@@ -3,7 +3,7 @@
 use arrow_schema::{DataType, FieldRef, TimeUnit};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
-use crate::error::{ConvError, ConvResult};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
 
 /// The target PostgreSQL column type, classified into the coarse bucket the
 /// `(Arrow DataType, PG type)` dispatch keys on.
@@ -25,6 +25,7 @@ pub enum PgColumnType {
     Float8,
     Text,
     Bytea,
+    Jsonb,
     Uuid,
     Numeric,
     Date,
@@ -55,10 +56,10 @@ impl PgColumnType {
     /// layer cannot target.
     ///
     /// Several OIDs collapse to one bucket on purpose: `text`/`varchar`/
-    /// `bpchar`/`name`/`json` → [`Text`](Self::Text) and `bytea`/`jsonb` →
-    /// [`Bytea`](Self::Bytea). The bucket only selects the conversion *rule*;
-    /// the exact OID (carried separately into datum construction) picks the
-    /// precise varlena form. An array OID collapses to [`Array`](Self::Array)
+    /// `bpchar`/`name`/`json` → [`Text`](Self::Text). `jsonb` remains distinct
+    /// as a PostgreSQL target, but this format-neutral resolver does not choose
+    /// a physical representation for it; a provider must bind that explicitly.
+    /// An array OID collapses to [`Array`](Self::Array)
     /// carrying its **element** OID (`pg_type.typelem`); the element *kind*
     /// comes from the Arrow list element, but the element OID is what read-side
     /// datum construction targets (and narrows to).
@@ -77,9 +78,8 @@ impl PgColumnType {
                 | PgBuiltInOids::NAMEOID
                 | PgBuiltInOids::JSONOID,
             ) => Self::Text,
-            PgOid::BuiltIn(PgBuiltInOids::BYTEAOID | PgBuiltInOids::JSONBOID) => {
-                Self::Bytea
-            }
+            PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => Self::Bytea,
+            PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => Self::Jsonb,
             PgOid::BuiltIn(PgBuiltInOids::UUIDOID) => Self::Uuid,
             PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => Self::Numeric,
             PgOid::BuiltIn(PgBuiltInOids::DATEOID) => Self::Date,
@@ -117,6 +117,10 @@ pub enum ColumnRule {
     Utf8,
     /// `Binary` or `LargeBinary`.
     Binary,
+    /// `Binary` or `LargeBinary` containing complete PostgreSQL JSONB
+    /// internal-varlena bytes. This is a provider-selected physical codec, not
+    /// the representation of [`Cell::Jsonb`](pg_lakebase_core::tuple::Cell).
+    PostgresJsonbVarlena,
     /// `FixedSizeBinary(len)` mapped to `bytea`.
     FixedBinary {
         len: usize,
@@ -159,7 +163,7 @@ impl ColumnRule {
     /// precision/scale, fixed-binary width, timestamp unit/timezone. Validating
     /// the full `DataType` once per scan (against the type the plan resolved
     /// from the schema) turns a producer/plan drift into a clean
-    /// [`ConvError::ArrowTypeMismatch`] at the boundary instead of a panic or a
+    /// [`ArrowConversionError::ArrowTypeMismatch`] at the boundary instead of a panic or a
     /// value silently decoded at the wrong scale/width.
     ///
     /// The accepted set mirrors [`resolve_column_rule`] (e.g. `Utf8` accepts
@@ -173,6 +177,9 @@ impl ColumnRule {
             ColumnRule::F64 => matches!(dt, DataType::Float64),
             ColumnRule::Utf8 => matches!(dt, DataType::Utf8 | DataType::LargeUtf8),
             ColumnRule::Binary => {
+                matches!(dt, DataType::Binary | DataType::LargeBinary)
+            }
+            ColumnRule::PostgresJsonbVarlena => {
                 matches!(dt, DataType::Binary | DataType::LargeBinary)
             }
             ColumnRule::FixedBinary { len } => {
@@ -206,6 +213,20 @@ impl ColumnRule {
                     if element.accepts_data_type(field.data_type())
             ),
         }
+    }
+
+    /// Whether decoding or encoding this rule crosses the PostgreSQL/Arrow
+    /// semantic UTF-8 boundary. Physical PostgreSQL JSONB varlena bytes are
+    /// deliberately excluded.
+    pub(crate) fn requires_utf8_server_encoding(&self) -> bool {
+        matches!(self, Self::Utf8)
+            || matches!(
+                self,
+                Self::List {
+                    element: ListElementRule::String,
+                    ..
+                }
+            )
     }
 }
 
@@ -290,14 +311,14 @@ impl ListElementRule {
 /// rejected here at converter construction rather than surfacing as a corrupt
 /// or failed datum mid-scan.
 ///
-/// Returns [`ConvError::IncompatibleColumnType`] when the `DataType` is
+/// Returns [`ArrowConversionError::IncompatibleColumnType`] when the `DataType` is
 /// recognized but paired with an incompatible PostgreSQL type, and
-/// [`ConvError::UnsupportedColumnType`] when the `DataType` is one this layer
+/// [`ArrowConversionError::UnsupportedColumnType`] when the `DataType` is one this layer
 /// cannot materialize at all.
 pub fn resolve_column_rule(
     arrow: &DataType,
     pg: PgColumnType,
-) -> ConvResult<ColumnRule> {
+) -> ArrowConversionResult<ColumnRule> {
     use PgColumnType as Pg;
     match arrow {
         DataType::Boolean => require_pg(pg == Pg::Bool, arrow, pg, ColumnRule::Bool),
@@ -334,10 +355,12 @@ pub fn resolve_column_rule(
                 TimeUnit::Microsecond => false,
                 TimeUnit::Nanosecond => true,
                 TimeUnit::Second | TimeUnit::Millisecond => {
-                    return Err(ConvError::UnsupportedColumnType(format!(
-                        "Timestamp unit {unit:?} is not supported \
+                    return Err(ArrowConversionError::UnsupportedColumnType(
+                        format!(
+                            "Timestamp unit {unit:?} is not supported \
                          (only microsecond and nanosecond)"
-                    )));
+                        ),
+                    ));
                 }
             };
             // A zone-aware Arrow timestamp must land in `timestamptz` and a
@@ -376,7 +399,7 @@ pub fn resolve_column_rule(
                 || !(0..=38).contains(scale)
                 || *scale as u32 > *precision as u32
             {
-                return Err(ConvError::IncompatibleColumnType(
+                return Err(ArrowConversionError::IncompatibleColumnType(
                     format!("Decimal128({precision}, {scale})"),
                     "require 1 <= precision <= 38 and 0 <= scale <= precision"
                         .to_string(),
@@ -396,12 +419,12 @@ pub fn resolve_column_rule(
             } else if pg == Pg::Bytea && (1..=i32::MAX).contains(&n) {
                 Ok(ColumnRule::FixedBinary { len: n as usize })
             } else if n == 16 {
-                Err(ConvError::IncompatibleColumnType(
+                Err(ArrowConversionError::IncompatibleColumnType(
                     "FixedSizeBinary(16)".to_string(),
                     format!("target PG type {pg:?} is neither uuid nor bytea"),
                 ))
             } else {
-                Err(ConvError::UnsupportedColumnType(format!(
+                Err(ArrowConversionError::UnsupportedColumnType(format!(
                     "FixedSizeBinary({n}) is only supported as bytea"
                 )))
             }
@@ -418,7 +441,7 @@ pub fn resolve_column_rule(
             // family), so a desync is rejected here rather than mid-scan at datum
             // construction.
             if !element.accepts_target_oid(elem_oid) {
-                return Err(ConvError::IncompatibleColumnType(
+                return Err(ArrowConversionError::IncompatibleColumnType(
                     format!("{arrow:?}"),
                     format!(
                         "list element rule {element:?} cannot materialize into PG \
@@ -433,19 +456,21 @@ pub fn resolve_column_rule(
                 elem_oid,
             })
         }
-        other => Err(ConvError::UnsupportedColumnType(format!("{other:?}"))),
+        other => Err(ArrowConversionError::UnsupportedColumnType(format!(
+            "{other:?}"
+        ))),
     }
 }
 
 /// Return `rule` when the resolved `(arrow, pg)` pair is compatible, otherwise
-/// the [`ConvError::IncompatibleColumnType`] naming the offending pair. Keeps
+/// the [`ArrowConversionError::IncompatibleColumnType`] naming the offending pair. Keeps
 /// the per-`DataType` arms above to a single line each.
 fn require_pg(
     compatible: bool,
     arrow: &DataType,
     pg: PgColumnType,
     rule: ColumnRule,
-) -> ConvResult<ColumnRule> {
+) -> ArrowConversionResult<ColumnRule> {
     if compatible {
         Ok(rule)
     } else {
@@ -453,10 +478,10 @@ fn require_pg(
     }
 }
 
-/// Build the [`ConvError::IncompatibleColumnType`] for a recognized Arrow type
+/// Build the [`ArrowConversionError::IncompatibleColumnType`] for a recognized Arrow type
 /// paired with a PostgreSQL type it cannot target.
-fn incompatible(arrow: &DataType, pg: PgColumnType) -> ConvError {
-    ConvError::IncompatibleColumnType(
+fn incompatible(arrow: &DataType, pg: PgColumnType) -> ArrowConversionError {
+    ArrowConversionError::IncompatibleColumnType(
         format!("{arrow:?}"),
         format!("cannot materialize into PG type {pg:?}"),
     )
@@ -464,10 +489,10 @@ fn incompatible(arrow: &DataType, pg: PgColumnType) -> ConvError {
 
 /// Resolve the conversion rule for a list element from its Arrow `DataType`.
 /// Anything outside `bool`/`int`/`long`/`float`/`double`/`string` (including a
-/// nested list) is rejected with [`ConvError::UnsupportedColumnType`].
+/// nested list) is rejected with [`ArrowConversionError::UnsupportedColumnType`].
 pub fn resolve_list_element_rule(
     element_type: &DataType,
-) -> ConvResult<ListElementRule> {
+) -> ArrowConversionResult<ListElementRule> {
     match element_type {
         DataType::Boolean => Ok(ListElementRule::Bool),
         DataType::Int32 => Ok(ListElementRule::Int),
@@ -475,7 +500,7 @@ pub fn resolve_list_element_rule(
         DataType::Float32 => Ok(ListElementRule::Float),
         DataType::Float64 => Ok(ListElementRule::Double),
         DataType::Utf8 | DataType::LargeUtf8 => Ok(ListElementRule::String),
-        other => Err(ConvError::UnsupportedColumnType(format!(
+        other => Err(ArrowConversionError::UnsupportedColumnType(format!(
             "list element type {other:?} is not supported"
         ))),
     }
@@ -496,10 +521,10 @@ pub fn resolve_list_element_rule(
 pub fn validate_supported(
     arrow_schema: &arrow_schema::Schema,
     pg_column_types: &[PgColumnType],
-) -> ConvResult<()> {
+) -> ArrowConversionResult<()> {
     let fields = arrow_schema.fields();
     if fields.len() != pg_column_types.len() {
-        return Err(ConvError::InvariantViolated(
+        return Err(ArrowConversionError::InvariantViolated(
             "validate_supported: Arrow schema and PG target-type counts differ",
         ));
     }

@@ -3,7 +3,9 @@
 //! so assertions use `matches!`.
 
 use arrow_schema::DataType;
-use pg_arrow_conv::{ColumnRule, ConvError, PgColumnType, resolve_column_rule};
+use pg_arrow_conv::{
+    ArrowConversionError, ColumnRule, PgColumnType, resolve_column_rule,
+};
 use proptest::prelude::*;
 
 /// `FixedSizeBinary(16)` + `uuid` resolves to [`ColumnRule::Uuid`].
@@ -32,14 +34,14 @@ fn fixed16_bytea_resolves_to_fixed_binary() {
 }
 
 /// `FixedSizeBinary(16)` paired with neither `uuid` nor `bytea`
-/// is rejected with [`ConvError::IncompatibleColumnType`].
+/// is rejected with [`ArrowConversionError::IncompatibleColumnType`].
 #[test]
 fn fixed16_other_pg_type_is_incompatible() {
     let err = resolve_column_rule(&DataType::FixedSizeBinary(16), PgColumnType::Text)
         .expect_err("FixedSizeBinary(16) + Text must be rejected");
     assert!(
-        matches!(err, ConvError::IncompatibleColumnType(_, _)),
-        "expected ConvError::IncompatibleColumnType, got {err:?}"
+        matches!(err, ArrowConversionError::IncompatibleColumnType(_, _)),
+        "expected ArrowConversionError::IncompatibleColumnType, got {err:?}"
     );
 }
 

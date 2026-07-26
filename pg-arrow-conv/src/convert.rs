@@ -5,18 +5,16 @@
 //! same [`ArrowColumnEncoder`] the columnar hot path uses (via `append_cell`),
 //! so a buffered `Cell` and a live datum produce a bit-identical Arrow array.
 //!
-//! The read direction has no per-value dispatcher here: both worlds decode a
-//! batch through [`ColumnReader`](crate::read), which binds a column's concrete
-//! typed array once per batch and then reads values without a per-value
-//! downcast — [`read_datum`](crate::read::ColumnReader::read_datum) for the
-//! slot-first scan, [`read_cell`](crate::read::ColumnReader::read_cell) for the
-//! row-world `Cell`.
+//! The read direction has no per-value downcast here. The row-world binds
+//! semantic columns through [`ColumnReader`](crate::read::ColumnReader); the
+//! slot-first path binds provider datum codecs through
+//! [`ArrowColumnDecoder`](crate::read::ArrowColumnDecoder). Both resolve the
+//! concrete Arrow array once per batch.
 
 use arrow_array::ArrayRef;
-use pg_lakebase_core::batch::DatumColumnAppender;
 use pg_lakebase_core::tuple::Row;
 
-use crate::error::ConvResult;
+use crate::error::ArrowConversionResult;
 use crate::rule::ColumnRule;
 use crate::types::ArrowColumnEncoder;
 
@@ -29,7 +27,11 @@ impl ColumnRule {
     /// [`ArrowColumnEncoder::append_cell`], so a buffered `Cell` and a live
     /// datum produce a bit-identical Arrow array. A missing/NULL cell appends a
     /// NULL slot.
-    pub fn build(&self, rows: &[Row], col_idx: usize) -> ConvResult<ArrayRef> {
+    pub fn build(
+        &self,
+        rows: &[Row],
+        col_idx: usize,
+    ) -> ArrowConversionResult<ArrayRef> {
         let mut encoder = ArrowColumnEncoder::new(self, rows.len());
         for cell in rows
             .iter()

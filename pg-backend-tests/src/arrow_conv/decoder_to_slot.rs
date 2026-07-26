@@ -21,11 +21,12 @@ mod tests {
     };
     use arrow_schema::{Field, Schema};
     use pg_arrow_conv::{
-        ArrowBatchSource, ArrowColumnDecoder, ColumnReader, ColumnRule, ConvError,
-        DecodedColumn, PgColumnType, resolve_column_rule,
+        ArrowBatchSource, ArrowColumnDecoder, ArrowConversionError, ColumnReader,
+        ColumnRule, DatumCodec, DecodedColumn, PgColumnType, resolve_column_rule,
     };
     use pg_lakebase_core::batch::{BatchRowCursor, BatchRowDecoder};
-    use pg_lakebase_core::tuple::SlotColumns;
+    use pg_lakebase_core::handles::ScanDirection;
+    use pg_lakebase_core::tuple::{ColumnDatumCodec, ColumnDatumTarget, SlotColumns};
     use pgrx::prelude::*;
     use pgrx::{FromDatum, datum::Uuid, pg_sys};
 
@@ -200,7 +201,16 @@ mod tests {
         let columns: Vec<DecodedColumn> = plan
             .iter()
             .enumerate()
-            .map(|(i, (_, rule, oid))| DecodedColumn::new(rule.clone(), i, i, *oid))
+            .map(|(i, (_, rule, oid))| unsafe {
+                DecodedColumn::new(
+                    rule.clone(),
+                    i,
+                    i,
+                    *oid,
+                    DatumCodec::standard(*oid).expect("bind standard datum codec"),
+                )
+                .expect("bind decoded column")
+            })
             .collect();
 
         let batch = batch_of(arrays);
@@ -274,8 +284,28 @@ mod tests {
         ]);
         // src 0 -> slot 0 (value); src 1 (null) -> slot 3; slots 1 and 2 unmapped.
         let decoder = ArrowColumnDecoder::new(vec![
-            DecodedColumn::new(ColumnRule::I32, 0, 0, pg_sys::INT4OID),
-            DecodedColumn::new(ColumnRule::I32, 1, 3, pg_sys::INT4OID),
+            unsafe {
+                DecodedColumn::new(
+                    ColumnRule::I32,
+                    0,
+                    0,
+                    pg_sys::INT4OID,
+                    DatumCodec::standard(pg_sys::INT4OID)
+                        .expect("bind standard datum codec"),
+                )
+                .expect("bind decoded column")
+            },
+            unsafe {
+                DecodedColumn::new(
+                    ColumnRule::I32,
+                    1,
+                    3,
+                    pg_sys::INT4OID,
+                    DatumCodec::standard(pg_sys::INT4OID)
+                        .expect("bind standard datum codec"),
+                )
+                .expect("bind decoded column")
+            },
         ]);
         let natts = 4;
 
@@ -307,12 +337,17 @@ mod tests {
             Some("first"),
             Some("second"),
         ]))]);
-        let decoder = ArrowColumnDecoder::new(vec![DecodedColumn::new(
-            ColumnRule::Utf8,
-            0,
-            0,
-            pg_sys::TEXTOID,
-        )]);
+        let decoder = ArrowColumnDecoder::new(vec![unsafe {
+            DecodedColumn::new(
+                ColumnRule::Utf8,
+                0,
+                0,
+                pg_sys::TEXTOID,
+                DatumCodec::standard(pg_sys::TEXTOID)
+                    .expect("bind standard datum codec"),
+            )
+            .expect("bind decoded column")
+        }]);
 
         unsafe {
             let tmp_ctx = pg_sys::AllocSetContextCreateExtended(
@@ -368,14 +403,19 @@ mod tests {
     fn slot_marked_nonempty_once_per_row_never_at_end_of_scan() {
         let batch = batch_of(vec![Arc::new(Int32Array::from(vec![Some(7)]))]);
         let source = ArrowBatchSource::new(
-            vec![Ok::<RecordBatch, ConvError>(batch)].into_iter(),
+            vec![Ok::<RecordBatch, ArrowConversionError>(batch)].into_iter(),
         );
-        let decoder = ArrowColumnDecoder::new(vec![DecodedColumn::new(
-            ColumnRule::I32,
-            0,
-            0,
-            pg_sys::INT4OID,
-        )]);
+        let decoder = ArrowColumnDecoder::new(vec![unsafe {
+            DecodedColumn::new(
+                ColumnRule::I32,
+                0,
+                0,
+                pg_sys::INT4OID,
+                DatumCodec::standard(pg_sys::INT4OID)
+                    .expect("bind standard datum codec"),
+            )
+            .expect("bind decoded column")
+        }]);
         let mut cursor = BatchRowCursor::new(source, decoder);
 
         unsafe {
@@ -385,7 +425,11 @@ mod tests {
             pg_sys::ExecClearTuple(slot);
             assert!(is_empty(slot), "slot is empty before a row is produced");
             let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
-            assert!(cursor.next_into_slot(&mut cols).expect("first row"));
+            assert!(
+                cursor
+                    .next_into_slot(ScanDirection::Forward, &mut cols)
+                    .expect("first row")
+            );
             pg_sys::ExecStoreVirtualTuple(slot);
             assert!(!is_empty(slot), "slot is non-empty after a produced row");
             assert_eq!(read::<i32>(slot, 0), Some(7));
@@ -393,7 +437,11 @@ mod tests {
             // End of scan: clear, decode returns false, no store.
             pg_sys::ExecClearTuple(slot);
             let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
-            assert!(!cursor.next_into_slot(&mut cols).expect("end of scan"));
+            assert!(
+                !cursor
+                    .next_into_slot(ScanDirection::Forward, &mut cols)
+                    .expect("end of scan")
+            );
             assert!(is_empty(slot), "slot stays empty at end of scan");
         }
     }
@@ -434,8 +482,28 @@ mod tests {
         let oids = [pg_sys::INT4ARRAYOID, pg_sys::TEXTARRAYOID];
         let batch = batch_of(vec![int_list, str_list]);
         let decoder = ArrowColumnDecoder::new(vec![
-            DecodedColumn::new(int_rule, 0, 0, pg_sys::INT4ARRAYOID),
-            DecodedColumn::new(str_rule, 1, 1, pg_sys::TEXTARRAYOID),
+            unsafe {
+                DecodedColumn::new(
+                    int_rule,
+                    0,
+                    0,
+                    pg_sys::INT4ARRAYOID,
+                    DatumCodec::standard(pg_sys::INT4ARRAYOID)
+                        .expect("bind standard datum codec"),
+                )
+                .expect("bind decoded column")
+            },
+            unsafe {
+                DecodedColumn::new(
+                    str_rule,
+                    1,
+                    1,
+                    pg_sys::TEXTARRAYOID,
+                    DatumCodec::standard(pg_sys::TEXTARRAYOID)
+                        .expect("bind standard datum codec"),
+                )
+                .expect("bind decoded column")
+            },
         ]);
 
         unsafe {
@@ -477,8 +545,9 @@ mod tests {
     // Canonical case: when the Arrow physical element representation already
     // matches the target element type (so no element-OID retarget is needed),
     // the slot-first direct array datum and the row-world `Cell` path
-    // (`read_cell` + `into_datum_typed`) must agree. This pins that the direct
-    // path is a faithful shortcut *for these cases*. The divergent retarget
+    // (`read_cell_unchecked` + target-aware Cell conversion) must agree. This
+    // pins that the direct path is a faithful shortcut *for these cases*. The
+    // divergent retarget
     // cases are covered separately by `retarget_list_datum_targets_element_oid`,
     // where the Cell path is deliberately the wrong oracle.
     #[pg_test]
@@ -492,12 +561,17 @@ mod tests {
         {
             unsafe {
                 // Direct: bind the one-column batch and decode row 0 into a slot.
-                let decoder = ArrowColumnDecoder::new(vec![DecodedColumn::new(
-                    rule.clone(),
-                    0,
-                    0,
-                    array_oid,
-                )]);
+                let decoder = ArrowColumnDecoder::new(vec![
+                    DecodedColumn::new(
+                        rule.clone(),
+                        0,
+                        0,
+                        array_oid,
+                        DatumCodec::standard(array_oid)
+                            .expect("bind standard datum codec"),
+                    )
+                    .expect("bind decoded column"),
+                ]);
                 let bound =
                     decoder.bind(batch_of(vec![array.clone()])).expect("bind");
                 let slot = make_slot(&[array_oid]);
@@ -509,12 +583,13 @@ mod tests {
                 // materialize it for the same target oid.
                 let cell = ColumnReader::bind(rule, array.as_ref())
                     .expect("bind cell reader")
-                    .read_cell(0)
-                    .expect("read_cell")
+                    .read_cell_unchecked(0)
+                    .expect("read_cell_unchecked")
                     .expect("present cell");
-                let via_cell = cell
-                    .into_datum_typed(array_oid, -1)
-                    .expect("cell into_datum_typed");
+                let codec =
+                    ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(array_oid))
+                        .expect("bind cell datum codec");
+                let via_cell = codec.cell_to_datum(cell).expect("cell to datum");
                 assert_eq!(
                     direct,
                     T::from_datum(via_cell, false),
@@ -586,13 +661,14 @@ mod tests {
     // Retarget cases: the produced array's element type must come from the
     // rule's declared element OID, *not* the Arrow physical type. Here the Cell
     // path would be the wrong oracle (it keeps the physical element type), so
-    // these assert `read_datum`'s output directly off the `ArrayType` header.
+    // these assert `read_datum_unchecked`'s output directly off the `ArrayType`
+    // header.
     //
     // - Physical `Int32` targeting `int2[]`: asserts both the element OID and
-    //   the narrowed values, whereas `Cell::I32Array` -> `into_datum_typed`
+    //   the narrowed values, whereas the natural Cell array conversion
     //   would yield `int4[]`.
     // - Physical `Utf8` targeting `name[]`: asserts the element OID only (the
-    //   text-family retarget signal — `Cell::StringArray` -> `into_datum_typed`
+    //   text-family retarget signal — a natural `StringArray` conversion
     //   would yield `text[]`). The values are not read back here because `name`
     //   is a fixed 64-byte type, not a varlena, so a generic `String` array
     //   read-back is not reliable.
@@ -606,13 +682,17 @@ mod tests {
         unsafe fn read_list_datum(
             rule: &ColumnRule,
             array: &ArrayRef,
+            target_oid: pg_sys::Oid,
         ) -> pg_sys::Datum {
             let reader =
                 ColumnReader::bind(rule, array.as_ref()).expect("bind reader");
-            // List ignores the (oid, typmod) args; the element type comes from
-            // the rule's bound elem_oid.
-            unsafe { reader.read_datum(0, pg_sys::InvalidOid, -1) }
-                .expect("read_datum")
+            // The list's element type comes from the rule's bound elem_oid;
+            // the standard array codec still binds the destination array OID.
+            let target =
+                ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(target_oid))
+                    .expect("bind standard array datum codec");
+            unsafe { reader.read_datum_unchecked(0, target) }
+                .expect("read_datum_unchecked")
                 .expect("present list cell")
         }
 
@@ -641,7 +721,8 @@ mod tests {
         .expect("name[] rule");
 
         unsafe {
-            let int2_datum = read_list_datum(&int2_rule, &i32_list);
+            let int2_datum =
+                read_list_datum(&int2_rule, &i32_list, pg_sys::INT2ARRAYOID);
             assert_eq!(
                 array_elem_oid(int2_datum),
                 pg_sys::INT2OID,
@@ -653,7 +734,8 @@ mod tests {
                 "int2[] values must be the narrowed elements"
             );
 
-            let name_datum = read_list_datum(&name_rule, &str_list);
+            let name_datum =
+                read_list_datum(&name_rule, &str_list, pg_sys::NAMEARRAYOID);
             assert_eq!(
                 array_elem_oid(name_datum),
                 pg_sys::NAMEOID,

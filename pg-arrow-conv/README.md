@@ -40,12 +40,12 @@ hands back datums (or arrays) with no knowledge of where the Arrow came from.
 
 ## Principle: dispatch on `(Arrow DataType, PgColumnType)`
 
-The crate's central idea is that the conversion for a column is fully determined
-by a pair: the Arrow `DataType` of the source column and the target PostgreSQL
-column type. The Arrow `DataType` already carries decimal precision/scale,
-timestamp unit and timezone, and binary width, so the target PostgreSQL type is
-load-bearing for exactly one distinction Arrow cannot make on its own —
-separating a `uuid` from a fixed-width `bytea` when both arrive as
+The crate's central idea is that **standard semantic** conversion for a column is
+determined by a pair: the Arrow `DataType` of the source column and the target
+PostgreSQL column type. The Arrow `DataType` already carries decimal
+precision/scale, timestamp unit and timezone, and binary width, so the target
+PostgreSQL type is load-bearing for exactly one distinction Arrow cannot make on
+its own — separating a `uuid` from a fixed-width `bytea` when both arrive as
 `FixedSizeBinary(16)`.
 
 This pair is resolved **once per column** into a `ColumnRule`, an enum that
@@ -53,7 +53,11 @@ captures everything the conversion needs (and nothing about column position or
 format type). After resolution, every row of the batch reuses the same rule with
 no further type dispatch or allocation. Schemas that pair an Arrow type with an
 incompatible PostgreSQL type, or that use an Arrow type the layer cannot
-materialize, are rejected up front rather than failing mid-scan.
+materialize, are rejected up front rather than failing mid-scan. A provider that
+uses a private physical representation (for example, complete PostgreSQL
+JSONB varlena bytes in Arrow `Binary`) must bind the corresponding explicit
+`ColumnRule` and `DatumCodec` at its own column-planning boundary; the
+format-neutral resolver never infers that representation from `JSONBOID`.
 
 ## Two worlds, one set of rules
 
@@ -67,19 +71,24 @@ representation:
 
 - On read, a batch source yields one Arrow `RecordBatch` at a time and a row
   decoder writes one row of that batch straight into a slot, column by column.
-- On write, a slot-fed buffer appends datum references into one Arrow column
-  builder per column and produces a `RecordBatch` on flush.
+- On write, a relation-bound slot-fed buffer appends validated PostgreSQL
+  datums into one Arrow column builder per column and produces a `RecordBatch`
+  on flush.
 
-These two halves implement the `AmScanBatchSource` / `BatchRowDecoder` and
-`BatchBuffer` / `SlotColumnarBatchBuffer` traits from `pg-lakebase-core`, so core
-drives them generically while staying Arrow-agnostic.
+The read half implements the `AmScanBatchSource` / `BatchRowDecoder` traits from
+`pg-lakebase-core`; the relation-bound write buffer implements `BatchBuffer`
+while keeping its provider-specific source binding in `pg-arrow-conv`.
 
 **Row world (FDW and row-mode).** A row-at-a-time consumer (an FDW, a row-mode
 access method, or buffering and `EXPLAIN` rendering) works through `pg-lakebase-core`'s
-owned `Cell`/`Row` types instead. The bound `ColumnReader::read_cell` extracts an
+owned `Cell`/`Row` types instead. After the caller establishes the row bound,
+the bound `ColumnReader::read_cell_unchecked` extracts a standard semantic
 Arrow value into a `Cell`, and the same `ColumnRule` builds an Arrow array from
-buffered `Cell`s (`ColumnRule::build`). Because the build path drives the very
-same column encoder the columnar hot path uses, the two write sources stay in
+buffered `Cell`s (`ColumnRule::build`). A provider-owned physical codec is
+intentionally not exposed as a semantic `Cell` through
+`read_cell_unchecked`; its slot path binds the `DatumCodec` once and copies
+directly into the destination slot. Because the build path drives the very same
+column encoder the columnar hot path uses, the two write sources stay in
 lockstep.
 
 ## Memory and error discipline
@@ -91,7 +100,7 @@ the calling shim has already switched to, so per-row resets reclaim them
 correctly.
 
 Errors use the same domain-error machinery as the rest of the workspace.
-`ConvError` is a `thiserror` enum that implements `pg-lakebase-core`'s
+`ArrowConversionError` is a `thiserror` enum that implements `pg-lakebase-core`'s
 `SqlStateError`, so each variant maps to a `PgSqlErrorCode` (datatype mismatch,
 data exception, or internal error). Consumers embed it with a `#[from]` variant
 in their own error type and delegate the SQLSTATE, so a conversion failure

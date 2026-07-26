@@ -1,4 +1,4 @@
-//! Backend tests for datum-path hazards and `SlotRecordBatchBuffer` behavior
+//! Backend tests for bound datum-path hazards and buffer behavior
 //! that need a live PostgreSQL backend: the varlena detoast fix runs real toast
 //! fetches, and the buffer's NULL-alignment / flush behavior is driven from
 //! actual tuple slots.
@@ -10,10 +10,8 @@ mod tests {
 
     use arrow_array::{Array, LargeBinaryArray};
     use arrow_schema::{DataType, Field, Schema};
-    use pg_arrow_conv::{ArrowColumnEncoder, ColumnRule, SlotRecordBatchBuffer};
-    use pg_lakebase_core::batch::{
-        BatchBuffer, DatumColumnAppender, SlotColumnarBatchBuffer,
-    };
+    use pg_arrow_conv::{BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule};
+    use pg_lakebase_core::batch::BatchBuffer;
     use pg_lakebase_core::tuple::TupleSlotRow;
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
@@ -65,6 +63,28 @@ mod tests {
         }
     }
 
+    fn bound_buffer(
+        schema: Arc<Schema>,
+        bindings: &[(ColumnRule, pg_sys::Oid)],
+    ) -> BoundWriteBuffer {
+        let slot_width = bindings.len();
+        let plans = bindings
+            .iter()
+            .enumerate()
+            .map(|(index, (rule, oid))| {
+                BoundWriteColumnPlan::bind(
+                    rule.clone(),
+                    Some(index),
+                    Some(*oid),
+                    slot_width,
+                )
+                .expect("bind bound write column")
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        BoundWriteBuffer::new(schema, plans).expect("bind bound write buffer")
+    }
+
     // A toasted `bytea`, read through the encoder, must append the fully
     // detoasted payload — the structural fix for the old write path that read
     // varlena bytes without detoasting. EXTERNAL storage forces an 8 KB value
@@ -96,11 +116,17 @@ mod tests {
 
             let slot = make_slot(&[pg_sys::BYTEAOID]);
             store_row(slot, &[Some(datum)]);
-            let mut encoder = ArrowColumnEncoder::new(&ColumnRule::Binary, 1);
-            encoder
-                .append_datum(TupleSlotRow::from_raw(slot).datum_at(0))
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "b",
+                DataType::LargeBinary,
+                true,
+            )]));
+            let mut buffer =
+                bound_buffer(schema, &[(ColumnRule::Binary, pg_sys::BYTEAOID)]);
+            buffer
+                .append_slot_row(TupleSlotRow::from_raw(slot))
                 .expect("append toasted bytea");
-            let array = encoder.finish().expect("finish");
+            let array = buffer.finish_batch().expect("finish").column(0).clone();
 
             pg_sys::SPI_finish();
             array
@@ -121,10 +147,16 @@ mod tests {
             let slot = make_slot(&[pg_sys::BYTEAOID]);
             let wrong: &[u8] = &[1, 2, 3];
             store_row(slot, &[wrong.into_datum()]);
-            let mut encoder =
-                ArrowColumnEncoder::new(&ColumnRule::FixedBinary { len: 16 }, 1);
-            let result =
-                encoder.append_datum(TupleSlotRow::from_raw(slot).datum_at(0));
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "b",
+                DataType::FixedSizeBinary(16),
+                true,
+            )]));
+            let mut buffer = bound_buffer(
+                schema,
+                &[(ColumnRule::FixedBinary { len: 16 }, pg_sys::BYTEAOID)],
+            );
+            let result = buffer.append_slot_row(TupleSlotRow::from_raw(slot));
             assert!(result.is_err(), "width mismatch must fail");
         }
     }
@@ -139,7 +171,14 @@ mod tests {
             Field::new("c", DataType::Boolean, true),
         ]));
         let rules = [ColumnRule::I32, ColumnRule::Utf8, ColumnRule::Bool];
-        let mut buffer = SlotRecordBatchBuffer::new(schema, &rules);
+        let mut buffer = bound_buffer(
+            schema,
+            &[
+                (rules[0].clone(), pg_sys::INT4OID),
+                (rules[1].clone(), pg_sys::TEXTOID),
+                (rules[2].clone(), pg_sys::BOOLOID),
+            ],
+        );
 
         unsafe {
             let slot =
@@ -176,7 +215,7 @@ mod tests {
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
         let mut buffer =
-            SlotRecordBatchBuffer::new(schema.clone(), &[ColumnRule::I32]);
+            bound_buffer(schema.clone(), &[(ColumnRule::I32, pg_sys::INT4OID)]);
 
         assert!(buffer.is_empty());
         let batch = buffer.finish_batch().expect("finish empty");
@@ -190,7 +229,7 @@ mod tests {
     fn flush_signals_at_configured_byte_threshold() {
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
-        let mut buffer = SlotRecordBatchBuffer::new(schema, &[ColumnRule::I32]);
+        let mut buffer = bound_buffer(schema, &[(ColumnRule::I32, pg_sys::INT4OID)]);
         let threshold = 40; // 10 Int32 rows * 4 bytes
 
         unsafe {
