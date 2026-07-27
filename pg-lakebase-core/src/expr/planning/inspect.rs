@@ -5,9 +5,26 @@
 //! facts to CustomScan planning/execution code.
 
 use core::ffi::c_void;
+use core::ptr::NonNull;
 
 use pgrx::pg_guard;
 use pgrx::pg_sys;
+
+/// Return true when a subtree contains volatile functions or SubPlans.
+///
+/// # Safety
+///
+/// `expr` must be NULL or a live PostgreSQL expression tree in the current
+/// backend memory context.
+pub(crate) unsafe fn subtree_is_unsafe_to_push(expr: *mut pg_sys::Expr) -> bool {
+    if expr.is_null() {
+        return false;
+    }
+    if unsafe { pg_sys::contain_volatile_functions(expr.cast::<pg_sys::Node>()) } {
+        return true;
+    }
+    unsafe { pg_sys::contain_subplans(expr.cast::<pg_sys::Node>()) }
+}
 
 /// Planner relation scope used to decide whether a `Var` belongs to the scan.
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +57,21 @@ impl RelationScope {
             }
         }
     }
+
+    #[inline]
+    unsafe fn overlaps_relids(self, relids: *const pg_sys::Bitmapset) -> bool {
+        if relids.is_null() {
+            return false;
+        }
+        match self {
+            Self::Exact(relid) => unsafe {
+                pg_sys::bms_is_member(relid as i32, relids)
+            },
+            Self::Relids(scope) => {
+                !scope.is_null() && unsafe { pg_sys::bms_overlap(scope, relids) }
+            }
+        }
+    }
 }
 
 /// One user-column `Var` belonging to the requested relation scope.
@@ -50,7 +82,7 @@ pub(crate) struct ExprVarRef {
     pub(crate) attcollation: pg_sys::Oid,
     /// Planner-owned source node. Consumers that manufacture a scan tlist
     /// copy this node so PostgreSQL's `varnullingrels` identity is preserved.
-    pub(crate) raw: *mut pg_sys::Var,
+    pub(crate) raw: NonNull<pg_sys::Var>,
 }
 
 /// Owned expression-usage facts for one relation scope.
@@ -86,11 +118,13 @@ impl RelationExprUsage {
     fn record_var(&mut self, var: *mut pg_sys::Var) {
         let attno = unsafe { (*var).varattno };
         if attno > 0 {
+            // `relation_var_walker` calls this only for a non-null T_Var node.
+            let raw = unsafe { NonNull::new_unchecked(var) };
             self.user_vars.push(ExprVarRef {
                 attno,
                 atttypid: unsafe { (*var).vartype },
                 attcollation: unsafe { (*var).varcollid },
-                raw: var,
+                raw,
             });
         } else if attno == 0 {
             self.has_whole_row = true;
@@ -113,6 +147,36 @@ impl RelationExprAnalyzer {
     #[inline]
     pub(crate) fn new(scope: RelationScope) -> Self {
         Self { scope }
+    }
+
+    /// Determine whether PostgreSQL considers an expression dependent on the
+    /// analyzer's relation scope.
+    ///
+    /// This delegates to PostgreSQL's `pull_varnos` rather than only walking
+    /// direct `Var` nodes.  In particular, PG accounts for correlated query
+    /// levels, `PlaceHolderVar` evaluation relids, nulling rels, and other
+    /// planner representations that a local expression walker cannot
+    /// reproduce safely.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be the live `PlannerInfo` for `expr`, and `expr` must be a
+    /// live planner expression node owned by that planning invocation.
+    pub(crate) unsafe fn depends_on_relation(
+        &self,
+        root: *mut pg_sys::PlannerInfo,
+        expr: *mut pg_sys::Expr,
+    ) -> bool {
+        if root.is_null() || expr.is_null() {
+            return true;
+        }
+        let relids = unsafe { pg_sys::pull_varnos(root, expr.cast()) };
+        if relids.is_null() {
+            return false;
+        }
+        let depends = unsafe { self.scope.overlaps_relids(relids) };
+        unsafe { pg_sys::bms_free(relids) };
+        depends
     }
 
     /// Collect relation-local `Var` usage from a single expression node.
@@ -223,40 +287,6 @@ unsafe extern "C-unwind" fn relation_var_walker(
         }
         _ => unsafe {
             pg_sys::expression_tree_walker(node, Some(relation_var_walker), context)
-        },
-    }
-}
-
-/// Finds SubPlan-like nodes using PG's expression walker.
-///
-/// # Safety
-///
-/// `node` is NULL or a live expression node.
-pub(crate) unsafe fn contains_subplan(node: *mut pg_sys::Node) -> bool {
-    unsafe { subplan_walker(node, core::ptr::null_mut()) }
-}
-
-#[pg_guard]
-unsafe extern "C-unwind" fn subplan_walker(
-    node: *mut pg_sys::Node,
-    _context: *mut c_void,
-) -> bool {
-    if node.is_null() {
-        return false;
-    }
-    match unsafe { (*node).type_ } {
-        pg_sys::NodeTag::T_SubPlan | pg_sys::NodeTag::T_AlternativeSubPlan => true,
-        pg_sys::NodeTag::T_RestrictInfo => {
-            let rinfo = node.cast::<pg_sys::RestrictInfo>();
-            let clause = unsafe { (*rinfo).clause }.cast::<pg_sys::Node>();
-            unsafe { subplan_walker(clause, core::ptr::null_mut()) }
-        }
-        _ => unsafe {
-            pg_sys::expression_tree_walker(
-                node,
-                Some(subplan_walker),
-                core::ptr::null_mut(),
-            )
         },
     }
 }

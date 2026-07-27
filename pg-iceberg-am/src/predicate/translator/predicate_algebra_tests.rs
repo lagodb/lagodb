@@ -82,6 +82,23 @@ fn fold_predicates_rejects_empty_input() {
     ));
 }
 
+#[test]
+fn conjoin_empty_means_no_provider_filter() {
+    assert_eq!(IcebergPredicateTranslator::conjoin(Vec::new()), None);
+}
+
+#[test]
+fn conjoin_multiple_predicates_is_left_associative() {
+    let a = Reference::new("a").equal_to(Datum::int(1));
+    let b = Reference::new("b").equal_to(Datum::int(2));
+    let c = Reference::new("c").equal_to(Datum::int(3));
+
+    assert_eq!(
+        IcebergPredicateTranslator::conjoin(vec![a.clone(), b.clone(), c.clone()]),
+        Some(a.and(b).and(c)),
+    );
+}
+
 fn arb_leaf_predicate() -> impl Strategy<Value = Predicate> {
     prop_oneof![
         Just(Predicate::AlwaysTrue),

@@ -1,52 +1,13 @@
 //! Plan-stage `RestrictInfo` unwrap, security/movability gates, and [`PlanPushdownSplitter`]
-//! → [`PlanPushdownSplit`]. Expression pointers are PG-owned; encode in `customscan::custom_private`.
+//! → [`PlanPushdownSplit`]. Expression pointers are PG-owned; encode in the
+//! customscan plan-data envelope.
 
 use pgrx::pg_sys;
 
-pub use crate::expr::relation::{
-    ColumnNameResolver, ColumnRef, PlanRelationResolver,
+use crate::expr::contract::{
+    ColumnRef, PushdownContract, PushdownCosting, QualPushdownDecision,
 };
-
-/// Provider pushdown contract: where the clause is stored in the plan split and
-/// what execution obligation the provider assumes on the normal scan path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PushdownContract {
-    /// Provider applies row-level SQL-equivalent filtering during the normal scan.
-    /// Clause is pushed and duplicated in `recheck` (EPQ only); not in `plan.qual`.
-    ExactRowFilter,
-    /// Provider may only conservatively prune candidates: no false negatives,
-    /// false positives allowed; residual `plan.qual` preserves correctness.
-    ConservativePruning,
-}
-
-impl PushdownContract {
-    /// Whether the original clause must remain in residual / `plan.qual`.
-    pub fn requires_residual(self) -> bool {
-        matches!(self, Self::ConservativePruning)
-    }
-
-    /// Whether the pushed clause is duplicated into the recheck section of `custom_exprs`.
-    pub fn requires_recheck(self) -> bool {
-        matches!(self, Self::ExactRowFilter)
-    }
-}
-
-/// Planner-side costing tier: whether a pushed expr may reduce estimated scan volume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PushdownCosting {
-    /// Eligible for `clauselist_selectivity` / scanned-pages discount.
-    CostedPruning,
-    /// Semantically pushed for best-effort runtime pruning; not counted in cost model.
-    UncostedBestEffort,
-}
-
-impl PushdownCosting {
-    /// Whether this tier contributes to path-stage scan-volume costing.
-    #[inline]
-    pub fn is_costed(self) -> bool {
-        matches!(self, Self::CostedPruning)
-    }
-}
+use crate::expr::predicate::PlanPredicate;
 
 /// One pushed PG expression with contract and costing metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,15 +15,6 @@ pub struct PushedExpr {
     pub expr: *mut pg_sys::Expr,
     pub contract: PushdownContract,
     pub costing: PushdownCosting,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum QualPushdownDecision {
-    Pushable {
-        contract: PushdownContract,
-        costing: PushdownCosting,
-    },
-    Unsupported,
 }
 
 /// Source of a planner clause list.
@@ -160,17 +112,21 @@ impl PlanPushdownSplit {
 
 /// Bare `Expr` from `RestrictInfo.clause` plus the source `rinfo` for gates.
 #[derive(Debug, Clone, Copy)]
-pub struct UnwrappedClause {
-    pub clause: *mut pg_sys::Expr,
-    pub rinfo: *mut pg_sys::RestrictInfo,
+struct UnwrappedClause {
+    clause: *mut pg_sys::Expr,
+    rinfo: *mut pg_sys::RestrictInfo,
 }
 
+use crate::expr::classify::{ClauseClassification, ClauseClassifier};
 use crate::expr::relation::{ColumnRefCollector, PlanScanRelation};
-use crate::expr::walker::{
-    ClauseClassification, ClauseClassifier, rewrite_not, subtree_is_unsafe_to_push,
-};
 
-/// Planner clause splitter: unwrap → gates → volatile check → NOT rewrite → classify → column refs.
+/// Planner clause splitter for PG-preprocessed `RestrictInfo.clause` trees.
+///
+/// PostgreSQL runs quals through `preprocess_expression(EXPRKIND_QUAL)` and
+/// `eval_const_expressions`, whose `NOT_EXPR` branch delegates to
+/// `negate_clause`, before constructing these `RestrictInfo` nodes. This layer
+/// therefore classifies the resulting PG semantics and never reimplements NOT
+/// normalization.
 pub struct PlanPushdownSplitter<'a, F> {
     root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
@@ -181,7 +137,7 @@ pub struct PlanPushdownSplitter<'a, F> {
 
 impl<'a, F> PlanPushdownSplitter<'a, F>
 where
-    F: FnMut(&crate::expr::predicate::PlanPredicate) -> QualPushdownDecision,
+    F: FnMut(&PlanPredicate) -> QualPushdownDecision,
 {
     #[inline]
     pub fn new(
@@ -244,14 +200,7 @@ where
                 continue;
             }
 
-            // Volatile/SubPlan gate on the original clause before NOT rewrite.
-            if unsafe { subtree_is_unsafe_to_push(clause.clause) } {
-                out.push_residual(clause.clause);
-                continue;
-            }
-
-            let rewritten = unsafe { rewrite_not(clause.clause) };
-            let classification = unsafe { classifier.classify(rewritten) };
+            let classification = unsafe { classifier.classify(clause.clause) };
             out.absorb_classification(clause.clause, classification);
         }
 
@@ -264,13 +213,13 @@ where
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct PlannerClauseGate {
+pub(crate) struct PlannerClauseGate {
     baserel: *mut pg_sys::RelOptInfo,
 }
 
 impl PlannerClauseGate {
     #[inline]
-    pub fn for_relation(baserel: *mut pg_sys::RelOptInfo) -> Self {
+    pub(crate) fn for_relation(baserel: *mut pg_sys::RelOptInfo) -> Self {
         Self { baserel }
     }
 
@@ -280,7 +229,7 @@ impl PlannerClauseGate {
     ///
     /// Live `RestrictInfo` and `RelOptInfo` in the planner context.
     #[inline]
-    pub unsafe fn is_securely_promotable(
+    pub(crate) unsafe fn is_securely_promotable(
         self,
         rinfo: *mut pg_sys::RestrictInfo,
     ) -> bool {
@@ -293,7 +242,7 @@ impl PlannerClauseGate {
     ///
     /// Live planner pointers.
     #[inline]
-    pub unsafe fn is_movable_to_relation(
+    pub(crate) unsafe fn is_movable_to_relation(
         self,
         rinfo: *mut pg_sys::RestrictInfo,
     ) -> bool {
@@ -399,10 +348,7 @@ impl SplitAccumulator {
         classification: ClauseClassification,
     ) {
         match classification {
-            ClauseClassification::Pushable {
-                parts,
-                residual: clause_residual,
-            } => {
+            ClauseClassification::Pushable { parts, residuals } => {
                 for part in parts {
                     self.push_pushed(PushedExpr {
                         expr: part.expr,
@@ -410,21 +356,23 @@ impl SplitAccumulator {
                         costing: part.costing,
                     });
                 }
-                if let Some(r) = clause_residual {
-                    self.push_residual(r);
+                for residual in residuals {
+                    // Every classifier residual is an untouched subtree of
+                    // `original`; no semantic rewrite precedes classification.
+                    self.push_residual(residual.as_ptr());
                 }
             }
 
             ClauseClassification::PartialPush {
                 pushed: p,
-                residual: r,
+                residual: _,
             } => {
                 self.push_pushed(PushedExpr {
                     expr: p,
                     contract: PushdownContract::ConservativePruning,
                     costing: PushdownCosting::UncostedBestEffort,
                 });
-                self.push_residual(r);
+                self.push_residual(original);
             }
 
             ClauseClassification::Unsupported { residual: _ } => {

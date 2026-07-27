@@ -8,8 +8,10 @@ mod tests {
     };
     use pg_lakebase_core::expr::predicate::{PlanPredicate, PlanScalar};
     use pg_lakebase_core::expr::split::{
-        PlanPushdownSplitter, PushdownContract, PushdownCosting, PushedExpr,
-        QualPushdownDecision, ScanClauseSource,
+        PlanPushdownSplitter, PushedExpr, ScanClauseSource,
+    };
+    use pg_lakebase_core::expr::{
+        PushdownContract, PushdownCosting, QualPushdownDecision,
     };
     use pgrx::pg_sys;
     use pgrx::pg_test;
@@ -120,6 +122,14 @@ mod tests {
             args: &[*mut pg_sys::Expr],
         ) -> *mut pg_sys::Expr {
             unsafe { self.nodes.bool_expr(boolop, args) }
+        }
+
+        unsafe fn null_test(
+            &self,
+            arg: *mut pg_sys::Expr,
+            kind: pg_sys::NullTestType::Type,
+        ) -> *mut pg_sys::Expr {
+            unsafe { self.nodes.null_test(arg, kind) }
         }
     }
 
@@ -244,7 +254,7 @@ mod tests {
         }
     }
 
-    /// One AND clause mixing Exact + Conservative: residual is the conservative leaf only.
+    /// Mixed AND keeps every conservative residual as its original subtree.
     #[pg_test]
     fn split_mixed_and_clause_residual_is_minimal() {
         const INT4LT_OPNO: u32 = 97;
@@ -264,9 +274,15 @@ mod tests {
                 pg_sys::Oid::INVALID,
                 &[fixture.int4_var(2), fixture.int4_const(2)],
             );
+            let conservative_leaf_2 = fixture.op_expr(
+                INT4LT_OPNO,
+                pg_sys::Oid::INVALID,
+                pg_sys::Oid::INVALID,
+                &[fixture.int4_var(2), fixture.int4_const(3)],
+            );
             let and_clause = fixture.bool_expr(
                 pg_sys::BoolExprType::AND_EXPR,
-                &[exact_leaf, conservative_leaf],
+                &[exact_leaf, conservative_leaf, conservative_leaf_2],
             );
             let and_ri = fixture.restrictinfo(and_clause, false);
             let scan_clauses = fixture.restrictinfo_list(&[and_ri]);
@@ -303,8 +319,8 @@ mod tests {
 
             assert_eq!(
                 split.residual,
-                vec![conservative_leaf],
-                "mixed AND must keep only conservative leaf in residual",
+                vec![conservative_leaf, conservative_leaf_2],
+                "mixed AND must keep both original conservative subtrees",
             );
             assert_eq!(
                 split.pushed,
@@ -312,6 +328,10 @@ mod tests {
                     pushed_entry(exact_leaf, PushdownContract::ExactRowFilter),
                     pushed_entry(
                         conservative_leaf,
+                        PushdownContract::ConservativePruning,
+                    ),
+                    pushed_entry(
+                        conservative_leaf_2,
                         PushdownContract::ConservativePruning,
                     ),
                 ],
@@ -324,6 +344,67 @@ mod tests {
             assert!(
                 !split.residual.contains(&and_clause),
                 "original AND must not be widened into residual",
+            );
+        }
+    }
+
+    /// A row-valued NullTest under NOT remains in the original residual tree.
+    /// It must never be rewritten to the non-complementary opposite NullTest.
+    #[pg_test]
+    fn split_nested_row_null_not_preserves_original_or_residual() {
+        unsafe {
+            let fixture = SplitFixture::new();
+            let exact_left = fixture.op_expr(
+                INT4_EQ_OPNO,
+                pg_sys::Oid::INVALID,
+                pg_sys::Oid::INVALID,
+                &[fixture.int4_var(1), fixture.int4_const(1)],
+            );
+            let row_null =
+                fixture.null_test(fixture.int4_var(2), pg_sys::NullTestType::IS_NULL);
+            (*(row_null as *mut pg_sys::NullTest)).argisrow = true;
+            let not_row_null =
+                fixture.bool_expr(pg_sys::BoolExprType::NOT_EXPR, &[row_null]);
+            let left_branch = fixture.bool_expr(
+                pg_sys::BoolExprType::AND_EXPR,
+                &[exact_left, not_row_null],
+            );
+            let exact_right = fixture.op_expr(
+                INT4_EQ_OPNO,
+                pg_sys::Oid::INVALID,
+                pg_sys::Oid::INVALID,
+                &[fixture.int4_var(1), fixture.int4_const(2)],
+            );
+            let original_or = fixture.bool_expr(
+                pg_sys::BoolExprType::OR_EXPR,
+                &[left_branch, exact_right],
+            );
+            let rinfo = fixture.restrictinfo(original_or, false);
+            let scan_clauses = fixture.restrictinfo_list(&[rinfo]);
+            let mut classify_leaf =
+                |_p: &PlanPredicate| QualPushdownDecision::Pushable {
+                    contract: PushdownContract::ExactRowFilter,
+                    costing: PushdownCosting::CostedPruning,
+                };
+            let mut splitter = PlanPushdownSplitter::new(
+                fixture.root(),
+                fixture.baserel(),
+                scan_clauses,
+                ScanClauseSource::BaseRestriction,
+                &mut classify_leaf,
+            );
+
+            let split = splitter.split();
+
+            assert_eq!(split.residual, vec![original_or]);
+            assert_eq!(split.pushed.len(), 1);
+            assert_eq!(
+                split.pushed[0].contract,
+                PushdownContract::ConservativePruning,
+            );
+            assert_eq!(
+                (*(row_null as *mut pg_sys::NullTest)).nulltesttype,
+                pg_sys::NullTestType::IS_NULL,
             );
         }
     }

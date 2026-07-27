@@ -5,9 +5,9 @@ use core::ffi::c_int;
 use pgrx::pg_sys;
 use thiserror::Error;
 
-use crate::expr::nodes::{
-    ParamKey, PgComparisonOp, PgConst, PgExprRef, PgNullTest, PgOpExpr, PgParam,
-    PgVar,
+use crate::expr::contract::{ParamKey, PgComparisonOp};
+use crate::expr::pg::{
+    PgExprRef, PgNullTestKind, PgPredicateLeafRef, PgScalarExprRef, PgStructuralError,
 };
 
 /// Plan-stage context for parsing leaf predicates from PG `Expr` nodes.
@@ -22,87 +22,40 @@ impl PlanPredicateContext {
     ///
     /// Structural parse only: does not apply provider pushability rules.
     ///
-    /// # Safety
-    ///
-    /// `expr` must be valid for `'a` in the planner per-query memory context.
-    pub unsafe fn parse_leaf(
+    pub fn parse_leaf(
         &self,
         expr: PgExprRef<'_>,
     ) -> Result<PlanPredicate, PredicateParseError> {
-        let leaf = unsafe { expr.without_relabels() };
-        let tag = unsafe { leaf.node_tag() };
-
-        match tag {
-            pg_sys::NodeTag::T_OpExpr => {
-                let op = unsafe { PgOpExpr::try_from_expr(leaf) }
-                    .ok_or(PredicateParseError::UnsupportedNodeTag { tag })?;
-                unsafe { self.parse_comparison(op) }
+        match PgPredicateLeafRef::parse(expr).map_err(PredicateParseError::from)? {
+            PgPredicateLeafRef::Comparison { op, left, right } => {
+                Ok(PlanPredicate::Comparison {
+                    op,
+                    left: self.parse_scalar_operand(left)?,
+                    right: self.parse_scalar_operand(right)?,
+                })
             }
-            pg_sys::NodeTag::T_NullTest => {
-                let nt = unsafe { PgNullTest::try_from_expr(leaf) }
-                    .ok_or(PredicateParseError::UnsupportedNodeTag { tag })?;
-                unsafe { self.parse_null_test(nt) }
+            PgPredicateLeafRef::NullTest { kind, value } => {
+                let value = self.parse_scalar_operand(value)?;
+                match kind {
+                    PgNullTestKind::IsNull => Ok(PlanPredicate::IsNull { value }),
+                    PgNullTestKind::IsNotNull => {
+                        Ok(PlanPredicate::IsNotNull { value })
+                    }
+                }
             }
-            _ => Err(PredicateParseError::UnsupportedNodeTag { tag }),
         }
     }
 
-    unsafe fn parse_comparison(
+    fn parse_scalar_operand(
         &self,
-        op: PgOpExpr<'_>,
-    ) -> Result<PlanPredicate, PredicateParseError> {
-        let (lhs_raw, rhs_raw) = unsafe { op.binary_operands() }
-            .ok_or(PredicateParseError::NonBinaryOpExpr)?;
-        let lhs = unsafe { lhs_raw.without_relabels() };
-        let rhs = unsafe { rhs_raw.without_relabels() };
-
-        let lhs_scalar = unsafe { self.parse_scalar_operand(lhs) }?;
-        let rhs_scalar = unsafe { self.parse_scalar_operand(rhs) }?;
-
-        let key = unsafe { op.comparison_op() };
-        Ok(PlanPredicate::Comparison {
-            op: key,
-            left: lhs_scalar,
-            right: rhs_scalar,
-        })
-    }
-
-    unsafe fn parse_null_test(
-        &self,
-        nt: PgNullTest<'_>,
-    ) -> Result<PlanPredicate, PredicateParseError> {
-        if unsafe { nt.argisrow() } {
-            return Err(PredicateParseError::RowNullTest);
-        }
-        let arg = unsafe { nt.arg() }
-            .ok_or(PredicateParseError::UnsupportedScalarOperand)?;
-        let arg = unsafe { arg.without_relabels() };
-        let value = unsafe { self.parse_scalar_operand(arg) }?;
-
-        match unsafe { nt.nulltesttype() } {
-            pg_sys::NullTestType::IS_NULL => Ok(PlanPredicate::IsNull { value }),
-            pg_sys::NullTestType::IS_NOT_NULL => {
-                Ok(PlanPredicate::IsNotNull { value })
-            }
-            other => Err(PredicateParseError::UnsupportedNullTestType {
-                nulltesttype: other,
-            }),
-        }
-    }
-
-    unsafe fn parse_scalar_operand(
-        &self,
-        expr: PgExprRef<'_>,
+        expr: PgScalarExprRef<'_>,
     ) -> Result<PlanScalar, PredicateParseError> {
-        let tag = unsafe { expr.node_tag() };
-        match tag {
-            pg_sys::NodeTag::T_Var => {
-                let var = unsafe { PgVar::try_from_expr(expr) }
-                    .ok_or(PredicateParseError::UnsupportedScalarOperand)?;
-                let attno = unsafe { var.varattno() };
-                let varno = unsafe { var.varno() };
-                let atttypid = unsafe { var.vartype() };
-                let attcollation = unsafe { var.varcollid() };
+        match expr {
+            PgScalarExprRef::Var(var) => {
+                let attno = var.varattno();
+                let varno = var.varno();
+                let atttypid = var.vartype();
+                let attcollation = var.varcollid();
                 if varno == self.scan_relid {
                     if attno <= 0 {
                         return Err(PredicateParseError::UnsupportedScalarOperand);
@@ -124,32 +77,45 @@ impl PlanPredicateContext {
                     )))
                 }
             }
-            pg_sys::NodeTag::T_Const => {
-                let c = unsafe { PgConst::try_from_expr(expr) }
-                    .ok_or(PredicateParseError::UnsupportedScalarOperand)?;
-                let (consttypid, constcollid, _, is_null) = unsafe { c.parts() };
+            PgScalarExprRef::Const(value) => {
+                let (consttypid, constcollid, _, is_null) = value.parts();
                 Ok(PlanScalar::Literal(PlanLiteralRef {
                     consttypid,
                     constcollid,
                     is_null,
                 }))
             }
-            pg_sys::NodeTag::T_Param => {
-                let p = unsafe { PgParam::try_from_expr(expr) }
-                    .ok_or(PredicateParseError::UnsupportedScalarOperand)?;
+            PgScalarExprRef::Param(param) => {
                 Ok(PlanScalar::Dynamic(PlanDynamicRef::Param(PlanParamRef {
-                    key: unsafe { p.key() },
-                    paramtype: unsafe { p.paramtype() },
-                    paramcollid: unsafe { p.paramcollid() },
+                    key: param.key(),
+                    paramtype: param.paramtype(),
+                    paramcollid: param.paramcollid(),
                 })))
             }
-            _ => Err(PredicateParseError::UnsupportedScalarOperand),
+        }
+    }
+}
+
+impl From<PgStructuralError> for PredicateParseError {
+    fn from(error: PgStructuralError) -> Self {
+        match error {
+            PgStructuralError::UnsupportedNodeTag { tag } => {
+                Self::UnsupportedNodeTag { tag }
+            }
+            PgStructuralError::NonBinaryComparison => Self::NonBinaryOpExpr,
+            PgStructuralError::RowNullTest => Self::RowNullTest,
+            PgStructuralError::UnsupportedNullTest { kind } => {
+                Self::UnsupportedNullTestType { nulltesttype: kind }
+            }
+            PgStructuralError::UnsupportedScalar | PgStructuralError::NullChild => {
+                Self::UnsupportedScalarOperand
+            }
         }
     }
 }
 
 /// Typed plan-time predicate (temporary; not stored in `custom_private`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum PlanPredicate {
     Comparison {
         op: PgComparisonOp,

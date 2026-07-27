@@ -7,19 +7,20 @@ mod datum;
 
 pub(crate) use datum::decode_datum;
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
 };
 use iceberg_lite::spec::Datum;
 use pg_lakebase_core::expr::ColumnNameResolver;
-use pg_lakebase_core::expr::nodes::{
-    PgColumnRef, PgComparisonOp, PgLiteral, PgParamValue,
+use pg_lakebase_core::expr::PgComparisonOp;
+use pg_lakebase_core::expr::translator::{
+    PgColumnRef, PgLiteral, PgParamValue, PgPredicateTranslator,
 };
-use pg_lakebase_core::expr::translator::PgPredicateTranslator;
 use pgrx::pg_sys;
+
+use crate::relation_binding::RelationFieldIndex;
 
 use super::policy::{ComparisonOpClass, PredicatePushdownPolicy};
 
@@ -33,7 +34,7 @@ use super::policy::{ComparisonOpClass, PredicatePushdownPolicy};
 
 /// Runtime scalar leaf: column, non-null literal/param, or NULL operand.
 #[derive(Debug, Clone)]
-pub enum IcebergScalar {
+pub(crate) enum IcebergScalar {
     Column {
         reference: Reference,
         atttypid: pg_sys::Oid,
@@ -64,7 +65,7 @@ impl IcebergScalar {
 
 /// Operand shape tag for [`IcebergTranslationError::ComparisonShape`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScalarKind {
+pub(crate) enum ScalarKind {
     Column,
     Datum,
     Null,
@@ -76,7 +77,7 @@ pub enum ScalarKind {
 
 /// Errors surfaced by the Iceberg runtime predicate translator.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum IcebergTranslationError {
+pub(crate) enum IcebergTranslationError {
     #[error(
         "iceberg-am translator: get_attname returned NULL for \
          (rel_oid={}, attno={attno})",
@@ -164,61 +165,27 @@ pub enum IcebergTranslationError {
 // Translator
 // =============================================================================
 
-#[derive(Debug, Clone)]
-pub struct PredicateFieldBinding {
-    name: String,
-    field_id: i32,
-}
-
-/// Field-id bindings for pushed predicate column references.
-#[derive(Debug, Clone, Default)]
-pub struct PredicateFieldBindings {
-    by_attno: Arc<HashMap<pg_sys::AttrNumber, PredicateFieldBinding>>,
-}
-
-impl PredicateFieldBindings {
-    pub fn from_iter(
-        bindings: impl IntoIterator<Item = (pg_sys::AttrNumber, String, i32)>,
-    ) -> Self {
-        let by_attno = bindings
-            .into_iter()
-            .map(|(attno, name, field_id)| {
-                (attno, PredicateFieldBinding { name, field_id })
-            })
-            .collect();
-        Self {
-            by_attno: Arc::new(by_attno),
-        }
-    }
-
-    fn get(&self, attno: pg_sys::AttrNumber) -> Option<&PredicateFieldBinding> {
-        self.by_attno.get(&attno)
-    }
-}
-
 /// Runtime [`PgPredicateTranslator`] for Iceberg: column refs, datum decode, predicate assembly.
 #[derive(Debug)]
-pub struct IcebergPredicateTranslator {
-    field_bindings: Option<PredicateFieldBindings>,
+pub(crate) struct IcebergPredicateTranslator {
+    field_index: Option<Rc<RelationFieldIndex>>,
 }
 
 impl IcebergPredicateTranslator {
     /// Build the legacy name-binding translator for tests that exercise the
     /// scalar/predicate algebra without a real relation schema.
     ///
-    /// Production CustomScan paths must use [`Self::with_field_bindings`] so
+    /// Production CustomScan paths must use [`Self::with_field_index`] so
     /// column identity is the Iceberg field id resolved by `RelationFieldMap`,
     /// not a late `attno -> name` lookup.
     #[cfg(any(test, feature = "pg_test"))]
     pub(crate) fn new_unbound_for_tests() -> Self {
-        Self {
-            field_bindings: None,
-        }
+        Self { field_index: None }
     }
 
-    pub fn with_field_bindings(field_bindings: PredicateFieldBindings) -> Self {
+    pub(crate) fn with_field_index(field_index: Rc<RelationFieldIndex>) -> Self {
         Self {
-            field_bindings: Some(field_bindings),
+            field_index: Some(field_index),
         }
     }
 
@@ -244,20 +211,20 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
     type Error = IcebergTranslationError;
 
     fn column(&mut self, col: PgColumnRef<'_>) -> Result<Self::Scalar, Self::Error> {
-        let reference = if let Some(field_bindings) = self.field_bindings.as_ref() {
+        let reference = if let Some(field_index) = self.field_index.as_ref() {
             if col.attno <= 0 {
                 return Err(IcebergTranslationError::SystemOrWholeRowColumn {
                     rel_oid: col.rel_oid,
                     attno: col.attno,
                 });
             }
-            let binding = field_bindings.get(col.attno).ok_or(
+            let binding = field_index.binding_for_attno(col.attno).ok_or(
                 IcebergTranslationError::ColumnLookupFailed {
                     rel_oid: col.rel_oid,
                     attno: col.attno,
                 },
             )?;
-            Reference::new_bound_field(binding.name.clone(), binding.field_id)
+            Reference::new_bound_field(binding.debug_name.clone(), binding.field_id)
         } else {
             let name = Self::resolve_column_name(col.name, col.rel_oid, col.attno)?;
             Reference::new(name)
@@ -270,32 +237,33 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
 
     /// NULL literals decode to [`IcebergScalar::Null`]; [`Self::comparison`] folds them to `AlwaysFalse`.
     fn literal(&mut self, lit: PgLiteral<'_>) -> Result<Self::Scalar, Self::Error> {
-        if lit.is_null {
+        if lit.is_null() {
             return Ok(IcebergScalar::Null {
-                type_oid: lit.type_oid,
+                type_oid: lit.type_oid(),
             });
         }
         // SAFETY: PgLiteral carries Const.consttype alongside Const.constvalue;
         // the NULL branch returned above, and its PG memory context is tied to
         // the literal borrow for the duration of this call.
-        let datum = unsafe { decode_datum(lit.type_oid, lit.datum) }?;
+        let datum = unsafe { decode_datum(lit.type_oid(), lit.datum().as_raw()) }?;
         Ok(IcebergScalar::Datum(datum))
     }
 
     /// Mirrors [`Self::literal`]: NULL params decode to [`IcebergScalar::Null`], not an error.
     fn param_value(
         &mut self,
-        param: PgParamValue,
+        param: PgParamValue<'_>,
     ) -> Result<Self::Scalar, Self::Error> {
-        if param.is_null {
+        if param.is_null() {
             return Ok(IcebergScalar::Null {
-                type_oid: param.type_oid,
+                type_oid: param.type_oid(),
             });
         }
         // SAFETY: PgParamValue carries the resolved parameter type alongside
         // its Datum; the NULL branch returned above, and the executor-owned
         // parameter storage remains live for this translation call.
-        let datum = unsafe { decode_datum(param.type_oid, param.datum) }?;
+        let datum =
+            unsafe { decode_datum(param.type_oid(), param.datum().as_raw()) }?;
         Ok(IcebergScalar::Datum(datum))
     }
 
@@ -335,7 +303,7 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
             }
         };
 
-        if !PredicatePushdownPolicy::new().can_build(atttypid, op) {
+        if !PredicatePushdownPolicy::can_build(atttypid, op.identity()) {
             return Err(IcebergTranslationError::UnsupportedType {
                 type_oid: atttypid,
             });
@@ -414,10 +382,7 @@ impl IcebergPredicateTranslator {
             return Err(IcebergTranslationError::NullTestOnNonColumn);
         };
 
-        if matches!(
-            PredicatePushdownPolicy::new().null_test_capability(atttypid),
-            super::policy::PredicateCapability::Unsupported
-        ) {
+        if !PredicatePushdownPolicy::supports_null_test(atttypid) {
             return Err(IcebergTranslationError::UnsupportedType {
                 type_oid: atttypid,
             });
@@ -462,7 +427,7 @@ impl IcebergPredicateTranslator {
         &self,
         op: PgComparisonOp,
     ) -> Result<PredicateOperator, IcebergTranslationError> {
-        match PredicatePushdownPolicy::new().op_class(op.opno) {
+        match PredicatePushdownPolicy::op_class(op.opno) {
             Some(ComparisonOpClass::Eq) => Ok(PredicateOperator::Eq),
             Some(ComparisonOpClass::NotEq) => Ok(PredicateOperator::NotEq),
             Some(ComparisonOpClass::Lt) => Ok(PredicateOperator::LessThan),

@@ -7,13 +7,24 @@ mod tests {
     use std::fmt;
 
     use crate::lakebase_core::support::pg::{OpExprSpec, PgNodeBuilder};
-    use pg_lakebase_core::expr::nodes::{
-        PgColumnRef, PgComparisonOp, PgLiteral, PgParamValue,
-    };
-    use pg_lakebase_core::expr::split::ColumnRef;
     use pg_lakebase_core::expr::translator::{
-        BuildPredicateError, PgPredicateTranslator, PredicateBuilder,
+        BuildPredicateError, PgColumnRef, PgLiteral, PgParamValue,
+        PgPredicateTranslator,
     };
+    use pg_lakebase_core::expr::{ColumnRef, PredicateBuilder, ResolvedParam};
+    use pg_lakebase_core::expr::{ParamKey, PgComparisonOp};
+
+    unsafe fn resolved_param_from_raw_parts(
+        key: ParamKey,
+        type_oid: pg_sys::Oid,
+        collid: pg_sys::Oid,
+        datum: pg_sys::Datum,
+        is_null: bool,
+    ) -> ResolvedParam {
+        unsafe {
+            ResolvedParam::from_raw_parts(key, type_oid, collid, datum, is_null)
+        }
+    }
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
@@ -56,7 +67,7 @@ mod tests {
 
         fn param_value(
             &mut self,
-            _param: PgParamValue,
+            _param: PgParamValue<'_>,
         ) -> Result<Self::Scalar, Self::Error> {
             unreachable!("out-of-range check runs before param_value()")
         }
@@ -112,7 +123,7 @@ mod tests {
         let mut translator = OutOfRangeMockTranslator;
         let exprs: &[*mut pg_sys::Expr] = &[];
         let column_refs: &[ColumnRef] = &[];
-        let resolved_params: &[PgParamValue] = &[];
+        let resolved_params: &[ResolvedParam] = &[];
 
         // SAFETY: with an empty `exprs` slice and `expr_index = 0`,
         // `PredicateBuilder::build_one` returns the out-of-range error from
@@ -150,7 +161,7 @@ mod tests {
         let mut translator = OutOfRangeMockTranslator;
         let exprs: &[*mut pg_sys::Expr] = &[];
         let column_refs: &[ColumnRef] = &[];
-        let resolved_params: &[PgParamValue] = &[];
+        let resolved_params: &[ResolvedParam] = &[];
 
         // SAFETY: same as above — `expr_index = 5` is out of range for the
         // empty slice, so the error is returned before any deref.
@@ -199,11 +210,19 @@ mod tests {
         }
 
         fn literal(&mut self, lit: PgLiteral<'_>) -> Result<String, MockError> {
-            Ok(format!("lit(typ={:?},null={})", lit.type_oid, lit.is_null))
+            Ok(format!(
+                "lit(typ={:?},null={})",
+                lit.type_oid(),
+                lit.is_null()
+            ))
         }
 
-        fn param_value(&mut self, param: PgParamValue) -> Result<String, MockError> {
-            Ok(format!("param({:?},{})", param.paramkind, param.param_id))
+        fn param_value(
+            &mut self,
+            param: PgParamValue<'_>,
+        ) -> Result<String, MockError> {
+            let key = param.key();
+            Ok(format!("param({:?},{})", key.paramkind, key.param_id))
         }
 
         fn comparison(
@@ -589,21 +608,25 @@ mod tests {
             &mut self,
             lit: PgLiteral<'_>,
         ) -> Result<ConvergenceScalar, MockError> {
-            if lit.is_null {
+            if lit.is_null() {
                 Ok(ConvergenceScalar::Null)
             } else {
-                Ok(ConvergenceScalar::Datum(lit.datum.value()))
+                Ok(ConvergenceScalar::Datum(
+                    unsafe { lit.datum().as_raw() }.value(),
+                ))
             }
         }
 
         fn param_value(
             &mut self,
-            param: PgParamValue,
+            param: PgParamValue<'_>,
         ) -> Result<ConvergenceScalar, MockError> {
-            if param.is_null {
+            if param.is_null() {
                 Ok(ConvergenceScalar::Null)
             } else {
-                Ok(ConvergenceScalar::Datum(param.datum.value()))
+                Ok(ConvergenceScalar::Datum(
+                    unsafe { param.datum().as_raw() }.value(),
+                ))
             }
         }
 
@@ -833,14 +856,16 @@ mod tests {
                  form must be identical "
             );
 
-            let resolved = vec![PgParamValue {
-                param_id: CONV_PARAM_ID,
-                paramkind: pg_sys::ParamKind::PARAM_EXEC,
-                type_oid: CONV_INT4_OID,
-                collid: pg_sys::Oid::INVALID,
-                datum: pg_sys::Datum::from(value.unwrap_or(0) as usize),
-                is_null: value.is_none(),
-            }];
+            let resolved = vec![resolved_param_from_raw_parts(
+                ParamKey {
+                    paramkind: pg_sys::ParamKind::PARAM_EXEC,
+                    param_id: CONV_PARAM_ID,
+                },
+                CONV_INT4_OID,
+                pg_sys::Oid::INVALID,
+                pg_sys::Datum::from(value.unwrap_or(0) as usize),
+                value.is_none(),
+            )];
 
             let mut translator = ConvergenceMockTranslator;
 

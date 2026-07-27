@@ -18,6 +18,7 @@
 mod catalog;
 mod composite;
 mod cstring;
+mod executor;
 mod json;
 mod namespace;
 mod relation;

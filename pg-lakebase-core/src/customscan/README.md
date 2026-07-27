@@ -118,9 +118,12 @@ Composition across `AND` / `OR` / `NOT` follows from these guarantees:
 - `OR` with row-filter semantics is all-or-nothing; pushing one side of an
   exact `OR` would be wrong. For pruning, an `OR` is only useful if every
   branch still yields a useful predicate after widening unsupported parts.
-- `NOT` is first normalized (operator negators, `IS NULL` flips, DeMorgan)
-  before classification. A pruning child is never automatically wrapped in
-  `NOT`, because no-false-negative is not preserved under negation.
+- PostgreSQL planner preprocessing owns `NOT` normalization before
+  `RestrictInfo` construction. The framework classifies that resulting tree
+  without flipping operators or `NullTest` nodes, or applying De Morgan a
+  second time. A remaining `NOT` is pushed only when its child is one exact
+  predicate with no residual; a pruning child is never negated because
+  no-false-negative is not preserved under negation.
 
 The classifier keys decisions on operator *identity* (operator OID plus
 collations), not operator name, so that e.g. text equality under a

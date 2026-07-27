@@ -1,15 +1,16 @@
-//! Planner expression walking and compositional pushdown classification.
+//! Planner expression safety inspection and compositional pushdown classification.
 
 use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::expr::inspect::contains_subplan;
-use crate::expr::nodes::{PgBoolExpr, PgExprRef, PgRelabelType};
+use crate::expr::contract::{
+    PushdownContract, PushdownCosting, QualPushdownDecision,
+};
+use crate::expr::pg::{PgBoolExpr, PgExprRef, PgRelabelType};
 use crate::expr::predicate::{PlanPredicate, PlanPredicateContext};
-use crate::expr::split::{PushdownContract, PushdownCosting, QualPushdownDecision};
 
-pub use crate::expr::rewrite::rewrite_not;
+use super::inspect::subtree_is_unsafe_to_push;
 
 /// One independently pushable fragment from clause classification.
 #[derive(Debug, Clone, Copy)]
@@ -19,23 +20,42 @@ pub struct ClassifiedPushedPart {
     pub costing: PushdownCosting,
 }
 
-/// Per-clause classification consumed by [`PlanPushdownSplitter`](crate::expr::split::PlanPushdownSplitter).
+/// A residual expression obtained from the original PG clause tree.
+///
+/// The constructor is private so generated widening expressions cannot be
+/// routed into the executor residual list by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OriginalExpr(*mut pg_sys::Expr);
+
+impl OriginalExpr {
+    #[inline]
+    fn from_ptr(expr: *mut pg_sys::Expr) -> Self {
+        Self(expr)
+    }
+
+    #[inline]
+    pub fn as_ptr(self) -> *mut pg_sys::Expr {
+        self.0
+    }
+}
+/// Per-clause classification consumed by [`PlanPushdownSplitter`](super::split::PlanPushdownSplitter).
 #[derive(Debug, Clone)]
 pub enum ClauseClassification {
     /// One or more pushed fragments. AND with mixed contracts keeps separate parts so a
     /// best-effort conservative child cannot drag down an exact sibling at runtime.
     Pushable {
         parts: Vec<ClassifiedPushedPart>,
-        residual: Option<*mut pg_sys::Expr>,
+        /// Untouched PG-owned subtrees that must remain as residual quals.
+        residuals: Vec<OriginalExpr>,
     },
 
     PartialPush {
         pushed: *mut pg_sys::Expr,
-        residual: *mut pg_sys::Expr,
+        residual: OriginalExpr,
     },
 
     Unsupported {
-        residual: *mut pg_sys::Expr,
+        residual: OriginalExpr,
     },
 }
 
@@ -72,10 +92,14 @@ where
         expr: *mut pg_sys::Expr,
     ) -> ClauseClassification {
         if expr.is_null() {
-            return ClauseClassification::Unsupported { residual: expr };
+            return ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(expr),
+            };
         }
         if unsafe { subtree_is_unsafe_to_push(expr) } {
-            return ClauseClassification::Unsupported { residual: expr };
+            return ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(expr),
+            };
         }
         unsafe { self.classify_subtree(expr) }
     }
@@ -85,7 +109,7 @@ where
         expr: *mut pg_sys::Expr,
     ) -> ClauseClassification {
         let r = unsafe { PgExprRef::from_raw(expr) };
-        let tag = unsafe { r.node_tag() };
+        let tag = r.node_tag();
 
         match tag {
             pg_sys::NodeTag::T_OpExpr | pg_sys::NodeTag::T_NullTest => unsafe {
@@ -93,9 +117,9 @@ where
             },
 
             pg_sys::NodeTag::T_BoolExpr => {
-                let be = unsafe { PgBoolExpr::try_from_expr(r) }
+                let be = PgBoolExpr::try_from_expr(r)
                     .expect("PgBoolExpr tag matched but downcast failed");
-                let boolop = unsafe { be.boolop() };
+                let boolop = be.boolop();
                 match boolop {
                     pg_sys::BoolExprType::AND_EXPR => unsafe {
                         self.classify_and(expr, be)
@@ -106,20 +130,26 @@ where
                     pg_sys::BoolExprType::NOT_EXPR => unsafe {
                         self.classify_not(expr, be)
                     },
-                    _ => ClauseClassification::Unsupported { residual: expr },
+                    _ => ClauseClassification::Unsupported {
+                        residual: OriginalExpr::from_ptr(expr),
+                    },
                 }
             }
 
             pg_sys::NodeTag::T_RelabelType => {
-                let rl = unsafe { PgRelabelType::try_from_expr(r) }
+                let rl = PgRelabelType::try_from_expr(r)
                     .expect("PgRelabelType tag matched but downcast failed");
-                match unsafe { rl.arg() } {
+                match rl.arg() {
                     Some(inner) => unsafe { self.classify_subtree(inner.as_ptr()) },
-                    None => ClauseClassification::Unsupported { residual: expr },
+                    None => ClauseClassification::Unsupported {
+                        residual: OriginalExpr::from_ptr(expr),
+                    },
                 }
             }
 
-            _ => ClauseClassification::Unsupported { residual: expr },
+            _ => ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(expr),
+            },
         }
     }
 
@@ -128,23 +158,27 @@ where
         expr: *mut pg_sys::Expr,
         r: PgExprRef<'_>,
     ) -> ClauseClassification {
-        let predicate = match unsafe { self.predicate_ctx.parse_leaf(r) } {
+        let predicate = match self.predicate_ctx.parse_leaf(r) {
             Ok(p) => p,
-            Err(_) => return ClauseClassification::Unsupported { residual: expr },
+            Err(_) => {
+                return ClauseClassification::Unsupported {
+                    residual: OriginalExpr::from_ptr(expr),
+                };
+            }
         };
         let decision = (self.classify_leaf)(&predicate);
         match decision {
             QualPushdownDecision::Pushable { contract, costing } => {
-                let residual = if contract.requires_residual() {
-                    Some(expr)
+                let residuals = if contract.requires_residual() {
+                    vec![OriginalExpr::from_ptr(expr)]
                 } else {
-                    None
+                    Vec::new()
                 };
-                Self::pushable_one(expr, contract, costing, residual)
+                Self::pushable_one(expr, contract, costing, residuals)
             }
-            QualPushdownDecision::Unsupported => {
-                ClauseClassification::Unsupported { residual: expr }
-            }
+            QualPushdownDecision::Unsupported => ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(expr),
+            },
         }
     }
 
@@ -153,14 +187,16 @@ where
         original: *mut pg_sys::Expr,
         be: PgBoolExpr<'_>,
     ) -> ClauseClassification {
-        let args = unsafe { be.args_list() };
+        let args = be.args_list();
         let len = if args.is_null() {
             0
         } else {
             unsafe { pg_sys::list_length(args) }
         };
         if len == 0 {
-            return ClauseClassification::Unsupported { residual: original };
+            return ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(original),
+            };
         }
 
         let mut children =
@@ -171,7 +207,7 @@ where
             children.absorb(child);
         }
 
-        let location = unsafe { (*be.as_ptr()).location };
+        let location = be.location();
         unsafe { children.into_and_classification(original, location) }
     }
 
@@ -180,14 +216,16 @@ where
         original: *mut pg_sys::Expr,
         be: PgBoolExpr<'_>,
     ) -> ClauseClassification {
-        let args = unsafe { be.args_list() };
+        let args = be.args_list();
         let len = if args.is_null() {
             0
         } else {
             unsafe { pg_sys::list_length(args) }
         };
         if len == 0 {
-            return ClauseClassification::Unsupported { residual: original };
+            return ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(original),
+            };
         }
 
         let mut child_results: Vec<ClauseClassification> =
@@ -202,7 +240,7 @@ where
             child_results.push(child);
         }
 
-        let location = unsafe { (*be.as_ptr()).location };
+        let location = be.location();
 
         if all_exact {
             let mut branch_exprs: Vec<*mut pg_sys::Expr> =
@@ -211,8 +249,8 @@ where
                 Vec::with_capacity(child_results.len());
             for c in &child_results {
                 match c {
-                    ClauseClassification::Pushable { parts, residual }
-                        if residual.is_none()
+                    ClauseClassification::Pushable { parts, residuals }
+                        if residuals.is_empty()
                             && !parts.is_empty()
                             && parts.iter().all(|p| {
                                 p.contract == PushdownContract::ExactRowFilter
@@ -229,7 +267,7 @@ where
                             "classify_or: all_exact invariant broken"
                         );
                         return ClauseClassification::Unsupported {
-                            residual: original,
+                            residual: OriginalExpr::from_ptr(original),
                         };
                     }
                 }
@@ -239,7 +277,7 @@ where
                 pushed,
                 PushdownContract::ExactRowFilter,
                 Self::merge_costing_all_costed(&all_costings),
-                None,
+                Vec::new(),
             );
         }
 
@@ -256,7 +294,9 @@ where
                     widenings.push(*pushed);
                 }
                 ClauseClassification::Unsupported { .. } => {
-                    return ClauseClassification::Unsupported { residual: original };
+                    return ClauseClassification::Unsupported {
+                        residual: OriginalExpr::from_ptr(original),
+                    };
                 }
             }
         }
@@ -264,7 +304,7 @@ where
         let pushed = unsafe { make_or(&widenings, location) };
         ClauseClassification::PartialPush {
             pushed,
-            residual: original,
+            residual: OriginalExpr::from_ptr(original),
         }
     }
 
@@ -273,34 +313,38 @@ where
         original: *mut pg_sys::Expr,
         be: PgBoolExpr<'_>,
     ) -> ClauseClassification {
-        let args = unsafe { be.args_list() };
+        let args = be.args_list();
         let len = if args.is_null() {
             0
         } else {
             unsafe { pg_sys::list_length(args) }
         };
         if len != 1 {
-            return ClauseClassification::Unsupported { residual: original };
+            return ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(original),
+            };
         }
         let child_ptr = unsafe { pg_sys::list_nth(args, 0) } as *mut pg_sys::Expr;
         let child = unsafe { self.classify_subtree(child_ptr) };
 
         match child {
-            ClauseClassification::Pushable { parts, residual }
-                if residual.is_none()
+            ClauseClassification::Pushable { parts, residuals }
+                if residuals.is_empty()
                     && parts.len() == 1
                     && parts[0].contract == PushdownContract::ExactRowFilter =>
             {
-                let location = unsafe { (*be.as_ptr()).location };
+                let location = be.location();
                 let not_node = unsafe { make_not(parts[0].expr, location) };
                 Self::pushable_one(
                     not_node,
                     PushdownContract::ExactRowFilter,
                     parts[0].costing,
-                    None,
+                    Vec::new(),
                 )
             }
-            _ => ClauseClassification::Unsupported { residual: original },
+            _ => ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(original),
+            },
         }
     }
 
@@ -308,7 +352,7 @@ where
         expr: *mut pg_sys::Expr,
         contract: PushdownContract,
         costing: PushdownCosting,
-        residual: Option<*mut pg_sys::Expr>,
+        residuals: Vec<OriginalExpr>,
     ) -> ClauseClassification {
         ClauseClassification::Pushable {
             parts: vec![ClassifiedPushedPart {
@@ -316,7 +360,7 @@ where
                 contract,
                 costing,
             }],
-            residual,
+            residuals,
         }
     }
 
@@ -338,8 +382,8 @@ where
         classification: &ClauseClassification,
     ) -> bool {
         match classification {
-            ClauseClassification::Pushable { parts, residual } => {
-                residual.is_none()
+            ClauseClassification::Pushable { parts, residuals } => {
+                residuals.is_empty()
                     && !parts.is_empty()
                     && parts
                         .iter()
@@ -361,7 +405,7 @@ where
 
 struct ChildClassificationAccumulator {
     pushed_parts: Vec<ClassifiedPushedPart>,
-    residual_parts: Vec<*mut pg_sys::Expr>,
+    residual_parts: Vec<OriginalExpr>,
     all_exact_pushable: bool,
     any_pushed: bool,
 }
@@ -378,7 +422,7 @@ impl ChildClassificationAccumulator {
 
     fn absorb(&mut self, child: ClauseClassification) {
         match child {
-            ClauseClassification::Pushable { parts, residual } => {
+            ClauseClassification::Pushable { parts, residuals } => {
                 self.any_pushed = true;
                 for part in parts {
                     if part.contract != PushdownContract::ExactRowFilter {
@@ -386,8 +430,8 @@ impl ChildClassificationAccumulator {
                     }
                     self.pushed_parts.push(part);
                 }
-                if let Some(res) = residual {
-                    self.residual_parts.push(res);
+                if !residuals.is_empty() {
+                    self.residual_parts.extend(residuals);
                     self.all_exact_pushable = false;
                 }
             }
@@ -414,7 +458,9 @@ impl ChildClassificationAccumulator {
         location: pg_sys::ParseLoc,
     ) -> ClauseClassification {
         if !self.any_pushed {
-            return ClauseClassification::Unsupported { residual: original };
+            return ClauseClassification::Unsupported {
+                residual: OriginalExpr::from_ptr(original),
+            };
         }
 
         if self.can_merge_as_exact() {
@@ -422,7 +468,7 @@ impl ChildClassificationAccumulator {
             if self.pushed_parts.len() == 1 {
                 return ClauseClassification::Pushable {
                     parts: self.pushed_parts,
-                    residual: None,
+                    residuals: Vec::new(),
                 };
             }
             let exprs: Vec<*mut pg_sys::Expr> =
@@ -434,14 +480,13 @@ impl ChildClassificationAccumulator {
                     contract: PushdownContract::ExactRowFilter,
                     costing: merged_costing,
                 }],
-                residual: None,
+                residuals: Vec::new(),
             };
         }
 
-        let residual = unsafe { self.residual_expr(location) };
         ClauseClassification::Pushable {
             parts: self.pushed_parts,
-            residual,
+            residuals: self.residual_parts,
         }
     }
 
@@ -456,35 +501,6 @@ impl ChildClassificationAccumulator {
             PushdownCosting::UncostedBestEffort
         }
     }
-
-    unsafe fn residual_expr(
-        &self,
-        location: pg_sys::ParseLoc,
-    ) -> Option<*mut pg_sys::Expr> {
-        if self.residual_parts.is_empty() {
-            None
-        } else if self.residual_parts.len() == 1 {
-            Some(self.residual_parts[0])
-        } else {
-            Some(unsafe { make_and(&self.residual_parts, location) })
-        }
-    }
-}
-
-/// Return true when a subtree contains volatile functions or SubPlans.
-///
-/// # Safety
-///
-/// `expr` must be NULL or a live PostgreSQL expression tree in the current
-/// backend memory context.
-pub(crate) unsafe fn subtree_is_unsafe_to_push(expr: *mut pg_sys::Expr) -> bool {
-    if expr.is_null() {
-        return false;
-    }
-    if unsafe { pg_sys::contain_volatile_functions(expr as *mut pg_sys::Node) } {
-        return true;
-    }
-    unsafe { contains_subplan(expr.cast::<pg_sys::Node>()) }
 }
 
 unsafe fn make_and(

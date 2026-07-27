@@ -1,4 +1,4 @@
-//! Backend tests for expr walker classification and pushed-expression column identity.
+//! Backend tests for expression classification and pushed-expression column identity.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
@@ -6,15 +6,13 @@ mod tests {
     use std::ptr;
 
     use crate::lakebase_core::support::pg::PgNodeBuilder;
-    use pg_lakebase_core::expr::nodes::PgExprRef;
+    use pg_lakebase_core::expr::classify::{ClauseClassification, ClauseClassifier};
+    use pg_lakebase_core::expr::pg::PgExprRef;
     use pg_lakebase_core::expr::predicate::{
         PlanColumnRef, PlanPredicate, PlanPredicateContext, PlanScalar,
     };
-    use pg_lakebase_core::expr::split::{
+    use pg_lakebase_core::expr::{
         ColumnRef, PushdownContract, PushdownCosting, QualPushdownDecision,
-    };
-    use pg_lakebase_core::expr::walker::{
-        ClauseClassification, ClauseClassifier, rewrite_not,
     };
     use pgrx::pg_sys;
     use pgrx::pg_test;
@@ -24,7 +22,6 @@ mod tests {
 
     const INT4_EQ_OID: u32 = 96; // pgrx: Int4EqualOperator
     const INT4_LT_OID: u32 = 97; // pgrx: Int4LessOperator
-    const INT4_NE_OID: u32 = 518;
 
     const BOOL_OID: pg_sys::Oid = pg_sys::Oid::from_u32(16);
 
@@ -169,31 +166,18 @@ mod tests {
         }
     }
 
-    unsafe fn null_test_kind_of(
-        expr: *mut pg_sys::Expr,
-    ) -> pg_sys::NullTestType::Type {
-        unsafe {
-            let r = PgExprRef::from_raw(expr);
-            assert_eq!(
-                r.node_tag(),
-                pg_sys::NodeTag::T_NullTest,
-                "expected T_NullTest",
-            );
-            let nt = expr as *mut pg_sys::NullTest;
-            (*nt).nulltesttype
-        }
-    }
-
-    /// `a = 1 AND unsupported(b)` → partial push; unsupported stays in residual.
+    /// Multiple residual children remain separate original subtrees.
     #[pg_test]
-    fn classify_and_partial_pushdown() {
+    fn classify_and_multiple_residuals_reuse_original_subtrees() {
         unsafe {
             let a_eq_1 = ExprFixture::int4_op(INT4_EQ_OID, VARATTNO_EXACT, 1);
             let unsupported_b =
                 ExprFixture::int4_op(INT4_EQ_OID, VARATTNO_UNSUPPORTED, 7);
+            let unsupported_c =
+                ExprFixture::int4_op(INT4_EQ_OID, VARATTNO_UNSUPPORTED, 8);
             let and_expr = ExprFixture::bool_expr(
                 pg_sys::BoolExprType::AND_EXPR,
-                &[a_eq_1, unsupported_b],
+                &[a_eq_1, unsupported_b, unsupported_c],
             );
 
             let mut classify = classify_by_varattno;
@@ -202,7 +186,7 @@ mod tests {
             let result = classifier.classify(and_expr);
 
             match result {
-                ClauseClassification::Pushable { parts, residual } => {
+                ClauseClassification::Pushable { parts, residuals } => {
                     assert_eq!(parts.len(), 1);
                     assert_eq!(
                         opno_of(parts[0].expr),
@@ -215,17 +199,13 @@ mod tests {
                     );
                     assert_eq!(parts[0].contract, PushdownContract::ExactRowFilter,);
 
-                    let Some(residual) = residual else {
-                        panic!("expected residual for partial AND pushdown");
-                    };
                     assert_eq!(
-                        opno_of(residual),
-                        INT4_EQ_OID,
-                        "residual should be the unsupported(b) OpExpr",
-                    );
-                    assert_eq!(
-                        residual, unsupported_b,
-                        "residual should reuse the original unsupported pointer",
+                        residuals
+                            .iter()
+                            .map(|residual| residual.as_ptr())
+                            .collect::<Vec<_>>(),
+                        vec![unsupported_b, unsupported_c],
+                        "residuals must be the two original unsupported subtrees",
                     );
                 }
                 other => panic!("expected Pushable with one part, got {other:?}"),
@@ -302,12 +282,13 @@ mod tests {
                         "widened OR should have 2 args"
                     );
                     assert_eq!(
-                        residual, or_expr,
+                        residual.as_ptr(),
+                        or_expr,
                         "residual should be the original OR ",
                     );
                 }
-                ClauseClassification::Pushable { parts, residual }
-                    if residual.is_none()
+                ClauseClassification::Pushable { parts, residuals }
+                    if residuals.is_empty()
                         && parts.iter().all(|p| {
                             p.contract == PushdownContract::ExactRowFilter
                         }) =>
@@ -363,7 +344,8 @@ mod tests {
                     assert_eq!(opno_of(arg1), INT4_EQ_OID);
 
                     assert_eq!(
-                        residual, or_expr,
+                        residual.as_ptr(),
+                        or_expr,
                         "residual should be the original OR ",
                     );
                 }
@@ -392,7 +374,8 @@ mod tests {
             match result {
                 ClauseClassification::Unsupported { residual } => {
                     assert_eq!(
-                        residual, or_expr,
+                        residual.as_ptr(),
+                        or_expr,
                         "residual should be the original OR",
                     );
                 }
@@ -403,120 +386,7 @@ mod tests {
         }
     }
 
-    /// `NOT (a = 1)` rewrites to `a <> 1`, then classifies as Exact.
-    #[pg_test]
-    fn rewrite_not_eq_becomes_ne() {
-        unsafe {
-            let a_eq_1 = ExprFixture::int4_op(INT4_EQ_OID, VARATTNO_EXACT, 1);
-            let not_eq =
-                ExprFixture::bool_expr(pg_sys::BoolExprType::NOT_EXPR, &[a_eq_1]);
-
-            let rewritten = rewrite_not(not_eq);
-
-            assert_eq!(
-                opno_of(rewritten),
-                INT4_NE_OID,
-                "NOT (a = 1) should rewrite to (a <> 1) via the operator negator",
-            );
-
-            let mut classify = classify_by_varattno;
-            let ctx = test_predicate_ctx();
-            let mut classifier = ClauseClassifier::new(&ctx, &mut classify);
-            let result = classifier.classify(rewritten);
-
-            match result {
-                ClauseClassification::Pushable {
-                    parts, residual, ..
-                } => {
-                    assert_eq!(
-                        parts[0].expr, rewritten,
-                        "Exact pushed pointer should be the rewritten OpExpr",
-                    );
-                    assert_eq!(
-                        opno_of(parts[0].expr),
-                        INT4_NE_OID,
-                        "Exact pushed should be the rewritten OpExpr",
-                    );
-                    assert!(
-                        residual.is_none(),
-                        "Exact pushable removes the clause from residual ",
-                    );
-                }
-                other => {
-                    panic!("expected Pushable Exact for rewritten <>, got {other:?}")
-                }
-            }
-        }
-    }
-
-    /// `NOT (a IS NULL)` rewrites to `a IS NOT NULL`.
-    #[pg_test]
-    fn rewrite_not_is_null_becomes_is_not_null() {
-        unsafe {
-            let var = ExprFixture::int4_var(VARATTNO_EXACT);
-            let is_null = ExprFixture::null_test(var, pg_sys::NullTestType::IS_NULL);
-            let not_is_null =
-                ExprFixture::bool_expr(pg_sys::BoolExprType::NOT_EXPR, &[is_null]);
-
-            let rewritten = rewrite_not(not_is_null);
-
-            let r = PgExprRef::from_raw(rewritten);
-            assert_eq!(
-                r.node_tag(),
-                pg_sys::NodeTag::T_NullTest,
-                "NOT (a IS NULL) should rewrite to a NullTest (IS NOT NULL)",
-            );
-            assert_eq!(
-                null_test_kind_of(rewritten),
-                pg_sys::NullTestType::IS_NOT_NULL,
-                "NOT (a IS NULL) should flip to IS NOT NULL",
-            );
-        }
-    }
-
-    /// DeMorgan: `NOT (a = 1 AND a = 2)` → `(a <> 1) OR (a <> 2)`.
-    #[pg_test]
-    fn rewrite_not_demorgan_and_to_or() {
-        unsafe {
-            let a_eq_1 = ExprFixture::int4_op(INT4_EQ_OID, VARATTNO_EXACT, 1);
-            let a_eq_2 = ExprFixture::int4_op(INT4_EQ_OID, VARATTNO_EXACT, 2);
-            let inner_and = ExprFixture::bool_expr(
-                pg_sys::BoolExprType::AND_EXPR,
-                &[a_eq_1, a_eq_2],
-            );
-            let not_and =
-                ExprFixture::bool_expr(pg_sys::BoolExprType::NOT_EXPR, &[inner_and]);
-
-            let rewritten = rewrite_not(not_and);
-
-            assert_eq!(
-                boolop_of(rewritten),
-                pg_sys::BoolExprType::OR_EXPR,
-                "DeMorgan: NOT (A AND B) should rewrite to (NOT A) OR (NOT B)",
-            );
-            assert_eq!(
-                boolexpr_argc(rewritten),
-                2,
-                "the resulting OR should have 2 args",
-            );
-
-            let be = rewritten as *mut pg_sys::BoolExpr;
-            let arg0 = pg_sys::list_nth((*be).args, 0) as *mut pg_sys::Expr;
-            let arg1 = pg_sys::list_nth((*be).args, 1) as *mut pg_sys::Expr;
-            assert_eq!(
-                opno_of(arg0),
-                INT4_NE_OID,
-                "first DeMorgan child should be (a <> 1)",
-            );
-            assert_eq!(
-                opno_of(arg1),
-                INT4_NE_OID,
-                "second DeMorgan child should be (a <> 2)",
-            );
-        }
-    }
-
-    /// Literal `NOT` over ConservativePruning child (without rewrite) must not auto-push.
+    /// Literal `NOT` over ConservativePruning child must not auto-push.
     #[pg_test]
     fn classify_not_conservative_pruning_is_not_auto_pushed() {
         unsafe {
@@ -525,7 +395,6 @@ mod tests {
             let not_expr =
                 ExprFixture::bool_expr(pg_sys::BoolExprType::NOT_EXPR, &[a_lt_2]);
 
-            // Skip `rewrite_not` to simulate a NOT the rewrite could not eliminate.
             let mut classify = classify_by_varattno;
             let ctx = test_predicate_ctx();
             let mut classifier = ClauseClassifier::new(&ctx, &mut classify);
@@ -534,7 +403,8 @@ mod tests {
             match result {
                 ClauseClassification::Unsupported { residual } => {
                     assert_eq!(
-                        residual, not_expr,
+                        residual.as_ptr(),
+                        not_expr,
                         "literal NOT over ConservativePruning child must remain in residual",
                     );
                 }
@@ -577,7 +447,8 @@ mod tests {
             match result {
                 ClauseClassification::Unsupported { residual } => {
                     assert_eq!(
-                        residual, cmp,
+                        residual.as_ptr(),
+                        cmp,
                         "volatile-tainted clause should be returned as Unsupported with the original residual",
                     );
                 }
@@ -616,7 +487,8 @@ mod tests {
             match result {
                 ClauseClassification::Unsupported { residual } => {
                     assert_eq!(
-                        residual, cmp,
+                        residual.as_ptr(),
+                        cmp,
                         "SubPlan-tainted clause should be returned as Unsupported with the original residual",
                     );
                 }
@@ -1137,7 +1009,7 @@ mod tests {
 
     /// Scan-column identity stability (manual `TestRunner`, >=256 cases).
     #[pg_test]
-    fn walker_column_identity_stable_property() {
+    fn column_ref_identity_stable_property() {
         let config = ProptestConfig {
             cases: 256,
             failure_persistence: None,

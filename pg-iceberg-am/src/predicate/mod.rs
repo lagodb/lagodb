@@ -4,5 +4,5 @@ mod classifier;
 pub(crate) mod policy;
 pub(crate) mod translator;
 
-pub use classifier::IcebergPredicateClassifier;
-pub use translator::{IcebergPredicateTranslator, PredicateFieldBindings};
+pub(crate) use classifier::IcebergPredicateClassifier;
+pub(crate) use translator::IcebergPredicateTranslator;

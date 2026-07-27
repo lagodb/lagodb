@@ -1,10 +1,8 @@
 //! Plan-stage Iceberg predicate classifier ([`IcebergPredicateClassifier`]).
 
-use pg_lakebase_core::customscan::provider::PlanTranslateContext;
-use pg_lakebase_core::expr::nodes::PgComparisonOp;
 use pg_lakebase_core::expr::predicate::{PlanDynamicRef, PlanPredicate, PlanScalar};
-use pg_lakebase_core::expr::split::{
-    PushdownContract, PushdownCosting, QualPushdownDecision,
+use pg_lakebase_core::expr::{
+    PgComparisonOp, PushdownContract, PushdownCosting, QualPushdownDecision,
 };
 use pgrx::pg_sys;
 
@@ -12,25 +10,9 @@ use super::policy::{PredicateCapability, PredicatePushdownPolicy};
 
 /// Iceberg per-leaf classifier; delegates type/op verdict to
 /// [`PredicatePushdownPolicy`].
-#[derive(Clone, Copy, Debug)]
-pub struct IcebergPredicateClassifier;
+pub(crate) struct IcebergPredicateClassifier;
 
 impl IcebergPredicateClassifier {
-    pub const fn new() -> Self {
-        Self
-    }
-
-    /// CustomScan adapter. Iceberg's capability policy depends on predicate
-    /// metadata rather than planner costing context; other providers may use
-    /// `PlanTranslateContext` through the provider trait.
-    pub fn classify_predicate(
-        &self,
-        _ctx: &PlanTranslateContext,
-        predicate: &PlanPredicate,
-    ) -> QualPushdownDecision {
-        self.classify(predicate)
-    }
-
     /// Classify a parsed leaf predicate for this classifier's purpose.
     pub(crate) fn classify(&self, predicate: &PlanPredicate) -> QualPushdownDecision {
         match predicate {
@@ -59,7 +41,7 @@ impl IcebergPredicateClassifier {
             return QualPushdownDecision::Unsupported;
         };
 
-        match PredicatePushdownPolicy::new().capability_for(col_type, op) {
+        match PredicatePushdownPolicy::capability_for(col_type, op.identity()) {
             PredicateCapability::ExactRowFilter => QualPushdownDecision::Pushable {
                 contract: PushdownContract::ExactRowFilter,
                 costing: PushdownCosting::CostedPruning,
@@ -81,18 +63,13 @@ impl IcebergPredicateClassifier {
             return QualPushdownDecision::Unsupported;
         };
 
-        match PredicatePushdownPolicy::new().null_test_capability(col_type) {
-            PredicateCapability::ExactRowFilter => QualPushdownDecision::Pushable {
+        if PredicatePushdownPolicy::supports_null_test(col_type) {
+            QualPushdownDecision::Pushable {
                 contract: PushdownContract::ExactRowFilter,
                 costing: PushdownCosting::CostedPruning,
-            },
-            PredicateCapability::ConservativePruning => {
-                QualPushdownDecision::Pushable {
-                    contract: PushdownContract::ConservativePruning,
-                    costing: PushdownCosting::UncostedBestEffort,
-                }
             }
-            PredicateCapability::Unsupported => QualPushdownDecision::Unsupported,
+        } else {
+            QualPushdownDecision::Unsupported
         }
     }
 
@@ -108,22 +85,16 @@ impl IcebergPredicateClassifier {
         // finite values like `date = '2024-01-01'` until plan-time literal
         // inspection exists.
         if shape.has_param_or_outer()
-            || PredicatePushdownPolicy::new().is_value_sensitive_type(col_type)
+            || PredicatePushdownPolicy::is_value_sensitive_type(col_type)
         {
             return PushdownCosting::UncostedBestEffort;
         }
 
-        if PredicatePushdownPolicy::new().can_build(col_type, op) {
+        if PredicatePushdownPolicy::can_build(col_type, op.identity()) {
             PushdownCosting::CostedPruning
         } else {
             PushdownCosting::UncostedBestEffort
         }
-    }
-}
-
-impl Default for IcebergPredicateClassifier {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

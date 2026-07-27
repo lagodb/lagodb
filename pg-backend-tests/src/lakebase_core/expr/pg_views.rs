@@ -1,4 +1,4 @@
-//! Backend proptest for `PgOpExpr::arity` and `binary_operands`.
+//! Backend proptest for borrowed PostgreSQL expression views.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
@@ -8,7 +8,7 @@ mod tests {
     use crate::lakebase_core::support::pg::{
         INT4_EQ_OPNO, OpExprSpec, PgNodeBuilder,
     };
-    use pg_lakebase_core::expr::nodes::{PgExprRef, PgOpExpr};
+    use pg_lakebase_core::expr::pg::{PgExprRef, PgOpExpr};
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
