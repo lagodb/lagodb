@@ -212,7 +212,7 @@ The exact API should be designed in code, but the shape should be:
 
 ```rust
 trait LakebaseDataFusionProvider {
-    fn supports_offload_relation(ctx: &RelPathContext) -> bool;
+    fn supports_offload_relation(ctx: &RelationContext<'_>) -> bool;
 
     fn classify_offload_expr(
         expr: &pg_sys::Expr,

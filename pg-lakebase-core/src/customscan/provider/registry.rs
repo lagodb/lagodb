@@ -7,10 +7,11 @@ use std::cell::RefCell;
 use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
+use crate::customscan::planning::builder::{EmitCustomPathContext, emit_custom_path};
+use crate::expr::contract::QualPushdownDecision;
 use crate::expr::predicate::PlanPredicate;
-use crate::expr::split::QualPushdownDecision;
 
-use super::{LakebaseCustomScanProvider, PlanTranslateContext, RelPathContext};
+use super::{LakebaseCustomScanProvider, PlanTranslateContext, RelationContext};
 
 /// Type-erased registered provider for the pathlist router.
 pub trait ErasedProvider: Sync {
@@ -18,7 +19,7 @@ pub trait ErasedProvider: Sync {
     fn name(&self) -> &'static CStr;
 
     /// Forwards to `P::supports_relation` (framework path-stage gates already applied).
-    fn supports_relation(&self, ctx: &RelPathContext) -> bool;
+    fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool;
 
     /// Forwards to `P::classify_predicate`.
     fn classify_predicate(
@@ -27,7 +28,7 @@ pub trait ErasedProvider: Sync {
         predicate: &PlanPredicate,
     ) -> QualPushdownDecision;
 
-    /// Forwards to [`emit_custom_path`](crate::customscan::builder::emit_custom_path).
+    /// Forwards to [`emit_custom_path`](crate::customscan::planning::builder::emit_custom_path).
     ///
     /// # Safety
     ///
@@ -36,7 +37,7 @@ pub trait ErasedProvider: Sync {
     /// valid while emitting the path.
     unsafe fn emit_path(
         &self,
-        ctx: &crate::customscan::builder::EmitCustomPathContext<'_>,
+        ctx: &EmitCustomPathContext<'_>,
     ) -> Result<bool, CustomScanError>;
 }
 
@@ -61,7 +62,7 @@ impl<P: LakebaseCustomScanProvider> ErasedProvider for ProviderEntry<P> {
         P::NAME
     }
 
-    fn supports_relation(&self, ctx: &RelPathContext) -> bool {
+    fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool {
         P::supports_relation(ctx)
     }
 
@@ -75,10 +76,10 @@ impl<P: LakebaseCustomScanProvider> ErasedProvider for ProviderEntry<P> {
 
     unsafe fn emit_path(
         &self,
-        ctx: &crate::customscan::builder::EmitCustomPathContext<'_>,
+        ctx: &EmitCustomPathContext<'_>,
     ) -> Result<bool, CustomScanError> {
         // SAFETY: caller upholds emit_custom_path contract.
-        unsafe { crate::customscan::builder::emit_custom_path::<P>(ctx) }
+        unsafe { emit_custom_path::<P>(ctx) }
     }
 }
 
@@ -113,7 +114,7 @@ pub fn register_provider<P: LakebaseCustomScanProvider>() {
 
 /// Find the unique provider claiming this relation, or `None` / multi-match error.
 pub fn find_matching_provider(
-    ctx: &RelPathContext,
+    ctx: &RelationContext<'_>,
 ) -> Result<Option<&'static dyn ErasedProvider>, CustomScanError> {
     REGISTRY.with_borrow(|registry| {
         let mut matches = registry

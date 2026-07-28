@@ -5,20 +5,18 @@
 mod tests {
     use core::ffi::CStr;
 
-    use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
-    use pg_lakebase_core::customscan::custom_private::CustomScanPrivate;
-    use pg_lakebase_core::customscan::hook::pg_test_assert_set_rel_pathlist_callback_signature;
+    use pg_lakebase_core::customscan::hook::assert_set_rel_pathlist_callback_signature;
+    use pg_lakebase_core::customscan::provider::methods::method_tables_for;
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
-        method_tables_for,
+        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
+        RelationContext,
     };
-    use pg_lakebase_core::expr::runtime_params::ffi_accessors::{
-        ExecSetParamPlanFn, ExecSetParamPlanMultiFn, exec_set_param_plan,
-        exec_set_param_plan_multi,
+    use pg_lakebase_core::customscan::provider::{
+        CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
-    use pg_lakebase_core::expr::split::QualPushdownDecision;
+    use pg_lakebase_core::expr::QualPushdownDecision;
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
@@ -49,7 +47,7 @@ mod tests {
                 type PrivateData = GluePrivate;
                 type State = $state;
 
-                fn supports_relation(_ctx: &RelPathContext) -> bool {
+                fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
                     false
                 }
 
@@ -61,7 +59,7 @@ mod tests {
                 }
 
                 fn create_path(
-                    _ctx: &RelPathContext,
+                    _ctx: &PathContext<'_>,
                     _variant: &PathVariant<'_>,
                     _builder: CustomPathBuilder<Self>,
                 ) -> Option<CustomPathPlan<Self>> {
@@ -102,18 +100,6 @@ mod tests {
 
     impl_glue_provider!(GlueProviderA, c"glue-method-tables-provider-a", GlueStateA);
     impl_glue_provider!(GlueProviderB, c"glue-method-tables-provider-b", GlueStateB);
-
-    #[pg_test]
-    fn runtime_params_ffi_signatures_typecheck() {
-        let set_one = exec_set_param_plan();
-        let _: ExecSetParamPlanFn = set_one;
-        let set_multi = exec_set_param_plan_multi();
-        let _: Option<ExecSetParamPlanMultiFn> = set_multi;
-        assert!(
-            set_multi.is_some(),
-            "PG17 must expose ExecSetParamPlanMulti"
-        );
-    }
 
     #[pg_test]
     fn provider_exec_methods_are_stable_per_provider() {
@@ -187,7 +173,7 @@ mod tests {
 
     #[pg_test]
     fn hook_callback_matches_set_rel_pathlist_hook_type() {
-        pg_test_assert_set_rel_pathlist_callback_signature();
+        assert_set_rel_pathlist_callback_signature();
     }
 
     /// `emit_custom_path` emptiness uses `bms_membership == BMS_EMPTY_SET`

@@ -6,16 +6,18 @@ mod tests {
     use std::ptr;
 
     use crate::lakebase_core::support::pg::PlannerRelFixture;
-    use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
-    use pg_lakebase_core::customscan::custom_private::CustomScanPrivate;
+    use pg_lakebase_core::customscan::provider::find_matching_provider;
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
-        find_matching_provider, register_provider,
+        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
+        RelationContext, register_provider,
+    };
+    use pg_lakebase_core::customscan::provider::{
+        CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
     use pg_lakebase_core::diag::ReportableError;
-    use pg_lakebase_core::expr::split::QualPushdownDecision;
+    use pg_lakebase_core::expr::QualPushdownDecision;
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
@@ -25,7 +27,7 @@ mod tests {
     /// Synthetic relation OID both registry test providers claim.
     const PSG_REL_OID: u32 = 50_500;
 
-    /// Synthetic planner triple for [`RelPathContext`]; gate fields default to pass.
+    /// Synthetic planner nodes used by provider registry tests.
     unsafe fn make_psg_state() -> (
         *mut pg_sys::PlannerInfo,
         *mut pg_sys::RelOptInfo,
@@ -64,7 +66,7 @@ mod tests {
                 type PrivateData = PsgPrivate;
                 type State = $state;
 
-                fn supports_relation(ctx: &RelPathContext) -> bool {
+                fn supports_relation(ctx: &RelationContext<'_>) -> bool {
                     ctx.rel_oid() == pg_sys::Oid::from(PSG_REL_OID)
                 }
 
@@ -76,7 +78,7 @@ mod tests {
                 }
 
                 fn create_path(
-                    _ctx: &RelPathContext,
+                    _ctx: &PathContext<'_>,
                     _variant: &PathVariant<'_>,
                     _builder: CustomPathBuilder<Self>,
                 ) -> Option<CustomPathPlan<Self>> {
@@ -122,9 +124,9 @@ mod tests {
 
         unsafe {
             let (_root, _baserel, rte) = make_psg_state();
-            // SAFETY: `make_psg_state` returns a live `RangeTblEntry` in
-            // the test backend's per-query context.
-            let ctx = RelPathContext::new(rte);
+            // SAFETY: `make_psg_state` returns a live `RangeTblEntry` in the
+            // test backend's per-query context.
+            let ctx = RelationContext::from_ref(&*rte);
 
             let _ = find_matching_provider(&ctx).report_unwrap();
 
@@ -135,8 +137,8 @@ mod tests {
         }
     }
 
+    use crate::lakebase_core::customscan::support::TestScanState;
     use pg_lakebase_core::customscan::exec::next_slot_wrapper;
-    use pg_lakebase_core::customscan::state::CustomScanStateWrapper;
 
     struct SlotInvariantPrivate;
 
@@ -165,7 +167,7 @@ mod tests {
         type PrivateData = SlotInvariantPrivate;
         type State = SlotInvariantState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -177,7 +179,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -261,33 +263,17 @@ mod tests {
         }
     }
 
-    unsafe fn synth_empty_slot_wrapper()
-    -> *mut CustomScanStateWrapper<EmptySlotProvider> {
+    unsafe fn synth_empty_slot_wrapper() -> TestScanState<EmptySlotProvider> {
         unsafe {
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<EmptySlotProvider>,
-            >())
-                as *mut CustomScanStateWrapper<EmptySlotProvider>;
-            assert!(!wrapper_ptr.is_null());
-
-            // NodeTag required for cast-back through `CustomScanState`.
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
-
-            // Mirror `BeginCustomScan`: initialize `MaybeUninit<P::State>`.
-            (*wrapper_ptr)
-                .provider_state
-                .as_mut_ptr()
-                .write(SlotInvariantState);
-            (*wrapper_ptr).provider_state_initialized = true;
-            (*wrapper_ptr).provider_began = true;
-
-            (*wrapper_ptr).base.ss.ss_ScanTupleSlot = make_int4_slot();
-            (*wrapper_ptr).base.ss.ss_currentRelation =
+            let mut state = TestScanState::<EmptySlotProvider>::new();
+            state.install_provider_state(SlotInvariantState);
+            let base = state.base_mut();
+            base.ss.ss_ScanTupleSlot = make_int4_slot();
+            base.ss.ss_currentRelation =
                 make_relation_stub(pg_sys::Oid::from(50_600u32));
-            (*wrapper_ptr).base.ss.ps.state = make_estate_stub();
-            (*wrapper_ptr).base.ss.ps.ps_ExprContext = make_econtext_stub();
-
-            wrapper_ptr
+            base.ss.ps.state = make_estate_stub();
+            base.ss.ps.ps_ExprContext = make_econtext_stub();
+            state
         }
     }
 
@@ -297,10 +283,8 @@ mod tests {
     )]
     fn next_slot_empty_slot_raises_hard_error_independent_of_debug_assert() {
         unsafe {
-            let wrapper_ptr = synth_empty_slot_wrapper();
-            // `ScanState` is the first field of the `#[repr(C)]` wrapper.
-            let scan_state: *mut pg_sys::ScanState =
-                core::ptr::addr_of_mut!((*wrapper_ptr).base.ss);
+            let mut wrapper = synth_empty_slot_wrapper();
+            let scan_state = wrapper.scan_state_ptr();
 
             let _returned_slot = next_slot_wrapper::<EmptySlotProvider>(scan_state);
 
@@ -388,7 +372,7 @@ mod tests {
         type PrivateData = ContextProbePrivate;
         type State = ContextProbeState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -400,7 +384,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -457,31 +441,17 @@ mod tests {
         }
     }
 
-    unsafe fn synth_context_probe_wrapper()
-    -> *mut CustomScanStateWrapper<ContextProbeProvider> {
+    unsafe fn synth_context_probe_wrapper() -> TestScanState<ContextProbeProvider> {
         unsafe {
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<ContextProbeProvider>,
-            >())
-                as *mut CustomScanStateWrapper<ContextProbeProvider>;
-            assert!(!wrapper_ptr.is_null());
-
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
-            (*wrapper_ptr)
-                .provider_state
-                .as_mut_ptr()
-                .write(ContextProbeState);
-            (*wrapper_ptr).provider_state_initialized = true;
-            (*wrapper_ptr).provider_began = true;
-
-            (*wrapper_ptr).base.ss.ss_ScanTupleSlot = make_int4_slot();
-            (*wrapper_ptr).base.ss.ss_currentRelation =
+            let mut state = TestScanState::<ContextProbeProvider>::new();
+            state.install_provider_state(ContextProbeState);
+            let base = state.base_mut();
+            base.ss.ss_ScanTupleSlot = make_int4_slot();
+            base.ss.ss_currentRelation =
                 make_relation_stub(pg_sys::Oid::from(50_700u32));
-            (*wrapper_ptr).base.ss.ps.state = make_estate_stub();
-            (*wrapper_ptr).base.ss.ps.ps_ExprContext =
-                make_econtext_distinct_per_tuple();
-
-            wrapper_ptr
+            base.ss.ps.state = make_estate_stub();
+            base.ss.ps.ps_ExprContext = make_econtext_distinct_per_tuple();
+            state
         }
     }
 
@@ -491,9 +461,8 @@ mod tests {
     )]
     fn next_slot_err_restores_prior_context_before_raise() {
         unsafe {
-            let wrapper_ptr = synth_context_probe_wrapper();
-            let scan_state: *mut pg_sys::ScanState =
-                core::ptr::addr_of_mut!((*wrapper_ptr).base.ss);
+            let mut wrapper = synth_context_probe_wrapper();
+            let scan_state = wrapper.scan_state_ptr();
 
             let _ = next_slot_wrapper::<ContextProbeProvider>(scan_state);
 
@@ -544,32 +513,25 @@ mod tests {
         }
     }
 
-    unsafe fn synth_begin_context_probe() -> (
-        *mut CustomScanStateWrapper<ContextProbeProvider>,
-        *mut pg_sys::EState,
-    ) {
+    unsafe fn synth_begin_context_probe()
+    -> (TestScanState<ContextProbeProvider>, *mut pg_sys::EState) {
         unsafe {
             let relation_oid = pg_sys::Oid::from(50_701u32);
 
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<ContextProbeProvider>,
-            >())
-                as *mut CustomScanStateWrapper<ContextProbeProvider>;
-            assert!(!wrapper_ptr.is_null());
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
+            let mut wrapper = TestScanState::<ContextProbeProvider>::new();
 
             let cscan = make_begin_custom_scan_plan(relation_oid);
-            (*wrapper_ptr).base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
-            (*wrapper_ptr).base.ss.ss_currentRelation =
-                make_relation_stub(relation_oid);
-            (*wrapper_ptr).base.ss.ss_ScanTupleSlot = make_int4_slot();
+            let base = wrapper.base_mut();
+            base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
+            base.ss.ss_currentRelation = make_relation_stub(relation_oid);
+            base.ss.ss_ScanTupleSlot = make_int4_slot();
 
             // Begin does not switch into `ps_ExprContext`; provider uses its own scratch ctx.
-            (*wrapper_ptr).base.ss.ps.ps_ExprContext = make_econtext_stub();
+            base.ss.ps.ps_ExprContext = make_econtext_stub();
 
             let estate = make_begin_estate_stub();
 
-            (wrapper_ptr, estate)
+            (wrapper, estate)
         }
     }
 
@@ -579,9 +541,8 @@ mod tests {
     )]
     fn begin_err_restores_prior_context_before_raise() {
         unsafe {
-            let (wrapper_ptr, estate) = synth_begin_context_probe();
-            let node: *mut pg_sys::CustomScanState =
-                wrapper_ptr.cast::<pg_sys::CustomScanState>();
+            let (wrapper, estate) = synth_begin_context_probe();
+            let node = wrapper.node_ptr();
 
             begin_custom_scan_trampoline::<ContextProbeProvider>(node, estate, 0);
 
@@ -620,7 +581,7 @@ mod tests {
         type PrivateData = BoundaryDecodeFailPrivate;
         type State = BoundaryDecodeFailState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -632,7 +593,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -688,7 +649,7 @@ mod tests {
                 0,               // recheck_count
                 &[],             // pushed_contracts (len must equal pushed_count = 0)
                 &[],             // column_refs
-                ptr::null_mut(), // provider_metadata -> decode(NULL) = Err(NullPayload)
+                ptr::null_mut(), // provider decode sees an empty payload and fails
             )
             .expect("encode_split must succeed for the task decode-fail fixture");
 
@@ -703,28 +664,23 @@ mod tests {
     }
 
     unsafe fn synth_begin_decode_fail() -> (
-        *mut CustomScanStateWrapper<BoundaryDecodeFailProvider>,
+        TestScanState<BoundaryDecodeFailProvider>,
         *mut pg_sys::EState,
     ) {
         unsafe {
             let relation_oid = pg_sys::Oid::from(50_801u32);
 
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<BoundaryDecodeFailProvider>,
-            >())
-                as *mut CustomScanStateWrapper<BoundaryDecodeFailProvider>;
-            assert!(!wrapper_ptr.is_null());
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
+            let mut wrapper = TestScanState::<BoundaryDecodeFailProvider>::new();
 
             let cscan = make_decode_fail_custom_scan_plan(relation_oid);
-            (*wrapper_ptr).base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
-            (*wrapper_ptr).base.ss.ss_currentRelation =
-                make_relation_stub(relation_oid);
-            (*wrapper_ptr).base.ss.ps.ps_ExprContext = make_econtext_stub();
+            let base = wrapper.base_mut();
+            base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
+            base.ss.ss_currentRelation = make_relation_stub(relation_oid);
+            base.ss.ps.ps_ExprContext = make_econtext_stub();
 
             let estate = make_begin_estate_stub();
 
-            (wrapper_ptr, estate)
+            (wrapper, estate)
         }
     }
 
@@ -734,9 +690,8 @@ mod tests {
     )]
     fn decode_provider_private_boundary_raises_on_decode_error() {
         unsafe {
-            let (wrapper_ptr, estate) = synth_begin_decode_fail();
-            let node: *mut pg_sys::CustomScanState =
-                wrapper_ptr.cast::<pg_sys::CustomScanState>();
+            let (wrapper, estate) = synth_begin_decode_fail();
+            let node = wrapper.node_ptr();
 
             begin_custom_scan_trampoline::<BoundaryDecodeFailProvider>(
                 node, estate, 0,
@@ -781,7 +736,7 @@ mod tests {
         type PrivateData = CodecMalformedPrivate;
         type State = CodecMalformedState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -793,7 +748,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -875,29 +830,22 @@ mod tests {
         }
     }
 
-    unsafe fn synth_begin_codec_malformed() -> (
-        *mut CustomScanStateWrapper<CodecMalformedProvider>,
-        *mut pg_sys::EState,
-    ) {
+    unsafe fn synth_begin_codec_malformed()
+    -> (TestScanState<CodecMalformedProvider>, *mut pg_sys::EState) {
         unsafe {
             let relation_oid = pg_sys::Oid::from(50_802u32);
 
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<CodecMalformedProvider>,
-            >())
-                as *mut CustomScanStateWrapper<CodecMalformedProvider>;
-            assert!(!wrapper_ptr.is_null());
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
+            let mut wrapper = TestScanState::<CodecMalformedProvider>::new();
 
             let cscan = make_codec_malformed_custom_scan_plan(relation_oid);
-            (*wrapper_ptr).base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
-            (*wrapper_ptr).base.ss.ss_currentRelation =
-                make_relation_stub(relation_oid);
-            (*wrapper_ptr).base.ss.ps.ps_ExprContext = make_econtext_stub();
+            let base = wrapper.base_mut();
+            base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
+            base.ss.ss_currentRelation = make_relation_stub(relation_oid);
+            base.ss.ps.ps_ExprContext = make_econtext_stub();
 
             let estate = make_begin_estate_stub();
 
-            (wrapper_ptr, estate)
+            (wrapper, estate)
         }
     }
 
@@ -907,9 +855,8 @@ mod tests {
     )]
     fn decode_provider_private_boundary_raises_on_malformed_codec_payload() {
         unsafe {
-            let (wrapper_ptr, estate) = synth_begin_codec_malformed();
-            let node: *mut pg_sys::CustomScanState =
-                wrapper_ptr.cast::<pg_sys::CustomScanState>();
+            let (wrapper, estate) = synth_begin_codec_malformed();
+            let node = wrapper.node_ptr();
 
             begin_custom_scan_trampoline::<CodecMalformedProvider>(node, estate, 0);
 

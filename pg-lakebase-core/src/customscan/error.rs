@@ -8,7 +8,6 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-use crate::customscan::provider::LakebaseCustomScanProvider;
 use crate::diag::{
     PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
 };
@@ -65,6 +64,13 @@ enum CustomScanErrorKind {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    #[error("customscan runtime parameter resolution failed: {source}")]
+    RuntimeParameter {
+        sqlerrcode: PgSqlErrorCode,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("{message}: {source}")]
     Context {
         message: String,
@@ -76,7 +82,7 @@ enum CustomScanErrorKind {
     #[error("customscan custom_private codec error: {source}")]
     Codec {
         #[source]
-        source: crate::customscan::custom_private::DecodeError,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[error("{message}")]
@@ -145,6 +151,16 @@ impl CustomScanError {
         })
     }
 
+    pub(crate) fn runtime_parameter<E>(err: E) -> Self
+    where
+        E: SqlStateError + std::error::Error + Send + Sync + 'static,
+    {
+        Self::new(CustomScanErrorKind::RuntimeParameter {
+            sqlerrcode: err.sql_error_code(),
+            source: Box::new(err),
+        })
+    }
+
     /// Wrap any failure while encoding `custom_private` (provider payload or codec).
     pub(crate) fn encode_custom_private(source: impl Into<CustomScanError>) -> Self {
         Self::new(CustomScanErrorKind::Context {
@@ -153,20 +169,23 @@ impl CustomScanError {
         })
     }
 
-    /// Wrap a [`DecodeError`] from the custom_private codec (always `INTERNAL_ERROR`).
+    /// Wrap a custom_private codec error (always `INTERNAL_ERROR`).
     pub(crate) fn private_codec(
-        source: crate::customscan::custom_private::DecodeError,
+        source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::new(CustomScanErrorKind::Codec { source })
+        Self::new(CustomScanErrorKind::Codec {
+            source: Box::new(source),
+        })
     }
 
-    pub(crate) fn provider_private_decode<P: LakebaseCustomScanProvider>(
+    pub(crate) fn provider_private_decode(
+        provider: &'static CStr,
         source: impl Into<CustomScanError>,
     ) -> Self {
         Self::new(CustomScanErrorKind::Context {
             message: format!(
                 "customscan {:?} provider failed to decode custom_private payload",
-                P::NAME
+                provider
             ),
             source: Box::new(source.into()),
         })
@@ -235,12 +254,13 @@ impl CustomScanError {
     }
 
     /// Attach trampoline context before reporting at the FFI boundary.
-    pub(crate) fn with_provider_phase<P: LakebaseCustomScanProvider>(
+    pub(crate) fn with_provider_phase(
         self,
+        provider: &'static CStr,
         phase: CustomScanPhase,
     ) -> Self {
         Self::new(CustomScanErrorKind::Runtime {
-            provider: P::NAME,
+            provider,
             phase,
             source: Box::new(self),
         })
@@ -276,6 +296,7 @@ impl SqlStateError for CustomScanError {
         match &*self.0 {
             CustomScanErrorKind::Runtime { source, .. } => source.sql_error_code(),
             CustomScanErrorKind::Provider { sqlerrcode, .. } => *sqlerrcode,
+            CustomScanErrorKind::RuntimeParameter { sqlerrcode, .. } => *sqlerrcode,
             CustomScanErrorKind::PredicateBuild { .. }
             | CustomScanErrorKind::Context { .. }
             | CustomScanErrorKind::Codec { .. }
@@ -430,7 +451,8 @@ impl From<PgReportError> for CustomScanError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::customscan::custom_private::DecodeError;
+    use crate::customscan::plan_data::EnvelopeError;
+    use crate::expr::execution::params::RuntimeParamError;
     use proptest::prelude::*;
 
     #[derive(Debug, thiserror::Error)]
@@ -509,6 +531,19 @@ mod tests {
     }
 
     #[test]
+    fn runtime_parameter_preserves_domain_sqlstate() {
+        let err =
+            CustomScanError::runtime_parameter(RuntimeParamError::NoValueFound {
+                param_id: 3,
+            });
+        assert_eq!(
+            err.sql_error_code(),
+            PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
+        );
+        assert!(err.to_string().contains("no value found for parameter 3"));
+    }
+
+    #[test]
     fn pg_report_variant_keeps_message() {
         let err = CustomScanError::new(CustomScanErrorKind::PgReport {
             sqlerrcode: PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
@@ -536,7 +571,7 @@ mod tests {
             (
                 CustomScanError::encode_custom_private(
                     CustomScanError::private_codec(
-                        DecodeError::CountTooLargeToEncode { value: 99 },
+                        EnvelopeError::CountTooLargeToEncode { value: 99 },
                     ),
                 ),
                 "customscan: failed to encode custom_private",
@@ -558,8 +593,8 @@ mod tests {
     }
 
     #[test]
-    fn decode_error_maps_to_private_codec_with_internal_sqlstate() {
-        let err = CustomScanError::private_codec(DecodeError::NullPayload);
+    fn envelope_error_maps_to_private_codec_with_internal_sqlstate() {
+        let err = CustomScanError::private_codec(EnvelopeError::NullPayload);
         assert_eq!(err.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
         let report = custom_scan_error_report_parts(&err);
         assert!(

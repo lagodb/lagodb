@@ -6,6 +6,9 @@ use std::collections::HashMap;
 
 use pgrx::pg_sys;
 
+use crate::customscan::execution::{exec, explain, state};
+use crate::customscan::planning::builder;
+
 use super::LakebaseCustomScanProvider;
 
 /// The three PostgreSQL callback tables owned by one provider type.
@@ -54,33 +57,23 @@ pub fn method_tables_for<P: LakebaseCustomScanProvider>()
     let tables = ProviderMethodTables {
         path: pg_sys::CustomPathMethods {
             CustomName: name,
-            PlanCustomPath: Some(
-                crate::customscan::builder::plan_custom_path_trampoline::<P>,
-            ),
+            PlanCustomPath: Some(builder::plan_custom_path_trampoline::<P>),
             ReparameterizeCustomPathByChild: Some(
-                crate::customscan::builder::reparameterize_custom_path_by_child_trampoline::<P>,
+                builder::reparameterize_custom_path_by_child_trampoline::<P>,
             ),
         },
         scan: pg_sys::CustomScanMethods {
             CustomName: name,
             CreateCustomScanState: Some(
-                crate::customscan::state::create_custom_scan_state_trampoline::<P>,
+                state::create_custom_scan_state_trampoline::<P>,
             ),
         },
         exec: pg_sys::CustomExecMethods {
             CustomName: name,
-            BeginCustomScan: Some(
-                crate::customscan::exec::begin_custom_scan_trampoline::<P>,
-            ),
-            ReScanCustomScan: Some(
-                crate::customscan::exec::rescan_custom_scan_trampoline::<P>,
-            ),
-            ExecCustomScan: Some(
-                crate::customscan::exec::exec_custom_scan_trampoline::<P>,
-            ),
-            EndCustomScan: Some(
-                crate::customscan::exec::end_custom_scan_trampoline::<P>,
-            ),
+            BeginCustomScan: Some(exec::begin_custom_scan_trampoline::<P>),
+            ReScanCustomScan: Some(exec::rescan_custom_scan_trampoline::<P>),
+            ExecCustomScan: Some(exec::exec_custom_scan_trampoline::<P>),
+            EndCustomScan: Some(exec::end_custom_scan_trampoline::<P>),
             MarkPosCustomScan: None,
             RestrPosCustomScan: None,
             EstimateDSMCustomScan: None,
@@ -88,9 +81,7 @@ pub fn method_tables_for<P: LakebaseCustomScanProvider>()
             ReInitializeDSMCustomScan: None,
             InitializeWorkerCustomScan: None,
             ShutdownCustomScan: None,
-            ExplainCustomScan: Some(
-                crate::customscan::explain::explain_custom_scan_trampoline::<P>,
-            ),
+            ExplainCustomScan: Some(explain::explain_custom_scan_trampoline::<P>),
         },
     };
 

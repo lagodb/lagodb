@@ -18,8 +18,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 default = ["pg17"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
-# Enables `#[doc(hidden)]` test hooks consumed by `pg-lakebase-core-tests`.
-pg_test = []
 
 [dependencies]
 pgrx = { workspace = true }

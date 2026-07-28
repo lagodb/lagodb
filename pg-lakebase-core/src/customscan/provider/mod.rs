@@ -1,12 +1,29 @@
 //! Public provider boundary for the generic CustomScan framework.
 //!
-//! `api` defines the typed SPI implemented by storage providers. `registry`
-//! owns process-wide type erasure used only by planner routing.
+//! Planning, execution, and provider contracts are separate modules. This
+//! module remains the stable facade consumed by storage providers.
 
-mod api;
-mod methods;
-mod registry;
+mod context;
+mod contract;
+mod execution;
+pub mod methods;
+mod planning;
+mod private_data;
+pub mod registry;
 
-pub use api::*;
-pub use methods::{ProviderMethodTables, method_tables_for};
-pub use registry::{ErasedProvider, find_matching_provider, register_provider};
+pub use crate::customscan::error::CustomScanError;
+pub use crate::customscan::plan_data::tuple_layout::{
+    NeededColumns, ScanTupleDescriptor, ScanTupleLayout, WHOLEROW_NAME,
+};
+pub use contract::LakebaseCustomScanProvider;
+pub use execution::{
+    BeginContext, CreateStateContext, EndContext, NextSlotContext, PushedPredicates,
+    ReScanContext,
+};
+pub(crate) use methods::method_tables_for;
+pub use planning::*;
+pub use private_data::{
+    CustomScanPrivate, NoPrivateData, PrivateDataReader, PrivateDataWriter,
+};
+pub use registry::register_provider;
+pub use registry::{ErasedProvider, find_matching_provider};
