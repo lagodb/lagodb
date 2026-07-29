@@ -3,6 +3,7 @@
 use pgrx::pg_sys;
 
 use crate::customscan::ScanPurpose;
+use crate::customscan::provider::RelationContext;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
 
 /// Reason a relation cannot participate in CustomScan planning.
@@ -49,10 +50,6 @@ impl CustomScanCandidate {
     }
 
     unsafe fn validate(self) -> Result<(), CustomScanRejection> {
-        debug_assert!(!self.root.is_null(), "candidate root must be non-null");
-        debug_assert!(!self.rel.is_null(), "candidate rel must be non-null");
-        debug_assert!(!self.rte.is_null(), "candidate rte must be non-null");
-
         let rtekind = unsafe { (*self.rte).rtekind };
         if rtekind != pg_sys::RTEKind::RTE_RELATION {
             return Err(CustomScanRejection::NotARegularRelation);
@@ -97,14 +94,11 @@ impl CustomScanCandidate {
         self.purpose
     }
 
-    pub(super) unsafe fn provider_context(
-        self,
-    ) -> crate::customscan::provider::RelPathContext {
-        unsafe {
-            crate::customscan::provider::RelPathContext::with_planner(
-                self.rte, self.root, self.rel,
-            )
-        }
+    pub(super) unsafe fn relation_context(&self) -> RelationContext<'_> {
+        // SAFETY: `self.rte` is a live planner-owned node per `inspect`'s
+        // contract and the returned context cannot outlive this candidate.
+        let rte = unsafe { &*self.rte };
+        RelationContext::from_ref(rte)
     }
 
     unsafe fn is_modify_target(
@@ -112,10 +106,6 @@ impl CustomScanCandidate {
         rel: *mut pg_sys::RelOptInfo,
     ) -> bool {
         let parse = unsafe { (*root).parse };
-        debug_assert!(
-            !parse.is_null(),
-            "CustomScanCandidate: root->parse must be non-null"
-        );
         let command_type = unsafe { (*parse).commandType };
         if !matches!(
             command_type,
@@ -147,10 +137,8 @@ impl CustomScanCandidate {
         let mut usage = RelationExprUsage::default();
 
         let reltarget = unsafe { (*self.rel).reltarget };
-        if !reltarget.is_null() {
-            let exprs = unsafe { (*reltarget).exprs };
-            usage.extend(unsafe { analyzer.collect_expr_list(exprs) });
-        }
+        let exprs = unsafe { (*reltarget).exprs };
+        usage.extend(unsafe { analyzer.collect_expr_list(exprs) });
 
         let baserestrict = unsafe { (*self.rel).baserestrictinfo };
         usage.extend(unsafe { analyzer.collect_restrictinfo_list(baserestrict) });
@@ -184,9 +172,6 @@ impl CustomScanCandidate {
         for i in 0..len {
             let mark =
                 unsafe { pg_sys::list_nth(row_marks, i) } as *mut pg_sys::PlanRowMark;
-            if mark.is_null() {
-                continue;
-            }
             if unsafe { (*mark).rti } == relid {
                 return true;
             }

@@ -8,10 +8,13 @@ use std::ptr;
 use pgrx::pg_sys;
 
 use crate::customscan::ScanPurpose;
-use crate::customscan::codec::{PrivateDataReader, PrivateDataWriter};
 use crate::customscan::error::CustomScanError;
-use crate::customscan::tuple_layout::ScanTupleLayout;
-use crate::expr::split::{ColumnRef, PushdownContract};
+use crate::customscan::plan_data::{EnvelopeError, tuple_layout::ScanTupleLayout};
+use crate::expr::contract::{ColumnRef, PushdownContract};
+
+fn usize_to_int(value: usize) -> Result<i32, EnvelopeError> {
+    i32::try_from(value).map_err(|_| EnvelopeError::CountTooLargeToEncode { value })
+}
 
 // Positional indices into the top-level `T_List` payload. Both encode and
 // decode reference these so the layout is described in exactly one place.
@@ -44,130 +47,6 @@ const COLUMN_REF_REL_OID: i32 = 1;
 const COLUMN_REF_ATTNO: i32 = 2;
 const COLUMN_REF_ATTTYPID: i32 = 3;
 const COLUMN_REF_ATTCOLLATION: i32 = 4;
-
-/// Internal codec/wire-format errors for `CustomScan.custom_private`.
-///
-/// These stay inside Core as typed sources. Public customscan APIs surface them
-/// through [`CustomScanError`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum DecodeError {
-    /// Top-level `List*` was NULL.
-    #[error("custom_private payload is NULL")]
-    NullPayload,
-    /// Top-level list length differed from [`TOP_LEVEL_LEN`].
-    #[error(
-        "custom_private top-level list has wrong length: found {found}, expected {expected}"
-    )]
-    WrongTopLevelLength { found: usize, expected: usize },
-    /// A list cell that should have held a pointer-typed Node held NULL.
-    #[error("custom_private cell {field} is NULL but a Node* was expected")]
-    NullCell { field: i32 },
-    /// A cell's `NodeTag` did not match the expected tag.
-    #[error(
-        "custom_private cell {field} has wrong NodeTag: found {found:?}, expected {expected:?}"
-    )]
-    WrongNodeTag {
-        field: i32,
-        expected: pg_sys::NodeTag,
-        found: pg_sys::NodeTag,
-    },
-    /// `provider_id_or_name` (`T_String`) had a NULL `sval` pointer.
-    #[error("custom_private provider_id_or_name has NULL sval")]
-    NullProviderName,
-    /// A `column_refs` entry (or its inner 5-int sub-cell) did not have the
-    /// expected number of fields. The outer entry is a 2-cell `T_List`
-    /// ([`COLUMN_REF_ENTRY_LEN`]); its `[0]` sub-cell is a 5-int `T_IntList`
-    /// ([`COLUMN_REF_LEN`]).
-    #[error(
-        "custom_private column_refs[{entry}] has wrong length: found {found}, expected {expected}"
-    )]
-    MalformedColumnRef {
-        entry: usize,
-        found: usize,
-        expected: usize,
-    },
-    /// Encoded `pushed_contracts` value was outside the known set.
-    #[error(
-        "custom_private pushed_contracts[{entry}] holds unknown encoding {value}"
-    )]
-    UnknownContract { entry: usize, value: i32 },
-    /// A negative count was encoded for a length field.
-    #[error("custom_private cell {field} encodes negative count {value}")]
-    NegativeCount { field: i32, value: i32 },
-    /// `pushed_contracts.len()` must equal `pushed_count`.
-    #[error(
-        "custom_private cross-field invariant violated: \
-         pushed_contracts.len() = {pushed_contracts_len}, \
-         expected to equal pushed_count = {pushed_count}"
-    )]
-    PushedContractsLengthMismatch {
-        pushed_count: usize,
-        pushed_contracts_len: usize,
-    },
-    /// `column_refs[i].expr_index` must be `< pushed_count`.
-    #[error(
-        "custom_private column_refs[{entry}].expr_index = {expr_index} \
-         is out of range for pushed_count = {pushed_count}"
-    )]
-    ColumnRefExprIndexOutOfRange {
-        entry: usize,
-        expr_index: usize,
-        pushed_count: usize,
-    },
-    /// Count exceeds `i32::MAX` (PG `Integer` is signed 32-bit).
-    #[error("custom_private cannot encode count {value}: exceeds i32::MAX")]
-    CountTooLargeToEncode { value: usize },
-    /// A codec `read_*` was called with the cursor at or past the end of the
-    /// payload. Covers the Iceberg fail-closed posture for a NULL/empty
-    /// `provider_metadata` payload, where any read fails rather than
-    /// substituting a default.
-    #[error(
-        "custom_private read past end of payload: position {position}, len {len}"
-    )]
-    ReadPastEnd { position: usize, len: usize },
-    /// `PrivateDataReader::finish` found cells the provider never read — the
-    /// payload is longer than the shape the provider decoded. Lets Core reject
-    /// a payload with extra trailing cells.
-    #[error(
-        "custom_private payload has unexpected trailing cells: read {read}, len {len}"
-    )]
-    UnexpectedTrailingCells { read: usize, len: usize },
-    /// `append_str` was given a string containing an interior NUL byte, which
-    /// cannot be encoded as a C string. Surfaced as an error rather than
-    /// silently truncating at the NUL.
-    #[error(
-        "custom_private cannot encode string at position {position}: contains interior NUL byte"
-    )]
-    StringContainsInteriorNul { position: usize },
-    /// Defensive: malformed i64 in a float cell (corrupt plan tree).
-    #[error("custom_private cell at position {position} holds a malformed i64 value")]
-    MalformedI64Cell { position: usize },
-    /// Defensive: a `T_String` cell held an `sval` that does not contain valid
-    /// UTF-8. This cannot occur for a payload produced by [`PrivateDataWriter`];
-    /// it fails closed against a corrupt plan tree.
-    #[error(
-        "custom_private cell at position {position} holds a malformed string value"
-    )]
-    MalformedStringCell { position: usize },
-    /// Tuple-layout wire list is structurally invalid.
-    #[error("custom_private tuple layout is malformed: {reason}")]
-    MalformedTupleLayout { reason: &'static str },
-    /// Tuple-layout kind tag is not recognized.
-    #[error("custom_private tuple layout has unknown kind tag {value}")]
-    UnknownTupleLayoutKind { value: i32 },
-    /// Scan-purpose tag is not recognized.
-    #[error("custom_private has unknown scan purpose tag {value}")]
-    UnknownScanPurpose { value: i32 },
-    /// Tuple-layout column lists only contain positive `AttrNumber` values.
-    #[error("custom_private tuple layout attnos[{index}] has invalid value {value}")]
-    InvalidTupleLayoutAttno { index: usize, value: i32 },
-    /// A base attribute may appear only once in a tuple-layout column list.
-    #[error("custom_private tuple layout contains duplicate base attno {attno}")]
-    DuplicateTupleLayoutAttno { attno: pg_sys::AttrNumber },
-    /// Path-stage wrapper around provider metadata is invalid.
-    #[error("custom path private data is malformed: {reason}")]
-    MalformedPathPrivate { reason: &'static str },
-}
 
 /// Decoded path-stage wrapper. Unlike final `custom_private`, this exists only
 /// between `create_path` and `PlanCustomPath`.
@@ -208,7 +87,7 @@ pub(crate) unsafe fn decode_path_private(
 ) -> Result<EncodedPathPrivate, CustomScanError> {
     let decoded = (|| {
         if list.is_null() || unsafe { pg_sys::list_length(list) } != 3 {
-            return Err(DecodeError::MalformedPathPrivate {
+            return Err(EnvelopeError::MalformedPathPrivate {
                 reason: "expected a three-cell list",
             });
         }
@@ -217,26 +96,26 @@ pub(crate) unsafe fn decode_path_private(
         if purpose_node.is_null()
             || unsafe { (*purpose_node).type_ } != pg_sys::NodeTag::T_Integer
         {
-            return Err(DecodeError::MalformedPathPrivate {
+            return Err(EnvelopeError::MalformedPathPrivate {
                 reason: "purpose is not an Integer node",
             });
         }
         let purpose_raw = unsafe { (*purpose_node.cast::<pg_sys::Integer>()).ival };
         let purpose = ScanPurpose::from_wire(purpose_raw)
-            .ok_or(DecodeError::UnknownScanPurpose { value: purpose_raw })?;
+            .ok_or(EnvelopeError::UnknownScanPurpose { value: purpose_raw })?;
         let wholerow_node =
             unsafe { pg_sys::list_nth(list, 1) }.cast::<pg_sys::Node>();
         if wholerow_node.is_null()
             || unsafe { (*wholerow_node).type_ } != pg_sys::NodeTag::T_Integer
         {
-            return Err(DecodeError::MalformedPathPrivate {
+            return Err(EnvelopeError::MalformedPathPrivate {
                 reason: "requires_wholerow is not an Integer node",
             });
         }
         let requires_wholerow =
             unsafe { (*wholerow_node.cast::<pg_sys::Integer>()).ival };
         if !matches!(requires_wholerow, 0 | 1) {
-            return Err(DecodeError::MalformedPathPrivate {
+            return Err(EnvelopeError::MalformedPathPrivate {
                 reason: "requires_wholerow is not boolean",
             });
         }
@@ -249,31 +128,6 @@ pub(crate) unsafe fn decode_path_private(
         })
     })();
     decoded.map_err(CustomScanError::private_codec)
-}
-
-/// Provider-extensible encode/decode for the opaque tail of `custom_private`.
-///
-/// Encoded lists MUST be `copyObject`-safe (PG `Node*` values only).
-pub trait CustomScanPrivate: Sized {
-    /// Encode provider fields via `writer.append_*`.
-    fn encode(&self, writer: &mut PrivateDataWriter) -> Result<(), CustomScanError>;
-
-    /// Decode fields previously written by `encode`.
-    fn decode(reader: &mut PrivateDataReader<'_>) -> Result<Self, CustomScanError>;
-}
-
-/// Provider plan data for providers that need no private payload.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NoPrivateData;
-
-impl CustomScanPrivate for NoPrivateData {
-    fn encode(&self, _writer: &mut PrivateDataWriter) -> Result<(), CustomScanError> {
-        Ok(())
-    }
-
-    fn decode(_reader: &mut PrivateDataReader<'_>) -> Result<Self, CustomScanError> {
-        Ok(Self)
-    }
 }
 
 /// Decoded framework envelope from `CustomScan.custom_private`.
@@ -304,7 +158,7 @@ pub struct EncodedPrivate {
     pub column_refs: Vec<ColumnRef>,
 
     /// Raw provider-private payload — handed to the provider's
-    /// [`CustomScanPrivate::decode`] separately. NULL is permitted: a
+    /// The provider decodes this cell separately. NULL is permitted: a
     /// provider with no private state can ignore it.
     pub provider_metadata_raw: *mut pg_sys::List,
 
@@ -312,13 +166,13 @@ pub struct EncodedPrivate {
     pub tuple_layout: ScanTupleLayout,
 }
 
-/// Encode plan-stage pushdown split into `CustomScan.custom_private`.
-///
-/// `provider_metadata` MUST be `copyObject`-safe (debug-asserted).
+/// Encode a relation-shaped query envelope for backend tests.
 ///
 /// # Safety
 ///
-/// Returns a list in the current memory context; caller hands ownership to PG.
+/// `provider_metadata` must be NULL or a live copyObject-safe PostgreSQL list
+/// in the current memory context. The expression and metadata slices must
+/// remain valid for the duration of this call.
 pub unsafe fn encode_split(
     provider_id_or_name: &CStr,
     relation_oid: pg_sys::Oid,
@@ -381,7 +235,7 @@ unsafe fn encode_split_impl(
     column_refs: &[ColumnRef],
     provider_metadata: *mut pg_sys::List,
     tuple_layout: &ScanTupleLayout,
-) -> Result<*mut pg_sys::List, DecodeError> {
+) -> Result<*mut pg_sys::List, EnvelopeError> {
     debug_assert_eq!(
         pushed_contracts.len(),
         pushed_count,
@@ -505,24 +359,24 @@ pub unsafe fn decode_private(
 
 unsafe fn decode_private_impl(
     list: *mut pg_sys::List,
-) -> Result<EncodedPrivate, DecodeError> {
+) -> Result<EncodedPrivate, EnvelopeError> {
     if list.is_null() {
-        return Err(DecodeError::NullPayload);
+        return Err(EnvelopeError::NullPayload);
     }
 
     let len = unsafe { (*list).length } as usize;
     if len != TOP_LEVEL_LEN {
-        return Err(DecodeError::WrongTopLevelLength {
+        return Err(EnvelopeError::WrongTopLevelLength {
             found: len,
             expected: TOP_LEVEL_LEN,
         });
     }
 
     // Helper: read cell `i` as `*mut pg_sys::Node`, NULL-checked.
-    let cell_node = |idx: i32| -> Result<*mut pg_sys::Node, DecodeError> {
+    let cell_node = |idx: i32| -> Result<*mut pg_sys::Node, EnvelopeError> {
         let ptr = unsafe { pg_sys::list_nth(list, idx) } as *mut pg_sys::Node;
         if ptr.is_null() {
-            return Err(DecodeError::NullCell { field: idx });
+            return Err(EnvelopeError::NullCell { field: idx });
         }
         Ok(ptr)
     };
@@ -538,7 +392,7 @@ unsafe fn decode_private_impl(
         let s = provider_name_node.cast::<pg_sys::String>();
         let sval = (*s).sval;
         if sval.is_null() {
-            return Err(DecodeError::NullProviderName);
+            return Err(EnvelopeError::NullProviderName);
         }
         CStr::from_ptr(sval).to_owned()
     };
@@ -546,7 +400,7 @@ unsafe fn decode_private_impl(
     // FIELD_SCAN_PURPOSE: T_Integer
     let purpose_raw = unsafe { read_integer_cell(list, FIELD_SCAN_PURPOSE)? };
     let purpose = ScanPurpose::from_wire(purpose_raw)
-        .ok_or(DecodeError::UnknownScanPurpose { value: purpose_raw })?;
+        .ok_or(EnvelopeError::UnknownScanPurpose { value: purpose_raw })?;
 
     // FIELD_RELATION_OID: T_Integer (Oid round-tripped via i32 bitcast)
     let relation_oid = unsafe {
@@ -557,7 +411,7 @@ unsafe fn decode_private_impl(
     // FIELD_PUSHED_COUNT: T_Integer
     let pushed_count_raw = unsafe { read_integer_cell(list, FIELD_PUSHED_COUNT)? };
     if pushed_count_raw < 0 {
-        return Err(DecodeError::NegativeCount {
+        return Err(EnvelopeError::NegativeCount {
             field: FIELD_PUSHED_COUNT,
             value: pushed_count_raw,
         });
@@ -567,7 +421,7 @@ unsafe fn decode_private_impl(
     // FIELD_RECHECK_COUNT: T_Integer
     let recheck_count_raw = unsafe { read_integer_cell(list, FIELD_RECHECK_COUNT)? };
     if recheck_count_raw < 0 {
-        return Err(DecodeError::NegativeCount {
+        return Err(EnvelopeError::NegativeCount {
             field: FIELD_RECHECK_COUNT,
             value: recheck_count_raw,
         });
@@ -596,7 +450,7 @@ unsafe fn decode_private_impl(
                     PushdownContract::ConservativePruning
                 }
                 other => {
-                    return Err(DecodeError::UnknownContract {
+                    return Err(EnvelopeError::UnknownContract {
                         entry: i,
                         value: other,
                     });
@@ -626,7 +480,7 @@ unsafe fn decode_private_impl(
             let entry_ptr = unsafe { pg_sys::list_nth(column_refs_list, i as i32) }
                 as *mut pg_sys::List;
             if entry_ptr.is_null() {
-                return Err(DecodeError::NullCell {
+                return Err(EnvelopeError::NullCell {
                     field: FIELD_COLUMN_REFS,
                 });
             }
@@ -639,7 +493,7 @@ unsafe fn decode_private_impl(
             }
             let entry_len = unsafe { (*entry_ptr).length } as usize;
             if entry_len != COLUMN_REF_ENTRY_LEN {
-                return Err(DecodeError::MalformedColumnRef {
+                return Err(EnvelopeError::MalformedColumnRef {
                     entry: i,
                     found: entry_len,
                     expected: COLUMN_REF_ENTRY_LEN,
@@ -651,7 +505,7 @@ unsafe fn decode_private_impl(
                 unsafe { pg_sys::list_nth(entry_ptr, COLUMN_REF_SUBCELL_INTS) }
                     as *mut pg_sys::List;
             if ints_ptr.is_null() {
-                return Err(DecodeError::NullCell {
+                return Err(EnvelopeError::NullCell {
                     field: FIELD_COLUMN_REFS,
                 });
             }
@@ -664,7 +518,7 @@ unsafe fn decode_private_impl(
             }
             let ints_len = unsafe { (*ints_ptr).length } as usize;
             if ints_len != COLUMN_REF_LEN {
-                return Err(DecodeError::MalformedColumnRef {
+                return Err(EnvelopeError::MalformedColumnRef {
                     entry: i,
                     found: ints_len,
                     expected: COLUMN_REF_LEN,
@@ -728,14 +582,14 @@ unsafe fn decode_private_impl(
 
     // Cross-field invariants: contracts align with pushed_count; expr_index in range.
     if pushed_contracts.len() != pushed_count {
-        return Err(DecodeError::PushedContractsLengthMismatch {
+        return Err(EnvelopeError::PushedContractsLengthMismatch {
             pushed_count,
             pushed_contracts_len: pushed_contracts.len(),
         });
     }
     for (entry_idx, cr) in column_refs.iter().enumerate() {
         if cr.expr_index >= pushed_count {
-            return Err(DecodeError::ColumnRefExprIndexOutOfRange {
+            return Err(EnvelopeError::ColumnRefExprIndexOutOfRange {
                 entry: entry_idx,
                 expr_index: cr.expr_index,
                 pushed_count,
@@ -765,10 +619,10 @@ unsafe fn decode_private_impl(
 unsafe fn read_integer_cell(
     list: *mut pg_sys::List,
     field: i32,
-) -> Result<i32, DecodeError> {
+) -> Result<i32, EnvelopeError> {
     let node_ptr = unsafe { pg_sys::list_nth(list, field) } as *mut pg_sys::Node;
     if node_ptr.is_null() {
-        return Err(DecodeError::NullCell { field });
+        return Err(EnvelopeError::NullCell { field });
     }
     unsafe { expect_node_tag(node_ptr, pg_sys::NodeTag::T_Integer, field)? };
     let int_ptr = node_ptr.cast::<pg_sys::Integer>();
@@ -785,10 +639,10 @@ unsafe fn expect_node_tag(
     node: *mut pg_sys::Node,
     expected: pg_sys::NodeTag,
     field: i32,
-) -> Result<(), DecodeError> {
+) -> Result<(), EnvelopeError> {
     let found = unsafe { (*node).type_ };
     if found != expected {
-        return Err(DecodeError::WrongNodeTag {
+        return Err(EnvelopeError::WrongNodeTag {
             field,
             expected,
             found,
@@ -808,25 +662,16 @@ unsafe fn expect_list_tag(
     list: *mut pg_sys::List,
     expected: pg_sys::NodeTag,
     field: i32,
-) -> Result<(), DecodeError> {
+) -> Result<(), EnvelopeError> {
     let found = unsafe { (*list).type_ };
     if found != expected {
-        return Err(DecodeError::WrongNodeTag {
+        return Err(EnvelopeError::WrongNodeTag {
             field,
             expected,
             found,
         });
     }
     Ok(())
-}
-
-/// Convert `usize` count to PG `Integer` `c_int`; errors if `> i32::MAX`.
-#[inline]
-pub(crate) fn usize_to_int(value: usize) -> Result<i32, DecodeError> {
-    if value > i32::MAX as usize {
-        return Err(DecodeError::CountTooLargeToEncode { value });
-    }
-    Ok(value as i32)
 }
 
 /// Debug-only: assert provider metadata cells are copyObject-safe nodes.
@@ -896,7 +741,7 @@ fn node_tag_is_copyobject_safe(tag: pg_sys::NodeTag) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, assert_provider_name_matches, usize_to_int};
+    use super::{EnvelopeError, assert_provider_name_matches, usize_to_int};
     use proptest::prelude::*;
 
     use std::ffi::CString;
@@ -911,7 +756,7 @@ mod tests {
                     prop_assert_eq!(i as usize, v);
                     prop_assert!(i >= 0);
                 }
-                Err(DecodeError::CountTooLargeToEncode { value }) => {
+                Err(EnvelopeError::CountTooLargeToEncode { value }) => {
                     prop_assert!(v > i32::MAX as usize);
                     prop_assert_eq!(value, v);
                 }
@@ -930,11 +775,11 @@ mod tests {
         let just_over = i32::MAX as usize + 1;
         assert_eq!(
             usize_to_int(just_over),
-            Err(DecodeError::CountTooLargeToEncode { value: just_over })
+            Err(EnvelopeError::CountTooLargeToEncode { value: just_over })
         );
         assert_eq!(
             usize_to_int(usize::MAX),
-            Err(DecodeError::CountTooLargeToEncode { value: usize::MAX })
+            Err(EnvelopeError::CountTooLargeToEncode { value: usize::MAX })
         );
     }
 

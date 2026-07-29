@@ -3,17 +3,17 @@
 use pgrx::pg_sys;
 
 use crate::customscan::ScanPurpose;
-use crate::customscan::candidate::CustomScanCandidate;
 use crate::customscan::error::CustomScanError;
-use crate::customscan::parameterized::{
+use crate::customscan::planning::builder::EmitCustomPathContext;
+use crate::customscan::planning::candidate::CustomScanCandidate;
+use crate::customscan::planning::parameterized::{
     ParameterizedPathGroup, ParameterizedPathPlanner, ParameterizedPathResolver,
 };
 use crate::customscan::provider::{
     ErasedProvider, PathVariantKind, PlanTranslateContext,
 };
-use crate::expr::split::{
-    PlanPushdownSplit, PlanPushdownSplitter, QualPushdownDecision, ScanClauseSource,
-};
+use crate::expr::contract::QualPushdownDecision;
+use crate::expr::split::{PlanPushdownSplit, PlanPushdownSplitter, ScanClauseSource};
 
 /// Plans every CustomPath variant for one validated relation/provider pair.
 pub(super) struct CustomScanPathPlanner {
@@ -109,7 +109,7 @@ impl CustomScanPathPlanner {
         required_outer: *mut pg_sys::Bitmapset,
         split: &PlanPushdownSplit,
     ) -> Result<bool, CustomScanError> {
-        let ctx = crate::customscan::builder::EmitCustomPathContext {
+        let ctx = EmitCustomPathContext {
             root: self.candidate.root(),
             baserel: self.candidate.rel(),
             purpose: self.candidate.purpose(),
@@ -192,27 +192,5 @@ impl PredicatePlanner {
             &mut classify_leaf,
         );
         unsafe { splitter.split() }
-    }
-}
-
-/// True when a JoinParameterized variant adds no pushed predicates.
-pub fn join_parameterized_variant_pushes_nothing(
-    ppi_split: &PlanPushdownSplit,
-) -> bool {
-    !ppi_split.has_pushed_predicates()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::join_parameterized_variant_pushes_nothing;
-    use crate::customscan::test_support::PushdownSplitFixture;
-
-    #[test]
-    fn parameterized_variant_requires_a_pushed_predicate() {
-        let empty = PushdownSplitFixture::new(0).split_exact_counts(0, 2, 1);
-        let useful = PushdownSplitFixture::new(1).split_exact_counts(1, 2, 1);
-
-        assert!(join_parameterized_variant_pushes_nothing(&empty));
-        assert!(!join_parameterized_variant_pushes_nothing(&useful));
     }
 }

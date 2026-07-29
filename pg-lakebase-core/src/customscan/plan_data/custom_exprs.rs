@@ -6,19 +6,6 @@ use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
 
-/// Slice `custom_exprs`; NULL list only when both counts are zero.
-#[doc(hidden)]
-pub unsafe fn slice_pushed_recheck(
-    list: *mut pg_sys::List,
-    pushed_count: usize,
-    recheck_count: usize,
-) -> Result<(Vec<*mut pg_sys::Expr>, Vec<*mut pg_sys::Expr>), CustomScanError> {
-    unsafe {
-        CustomExprSections::from_custom_exprs(list, pushed_count, recheck_count)
-    }
-    .map(CustomExprSections::into_parts)
-}
-
 pub(crate) fn validate_custom_expr_section_counts(
     list_len: Option<usize>,
     pushed_count: usize,
@@ -105,10 +92,6 @@ impl CustomExprSections {
     #[inline]
     pub fn recheck(&self) -> &[*mut pg_sys::Expr] {
         &self.recheck
-    }
-
-    fn into_parts(self) -> (Vec<*mut pg_sys::Expr>, Vec<*mut pg_sys::Expr>) {
-        (self.pushed, self.recheck)
     }
 
     /// Build a PG `List` from the recheck section in the current memory context.

@@ -7,8 +7,9 @@ mod tests {
     use std::ptr;
 
     use crate::lakebase_core::support::pg::{INT4_EQ_OPNO, PgNodeBuilder};
-    use pg_lakebase_core::customscan::provider::{
-        NeededColumns, ScanTuplePlanProbe, ScanTupleShape,
+    use pg_lakebase_core::customscan::provider::NeededColumns;
+    use pg_lakebase_core::customscan::tuple_planner::{
+        ScanTuplePlanProbe, ScanTupleShape,
     };
     use pgrx::{Spi, pg_sys, pg_test};
 

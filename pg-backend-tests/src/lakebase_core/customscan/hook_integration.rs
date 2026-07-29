@@ -9,16 +9,17 @@
 use std::ffi::CStr;
 use std::sync::OnceLock;
 
-use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
-use pg_lakebase_core::customscan::custom_private::CustomScanPrivate;
 use pg_lakebase_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
     CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-    PathVariant, PathVariantKind, PlanTranslateContext, ReScanContext,
-    RelPathContext, register_provider,
+    PathContext, PathVariant, PathVariantKind, PlanTranslateContext, ReScanContext,
+    RelationContext, register_provider,
+};
+use pg_lakebase_core::customscan::provider::{
+    CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
 };
 use pg_lakebase_core::expr::predicate::{PlanPredicate, PlanScalar};
-use pg_lakebase_core::expr::split::{
+use pg_lakebase_core::expr::{
     PushdownContract, PushdownCosting, QualPushdownDecision,
 };
 use pgrx::pg_sys;
@@ -58,7 +59,7 @@ impl LakebaseCustomScanProvider for HookIntegrationProvider {
     type PrivateData = HookIntegrationPrivate;
     type State = HookIntegrationState;
 
-    fn supports_relation(ctx: &RelPathContext) -> bool {
+    fn supports_relation(ctx: &RelationContext<'_>) -> bool {
         relation_name(ctx.rel_oid()).is_some_and(|name| {
             name.starts_with(PLAIN_REL_PREFIX) || name.starts_with(JOIN_REL_PREFIX)
         })
@@ -79,7 +80,7 @@ impl LakebaseCustomScanProvider for HookIntegrationProvider {
     }
 
     fn create_path(
-        ctx: &RelPathContext,
+        ctx: &PathContext<'_>,
         variant: &PathVariant<'_>,
         builder: CustomPathBuilder<Self>,
     ) -> Option<CustomPathPlan<Self>> {

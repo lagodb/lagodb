@@ -8,7 +8,7 @@ mod tests {
     use crate::lakebase_core::support::pg::{
         OpExprSpec, PgNodeBuilder, PlannerRelFixture,
     };
-    use pg_lakebase_core::customscan::hook::{
+    use pg_lakebase_core::customscan::candidate::{
         CustomScanCandidate, CustomScanRejection,
     };
     use pgrx::pg_sys;
@@ -254,11 +254,10 @@ mod tests {
         }
     }
 
-    use pg_lakebase_core::customscan::hook::join_parameterized_variant_pushes_nothing;
     use pg_lakebase_core::expr::predicate::PlanPredicate;
-    use pg_lakebase_core::expr::split::{
-        PlanPushdownSplitter, PushdownContract, PushdownCosting,
-        QualPushdownDecision, ScanClauseSource,
+    use pg_lakebase_core::expr::split::{PlanPushdownSplitter, ScanClauseSource};
+    use pg_lakebase_core::expr::{
+        PushdownContract, PushdownCosting, QualPushdownDecision,
     };
 
     const INT4GE_OPNO: u32 = 525;
@@ -327,7 +326,7 @@ mod tests {
                  — this is isBugCondition(group)",
             );
 
-            let decision = if join_parameterized_variant_pushes_nothing(&ppi_split) {
+            let decision = if !ppi_split.has_pushed_predicates() {
                 JpEmitDecision::Skip
             } else {
                 JpEmitDecision::Emit
@@ -391,7 +390,7 @@ mod tests {
             let ppi_split = ppi_splitter.split();
 
             assert!(
-                join_parameterized_variant_pushes_nothing(&ppi_split),
+                !ppi_split.has_pushed_predicates(),
                 "the JoinParameterized group must be skipped (empty ppi_split.pushed) \
                  for this 'no coverage lost' scenario to apply",
             );
@@ -452,8 +451,7 @@ mod tests {
                  (non-empty ppi_split.pushed) — this is NOT isBugCondition(group)",
             );
 
-            let pushes_nothing =
-                join_parameterized_variant_pushes_nothing(&ppi_split);
+            let pushes_nothing = !ppi_split.has_pushed_predicates();
             assert!(
                 !pushes_nothing,
                 "join_parameterized_variant_pushes_nothing must return FALSE for a \

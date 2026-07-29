@@ -4,8 +4,10 @@
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
-    use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
     use pg_lakebase_core::customscan::provider::CustomScanError;
+    use pg_lakebase_core::customscan::provider::{
+        PrivateDataReader, PrivateDataWriter,
+    };
 
     fn assert_private_codec_message(err: CustomScanError, needles: &[&str]) {
         use pg_lakebase_core::diag::SqlStateError;

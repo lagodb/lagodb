@@ -3,7 +3,7 @@
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::customscan::paths::PredicatePlanner;
+use crate::customscan::planning::paths::PredicatePlanner;
 use crate::customscan::provider::ErasedProvider;
 use crate::expr::split::{PlanPushdownSplit, PlannerClauseGate, ScanClauseSource};
 
@@ -36,39 +36,9 @@ impl ParameterizedPathResolver {
         self,
         outer_relids: *mut pg_sys::Bitmapset,
     ) -> PlanPushdownSplit {
-        debug_assert!(
-            !self.root.is_null(),
-            "resolve_and_split_ppi_clauses: root must be non-null"
-        );
-        debug_assert!(
-            !self.rel.is_null(),
-            "resolve_and_split_ppi_clauses: rel must be non-null"
-        );
-        debug_assert!(
-            !outer_relids.is_null(),
-            "resolve_and_split_ppi_clauses: outer_relids must be non-empty \
-             (PG17 represents an empty Bitmapset as NULL)"
-        );
-
-        let lateral_relids = unsafe { (*self.rel).lateral_relids };
-        let rel_relids = unsafe { (*self.rel).relids };
-        debug_assert!(
-            unsafe { pg_sys::bms_is_subset(lateral_relids, outer_relids) },
-            "resolve_and_split_ppi_clauses: outer_relids must be a superset of lateral_relids"
-        );
-        debug_assert!(
-            !unsafe { pg_sys::bms_overlap(rel_relids, outer_relids) },
-            "resolve_and_split_ppi_clauses: outer_relids must not overlap rel->relids"
-        );
-
         let param_info = unsafe {
             pg_sys::get_baserel_parampathinfo(self.root, self.rel, outer_relids)
         };
-        debug_assert!(
-            !param_info.is_null(),
-            "get_baserel_parampathinfo returned NULL for non-empty outer_relids \
-             (PG17 contract — see relnode.c)"
-        );
 
         let ppi_clauses = unsafe { (*param_info).ppi_clauses };
         unsafe {
@@ -113,18 +83,6 @@ impl ParameterizedPathPlanner {
         self,
         joininfo: *mut pg_sys::List,
     ) -> Vec<ParameterizedPathGroup> {
-        debug_assert!(
-            !self.rel.is_null(),
-            "parameterized-path rel must be non-null"
-        );
-        debug_assert!(
-            !self.root.is_null(),
-            "parameterized-path root must be non-null"
-        );
-
-        let lateral_relids = unsafe { (*self.rel).lateral_relids };
-        let rel_relids = unsafe { (*self.rel).relids };
-
         let mut candidates = unsafe { ParameterizationCandidates::new(self.rel) };
         unsafe {
             candidates.collect_joininfo(joininfo);
@@ -138,19 +96,6 @@ impl ParameterizedPathPlanner {
             ParameterizedPathResolver::new(self.root, self.rel, self.provider);
 
         for required_outer in candidates {
-            debug_assert!(
-                unsafe { pg_sys::bms_is_subset(lateral_relids, required_outer) },
-                "required_outer must be a superset of lateral_relids"
-            );
-            debug_assert!(
-                !unsafe { pg_sys::bms_overlap(rel_relids, required_outer) },
-                "required_outer must not overlap rel->relids"
-            );
-            debug_assert!(
-                !required_outer.is_null(),
-                "JoinParameterized required_outer must be non-empty (PG17 represents empty Bitmapsets as NULL)"
-            );
-
             let ppi_split = unsafe { resolver.resolve_and_split(required_outer) };
             groups.push(ParameterizedPathGroup {
                 outer_relids: required_outer,
@@ -220,10 +165,6 @@ impl ParameterizationCandidates {
     }
 
     unsafe fn consider_clause(&mut self, rinfo: *mut pg_sys::RestrictInfo) {
-        if rinfo.is_null() {
-            return;
-        }
-
         if unsafe { (*rinfo).pseudoconstant } {
             return;
         }
@@ -273,9 +214,6 @@ unsafe extern "C-unwind" fn ec_member_is_scan_var(
     em: *mut pg_sys::EquivalenceMember,
     _arg: *mut core::ffi::c_void,
 ) -> bool {
-    if em.is_null() || rel.is_null() {
-        return false;
-    }
     let rel_relids = unsafe { (*rel).relids };
 
     // Strip RelabelType; require bare scan Var on this rel.

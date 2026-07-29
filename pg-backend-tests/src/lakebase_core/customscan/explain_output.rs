@@ -16,21 +16,21 @@ mod tests {
     use std::ffi::CString;
     use std::ptr;
 
+    use crate::lakebase_core::customscan::support::TestScanState;
     use crate::lakebase_core::support::pg::{OpExprSpec, PgNodeBuilder};
-    use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
-    use pg_lakebase_core::customscan::custom_private::{
-        CustomScanPrivate, encode_split,
-    };
+    use pg_lakebase_core::customscan::custom_private::encode_split;
     use pg_lakebase_core::customscan::explain::explain_custom_scan_trampoline;
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
+        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
+        RelationContext,
     };
-    use pg_lakebase_core::customscan::state::CustomScanStateWrapper;
-    use pg_lakebase_core::expr::split::{
-        ColumnRef, PushdownContract, QualPushdownDecision,
+    use pg_lakebase_core::customscan::provider::{
+        CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
+    use pg_lakebase_core::expr::ColumnRef;
+    use pg_lakebase_core::expr::{PushdownContract, QualPushdownDecision};
     use pgrx::pg_sys;
     use pgrx::pg_test;
     use proptest::prelude::*;
@@ -68,7 +68,7 @@ mod tests {
         type PrivateData = ExplainPrivate;
         type State = ExplainState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -80,7 +80,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -208,16 +208,11 @@ mod tests {
     /// Wrapper with only `base.ss.ps.plan` set; enough for the explain trampoline.
     unsafe fn make_wrapper(
         cscan: *mut pg_sys::CustomScan,
-    ) -> *mut CustomScanStateWrapper<ExplainProvider> {
+    ) -> TestScanState<ExplainProvider> {
         unsafe {
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<ExplainProvider>,
-            >())
-                as *mut CustomScanStateWrapper<ExplainProvider>;
-            assert!(!wrapper_ptr.is_null());
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
-            (*wrapper_ptr).base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
-            wrapper_ptr
+            let mut wrapper = TestScanState::<ExplainProvider>::new();
+            wrapper.base_mut().ss.ps.plan = cscan.cast::<pg_sys::Plan>();
+            wrapper
         }
     }
 
@@ -247,7 +242,7 @@ mod tests {
 
     /// Wrap JSON output like `ExplainPrintPlan` so the labeled group parses.
     unsafe fn drive_trampoline_json_document(
-        wrapper: *mut CustomScanStateWrapper<ExplainProvider>,
+        wrapper: &TestScanState<ExplainProvider>,
         es: *mut pg_sys::ExplainState,
     ) -> String {
         unsafe {
@@ -256,7 +251,7 @@ mod tests {
             pg_sys::ExplainOpenGroup(c"Plan".as_ptr(), ptr::null(), true, es);
 
             explain_custom_scan_trampoline::<ExplainProvider>(
-                wrapper.cast::<pg_sys::CustomScanState>(),
+                wrapper.node_ptr(),
                 ptr::null_mut(),
                 es,
             );
@@ -367,7 +362,7 @@ mod tests {
     /// as the deparse oracle for assertions.
     struct BuiltScenario {
         cscan: *mut pg_sys::CustomScan,
-        wrapper: *mut CustomScanStateWrapper<ExplainProvider>,
+        wrapper: TestScanState<ExplainProvider>,
         /// `custom_exprs` pushed segment, in plan order.
         pushed: Vec<*mut pg_sys::Expr>,
         /// Pushed subsequence with `ExactRowFilter` contract, in plan order.
@@ -494,7 +489,7 @@ mod tests {
                     self.alias(),
                 );
                 explain_custom_scan_trampoline::<ExplainProvider>(
-                    built.wrapper.cast::<pg_sys::CustomScanState>(),
+                    built.wrapper.node_ptr(),
                     ptr::null_mut(),
                     es,
                 );
@@ -512,7 +507,7 @@ mod tests {
                     self.relation_oid,
                     self.alias(),
                 );
-                drive_trampoline_json_document(built.wrapper, es)
+                drive_trampoline_json_document(&built.wrapper, es)
             }
         }
 
@@ -736,7 +731,7 @@ mod tests {
 
             let es = new_explain_state(/* verbose */ false);
             explain_custom_scan_trampoline::<ExplainProvider>(
-                wrapper.cast::<pg_sys::CustomScanState>(),
+                wrapper.node_ptr(),
                 ptr::null_mut(),
                 es,
             );

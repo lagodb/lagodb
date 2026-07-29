@@ -5,15 +5,14 @@ use std::sync::OnceLock;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::customscan::ScanPurpose;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::gucs;
-use crate::customscan::paths::CustomScanPathPlanner;
+use crate::customscan::planning::paths::CustomScanPathPlanner;
 use crate::customscan::provider::find_matching_provider;
+use crate::customscan::{ScanPurpose, has_modify_provider_for};
 use crate::diag::ReportableError;
 
-pub use crate::customscan::candidate::{CustomScanCandidate, CustomScanRejection};
-pub use crate::customscan::paths::join_parameterized_variant_pushes_nothing;
+use crate::customscan::planning::candidate::CustomScanCandidate;
 
 /// Previous hook captured at install; `None` if none was installed.
 static PREV_SET_REL_PATHLIST_HOOK: OnceLock<pg_sys::set_rel_pathlist_hook_type> =
@@ -53,7 +52,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist_callback(
     if candidate.purpose() == ScanPurpose::Query && !gucs::enabled() {
         return;
     }
-    let ctx = unsafe { candidate.provider_context() };
+    let ctx = unsafe { candidate.relation_context() };
 
     let provider = match find_matching_provider(&ctx).report_unwrap() {
         Some(p) => p,
@@ -61,7 +60,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist_callback(
     };
 
     if candidate.purpose() == ScanPurpose::Modify {
-        if !crate::customscan::has_modify_provider_for(&ctx) {
+        if !has_modify_provider_for(&ctx) {
             // A scan provider without a registered ModifyTable provider must
             // never emit a Modify-purpose scan that cannot be bound.
             return;
@@ -93,9 +92,8 @@ unsafe extern "C-unwind" fn set_rel_pathlist_callback(
 }
 
 /// Assert [`set_rel_pathlist_callback`] matches `set_rel_pathlist_hook_type`.
-#[cfg(feature = "pg_test")]
 #[doc(hidden)]
-pub fn pg_test_assert_set_rel_pathlist_callback_signature() {
+pub fn assert_set_rel_pathlist_callback_signature() {
     let _slot: pg_sys::set_rel_pathlist_hook_type = Some(set_rel_pathlist_callback);
 }
 

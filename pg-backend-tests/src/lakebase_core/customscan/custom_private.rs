@@ -13,9 +13,8 @@ mod tests {
     };
     use pg_lakebase_core::customscan::provider::NeededColumns;
     use pg_lakebase_core::diag::ReportableError;
-    use pg_lakebase_core::expr::nodes::PgParamValue;
-    use pg_lakebase_core::expr::split::{ColumnRef, PushdownContract};
-    use pg_lakebase_core::expr::translator::PredicateBuilder;
+    use pg_lakebase_core::expr::PushdownContract;
+    use pg_lakebase_core::expr::{ColumnRef, PredicateBuilder, ResolvedParam};
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
@@ -440,7 +439,7 @@ mod tests {
 
         fn column(
             &mut self,
-            col: pg_lakebase_core::expr::nodes::PgColumnRef<'_>,
+            col: pg_lakebase_core::expr::translator::PgColumnRef<'_>,
         ) -> Result<String, CountingTranslatorError> {
             if let Some(name) = col.name {
                 return Ok(name.to_string());
@@ -467,14 +466,14 @@ mod tests {
 
         fn literal(
             &mut self,
-            _lit: pg_lakebase_core::expr::nodes::PgLiteral<'_>,
+            _lit: pg_lakebase_core::expr::translator::PgLiteral<'_>,
         ) -> Result<String, CountingTranslatorError> {
             Ok("lit".to_string())
         }
 
         fn param_value(
             &mut self,
-            _param: pg_lakebase_core::expr::nodes::PgParamValue,
+            _param: pg_lakebase_core::expr::translator::PgParamValue<'_>,
         ) -> Result<String, CountingTranslatorError> {
             Ok("param".to_string())
         }
@@ -560,7 +559,7 @@ mod tests {
                 CountExprFixture::int4_eq(/* attno (b) */ 2, 2),
             ];
 
-            let resolved_params: Vec<PgParamValue> = Vec::new();
+            let resolved_params: Vec<ResolvedParam> = Vec::new();
 
             let carried_refs = vec![
                 ColumnRef {
