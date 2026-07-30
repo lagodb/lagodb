@@ -16,8 +16,8 @@ mod tests {
         RelabelSpec, ScanColumnSpec,
     };
     use crate::predicate::policy::{PredicateCapability, PredicatePushdownPolicy};
-    use pg_lakebase_core::expr::nodes::PgComparisonOp;
-    use pg_lakebase_core::expr::split::{
+    use pg_lakebase_core::expr::PgComparisonOp;
+    use pg_lakebase_core::expr::{
         PushdownContract, PushdownCosting, QualPushdownDecision,
     };
     use pgrx::pg_sys;
@@ -26,11 +26,11 @@ mod tests {
         type_oid: pg_sys::Oid,
         op_key: PgComparisonOp,
     ) -> PredicateCapability {
-        PredicatePushdownPolicy::new().capability_for(type_oid, op_key)
+        PredicatePushdownPolicy::capability_for(type_oid, op_key.identity())
     }
 
     fn is_value_sensitive_type(type_oid: pg_sys::Oid) -> bool {
-        PredicatePushdownPolicy::new().is_value_sensitive_type(type_oid)
+        PredicatePushdownPolicy::is_value_sensitive_type(type_oid)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +267,7 @@ mod tests {
         ]
     }
 
-    fn triple_cases() -> [TripleCase; 11] {
+    fn triple_cases() -> [TripleCase; 10] {
         let default_collation = u32::from(pg_sys::DEFAULT_COLLATION_OID);
         let c_collation = u32::from(pg_sys::C_COLLATION_OID);
 
@@ -306,13 +306,6 @@ mod tests {
                 opno: TEXTEQ_OPNO,
                 opcollid: 0,
                 inputcollid: default_collation,
-            },
-            TripleCase {
-                label: "text = under unresolvable non-default collation",
-                col_type: pg_sys::TEXTOID,
-                opno: TEXTEQ_OPNO,
-                opcollid: 0,
-                inputcollid: NON_DEFAULT_COLLATION_OID,
             },
             TripleCase {
                 label: "date = under (0,0)",

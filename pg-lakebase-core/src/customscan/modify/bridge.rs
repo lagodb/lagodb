@@ -1,17 +1,18 @@
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
-use std::ptr::NonNull;
 
 use crate::api::{
-    MutationDeleteContext, MutationOutcome, MutationUpdateContext,
+    AmResult, MutationDeleteContext, MutationOutcome, MutationUpdateContext,
     MutationWriteContext,
 };
-use crate::customscan::provider::LakebaseCustomModifyProvider;
-use crate::diag::ReportableError;
+use crate::customscan::modify::LakebaseCustomModifyProvider;
+use crate::diag::{PgReportError, ReportableError};
 use crate::handles::{ItemPointer, SnapshotHandle};
+use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
 use super::execution::{ModifyNodeState, ResultRelationState};
+use super::planning::WHOLEROW_NAME;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -95,14 +96,49 @@ pub(super) struct ModifyNodeCell<P: LakebaseCustomModifyProvider> {
 }
 
 impl<P: LakebaseCustomModifyProvider> ModifyNodeCell<P> {
-    pub fn new(
+    /// Build the cell and derive the whole-row junk attribute from the live
+    /// child plan used by UPDATE/DELETE/MERGE.
+    ///
+    /// # Safety
+    ///
+    /// For `Some(input_plan)`, the pointer must be the initialized child Plan
+    /// owned by the wrapped ModifyTable state. `None` is used for INSERT,
+    /// which does not consume a whole-row junk attribute.
+    pub(super) unsafe fn new(
         execution: ModifyNodeState<P>,
-        wholerow_attno: pg_sys::AttrNumber,
-    ) -> Self {
-        Self {
+        operation: pg_sys::CmdType::Type,
+        input_plan: Option<*mut pg_sys::Plan>,
+    ) -> AmResult<Self> {
+        let wholerow_attno = if matches!(
+            operation,
+            pg_sys::CmdType::CMD_UPDATE
+                | pg_sys::CmdType::CMD_DELETE
+                | pg_sys::CmdType::CMD_MERGE
+        ) {
+            let plan = input_plan.ok_or_else(|| {
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "ModifyTable input plan is missing",
+                )
+            })?;
+            let tlist = unsafe { (*plan).targetlist };
+            let wholerow = unsafe {
+                pg_sys::ExecFindJunkAttributeInTlist(tlist, WHOLEROW_NAME.as_ptr())
+            };
+            if operation == pg_sys::CmdType::CMD_UPDATE && wholerow <= 0 {
+                return Err(PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "Lakebase UPDATE input is missing PostgreSQL wholerow",
+                ));
+            }
+            wholerow.max(0)
+        } else {
+            0
+        };
+        Ok(Self {
             inner: UnsafeCell::new(execution),
             wholerow_attno,
-        }
+        })
     }
 
     /// # Safety
@@ -131,23 +167,24 @@ impl<P: LakebaseCustomModifyProvider> ModifyNodeCell<P> {
     }
 }
 
+/// PostgreSQL's modify-table C bridge supplies a live slot and row identity
+/// for trigger-row preservation; the outer callback reports the Rust result.
 #[pg_guard]
 unsafe extern "C-unwind" fn preserve_trigger_row<P: LakebaseCustomModifyProvider>(
     relation: *mut c_void,
     slot: *mut pg_sys::TupleTableSlot,
     row_id: *mut pg_sys::ItemPointerData,
 ) {
-    if slot.is_null() || row_id.is_null() {
-        pgrx::error!("Lakebase trigger-row preservation received NULL output");
-    }
-    let relation = NonNull::new(relation)
-        .expect("resolved Lakebase relation state is non-NULL")
-        .cast::<ResultRelationState<P>>();
-    let preserved = unsafe { (&mut *relation.as_ptr()).preserve_trigger_row(slot) }
-        .report_unwrap();
+    let relation = relation.cast::<ResultRelationState<P>>();
+    let preserved =
+        unsafe { (&mut *relation).preserve_trigger_row(slot) }.report_unwrap();
     unsafe { preserved.write_to_raw(row_id) };
 }
 
+/// PostgreSQL passes live trigger metadata and output storage from the active
+/// ModifyTable callback. The slot for each provider-owned side is non-NULL;
+/// the OLD slot is intentionally NULL when the source side remains native.
+/// The outer callback reports the Rust result.
 #[pg_guard]
 unsafe extern "C-unwind" fn prepare_update_trigger_rows<
     P: LakebaseCustomModifyProvider,
@@ -159,12 +196,7 @@ unsafe extern "C-unwind" fn prepare_update_trigger_rows<
     new_slot: *mut pg_sys::TupleTableSlot,
     prepared: *mut LakebasePreparedUpdateTriggerRows,
 ) {
-    if source_info.is_null() || destination_info.is_null() || prepared.is_null() {
-        pgrx::error!("Lakebase UPDATE trigger preparation received NULL metadata");
-    }
     let cell = unsafe { cell::<P>(state) };
-    // SAFETY: executor callbacks are serialized. Slots and ResultRelInfos are
-    // live for this call, and the returned identities are copied to C storage.
     let rows = unsafe {
         cell.with_mut(|execution| {
             execution.prepare_update_trigger_rows(
@@ -213,6 +245,8 @@ unsafe extern "C-unwind" fn wholerow_attno<P: LakebaseCustomModifyProvider>(
     cell.wholerow_attno
 }
 
+/// PostgreSQL supplies a live relation state and insert slot for this
+/// ModifyTable callback; the outer callback reports the Rust result.
 #[pg_guard]
 unsafe extern "C-unwind" fn insert<P: LakebaseCustomModifyProvider>(
     relation: *mut c_void,
@@ -220,14 +254,9 @@ unsafe extern "C-unwind" fn insert<P: LakebaseCustomModifyProvider>(
     cid: pg_sys::CommandId,
     options: i32,
 ) {
-    let relation = NonNull::new(relation)
-        .expect("resolved Lakebase relation state is non-NULL")
-        .cast::<ResultRelationState<P>>();
-    // SAFETY: the execution owns this boxed relation state and PostgreSQL
-    // serializes callbacks for one ModifyTable node.
+    let relation = relation.cast::<ResultRelationState<P>>();
     unsafe {
-        (&mut *relation.as_ptr())
-            .insert(new_slot, MutationWriteContext { cid, options })
+        (&mut *relation).insert(new_slot, MutationWriteContext { cid, options })
     }
     .report_unwrap();
 }
@@ -251,6 +280,8 @@ fn map_outcome(outcome: MutationOutcome) -> LakebaseMutationResult {
     }
 }
 
+/// PostgreSQL's heap mutation callback guarantees a live row identity and
+/// slots; an optional cross-check snapshot remains nullable by API contract.
 #[pg_guard]
 #[allow(clippy::too_many_arguments)] // C ABI mirrors PostgreSQL's callback context.
 unsafe extern "C-unwind" fn update<P: LakebaseCustomModifyProvider>(
@@ -263,12 +294,7 @@ unsafe extern "C-unwind" fn update<P: LakebaseCustomModifyProvider>(
     crosscheck: pg_sys::Snapshot,
     wait: bool,
 ) -> LakebaseMutationResult {
-    if tuple_id.is_null() {
-        pgrx::error!("Lakebase UPDATE received a NULL row identity");
-    }
-    // SAFETY: C supplies a callback-scoped ItemPointerData and Rust copies it.
     let tuple_id = unsafe { ItemPointer::from_raw(tuple_id.cast_mut()) };
-    // SAFETY: PG supplies live snapshots for the duration of this callback.
     let snapshot_handle = unsafe { SnapshotHandle::from_raw(snapshot) };
     let crosscheck_handle = (!crosscheck.is_null())
         .then(|| unsafe { SnapshotHandle::from_raw(crosscheck) });
@@ -278,16 +304,15 @@ unsafe extern "C-unwind" fn update<P: LakebaseCustomModifyProvider>(
         crosscheck: crosscheck_handle.as_ref(),
         wait,
     };
-    let relation = NonNull::new(relation)
-        .expect("resolved Lakebase relation state is non-NULL")
-        .cast::<ResultRelationState<P>>();
-    let outcome = unsafe {
-        (&mut *relation.as_ptr()).update(tuple_id, old_slot, new_slot, context)
-    }
-    .report_unwrap();
+    let relation = relation.cast::<ResultRelationState<P>>();
+    let outcome =
+        unsafe { (&mut *relation).update(tuple_id, old_slot, new_slot, context) }
+            .report_unwrap();
     map_outcome(outcome)
 }
 
+/// PostgreSQL's heap mutation callback guarantees a live row identity; an
+/// optional cross-check snapshot remains nullable by API contract.
 #[pg_guard]
 #[allow(clippy::too_many_arguments)] // C ABI mirrors PostgreSQL's callback context.
 unsafe extern "C-unwind" fn delete_<P: LakebaseCustomModifyProvider>(
@@ -299,12 +324,7 @@ unsafe extern "C-unwind" fn delete_<P: LakebaseCustomModifyProvider>(
     wait: bool,
     changing_partition: bool,
 ) -> LakebaseMutationResult {
-    if tuple_id.is_null() {
-        pgrx::error!("Lakebase DELETE received a NULL row identity");
-    }
-    // SAFETY: C supplies a callback-scoped ItemPointerData and Rust copies it.
     let tuple_id = unsafe { ItemPointer::from_raw(tuple_id.cast_mut()) };
-    // SAFETY: PG supplies live snapshots for the duration of this callback.
     let snapshot_handle = unsafe { SnapshotHandle::from_raw(snapshot) };
     let crosscheck_handle = (!crosscheck.is_null())
         .then(|| unsafe { SnapshotHandle::from_raw(crosscheck) });
@@ -315,11 +335,8 @@ unsafe extern "C-unwind" fn delete_<P: LakebaseCustomModifyProvider>(
         wait,
         changing_partition,
     };
-    let relation = NonNull::new(relation)
-        .expect("resolved Lakebase relation state is non-NULL")
-        .cast::<ResultRelationState<P>>();
-    let outcome = unsafe { &mut *relation.as_ptr() }
-        .delete(tuple_id, context)
-        .report_unwrap();
+    let relation = relation.cast::<ResultRelationState<P>>();
+    let outcome =
+        unsafe { (&mut *relation).delete(tuple_id, context) }.report_unwrap();
     map_outcome(outcome)
 }

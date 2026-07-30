@@ -285,7 +285,7 @@ DROP TABLE customscan_dml_other;
 -- A non-leakproof IMMUTABLE function and a custom comparison operator
 -- backed by it. We need:
 --   - IMMUTABLE so the framework's volatile/SubPlan gate
---     (`expr::walker::subtree_is_unsafe_to_push`
+--     (`expr::inspect::subtree_is_unsafe_to_push`)
 --     does NOT pre-empt the security gate. If the volatile gate
 --     fired the clause would land in residual for a different
 --     reason (volatility, not security), and Scenario 1 would lose

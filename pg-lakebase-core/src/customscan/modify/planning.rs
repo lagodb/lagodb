@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
-use crate::customscan::provider::{LakebaseCustomModifyProvider, RelPathContext};
+use crate::customscan::modify::LakebaseCustomModifyProvider;
+use crate::customscan::provider::RelationContext;
 use crate::diag::{PgReportError, ReportableError};
 
 use super::{methods, registry};
@@ -53,9 +54,6 @@ unsafe fn rte_for(
     root: *mut pg_sys::PlannerInfo,
     rti: pg_sys::Index,
 ) -> *mut pg_sys::RangeTblEntry {
-    if root.is_null() || rti == 0 {
-        return ptr::null_mut();
-    }
     let parse = unsafe { (*root).parse };
     unsafe { list_ptr((*parse).rtable, (rti - 1) as i32).cast() }
 }
@@ -71,10 +69,10 @@ unsafe fn provider_for_rti(
 unsafe fn provider_for_rte(
     rte: *mut pg_sys::RangeTblEntry,
 ) -> Option<&'static dyn registry::ErasedModifyProvider> {
-    if rte.is_null() || unsafe { (*rte).rtekind } != pg_sys::RTEKind::RTE_RELATION {
+    if unsafe { (*rte).rtekind } != pg_sys::RTEKind::RTE_RELATION {
         return None;
     }
-    let context = unsafe { RelPathContext::new(rte) };
+    let context = RelationContext::from_ref(unsafe { &*rte });
     registry::matching(&context)
 }
 
@@ -112,20 +110,15 @@ impl WholeRowPlanner {
     ///
     /// `parse` and its range table must be live rewrite-complete planner input.
     unsafe fn inspect(parse: *mut pg_sys::Query) -> Option<Self> {
-        if parse.is_null()
-            || !matches!(
-                unsafe { (*parse).commandType },
-                pg_sys::CmdType::CMD_UPDATE
-                    | pg_sys::CmdType::CMD_DELETE
-                    | pg_sys::CmdType::CMD_MERGE
-            )
-        {
+        if !matches!(
+            unsafe { (*parse).commandType },
+            pg_sys::CmdType::CMD_UPDATE
+                | pg_sys::CmdType::CMD_DELETE
+                | pg_sys::CmdType::CMD_MERGE
+        ) {
             return None;
         }
         let target_rti = unsafe { (*parse).resultRelation as pg_sys::Index };
-        if target_rti == 0 {
-            return None;
-        }
         let rte = unsafe {
             list_ptr((*parse).rtable, target_rti as i32 - 1)
                 .cast::<pg_sys::RangeTblEntry>()
@@ -146,9 +139,6 @@ impl WholeRowPlanner {
         for index in 0..len {
             let tle =
                 unsafe { list_ptr(targetlist, index).cast::<pg_sys::TargetEntry>() };
-            if tle.is_null() {
-                continue;
-            }
             if unsafe { Self::is_standard_wholerow_tle(tle, self.target_rti) } {
                 return true;
             }
@@ -172,7 +162,6 @@ impl WholeRowPlanner {
         // safe, but would then require a later lock upgrade to RowExclusiveLock
         // for DELETE and can introduce an avoidable upgrade deadlock.
         let lockmode = unsafe { (*self.rte).rellockmode };
-        debug_assert_ne!(lockmode, pg_sys::NoLock as i32);
         let relations = unsafe {
             find_all_inheritors((*self.rte).relid, lockmode, ptr::null_mut())
         };
@@ -328,26 +317,20 @@ unsafe extern "C-unwind" fn find_target_system_column(
 }
 
 unsafe fn reject_explicit_target_system_columns(parse: *mut pg_sys::Query) {
-    if parse.is_null()
-        || !matches!(
-            unsafe { (*parse).commandType },
-            pg_sys::CmdType::CMD_UPDATE
-                | pg_sys::CmdType::CMD_DELETE
-                | pg_sys::CmdType::CMD_MERGE
-        )
-    {
+    if !matches!(
+        unsafe { (*parse).commandType },
+        pg_sys::CmdType::CMD_UPDATE
+            | pg_sys::CmdType::CMD_DELETE
+            | pg_sys::CmdType::CMD_MERGE
+    ) {
         return;
     }
     let target_rti = unsafe { (*parse).resultRelation as pg_sys::Index };
-    if target_rti == 0 {
-        return;
-    }
     let rte = unsafe {
         list_ptr((*parse).rtable, target_rti as i32 - 1)
             .cast::<pg_sys::RangeTblEntry>()
     };
-    if rte.is_null()
-        || unsafe { (*rte).rtekind } != pg_sys::RTEKind::RTE_RELATION
+    if unsafe { (*rte).rtekind } != pg_sys::RTEKind::RTE_RELATION
         || unsafe { provider_for_rte(rte) }.is_none()
     {
         return;
@@ -427,7 +410,7 @@ unsafe fn replace_rowid_vars(
         let cell = unsafe { pg_sys::list_nth_cell(copied, index) };
         let tle = unsafe { (*cell).ptr_value.cast::<pg_sys::TargetEntry>() };
         let expr = unsafe { (*tle).expr };
-        if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
+        if unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
             continue;
         }
         let var = expr.cast::<pg_sys::Var>();
@@ -540,9 +523,7 @@ unsafe extern "C-unwind" fn create_upper_paths(
     for index in 0..len {
         let cell = unsafe { pg_sys::list_nth_cell(paths, index) };
         let path = unsafe { (*cell).ptr_value.cast::<pg_sys::Path>() };
-        if path.is_null()
-            || unsafe { (*path).type_ } != pg_sys::NodeTag::T_ModifyTablePath
-        {
+        if unsafe { (*path).type_ } != pg_sys::NodeTag::T_ModifyTablePath {
             continue;
         }
         let mt = path.cast::<pg_sys::ModifyTablePath>();

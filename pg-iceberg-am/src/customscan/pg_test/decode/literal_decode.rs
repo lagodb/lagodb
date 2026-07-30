@@ -4,7 +4,8 @@
 mod tests {
     use core::ffi::c_int;
 
-    use pg_lakebase_core::expr::nodes::{PgConst, PgExprRef, PgLiteral};
+    use pg_lakebase_core::expr::pg::{PgConst, PgExprRef};
+    use pg_lakebase_core::expr::translator::PgLiteral;
     use pg_lakebase_core::expr::translator::PgPredicateTranslator;
     use pgrx::pg_sys;
 
@@ -53,7 +54,7 @@ mod tests {
                 .expect("makeConst produced a T_Const node");
             let lit = PgLiteral::from_const(pg_const);
             assert!(
-                lit.is_null,
+                lit.is_null(),
                 "fixture Const must be NULL (constisnull = true)"
             );
 

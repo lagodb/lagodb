@@ -13,8 +13,9 @@
 //!   [`TableAccessMethod`] so the registry only needs a single `A: TableAccessMethod`
 //!   bound.
 //! - **Session traits** ([`AmScanSession`], [`AmIndexFetchSession`],
-//!   [`AmModifyQueryState`], [`AmModifyState`]) describe `&mut self` lifecycles
-//!   tied to a scan, an index fetch, a Modify query, or one result relation.
+//!   [`AmModifyQueryState`], [`AmModifyState`], [`AmCopySession`]) describe
+//!   stateful callbacks and lifecycles tied to a scan, an index fetch, a Modify
+//!   query, one result relation, or a COPY frame.
 //!   They surface as associated
 //!   types on [`TableAccessMethod`] so the framework can construct, store,
 //!   and drop one instance per active operation.
@@ -343,12 +344,13 @@ pub trait AmScanSession {
     ///
     /// The framework drives every TableAM scan through the one uniform
     /// [`ScanBatchDriver::next_into_slot`] path: the C shim calls this once per
-    /// `scan_getnextslot` and asks the returned driver to fill the slot with
-    /// the next tuple. row-vs-column is an implementation detail *inside* the
-    /// driver (a columnar AM decodes an Arrow batch straight into the slot),
-    /// not a branch in the framework. There is no separate row callback: a
-    /// TableAM is columnar by contract, and a row-at-a-time source (FDW) is a
-    /// different framework, not an `AmScanSession`.
+    /// `scan_getnextslot`, passes PostgreSQL's requested scan direction, and
+    /// asks the returned driver to fill the slot with the next tuple.
+    /// row-vs-column and direction support are implementation details *inside*
+    /// the driver (a forward-only AM must report unsupported directions).
+    /// There is no separate row callback: a TableAM is columnar by contract,
+    /// and a row-at-a-time source (FDW) is a different framework, not an
+    /// `AmScanSession`.
     ///
     /// The driver must be ready by the time the executor fetches a row, i.e.
     /// after [`Self::scan_begin`]; sessions typically build it there.
@@ -923,28 +925,25 @@ pub trait AmModifyState {
     /// Storage-specific metadata captured by the Modify-purpose target scan.
     type ScanContext: Clone + PartialEq + 'static;
 
-    /// Construct the write session for one result relation.
+    /// Begin and construct the complete write session for one result relation.
     ///
     /// `rel` is borrowed only for the duration of construction (symmetric with
-    /// [`AmScanSession::new`]); the AM derives everything it needs from the
-    /// handle (relation OID, file locator, WAL requirement, and any column
-    /// layout) and must capture it into owned fields rather than retaining the
-    /// handle. `context` carries the PostgreSQL command and, for target-reading
-    /// mutation, the provider context captured by the Modify scan.
-    fn new(
+    /// [`AmScanSession::new`]). This is the relation-local execution boundary:
+    /// implementations may load metadata, create writers, and allocate buffers
+    /// here. A successful return must be a fully usable session; a failure
+    /// returns before any provider state is published to the executor.
+    ///
+    /// The AM derives everything it needs from the handle (relation OID, file
+    /// locator, WAL requirement, and any column layout) and must capture it into
+    /// owned fields rather than retaining the handle. `context` carries the
+    /// PostgreSQL command and, for target-reading mutation, the provider context
+    /// captured by the Modify scan.
+    fn begin_modify(
         rel: &RelationHandle,
         context: ModifyStateContext<Self::QueryState, Self::ScanContext>,
     ) -> AmResult<Self>
     where
         Self: Sized;
-
-    /// Opens relation-local resources for the current execution.
-    ///
-    /// Typical implementations load table metadata, create file writers, and
-    /// allocate buffers here. This is execution-scoped, not transaction-scoped: a
-    /// single transaction may create many sessions across multiple statements,
-    /// partitions, nested SPI calls, COPY frames, or MERGE frames.
-    fn begin_modify(&mut self) -> AmResult<()>;
 
     /// Finishes the relation-local write session for a successful execution.
     ///
@@ -1006,11 +1005,14 @@ pub trait AmModifyState {
 /// Relation-local COPY FROM state. COPY bypasses ModifyTable and therefore has
 /// a separate utility-scoped lifecycle and callback surface.
 pub trait AmCopySession {
-    fn new(rel: &RelationHandle) -> AmResult<Self>
+    /// Begin and construct the complete relation-local COPY session.
+    ///
+    /// The relation handle is borrowed only during construction. A successful
+    /// return is a fully usable session; a failed construction is never
+    /// published into the COPY frame.
+    fn begin_copy(rel: &RelationHandle) -> AmResult<Self>
     where
         Self: Sized;
-
-    fn begin_copy(&mut self) -> AmResult<()>;
 
     fn end_copy(&mut self) -> AmResult<()>;
 

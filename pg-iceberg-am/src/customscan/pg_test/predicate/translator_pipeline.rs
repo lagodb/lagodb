@@ -15,7 +15,7 @@ mod tests {
         BinaryExpression, Predicate, PredicateOperator, Reference,
     };
     use iceberg_lite::spec::Datum;
-    use pg_lakebase_core::expr::split::{
+    use pg_lakebase_core::expr::{
         PushdownContract, PushdownCosting, QualPushdownDecision,
     };
     use pgrx::pg_sys;

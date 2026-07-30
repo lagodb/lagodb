@@ -3,17 +3,21 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use crate::access::mutation::acquire_modify_query_state;
-use crate::api::{AmResult, TableAccessMethod};
-use crate::customscan::CustomScanError;
-use crate::customscan::provider::LakebaseCustomModifyProvider;
+use crate::api::TableAccessMethod;
+use crate::customscan::ScanPurpose;
+use crate::customscan::error::CustomScanError;
+use crate::customscan::execution::exec::provider_scan_purpose;
+use crate::customscan::execution::state::CustomScanStateWrapper;
+use crate::customscan::modify::LakebaseCustomModifyProvider;
 use crate::diag::{PgReportError, ReportableError};
 use crate::resource::{ResourceHandle, forget_resource, remember_resource};
 use pgrx::memcxt::PgMemoryContexts;
+use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
 use super::bridge::{LakebaseModifyBridge, ModifyNodeCell};
 use super::execution::ModifyNodeState;
-use super::{methods, planning};
+use super::methods;
 
 unsafe extern "C-unwind" {
     unsafe fn lakebase_exec_modify_table(
@@ -92,31 +96,10 @@ pub(super) unsafe extern "C-unwind" fn create_state<
     ptr.cast()
 }
 
-fn find_wholerow_attno(plan: *mut pg_sys::Plan) -> AmResult<pg_sys::AttrNumber> {
-    if plan.is_null() {
-        return Err(PgReportError::from_message(
-            pgrx::prelude::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            "ModifyTable input plan is NULL",
-        ));
-    }
-    // SAFETY: plan belongs to the initialized inner node.
-    let tlist = unsafe { (*plan).targetlist };
-    let wholerow = unsafe {
-        pg_sys::ExecFindJunkAttributeInTlist(tlist, planning::WHOLEROW_NAME.as_ptr())
-    };
-    Ok(wholerow.max(0))
-}
-
-struct BindContext<'a, P: LakebaseCustomModifyProvider> {
+struct ModifyScanBinder<'a, P: LakebaseCustomModifyProvider> {
     execution: &'a ModifyNodeCell<P>,
-    error: Option<BindError>,
-    bound_scans: usize,
+    bound_scans: Result<usize, CustomScanError>,
     target_rtis: HashSet<pg_sys::Index>,
-}
-
-enum BindError {
-    Execution(PgReportError),
-    Scan(CustomScanError),
 }
 
 unsafe fn scan_state_relation(
@@ -155,54 +138,47 @@ unsafe fn scan_rti(plan_state: *mut pg_sys::PlanState) -> Option<pg_sys::Index> 
         return None;
     }
     let plan = unsafe { (*plan_state).plan };
-    if plan.is_null() {
-        return None;
-    }
     Some(unsafe { (*plan.cast::<pg_sys::Scan>()).scanrelid })
 }
 
 unsafe fn bind_tree<P: LakebaseCustomModifyProvider>(
     plan_state: *mut pg_sys::PlanState,
-    context: &mut BindContext<'_, P>,
+    context: &mut ModifyScanBinder<'_, P>,
 ) {
-    if plan_state.is_null() || context.error.is_some() {
+    if plan_state.is_null() || context.bound_scans.is_err() {
         return;
     }
     if unsafe { (*plan_state).type_ } == pg_sys::NodeTag::T_CustomScanState {
         let custom = plan_state.cast::<pg_sys::CustomScanState>();
-        let purpose = match unsafe {
-            crate::customscan::exec::provider_scan_purpose::<P>((*plan_state).plan)
-        } {
+        let purpose = match unsafe { provider_scan_purpose::<P>((*plan_state).plan) }
+        {
             Ok(purpose) => purpose,
             Err(error) => {
-                context.error = Some(BindError::Scan(error));
+                context.bound_scans = Err(error);
                 return;
             }
         };
-        if purpose == Some(crate::customscan::ScanPurpose::Modify) {
+        if purpose == Some(ScanPurpose::Modify) {
             let relation = unsafe { (*custom).ss.ss_currentRelation };
             if relation.is_null() {
-                context.error =
-                    Some(BindError::Execution(PgReportError::from_message(
-                        pgrx::prelude::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        "Modify CustomScan has no open relation",
-                    )));
+                context.bound_scans = Err(PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "Modify CustomScan has no open relation",
+                )
+                .into());
                 return;
             }
             let oid = unsafe { (*relation).rd_id };
-            let scan_context = unsafe {
-                crate::customscan::state::CustomScanStateWrapper::<P>::from_node_ptr(
-                    custom,
-                )
-            }
-            .active_provider_state_mut()
-            .and_then(|state| P::modify_scan_context(state));
+            let scan_context =
+                unsafe { CustomScanStateWrapper::<P>::from_node_ptr(custom) }
+                    .active_provider_state_mut()
+                    .and_then(|state| P::modify_scan_context(state));
             let Some(scan_context) = scan_context else {
-                context.error =
-                    Some(BindError::Execution(PgReportError::from_message(
-                        pgrx::prelude::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        "Modify CustomScan provider state is not active",
-                    )));
+                context.bound_scans = Err(PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "Modify CustomScan provider state is not active",
+                )
+                .into());
                 return;
             };
             let binding = match unsafe {
@@ -212,35 +188,39 @@ unsafe fn bind_tree<P: LakebaseCustomModifyProvider>(
             } {
                 Ok(binding) => binding,
                 Err(error) => {
-                    context.error = Some(BindError::Execution(error));
+                    context.bound_scans = Err(error.into());
                     return;
                 }
             };
-            if let Err(error) = unsafe {
-                crate::customscan::exec::bind_modify_scan::<P>(custom, binding)
-            } {
-                context.error = Some(BindError::Scan(error));
+            if let Err(error) =
+                unsafe { super::binding::bind_modify_scan::<P>(custom, binding) }
+            {
+                context.bound_scans = Err(error);
                 return;
             }
-            context.bound_scans += 1;
+            if let Ok(bound_scans) = &mut context.bound_scans {
+                *bound_scans += 1;
+            }
         } else if unsafe { scan_rti(plan_state) }
             .is_some_and(|rti| context.target_rtis.contains(&rti))
             && unsafe { is_provider_relation::<P>((*custom).ss.ss_currentRelation) }
         {
-            context.error = Some(BindError::Execution(PgReportError::from_message(
-                pgrx::prelude::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            context.bound_scans = Err(PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                 "required Modify relation was planned with an unbindable CustomScan",
-            )));
+            )
+            .into());
             return;
         }
     } else if unsafe { scan_rti(plan_state) }
         .is_some_and(|rti| context.target_rtis.contains(&rti))
         && unsafe { is_provider_relation::<P>(scan_state_relation(plan_state)) }
     {
-        context.error = Some(BindError::Execution(PgReportError::from_message(
-            pgrx::prelude::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        context.bound_scans = Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             "required Modify relation was planned with a standard scan",
-        )));
+        )
+        .into());
         return;
     }
     unsafe {
@@ -256,9 +236,9 @@ unsafe extern "C-unwind" fn bind_walker<P: LakebaseCustomModifyProvider>(
     plan_state: *mut pg_sys::PlanState,
     raw_context: *mut c_void,
 ) -> bool {
-    let context = unsafe { &mut *raw_context.cast::<BindContext<'_, P>>() };
+    let context = unsafe { &mut *raw_context.cast::<ModifyScanBinder<'_, P>>() };
     unsafe { bind_tree::<P>(plan_state, context) };
-    context.error.is_some()
+    context.bound_scans.is_err()
 }
 
 unsafe fn replace_aux_entry(
@@ -281,9 +261,24 @@ pub(super) unsafe extern "C-unwind" fn begin<P: LakebaseCustomModifyProvider>(
     estate: *mut pg_sys::EState,
     eflags: i32,
 ) {
+    unsafe { begin_impl::<P>(node, estate, eflags) }.report_unwrap();
+}
+
+/// Initialize the wrapped ModifyTable and bind all provider scans before the
+/// executor enters mutation callbacks. The FFI wrapper above is the only
+/// reporting boundary for initialization failures.
+unsafe fn begin_impl<P: LakebaseCustomModifyProvider>(
+    node: *mut pg_sys::CustomScanState,
+    estate: *mut pg_sys::EState,
+    eflags: i32,
+) -> Result<(), CustomScanError> {
     let state = unsafe { state::<P>(node) };
     if state.phase != ModifyNodePhase::Created {
-        pgrx::error!("LakebaseModifyTable was initialized more than once");
+        return Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "LakebaseModifyTable was initialized more than once",
+        )
+        .into());
     }
     let plan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
     let inner_plan =
@@ -292,7 +287,11 @@ pub(super) unsafe extern "C-unwind" fn begin<P: LakebaseCustomModifyProvider>(
     if inner_state.is_null()
         || unsafe { (*inner_state).type_ } != pg_sys::NodeTag::T_ModifyTableState
     {
-        pgrx::error!("LakebaseModifyTable child is not ModifyTableState");
+        return Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "LakebaseModifyTable child is not ModifyTableState",
+        )
+        .into());
     }
     state.inner = inner_state.cast();
     unsafe {
@@ -301,37 +300,29 @@ pub(super) unsafe extern "C-unwind" fn begin<P: LakebaseCustomModifyProvider>(
     state.phase = ModifyNodePhase::Begun;
 
     if (eflags as u32) & pg_sys::EXEC_FLAG_EXPLAIN_ONLY != 0 {
-        return;
+        return Ok(());
     }
 
-    let query_state =
-        acquire_modify_query_state::<P::AccessMethod>(estate).report_unwrap();
+    let query_state = acquire_modify_query_state::<P::AccessMethod>(estate)?;
     let execution = unsafe {
         ModifyNodeState::<P>::from_modify_table_state(state.inner, query_state)
-    }
-    .report_unwrap();
+    }?;
     let operation = unsafe { (*state.inner).operation };
-    let wholerow_attno = if matches!(
+    let input_plan = if matches!(
         operation,
         pg_sys::CmdType::CMD_UPDATE
             | pg_sys::CmdType::CMD_DELETE
             | pg_sys::CmdType::CMD_MERGE
     ) {
         let subplan = unsafe { (*state.inner).ps.lefttree };
-        let attno = find_wholerow_attno(unsafe { (*subplan).plan }).report_unwrap();
-        if operation == pg_sys::CmdType::CMD_UPDATE && attno <= 0 {
-            Err::<(), _>(PgReportError::from_message(
-                pgrx::prelude::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "Lakebase UPDATE input is missing PostgreSQL wholerow",
-            ))
-            .report_unwrap();
-        }
-        attno
+        Some(unsafe { (*subplan).plan })
     } else {
-        0
+        None
     };
 
-    let execution = Rc::new(ModifyNodeCell::<P>::new(execution, wholerow_attno));
+    let execution = Rc::new(unsafe {
+        ModifyNodeCell::<P>::new(execution, operation, input_plan)
+    }?);
     let cleanup = Rc::clone(&execution);
     state.resource = Some(remember_resource(move || {
         // SAFETY: ResourceOwner cleanup runs after executor control has left
@@ -341,13 +332,12 @@ pub(super) unsafe extern "C-unwind" fn begin<P: LakebaseCustomModifyProvider>(
     state.bridge = Some(execution.bridge());
     state.execution = Some(execution);
 
-    let mut bind_context = BindContext {
+    let mut bind_context = ModifyScanBinder {
         execution: state
             .execution
             .as_deref()
             .expect("execution was just installed"),
-        error: None,
-        bound_scans: 0,
+        bound_scans: Ok(0),
         target_rtis: {
             let plan =
                 unsafe { (*state.inner).ps.plan.cast::<pg_sys::ModifyTable>() };
@@ -363,25 +353,21 @@ pub(super) unsafe extern "C-unwind" fn begin<P: LakebaseCustomModifyProvider>(
         },
     };
     unsafe { bind_tree::<P>((*state.inner).ps.lefttree, &mut bind_context) };
-    if let Some(error) = bind_context.error {
-        match error {
-            BindError::Execution(error) => Err::<(), _>(error).report_unwrap(),
-            BindError::Scan(error) => Err::<(), _>(error).report_unwrap(),
-        }
-    }
+    let bound_scans = bind_context.bound_scans?;
     if matches!(
         operation,
         pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE
-    ) && bind_context.bound_scans == 0
+    ) && bound_scans == 0
     {
-        Err::<(), _>(PgReportError::from_message(
-            pgrx::prelude::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        return Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             "required Modify plan contains no bindable provider scan",
-        ))
-        .report_unwrap();
+        )
+        .into());
     }
 
     unsafe { replace_aux_entry(estate, state.inner, node) };
+    Ok(())
 }
 
 #[pg_guard]

@@ -1,13 +1,18 @@
 //! PG17 provider-neutral Custom ModifyTable framework.
 
+mod binding;
 mod bridge;
+mod contract;
 mod execution;
 mod methods;
 mod modify_table;
 mod planning;
 mod registry;
 
-use crate::customscan::provider::{LakebaseCustomModifyProvider, RelPathContext};
+pub use binding::ModifyBindContext;
+pub use contract::{LakebaseCustomModifyProvider, ModifyCapabilities};
+
+use crate::customscan::provider::RelationContext;
 
 /// Register one scan provider as a Custom ModifyTable provider.
 ///
@@ -19,6 +24,6 @@ pub fn register_provider<P: LakebaseCustomModifyProvider>() {
 }
 
 /// Whether a registered ModifyTable provider owns this target relation.
-pub(crate) fn has_provider_for(context: &RelPathContext) -> bool {
+pub(crate) fn has_provider_for(context: &RelationContext<'_>) -> bool {
     registry::has_provider(context)
 }

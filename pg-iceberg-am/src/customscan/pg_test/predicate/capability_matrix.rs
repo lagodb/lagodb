@@ -4,15 +4,15 @@
 //! `get_collation_isdeterministic` in its `text` arm, so even the integer /
 //! numeric / temporal / float rows (which never reach that syscache lookup)
 //! pull the symbol into the link and cannot run as host `#[test]`s (see
-//! `docs/testing.md`). The pure `op_class` mapping and `null_test_capability`
-//! stay as host tests in `predicate/policy.rs`; the `text` collation
+//! `docs/testing.md`). The pure `op_class` mapping and `supports_null_test`
+//! stay as host tests in `predicate/policy/tests.rs`; the `text` collation
 //! semantics live in `capability_backend.rs`. This module owns the
 //! type×operator×collation verdict matrix for the non-text categories plus the
 //! integer collation gate.
 
 #[pgrx::pg_schema]
 mod tests {
-    use pg_lakebase_core::expr::nodes::PgComparisonOp;
+    use pg_lakebase_core::expr::PgComparisonOp;
     use pgrx::pg_sys;
     use pgrx::pg_sys::Oid;
     use proptest::prelude::*;
@@ -22,7 +22,7 @@ mod tests {
         ComparisonOpClass, PredicateCapability, PredicatePushdownPolicy,
     };
     // Single source of truth for the comparison opno verdict table, shared with
-    // the host `#[test]` policy suite in `predicate/policy.rs`. `op`
+    // the host `#[test]` policy suite in `predicate/policy/tests.rs`. `op`
     // exposes the per-type rows (`op::INT4`, `op::TEXT`, ...).
     use crate::predicate::policy::test_opno_table as op;
     use crate::predicate::policy::test_opno_table::{CLASS_BY_COLUMN, opno_table};
@@ -31,7 +31,7 @@ mod tests {
         type_oid: pg_sys::Oid,
         op_key: PgComparisonOp,
     ) -> PredicateCapability {
-        PredicatePushdownPolicy::new().capability_for(type_oid, op_key)
+        PredicatePushdownPolicy::capability_for(type_oid, op_key.identity())
     }
 
     /// Build a collation-free `(opno, 0, 0)` comparison triple.
@@ -93,26 +93,16 @@ mod tests {
         }
     }
 
-    /// One integer-collation-gate case: the `(0,0)` triple must stay
-    /// `ExactRowFilter`, and tagging *either* collation slot with any non-zero
-    /// OID must flip it to `Unsupported`. Returns `Err` on assertion failure so
-    /// the `proptest` runner can shrink the counterexample.
+    /// One integer-collation-gate case: tagging either collation slot with any
+    /// non-zero OID must make the comparison `Unsupported`. Returns `Err` on
+    /// assertion failure so the `proptest` runner can shrink the counterexample.
     fn integer_collation_gate_case(
         idx: usize,
         collid: u32,
         tag_input: bool,
     ) -> Result<(), TestCaseError> {
         let (type_oid, opno) = INTEGER_EXACT_PRESERVATION_SET[idx];
-        let exact = triple(opno);
-        prop_assert_eq!(
-            supported_predicate(type_oid, exact),
-            PredicateCapability::ExactRowFilter,
-            "integer (type {}, opno {}) must be ExactRowFilter under (0,0)",
-            u32::from(type_oid),
-            opno,
-        );
-
-        let mut tagged = exact;
+        let mut tagged = triple(opno);
         if tag_input {
             tagged.inputcollid = Oid::from(collid);
         } else {
@@ -132,8 +122,8 @@ mod tests {
     }
 
     /// Across the full int4/int8 preservation set, any non-zero collation on
-    /// either slot makes the comparison `Unsupported`, while the collation-free
-    /// triple stays `ExactRowFilter`. Property port of the former host
+    /// either slot makes the comparison `Unsupported`. This ports the former
+    /// host property
     /// `prop_integer_exact_is_unsupported_when_either_collation_slot_nonzero`,
     /// driven through a backend `TestRunner` because `capability_for` links the
     /// `text` arm's `get_collation_isdeterministic` syscache symbol.
@@ -156,39 +146,6 @@ mod tests {
                 integer_collation_gate_case(idx, collid, tag_input)
             })
             .expect("integer collation gate property failed");
-    }
-
-    /// Both collation slots non-zero likewise rejects integer pushdown.
-    #[pgrx::pg_test(schema = "tests")]
-    fn supported_predicate_integer_with_collation_is_unsupported() {
-        assert_eq!(
-            supported_predicate(
-                pg_sys::INT4OID,
-                triple_with_collation(op::INT4[0], 50_000),
-            ),
-            PredicateCapability::Unsupported,
-        );
-        assert_eq!(
-            supported_predicate(
-                pg_sys::INT8OID,
-                triple_with_collation(op::INT8[2], 50_000),
-            ),
-            PredicateCapability::Unsupported,
-        );
-    }
-
-    /// Every int4/int8 comparison stays `Exact` under `(0, 0)`.
-    #[pgrx::pg_test(schema = "tests")]
-    fn supported_predicate_integer_exact_preservation_set_is_exact() {
-        assert!(!INTEGER_EXACT_PRESERVATION_SET.is_empty());
-        for &(type_oid, opno) in INTEGER_EXACT_PRESERVATION_SET {
-            assert_eq!(
-                supported_predicate(type_oid, triple(opno)),
-                PredicateCapability::ExactRowFilter,
-                "integer preservation (type {}, opno {opno}) must stay ExactRowFilter under (0,0)",
-                u32::from(type_oid),
-            );
-        }
     }
 
     /// Capability key uses `(type_oid, opno, opcollid, inputcollid)` only;

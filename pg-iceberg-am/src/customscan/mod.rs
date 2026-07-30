@@ -8,26 +8,30 @@ mod pg_test;
 
 use core::ffi::CStr;
 
+use pg_lakebase_core::customscan::modify::{
+    LakebaseCustomModifyProvider, ModifyBindContext, ModifyCapabilities,
+    register_provider as register_modify_provider,
+};
 use pg_lakebase_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-    CustomScanError, EndContext, LakebaseCustomModifyProvider,
-    LakebaseCustomScanProvider, ModifyBindContext, ModifyCapabilities,
-    NextSlotContext, NoPrivateData, PathVariant, PlanTranslateContext, ReScanContext,
-    RelPathContext,
+    CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
+    NoPrivateData, PathContext, PathVariant, PlanTranslateContext, ReScanContext,
+    RelationContext, register_provider as register_scan_provider,
 };
+use pg_lakebase_core::expr::QualPushdownDecision;
 use pg_lakebase_core::expr::predicate::PlanPredicate;
-use pg_lakebase_core::expr::split::QualPushdownDecision;
 use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
+use crate::access::mutation::IcebergModifyScanContext;
 use crate::catalog::IcebergAccessMethod;
 use crate::error::IcebergError;
 use crate::predicate::IcebergPredicateClassifier;
 
-pub use scan_state::IcebergScanState;
+use scan_state::IcebergScanState;
 
 /// Zero-sized marker for the Iceberg [`LakebaseCustomScanProvider`].
-pub struct IcebergCustomScanProvider;
+struct IcebergCustomScanProvider;
 
 impl From<IcebergError> for CustomScanError {
     fn from(err: IcebergError) -> Self {
@@ -42,41 +46,22 @@ impl LakebaseCustomScanProvider for IcebergCustomScanProvider {
     type State = IcebergScanState;
 
     /// True when the relation uses the Iceberg access method.
-    fn supports_relation(ctx: &RelPathContext) -> bool {
-        // Defense-in-depth: refuse non-relation RTEs even if the router is bypassed.
-        if ctx.rtekind() != pg_sys::RTEKind::RTE_RELATION {
-            return false;
-        }
-
-        // Defense-in-depth: only concrete heap-shaped storage relkinds.
-        if !matches!(
-            ctx.relkind(),
-            pg_sys::RELKIND_RELATION
-                | pg_sys::RELKIND_MATVIEW
-                | pg_sys::RELKIND_TOASTVALUE
-        ) {
-            return false;
-        }
-
-        let Some(iceberg_am_oid) = IcebergAccessMethod::oid() else {
-            return false;
-        };
-
-        ctx.access_method_oid() == iceberg_am_oid
+    fn supports_relation(ctx: &RelationContext<'_>) -> bool {
+        IcebergAccessMethod::matches_oid(ctx.access_method_oid())
     }
 
     fn classify_predicate(
-        ctx: &PlanTranslateContext,
+        _ctx: &PlanTranslateContext,
         predicate: &PlanPredicate,
     ) -> QualPushdownDecision {
-        IcebergPredicateClassifier.classify_predicate(ctx, predicate)
+        IcebergPredicateClassifier.classify(predicate)
     }
 
     /// Query paths require pushed predicates. Modify paths remain eligible even
     /// when the pushdown set is empty so projection pruning can compete with
     /// the standard TableAM path through normal costing.
     fn create_path(
-        ctx: &RelPathContext,
+        ctx: &PathContext<'_>,
         variant: &PathVariant<'_>,
         builder: CustomPathBuilder<Self>,
     ) -> Option<CustomPathPlan<Self>> {
@@ -125,28 +110,22 @@ impl LakebaseCustomModifyProvider for IcebergCustomScanProvider {
         IcebergScanState::bind_modify(ctx)
     }
 
-    fn supports_modify_target(ctx: &RelPathContext) -> bool {
-        ctx.rtekind() == pg_sys::RTEKind::RTE_RELATION
-            && matches!(
-                ctx.relkind(),
-                pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE
-            )
-            && IcebergAccessMethod::oid()
-                .is_some_and(|oid| ctx.access_method_oid() == oid)
+    fn supports_modify_target(ctx: &RelationContext<'_>) -> bool {
+        matches!(
+            ctx.relkind(),
+            pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE
+        ) && IcebergAccessMethod::matches_oid(ctx.access_method_oid())
     }
 
-    fn modify_scan_context(
-        state: &Self::State,
-    ) -> Option<crate::access::mutation::IcebergModifyScanContext> {
+    fn modify_scan_context(state: &Self::State) -> Option<IcebergModifyScanContext> {
         state.modify_scan_context()
     }
 }
 
 /// Register the Iceberg provider once from `_PG_init`.
-pub fn register() {
-    pg_lakebase_core::customscan::provider::register_provider::<
-        IcebergCustomScanProvider,
-    >();
+pub(super) fn register() {
+    register_scan_provider::<IcebergCustomScanProvider>();
+    register_modify_provider::<IcebergCustomScanProvider>();
 }
 
 #[cfg(test)]

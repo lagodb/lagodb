@@ -3,9 +3,9 @@
 use core::ffi::c_int;
 
 use iceberg_lite::expr::Predicate;
-use pg_lakebase_core::expr::nodes::PgParamValue;
-use pg_lakebase_core::expr::split::{ColumnRef, QualPushdownDecision};
-use pg_lakebase_core::expr::translator::{BuildPredicateError, PredicateBuilder};
+use pg_lakebase_core::expr::QualPushdownDecision;
+use pg_lakebase_core::expr::translator::BuildPredicateError;
+use pg_lakebase_core::expr::{ColumnRef, PredicateBuilder, ResolvedParam};
 use pgrx::pg_sys;
 
 use crate::customscan::pg_test::support::classifier_harness::CLASSIFIER;
@@ -153,7 +153,7 @@ impl PredicateTestHarness {
                 name: Some(String::from(spec.column.name)),
             }];
             let exprs = [expr];
-            let resolved_params: [PgParamValue; 0] = [];
+            let resolved_params: [ResolvedParam; 0] = [];
             let mut translator = IcebergPredicateTranslator::new_unbound_for_tests();
             let mut builder = PredicateBuilder::new(
                 &mut translator,

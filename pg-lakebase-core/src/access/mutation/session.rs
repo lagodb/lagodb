@@ -125,8 +125,7 @@ fn create_session<A: TableAccessMethod>(
 ) -> Result<Box<CopyRelationSession>, PgReportError> {
     // SAFETY: the table-AM callback borrows a live relation for this call.
     let relation = unsafe { RelationHandle::from_raw(rel) };
-    let mut state = A::CopySession::new(&relation)?;
-    state.begin_copy()?;
+    let state = A::CopySession::begin_copy(&relation)?;
     Ok(Box::new(CopyRelationSession::new(state)))
 }
 

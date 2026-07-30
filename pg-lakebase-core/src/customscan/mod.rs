@@ -12,32 +12,26 @@ mod plan_data;
 mod planning;
 pub mod provider;
 
-pub use execution::{exec, explain, state};
+use provider::RelationContext;
+
 pub use plan_data::ScanPurpose;
-pub use plan_data::{codec, custom_private};
-pub use planning::{builder, hook};
 
-pub(crate) use execution::exec_params;
-pub(crate) use plan_data::{custom_exprs, tuple_layout};
-pub(crate) use planning::{candidate, parameterized, paths};
-
-#[cfg(test)]
-mod test_support;
+// Backend tests live in `pg-backend-tests`; these are only the production
+// modules they exercise, exposed through the normal public facade.
+pub use execution::{exec, exec_params, explain, state};
+pub use plan_data::{custom_exprs, custom_private};
+pub use planning::{candidate, hook, tuple_planner};
 
 #[cfg(feature = "pg17")]
 pub mod modify;
 
 #[cfg(feature = "pg17")]
-pub(crate) fn has_modify_provider_for(
-    context: &crate::customscan::provider::RelPathContext,
-) -> bool {
+pub(crate) fn has_modify_provider_for(context: &RelationContext<'_>) -> bool {
     modify::has_provider_for(context)
 }
 
 #[cfg(not(feature = "pg17"))]
-pub(crate) fn has_modify_provider_for(
-    _context: &crate::customscan::provider::RelPathContext,
-) -> bool {
+pub(crate) fn has_modify_provider_for(_context: &RelationContext<'_>) -> bool {
     false
 }
 
@@ -45,6 +39,6 @@ pub(crate) fn has_modify_provider_for(
 pub fn init() {
     // SAFETY: call from `_PG_init` (single-threaded hook slot update).
     unsafe {
-        hook::install_set_rel_pathlist_hook();
+        planning::hook::install_set_rel_pathlist_hook();
     }
 }

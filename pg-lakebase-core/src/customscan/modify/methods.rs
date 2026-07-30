@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use pgrx::pg_sys;
 
-use crate::customscan::provider::LakebaseCustomModifyProvider;
+use crate::customscan::modify::LakebaseCustomModifyProvider;
 
 pub(super) struct ModifyMethodTables {
     pub modify_path: pg_sys::CustomPathMethods,

@@ -161,8 +161,8 @@ The public API separates callbacks by lifecycle:
 - Stateless facets are implemented on the AM identity type:
   `AmScan`, `AmRelation`, `AmIndexCallbacks`, and `AmDdl`.
 - Stateful operation lifecycles are associated session types:
-  `AmScanSession`, `AmIndexFetchSession`, `AmModifyQueryState`, and
-  `AmModifyState`.
+  `AmScanSession`, `AmIndexFetchSession`, `AmModifyQueryState`,
+  `AmModifyState`, and `AmCopySession`.
 
 This keeps relation-level and DDL callbacks from requiring empty marker state,
 while preserving real per-operation state for scans, index fetches, and DML.
@@ -288,8 +288,8 @@ cargo test -p pg-lakebase-core
 
 ### PostgreSQL integration tests (`#[pg_test]`)
 
-Some functionality — like `Cell`'s `IntoDatum`/`FromDatum` round-tripping and
-`Display` formatting via `pg_sys::date_out` etc. — requires a real PostgreSQL
+Some functionality — like bound `Cell`/`RowDatumCodec` round-tripping
+and `Display` formatting via `pg_sys::date_out` etc. — requires a real PostgreSQL
 backend. Because `pg-lakebase-core` is a plain library (`rlib`) and not a
 loadable extension, its `#[pg_test]` tests cannot run from inside this crate.
 They live in the workspace's shared backend-test extension

@@ -15,8 +15,9 @@
 #[pgrx::pg_schema]
 mod tests {
     use iceberg_lite::expr::{Predicate, Reference};
-    use pg_lakebase_core::expr::nodes::{PgComparisonOp, PgParamValue};
+    use pg_lakebase_core::expr::ResolvedParam;
     use pg_lakebase_core::expr::translator::PgPredicateTranslator;
+    use pg_lakebase_core::expr::{ParamKey, PgComparisonOp};
     use pgrx::pg_sys;
     use pgrx::pg_sys::Oid;
 
@@ -137,16 +138,20 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn param_value_null_decodes_to_null() {
         let mut translator = IcebergPredicateTranslator::new_unbound_for_tests();
-        let null_param = PgParamValue {
-            param_id: 1,
-            paramkind: pg_sys::ParamKind::PARAM_EXTERN,
-            type_oid: pg_sys::INT4OID,
-            collid: pg_sys::Oid::INVALID,
-            datum: pg_sys::Datum::from(0usize),
-            is_null: true,
+        let null_param = unsafe {
+            ResolvedParam::from_raw_parts(
+                ParamKey {
+                    paramkind: pg_sys::ParamKind::PARAM_EXTERN,
+                    param_id: 1,
+                },
+                pg_sys::INT4OID,
+                pg_sys::Oid::INVALID,
+                pg_sys::Datum::from(0usize),
+                true,
+            )
         };
 
-        let result = translator.param_value(null_param);
+        let result = translator.param_value(null_param.value());
 
         match result {
             Ok(IcebergScalar::Null { type_oid }) => {

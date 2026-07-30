@@ -783,6 +783,33 @@ WHERE a = 1 OR length(b) > 0
 ORDER BY a, b;
 
 -- ============================================================================
+-- Test 3: row-valued NullTest residual survives OR widening
+-- ============================================================================
+-- PostgreSQL's row-valued IS NULL and IS NOT NULL tests are not complements.
+-- The classifier may widen the OR to `(a = 1) OR (a = 2)` for conservative
+-- pruning, but PostgreSQL must evaluate the original `NOT (t IS NULL)` tree as
+-- the local residual. The additional `(1, NULL)` row distinguishes the correct
+-- three-row result from the incorrect two-row result produced by rewriting the
+-- row test to `t IS NOT NULL`.
+INSERT INTO customscan_partial_pushdown_t VALUES (1, NULL);
+
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT count(*) AS matched_rows
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT count(*) AS matched_rows
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+
+-- ============================================================================
 -- Cleanup
 -- ============================================================================
 RESET pg_lakebase.customscan_mode;

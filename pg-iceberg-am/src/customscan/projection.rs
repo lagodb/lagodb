@@ -8,35 +8,21 @@ use pgrx::pg_sys;
 use crate::access::projection::{ProjectedField, Projection};
 
 /// Resolves core's referenced-column set into the Iceberg scan projection.
-pub(super) struct ProjectionResolver {
-    policy: ProjectionPolicy,
-}
+pub(super) struct ProjectionResolver;
 
 impl ProjectionResolver {
-    pub(super) fn new() -> Self {
-        Self {
-            policy: ProjectionPolicy,
-        }
-    }
-
     pub(super) fn resolve(
         &self,
         needed: NeededColumns<'_>,
         scan_tuple: ScanTupleDescriptor<'_>,
     ) -> Result<Option<Projection>, CustomScanError> {
-        self.policy
-            .resolve(needed, |attno| scan_tuple.destination_for_attno(attno))
+        self.resolve_with(needed, |attno| scan_tuple.destination_for_attno(attno))
             .map_err(Into::into)
     }
-}
 
-/// Pure projection policy: `All` maps to select-all; projected layouts map
-/// each base attribute to the destination supplied by Core's tuple contract.
-#[derive(Clone, Copy, Debug, Default)]
-struct ProjectionPolicy;
-
-impl ProjectionPolicy {
-    fn resolve<D>(
+    /// Pure policy seam used by host tests: `All` maps to select-all; projected
+    /// layouts map each base attribute to the supplied destination.
+    fn resolve_with<D>(
         &self,
         needed: NeededColumns<'_>,
         resolve_destination: D,
@@ -88,7 +74,7 @@ mod tests {
             &self,
             needed: NeededColumns<'_>,
         ) -> Result<Option<Projection>, ProjectionError> {
-            ProjectionPolicy.resolve(needed, |attno| {
+            ProjectionResolver.resolve_with(needed, |attno| {
                 self.destinations
                     .iter()
                     .find_map(|(source, dest)| (*source == attno).then_some(*dest))

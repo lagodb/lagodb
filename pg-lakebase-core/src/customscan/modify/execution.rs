@@ -12,7 +12,7 @@ use crate::api::{
     MutationDeleteContext, MutationOutcome, MutationUpdateContext,
     MutationWriteContext, TableAccessMethod,
 };
-use crate::customscan::provider::LakebaseCustomModifyProvider;
+use crate::customscan::modify::LakebaseCustomModifyProvider;
 use crate::diag::PgReportError;
 use crate::handles::{ItemPointer, RelationHandle};
 use crate::tuple::TupleSlotRow;
@@ -37,9 +37,6 @@ enum RelationPhase {
 /// AM needs only their union: a sink is necessary if any target can execute the
 /// corresponding action.
 unsafe fn modify_actions(plan: *mut pg_sys::ModifyTable) -> AmResult<ModifyActions> {
-    if plan.is_null() {
-        return Err(internal_error("ModifyTable plan is NULL"));
-    }
     match unsafe { (*plan).operation } {
         pg_sys::CmdType::CMD_INSERT => Ok(ModifyActions::INSERT),
         pg_sys::CmdType::CMD_UPDATE => Ok(ModifyActions::UPDATE),
@@ -56,14 +53,6 @@ unsafe fn modify_actions(plan: *mut pg_sys::ModifyTable) -> AmResult<ModifyActio
                         pg_sys::list_nth(actions, action_index)
                             .cast::<pg_sys::MergeAction>()
                     };
-                    if action.is_null()
-                        || unsafe { (*action).type_ }
-                            != pg_sys::NodeTag::T_MergeAction
-                    {
-                        return Err(internal_error(
-                            "MERGE plan contains an invalid action",
-                        ));
-                    }
                     match unsafe { (*action).commandType } {
                         pg_sys::CmdType::CMD_INSERT => {
                             result = result.union(ModifyActions::INSERT);
@@ -112,14 +101,11 @@ impl<P: LakebaseCustomModifyProvider> ResultRelationState<P> {
             <P::AccessMethod as TableAccessMethod>::ModifyQueryState,
         >,
     ) -> AmResult<Self> {
-        let relation =
-            NonNull::new(unsafe { result_rel_info.as_ref().ri_RelationDesc })
-                .ok_or_else(|| {
-                    internal_error("ModifyTable result relation is not open")
-                })?;
+        let relation = unsafe {
+            NonNull::new_unchecked(result_rel_info.as_ref().ri_RelationDesc)
+        };
         if !P::MODIFY_CAPABILITIES.postgres_indexes()
-            && unsafe { relation.as_ref().rd_rel.as_ref() }
-                .is_some_and(|class| class.relhasindex)
+            && unsafe { (*relation.as_ref().rd_rel).relhasindex }
         {
             return Err(feature_not_supported(
                 "the Custom ModifyTable provider does not support PostgreSQL indexes",
@@ -130,11 +116,6 @@ impl<P: LakebaseCustomModifyProvider> ResultRelationState<P> {
             let trigger_count =
                 usize::try_from(unsafe { (*trigger_desc).numtriggers })
                     .map_err(|_| internal_error("invalid trigger count"))?;
-            if trigger_count > 0 && unsafe { (*trigger_desc).triggers.is_null() } {
-                return Err(internal_error(
-                    "trigger descriptor has a NULL trigger array",
-                ));
-            }
             let triggers = unsafe {
                 std::slice::from_raw_parts(
                     if trigger_count == 0 {
@@ -217,11 +198,10 @@ impl<P: LakebaseCustomModifyProvider> ResultRelationState<P> {
         // SAFETY: the owning ModifyTableState keeps the relation open; the AM
         // contract requires the state to retain only derived owned data.
         let relation = unsafe { RelationHandle::from_raw(self.relation.as_ptr()) };
-        let mut modify_state =
-            <P::AccessMethod as TableAccessMethod>::ModifyState::new(
+        let modify_state =
+            <P::AccessMethod as TableAccessMethod>::ModifyState::begin_modify(
                 &relation, context,
             )?;
-        modify_state.begin_modify()?;
         self.modify_state = Some(modify_state);
         Ok(())
     }
@@ -255,18 +235,18 @@ impl<P: LakebaseCustomModifyProvider> ResultRelationState<P> {
         ))
     }
 
-    fn prepare_insert(&mut self) -> AmResult<()> {
-        self.ensure_ready()?;
+    fn prepare_insert(&mut self) {
         if matches!(self.access, RelationAccess::Unbound) {
             self.access = RelationAccess::InsertOnly;
         }
-        Ok(())
     }
 
+    // The mutation entry points perform the phase check once before reaching
+    // this state-construction path. Keeping that check outside avoids a second
+    // phase read for every INSERT callback.
     fn modify_state(
         &mut self,
     ) -> AmResult<&mut <P::AccessMethod as TableAccessMethod>::ModifyState> {
-        self.ensure_ready()?;
         if self.modify_state.is_none() {
             let context = match &self.access {
                 RelationAccess::Unbound => {
@@ -331,7 +311,8 @@ impl<P: LakebaseCustomModifyProvider> ResultRelationState<P> {
         new_slot: *mut pg_sys::TupleTableSlot,
         context: MutationWriteContext,
     ) -> AmResult<()> {
-        self.prepare_insert()?;
+        self.ensure_ready()?;
+        self.prepare_insert();
         let new = unsafe { TupleSlotRow::from_raw(new_slot) };
         self.modify_state()?.insert_slot(new, context)
     }
@@ -345,6 +326,7 @@ impl<P: LakebaseCustomModifyProvider> ResultRelationState<P> {
     ) -> AmResult<MutationOutcome> {
         let old = unsafe { TupleSlotRow::from_raw(old_slot) };
         let new = unsafe { TupleSlotRow::from_raw(new_slot) };
+        self.ensure_ready()?;
         self.modify_state()?.update_slot(row_id, old, new, context)
     }
 
@@ -353,6 +335,7 @@ impl<P: LakebaseCustomModifyProvider> ResultRelationState<P> {
         row_id: ItemPointer,
         context: MutationDeleteContext<'_>,
     ) -> AmResult<MutationOutcome> {
+        self.ensure_ready()?;
         self.modify_state()?.delete_slot(row_id, context)
     }
 
@@ -401,13 +384,11 @@ impl<P: LakebaseCustomModifyProvider> ModifyNodeState<P> {
             <P::AccessMethod as TableAccessMethod>::ModifyQueryState,
         >,
     ) -> AmResult<Self> {
-        let mtstate = NonNull::new(mtstate)
-            .ok_or_else(|| internal_error("ModifyTableState is NULL"))?;
-        let state = unsafe { mtstate.as_ref() };
+        let state = unsafe { &*mtstate };
         let count = usize::try_from(state.mt_nrels).map_err(|_| {
             internal_error("invalid ModifyTable result relation count")
         })?;
-        if count == 0 || state.resultRelInfo.is_null() {
+        if count == 0 {
             return Err(internal_error(
                 "ModifyTableState has no initialized result relations",
             ));
@@ -433,9 +414,7 @@ impl<P: LakebaseCustomModifyProvider> ModifyNodeState<P> {
             let info =
                 unsafe { NonNull::new_unchecked(state.resultRelInfo.add(index)) };
             let relation_desc = unsafe { info.as_ref().ri_RelationDesc };
-            if relation_desc.is_null()
-                || unsafe { (*(*relation_desc).rd_rel).relam } != access_method_oid
-            {
+            if unsafe { (*(*relation_desc).rd_rel).relam } != access_method_oid {
                 continue;
             }
             let relation_oid = unsafe { (*relation_desc).rd_id };
@@ -488,19 +467,22 @@ impl<P: LakebaseCustomModifyProvider> ModifyNodeState<P> {
         unsafe { &mut *pointer.as_ptr() }.bind_scan(context)
     }
 
-    pub(super) fn resolve_relation(
+    /// Resolve the provider-owned relation for a PostgreSQL result relation.
+    ///
+    /// # Safety
+    ///
+    /// `result_rel_info` is the live `ResultRelInfo` supplied by PostgreSQL's
+    /// ModifyTable executor.
+    pub(super) unsafe fn resolve_relation(
         &mut self,
         result_rel_info: *mut pg_sys::ResultRelInfo,
     ) -> AmResult<Option<NonNull<ResultRelationState<P>>>> {
-        let info = NonNull::new(result_rel_info)
-            .ok_or_else(|| internal_error("ResultRelInfo is NULL"))?;
+        let info = unsafe { NonNull::new_unchecked(result_rel_info) };
         if let Some(&pointer) = self.relation_by_info.get(&info) {
             return Ok(Some(pointer));
         }
         let relation_desc = unsafe { info.as_ref().ri_RelationDesc };
-        if relation_desc.is_null()
-            || unsafe { (*(*relation_desc).rd_rel).relam } != self.access_method_oid
-        {
+        if unsafe { (*(*relation_desc).rd_rel).relam } != self.access_method_oid {
             return Ok(None);
         }
         let relation_oid = unsafe { (*relation_desc).rd_id };
@@ -537,25 +519,15 @@ impl<P: LakebaseCustomModifyProvider> ModifyNodeState<P> {
         old_slot: *mut pg_sys::TupleTableSlot,
         new_slot: *mut pg_sys::TupleTableSlot,
     ) -> AmResult<PreparedUpdateTriggerRows> {
-        let source = self.resolve_relation(source_info)?;
-        let destination = self.resolve_relation(destination_info)?;
+        let source = unsafe { self.resolve_relation(source_info) }?;
+        let destination = unsafe { self.resolve_relation(destination_info) }?;
 
         let old_tid = if let Some(mut source) = source {
-            if old_slot.is_null() {
-                return Err(internal_error(
-                    "provider UPDATE trigger event has no OLD slot",
-                ));
-            }
             Some(unsafe { source.as_mut().preserve_trigger_row(old_slot) }?)
         } else {
             None
         };
         let new_tid = if let Some(mut destination) = destination {
-            if new_slot.is_null() {
-                return Err(internal_error(
-                    "provider UPDATE trigger event has no NEW slot",
-                ));
-            }
             Some(unsafe { destination.as_mut().preserve_trigger_row(new_slot) }?)
         } else {
             None

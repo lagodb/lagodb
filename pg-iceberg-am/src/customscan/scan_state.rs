@@ -1,32 +1,43 @@
 //! Iceberg-specific runtime state and scan lifecycle.
 
-use crate::access::column_mapping::{RelationFieldMap, RelationShape};
+use std::rc::Rc;
+
 use crate::access::mutation::{IcebergModifyQueryState, IcebergModifyScanContext};
 use crate::access::scan::{IcebergBatchCursor, ScanSpec};
-use crate::predicate::{IcebergPredicateTranslator, PredicateFieldBindings};
+use crate::error::IcebergError;
+use crate::predicate::IcebergPredicateTranslator;
+use crate::relation_binding::{RelationFieldIndex, RelationShape};
 use iceberg_lite::expr::Predicate;
 use pg_lakebase_core::access::mutation::ModifyScanBinding;
+use pg_lakebase_core::customscan::modify::ModifyBindContext;
 use pg_lakebase_core::customscan::provider::{
-    BeginContext, CustomScanError, EndContext, ModifyBindContext, NextSlotContext,
-    ReScanContext, ScanPurpose,
+    BeginContext, CustomScanError, EndContext, NextSlotContext, ReScanContext,
+    ScanPurpose,
 };
 
 use super::IcebergCustomScanProvider;
 use super::projection::ProjectionResolver;
 
 /// Per-scan runtime state inside the framework's `CustomScanStateWrapper`.
-pub struct IcebergScanState {
-    pub(crate) spec: Option<ScanSpec>,
-    pub(crate) cursor: Option<IcebergBatchCursor>,
+pub(super) struct IcebergScanState {
+    active_scan: Option<ActiveScan>,
+    cursor: Option<IcebergBatchCursor>,
     conflict_filter: Predicate,
     purpose: ScanPurpose,
     modify_binding: Option<ModifyScanBinding<IcebergModifyQueryState>>,
 }
 
+/// The scan specification and predicate lookup originate from the same
+/// relation binding pass and remain coupled for the CustomScan lifetime.
+struct ActiveScan {
+    spec: ScanSpec,
+    field_index: Rc<RelationFieldIndex>,
+}
+
 impl Default for IcebergScanState {
     fn default() -> Self {
         Self {
-            spec: None,
+            active_scan: None,
             cursor: None,
             conflict_filter: Predicate::AlwaysTrue,
             purpose: ScanPurpose::Query,
@@ -41,16 +52,12 @@ enum RowFilterUpdate {
 }
 
 impl RowFilterUpdate {
-    fn from_rescan(
+    fn from_changed_params(
         ctx: &ReScanContext<'_, IcebergCustomScanProvider>,
-        field_bindings: &PredicateFieldBindings,
+        field_index: &Rc<RelationFieldIndex>,
     ) -> Result<Self, CustomScanError> {
-        if !ctx.params_changed {
-            return Ok(Self::Unchanged);
-        }
-
-        let translated = ctx.translate_pushed_predicates(|_| {
-            IcebergPredicateTranslator::with_field_bindings(field_bindings.clone())
+        let translated = ctx.pushed_predicates.translate(|_| {
+            IcebergPredicateTranslator::with_field_index(Rc::clone(field_index))
         })?;
         Ok(Self::Replace(IcebergPredicateTranslator::conjoin(
             translated,
@@ -78,13 +85,13 @@ impl IcebergScanState {
         let rel_oid = ctx.relation.oid();
         let spc_oid = ctx.relation.tablespace_oid();
         let scan_tuple = ctx.scan_tuple();
-        let projection =
-            ProjectionResolver::new().resolve(ctx.required_columns(), scan_tuple)?;
+        let projection = ProjectionResolver
+            .resolve(ctx.pushed_predicates.required_columns(), scan_tuple)?;
         let shape = RelationShape::from_relation(&ctx.relation);
 
-        let mut spec = match projection {
+        let (mut spec, field_index) = match projection {
             None => {
-                ScanSpec::build_with_predicates(rel_oid, spc_oid, None, None, &shape)?
+                ScanSpec::build_for_custom_scan(rel_oid, spc_oid, None, None, &shape)?
             }
             Some(proj) => {
                 let scan_attr_types = scan_tuple.attr_types();
@@ -100,23 +107,23 @@ impl IcebergScanState {
             }
         };
 
-        let field_bindings = Self::predicate_field_bindings(spec.schema(), &shape)?;
-        let row_filter = if !ctx.has_pushed_predicates() {
+        let has_pushed_predicates = ctx.pushed_predicates.has_pushed_predicates();
+        let row_filter = if !has_pushed_predicates {
             None
         } else {
-            Self::translate_predicates(&ctx, &field_bindings)?
+            Self::translate_predicates(&ctx, &field_index)?
         };
-        let planning_filter = if !ctx.has_pushed_predicates() {
+        let planning_filter = if !has_pushed_predicates {
             None
         } else {
-            Self::translate_rescan_stable_predicates(&ctx, &field_bindings)?
+            Self::translate_rescan_stable_predicates(&ctx, &field_index)?
         };
         let conflict_filter = if ctx.purpose.is_modify() {
             IcebergPredicateTranslator::conjoin(
-                ctx.translate_static_pushed_predicates(|_| {
-                    IcebergPredicateTranslator::with_field_bindings(
-                        field_bindings.clone(),
-                    )
+                ctx.pushed_predicates.translate_static(|_| {
+                    IcebergPredicateTranslator::with_field_index(Rc::clone(
+                        &field_index,
+                    ))
                 })?,
             )
             .unwrap_or(Predicate::AlwaysTrue)
@@ -138,18 +145,18 @@ impl IcebergScanState {
         } else {
             Some(spec.open_batch_cursor()?)
         };
-        state.spec = Some(spec);
+        state.active_scan = Some(ActiveScan { spec, field_index });
         state.cursor = cursor;
         state.modify_binding = None;
 
         Ok(())
     }
 
-    pub(crate) fn modify_scan_context(&self) -> Option<IcebergModifyScanContext> {
-        self.spec.as_ref().and_then(|spec| {
-            let scan_tasks = spec.prepared_mutation_tasks()?;
+    pub(super) fn modify_scan_context(&self) -> Option<IcebergModifyScanContext> {
+        self.active_scan.as_ref().and_then(|scan| {
+            let scan_tasks = scan.spec.prepared_mutation_tasks()?;
             Some(IcebergModifyScanContext::new(
-                spec.starting_snapshot_id(),
+                scan.spec.starting_snapshot_id(),
                 self.conflict_filter.clone(),
                 scan_tasks,
             ))
@@ -161,26 +168,19 @@ impl IcebergScanState {
     ) -> Result<(), CustomScanError> {
         let binding = ctx.binding;
         let state = ctx.state;
-        if state.purpose != ScanPurpose::Modify {
-            return Err(CustomScanError::provider(
-                crate::error::IcebergError::InvariantViolated(
-                    "Modify binding reached a query scan state",
-                ),
-            ));
-        }
         match state.modify_binding.as_ref() {
             Some(existing) if existing == &binding => return Ok(()),
             Some(_) => {
                 return Err(CustomScanError::provider(
-                    crate::error::IcebergError::InvariantViolated(
+                    IcebergError::InvariantViolated(
                         "Modify scan was bound to two relation states",
                     ),
                 ));
             }
             None => {}
         }
-        state.spec.as_ref().ok_or_else(|| {
-            CustomScanError::provider(crate::error::IcebergError::InvariantViolated(
+        state.active_scan.as_ref().ok_or_else(|| {
+            CustomScanError::provider(IcebergError::InvariantViolated(
                 "Modify scan binding has no scan specification",
             ))
         })?;
@@ -194,29 +194,24 @@ impl IcebergScanState {
     pub(super) fn next_slot(
         mut ctx: NextSlotContext<'_, IcebergCustomScanProvider>,
     ) -> Result<bool, CustomScanError> {
-        ctx.check_for_interrupts();
-
         let purpose = ctx.state.purpose;
         let mut cursor = match ctx.state.cursor.take() {
             Some(cursor) => cursor,
             None if purpose.is_modify() => {
                 let binding = ctx.state.modify_binding.clone().ok_or_else(|| {
-                    CustomScanError::provider(
-                        crate::error::IcebergError::InvariantViolated(
-                            "Modify scan executed before outer binding",
-                        ),
-                    )
+                    CustomScanError::provider(IcebergError::InvariantViolated(
+                        "Modify scan executed before outer binding",
+                    ))
                 })?;
                 ctx.state
-                    .spec
+                    .active_scan
                     .as_mut()
                     .ok_or_else(|| {
-                        CustomScanError::provider(
-                            crate::error::IcebergError::InvariantViolated(
-                                "Modify scan has no scan specification",
-                            ),
-                        )
+                        CustomScanError::provider(IcebergError::InvariantViolated(
+                            "Modify scan has no scan specification",
+                        ))
                     })?
+                    .spec
                     .open_mutation_batch_cursor(binding, ctx.relation.oid())?
             }
             None => return Ok(false),
@@ -233,29 +228,34 @@ impl IcebergScanState {
         ctx: ReScanContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
         let relation_oid = ctx.relation.oid();
-        let shape = RelationShape::from_relation(&ctx.relation);
-        let field_bindings = {
-            let Some(spec) = ctx.state.spec.as_ref() else {
-                return Ok(());
+        let row_filter_update =
+            if ctx.params_changed && ctx.pushed_predicates.has_pushed_predicates() {
+                let Some(field_index) = ctx
+                    .state
+                    .active_scan
+                    .as_ref()
+                    .map(|scan| Rc::clone(&scan.field_index))
+                else {
+                    return Ok(());
+                };
+                RowFilterUpdate::from_changed_params(&ctx, &field_index)?
+            } else {
+                RowFilterUpdate::Unchanged
             };
-            Self::predicate_field_bindings(spec.schema(), &shape)?
-        };
-        let row_filter_update = RowFilterUpdate::from_rescan(&ctx, &field_bindings)?;
 
         let state = ctx.state;
-        let Some(spec) = state.spec.as_mut() else {
+        let Some(scan) = state.active_scan.as_mut() else {
             return Ok(());
         };
+        let spec = &mut scan.spec;
 
         row_filter_update.apply_to(spec);
 
         state.cursor = Some(if state.purpose.is_modify() {
             let binding = state.modify_binding.clone().ok_or_else(|| {
-                CustomScanError::provider(
-                    crate::error::IcebergError::InvariantViolated(
-                        "Modify rescan occurred before outer binding",
-                    ),
-                )
+                CustomScanError::provider(IcebergError::InvariantViolated(
+                    "Modify rescan occurred before outer binding",
+                ))
             })?;
             spec.open_mutation_batch_cursor(binding, relation_oid)?
         } else {
@@ -268,9 +268,10 @@ impl IcebergScanState {
         ctx: EndContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
         let state = ctx.state;
-        // Drop cursor before spec so IO closes before metadata/predicate teardown.
+        // Drop cursor before the active scan so IO closes before
+        // metadata/predicate teardown.
         let _ = state.cursor.take();
-        let _ = state.spec.take();
+        let _ = state.active_scan.take();
         state.modify_binding = None;
         Ok(())
     }
@@ -278,10 +279,10 @@ impl IcebergScanState {
     /// Translate pushed expressions and AND the survivors into one predicate.
     fn translate_predicates(
         ctx: &BeginContext<'_, IcebergCustomScanProvider>,
-        field_bindings: &PredicateFieldBindings,
+        field_index: &Rc<RelationFieldIndex>,
     ) -> Result<Option<Predicate>, CustomScanError> {
-        let translated = ctx.translate_pushed_predicates(|_| {
-            IcebergPredicateTranslator::with_field_bindings(field_bindings.clone())
+        let translated = ctx.pushed_predicates.translate(|_| {
+            IcebergPredicateTranslator::with_field_index(Rc::clone(field_index))
         })?;
         Ok(IcebergPredicateTranslator::conjoin(translated))
     }
@@ -292,56 +293,11 @@ impl IcebergScanState {
     /// inner path.
     fn translate_rescan_stable_predicates(
         ctx: &BeginContext<'_, IcebergCustomScanProvider>,
-        field_bindings: &PredicateFieldBindings,
+        field_index: &Rc<RelationFieldIndex>,
     ) -> Result<Option<Predicate>, CustomScanError> {
-        let translated = ctx.translate_rescan_stable_pushed_predicates(|_| {
-            IcebergPredicateTranslator::with_field_bindings(field_bindings.clone())
+        let translated = ctx.pushed_predicates.translate_rescan_stable(|_| {
+            IcebergPredicateTranslator::with_field_index(Rc::clone(field_index))
         })?;
         Ok(IcebergPredicateTranslator::conjoin(translated))
-    }
-
-    fn predicate_field_bindings(
-        schema: &iceberg_lite::spec::Schema,
-        shape: &RelationShape,
-    ) -> Result<PredicateFieldBindings, CustomScanError> {
-        let field_map = RelationFieldMap::from_shape(schema, shape)?;
-        Ok(PredicateFieldBindings::from_iter(
-            field_map.bindings().iter().map(|binding| {
-                (binding.attno, binding.debug_name.clone(), binding.field_id)
-            }),
-        ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use iceberg_lite::expr::Reference;
-    use iceberg_lite::spec::Datum;
-
-    #[test]
-    fn conjoin_empty_is_none() {
-        assert_eq!(IcebergPredicateTranslator::conjoin(vec![]), None);
-    }
-
-    #[test]
-    fn conjoin_single_is_unchanged() {
-        let p = Reference::new("a").equal_to(Datum::int(1));
-        let combined = IcebergPredicateTranslator::conjoin(vec![p.clone()]);
-        assert_eq!(combined, Some(p));
-    }
-
-    #[test]
-    fn conjoin_many_is_left_assoc_conjunction() {
-        let a = Reference::new("a").equal_to(Datum::int(1));
-        let b = Reference::new("b").equal_to(Datum::int(2));
-        let c = Reference::new("c").equal_to(Datum::int(3));
-        let combined = IcebergPredicateTranslator::conjoin(vec![
-            a.clone(),
-            b.clone(),
-            c.clone(),
-        ]);
-        let expected = a.and(b).and(c);
-        assert_eq!(combined, Some(expected));
     }
 }

@@ -5,8 +5,9 @@ This core module contains only storage-neutral executor contracts.
 `AmModifyQueryState` owns provider-defined query handles shared by all
 ModifyTable nodes in one PostgreSQL `EState`. The lifetime of the physical
 identity namespace remains a provider decision; Iceberg keeps its file
-registry at transaction/relation scope. `AmModifyState` owns the relation-local
-writer and exposes begin, mutation, finish, and abort methods.
+registry at transaction/relation scope. `AmModifyState::begin_modify` constructs
+the complete relation-local writer session; the returned state exposes mutation,
+finish, and abort methods.
 `ModifyStateContext<Q, C>` carries the shared query-state handle, PostgreSQL
 command, and either an independent-write marker or the provider context
 captured by a target scan. Core does not define snapshot IDs, predicates, file

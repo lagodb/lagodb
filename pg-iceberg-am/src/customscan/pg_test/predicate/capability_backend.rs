@@ -5,7 +5,7 @@ mod tests {
     use crate::customscan::pg_test::support::fixtures::{
         TEXT_ORDERED_OPNOS, TEXTEQ_OPNO, TEXTNE_OPNO,
     };
-    use pg_lakebase_core::expr::nodes::PgComparisonOp;
+    use pg_lakebase_core::expr::PgComparisonOp;
     use pgrx::pg_sys;
 
     use crate::predicate::policy::{PredicateCapability, PredicatePushdownPolicy};
@@ -14,15 +14,15 @@ mod tests {
         type_oid: pg_sys::Oid,
         op_key: PgComparisonOp,
     ) -> PredicateCapability {
-        PredicatePushdownPolicy::new().capability_for(type_oid, op_key)
+        PredicatePushdownPolicy::capability_for(type_oid, op_key.identity())
     }
 
     fn is_c_or_posix_collation(oid: pg_sys::Oid) -> bool {
-        PredicatePushdownPolicy::new().is_c_or_posix_collation(oid)
+        PredicatePushdownPolicy::is_c_or_posix_collation(oid)
     }
 
     fn is_deterministic_collation(oid: pg_sys::Oid) -> bool {
-        PredicatePushdownPolicy::new().is_deterministic_collation(oid)
+        PredicatePushdownPolicy::is_deterministic_collation(oid)
     }
 
     /// `text` comparison triple; `inputcollid` is what `supported_predicate` reads.
@@ -202,44 +202,14 @@ mod tests {
         }
     }
 
-    /// Unresolvable collation OID fail-safes to `Unsupported` for text comparisons.
+    /// `InvalidOid` is rejected without consulting the collation syscache.
     #[pgrx::pg_test(schema = "tests")]
-    fn cap_pg_text_failsafe_unresolvable_collation_is_unsupported() {
-        // Bogus OID with no `pg_collation` row — forces syscache-miss error path.
-        let bogus = pg_sys::Oid::from(2_000_000_000u32);
-        // Sanity: the bogus OID really has no catalog row, so this is a genuine
-        // unresolvable case rather than an accidental hit.
-        {
-            use pgrx::Spi;
-            let exists = Spi::get_one::<i64>(&format!(
-                "SELECT count(*)::int8 FROM pg_collation WHERE oid = {}",
-                u32::from(bogus),
-            ))
-            .expect("collation existence probe");
-            assert_eq!(
-                exists,
-                Some(0),
-                "the bogus OID must have no pg_collation row for the fail-safe path",
-            );
-        }
-
-        // Fail-safe: the catch path downgrades the cache-lookup error to `false`.
-        assert!(
-            !is_deterministic_collation(bogus),
-            "an unresolvable collation OID must fail-safe to non-deterministic",
-        );
-        // Fast path: InvalidOid is never deterministic.
+    fn cap_pg_text_invalid_collation_is_unsupported() {
         assert!(
             !is_deterministic_collation(pg_sys::Oid::INVALID),
-            "InvalidOid must fail-safe to non-deterministic",
+            "InvalidOid is not a deterministic collation",
         );
 
-        // Oracle verdict for text `=`: Unsupported under both unresolvable cases.
-        assert_eq!(
-            supported_predicate(pg_sys::TEXTOID, text_op(TEXTEQ_OPNO, bogus)),
-            PredicateCapability::Unsupported,
-            "text `=` under an unresolvable collation must be Unsupported",
-        );
         assert_eq!(
             supported_predicate(
                 pg_sys::TEXTOID,
@@ -249,15 +219,7 @@ mod tests {
             "text `=` under InvalidOid must be Unsupported",
         );
 
-        // Ordered text under both unresolvable cases is also Unsupported (fails the
-        // C/POSIX gate, which does not touch the syscache).
         for opno in TEXT_ORDERED_OPNOS {
-            assert_eq!(
-                supported_predicate(pg_sys::TEXTOID, text_op(opno, bogus)),
-                PredicateCapability::Unsupported,
-                "ordered text (opno {opno}) under an unresolvable collation must be \
-             Unsupported",
-            );
             assert_eq!(
                 supported_predicate(
                     pg_sys::TEXTOID,

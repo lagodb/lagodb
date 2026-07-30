@@ -6,14 +6,15 @@ use std::marker::PhantomData;
 
 use pgrx::pg_sys;
 
-use crate::customscan::provider::{LakebaseCustomModifyProvider, RelPathContext};
+use crate::customscan::modify::LakebaseCustomModifyProvider;
+use crate::customscan::provider::RelationContext;
 
 use super::methods;
 
 pub(super) trait ErasedModifyProvider: Sync {
     fn type_id(&self) -> TypeId;
     fn name(&self) -> &'static std::ffi::CStr;
-    fn supports_relation(&self, context: &RelPathContext) -> bool;
+    fn supports_relation(&self, context: &RelationContext<'_>) -> bool;
     fn path_methods(&self) -> *const pg_sys::CustomPathMethods;
     fn scan_methods(&self) -> *const pg_sys::CustomScanMethods;
 }
@@ -43,7 +44,7 @@ impl<P: LakebaseCustomModifyProvider> ErasedModifyProvider
         P::MODIFY_NAME
     }
 
-    fn supports_relation(&self, context: &RelPathContext) -> bool {
+    fn supports_relation(&self, context: &RelationContext<'_>) -> bool {
         P::supports_modify_target(context)
     }
 
@@ -83,7 +84,7 @@ pub(super) fn register<P: LakebaseCustomModifyProvider>() {
 }
 
 pub(super) fn matching(
-    context: &RelPathContext,
+    context: &RelationContext<'_>,
 ) -> Option<&'static dyn ErasedModifyProvider> {
     REGISTRY.with_borrow(|registry| {
         let mut matches = registry
@@ -110,6 +111,6 @@ pub(super) fn is_modify_scan_methods(
     })
 }
 
-pub(crate) fn has_provider(context: &RelPathContext) -> bool {
+pub(crate) fn has_provider(context: &RelationContext<'_>) -> bool {
     matching(context).is_some()
 }
