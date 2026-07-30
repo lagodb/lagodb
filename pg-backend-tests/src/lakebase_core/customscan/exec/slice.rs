@@ -6,12 +6,26 @@ mod tests {
     use std::ptr;
 
     use crate::lakebase_core::customscan::exec::support::ExecExprFixture;
-    use pg_lakebase_core::customscan::exec::{
-        check_scan_relation_oid, slice_pushed_recheck,
-    };
+    use pg_lakebase_core::customscan::CustomScanError;
+    use pg_lakebase_core::customscan::custom_exprs::CustomExprSections;
+    use pg_lakebase_core::customscan::exec::check_scan_relation_oid;
     use pg_lakebase_core::diag::ReportableError;
     use pgrx::pg_sys;
     use pgrx::pg_test;
+
+    /// Split `custom_exprs` in the backend test crate so the production core
+    /// only exposes the validated `CustomExprSections` abstraction.
+    unsafe fn slice_pushed_recheck(
+        list: *mut pg_sys::List,
+        pushed_count: usize,
+        recheck_count: usize,
+    ) -> Result<(Vec<*mut pg_sys::Expr>, Vec<*mut pg_sys::Expr>), CustomScanError>
+    {
+        let sections = unsafe {
+            CustomExprSections::from_custom_exprs(list, pushed_count, recheck_count)
+        }?;
+        Ok((sections.pushed().to_vec(), sections.recheck().to_vec()))
+    }
 
     /// Split `custom_exprs` into pushed and recheck windows without copying cells.
     #[pg_test]

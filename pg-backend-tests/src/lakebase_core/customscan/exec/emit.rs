@@ -6,20 +6,22 @@
 mod tests {
     use core::ffi::c_void;
 
+    use crate::lakebase_core::customscan::support::TestScanState;
     use pg_lakebase_core::api::AmResult;
     use pg_lakebase_core::batch::ScanBatchDriver;
-    use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
-    use pg_lakebase_core::customscan::custom_private::CustomScanPrivate;
     use pg_lakebase_core::customscan::exec::next_slot_wrapper;
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
+        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
+        RelationContext,
     };
-    use pg_lakebase_core::customscan::state::CustomScanStateWrapper;
-    use pg_lakebase_core::expr::split::QualPushdownDecision;
-    use pg_lakebase_core::handles::RelationHandle;
-    use pg_lakebase_core::tuple::{Cell, Row, SlotColumns};
+    use pg_lakebase_core::customscan::provider::{
+        CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
+    };
+    use pg_lakebase_core::expr::QualPushdownDecision;
+    use pg_lakebase_core::handles::{RelationHandle, ScanDirection};
+    use pg_lakebase_core::tuple::{Cell, Row, RowDatumCodec, SlotColumns};
     use pgrx::pg_sys;
     use pgrx::pg_test;
     use pgrx::{FromDatum, IntoDatum};
@@ -117,7 +119,7 @@ mod tests {
         type PrivateData = HandleAccessorPrivate;
         type State = HandleAccessorState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -129,7 +131,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -158,7 +160,10 @@ mod tests {
             let mut row = Row::with_capacity(2);
             row.set_cell(0, Some(Cell::I32(7)));
             row.set_cell(1, Some(Cell::String(HANDLE_EMIT_TEXT.to_string())));
-            ctx.emit_row(&mut row)?;
+            let codec =
+                unsafe { RowDatumCodec::from_relation(ctx.relation.as_raw()) }
+                    .map_err(CustomScanError::provider)?;
+            unsafe { ctx.emit_row(&mut row, &codec)? };
 
             ctx.state.emitted = true;
             Ok(true)
@@ -179,7 +184,7 @@ mod tests {
     /// slot's `tts_mcxt`, for driving `next_slot_wrapper` directly. Generic over
     /// the provider so both the `emit_row` and `emit_columns` paths share one setup.
     struct ScanFixture<P: LakebaseCustomScanProvider> {
-        wrapper_ptr: *mut CustomScanStateWrapper<P>,
+        wrapper_ptr: TestScanState<P>,
         scan_state: *mut pg_sys::ScanState,
         slot: *mut pg_sys::TupleTableSlot,
         per_tuple_ctx: pg_sys::MemoryContext,
@@ -206,6 +211,9 @@ mod tests {
             let estate = pg_sys::palloc0(core::mem::size_of::<pg_sys::EState>())
                 as *mut pg_sys::EState;
             (*estate).type_ = pg_sys::NodeTag::T_EState;
+            // ExecutePlan sets the direction before invoking scan callbacks;
+            // mirror that executor invariant in this synthetic fixture.
+            (*estate).es_direction = pg_sys::ScanDirection::ForwardScanDirection;
 
             let per_tuple_ctx = pg_sys::AllocSetContextCreateExtended(
                 pg_sys::CurrentMemoryContext,
@@ -221,24 +229,14 @@ mod tests {
             (*econtext).ecxt_per_tuple_memory = per_tuple_ctx;
             (*econtext).ecxt_per_query_memory = pg_sys::CurrentMemoryContext;
 
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<P>,
-            >()) as *mut CustomScanStateWrapper<P>;
-            assert!(!wrapper_ptr.is_null());
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
-
-            // SAFETY: mirrors BeginCustomScan — `ptr::write` before next_slot reads state.
-            (*wrapper_ptr).provider_state.as_mut_ptr().write(state);
-            (*wrapper_ptr).provider_state_initialized = true;
-            (*wrapper_ptr).provider_began = true;
-
-            (*wrapper_ptr).base.ss.ss_ScanTupleSlot = slot;
-            (*wrapper_ptr).base.ss.ss_currentRelation = rel;
-            (*wrapper_ptr).base.ss.ps.state = estate;
-            (*wrapper_ptr).base.ss.ps.ps_ExprContext = econtext;
-
-            let scan_state: *mut pg_sys::ScanState =
-                core::ptr::addr_of_mut!((*wrapper_ptr).base.ss);
+            let mut wrapper_ptr = TestScanState::<P>::new();
+            wrapper_ptr.install_provider_state(state);
+            let base = wrapper_ptr.base_mut();
+            base.ss.ss_ScanTupleSlot = slot;
+            base.ss.ss_currentRelation = rel;
+            base.ss.ps.state = estate;
+            base.ss.ps.ps_ExprContext = econtext;
+            let scan_state = wrapper_ptr.scan_state_ptr();
 
             ScanFixture {
                 wrapper_ptr,
@@ -279,7 +277,7 @@ mod tests {
                 "next_slot_wrapper must return the filled scan slot on Ok(true)",
             );
 
-            let state = (*fx.wrapper_ptr).provider_state.assume_init_ref();
+            let state = fx.wrapper_ptr.provider_state();
             assert!(
                 state.emitted,
                 "the provider's next_slot must have run and emitted a row",
@@ -379,7 +377,12 @@ mod tests {
     struct EmitColumnsDriver;
 
     impl ScanBatchDriver for EmitColumnsDriver {
-        fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+        fn next_into_slot(
+            &mut self,
+            direction: ScanDirection,
+            out: &mut SlotColumns<'_>,
+        ) -> AmResult<bool> {
+            assert_eq!(direction, ScanDirection::Forward);
             out.set_datum(0, Some(pg_sys::Datum::from(7usize)));
             let text = EMIT_COLUMNS_TEXT.into_datum().expect("text datum");
             out.set_datum(1, Some(text));
@@ -397,7 +400,7 @@ mod tests {
         type PrivateData = HandleAccessorPrivate;
         type State = EmitColumnsState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -409,7 +412,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -460,7 +463,7 @@ mod tests {
                 "next_slot_wrapper must return the filled scan slot on Ok(true)",
             );
             assert!(
-                (*fx.wrapper_ptr).provider_state.assume_init_ref().emitted,
+                fx.wrapper_ptr.provider_state().emitted,
                 "the provider's next_slot must have run emit_columns",
             );
 

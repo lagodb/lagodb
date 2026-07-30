@@ -9,11 +9,13 @@ use std::ffi::CString;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::customscan::custom_exprs::CustomExprSections;
-use crate::customscan::custom_private::{EncodedPrivate, decode_private};
+use crate::customscan::plan_data::custom_exprs::CustomExprSections;
+use crate::customscan::plan_data::custom_private::{
+    EncodedPrivate, assert_provider_name_matches, decode_private,
+};
 use crate::customscan::provider::LakebaseCustomScanProvider;
 use crate::diag::ReportableError;
-use crate::expr::split::PushdownContract;
+use crate::expr::contract::PushdownContract;
 
 const GROUP_LABEL: &CStr = c"Lakebase Pushdown";
 const PROP_PROVIDER: &CStr = c"Provider";
@@ -25,6 +27,11 @@ const PROP_PUSHED_FILTER_CONSERVATIVE_PRUNING: &CStr =
 const PROP_RECHECK: &CStr = c"Recheck";
 
 /// `ExplainCustomScan` trampoline (`#[doc(hidden)]` for core-tests).
+///
+/// # Safety
+///
+/// PostgreSQL calls this callback with the initialized CustomScan plan and
+/// live ExplainState for the current EXPLAIN operation.
 #[doc(hidden)]
 #[pg_guard]
 #[allow(
@@ -43,19 +50,12 @@ pub unsafe extern "C-unwind" fn explain_custom_scan_trampoline<
     ancestors: *mut pg_sys::List,
     es: *mut pg_sys::ExplainState,
 ) {
-    debug_assert!(!node.is_null(), "ExplainCustomScan: node must be non-null");
-    debug_assert!(!es.is_null(), "ExplainCustomScan: es must be non-null");
-
     let plan = unsafe { (*node).ss.ps.plan };
-    debug_assert!(
-        !plan.is_null(),
-        "ExplainCustomScan: ss.ps.plan must reference a CustomScan node",
-    );
     let cscan = plan as *mut pg_sys::CustomScan;
     let priv_payload: EncodedPrivate =
         unsafe { decode_private((*cscan).custom_private) }.report_unwrap();
 
-    crate::customscan::custom_private::assert_provider_name_matches(
+    assert_provider_name_matches(
         priv_payload.provider_id_or_name.as_c_str(),
         P::NAME,
     )
@@ -287,11 +287,6 @@ unsafe fn emit_section_exprs(
     dpcontext: *mut pg_sys::List,
     exprs: &[*mut pg_sys::Expr],
 ) {
-    debug_assert!(
-        exprs.is_empty() || !dpcontext.is_null(),
-        "emit_section_exprs: dpcontext must be non-null when the section is non-empty",
-    );
-
     if is_text {
         if let Some(joined) =
             unsafe { deparse_and_join(dpcontext, exprs.iter().copied()) }

@@ -6,17 +6,18 @@ use core::ptr;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::diag::PgReportError;
-use crate::expr::runtime_params::{
-    ExecParamRef, ExternParamRef, RuntimeParamResolver,
+use crate::expr::execution::params::{
+    ExecParamRef, ExternParamRef, ResolvedParam, RuntimeParamError,
+    RuntimeParamResolver,
 };
+use crate::wrapper::PgWrapper;
 
 /// Deduplicated parameter references and the EXEC-param change bitmap for one scan.
 #[doc(hidden)]
 pub struct RuntimeParamRefs {
-    extern_params: Vec<ExternParamRef>,
-    exec_params: Vec<ExecParamRef>,
-    exec_param_ids: *mut pg_sys::Bitmapset,
+    pub(crate) extern_params: Vec<ExternParamRef>,
+    pub(crate) exec_params: Vec<ExecParamRef>,
+    pub(crate) exec_param_ids: *mut pg_sys::Bitmapset,
 }
 
 impl RuntimeParamRefs {
@@ -93,14 +94,21 @@ impl RuntimeParamRefs {
 
     /// # Safety
     ///
-    /// `estate` and `econtext` must be the live executor state for this scan.
+    /// `estate` and `econtext` must be the live executor state for this scan,
+    /// and the collected parameter references must originate from its plan.
     pub unsafe fn resolve(
         &self,
         estate: *mut pg_sys::EState,
         econtext: *mut pg_sys::ExprContext,
-    ) -> Result<Vec<crate::expr::nodes::PgParamValue>, PgReportError> {
+    ) -> Result<Vec<ResolvedParam>, RuntimeParamError> {
+        if !self.exec_params.is_empty() {
+            unsafe {
+                PgWrapper::exec_set_param_plan_multi(self.exec_param_ids, econtext)
+            }
+            .map_err(|source| RuntimeParamError::MaterializeExec { source })?;
+        }
         unsafe {
-            RuntimeParamResolver::new(estate, econtext)
+            RuntimeParamResolver::new(estate)
                 .resolve(&self.extern_params, &self.exec_params)
         }
     }

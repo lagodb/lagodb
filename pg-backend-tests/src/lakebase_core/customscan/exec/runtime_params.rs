@@ -3,18 +3,31 @@
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
+    use core::ffi::c_int;
     use std::ptr;
 
-    use crate::lakebase_core::customscan::exec::support::{
-        make_econtext_stub, make_estate_stub,
+    use crate::lakebase_core::customscan::exec::support::make_estate_stub;
+    use pg_lakebase_core::expr::ParamKey;
+    use pg_lakebase_core::expr::{
+        ExecParamRef, ExternParamRef, ResolvedParam, RuntimeParamResolver,
     };
-    use pg_lakebase_core::diag::ReportableError;
-    use pg_lakebase_core::expr::nodes::{ParamKey, PgParamValue};
-    use pg_lakebase_core::expr::runtime_params::{
-        ExecParamRef, ExternParamRef, RuntimeParamResolver,
-    };
-    use pgrx::pg_sys;
-    use pgrx::pg_test;
+    use pgrx::{pg_guard, pg_sys, pg_test};
+
+    #[pg_guard]
+    unsafe extern "C-unwind" fn fetch_param_from_workspace(
+        _params: pg_sys::ParamListInfo,
+        param_id: c_int,
+        _speculative: bool,
+        workspace: *mut pg_sys::ParamExternData,
+    ) -> *mut pg_sys::ParamExternData {
+        unsafe {
+            (*workspace).ptype = pg_sys::INT4OID;
+            (*workspace).value = pg_sys::Datum::from(param_id * 10);
+            (*workspace).isnull = false;
+            (*workspace).pflags = 0;
+        }
+        workspace
+    }
 
     /// `ParamListInfo` with one INT4 slot (paramid 1) holding `value`.
     unsafe fn make_param_list_int4_value(value: i32) -> pg_sys::ParamListInfo {
@@ -45,6 +58,28 @@ mod tests {
         }
     }
 
+    #[pg_test]
+    fn runtime_param_resolver_uses_fetch_hook_before_flexible_array() {
+        unsafe {
+            let pli = pg_sys::makeParamList(0);
+            (*pli).numParams = 2;
+            (*pli).paramFetch = Some(fetch_param_from_workspace);
+            let estate = make_estate_stub(pli);
+            let refs = [ExternParamRef {
+                param_id: 2,
+                expected_type: pg_sys::INT4OID,
+                collid: pg_sys::Oid::INVALID,
+            }];
+
+            let resolved = RuntimeParamResolver::new(estate)
+                .resolve(&refs, &[])
+                .expect("paramFetch-backed parameter must resolve");
+
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].value().datum().as_raw().value(), 20);
+        }
+    }
+
     /// Colliding EXTERN/EXEC ids resolve by ParamKey, not numeric id alone.
     #[pg_test]
     fn runtime_param_resolver_mixed_colliding_ids_resolve_by_param_key() {
@@ -53,8 +88,6 @@ mod tests {
             let estate = make_estate_stub(pli);
             let exec_vals = make_param_exec_vals_slot1(200);
             (*estate).es_param_exec_vals = exec_vals;
-            let econtext = make_econtext_stub();
-
             let extern_refs = [ExternParamRef {
                 param_id: 1,
                 expected_type: pg_sys::INT4OID,
@@ -82,15 +115,15 @@ mod tests {
             );
 
             fn lookup(
-                values: &[PgParamValue],
+                values: &[ResolvedParam],
                 key: ParamKey,
-            ) -> Option<&PgParamValue> {
+            ) -> Option<&ResolvedParam> {
                 values.iter().find(|v| v.key() == key)
             }
 
-            let resolved = RuntimeParamResolver::new(estate, econtext)
+            let resolved = RuntimeParamResolver::new(estate)
                 .resolve(&extern_refs, &exec_refs)
-                .report_unwrap();
+                .expect("mixed runtime parameters must resolve");
             assert_eq!(
                 resolved.len(),
                 2,
@@ -104,31 +137,31 @@ mod tests {
                 .expect("EXEC slot 1 must resolve by its ParamKey ");
 
             assert_eq!(
-                extern_val.paramkind,
+                extern_val.key().paramkind,
                 pg_sys::ParamKind::PARAM_EXTERN,
                 "the EXTERN-keyed value must be stamped PARAM_EXTERN",
             );
             assert_eq!(
-                exec_val.paramkind,
+                exec_val.key().paramkind,
                 pg_sys::ParamKind::PARAM_EXEC,
                 "the EXEC-keyed value must be stamped PARAM_EXEC",
             );
             assert_eq!(
-                extern_val.datum.value(),
+                extern_val.value().datum().as_raw().value(),
                 100,
                 "EXTERN $1 must resolve to its own value (100), not the EXEC \
                  slot's value ",
             );
             assert_eq!(
-                exec_val.datum.value(),
+                exec_val.value().datum().as_raw().value(),
                 200,
                 "EXEC slot 1 must resolve to its own value (200), not the \
                  EXTERN $1 value ",
             );
             // Regression guard: pre-fix bug collapsed both ids onto the EXTERN value.
             assert_ne!(
-                extern_val.datum.value(),
-                exec_val.datum.value(),
+                extern_val.value().datum().as_raw().value(),
+                exec_val.value().datum().as_raw().value(),
                 "colliding (EXTERN $1) and (EXEC slot 1) must resolve to \
                  DISTINCT values — collapsing them to one value is the \
                  param-kind-collision data-loss bug ",
@@ -136,9 +169,9 @@ mod tests {
 
             (*exec_vals.add(1)).value = pg_sys::Datum::from(300i32);
 
-            let resolved_rescan = RuntimeParamResolver::new(estate, econtext)
+            let resolved_rescan = RuntimeParamResolver::new(estate)
                 .resolve(&extern_refs, &exec_refs)
-                .report_unwrap();
+                .expect("mixed runtime parameters must re-resolve");
             assert_eq!(
                 resolved_rescan.len(),
                 2,
@@ -151,13 +184,13 @@ mod tests {
                 .expect("EXEC slot 1 must still resolve after ReScan");
 
             assert_eq!(
-                exec_val2.datum.value(),
+                exec_val2.value().datum().as_raw().value(),
                 300,
                 "the changed EXEC slot must re-resolve to its new value (300) \
                  by ParamKey after ReScan ",
             );
             assert_eq!(
-                extern_val2.datum.value(),
+                extern_val2.value().datum().as_raw().value(),
                 100,
                 "the EXTERN $1 value must be unaffected by the EXEC change — \
                  the two ParamKeys never alias ",

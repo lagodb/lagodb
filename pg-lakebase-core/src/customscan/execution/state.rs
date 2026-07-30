@@ -1,59 +1,57 @@
 //! Executor-owned `#[repr(C)]` `CustomScanStateWrapper<P>` (`base` at offset 0).
-//! `MaybeUninit` provider fields use initialization flags for exception-safe teardown.
+//! Typed provider payloads are stored as `Option` so ownership and teardown are
+//! represented by the fields themselves.
 
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
 
 use pgrx::PgMemoryContexts;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::customscan::provider::LakebaseCustomScanProvider;
+use crate::customscan::ScanPurpose;
+use crate::customscan::execution::exec_params::RuntimeParamRefs;
+use crate::customscan::plan_data::custom_exprs::CustomExprSections;
+use crate::customscan::plan_data::tuple_layout::ScanTupleLayout;
+use crate::customscan::provider::{LakebaseCustomScanProvider, method_tables_for};
+use crate::expr::contract::{ColumnRef, PushdownContract};
 
 /// `#[repr(C)]` wrapper PostgreSQL holds as `*mut CustomScanState`.
 ///
 /// `base` MUST be the first field for pointer casts via [`Self::from_node_ptr`].
 /// `CreateCustomScanState` allocates the wrapper; `BeginCustomScan` fills runtime
-/// fields. Typed payloads drop in `EndCustomScan`, gated on `*_initialized` flags;
-/// [`Drop`] is a fallback when Begin errors before End runs.
+/// fields. Typed payloads drop in `EndCustomScan`; [`Drop`] is a fallback when
+/// Begin errors before End runs.
 #[repr(C)]
 pub struct CustomScanStateWrapper<P: LakebaseCustomScanProvider> {
     /// PG's [`pg_sys::CustomScanState`]. **MUST** remain the first field
     /// so `*mut CustomScanState` and `*mut CustomScanStateWrapper<P>`
     /// share an address.
-    pub base: pg_sys::CustomScanState,
+    pub(crate) base: pg_sys::CustomScanState,
 
     /// Recheck `ExprState` from `ExecInitQual`; NULL when `recheck_count == 0`.
-    pub recheck_state: *mut pg_sys::ExprState,
+    pub(crate) recheck_state: *mut pg_sys::ExprState,
 
     /// Immutable expression sections validated once during Begin.
-    pub expr_sections: Option<crate::customscan::custom_exprs::CustomExprSections>,
+    pub(crate) expr_sections: Option<CustomExprSections>,
 
     /// Deduplicated parameter references collected once during Begin.
-    pub runtime_params: Option<crate::customscan::exec_params::RuntimeParamRefs>,
+    pub(crate) runtime_params: Option<RuntimeParamRefs>,
 
     /// Decoded provider [`PrivateData`](LakebaseCustomScanProvider::PrivateData).
-    /// Read/drop only when [`Self::decoded_private_initialized`] is true.
-    pub decoded_private: MaybeUninit<P::PrivateData>,
+    pub(crate) decoded_private: Option<P::PrivateData>,
 
-    /// Provider-owned runtime state (`P::State`). Gated on
-    /// [`Self::provider_state_initialized`].
-    pub provider_state: MaybeUninit<P::State>,
+    /// Provider-owned runtime state (`P::State`). Present after
+    /// `P::create_state` and removed during teardown.
+    pub(crate) provider_state: Option<P::State>,
 
     /// Cached framework envelope fields needed by rescan (avoids re-decoding
     /// the immutable `custom_private` list on every `ReScanCustomScan` call).
     /// Populated once during `BeginCustomScan`; `None` until then.
-    pub cached_envelope: Option<CachedEnvelope>,
-
-    /// Set after `BeginCustomScan` writes [`Self::decoded_private`].
-    pub decoded_private_initialized: bool,
-
-    /// Set after `BeginCustomScan` writes [`Self::provider_state`].
-    pub provider_state_initialized: bool,
+    pub(crate) cached_envelope: Option<CachedEnvelope>,
 
     /// Set after `P::begin` succeeds; End calls `P::end` only when true
     /// (EXPLAIN_ONLY may have state without begin).
-    pub provider_began: bool,
+    pub(crate) provider_began: bool,
 
     /// Zero-sized marker for provider type `P`.
     _marker: PhantomData<fn() -> P>,
@@ -65,32 +63,22 @@ pub struct CustomScanStateWrapper<P: LakebaseCustomScanProvider> {
 #[derive(Debug)]
 pub struct CachedEnvelope {
     /// Query or modification-target use of the provider scan.
-    pub purpose: crate::customscan::ScanPurpose,
+    pub purpose: ScanPurpose,
     /// Per-pushed-expression pushdown contract (aligned with pushed section).
-    pub pushed_contracts: Vec<crate::expr::split::PushdownContract>,
+    pub pushed_contracts: Vec<PushdownContract>,
     /// Pre-resolved column metadata for the pushed expressions.
-    pub column_refs: Vec<crate::expr::split::ColumnRef>,
+    pub column_refs: Vec<ColumnRef>,
     /// Decoded once from `custom_private`; shared by begin/rescan translation
     /// and provider scan-tuple binding.
-    pub tuple_layout: crate::customscan::tuple_layout::ScanTupleLayout,
+    pub tuple_layout: ScanTupleLayout,
 }
 
 impl<P: LakebaseCustomScanProvider> Drop for CustomScanStateWrapper<P> {
     fn drop(&mut self) {
-        // Normal EndCustomScan runs provider teardown and clears these flags.
-        // This fallback only drops typed Rust payloads that survived an ERROR path.
-        if self.provider_state_initialized {
-            unsafe {
-                core::ptr::drop_in_place(self.provider_state.as_mut_ptr());
-            }
-            self.provider_state_initialized = false;
-        }
-        if self.decoded_private_initialized {
-            unsafe {
-                core::ptr::drop_in_place(self.decoded_private.as_mut_ptr());
-            }
-            self.decoded_private_initialized = false;
-        }
+        // Normal EndCustomScan runs provider teardown before these owned values
+        // are taken. This fallback drops values that survived an ERROR path.
+        let _ = self.provider_state.take();
+        let _ = self.decoded_private.take();
     }
 }
 
@@ -104,38 +92,111 @@ impl<P: LakebaseCustomScanProvider> CustomScanStateWrapper<P> {
     pub unsafe fn from_node_ptr<'a>(
         node: *mut pg_sys::CustomScanState,
     ) -> &'a mut Self {
-        debug_assert!(!node.is_null(), "from_node_ptr called with NULL node");
         // SAFETY: forwarded from this function's contract; the cast is
         // sound under `#[repr(C)]` with `base` as the first field.
         unsafe { &mut *(node as *mut Self) }
     }
 
-    /// Return `*mut CustomScanState` aliasing `self.base`.
-    pub fn as_node_ptr(&mut self) -> *mut pg_sys::CustomScanState {
-        // SAFETY: `base` is at offset 0 under `#[repr(C)]`.
-        &mut self.base as *mut pg_sys::CustomScanState
-    }
-
-    /// Upcast to `*mut Node`.
-    pub fn as_node(&mut self) -> *mut pg_sys::Node {
-        self.as_node_ptr().cast()
-    }
-
     /// Borrow the provider state after a successful BeginCustomScan.
-    pub fn active_provider_state_mut(&mut self) -> Option<&mut P::State> {
-        if !self.provider_state_initialized || !self.provider_began {
+    pub(crate) fn active_provider_state_mut(&mut self) -> Option<&mut P::State> {
+        if !self.provider_began {
             return None;
         }
-        // SAFETY: the lifecycle flags are set only after this field is written
-        // and cleared before it is dropped.
-        Some(unsafe { self.provider_state.assume_init_mut() })
+        self.provider_state.as_mut()
+    }
+
+    /// Borrow provider state from a callback after PostgreSQL has completed Begin.
+    ///
+    /// # Safety
+    ///
+    /// The wrapper must contain a provider state created before the callback.
+    /// The caller must not use this accessor after the corresponding End
+    /// callback has taken the state.
+    pub(crate) unsafe fn provider_state_mut_unchecked(&mut self) -> &mut P::State {
+        // SAFETY: guaranteed by this method's callback-lifecycle contract.
+        unsafe { self.provider_state.as_mut().unwrap_unchecked() }
+    }
+
+    /// # Safety
+    ///
+    /// `self` must refer to a live wrapper allocated for the current test
+    /// backend memory context.
+    pub unsafe fn test_base_mut(&mut self) -> &mut pg_sys::CustomScanState {
+        &mut self.base
+    }
+
+    /// # Safety
+    ///
+    /// `self` must refer to a live wrapper allocated for the current test
+    /// backend memory context.
+    pub unsafe fn test_base(&self) -> &pg_sys::CustomScanState {
+        &self.base
+    }
+
+    /// # Safety
+    ///
+    /// `self` must refer to a live wrapper allocated for the current test
+    /// backend memory context.
+    pub unsafe fn test_scan_state_ptr(&mut self) -> *mut pg_sys::ScanState {
+        core::ptr::addr_of_mut!(self.base.ss)
+    }
+
+    /// # Safety
+    ///
+    /// `state` must be the provider state created for this wrapper, and the
+    /// wrapper must not already contain an installed provider state.
+    pub unsafe fn test_install_provider_state(&mut self, state: P::State) {
+        self.provider_state = Some(state);
+        self.provider_began = true;
+    }
+
+    /// # Safety
+    ///
+    /// The caller must have installed the provider state and must not use the
+    /// returned reference after teardown begins.
+    pub unsafe fn test_provider_state(&self) -> &P::State {
+        self.provider_state
+            .as_ref()
+            .expect("test provider state was not installed")
+    }
+
+    /// # Safety
+    ///
+    /// `envelope` must describe the live custom scan plan installed in the
+    /// wrapper and must be set before invoking the ReScan callback.
+    pub unsafe fn test_set_cached_envelope(&mut self, envelope: CachedEnvelope) {
+        self.cached_envelope = Some(envelope);
+    }
+
+    /// # Safety
+    ///
+    /// `sections` must reference the live `custom_exprs` plan data for this
+    /// wrapper and must be set before invoking the ReScan callback.
+    pub unsafe fn test_set_expr_sections(&mut self, sections: CustomExprSections) {
+        self.expr_sections = Some(sections);
+    }
+
+    /// # Safety
+    ///
+    /// `params` must have been collected from the wrapper's pushed expressions
+    /// and must remain valid until the corresponding scan teardown.
+    pub unsafe fn test_set_runtime_params(&mut self, params: RuntimeParamRefs) {
+        self.runtime_params = Some(params);
+    }
+
+    /// # Safety
+    ///
+    /// The returned reference is valid only while the wrapper remains live and
+    /// before its runtime parameters are cleared during teardown.
+    pub unsafe fn test_runtime_params(&self) -> Option<&RuntimeParamRefs> {
+        self.runtime_params.as_ref()
     }
 }
 
 /// `CreateCustomScanState`: allocate wrapper in current memory context,
 /// point `base.methods` at cached exec methods. Begin fills runtime fields.
 #[pg_guard]
-pub(crate) unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
+pub unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
     P: LakebaseCustomScanProvider,
 >(
     _cscan: *mut pg_sys::CustomScan,
@@ -149,17 +210,15 @@ pub(crate) unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
                 },
                 ..Default::default()
             },
-            methods: crate::customscan::provider::method_tables_for::<P>().exec(),
+            methods: method_tables_for::<P>().exec(),
             ..Default::default()
         },
         recheck_state: core::ptr::null_mut(),
         expr_sections: None,
         runtime_params: None,
-        decoded_private: MaybeUninit::uninit(),
-        provider_state: MaybeUninit::uninit(),
+        decoded_private: None,
+        provider_state: None,
         cached_envelope: None,
-        decoded_private_initialized: false,
-        provider_state_initialized: false,
         provider_began: false,
         _marker: PhantomData,
     };
@@ -170,57 +229,4 @@ pub(crate) unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
 
     // SAFETY: repr(C) first-field chain: wrapper → base → ss → ps → type_.
     wrapper_ptr.cast::<pg_sys::Node>()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct TestStateA;
-
-    use crate::customscan::test_support::{NoopProvider, NoopProviderSpec};
-
-    struct StateProviderSpec;
-
-    impl NoopProviderSpec for StateProviderSpec {
-        const NAME: &'static core::ffi::CStr = c"test-provider-a";
-        type State = TestStateA;
-
-        fn state() -> Self::State {
-            TestStateA
-        }
-    }
-
-    type ProviderA = NoopProvider<StateProviderSpec>;
-
-    #[test]
-    fn base_field_is_at_offset_zero() {
-        let offset = core::mem::offset_of!(CustomScanStateWrapper<ProviderA>, base);
-        assert_eq!(
-            offset, 0,
-            "CustomScanStateWrapper::base must be the first field"
-        );
-    }
-
-    #[test]
-    fn from_node_ptr_and_as_node_ptr_round_trip() {
-        let mut storage: MaybeUninit<CustomScanStateWrapper<ProviderA>> =
-            MaybeUninit::zeroed();
-        // SAFETY: zeroed wrapper; typed payloads never read.
-        let wrapper_ptr: *mut CustomScanStateWrapper<ProviderA> =
-            storage.as_mut_ptr();
-        let node_ptr: *mut pg_sys::CustomScanState = wrapper_ptr.cast();
-
-        // SAFETY: `storage` lives for the test.
-        let wrapper_ref =
-            unsafe { CustomScanStateWrapper::<ProviderA>::from_node_ptr(node_ptr) };
-        let round_tripped = wrapper_ref.as_node_ptr();
-        assert_eq!(
-            round_tripped, node_ptr,
-            "as_node_ptr(from_node_ptr(p)) must equal p",
-        );
-
-        let as_node = wrapper_ref.as_node();
-        assert_eq!(as_node as *mut pg_sys::CustomScanState, node_ptr);
-    }
 }

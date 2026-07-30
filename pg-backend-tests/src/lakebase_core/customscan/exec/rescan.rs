@@ -10,27 +10,26 @@ mod tests {
     use crate::lakebase_core::customscan::exec::support::{
         make_econtext_stub, make_estate_stub,
     };
+    use crate::lakebase_core::customscan::support::{
+        RuntimeParamRefsView, TestCachedEnvelope, TestScanState,
+    };
     use crate::lakebase_core::support::pg::{OpExprSpec, PgNodeBuilder};
     use pg_lakebase_core::customscan::ScanPurpose;
-    use pg_lakebase_core::customscan::codec::{PrivateDataReader, PrivateDataWriter};
-    use pg_lakebase_core::customscan::custom_private::{
-        CustomScanPrivate, encode_split,
-    };
-    use pg_lakebase_core::customscan::exec::{
-        CustomExprSections, RuntimeParamRefs, rescan_custom_scan_trampoline,
-    };
+    use pg_lakebase_core::customscan::custom_exprs::CustomExprSections;
+    use pg_lakebase_core::customscan::custom_private::encode_split;
+    use pg_lakebase_core::customscan::exec::rescan_custom_scan_trampoline;
+    use pg_lakebase_core::customscan::exec_params::RuntimeParamRefs;
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathVariant, PlanTranslateContext, ReScanContext, RelPathContext,
-        ScanTupleLayout,
+        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
+        RelationContext, ScanTupleLayout,
     };
-    use pg_lakebase_core::customscan::state::{
-        CachedEnvelope, CustomScanStateWrapper,
+    use pg_lakebase_core::customscan::provider::{
+        CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
-    use pg_lakebase_core::expr::split::{
-        ColumnRef, PushdownContract, QualPushdownDecision,
-    };
+    use pg_lakebase_core::expr::ColumnRef;
+    use pg_lakebase_core::expr::{PushdownContract, QualPushdownDecision};
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
@@ -144,7 +143,7 @@ mod tests {
         type PrivateData = CountingPrivate;
         type State = CountingState;
 
-        fn supports_relation(_ctx: &RelPathContext) -> bool {
+        fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
         }
 
@@ -156,7 +155,7 @@ mod tests {
         }
 
         fn create_path(
-            _ctx: &RelPathContext,
+            _ctx: &PathContext<'_>,
             _variant: &PathVariant<'_>,
             _builder: CustomPathBuilder<Self>,
         ) -> Option<CustomPathPlan<Self>> {
@@ -185,9 +184,11 @@ mod tests {
             if ctx.params_changed {
                 ctx.state.predicate_rebuilt = true;
             }
-            ctx.state.resolved_param_count = ctx.resolved_param_count();
-            ctx.state.last_pushed_count = ctx.pushed_predicate_count();
-            ctx.state.last_scan_relid = ctx.scan_relid();
+            ctx.state.resolved_param_count =
+                ctx.pushed_predicates.resolved_param_count();
+            ctx.state.last_pushed_count =
+                ctx.pushed_predicates.pushed_predicate_count();
+            ctx.state.last_scan_relid = ctx.pushed_predicates.scan_relid();
             Ok(())
         }
 
@@ -198,8 +199,8 @@ mod tests {
 
     /// Synthetic rescan fixture from `synth_setup_chgparam_rescan`.
     struct ChgParamFixture {
-        wrapper_ptr: *mut CustomScanStateWrapper<CountingProvider>,
-        /// Same allocation as `wrapper_ptr` (`base` is the first field).
+        wrapper_ptr: TestScanState<CountingProvider>,
+        /// Same allocation as `wrapper_ptr`.
         node: *mut pg_sys::CustomScanState,
         /// Retained to assert the trampoline did not stomp cached ids.
         cached_ids: *mut pg_sys::Bitmapset,
@@ -282,21 +283,8 @@ mod tests {
         unsafe {
             let relation_oid = pg_sys::Oid::from(50_500u32);
 
-            let wrapper_ptr = pg_sys::palloc0(core::mem::size_of::<
-                CustomScanStateWrapper<CountingProvider>,
-            >())
-                as *mut CustomScanStateWrapper<CountingProvider>;
-            assert!(!wrapper_ptr.is_null());
-            (*wrapper_ptr).base.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
-
-            // SAFETY: mirrors BeginCustomScan — `ptr::write` before the trampoline reads state.
-            (*wrapper_ptr)
-                .provider_state
-                .as_mut_ptr()
-                .write(CountingState::default());
-            // Mirror post-Begin init flags so the trampoline sees initialized provider state.
-            (*wrapper_ptr).provider_state_initialized = true;
-            (*wrapper_ptr).provider_began = true;
+            let mut wrapper_ptr = TestScanState::<CountingProvider>::new();
+            wrapper_ptr.install_provider_state(CountingState::default());
 
             // Populate the cached envelope that rescan reads (mirrors BeginCustomScan).
             let column_refs = vec![ColumnRef {
@@ -307,7 +295,7 @@ mod tests {
                 attcollation: pg_sys::Oid::INVALID,
                 name: None,
             }];
-            (*wrapper_ptr).cached_envelope = Some(CachedEnvelope {
+            wrapper_ptr.set_cached_envelope(TestCachedEnvelope {
                 purpose: ScanPurpose::Query,
                 pushed_contracts: vec![PushdownContract::ExactRowFilter],
                 column_refs,
@@ -315,41 +303,45 @@ mod tests {
             });
 
             let cscan = make_custom_scan_plan(relation_oid);
-            (*wrapper_ptr).base.ss.ps.plan = cscan.cast::<pg_sys::Plan>();
+            wrapper_ptr.base_mut().ss.ps.plan = cscan.cast::<pg_sys::Plan>();
             let expr_sections =
                 CustomExprSections::from_custom_exprs((*cscan).custom_exprs, 1, 0)
                     .expect("fixture custom_exprs must have one pushed expression");
             let runtime_params =
                 RuntimeParamRefs::collect_from_exprs(expr_sections.pushed());
-            let cached_ids = runtime_params.exec_param_ids();
-            (*wrapper_ptr).expr_sections = Some(expr_sections);
-            (*wrapper_ptr).runtime_params = Some(runtime_params);
+            let cached_ids =
+                RuntimeParamRefsView::new(&runtime_params).exec_param_ids();
+            wrapper_ptr.set_expr_sections(expr_sections);
+            wrapper_ptr.set_runtime_params(runtime_params);
 
             let scan_rel = make_relation_stub(relation_oid);
-            (*wrapper_ptr).base.ss.ss_currentRelation = scan_rel;
+            wrapper_ptr.base_mut().ss.ss_currentRelation = scan_rel;
 
             let estate = make_estate_stub(ptr::null_mut());
             (*estate).es_param_exec_vals = make_exec_params_int4_one();
             let econtext = make_econtext_stub();
-            (*wrapper_ptr).base.ss.ps.state = estate;
-            (*wrapper_ptr).base.ss.ps.ps_ExprContext = econtext;
+            (*econtext).ecxt_param_exec_vals = (*estate).es_param_exec_vals;
+            wrapper_ptr.base_mut().ss.ps.state = estate;
+            wrapper_ptr.base_mut().ss.ps.ps_ExprContext = econtext;
 
             let chg = make_bms(chgparam_members);
-            (*wrapper_ptr).base.ss.ps.chgParam = chg;
+            wrapper_ptr.base_mut().ss.ps.chgParam = chg;
+
+            let node = wrapper_ptr.node_ptr();
 
             ChgParamFixture {
                 wrapper_ptr,
-                node: wrapper_ptr.cast::<pg_sys::CustomScanState>(),
+                node,
                 cached_ids,
             }
         }
     }
 
-    /// Read provider state after rescan; sound because setup used `ptr::write`.
+    /// Read provider state after rescan; setup installed it through the facade.
     unsafe fn read_state(
-        wrapper_ptr: *mut CustomScanStateWrapper<CountingProvider>,
-    ) -> &'static CountingState {
-        unsafe { (*wrapper_ptr).provider_state.assume_init_ref() }
+        wrapper_ptr: &TestScanState<CountingProvider>,
+    ) -> &CountingState {
+        unsafe { wrapper_ptr.provider_state() }
     }
 
     /// Overlapping chgParam triggers rebuild with re-resolved params.
@@ -360,7 +352,7 @@ mod tests {
 
             rescan_custom_scan_trampoline::<CountingProvider>(fx.node);
 
-            let state = read_state(fx.wrapper_ptr);
+            let state = read_state(&fx.wrapper_ptr);
             assert_eq!(
                 state.rescan_call_count, 1,
                 "rescan trampoline must invoke provider.rescan exactly once",
@@ -384,12 +376,12 @@ mod tests {
                 "scan_relid must be forwarded verbatim from \
                  cscan->scan.scanrelid ",
             );
+            let cached_params = fx
+                .wrapper_ptr
+                .runtime_params()
+                .expect("runtime params cached");
             assert_eq!(
-                (*fx.wrapper_ptr)
-                    .runtime_params
-                    .as_ref()
-                    .expect("runtime params cached")
-                    .exec_param_ids(),
+                RuntimeParamRefsView::new(cached_params).exec_param_ids(),
                 fx.cached_ids,
                 "runtime param ids are computed once at Begin and must \
                  NOT be stomped by ReScan ",
@@ -405,7 +397,7 @@ mod tests {
 
             rescan_custom_scan_trampoline::<CountingProvider>(fx.node);
 
-            let state = read_state(fx.wrapper_ptr);
+            let state = read_state(&fx.wrapper_ptr);
             assert_eq!(
                 state.rescan_call_count, 1,
                 "reopen-only branch must still invoke provider.rescan exactly \
@@ -421,12 +413,12 @@ mod tests {
                 "reopen-only branch must hand the provider the empty \
                  resolved-params slice",
             );
+            let cached_params = fx
+                .wrapper_ptr
+                .runtime_params()
+                .expect("runtime params cached");
             assert_eq!(
-                (*fx.wrapper_ptr)
-                    .runtime_params
-                    .as_ref()
-                    .expect("runtime params cached")
-                    .exec_param_ids(),
+                RuntimeParamRefsView::new(cached_params).exec_param_ids(),
                 fx.cached_ids,
                 "runtime param ids must remain unchanged across the \
                  reopen-only branch ",
@@ -440,14 +432,14 @@ mod tests {
         unsafe {
             let fx = synth_setup_chgparam_rescan(&[]);
             assert!(
-                (*fx.wrapper_ptr).base.ss.ps.chgParam.is_null(),
+                fx.wrapper_ptr.base().ss.ps.chgParam.is_null(),
                 "make_bms with no members must produce NULL — PG's \
                  empty-bitmapset convention",
             );
 
             rescan_custom_scan_trampoline::<CountingProvider>(fx.node);
 
-            let state = read_state(fx.wrapper_ptr);
+            let state = read_state(&fx.wrapper_ptr);
             assert_eq!(state.rescan_call_count, 1);
             assert!(
                 !state.predicate_rebuilt,
