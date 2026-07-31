@@ -9,7 +9,8 @@
 //! the job of [`column_mapping`](super::column_mapping).
 //!
 //! Everything here is expressed as **extension traits on the Iceberg types**
-//! (`schema.to_arrow_schema()`, `field.resolve_rule()`,
+//! (`schema.to_arrow_schema()`, `field.resolve_rule()` /
+//! `field.resolve_rule_for_column()`,
 //! `ty.pg_column_type()`, `ty.validate_supported()`) rather than a chain of
 //! similarly-named free functions, so call sites read as method calls on the
 //! value being mapped.
@@ -27,21 +28,21 @@
 //!
 //! # Relationship to `catalog::schema_builder`
 //!
-//! [`IcebergTypeExt::pg_column_type`] is the **logical inverse** of
+//! [`IcebergTypeExt::pg_column_type`] is the format-level companion of
 //! `catalog::schema_builder`'s PostgreSQL → Iceberg mapping (PG `uuid` →
-//! Iceberg `Uuid` → PG `uuid`; PG `bytea`/`jsonb` → Iceberg `Binary` → PG
-//! `bytea`; PG `text`/`varchar`/`bpchar`/`json`/`name` → Iceberg `String`).
-//! pg-iceberg-am always builds its Iceberg schema from the relation's PG
-//! columns, so deriving the target `PgColumnType` back from the Iceberg field
-//! reproduces the column's original PG type. The two halves live in different
-//! layers on purpose (DDL-time field-id allocation vs. data-path conversion);
-//! they only need to agree coarsely, because the scan decoder ultimately keys
-//! off the relation's real `(oid, typmod)`. A round-trip test guards the
-//! correspondence against drift.
+//! Iceberg `Uuid` → PG `uuid`; PG `bytea` → Iceberg `Binary` → PG `bytea`;
+//! PG `jsonb` → Iceberg `Binary` with an explicit JSONB-internal codec; PG
+//! `text`/`varchar`/`bpchar`/`json`/`name` → Iceberg `String`). Iceberg `Binary`
+//! cannot by itself distinguish `bytea` from `jsonb`, so live scan/write
+//! planning must combine this coarse format type with the relation's actual
+//! `(oid, typmod)` before resolving the rule. A round-trip test guards the
+//! deliberately coarse correspondence against drift.
 
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::spec::{NestedField, PrimitiveType, Schema as IcebergSchema, Type};
-use pg_arrow_conv::{ColumnRule, PgColumnType, resolve_column_rule};
+use pg_arrow_conv::{
+    ArrowConversionError, ColumnRule, PgColumnType, resolve_column_rule,
+};
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
@@ -102,7 +103,9 @@ impl IcebergTypeExt for Type {
                 }
                 PrimitiveType::String => PgColumnType::Text,
                 // The load-bearing distinction: `Uuid` → `uuid`, `Fixed`/
-                // `Binary` → `bytea`, disambiguating Arrow `FixedSizeBinary(16)`.
+                // `Binary` → `bytea` at the format-only boundary. A live
+                // PostgreSQL JSONB target is classified separately by
+                // `PgColumnType::from_pg_type` before rule resolution.
                 PrimitiveType::Uuid => PgColumnType::Uuid,
                 PrimitiveType::Fixed(_) | PrimitiveType::Binary => {
                     PgColumnType::Bytea
@@ -142,11 +145,12 @@ pub(crate) trait IcebergFieldExt {
     /// Resolve the [`ColumnRule`] for this field against an explicit target
     /// PostgreSQL type, keyed on the pair `(Arrow DataType, PgColumnType)`.
     ///
-    /// This is the **single** point where a column's rule is resolved (and
-    /// thereby validated): both scan-plan construction and the mutation write path
-    /// bind their per-column rules through here, so an unsupported or
-    /// incompatible pair surfaces as a `ConvError`/[`IcebergError`] at session
-    /// begin rather than mid-row.
+    /// This is the generic point where a format-only field's rule is resolved
+    /// (and thereby validated). Live scan/write columns use
+    /// [`Self::resolve_rule_for_column`] so a provider can add an explicit
+    /// physical codec when the format type is coarser than the live PostgreSQL
+    /// type. In either case, an unsupported or incompatible pair surfaces as a
+    /// `ArrowConversionError`/[`IcebergError`] at session begin rather than mid-row.
     ///
     /// `pg` is the column's **real** target type — derived from the relation's
     /// `TupleDesc` (`PgColumnType::from_pg_type`) for a live column, so a desync
@@ -155,6 +159,15 @@ pub(crate) trait IcebergFieldExt {
     /// PG column; the write path passes the Iceberg-derived type for those
     /// NULL-only columns via [`IcebergTypeExt::pg_column_type`].)
     fn resolve_rule(&self, pg: PgColumnType) -> IcebergResult<ColumnRule>;
+
+    /// Resolve a rule for a live PostgreSQL column, allowing this provider to
+    /// bind its private JSONB-in-Iceberg-Binary codec explicitly. The generic
+    /// Arrow resolver intentionally does not infer that codec from `JSONBOID`.
+    fn resolve_rule_for_column(
+        &self,
+        pg: PgColumnType,
+        target_oid: pg_sys::Oid,
+    ) -> IcebergResult<ColumnRule>;
 }
 
 impl IcebergFieldExt for NestedField {
@@ -170,6 +183,32 @@ impl IcebergFieldExt for NestedField {
         // such a width into a valid-looking Arrow type and mis-match a rule.
         self.field_type.validate_supported()?;
         let arrow_dt = self.field_type.arrow_type()?;
+        resolve_column_rule(&arrow_dt, pg).map_err(IcebergError::from)
+    }
+
+    fn resolve_rule_for_column(
+        &self,
+        pg: PgColumnType,
+        target_oid: pg_sys::Oid,
+    ) -> IcebergResult<ColumnRule> {
+        self.field_type.validate_supported()?;
+        let arrow_dt = self.field_type.arrow_type()?;
+
+        if target_oid == pg_sys::JSONBOID {
+            return match arrow_dt {
+                DataType::Binary | DataType::LargeBinary => {
+                    Ok(ColumnRule::PostgresJsonbVarlena)
+                }
+                _ => Err(IcebergError::from(
+                    ArrowConversionError::IncompatibleColumnType(
+                        format!("{arrow_dt:?}"),
+                        "JSONB requires the provider's Binary JSONB codec"
+                            .to_string(),
+                    ),
+                )),
+            };
+        }
+
         resolve_column_rule(&arrow_dt, pg).map_err(IcebergError::from)
     }
 }
@@ -203,8 +242,9 @@ impl IcebergSchemaExt for IcebergSchema {
 /// Reject types that pg-iceberg-am's mutation/scan paths cannot handle.
 ///
 /// Implemented for [`Type`] and [`PrimitiveType`] and invoked per field from
-/// [`IcebergFieldExt::resolve_rule`], so the gate is scoped to exactly the
-/// columns a plan maps rather than the whole stored schema.
+/// [`IcebergFieldExt::resolve_rule`] or
+/// [`IcebergFieldExt::resolve_rule_for_column`] method, so the gate is scoped
+/// to exactly the columns a plan maps rather than the whole stored schema.
 ///
 /// A top-level column is accepted for any primitive type or for a single level
 /// of `List` whose element type is one the format-neutral list dispatch in

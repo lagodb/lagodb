@@ -2,3 +2,4 @@
 
 mod column_mapping;
 mod mutation;
+mod scan;

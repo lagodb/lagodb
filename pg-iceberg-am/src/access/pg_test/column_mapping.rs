@@ -13,11 +13,10 @@ mod tests {
     };
     use pgrx::pg_sys;
 
-    use crate::access::column_mapping::{
-        ColumnMapping, LiveColumn, RelationFieldMap, RelationShape,
-    };
+    use crate::access::column_mapping::ColumnMapping;
     use crate::access::projection::{ProjectedField, Projection};
     use crate::error::IcebergError;
+    use crate::relation_binding::{LiveColumn, RelationFieldMap, RelationShape};
 
     fn int_schema(names: &[&str]) -> IcebergSchema {
         let fields: Vec<_> = names
@@ -82,6 +81,7 @@ mod tests {
         )
         .unwrap();
         let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
+        let field_index = field_map.into_indexed();
 
         assert_eq!(
             plan.entries
@@ -97,6 +97,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
+
+        assert_eq!(field_index.binding_for_attno(1).unwrap().field_id, 1);
+        assert_eq!(field_index.binding_for_attno(2).unwrap().field_id, 2);
+        assert!(field_index.binding_for_attno(3).is_none());
+        assert_eq!(field_index.binding_for_attno(4).unwrap().field_id, 3);
     }
 
     #[pgrx::pg_test(schema = "tests")]
@@ -134,9 +139,21 @@ mod tests {
             ProjectedField::new(5, 0),
         ]);
         let field_map = full_map
-            .project(&projection, 2, &int_attribute_types(2))
+            .project(
+                projection
+                    .columns()
+                    .iter()
+                    .map(|field| (field.attno, field.destination)),
+                2,
+                &int_attribute_types(2),
+            )
             .unwrap();
         let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
+        let field_index = field_map.into_indexed();
+
+        assert!(field_index.binding_for_attno(1).is_none());
+        assert_eq!(field_index.binding_for_attno(2).unwrap().field_id, 2);
+        assert_eq!(field_index.binding_for_attno(5).unwrap().field_id, 5);
 
         assert_eq!(
             plan.entries
@@ -167,7 +184,14 @@ mod tests {
             ProjectedField::new(4, 1),
         ]);
         let field_map = full_map
-            .project(&projection, 2, &int_attribute_types(2))
+            .project(
+                projection
+                    .columns()
+                    .iter()
+                    .map(|field| (field.attno, field.destination)),
+                2,
+                &int_attribute_types(2),
+            )
             .unwrap();
         let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
 
@@ -186,7 +210,14 @@ mod tests {
         let full_map =
             RelationFieldMap::from_shape(&schema, &shape(&[(2, "b")], 2)).unwrap();
         let projection = Projection::new(vec![ProjectedField::new(1, 0)]);
-        let result = full_map.project(&projection, 2, &int_attribute_types(2));
+        let result = full_map.project(
+            projection
+                .columns()
+                .iter()
+                .map(|field| (field.attno, field.destination)),
+            2,
+            &int_attribute_types(2),
+        );
 
         assert!(matches!(result, Err(IcebergError::ColumnNotFound(_))));
     }
@@ -197,7 +228,14 @@ mod tests {
         let full_map =
             RelationFieldMap::from_shape(&schema, &shape(&[(1, "a")], 2)).unwrap();
         let projection = Projection::new(vec![ProjectedField::new(0, 0)]);
-        let result = full_map.project(&projection, 2, &int_attribute_types(2));
+        let result = full_map.project(
+            projection
+                .columns()
+                .iter()
+                .map(|field| (field.attno, field.destination)),
+            2,
+            &int_attribute_types(2),
+        );
 
         assert!(matches!(result, Err(IcebergError::InvariantViolated(_))));
     }
@@ -208,7 +246,14 @@ mod tests {
         let full_map =
             RelationFieldMap::from_shape(&schema, &shape(&[(2, "b")], 2)).unwrap();
         let projection = Projection::new(vec![ProjectedField::new(2, 5)]);
-        let result = full_map.project(&projection, 2, &int_attribute_types(2));
+        let result = full_map.project(
+            projection
+                .columns()
+                .iter()
+                .map(|field| (field.attno, field.destination)),
+            2,
+            &int_attribute_types(2),
+        );
 
         assert!(matches!(result, Err(IcebergError::InvariantViolated(_))));
     }

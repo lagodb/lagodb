@@ -1,6 +1,6 @@
-//! Immutable Iceberg scan description and file-task planning.
+//! Statement-scoped Iceberg scan description and file-task planning.
 
-use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use iceberg_lite::expr::Predicate;
@@ -9,83 +9,27 @@ use iceberg_lite::overlay::SnapshotDelta;
 use iceberg_lite::scan::{ArrowRecordBatchIterator, FileScanTask, TableScan};
 use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
-use pg_arrow_conv::{ArrowBatchSource, ArrowColumnDecoder};
+use pg_arrow_conv::ArrowBatchSource;
 use pg_lakebase_core::access::mutation::ModifyScanBinding;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 
-use super::cursor::{IcebergArrowBatches, IcebergBatchCursor};
+use super::batch::IcebergArrowBatches;
+use super::cursor::IcebergBatchCursor;
+use super::tasks::PlannedMutationTasks;
 use crate::access::analyze::AnalyzePreparation;
-use crate::access::column_mapping::{RelationShape, ScanColumns};
+use crate::access::column_mapping::ScanColumns;
 use crate::access::isolation::PgTransactionIsolation;
 use crate::access::mutation::IcebergModifyQueryState;
 use crate::access::projection::Projection;
 use crate::catalog::bridge::IcebergTableId;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
+use crate::relation_binding::{RelationFieldIndex, RelationShape};
 use crate::storage::StorageContext;
 
-/// Planned file tasks for one concrete scan predicate/projection.
-#[derive(Debug)]
-pub(crate) struct PlannedScanTasks {
-    tasks: Arc<[FileScanTask]>,
-    tasks_by_path: HashMap<Box<str>, Vec<usize>>,
-}
-
-impl PlannedScanTasks {
-    fn query(tasks: Vec<FileScanTask>) -> Self {
-        Self {
-            tasks: Arc::from(tasks.into_boxed_slice()),
-            tasks_by_path: HashMap::new(),
-        }
-    }
-
-    pub(crate) fn mutation(tasks: Vec<FileScanTask>) -> Self {
-        let mut tasks_by_path: HashMap<Box<str>, Vec<usize>> = HashMap::new();
-        for (task_index, task) in tasks.iter().enumerate() {
-            tasks_by_path
-                .entry(Box::<str>::from(task.data_file_path.as_str()))
-                .or_default()
-                .push(task_index);
-        }
-        Self {
-            tasks: Arc::from(tasks.into_boxed_slice()),
-            tasks_by_path,
-        }
-    }
-
-    fn tasks(&self) -> &[FileScanTask] {
-        &self.tasks
-    }
-
-    fn shared_tasks(&self) -> Arc<[FileScanTask]> {
-        Arc::clone(&self.tasks)
-    }
-
-    pub(crate) fn mutation_tasks_for_path(
-        &self,
-        path: &str,
-    ) -> IcebergResult<Vec<FileScanTask>> {
-        let task_refs = self.tasks_by_path.get(path).ok_or_else(|| {
-            IcebergError::MetadataTracker(format!(
-                "cannot find Iceberg scan task metadata for deletion target {path}"
-            ))
-        })?;
-        let mut tasks = Vec::with_capacity(task_refs.len());
-        for task_index in task_refs {
-            let task = self.tasks().get(*task_index).ok_or(
-                IcebergError::InvariantViolated(
-                    "scan task path index is inconsistent",
-                ),
-            )?;
-            tasks.push(task.clone());
-        }
-        Ok(tasks)
-    }
-}
-
-/// Immutable parameters for a scan: which table, snapshot schema, columns, and
-/// predicate.
+/// Statement-scoped scan state: snapshot, bound columns, predicates, and
+/// planned-task caches.
 ///
 /// `ScanSpec::build*` is the only place metadata is read from storage during a
 /// scan; `scan_rescan` reuses the spec and rebuilds only the cursor.
@@ -94,8 +38,8 @@ impl PlannedScanTasks {
 /// `ScanSpec` from a runtime-built [`Predicate`], reusing the same scan core in
 /// both the TableAM seqscan and CustomScan paths.
 pub(crate) struct ScanSpec {
-    /// Ready-to-scan Iceberg table. Cheap to clone (`Arc`-backed).
-    table: Arc<Table>,
+    /// Ready-to-scan table bound to the captured metadata snapshot.
+    table: Table,
     /// Schema-bound column plan for the captured snapshot. Drives the cursor
     /// decoder and exposes the `IcebergSchema` for predicate translation.
     plan: ScanColumns,
@@ -112,16 +56,22 @@ pub(crate) struct ScanSpec {
     /// population. Captured with the same metadata snapshot as the file tasks.
     storage_bytes: Option<u64>,
     /// Stable planned tasks for ordinary query projection.
-    query_tasks: Option<Arc<PlannedScanTasks>>,
+    query_tasks: Option<Arc<[FileScanTask]>>,
     /// Stable planned tasks for mutation projection, including row-location
     /// metadata and a path index used by v3 deletion-vector finalization.
-    mutation_tasks: Option<Arc<PlannedScanTasks>>,
+    mutation_tasks: Option<Rc<PlannedMutationTasks>>,
 }
 
 #[derive(Clone, Copy)]
 enum ScanMetadataPurpose {
     Query,
     Analyze,
+}
+
+#[derive(Clone, Copy)]
+enum RowLocationProjection {
+    Exclude,
+    Include,
 }
 
 struct LoadedScanMetadata {
@@ -144,7 +94,7 @@ impl ScanSpec {
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
         let mut spec =
-            Self::build_with_predicates(rel_oid, spc_oid, None, None, shape)?;
+            Self::build_full(rel_oid, spc_oid, shape, ScanMetadataPurpose::Query)?;
 
         // Translate keys after the schema is in hand (the translator needs
         // Iceberg type / field-id info from parsed metadata).
@@ -159,50 +109,61 @@ impl ScanSpec {
         spc_oid: pg_sys::Oid,
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
-        Self::build_with_predicates_for(
-            rel_oid,
-            spc_oid,
-            None,
-            None,
-            shape,
-            ScanMetadataPurpose::Analyze,
-        )
+        Self::build_full(rel_oid, spc_oid, shape, ScanMetadataPurpose::Analyze)
     }
 
-    pub(crate) fn build_with_predicates(
+    /// Build the full-column CustomScan plan together with the direct attno
+    /// index used by its predicate translators.
+    pub(crate) fn build_for_custom_scan(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
         planning_filter: Option<Predicate>,
         row_filter: Option<Predicate>,
         shape: &RelationShape,
-    ) -> IcebergResult<Self> {
-        Self::build_with_predicates_for(
-            rel_oid,
-            spc_oid,
-            planning_filter,
-            row_filter,
-            shape,
-            ScanMetadataPurpose::Query,
-        )
+    ) -> IcebergResult<(Self, Rc<RelationFieldIndex>)> {
+        let LoadedScanMetadata {
+            table,
+            schema,
+            delta,
+            storage_bytes,
+        } = Self::load_table(rel_oid, spc_oid, ScanMetadataPurpose::Query)?;
+        let (plan, field_map) = ScanColumns::new_with_bindings(schema, shape)?;
+        let field_index = Rc::new(field_map.into_indexed());
+        Ok((
+            Self {
+                table,
+                plan,
+                planning_filter,
+                row_filter,
+                delta,
+                storage_bytes,
+                query_tasks: None,
+                mutation_tasks: None,
+            },
+            field_index,
+        ))
     }
 
-    fn build_with_predicates_for(
+    fn build_full(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
-        planning_filter: Option<Predicate>,
-        row_filter: Option<Predicate>,
         shape: &RelationShape,
         purpose: ScanMetadataPurpose,
     ) -> IcebergResult<Self> {
-        let loaded = Self::load_table(rel_oid, spc_oid, purpose)?;
-        let plan = ScanColumns::new(loaded.schema, shape)?;
+        let LoadedScanMetadata {
+            table,
+            schema,
+            delta,
+            storage_bytes,
+        } = Self::load_table(rel_oid, spc_oid, purpose)?;
+        let plan = ScanColumns::new(schema, shape)?;
         Ok(Self {
-            table: Arc::new(loaded.table),
+            table,
             plan,
-            planning_filter,
-            row_filter,
-            delta: loaded.delta,
-            storage_bytes: loaded.storage_bytes,
+            planning_filter: None,
+            row_filter: None,
+            delta,
+            storage_bytes,
             query_tasks: None,
             mutation_tasks: None,
         })
@@ -224,29 +185,38 @@ impl ScanSpec {
         row_filter: Option<Predicate>,
         shape: &RelationShape,
         scan_attr_types: &[(pg_sys::Oid, i32)],
-    ) -> IcebergResult<Self> {
-        let loaded = Self::load_table(rel_oid, spc_oid, ScanMetadataPurpose::Query)?;
-        let plan = ScanColumns::with_projection(
-            loaded.schema,
+    ) -> IcebergResult<(Self, Rc<RelationFieldIndex>)> {
+        let LoadedScanMetadata {
+            table,
+            schema,
+            delta,
+            storage_bytes,
+        } = Self::load_table(rel_oid, spc_oid, ScanMetadataPurpose::Query)?;
+        let (plan, field_map) = ScanColumns::with_projection(
+            schema,
             shape,
             &projection,
             scan_attr_types.len(),
             scan_attr_types,
         )?;
-        Ok(Self {
-            table: Arc::new(loaded.table),
-            plan,
-            planning_filter,
-            row_filter,
-            delta: loaded.delta,
-            storage_bytes: loaded.storage_bytes,
-            query_tasks: None,
-            mutation_tasks: None,
-        })
+        let field_index = Rc::new(field_map.into_indexed());
+        Ok((
+            Self {
+                table,
+                plan,
+                planning_filter,
+                row_filter,
+                delta,
+                storage_bytes,
+                query_tasks: None,
+                mutation_tasks: None,
+            },
+            field_index,
+        ))
     }
 
     /// Shared Iceberg scan core: resolve the relation's metadata through PG's
-    /// transactional cache and build the `Arc<Table>` bound to the current
+    /// transactional cache and build the [`Table`] bound to the current
     /// snapshot's schema. Used by both PG-side entry points.
     fn load_table(
         rel_oid: pg_sys::Oid,
@@ -287,17 +257,13 @@ impl ScanSpec {
 
     /// Replace both the planning and row predicates. Used by the TableAM
     /// scan-key path where a changed key must invalidate planned tasks.
-    pub(crate) fn set_filter(
-        &mut self,
-        predicate: Option<Predicate>,
-    ) -> IcebergResult<()> {
+    pub(crate) fn set_filter(&mut self, predicate: Option<Predicate>) {
         if self.planning_filter != predicate {
             self.query_tasks = None;
             self.mutation_tasks = None;
         }
         self.planning_filter.clone_from(&predicate);
         self.row_filter = predicate;
-        Ok(())
     }
 
     /// Replace the planning and row predicates independently. Used by
@@ -323,48 +289,51 @@ impl ScanSpec {
         self.row_filter = predicate;
     }
 
-    pub(crate) fn prepared_mutation_tasks(&self) -> Option<Arc<PlannedScanTasks>> {
-        self.mutation_tasks.clone()
+    pub(crate) fn prepared_mutation_tasks(&self) -> Option<Rc<PlannedMutationTasks>> {
+        self.mutation_tasks.as_ref().map(Rc::clone)
     }
 
     pub(crate) fn prepare_mutation_tasks(&mut self) -> IcebergResult<()> {
         self.planned_mutation_tasks().map(|_| ())
     }
 
-    fn planned_query_tasks(&mut self) -> IcebergResult<Arc<PlannedScanTasks>> {
+    fn planned_query_tasks(&mut self) -> IcebergResult<Arc<[FileScanTask]>> {
         if let Some(tasks) = self.query_tasks.as_ref() {
             return Ok(Arc::clone(tasks));
         }
         let tasks = self
-            .build_scan(false, self.planning_filter.as_ref())?
+            .build_scan(
+                RowLocationProjection::Exclude,
+                self.planning_filter.as_ref(),
+            )?
             .plan_files()?;
-        let planned = Arc::new(PlannedScanTasks::query(tasks));
-        self.query_tasks = Some(Arc::clone(&planned));
-        Ok(planned)
+        let tasks = Arc::from(tasks.into_boxed_slice());
+        self.query_tasks = Some(Arc::clone(&tasks));
+        Ok(tasks)
     }
 
-    fn planned_mutation_tasks(&mut self) -> IcebergResult<Arc<PlannedScanTasks>> {
+    fn planned_mutation_tasks(&mut self) -> IcebergResult<Rc<PlannedMutationTasks>> {
         if let Some(tasks) = self.mutation_tasks.as_ref() {
-            return Ok(Arc::clone(tasks));
+            return Ok(Rc::clone(tasks));
         }
         let tasks = self
-            .build_scan(true, self.planning_filter.as_ref())?
+            .build_scan(
+                RowLocationProjection::Include,
+                self.planning_filter.as_ref(),
+            )?
             .plan_files()?;
-        let planned = Arc::new(PlannedScanTasks::mutation(tasks));
-        self.mutation_tasks = Some(Arc::clone(&planned));
+        let planned = Rc::new(PlannedMutationTasks::new(tasks));
+        self.mutation_tasks = Some(Rc::clone(&planned));
         Ok(planned)
     }
 
     fn read_planned_tasks(
         &self,
-        include_row_locations: bool,
-        tasks: Arc<PlannedScanTasks>,
+        row_locations: RowLocationProjection,
+        tasks: Arc<[FileScanTask]>,
     ) -> IcebergResult<ArrowRecordBatchIterator> {
-        self.build_scan(include_row_locations, None)?
-            .to_arrow_with_shared_tasks_and_filter(
-                tasks.shared_tasks(),
-                self.row_filter.clone(),
-            )
+        self.build_scan(row_locations, None)?
+            .to_arrow_with_shared_tasks_and_filter(tasks, self.row_filter.clone())
             .map_err(IcebergError::from)
     }
 
@@ -372,10 +341,9 @@ impl ScanSpec {
     pub(crate) fn open_batch_cursor(&mut self) -> IcebergResult<IcebergBatchCursor> {
         let tasks = self.planned_query_tasks()?;
         let source = ArrowBatchSource::new(IcebergArrowBatches(
-            self.read_planned_tasks(false, tasks)?,
+            self.read_planned_tasks(RowLocationProjection::Exclude, tasks)?,
         ));
-        let decoder = ArrowColumnDecoder::new(self.plan.decoded_columns());
-        Ok(IcebergBatchCursor::query(source, decoder))
+        Ok(IcebergBatchCursor::query(source, self.plan.decoder()))
     }
 
     /// Plan the whole logical snapshot for PostgreSQL ANALYZE. Sampling is
@@ -384,12 +352,12 @@ impl ScanSpec {
         &self,
         #[cfg(not(feature = "pg17"))] statistics_target: i32,
     ) -> IcebergResult<AnalyzePreparation> {
-        let scan = self.build_scan(true, None)?;
+        let scan = self.build_scan(RowLocationProjection::Include, None)?;
         let tasks = scan.plan_files()?;
         AnalyzePreparation::try_new(
             scan,
             tasks,
-            ArrowColumnDecoder::new(self.plan.decoded_columns()),
+            self.plan.decoder(),
             self.storage_bytes.ok_or(IcebergError::InvariantViolated(
                 "ANALYZE ScanSpec is missing storage-byte statistics",
             ))?,
@@ -406,12 +374,16 @@ impl ScanSpec {
         table_oid: pg_sys::Oid,
     ) -> IcebergResult<IcebergBatchCursor> {
         let tasks = self.planned_mutation_tasks()?;
-        let source = ArrowBatchSource::new(IcebergArrowBatches(
-            self.read_planned_tasks(true, tasks)?,
-        ));
-        let decoder = ArrowColumnDecoder::new(self.plan.decoded_columns());
+        let source =
+            ArrowBatchSource::new(IcebergArrowBatches(self.read_planned_tasks(
+                RowLocationProjection::Include,
+                tasks.shared_tasks(),
+            )?));
         Ok(IcebergBatchCursor::mutation(
-            source, decoder, binding, table_oid,
+            source,
+            self.plan.decoder(),
+            binding,
+            table_oid,
         ))
     }
 
@@ -419,12 +391,21 @@ impl ScanSpec {
     /// planning filter.
     fn build_scan(
         &self,
-        include_row_locations: bool,
+        row_locations: RowLocationProjection,
         filter: Option<&Predicate>,
     ) -> IcebergResult<TableScan> {
         let mut builder = self.table.scan();
-        builder =
-            builder.select_field_ids(self.scan_field_ids(include_row_locations));
+        builder = match row_locations {
+            RowLocationProjection::Exclude => builder
+                .select_field_ids(self.plan.project_field_ids().iter().copied()),
+            RowLocationProjection::Include => builder.select_field_ids(
+                self.plan
+                    .project_field_ids()
+                    .iter()
+                    .copied()
+                    .chain([RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS]),
+            ),
+        };
         if let Some(predicate) = filter {
             builder = builder.with_filter(predicate.clone());
         }
@@ -434,21 +415,8 @@ impl ScanSpec {
         Ok(builder.build()?)
     }
 
-    fn scan_field_ids(&self, include_row_locations: bool) -> Vec<i32> {
-        let mut field_ids = self.plan.project_field_ids().to_vec();
-        if include_row_locations {
-            field_ids.push(RESERVED_FIELD_ID_FILE);
-            field_ids.push(RESERVED_FIELD_ID_POS);
-        }
-        field_ids
-    }
-
     pub(crate) fn starting_snapshot_id(&self) -> Option<i64> {
         self.table.metadata().current_snapshot_id()
-    }
-
-    pub(crate) fn schema(&self) -> &IcebergSchema {
-        self.plan.schema()
     }
 
     /// Re-translate the current effective [`OwnedScanKeys`] into a filter.
@@ -456,7 +424,9 @@ impl ScanSpec {
         &mut self,
         keys: &OwnedScanKeys,
     ) -> IcebergResult<()> {
-        self.set_filter(scan_keys_to_predicate(keys, self.plan.schema())?)
+        let filter = scan_keys_to_predicate(keys, self.plan.schema())?;
+        self.set_filter(filter);
+        Ok(())
     }
 }
 

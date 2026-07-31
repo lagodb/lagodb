@@ -168,8 +168,8 @@ pub enum IcebergError {
     #[error("postgres error: {0}")]
     PgError(#[from] PgError),
 
-    #[error("conversion error: {0}")]
-    ConvError(#[from] pg_arrow_conv::ConvError),
+    #[error("Arrow/Datum conversion error: {0}")]
+    ArrowConversion(#[from] pg_arrow_conv::ArrowConversionError),
 
     #[error("tablespace options not found")]
     TablespaceNotFound,
@@ -295,7 +295,7 @@ impl SqlStateError for IcebergError {
 
             IcebergError::PgError(error) => error.sql_error_code(),
 
-            IcebergError::ConvError(conv) => conv.sql_error_code(),
+            IcebergError::ArrowConversion(conv) => conv.sql_error_code(),
 
             IcebergError::MetadataTracker(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
@@ -535,8 +535,8 @@ mod tests {
         );
     }
 
-    /// Every representative `ConvError` variant must report the same SQLSTATE
-    /// before and after being wrapped in `IcebergError::ConvError`.
+    /// Every representative `ArrowConversionError` variant must report the same SQLSTATE
+    /// before and after being wrapped in `IcebergError::ArrowConversion`.
     #[test]
     fn conv_error_sqlstate_survives_iceberg_error_boundary() {
         use pgrx::datum::datetime_support::DateTimeConversionError;
@@ -544,38 +544,32 @@ mod tests {
 
         let representatives = [
             // DATATYPE_MISMATCH group
-            pg_arrow_conv::ConvError::UnsupportedColumnType(
+            pg_arrow_conv::ArrowConversionError::UnsupportedColumnType(
                 "Decimal256(76, 10)".into(),
             ),
-            pg_arrow_conv::ConvError::IncompatibleColumnType(
+            pg_arrow_conv::ArrowConversionError::IncompatibleColumnType(
                 "FixedSizeBinary(16)".into(),
                 "expected uuid".into(),
             ),
-            pg_arrow_conv::ConvError::ArrowTypeMismatch("Int32Array".into()),
+            pg_arrow_conv::ArrowConversionError::ArrowTypeMismatch("Int32Array".into()),
             // DATA_EXCEPTION group
-            pg_arrow_conv::ConvError::DatumConversionError(
+            pg_arrow_conv::ArrowConversionError::ValueOutOfRange(
                 "value out of range".into(),
             ),
-            pg_arrow_conv::ConvError::NumericError(PgNumericError::Invalid(
+            pg_arrow_conv::ArrowConversionError::NumericError(PgNumericError::Invalid(
                 "not a numeric".into(),
             )),
-            pg_arrow_conv::ConvError::DatetimeConversionError(
+            pg_arrow_conv::ArrowConversionError::DatetimeConversionError(
                 DateTimeConversionError::FieldOverflow,
             ),
-            pg_arrow_conv::ConvError::InvalidUtf8({
-                let bytes: &[u8] = &[0xff, 0xfe];
-                // Intentionally invalid UTF-8: we need a real `Utf8Error` to
-                // exercise the error-code mapping below.
-                #[allow(invalid_from_utf8)]
-                let err = std::str::from_utf8(bytes).unwrap_err();
-                err
-            }),
             // INTERNAL_ERROR group
-            pg_arrow_conv::ConvError::ArrowError(
+            pg_arrow_conv::ArrowConversionError::ArrowError(
                 arrow_schema::ArrowError::SchemaError("bad schema".into()),
             ),
-            pg_arrow_conv::ConvError::DecimalCodecBug(
-                "malformed numeric bytes".into(),
+            pg_arrow_conv::ArrowConversionError::DecimalCodec(
+                pg_lakebase_core::tuple::DecimalCodecError::InvalidBinaryRepresentation {
+                    message: "malformed numeric bytes".into(),
+                },
             ),
         ];
 
@@ -585,42 +579,44 @@ mod tests {
             assert_eq!(
                 wrapped.sql_error_code(),
                 expected,
-                "IcebergError::ConvError must preserve the inner ConvError SQLSTATE"
+                "IcebergError::ArrowConversion must preserve the inner ArrowConversionError SQLSTATE"
             );
         }
     }
 
-    /// A `ConvError` must cross into `IcebergError` through plain `?`
+    /// A `ArrowConversionError` must cross into `IcebergError` through plain `?`
     /// propagation, since the write path relies on the `#[from]` conversion to
     /// surface conversion failures without manual mapping.
     #[test]
     fn conv_error_propagates_into_iceberg_error_via_question_mark() {
         fn boundary() -> IcebergResult<()> {
-            Err(pg_arrow_conv::ConvError::DatumConversionError(
+            Err(pg_arrow_conv::ArrowConversionError::ValueOutOfRange(
                 "value out of range".into(),
             ))?;
             Ok(())
         }
 
-        let err = boundary().expect_err("ConvError should propagate as IcebergError");
-        assert!(matches!(err, IcebergError::ConvError(_)));
+        let err = boundary()
+            .expect_err("ArrowConversionError should propagate as IcebergError");
+        assert!(matches!(err, IcebergError::ArrowConversion(_)));
     }
 
-    /// A decode-path `ConvError` (here the physical-array mismatch the column
+    /// A decode-path `ArrowConversionError` (here the physical-array mismatch the column
     /// decoder raises) must reach the scan boundary through plain `?`, so the
     /// decoder needs no bespoke mapping to surface failures as `IcebergError`.
     #[test]
     fn decode_conv_error_propagates_into_iceberg_error_via_question_mark() {
         fn boundary() -> IcebergResult<()> {
-            Err(pg_arrow_conv::ConvError::ArrowTypeMismatch(
+            Err(pg_arrow_conv::ArrowConversionError::ArrowTypeMismatch(
                 "expected Int32Array".into(),
             ))?;
             Ok(())
         }
 
-        let err = boundary()
-            .expect_err("decode ConvError should propagate as IcebergError");
-        assert!(matches!(err, IcebergError::ConvError(_)));
+        let err = boundary().expect_err(
+            "decode ArrowConversionError should propagate as IcebergError",
+        );
+        assert!(matches!(err, IcebergError::ArrowConversion(_)));
     }
 
     /// The UUID-conversion arm needs a real `uuid::Error`, constructed here so
@@ -628,16 +624,16 @@ mod tests {
     #[test]
     fn conv_uuid_error_sqlstate_survives_iceberg_error_boundary() {
         let uuid_err = uuid::Uuid::parse_str("not-a-uuid").unwrap_err();
-        let conv = pg_arrow_conv::ConvError::UuidConversionError(uuid_err);
+        let conv = pg_arrow_conv::ArrowConversionError::UuidConversionError(uuid_err);
 
         let expected = conv.sql_error_code();
         assert_eq!(expected, PgSqlErrorCode::ERRCODE_DATA_EXCEPTION);
         assert_eq!(IcebergError::from(conv).sql_error_code(), expected);
     }
 
-    /// Each `DecimalCodecError` arm, routed through `ConvError` and wrapped in
+    /// Each `DecimalCodecError` arm, routed through `ArrowConversionError` and wrapped in
     /// `IcebergError`, must land on its expected SQLSTATE class. The codec
-    /// error reaches `IcebergError` only via `pg_arrow_conv::ConvError` (the
+    /// error reaches `IcebergError` only via `pg_arrow_conv::ArrowConversionError` (the
     /// AM no longer routes `DecimalCodecError` directly), so this is the one
     /// routing that must hold.
     #[test]
@@ -662,7 +658,7 @@ mod tests {
                     scale: 2,
                     message: "value exceeds NUMERIC(10, 2)".into(),
                 },
-                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+                PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
             ),
             (
                 DecimalCodecError::InvalidBinaryRepresentation {
@@ -673,14 +669,14 @@ mod tests {
         ];
 
         for (codec_err, expected_class) in cases {
-            // DecimalCodecError -> ConvError -> IcebergError.
-            let conv: pg_arrow_conv::ConvError = codec_err.into();
+            // DecimalCodecError -> ArrowConversionError -> IcebergError.
+            let conv: pg_arrow_conv::ArrowConversionError = codec_err.into();
             let via_conv = IcebergError::from(conv);
 
             assert_eq!(
                 via_conv.sql_error_code(),
                 expected_class,
-                "DecimalCodecError -> ConvError -> IcebergError must preserve the SQLSTATE class"
+                "DecimalCodecError -> ArrowConversionError -> IcebergError must preserve the SQLSTATE class"
             );
         }
     }

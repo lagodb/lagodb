@@ -483,14 +483,17 @@ mod tests {
     /// correspondence, which live in different layers: PG→Iceberg here
     /// ([`PgType::primitive_type`]) and Iceberg→PG in
     /// [`crate::access::type_mapping`] ([`IcebergTypeExt::pg_column_type`]).
-    /// They are logical inverses and must agree on the canonical target type,
-    /// but nothing structural forces it — so this round-trips every supported
-    /// scalar built-in and asserts it lands back on the expected canonical
-    /// `PgColumnType`.
+    /// They are coarse logical companions and must agree on the canonical
+    /// target type, but nothing structural forces it — so this round-trips
+    /// every supported scalar built-in and asserts it lands back on the
+    /// expected canonical `PgColumnType`. Iceberg `Binary` intentionally does
+    /// not preserve the bytea/jsonb distinction; the live relation OID supplies
+    /// that distinction to the execution rule resolver.
     ///
     /// The mapping is canonicalizing, not bijective: `int2` widens to Iceberg
     /// `Int` (→ `Int4`), the `text`/`varchar`/`bpchar`/`json`/`name` family
-    /// collapses to `Text`, and `bytea`/`jsonb` collapse to `Bytea`. The
+    /// collapses to `Text`; `bytea` and `jsonb` remain distinct at the
+    /// conversion-rule boundary even though both use Iceberg `Binary`. The
     /// round-trip target is therefore the canonical PG type, not necessarily
     /// the original OID.
     #[test]
@@ -515,6 +518,9 @@ mod tests {
             (PgBuiltInOids::JSONOID, PgColumnType::Text),
             (PgBuiltInOids::NAMEOID, PgColumnType::Text),
             (PgBuiltInOids::BYTEAOID, PgColumnType::Bytea),
+            // Iceberg Binary alone cannot recover whether the source was
+            // bytea or jsonb; the live relation OID supplies that distinction
+            // during execution planning.
             (PgBuiltInOids::JSONBOID, PgColumnType::Bytea),
             (PgBuiltInOids::UUIDOID, PgColumnType::Uuid),
             (PgBuiltInOids::NUMERICOID, PgColumnType::Numeric),

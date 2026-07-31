@@ -1,7 +1,7 @@
 //! Stable Iceberg file population and ANALYZE read-plan construction.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use iceberg_lite::arrow::SelectedRowsReadRequest;
 use iceberg_lite::scan::FileScanTask;
@@ -118,7 +118,7 @@ impl AnalyzePopulation {
             if sample.positions.is_empty() {
                 continue;
             }
-            let path: Arc<str> = Arc::from(file.task.data_file_path.as_str());
+            let path: Rc<str> = Rc::from(file.task.data_file_path.as_str());
             let positions = sample
                 .positions
                 .iter()
@@ -153,7 +153,7 @@ impl AnalyzePopulation {
         let mut expected_files = Vec::with_capacity(file_count);
         for file in self.files.into_iter().chain(self.zero_row_files) {
             expected_files.push(ExpectedFile {
-                path: Arc::from(file.task.data_file_path.as_str()),
+                path: Rc::from(file.task.data_file_path.as_str()),
                 positions: ExpectedPositions::All(file.record_count),
             });
             tasks.push(file.task);

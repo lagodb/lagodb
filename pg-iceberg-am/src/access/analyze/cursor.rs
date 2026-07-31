@@ -2,9 +2,9 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
-use arrow_array::RecordBatch;
+use arrow_array::{Int64Array, RecordBatch};
 use iceberg_lite::arrow::SelectedRowsReadRequest;
 use iceberg_lite::scan::{FileScanTask, TableScan};
 use pg_arrow_conv::{ArrowBatchSource, ArrowColumnDecoder, BoundBatch};
@@ -12,8 +12,9 @@ use pg_lakebase_core::api::{AnalyzeTupleOutcome, TRIGGER_ROW_BLOCK_BASE};
 use pg_lakebase_core::prelude::*;
 
 use super::sampling::SampledPosition;
-use crate::access::scan::{
-    BatchMetadataColumns, IcebergArrowBatchSource, IcebergArrowBatches,
+use crate::access::scan::batch::{
+    IcebergArrowBatchSource, IcebergArrowBatches, RowLocationLayout,
+    position_unchecked,
 };
 use crate::error::{IcebergError, IcebergResult};
 
@@ -52,17 +53,22 @@ impl AnalyzeReadPlan {
 
 struct AnalyzeBoundBatch {
     decoded: BoundBatch,
-    metadata: BatchMetadataColumns,
+    positions: Int64Array,
+    file_index: usize,
 }
 
 pub(super) struct AnalyzeBatchCursor {
     source: IcebergArrowBatchSource,
     decoder: ArrowColumnDecoder,
     current: Option<AnalyzeBoundBatch>,
+    row_location_layout: Option<RowLocationLayout>,
     row_index: usize,
     expected: ExpectedCursor,
-    file_indices: HashMap<Arc<str>, usize>,
-    cached_returned_file: Option<(Arc<str>, usize)>,
+    file_indices: HashMap<Rc<str>, usize>,
+    /// Batch-level fast path for consecutive batches from the same file.
+    /// Selected-row reads can legally produce one-row batches, so retaining
+    /// this avoids replacing the old string comparison with a hash per row.
+    last_bound_file: Option<(Rc<str>, usize)>,
     tickets: u64,
     next_ticket: u64,
     ticket_end: u64,
@@ -91,10 +97,11 @@ impl AnalyzeBatchCursor {
             source,
             decoder,
             current: None,
+            row_location_layout: None,
             row_index: 0,
             expected,
             file_indices,
-            cached_returned_file: None,
+            last_bound_file: None,
             tickets,
             next_ticket: 0,
             ticket_end: 0,
@@ -179,24 +186,13 @@ impl AnalyzeBatchCursor {
             if let Some(batch) = self.current.as_ref()
                 && self.row_index < self.decoder.num_rows(&batch.decoded)
             {
-                let path = batch.metadata.file(self.row_index)?;
-                let file_index = if let Some((cached_path, index)) =
-                    self.cached_returned_file.as_ref()
-                    && cached_path.as_ref() == path
-                {
-                    *index
-                } else {
-                    let index = *self.file_indices.get(path).ok_or(
-                        IcebergError::InvariantViolated(
-                            "ANALYZE reader returned an unplanned data file",
-                        ),
-                    )?;
-                    self.cached_returned_file = Some((Arc::from(path), index));
-                    index
-                };
                 return Ok(Some(RowIdentity {
-                    file_index,
-                    position: batch.metadata.position(self.row_index)?,
+                    file_index: batch.file_index,
+                    // SAFETY: Iceberg's row-number producer supplies non-null,
+                    // non-negative positions before publishing the batch.
+                    position: unsafe {
+                        position_unchecked(&batch.positions, self.row_index)
+                    },
                 }));
             }
 
@@ -204,18 +200,72 @@ impl AnalyzeBatchCursor {
             let Some(batch) = self.source.next_batch()? else {
                 return Ok(None);
             };
-            self.current = Some(Self::bind_batch(&self.decoder, batch)?);
+            let Some(bound) = self.bind_batch(batch)? else {
+                continue;
+            };
+            self.current = Some(bound);
             self.row_index = 0;
         }
     }
 
     fn bind_batch(
-        decoder: &ArrowColumnDecoder,
+        &mut self,
         batch: RecordBatch,
-    ) -> AmResult<AnalyzeBoundBatch> {
-        let metadata = BatchMetadataColumns::try_new(&batch)?;
-        let decoded = decoder.bind(batch)?;
-        Ok(AnalyzeBoundBatch { decoded, metadata })
+    ) -> AmResult<Option<AnalyzeBoundBatch>> {
+        let layout = match self.row_location_layout {
+            Some(layout) => layout,
+            None => {
+                let layout = RowLocationLayout::try_new(&batch)?;
+                self.row_location_layout = Some(layout);
+                layout
+            }
+        };
+        // SAFETY: this is the Iceberg reader projection used to create the
+        // stable layout; `bind` handles empty batches without reading `_file`.
+        let locations = unsafe { layout.bind(&batch) }?;
+        let Some(locations) = locations else {
+            // Preserve the old empty-batch schema validation without creating
+            // a row-bearing ANALYZE state.
+            let _ = self.decoder.bind(batch)?;
+            return Ok(None);
+        };
+        let path = locations.file_path();
+        let cached_file_index = if let Some((cached_path, index)) =
+            self.last_bound_file.as_ref()
+            && cached_path.as_ref() == path
+        {
+            Some(*index)
+        } else {
+            None
+        };
+        let resolved_file_index =
+            cached_file_index.or_else(|| self.file_indices.get(path).copied());
+        let positions = locations.into_positions();
+
+        // Preserve the old validation order: decoded columns are bound before
+        // ANALYZE reports a returned file outside its expected population.
+        let decoded = self.decoder.bind(batch)?;
+        let file_index =
+            resolved_file_index.ok_or(IcebergError::InvariantViolated(
+                "ANALYZE reader returned an unplanned data file",
+            ))?;
+        if cached_file_index.is_none() {
+            let expected_path = self
+                .expected
+                .files
+                .get(file_index)
+                .ok_or(IcebergError::InvariantViolated(
+                    "ANALYZE file index is outside its expected population",
+                ))?
+                .path
+                .clone();
+            self.last_bound_file = Some((expected_path, file_index));
+        }
+        Ok(Some(AnalyzeBoundBatch {
+            decoded,
+            positions,
+            file_index,
+        }))
     }
 
     fn write_current_row(
@@ -229,8 +279,13 @@ impl AnalyzeBatchCursor {
             .ok_or(IcebergError::InvariantViolated(
                 "ANALYZE current batch disappeared before decode",
             ))?;
-        self.decoder
-            .write_row(&batch.decoded, self.row_index, out)?;
+        // SAFETY: ANALYZE receives the same relation-bound decoder plan as the
+        // scan cursor; its destinations were validated against that slot
+        // layout while the plan was constructed.
+        unsafe {
+            self.decoder
+                .write_row_unchecked(&batch.decoded, self.row_index, out)
+        }?;
         out.set_tid(&Self::synthetic_tid(sample_ordinal)?);
         Ok(())
     }
@@ -266,7 +321,7 @@ pub(super) struct ExpectedCursor {
 }
 
 pub(super) struct ExpectedFile {
-    pub(super) path: Arc<str>,
+    pub(super) path: Rc<str>,
     pub(super) positions: ExpectedPositions,
 }
 
@@ -373,7 +428,7 @@ mod tests {
     #[test]
     fn expected_cursor_repeats_one_physical_position_without_reordering() {
         let mut cursor = ExpectedCursor::new(vec![ExpectedFile {
-            path: Arc::from("data.parquet"),
+            path: Rc::from("data.parquet"),
             positions: ExpectedPositions::Selected(
                 vec![
                     SampledPosition {

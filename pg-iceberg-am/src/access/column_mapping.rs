@@ -5,235 +5,42 @@
 //! lives in [`type_mapping`](super::type_mapping); here those resolved rules
 //! get *bound* to concrete slot/attno/Arrow-column positions:
 //!
-//! - [`RelationShape`] captures the PostgreSQL tuple layout once and supplies
-//!   the same descriptor-derived inputs to both directions.
-//! - [`ScanColumns`] (read): holds the bound `IcebergSchema` and the cached
-//!   [`ColumnMapping`]; produces the slot-first decoder plan (`decoded_columns`)
-//!   both scan paths consume.
-//! - [`WriteColumns`] (write): holds the bound Arrow schema and one
-//!   [`pg_arrow_conv::ColumnRule`] per column, and builds the columnar slot
-//!   buffer the mutation write path appends tuple slots into directly.
+//! - [`RelationShape`](crate::relation_binding::RelationShape) captures the
+//!   PostgreSQL tuple layout once and supplies the same descriptor-derived
+//!   inputs to both directions.
+//! - [`ScanColumns`] (read): holds the bound `IcebergSchema`, projected field
+//!   ids, and the compiled slot-first decoder shared by cursors in this scan.
+//! - [`WriteColumns`] (write): binds Iceberg fields to the relation's source
+//!   slots and hands the resulting source/Arrow plan to the generic bound
+//!   columnar writer.
 //!
-//! ## Position arithmetic lives here
+//! ## Position arithmetic
 //!
-//! [`ColumnMapping`] is the *single owner* of all "Arrow column ↔ slot
-//! position" arithmetic for the scan path. `scan.rs` and
-//! `provider.rs` contain no `attno - 1` / `dest` index math: they hand this
-//! module a [`RelationShape`] (full-schema path) or a resolved projection
-//! (projected path), and `ColumnMapping` turns those into destination slot
-//! indices.
+//! [`RelationFieldMap`] owns PostgreSQL position validation, while the
+//! CustomScan-only relation index owns direct `attno - 1` lookup.
+//! [`ColumnMapping`] consumes validated bindings and owns Arrow-column to
+//! tuple-slot conversion planning. Scan and provider lifecycle code perform no
+//! position arithmetic.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use iceberg_lite::spec::Schema as IcebergSchema;
-use pg_arrow_conv::{ColumnRule, DecodedColumn, PgColumnType, SlotRecordBatchBuffer};
-use pg_lakebase_core::batch::{BatchBuffer, SlotColumnarBatchBuffer};
-use pg_lakebase_core::handles::RelationHandle;
+use pg_arrow_conv::{
+    ArrowColumnDecoder, BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule,
+    DatumCodec, DecodedColumn, PgColumnType,
+};
+use pg_lakebase_core::batch::BatchBuffer;
 use pg_lakebase_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
 use super::projection::Projection;
 use super::type_mapping::{IcebergFieldExt, IcebergSchemaExt, IcebergTypeExt};
 use crate::error::{IcebergError, IcebergResult};
-
-// ---------------------------------------------------------------------------
-// Relation column layout
-// ---------------------------------------------------------------------------
-
-/// One live (non-dropped) PG relation column: its 1-based attribute number and
-/// PostgreSQL column name.
-///
-/// Names are used only at the catalog boundary to bind PG attributes to
-/// Iceberg field ids. Execution plans carry the resolved field id.
-#[derive(Debug, Clone)]
-pub(crate) struct LiveColumn {
-    /// 1-based PG attribute number of the live column.
-    pub(crate) attno: pg_sys::AttrNumber,
-    /// Column name (== Iceberg field name).
-    pub(crate) name: String,
-}
-
-impl LiveColumn {
-    pub(crate) fn new(attno: pg_sys::AttrNumber, name: String) -> Self {
-        Self { attno, name }
-    }
-}
-
-/// Relation layout shared by the read and write column-mapping paths.
-///
-/// Derived once from a relation's `TupleDesc`: live columns retain their
-/// names and one-based attribute numbers, while `slot_width` and `attr_types`
-/// retain the full tuple layout including dropped-column positions.
-#[derive(Debug, Clone)]
-pub(crate) struct RelationShape {
-    live_columns: Vec<LiveColumn>,
-    slot_width: usize,
-    attr_types: Vec<(pg_sys::Oid, i32)>,
-}
-
-impl RelationShape {
-    /// Capture the column layout from a live PostgreSQL relation.
-    pub(crate) fn from_relation(rel: &RelationHandle) -> Self {
-        let live_columns = rel
-            .live_columns()
-            .into_iter()
-            .map(|(attno, name)| LiveColumn::new(attno, name))
-            .collect();
-
-        Self {
-            live_columns,
-            slot_width: rel.natts(),
-            attr_types: rel.attr_types(),
-        }
-    }
-
-    #[cfg(feature = "pg_test")]
-    pub(crate) fn for_test(
-        live_columns: Vec<LiveColumn>,
-        slot_width: usize,
-        attr_types: Vec<(pg_sys::Oid, i32)>,
-    ) -> Self {
-        Self {
-            live_columns,
-            slot_width,
-            attr_types,
-        }
-    }
-
-    fn live_columns(&self) -> &[LiveColumn] {
-        &self.live_columns
-    }
-
-    fn slot_width(&self) -> usize {
-        self.slot_width
-    }
-
-    fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
-        &self.attr_types
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RelationFieldMap: PG attno -> Iceberg field id binding
-// ---------------------------------------------------------------------------
-
-/// One live relation field bound to an Iceberg field id.
-#[derive(Debug, Clone)]
-pub(crate) struct RelationFieldBinding {
-    /// 1-based PostgreSQL attribute number.
-    pub(crate) attno: pg_sys::AttrNumber,
-    /// Zero-based destination in the target tuple slot.
-    pub(crate) destination: usize,
-    /// Iceberg field id. This is the execution identity.
-    pub(crate) field_id: i32,
-    /// Current PostgreSQL/Iceberg name, retained for diagnostics only.
-    pub(crate) debug_name: String,
-}
-
-impl RelationFieldBinding {
-    fn with_destination(&self, destination: usize) -> Self {
-        Self {
-            attno: self.attno,
-            destination,
-            field_id: self.field_id,
-            debug_name: self.debug_name.clone(),
-        }
-    }
-}
-
-/// Field-id binding for one scan/write descriptor.
-#[derive(Debug, Clone)]
-pub(crate) struct RelationFieldMap {
-    fields: Vec<RelationFieldBinding>,
-    slot_width: usize,
-    attr_types: Vec<(pg_sys::Oid, i32)>,
-}
-
-impl RelationFieldMap {
-    /// Bind every live PG column in `shape` to the current Iceberg schema.
-    ///
-    /// This is the only catalog-boundary name lookup in the scan/write path.
-    /// The returned map carries field ids, and later execution code must not
-    /// use column names as identity.
-    pub(crate) fn from_shape(
-        schema: &IcebergSchema,
-        shape: &RelationShape,
-    ) -> IcebergResult<Self> {
-        let mut fields = Vec::with_capacity(shape.live_columns().len());
-        for col in shape.live_columns() {
-            let field = schema
-                .field_by_name(&col.name)
-                .ok_or_else(|| IcebergError::ColumnNotFound(col.name.clone()))?;
-            let destination =
-                ColumnMapping::dest_from_attno(col.attno, shape.slot_width())?;
-            fields.push(RelationFieldBinding {
-                attno: col.attno,
-                destination,
-                field_id: field.id,
-                debug_name: col.name.clone(),
-            });
-        }
-        Ok(Self {
-            fields,
-            slot_width: shape.slot_width(),
-            attr_types: shape.attr_types().to_vec(),
-        })
-    }
-
-    /// Build the compact custom-scan binding for a projection.
-    pub(crate) fn project(
-        &self,
-        projection: &Projection,
-        slot_width: usize,
-        attr_types: &[(pg_sys::Oid, i32)],
-    ) -> IcebergResult<Self> {
-        let mut fields = Vec::with_capacity(projection.columns().len());
-        for projected in projection.columns() {
-            if projected.attno <= 0 {
-                return Err(IcebergError::InvariantViolated(
-                    "RelationFieldMap: projected source attno must be >= 1",
-                ));
-            }
-            let binding =
-                self.binding_for_attno(projected.attno).ok_or_else(|| {
-                    IcebergError::ColumnNotFound(format!("attno {}", projected.attno))
-                })?;
-            let destination =
-                ColumnMapping::validate_dest(projected.destination, slot_width)?;
-            fields.push(binding.with_destination(destination));
-        }
-        Ok(Self {
-            fields,
-            slot_width,
-            attr_types: attr_types.to_vec(),
-        })
-    }
-
-    fn binding_for_attno(
-        &self,
-        attno: pg_sys::AttrNumber,
-    ) -> Option<&RelationFieldBinding> {
-        self.fields.iter().find(|binding| binding.attno == attno)
-    }
-
-    pub(crate) fn bindings(&self) -> &[RelationFieldBinding] {
-        &self.fields
-    }
-
-    fn slot_width(&self) -> usize {
-        self.slot_width
-    }
-
-    fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
-        &self.attr_types
-    }
-
-    fn field_ids(&self) -> Vec<i32> {
-        self.fields.iter().map(|field| field.field_id).collect()
-    }
-}
+use crate::relation_binding::{
+    RelationFieldBinding, RelationFieldMap, RelationShape,
+};
 
 // ---------------------------------------------------------------------------
 // ColumnMapping: the single owner of scan position arithmetic
@@ -242,7 +49,6 @@ impl RelationFieldMap {
 /// One selected column: the Iceberg field to decode, the index of the Arrow
 /// batch column it is read from, and the destination slot index it must be
 /// written to.
-#[derive(Clone)]
 pub(crate) struct ProjectedColumn {
     /// Original base-relation attribute number used to resolve the Iceberg
     /// source field. It is intentionally distinct from `dest`.
@@ -261,12 +67,15 @@ pub(crate) struct ProjectedColumn {
     /// Destination cell index in the actual PG scan tuple.
     pub(crate) dest: usize,
     /// The `pg-arrow-conv` conversion rule for this column, resolved once at
-    /// construction from the pair `(Arrow DataType, PgColumnType)` (see
-    /// [`IcebergFieldExt::resolve_rule`]). The hot loops dispatch through this
-    /// already-resolved rule rather than re-resolving per row.
+    /// construction from the Iceberg field and the live PostgreSQL target (see
+    /// [`IcebergFieldExt::resolve_rule_for_column`]). The hot loops dispatch
+    /// through this already-resolved rule rather than re-resolving per row.
     pub(crate) rule: ColumnRule,
-    /// Actual destination descriptor OID, cached once for decoder binding.
+    /// The relation attribute OID the decoder will write. It travels with the
+    /// physical codec so JSONB bytes cannot be bound to an unrelated slot type.
     pub(crate) target_oid: pg_sys::Oid,
+    /// Provider-selected Datum codec, bound once with the rule.
+    pub(crate) codec: DatumCodec,
 }
 
 /// Projection-aware column plan: the single owner of position arithmetic.
@@ -287,9 +96,8 @@ pub(crate) struct ProjectedColumn {
 /// diverge for a full-table scan whose Iceberg schema is wider than the
 /// live PG columns (a dropped column that still lingers in the Iceberg
 /// metadata schema).
-#[derive(Clone)]
 pub(crate) struct ColumnMapping {
-    pub(crate) entries: Arc<[ProjectedColumn]>,
+    pub(crate) entries: Box<[ProjectedColumn]>,
 }
 
 impl ColumnMapping {
@@ -306,17 +114,35 @@ impl ColumnMapping {
                 .ok_or_else(|| {
                     IcebergError::ColumnNotFound(binding.debug_name.clone())
                 })?;
-            let dest =
-                Self::validate_dest(binding.destination, field_map.slot_width())?;
-            let rule = field
-                .resolve_rule(Self::pg_target_at(field_map.attr_types(), dest)?)?;
+            let dest = RelationFieldMap::validate_destination(
+                binding.destination,
+                field_map.slot_width(),
+            )?;
             let target_oid = field_map.attr_types()[dest].0;
+            let pg = Self::pg_target_at(field_map.attr_types(), dest)?;
+            let rule = field.resolve_rule_for_column(pg, target_oid)?;
+            let codec = match (target_oid, &rule) {
+                (pg_sys::JSONBOID, ColumnRule::PostgresJsonbVarlena) => {
+                    // SAFETY: the provider-selected rule is backed by the
+                    // Iceberg JSONB writer, which emits complete PostgreSQL
+                    // JSONB varlena bytes.
+                    unsafe { DatumCodec::postgres_jsonb_varlena() }
+                }
+                (pg_sys::JSONOID, ColumnRule::Utf8) => {
+                    // SAFETY: PostgreSQL JSON values entering this relation
+                    // have already passed json_in; the writer stores their
+                    // validated text payload unchanged.
+                    unsafe { DatumCodec::prevalidated_json_text() }
+                }
+                (_, _) => DatumCodec::standard(target_oid)?,
+            };
             entries.push(ProjectedColumn {
                 source_base_attno: binding.attno,
                 src_col,
                 dest,
                 rule,
                 target_oid,
+                codec,
             });
         }
         Ok(Self {
@@ -325,54 +151,34 @@ impl ColumnMapping {
     }
 
     /// Build the slot-first decoder plan from this mapping, pairing each
-    /// already-resolved entry with the destination column's target type OID.
+    /// already-resolved entry with its explicit physical datum codec.
     ///
-    /// Reuses the entries' bound `rule`/`src_col`/`dest` verbatim and looks up
-    /// `dest_oid` at `attr_types[dest]`. The target OID is load-bearing for rules
-    /// a single `ColumnRule` cannot disambiguate (`text`/`json`/`name`,
-    /// `bytea`/`jsonb`); the decoder classifies it into a `DatumTarget` once at
-    /// bind. `attr_types` is the relation's full-width `(oid, typmod)` list
-    /// indexed by `attno - 1`, so `dest` indexes it directly.
-    fn decoded_columns(&self) -> Vec<DecodedColumn> {
+    /// Reuses each entry's already-bound `rule`/`src_col`/`dest`/`codec`
+    /// verbatim. Physical codec selection belongs to the provider's planning
+    /// boundary, not to the generic Arrow decoder or its row loop.
+    fn into_decoder(self) -> IcebergResult<ArrowColumnDecoder> {
         self.entries
-            .iter()
+            .into_vec()
+            .into_iter()
             .map(|e| {
                 debug_assert!(e.source_base_attno > 0);
-                DecodedColumn::new(e.rule.clone(), e.src_col, e.dest, e.target_oid)
+                unsafe {
+                    DecodedColumn::new(
+                        e.rule,
+                        e.src_col,
+                        e.dest,
+                        e.target_oid,
+                        e.codec,
+                    )
+                }
             })
-            .collect()
-    }
-
-    fn validate_dest(dest: usize, slot_width: usize) -> IcebergResult<usize> {
-        if dest >= slot_width {
-            return Err(IcebergError::InvariantViolated(
-                "ColumnMapping: projected destination is outside the slot width",
-            ));
-        }
-        Ok(dest)
-    }
-
-    /// Compute and bounds-check `dest = attno - 1` against `slot_width`.
-    fn dest_from_attno(
-        attno: pg_sys::AttrNumber,
-        slot_width: usize,
-    ) -> IcebergResult<usize> {
-        if attno < 1 {
-            return Err(IcebergError::InvariantViolated(
-                "ColumnMapping: projected column attno must be >= 1",
-            ));
-        }
-        let dest = (attno as usize) - 1;
-        if dest >= slot_width {
-            return Err(IcebergError::InvariantViolated(
-                "ColumnMapping: computed dest is outside the slot width",
-            ));
-        }
-        Ok(dest)
+            .collect::<Result<Vec<_>, _>>()
+            .map(ArrowColumnDecoder::new)
+            .map_err(IcebergError::from)
     }
 
     /// Resolve the destination column's real PostgreSQL target bucket from the
-    /// relation's `(oid, typmod)` list — the companion to [`Self::dest_from_attno`].
+    /// relation's `(oid, typmod)` list.
     ///
     /// Rules are resolved against the column's *actual* type (via
     /// [`PgColumnType::from_pg_type`]) rather than a type round-tripped back from
@@ -398,20 +204,11 @@ impl ColumnMapping {
 // ScanColumns: bound read-side column plan
 // ---------------------------------------------------------------------------
 
-/// Holds the bound Iceberg schema and the cached [`ColumnMapping`] for one
-/// scan.
-///
-/// Constructed once per scan from the bound Iceberg schema plus the position
-/// mapping (full-schema or projected). It produces the slot-first decoder plan
-/// (`decoded_columns`) both scan paths consume. The bound schema is also
-/// exposed so callers that need it for adjacent work (e.g. translating
-/// PostgreSQL `ScanKey`s into Iceberg `Predicate`s) do not need to keep a
-/// second reference.
-#[derive(Clone)]
+/// Holds the bound Iceberg schema and compiled decoder for one scan.
 pub(crate) struct ScanColumns {
     schema: Arc<IcebergSchema>,
-    plan: ColumnMapping,
-    project_field_ids: Arc<[i32]>,
+    decoder: ArrowColumnDecoder,
+    project_field_ids: Box<[i32]>,
 }
 
 impl ScanColumns {
@@ -434,21 +231,25 @@ impl ScanColumns {
         // dropped-but-unsupported field that no live column maps to is never
         // decoded and so is correctly left unchecked.
         let field_map = RelationFieldMap::from_shape(&schema, shape)?;
-        let project_field_ids = field_map.field_ids().into();
-        let plan = ColumnMapping::from_field_map(&schema, &field_map)?;
-        Ok(Self {
-            schema,
-            plan,
-            project_field_ids,
-        })
+        Self::from_field_map(schema, &field_map)
+    }
+
+    /// Select-all plan plus the compact bindings retained by CustomScan for
+    /// its predicate index.
+    pub(crate) fn new_with_bindings(
+        schema: Arc<IcebergSchema>,
+        shape: &RelationShape,
+    ) -> IcebergResult<(Self, RelationFieldMap)> {
+        let field_map = RelationFieldMap::from_shape(&schema, shape)?;
+        let columns = Self::from_field_map(schema, &field_map)?;
+        Ok((columns, field_map))
     }
 
     /// Projected plan.
     ///
     /// The projection carries `(attno, destination)` pairs in scan order
-    /// (`== iceberg select_field_ids order`); `slot_width` is the relation's
-    /// full `natts`; `attr_types` is the relation's full-width `(oid,
-    /// typmod)` list.
+    /// (`== iceberg select_field_ids order`); `slot_width` and `attr_types`
+    /// describe the CustomScan tuple receiving the projected columns.
     ///
     /// The supported-shape gate is applied per projected column through
     /// [`ColumnMapping::from_field_map`], not over the whole stored schema. A
@@ -461,14 +262,30 @@ impl ScanColumns {
         projection: &Projection,
         slot_width: usize,
         attr_types: &[(pg_sys::Oid, i32)],
-    ) -> IcebergResult<Self> {
+    ) -> IcebergResult<(Self, RelationFieldMap)> {
         let full_map = RelationFieldMap::from_shape(&schema, shape)?;
-        let field_map = full_map.project(projection, slot_width, attr_types)?;
-        let project_field_ids = field_map.field_ids().into();
-        let plan = ColumnMapping::from_field_map(&schema, &field_map)?;
+        let field_map = full_map.project(
+            projection
+                .columns()
+                .iter()
+                .map(|field| (field.attno, field.destination)),
+            slot_width,
+            attr_types,
+        )?;
+        let columns = Self::from_field_map(schema, &field_map)?;
+        Ok((columns, field_map))
+    }
+
+    fn from_field_map(
+        schema: Arc<IcebergSchema>,
+        field_map: &RelationFieldMap,
+    ) -> IcebergResult<Self> {
+        let project_field_ids = field_map.field_ids().into_boxed_slice();
+        let plan = ColumnMapping::from_field_map(&schema, field_map)?;
+        let decoder = plan.into_decoder()?;
         Ok(Self {
             schema,
-            plan,
+            decoder,
             project_field_ids,
         })
     }
@@ -479,12 +296,9 @@ impl ScanColumns {
         self.schema.as_ref()
     }
 
-    /// Slot-first decoder plan for the TableAM scan path, derived from this
-    /// plan's already-bound [`ColumnMapping`] and the relation's full-width
-    /// `(oid, typmod)` list. Lets the AM build an `ArrowColumnDecoder` without
-    /// re-resolving rules or re-deriving `dest` arithmetic.
-    pub(crate) fn decoded_columns(&self) -> Vec<DecodedColumn> {
-        self.plan.decoded_columns()
+    /// Clone the scan-lifetime decoder plan without rebuilding its columns.
+    pub(crate) fn decoder(&self) -> ArrowColumnDecoder {
+        self.decoder.clone()
     }
 
     pub(crate) fn project_field_ids(&self) -> &[i32] {
@@ -500,18 +314,13 @@ impl ScanColumns {
 /// analogue of [`ScanColumns`] (and a sibling of the read cursor, which bundles
 /// its decoder and batch source the same way).
 ///
-/// It owns both the per-column Arrow write buffer and the source-slot mapping,
-/// so the mutation sink drives a single cohesive object rather than coordinating a
-/// loose buffer and a separate plan.
+/// It owns the per-column Arrow write buffer, whose columns each carry their
+/// source-slot binding, so the mutation sink drives one cohesive plan rather
+/// than coordinating parallel mapping and encoder vectors.
 pub(crate) struct WriteColumns {
-    /// Per-column Arrow write buffer (one encoder per output column), bound to
-    /// the relation's Arrow schema. Produces a `RecordBatch` on flush.
-    buffer: SlotRecordBatchBuffer,
-    /// Source slot index feeding each output column, in Arrow/Iceberg column
-    /// order. `Some(attno - 1)` for a column backed by a live PG column;
-    /// `None` for an Iceberg field with no live PG column (a dropped column
-    /// lingering in the Iceberg metadata schema), which is written as SQL NULL.
-    source_slots: Vec<Option<usize>>,
+    /// Relation-bound source codecs and Arrow encoders in Iceberg schema order.
+    /// The buffer owns the complete hot-path plan, including source positions.
+    buffer: BoundWriteBuffer,
 }
 
 impl WriteColumns {
@@ -519,31 +328,29 @@ impl WriteColumns {
     /// bound columnar buffer.
     ///
     /// Runs the supported-shape gate per Iceberg field through
-    /// [`IcebergFieldExt::resolve_rule`] (the single resolution+validation
-    /// point), binds one rule per column, and resolves each output column's
-    /// source slot, so an unsupported column or a column/field desync surfaces
-    /// at session begin rather than mid-INSERT. The bound schema and per-column
-    /// rules are consumed into the buffer here and not retained.
+    /// [`IcebergFieldExt::resolve_rule`] or
+    /// [`IcebergFieldExt::resolve_rule_for_column`], binds one rule per
+    /// column, and resolves each output column's source slot, so an unsupported
+    /// column or a column/field desync surfaces at session begin rather than
+    /// mid-INSERT. The bound schema and per-column rules are consumed into the
+    /// buffer here and not retained.
     ///
     pub(crate) fn resolve(
         schema: &IcebergSchema,
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
-        // `resolve_columns` resolves every Iceberg field's rule via
-        // `resolve_rule`, which applies the supported-shape gate per field, so
-        // an unsupported column surfaces here at session begin rather than
-        // mid-INSERT — and before `to_arrow_schema` can silently truncate an
-        // oversized `Fixed` width. The writer emits every field, so iterating
-        // all fields here is the correct scope (no projection on the write
-        // path).
+        // `resolve_columns` resolves every Iceberg field's rule via one of the
+        // two field resolvers, both of which apply the supported-shape gate per
+        // field. An unsupported column therefore surfaces here at session
+        // begin rather than mid-INSERT — and before `to_arrow_schema` can
+        // silently truncate an oversized `Fixed` width. The writer emits every
+        // field, so iterating all fields here is the correct scope (no
+        // projection on the write path).
         let field_map = RelationFieldMap::from_shape(schema, shape)?;
-        let (rules, source_slots) = Self::resolve_columns(schema, &field_map)?;
+        let columns = Self::resolve_columns(schema, &field_map)?;
         let arrow_schema = Arc::new(schema.to_arrow_schema()?);
-        let buffer = SlotRecordBatchBuffer::new(arrow_schema, &rules);
-        Ok(Self {
-            buffer,
-            source_slots,
-        })
+        let buffer = BoundWriteBuffer::new(arrow_schema, columns.into_boxed_slice())?;
+        Ok(Self { buffer })
     }
 
     /// Resolve, per Iceberg output column (in schema order), its conversion
@@ -561,10 +368,9 @@ impl WriteColumns {
     fn resolve_columns(
         schema: &IcebergSchema,
         field_map: &RelationFieldMap,
-    ) -> IcebergResult<(Vec<ColumnRule>, Vec<Option<usize>>)> {
+    ) -> IcebergResult<Vec<BoundWriteColumnPlan>> {
         let fields = schema.as_struct().fields();
-        let mut rules = Vec::with_capacity(fields.len());
-        let mut source_slots = Vec::with_capacity(fields.len());
+        let mut columns = Vec::with_capacity(fields.len());
         let mut matched_live = 0usize;
         let bindings_by_field_id: HashMap<i32, &RelationFieldBinding> = field_map
             .bindings()
@@ -572,16 +378,25 @@ impl WriteColumns {
             .map(|field| (field.field_id, field))
             .collect();
         for field in fields.iter() {
-            let (rule, source) = match bindings_by_field_id.get(&field.id) {
+            let column = match bindings_by_field_id.get(&field.id) {
                 Some(binding) => {
-                    let dest = ColumnMapping::validate_dest(
+                    let dest = RelationFieldMap::validate_destination(
                         binding.destination,
                         field_map.slot_width(),
                     )?;
                     let pg =
                         ColumnMapping::pg_target_at(field_map.attr_types(), dest)?;
                     matched_live += 1;
-                    (field.resolve_rule(pg)?, Some(dest))
+                    let rule = field.resolve_rule_for_column(
+                        pg,
+                        field_map.attr_types()[dest].0,
+                    )?;
+                    BoundWriteColumnPlan::bind(
+                        rule,
+                        Some(dest),
+                        Some(field_map.attr_types()[dest].0),
+                        field_map.slot_width(),
+                    )?
                 }
                 None => {
                     // No live PG column feeds this Iceberg field. That is only
@@ -610,11 +425,15 @@ impl WriteColumns {
                             field.field_type
                         ))
                     })?;
-                    (field.resolve_rule(pg)?, None)
+                    BoundWriteColumnPlan::bind(
+                        field.resolve_rule(pg)?,
+                        None,
+                        None,
+                        field_map.slot_width(),
+                    )?
                 }
             };
-            rules.push(rule);
-            source_slots.push(source);
+            columns.push(column);
         }
         // Field names are unique and live-column names are unique, so a
         // shortfall means some live column found no field to write into (e.g.
@@ -631,27 +450,24 @@ impl WriteColumns {
                 .unwrap_or_else(|| "<unknown>".to_string());
             return Err(IcebergError::ColumnNotFound(missing));
         }
-        Ok((rules, source_slots))
+        Ok(columns)
     }
 
     /// Append one tuple-slot row, pulling each output column from its bound
     /// source slot (SQL NULL for columns with no live source).
     ///
-    /// This is the write-side twin of the read path's per-column decode: the
-    /// position arithmetic stays here, and the buffer only ever sees
-    /// already-mapped per-column datums. The slot is deformed once via
-    /// [`TupleSlotRow::datums`] so each source lookup is an O(1) index rather
-    /// than rebuilding the slot's backing slices per column.
-    pub(crate) fn append_slot_row(
+    /// The bound writer deforms the slot once and directly iterates its fixed
+    /// source/encoder column plan; no parallel source-slot and encoder indices
+    /// are synchronized in this row path.
+    pub(crate) unsafe fn append_slot_row(
         &mut self,
         row: TupleSlotRow<'_>,
     ) -> IcebergResult<()> {
-        let datums = row.datums();
-        for (col_idx, &source) in self.source_slots.iter().enumerate() {
-            let value = source.and_then(|slot_idx| datums.datum_at(slot_idx));
-            self.buffer.append_datum_to_column(col_idx, value)?;
-        }
-        self.buffer.finish_row()?;
+        // SAFETY: `WriteColumns` is resolved from this relation's
+        // `RelationShape`, and callers pass the tuple slot received by the
+        // same relation-local mutation callback. The slot layout and source
+        // OIDs therefore match the bound plan.
+        unsafe { self.buffer.append_slot_row(row)? };
         Ok(())
     }
 

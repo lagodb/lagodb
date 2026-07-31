@@ -1,50 +1,64 @@
-//! Iceberg Table Scan Implementation.
+//! PostgreSQL TableAM scan lifecycle for Iceberg tables.
 //!
-//! A scan's state is split in two:
+//! Query scans keep two lifecycle layers:
 //!
-//! - [`ScanSpec`] is the immutable scan description (table, scan columns, and
-//!   optional predicate). Built once in [`AmScanSession::scan_begin`] and
+//! - [`ScanSpec`] owns the statement snapshot, bound columns, predicates, and
+//!   planned-task caches. It is built once in [`AmScanSession::scan_begin`] and
 //!   preserved across `scan_rescan`, so the visible snapshot is frozen for the
 //!   scan's duration. This matches the Read Committed contract: every
 //!   `scan_rescan` comes from the same statement that issued `scan_begin`.
-//! - [`IcebergBatchCursor`] is the per-cursor mutable state; `scan_rescan`
-//!   rebuilds only the cursor from the spec.
+//! - [`IcebergBatchCursor`] owns one traversal over the planned tasks;
+//!   `scan_rescan` rebuilds only this traversal from the existing spec.
 //!
-//! `scan_rescan` re-translates the dispatcher-supplied keys (PostgreSQL's
-//! "non-null replaces, null keeps" rule is applied by the dispatcher first).
-//! The borrow is consumed within each callback, never retained.
-//!
-//! Scan-key predicate translation currently returns `None`, so predicates
-//! remain handled by the executor (`ExecQual`).
+//! ANALYZE has its own state after the shared statement metadata and decoder
+//! have been captured. Batch adaptation and row-location binding live in
+//! [`batch`], below both query and ANALYZE cursors.
 
+use std::mem;
+
+pub(crate) mod batch;
 mod cursor;
 mod spec;
+mod tasks;
 
 pub use cursor::IcebergBatchCursor;
-pub(crate) use cursor::{
-    BatchMetadataColumns, IcebergArrowBatchSource, IcebergArrowBatches,
-};
-pub(crate) use spec::{PlannedScanTasks, ScanSpec};
+pub(crate) use spec::ScanSpec;
+pub(crate) use tasks::PlannedMutationTasks;
 
+use pg_lakebase_core::access::scan::virtual_slot_callbacks_with_tid;
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
-use crate::access::column_mapping::RelationShape;
+use crate::access::analyze::AnalyzeScanState;
 use crate::error::IcebergError;
+use crate::relation_binding::RelationShape;
 
-/// PostgreSQL-facing scan session for the Iceberg table AM. Thin bookkeeping
-/// (`rel_oid` / `spc_oid` / `shape`) over the lazily-built [`ScanSpec`] and
-/// current [`IcebergBatchCursor`].
+/// PostgreSQL-facing scan session for the Iceberg table AM.
 pub struct IcebergScan {
-    rel_oid: pg_sys::Oid,
-    spc_oid: pg_sys::Oid,
-    /// Relation shape captured in [`AmScanSession::new`] (the one place the
-    /// `RelationHandle` is in scope), threaded into `ScanSpec::build`.
-    shape: RelationShape,
+    relation: ScanRelation,
     state: IcebergScanState,
 }
+
+/// Descriptor-derived relation facts retained after the `RelationHandle`
+/// borrow ends.
+struct ScanRelation {
+    oid: pg_sys::Oid,
+    tablespace_oid: pg_sys::Oid,
+    shape: RelationShape,
+}
+
+impl ScanRelation {
+    fn from_relation(relation: &RelationHandle) -> Self {
+        Self {
+            oid: relation.oid(),
+            tablespace_oid: relation.tablespace_oid(),
+            shape: RelationShape::from_relation(relation),
+        }
+    }
+}
+
 enum ScanPurpose {
     Query,
     Analyze {
@@ -53,23 +67,75 @@ enum ScanPurpose {
     },
 }
 
+impl ScanPurpose {
+    fn begin(
+        self,
+        relation: &ScanRelation,
+        keys: &OwnedScanKeys,
+    ) -> AmResult<IcebergScanState> {
+        match self {
+            Self::Query => Ok(IcebergScanState::Query(QueryScanState::begin(
+                relation, keys,
+            )?)),
+            Self::Analyze {
+                #[cfg(not(feature = "pg17"))]
+                statistics_target,
+            } => {
+                let spec = ScanSpec::build_for_analyze(
+                    relation.oid,
+                    relation.tablespace_oid,
+                    &relation.shape,
+                )?;
+                let preparation = spec.prepare_analyze(
+                    #[cfg(not(feature = "pg17"))]
+                    statistics_target,
+                )?;
+                Ok(IcebergScanState::Analyze(Box::new(
+                    AnalyzeScanState::pending(preparation),
+                )))
+            }
+        }
+    }
+}
+
+struct QueryScanState {
+    spec: ScanSpec,
+    cursor: IcebergBatchCursor,
+}
+
+impl QueryScanState {
+    fn begin(relation: &ScanRelation, keys: &OwnedScanKeys) -> AmResult<Self> {
+        let mut spec = ScanSpec::build(
+            relation.oid,
+            relation.tablespace_oid,
+            keys,
+            &relation.shape,
+        )?;
+        let cursor = spec.open_batch_cursor()?;
+        Ok(Self { spec, cursor })
+    }
+
+    fn rescan(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
+        self.spec.refresh_filter(keys)?;
+        self.cursor = self.spec.open_batch_cursor()?;
+        Ok(())
+    }
+}
+
 // Query state stays inline intentionally: boxing it would add an allocation
 // per ordinary scan and an indirection on every scan_getnextslot call merely
 // to shrink this once-per-scan state object.
 #[allow(clippy::large_enum_variant)]
 enum IcebergScanState {
     Pending(ScanPurpose),
-    Query {
-        spec: ScanSpec,
-        cursor: IcebergBatchCursor,
-    },
-    Analyze(Box<crate::access::analyze::AnalyzeScanState>),
+    Query(QueryScanState),
+    Analyze(Box<AnalyzeScanState>),
     Ended,
 }
 
 impl AmScan for IcebergTableAm {
     fn analyze_slot_callbacks() -> *const pg_sys::TupleTableSlotOps {
-        pg_lakebase_core::access::scan::virtual_slot_callbacks_with_tid()
+        virtual_slot_callbacks_with_tid()
     }
 }
 
@@ -82,12 +148,9 @@ impl AmScanSession for IcebergScan {
         _pscan: Option<&ParallelTableScanDescHandle>,
         flags: ScanFlags,
     ) -> AmResult<Self> {
-        // No metadata IO yet: defer schema-dependent work to `scan_begin`. The
-        // relation shape is captured here, where the `RelationHandle` is in scope.
+        // No metadata IO yet: defer schema-dependent work to `scan_begin`.
         Ok(IcebergScan {
-            rel_oid: rel.oid(),
-            spc_oid: rel.tablespace_oid(),
-            shape: RelationShape::from_relation(rel),
+            relation: ScanRelation::from_relation(rel),
             state: IcebergScanState::Pending(if flags.is_analyze() {
                 ScanPurpose::Analyze {
                     #[cfg(not(feature = "pg17"))]
@@ -100,42 +163,17 @@ impl AmScanSession for IcebergScan {
     }
 
     fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
-        let purpose =
-            match std::mem::replace(&mut self.state, IcebergScanState::Ended) {
-                IcebergScanState::Pending(purpose) => purpose,
-                state => {
-                    self.state = state;
-                    return Err(IcebergError::InvariantViolated(
-                        "scan_begin called more than once for one Iceberg scan",
-                    )
-                    .into());
-                }
-            };
-        self.state = match purpose {
-            ScanPurpose::Query => {
-                let mut spec =
-                    ScanSpec::build(self.rel_oid, self.spc_oid, keys, &self.shape)?;
-                let cursor = spec.open_batch_cursor()?;
-                IcebergScanState::Query { spec, cursor }
-            }
-            ScanPurpose::Analyze {
-                #[cfg(not(feature = "pg17"))]
-                statistics_target,
-            } => {
-                let spec = ScanSpec::build_for_analyze(
-                    self.rel_oid,
-                    self.spc_oid,
-                    &self.shape,
-                )?;
-                let preparation = spec.prepare_analyze(
-                    #[cfg(not(feature = "pg17"))]
-                    statistics_target,
-                )?;
-                IcebergScanState::Analyze(Box::new(
-                    crate::access::analyze::AnalyzeScanState::pending(preparation),
-                ))
+        let purpose = match mem::replace(&mut self.state, IcebergScanState::Ended) {
+            IcebergScanState::Pending(purpose) => purpose,
+            state => {
+                self.state = state;
+                return Err(IcebergError::InvariantViolated(
+                    "scan_begin called more than once for one Iceberg scan",
+                )
+                .into());
             }
         };
+        self.state = purpose.begin(&self.relation, keys)?;
         Ok(())
     }
 
@@ -146,7 +184,7 @@ impl AmScanSession for IcebergScan {
         // `scan_begin` builds the cursor before the executor fetches any row,
         // so it is always present by the time the framework calls this.
         match &mut self.state {
-            IcebergScanState::Query { cursor, .. } => cursor,
+            IcebergScanState::Query(state) => &mut state.cursor,
             _ => panic!("scan_driver called outside a query scan"),
         }
     }
@@ -167,11 +205,7 @@ impl AmScanSession for IcebergScan {
         _allow_pagemode: bool,
     ) -> AmResult<()> {
         match &mut self.state {
-            IcebergScanState::Query { spec, cursor } => {
-                spec.refresh_filter(keys)?;
-                *cursor = spec.open_batch_cursor()?;
-                Ok(())
-            }
+            IcebergScanState::Query(state) => state.rescan(keys),
             IcebergScanState::Pending(_) => Ok(()),
             IcebergScanState::Analyze(_) => Err(IcebergError::InvariantViolated(
                 "PostgreSQL attempted to rescan an ANALYZE session",
