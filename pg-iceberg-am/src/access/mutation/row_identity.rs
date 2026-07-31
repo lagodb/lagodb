@@ -1,14 +1,14 @@
 //! Synthetic row identities and their transaction-owned relation registries.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use iceberg_lite::expr::Predicate;
 use pg_lakebase_core::api::TRIGGER_ROW_BLOCK_BASE;
 use pg_lakebase_core::prelude::{AmModifyQueryState, AmResult, ItemPointer};
 use pgrx::pg_sys;
 
-use crate::access::scan::PlannedScanTasks;
+use crate::access::scan::PlannedMutationTasks;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::catalog::row_mutations::{
     ICEBERG_FILE_ID_BITS, IcebergFileId, RelationRowRegistry,
@@ -21,14 +21,14 @@ use crate::error::{IcebergError, IcebergResult};
 pub struct IcebergModifyScanContext {
     pub(super) starting_snapshot_id: Option<i64>,
     pub(super) conflict_filter: Predicate,
-    scan_tasks: Arc<PlannedScanTasks>,
+    scan_tasks: Rc<PlannedMutationTasks>,
 }
 
 impl IcebergModifyScanContext {
     pub(crate) fn new(
         starting_snapshot_id: Option<i64>,
         conflict_filter: Predicate,
-        scan_tasks: Arc<PlannedScanTasks>,
+        scan_tasks: Rc<PlannedMutationTasks>,
     ) -> Self {
         Self {
             starting_snapshot_id,
@@ -37,8 +37,8 @@ impl IcebergModifyScanContext {
         }
     }
 
-    pub(crate) fn scan_tasks(&self) -> Arc<PlannedScanTasks> {
-        Arc::clone(&self.scan_tasks)
+    pub(crate) fn scan_tasks(&self) -> Rc<PlannedMutationTasks> {
+        Rc::clone(&self.scan_tasks)
     }
 }
 
@@ -46,7 +46,7 @@ impl PartialEq for IcebergModifyScanContext {
     fn eq(&self, other: &Self) -> bool {
         self.starting_snapshot_id == other.starting_snapshot_id
             && self.conflict_filter == other.conflict_filter
-            && Arc::ptr_eq(&self.scan_tasks, &other.scan_tasks)
+            && Rc::ptr_eq(&self.scan_tasks, &other.scan_tasks)
     }
 }
 
@@ -79,21 +79,19 @@ impl IcebergRowIdentity {
         file_id: IcebergFileId,
         position: u64,
     ) -> IcebergResult<ItemPointer> {
-        if u64::from(file_id.raw()) > FILE_MASK || position > MAX_POSITION {
+        if position > MAX_POSITION {
             return Err(IcebergError::RowIdentityLimitExceeded);
         }
+        debug_assert!(u64::from(file_id.raw()) <= FILE_MASK);
         let payload = (u64::from(file_id.raw()) << POSITION_BITS) | position;
-        let block_number = u32::try_from(payload / OFFSET_BASE).map_err(|_| {
-            IcebergError::InvariantViolated("synthetic ctid block number overflow")
-        })?;
-        if block_number >= TRIGGER_ROW_BLOCK_BASE {
-            return Err(IcebergError::InvariantViolated(
-                "Iceberg row identity overlaps the trigger-row namespace",
-            ));
-        }
-        let offset = u16::try_from((payload % OFFSET_BASE) + 1).map_err(|_| {
-            IcebergError::InvariantViolated("synthetic ctid offset overflow")
-        })?;
+        // The validated 17/30-bit payload is at most 2^47 - 1. Dividing that
+        // by 65535 yields at most 0x80008000, below both u32::MAX and the
+        // 0xC0000000 trigger-row boundary. The remainder plus one is at most
+        // u16::MAX.
+        let block_number = (payload / OFFSET_BASE) as u32;
+        let offset = ((payload % OFFSET_BASE) + 1) as u16;
+        debug_assert!(block_number < TRIGGER_ROW_BLOCK_BASE);
+        debug_assert_ne!(offset, 0);
         Ok(ItemPointer {
             block_number,
             offset,
@@ -106,25 +104,20 @@ impl IcebergRowIdentity {
                 "ctid is not an Iceberg physical row identity",
             ));
         }
-        let payload = u64::from(tid.block_number)
-            .checked_mul(OFFSET_BASE)
-            .and_then(|base| base.checked_add(u64::from(tid.offset - 1)))
-            .ok_or_else(|| {
-                IcebergError::InvariantViolated("synthetic ctid payload overflow")
-            })?;
+        // `block_number < 0xC0000000` and `offset <= u16::MAX`, so this
+        // reconstruction is strictly below 2^48 and cannot overflow `u64`.
+        let payload =
+            u64::from(tid.block_number) * OFFSET_BASE + u64::from(tid.offset - 1);
         if payload >= PAYLOAD_LIMIT {
             return Err(IcebergError::InvariantViolated(
                 "ctid is not an Iceberg physical row identity",
             ));
         }
-        let file_id = u32::try_from((payload >> POSITION_BITS) & FILE_MASK)
-            .map(IcebergFileId::from_raw)
-            .map_err(|_| {
-                IcebergError::InvariantViolated("synthetic ctid file id overflow")
-            })?;
-        let row_position = u32::try_from(payload & POSITION_MASK).map_err(|_| {
-            IcebergError::InvariantViolated("synthetic ctid row position overflow")
-        })?;
+        let raw_file_id = ((payload >> POSITION_BITS) & FILE_MASK) as u32;
+        // SAFETY: masking with FILE_MASK establishes the 17-bit ID bound.
+        let file_id = unsafe { IcebergFileId::from_valid_raw(raw_file_id) };
+        // Masking with the 30-bit POSITION_MASK establishes the u32 bound.
+        let row_position = (payload & POSITION_MASK) as u32;
         Ok(Self::new(file_id, row_position))
     }
 }
@@ -140,7 +133,7 @@ const POSITION_MASK: u64 = (1u64 << POSITION_BITS) - 1;
 const PAYLOAD_LIMIT: u64 = 1u64 << (ICEBERG_FILE_ID_BITS + POSITION_BITS);
 const OFFSET_BASE: u64 = u16::MAX as u64;
 
-/// Borrowed data-file source registered once per contiguous scan run.
+/// Borrowed data-file source passed to the transaction-scoped path interner.
 #[derive(Debug, Clone, Copy)]
 pub struct IcebergFileSource<'a>(&'a str);
 
@@ -196,5 +189,52 @@ impl AmModifyQueryState for IcebergModifyQueryState {
         position: &Self::ScanIdentity<'_>,
     ) -> AmResult<ItemPointer> {
         Ok(IcebergRowIdentity::encode(source, *position)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pg_lakebase_core::api::TRIGGER_ROW_BLOCK_BASE;
+    use pg_lakebase_core::prelude::ItemPointer;
+
+    use super::*;
+
+    #[test]
+    fn synthetic_ctid_round_trips_boundaries() {
+        let cases = [
+            (0, 0),
+            (0, MAX_POSITION),
+            (u32::try_from(FILE_MASK).unwrap(), 0),
+            (u32::try_from(FILE_MASK).unwrap(), MAX_POSITION),
+        ];
+        for (file_id, position) in cases {
+            let file_id = IcebergFileId::try_from_raw(file_id).unwrap();
+            let tid = IcebergRowIdentity::encode(file_id, position).unwrap();
+            assert_ne!(tid.offset, 0);
+            assert!(tid.block_number < TRIGGER_ROW_BLOCK_BASE);
+            let decoded = IcebergRowIdentity::decode(&tid).unwrap();
+            assert_eq!(decoded.file_id(), file_id);
+            assert_eq!(u64::from(decoded.row_position()), position);
+        }
+    }
+
+    #[test]
+    fn synthetic_ctid_rejects_out_of_range_values() {
+        assert!(IcebergFileId::try_from_raw(1 << ICEBERG_FILE_ID_BITS).is_err());
+        assert!(
+            IcebergRowIdentity::encode(
+                IcebergFileId::try_from_raw(0).unwrap(),
+                MAX_POSITION + 1,
+            )
+            .is_err()
+        );
+        assert!(IcebergRowIdentity::decode(&ItemPointer::default()).is_err());
+        assert!(
+            IcebergRowIdentity::decode(&ItemPointer {
+                block_number: TRIGGER_ROW_BLOCK_BASE,
+                offset: 1,
+            })
+            .is_err()
+        );
     }
 }

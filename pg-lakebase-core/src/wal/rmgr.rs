@@ -2,6 +2,17 @@
 //!
 //! This module provides the core trait for implementing custom WAL resource managers
 //! and the registration mechanism to hook them into PostgreSQL.
+//!
+//! # Callback error contract
+//!
+//! `redo`, `startup`, and `cleanup` cannot return a `Result` through PostgreSQL's
+//! `RmgrData` C callbacks. The registry therefore reports every returned
+//! [`WalRmgrError`] as a PostgreSQL `ERROR` through `report_unwrap`.
+//! PostgreSQL invokes these callbacks during recovery without a query-level
+//! exception handler; in that context PostgreSQL promotes the `ERROR` to
+//! `FATAL`, which terminates the recovery process. Providers must handle
+//! explicitly lossy conditions themselves, record the warning, and return
+//! `Ok(())`; the core layer does not reinterpret provider errors as `PANIC`.
 
 use crate::diag::{self, ReportableError};
 use crate::wal::record::WalRecord;
@@ -58,6 +69,12 @@ impl From<RmgrId> for u8 {
 }
 
 /// Error type for WAL resource manager operations
+///
+/// The core WAL registry reports this error as PostgreSQL `ERROR`. When the
+/// callback runs in PostgreSQL recovery, the absence of a query-level
+/// exception handler promotes that `ERROR` to `FATAL` and terminates the
+/// recovery process. Conditions that are explicitly lossy must be handled by
+/// the provider and returned as `Ok(())` instead of this error.
 #[derive(Error, Debug)]
 pub enum WalRmgrError {
     #[error("WAL redo failed: {0}")]
@@ -114,6 +131,12 @@ pub trait WalResourceManager: Send + Sync + 'static {
     /// This is the core recovery function. It must be idempotent -
     /// replaying the same record multiple times should have the same
     /// effect as replaying it once.
+    ///
+    /// # Errors
+    ///
+    /// Returning an error causes the framework to report PostgreSQL `ERROR`.
+    /// During recovery, PostgreSQL promotes that error to `FATAL` because the
+    /// callback is not inside a query-level exception handler.
     fn redo(&self, record: &WalRecord) -> Result<(), WalRmgrError>;
 
     /// Describe a WAL record for debugging (pg_waldump)
@@ -136,6 +159,12 @@ pub trait WalResourceManager: Send + Sync + 'static {
     /// Called during resource manager startup
     ///
     /// This is invoked once when PostgreSQL starts or during recovery initialization.
+    ///
+    /// # Errors
+    ///
+    /// Returning an error causes the framework to report PostgreSQL `ERROR`.
+    /// During recovery, PostgreSQL promotes that error to `FATAL` because the
+    /// callback is not inside a query-level exception handler.
     fn startup(&self) -> Result<(), WalRmgrError> {
         Ok(())
     }
@@ -143,6 +172,12 @@ pub trait WalResourceManager: Send + Sync + 'static {
     /// Called during resource manager cleanup
     ///
     /// This is invoked when PostgreSQL shuts down or recovery ends.
+    ///
+    /// # Errors
+    ///
+    /// Returning an error causes the framework to report PostgreSQL `ERROR`.
+    /// During recovery, PostgreSQL promotes that error to `FATAL` because the
+    /// callback is not inside a query-level exception handler.
     fn cleanup(&self) -> Result<(), WalRmgrError> {
         Ok(())
     }

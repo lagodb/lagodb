@@ -5,20 +5,20 @@ use std::sync::OnceLock;
 mod access;
 pub mod catalog;
 pub mod constants;
-pub mod customscan;
+mod customscan;
 pub mod error;
 pub mod gucs;
 pub mod hooks;
 mod maintenance;
 pub mod options;
 mod predicate;
+mod relation_binding;
 pub mod storage;
 pub mod wal;
 
 use access::index::IcebergIndexFetch;
 use access::mutation::{IcebergModifyQueryState, IcebergModifyState};
 use access::scan::IcebergScan;
-use customscan::IcebergCustomScanProvider;
 
 /// Get the cached Iceberg TableAmRoutine pointer.
 /// This will initialize the routine if it hasn't been initialized yet.
@@ -60,9 +60,6 @@ extern "C-unwind" fn _PG_init() {
     // `pg_lakebase_core::customscan::init`) is "register all
     // providers first, then install the hook in `_PG_init`".
     customscan::register();
-    pg_lakebase_core::customscan::modify::register_provider::<
-        IcebergCustomScanProvider,
-    >();
     pg_lakebase_core::customscan::init();
     pg_lakebase_core::table_maintenance::register_provider::<
         maintenance::IcebergTableMaintenanceProvider,

@@ -124,19 +124,6 @@ impl<'a> WalRecord<'a> {
         }
     }
 
-    /// Get the main data as a typed reference
-    ///
-    /// # Safety
-    /// The caller must ensure that T matches the actual data layout
-    /// stored in this WAL record.
-    pub unsafe fn main_data_as<T>(&self) -> Option<&T> {
-        let data = self.main_data()?;
-        if data.len() < std::mem::size_of::<T>() {
-            return None;
-        }
-        unsafe { Some(&*(data.as_ptr() as *const T)) }
-    }
-
     /// Get the number of block references in this record
     pub fn max_block_id(&self) -> i8 {
         unsafe {

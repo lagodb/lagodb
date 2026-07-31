@@ -64,6 +64,13 @@ thread_local! {
 /// Note: If the transaction commits and the resource hasn't been forgotten, the callback
 /// WILL still run, and a warning will be logged, implying a resource leak if explicit
 /// cleanup was expected.
+///
+/// # Panics
+///
+/// Panics when PostgreSQL's `CurrentResourceOwner` is null. PostgreSQL uses a
+/// null current owner outside a transaction and inside a failed transaction.
+/// An auxiliary-process `ResourceOwner` satisfies this precondition; the
+/// caller does not need to be in a user transaction.
 pub fn remember_resource<F>(callback: F) -> ResourceHandle
 where
     F: FnOnce() + 'static,
@@ -75,7 +82,7 @@ where
 
     if owner.is_null() {
         panic!(
-            "CurrentResourceOwner is NULL - remember_resource called outside of a transaction"
+            "remember_resource requires PostgreSQL's CurrentResourceOwner to be set"
         );
     }
 

@@ -18,8 +18,9 @@ use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
 use pg_lakebase_core::prelude::TupleSlotRow;
 
-use crate::access::column_mapping::{RelationShape, WriteColumns};
+use crate::access::column_mapping::WriteColumns;
 use crate::error::{IcebergError, IcebergResult};
+use crate::relation_binding::RelationShape;
 
 type ParquetDataFileWriter = DataFileWriter<
     ParquetWriterBuilder,
@@ -76,8 +77,19 @@ impl DataFileSink {
 
     /// Append one tuple-slot row into the buffer, then flush if the memory
     /// threshold is reached. The borrowed slot view is consumed within this call.
-    pub(super) fn append(&mut self, row: TupleSlotRow<'_>) -> IcebergResult<()> {
-        self.columns.append_slot_row(row)?;
+    ///
+    /// # Safety
+    ///
+    /// `row` must be a tuple slot from the same relation layout used to
+    /// construct this sink. The mutation framework supplies that relation-local
+    /// invariant at its callback boundary.
+    pub(super) unsafe fn append(
+        &mut self,
+        row: TupleSlotRow<'_>,
+    ) -> IcebergResult<()> {
+        // SAFETY: the caller's relation-local callback supplies the layout
+        // captured by `WriteColumns::resolve` during sink construction.
+        unsafe { self.columns.append_slot_row(row)? };
         self.flush_if_needed()
     }
 

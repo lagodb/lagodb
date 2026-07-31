@@ -22,7 +22,25 @@ pub(crate) const MAX_ICEBERG_FILES: usize = 1usize << ICEBERG_FILE_ID_BITS;
 pub struct IcebergFileId(u32);
 
 impl IcebergFileId {
-    pub(crate) const fn from_raw(raw: u32) -> Self {
+    /// Construct a file ID at the boundary where an external integer enters
+    /// the transaction-local identity domain.
+    pub(crate) fn try_from_raw(raw: u32) -> IcebergResult<Self> {
+        if raw >= MAX_ICEBERG_FILES as u32 {
+            return Err(IcebergError::FileIdLimitExceeded {
+                max_files: MAX_ICEBERG_FILES,
+            });
+        }
+        Ok(Self(raw))
+    }
+
+    /// Construct an ID whose 17-bit bound was established by the synthetic
+    /// identity decoder.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be less than [`MAX_ICEBERG_FILES`].
+    pub(crate) const unsafe fn from_valid_raw(raw: u32) -> Self {
+        debug_assert!(raw < MAX_ICEBERG_FILES as u32);
         Self(raw)
     }
 
@@ -31,8 +49,7 @@ impl IcebergFileId {
     }
 
     pub(crate) fn index(self) -> usize {
-        usize::try_from(self.0)
-            .expect("PostgreSQL platforms can index every Iceberg file ID")
+        self.0 as usize
     }
 }
 
@@ -77,7 +94,7 @@ impl OwnedRowPositions {
 }
 
 /// Result of claiming one physical Iceberg row for mutation.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum RowMutationClaim {
     FirstTouch {
         /// Present exactly once, when this ModifyState first touches the file.
@@ -133,18 +150,12 @@ impl RelationRowRegistry {
         if let Some(&file_id) = inner.file_ids.get(file_path) {
             return Ok(file_id);
         }
-        if inner.files.len() >= MAX_ICEBERG_FILES {
-            return Err(IcebergError::FileIdLimitExceeded {
-                max_files: MAX_ICEBERG_FILES,
-            });
-        }
-
         let raw_id = u32::try_from(inner.files.len()).map_err(|_| {
             IcebergError::MetadataTracker(
                 "Iceberg file ID cannot be represented as u32".to_owned(),
             )
         })?;
-        let file_id = IcebergFileId(raw_id);
+        let file_id = IcebergFileId::try_from_raw(raw_id)?;
         let path = Rc::<str>::from(file_path);
         inner.file_ids.insert(Rc::clone(&path), file_id);
         inner.files.push(RegisteredFile {
@@ -202,18 +213,14 @@ impl RelationRowRegistry {
         position: u32,
         command_id: pg_sys::CommandId,
     ) -> IcebergResult<RowMutationClaim> {
-        // SAFETY: AM callbacks run in an active backend transaction. No PG
-        // pointer is retained.
-        let nest_level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
-        self.claim_at_level(
-            modify_state_id,
-            file_id,
-            position,
-            command_id,
-            nest_level,
-        )
+        self.claim_inner(modify_state_id, file_id, position, command_id, || {
+            // SAFETY: AM callbacks run in an active backend transaction.
+            // No PostgreSQL pointer is retained.
+            unsafe { pg_sys::GetCurrentTransactionNestLevel() }
+        })
     }
 
+    #[cfg(test)]
     fn claim_at_level(
         &self,
         modify_state_id: ModifyStateId,
@@ -222,6 +229,22 @@ impl RelationRowRegistry {
         command_id: pg_sys::CommandId,
         nest_level: i32,
     ) -> IcebergResult<RowMutationClaim> {
+        self.claim_inner(modify_state_id, file_id, position, command_id, || {
+            nest_level
+        })
+    }
+
+    fn claim_inner<NestLevel>(
+        &self,
+        modify_state_id: ModifyStateId,
+        file_id: IcebergFileId,
+        position: u32,
+        command_id: pg_sys::CommandId,
+        nest_level: NestLevel,
+    ) -> IcebergResult<RowMutationClaim>
+    where
+        NestLevel: FnOnce() -> i32,
+    {
         let mut inner = self.inner.try_borrow_mut().map_err(|_| {
             IcebergError::InvariantViolated(
                 "transaction row registry is already borrowed",
@@ -234,18 +257,16 @@ impl RelationRowRegistry {
             ))
         })?;
 
-        let current_owner = file
-            .mutation_owners
-            .iter()
-            .position(|owner| owner.modify_state_id == modify_state_id);
-
         // TODO(row-claim-index): this probes every other ModifyState bitmap for
         // each row, making repeated cross-node mutations O(owner count). Keep a
         // per-file union bitmap (with a same-owner fast path) once this becomes
         // measurable; subtransaction rollback must rebuild or version that
         // union together with `mutation_owners`.
+        let mut current_owner = None;
         for (index, owner) in file.mutation_owners.iter().enumerate() {
-            if Some(index) != current_owner && owner.positions.contains(position)? {
+            if owner.modify_state_id == modify_state_id {
+                current_owner = Some(index);
+            } else if owner.positions.contains(position)? {
                 return Ok(RowMutationClaim::PreviouslyModified {
                     modifying_command_id: owner.command_id,
                 });
@@ -269,6 +290,7 @@ impl RelationRowRegistry {
             });
         }
 
+        let nest_level = nest_level();
         let positions = OwnedRowPositions::new_with(position);
         file.mutation_owners.push(MutationOwner {
             modify_state_id,
