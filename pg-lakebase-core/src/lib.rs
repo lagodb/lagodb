@@ -49,6 +49,9 @@ pub mod expr;
 /// that turns SQL `WHERE` predicates into provider-native scan predicates.
 pub mod customscan;
 
+/// Generic PostgreSQL Foreign Data Wrapper planning and scan framework.
+pub mod fdw;
+
 /// Registration logic for Table Access Method routines
 pub mod registry;
 
@@ -109,8 +112,8 @@ pub mod prelude {
         SqlStateError,
     };
     pub use crate::handles::*;
-    pub use crate::pg_table_am;
     pub use crate::tuple::*;
+    pub use crate::{pg_fdw, pg_table_am};
 }
 
 use pgrx::AllocatedByPostgres;
@@ -120,4 +123,4 @@ use pgrx::prelude::*;
 pub type TableAmRoutine<A = AllocatedByPostgres> = PgBox<pg_sys::TableAmRoutine, A>;
 
 /// Procedural macro for generating table access method boilerplate
-pub use pg_lakebase_macros::pg_table_am;
+pub use pg_lakebase_macros::{pg_fdw, pg_table_am};

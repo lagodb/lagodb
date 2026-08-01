@@ -4,9 +4,208 @@ use proc_macro2::Span;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, TokenStreamExt, format_ident, quote};
 use syn::{
-    ItemStruct, Lit, LitStr, MetaNameValue, Token, parse_macro_input,
+    ItemStruct, Lit, LitStr, Meta, MetaNameValue, Token, parse_macro_input,
     punctuated::Punctuated,
 };
+
+/// Generate PostgreSQL handler, validator, and metadata functions for an FDW.
+///
+/// The provider's `ForeignDataWrapper::register` implementation calls
+/// `register_scan` and/or `register_modify`. Keeping those calls in the trait
+/// implementation avoids declaring the same capability a second time in the
+/// attribute. A procedural macro cannot inspect trait implementations
+/// elsewhere in the crate on stable Rust.
+///
+/// Metadata arguments are optional. The macro accepts only `version`,
+/// `author`, and `website`; scan and modify capabilities are registered by the
+/// provider's `register` implementation.
+/// Use `#[pg_fdw]` when the provider has no metadata values to publish.
+///
+/// ```rust,ignore
+/// use core::ffi::CStr;
+/// use pg_lakebase_core::fdw::prelude::*;
+/// use pg_lakebase_core::pg_fdw;
+///
+/// #[pg_fdw(
+///     version = "0.1.0",
+///     author = "Author",
+///     website = "https://example.com"
+/// )]
+/// pub struct MyFdw;
+///
+/// impl ForeignDataWrapper for MyFdw {
+///     const NAME: &'static CStr = c"my_fdw";
+///
+///     fn register(routine: &mut FdwRoutine) {
+///         register_scan::<Self>(routine);
+///         // register_modify::<Self>(routine); // for a combined provider
+///     }
+///
+///     fn validate(
+///         options: &[Option<String>],
+///         catalog: Option<pgrx::pg_sys::Oid>,
+///     ) -> Result<(), ForeignValidationError> {
+///         let _ = (options, catalog);
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// The generated SQL functions can be used as follows:
+///
+/// ```sql
+/// CREATE FOREIGN DATA WRAPPER my_fdw
+///   HANDLER my_fdw_fdw_handler
+///   VALIDATOR my_fdw_fdw_validator;
+///
+/// SELECT * FROM my_fdw_fdw_meta();
+/// ```
+#[proc_macro_attribute]
+pub fn pg_fdw(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let meta_attrs: Punctuated<Meta, Token![,]> =
+        parse_macro_input!(attr with Punctuated::parse_terminated);
+    let mut version = None;
+    let mut author = None;
+    let mut website = None;
+
+    for meta in meta_attrs {
+        let Meta::NameValue(meta) = meta else {
+            return syn::Error::new_spanned(
+                meta,
+                "`pg_fdw` accepts only version, author, and website string metadata",
+            )
+            .to_compile_error()
+            .into();
+        };
+
+        if meta.path.segments.len() != 1 {
+            return syn::Error::new_spanned(
+                meta.path,
+                "FDW metadata keys must be simple identifiers",
+            )
+            .to_compile_error()
+            .into();
+        }
+
+        let name = meta.path.segments[0].ident.clone();
+        let value = match meta.lit {
+            Lit::Str(value) => value,
+            literal => {
+                return syn::Error::new_spanned(
+                    literal,
+                    "FDW metadata values must be string literals",
+                )
+                .to_compile_error()
+                .into();
+            }
+        };
+
+        let target = match name.to_string().as_str() {
+            "version" => &mut version,
+            "author" => &mut author,
+            "website" => &mut website,
+            _ => {
+                return syn::Error::new_spanned(
+                    &name,
+                    "unknown FDW metadata key; expected version, author, or website",
+                )
+                .to_compile_error()
+                .into();
+            }
+        };
+
+        if target.is_some() {
+            return syn::Error::new_spanned(&name, "duplicate FDW metadata key")
+                .to_compile_error()
+                .into();
+        }
+        *target = Some(value);
+    }
+
+    let version = metadata_value(version);
+    let author = metadata_value(author);
+    let website = metadata_value(website);
+
+    let item: ItemStruct = parse_macro_input!(item as ItemStruct);
+    let item_tokens = item.to_token_stream();
+    let ident = item.ident;
+    let ident_str = ident.to_string();
+    let ident_snake = to_snake_case(ident_str.as_str());
+    let module_ident = format_ident!("__{}_fdw", ident_snake);
+    let fn_ident = format_ident!("{}_fdw_handler", ident_snake);
+    let fn_validator_ident = format_ident!("{}_fdw_validator", ident_snake);
+    let fn_meta_ident = format_ident!("{}_fdw_meta", ident_snake);
+
+    let sql = format!(
+        "CREATE OR REPLACE FUNCTION {0}() RETURNS fdw_handler LANGUAGE c STRICT AS 'MODULE_PATHNAME', '{0}_wrapper';",
+        fn_ident
+    );
+    let sql_lit = LitStr::new(&sql, Span::call_site());
+    quote! {
+        #item_tokens
+
+        impl #ident {
+            pub fn fdw_routine() -> pg_lakebase_core::fdw::FdwRoutine {
+                let mut routine = pg_lakebase_core::fdw::__private::new_routine();
+                <#ident as pg_lakebase_core::fdw::ForeignDataWrapper>::register(&mut routine);
+                routine
+            }
+        }
+
+        mod #module_ident {
+            use super::#ident;
+            use pg_lakebase_core::diag::ReportableError;
+            use pg_lakebase_core::fdw::ForeignDataWrapper;
+            use pgrx::pg_sys::panic::ErrorReportable;
+            use pgrx::prelude::*;
+
+            #[pg_extern(create_or_replace, sql = #sql_lit)]
+            fn #fn_ident() -> pg_lakebase_core::fdw::FdwRoutine {
+                #ident::fdw_routine()
+            }
+
+            #[pg_extern(create_or_replace)]
+            fn #fn_validator_ident(
+                options: Vec<Option<String>>,
+                catalog: Option<pg_sys::Oid>,
+            ) {
+                <#ident as pg_lakebase_core::fdw::ForeignDataWrapper>::validate(
+                    &options,
+                    catalog,
+                )
+                .report_unwrap();
+            }
+
+            #[pg_extern(create_or_replace)]
+            fn #fn_meta_ident() -> TableIterator<'static, (
+                name!(name, Option<String>),
+                name!(version, Option<String>),
+                name!(author, Option<String>),
+                name!(website, Option<String>)
+            )> {
+                TableIterator::once((
+                    Some(
+                        <#ident as ForeignDataWrapper>::NAME
+                            .to_str()
+                            .unwrap_or_report()
+                            .to_owned(),
+                    ),
+                    #version,
+                    #author,
+                    #website,
+                ))
+            }
+        }
+    }
+    .into()
+}
+
+fn metadata_value(value: Option<LitStr>) -> TokenStream2 {
+    match value {
+        Some(value) => quote! { Some(#value.to_owned()) },
+        None => quote! { None },
+    }
+}
 
 /// Create necessary handler and meta functions for a PostgreSQL Table Access Method
 ///
