@@ -118,7 +118,7 @@ impl<'a> RowGroupMetricsEvaluator<'a> {
                 ErrorKind::Unexpected,
                 format!(
                     "Could not find a field with id '{}' in the snapshot schema",
-                    &field_id
+                    field_id
                 ),
             ));
         };
@@ -128,7 +128,7 @@ impl<'a> RowGroupMetricsEvaluator<'a> {
                 ErrorKind::Unexpected,
                 format!(
                     "Could not determine the PrimitiveType for field id '{}'",
-                    &field_id
+                    field_id
                 ),
             ));
         };
@@ -562,7 +562,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .greater_than(Datum::float(1.0))
+            .greater_than(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -585,7 +585,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .greater_than(Datum::float(1.0))
+            .greater_than(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -726,7 +726,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .greater_than(Datum::float(1.0))
+            .greater_than(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -789,7 +789,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .greater_than(Datum::float(1.0))
+            .greater_than(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -823,7 +823,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .greater_than(Datum::float(1.0))
+            .greater_than(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -857,7 +857,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .greater_than(Datum::float(1.0))
+            .greater_than(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -885,7 +885,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .equal_to(Datum::float(1.0))
+            .equal_to(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -919,7 +919,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .equal_to(Datum::float(1.0))
+            .equal_to(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -953,7 +953,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .equal_to(Datum::float(1.0))
+            .equal_to(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -987,7 +987,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .equal_to(Datum::float(1.0))
+            .equal_to(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1021,7 +1021,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .equal_to(Datum::float(1.0))
+            .equal_to(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1055,7 +1055,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .equal_to(Datum::float(1.0))
+            .equal_to(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1089,7 +1089,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .not_equal_to(Datum::float(1.0))
+            .not_equal_to(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1145,7 +1145,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .starts_with(Datum::float(1.0))
+            .starts_with(Datum::float(1.0_f32))
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1694,8 +1694,10 @@ mod tests {
 
         let filter = Reference::new("col_float")
             .is_in(
-                std::iter::repeat_with(|| Datum::float(rng.random_range(0.0..10.0)))
-                    .take(1000),
+                std::iter::repeat_with(|| {
+                    Datum::float(rng.random_range(0.0_f32..10.0_f32))
+                })
+                .take(1000),
             )
             .bind(iceberg_schema_ref.clone(), false)?;
 
@@ -1760,7 +1762,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .is_in([Datum::float(2.0), Datum::float(3.0)])
+            .is_in([Datum::float(2.0_f32), Datum::float(3.0_f32)])
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1788,7 +1790,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .is_in([Datum::float(2.0), Datum::float(3.0)])
+            .is_in([Datum::float(2.0_f32), Datum::float(3.0_f32)])
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1822,7 +1824,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .is_in([Datum::float(2.0), Datum::float(3.0)])
+            .is_in([Datum::float(2.0_f32), Datum::float(3.0_f32)])
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(
@@ -1856,7 +1858,7 @@ mod tests {
             build_iceberg_schema_and_field_map()?;
 
         let filter = Reference::new("col_float")
-            .is_in([Datum::float(2.0), Datum::float(3.0)])
+            .is_in([Datum::float(2.0_f32), Datum::float(3.0_f32)])
             .bind(iceberg_schema_ref.clone(), false)?;
 
         let result = RowGroupMetricsEvaluator::eval(

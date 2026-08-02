@@ -1086,7 +1086,7 @@ pub mod tests {
                                 .content(DataContentType::Data)
                                 .file_path(format!(
                                     "{}/1.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(0)
@@ -1114,7 +1114,7 @@ pub mod tests {
                                 .content(DataContentType::Data)
                                 .file_path(format!(
                                     "{}/2.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(0)
@@ -1141,7 +1141,7 @@ pub mod tests {
                                 .content(DataContentType::Data)
                                 .file_path(format!(
                                     "{}/3.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(0)
@@ -1312,7 +1312,7 @@ pub mod tests {
 
             for n in 1..=3 {
                 let file =
-                    File::create(format!("{}/{}.parquet", &self.table_location, n))
+                    File::create(format!("{}/{}.parquet", self.table_location, n))
                         .unwrap();
                 let mut writer = ArrowWriter::try_new(
                     file,
@@ -1360,7 +1360,7 @@ pub mod tests {
                                 .content(DataContentType::Data)
                                 .file_path(format!(
                                     "{}/1.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(0)
@@ -1387,7 +1387,7 @@ pub mod tests {
                                 .content(DataContentType::Data)
                                 .file_path(format!(
                                     "{}/2.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(0)
@@ -1413,7 +1413,7 @@ pub mod tests {
                                 .content(DataContentType::Data)
                                 .file_path(format!(
                                     "{}/3.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(0)
@@ -1575,7 +1575,7 @@ pub mod tests {
 
             for n in 1..=3 {
                 let file =
-                    File::create(format!("{}/{}.parquet", &self.table_location, n))
+                    File::create(format!("{}/{}.parquet", self.table_location, n))
                         .unwrap();
                 let mut writer = ArrowWriter::try_new(
                     file,
@@ -1623,7 +1623,7 @@ pub mod tests {
                                     .content(DataContentType::Data)
                                     .file_path(format!(
                                         "{}/{}.parquet",
-                                        &self.table_location, i
+                                        self.table_location, i
                                     ))
                                     .file_format(DataFileFormat::Parquet)
                                     .file_size_in_bytes(0)
@@ -1661,7 +1661,7 @@ pub mod tests {
                                 .content(DataContentType::PositionDeletes)
                                 .file_path(format!(
                                     "{}/del.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(0)
@@ -1899,13 +1899,13 @@ pub mod tests {
         // Check first task is added data file
         assert_eq!(
             tasks[0].data_file_path,
-            format!("{}/1.parquet", &fixture.table_location)
+            format!("{}/1.parquet", fixture.table_location)
         );
 
         // Check second task is existing data file
         assert_eq!(
             tasks[1].data_file_path,
-            format!("{}/3.parquet", &fixture.table_location)
+            format!("{}/3.parquet", fixture.table_location)
         );
     }
 

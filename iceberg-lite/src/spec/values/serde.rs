@@ -764,7 +764,7 @@ pub(crate) mod _serde {
                                             "record",
                                             &format!(
                                                 "field {} is not exist",
-                                                &field_name
+                                                field_name
                                             ),
                                         )
                                     })?;

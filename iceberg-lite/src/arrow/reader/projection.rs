@@ -1735,7 +1735,7 @@ message schema {
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
-        let file = File::create(format!("{}/data.parquet", &table_location)).unwrap();
+        let file = File::create(format!("{}/data.parquet", table_location)).unwrap();
         let mut writer =
             ArrowWriter::try_new(file, to_write.schema(), Some(props)).unwrap();
         writer.write(&to_write).expect("Writing batch");

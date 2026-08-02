@@ -339,7 +339,7 @@ mod tests {
                                 .content(DataContentType::Data)
                                 .file_path(format!(
                                     "{}/1.parquet",
-                                    &self.table_location
+                                    self.table_location
                                 ))
                                 .file_format(DataFileFormat::Parquet)
                                 .file_size_in_bytes(100)

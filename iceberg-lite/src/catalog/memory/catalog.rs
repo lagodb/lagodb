@@ -727,7 +727,7 @@ pub(crate) mod tests {
                 .to_string(),
             format!(
                 "NamespaceAlreadyExists => Cannot create namespace {:?}. Namespace already exists.",
-                &namespace_ident
+                namespace_ident
             )
         );
 
@@ -1395,7 +1395,7 @@ pub(crate) mod tests {
                 .to_string(),
             format!(
                 "TableAlreadyExists => Cannot create table {:?}. Table already exists.",
-                &table_ident
+                table_ident
             )
         );
     }
@@ -1811,7 +1811,7 @@ pub(crate) mod tests {
                 .to_string(),
             format!(
                 "TableAlreadyExists => Cannot create table {:?}. Table already exists.",
-                &dst_table_ident
+                dst_table_ident
             ),
         );
     }

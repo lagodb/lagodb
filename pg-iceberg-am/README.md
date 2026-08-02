@@ -1,6 +1,6 @@
 # pg-iceberg-am
 
-[![Rust](https://img.shields.io/badge/rust-1.96.0%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-17-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
@@ -146,10 +146,10 @@ estimated scan fraction from making the path look free to the planner.
 
 ### Requirements
 
-- Rust 1.96.0 or later
+- Rust 1.97.1 or later
 - PostgreSQL 17 (current product target; PostgreSQL 16, 18, and 19 are planned
   targets; see [PostgreSQL support](../README.md#postgresql-support))
-- `cargo-pgrx` 0.18.1
+- `cargo-pgrx` 0.19.2
 
 The repository-level [build-from-source guide](../docs/build-from-source.md)
 contains the installation, package, and pgrx-managed-server commands.

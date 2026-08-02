@@ -1367,7 +1367,7 @@ mod tests {
                 (0, Datum::bool(false)),
                 (1, Datum::int(1)),
                 (2, Datum::long(1)),
-                (3, Datum::float(0.5)),
+                (3, Datum::float(0.5_f32)),
                 (4, Datum::double(0.5)),
                 (5, Datum::string("a")),
                 (6, Datum::binary(vec![])),
@@ -1407,7 +1407,7 @@ mod tests {
                 (0, Datum::bool(true)),
                 (1, Datum::int(4)),
                 (2, Datum::long(4)),
-                (3, Datum::float(3.5)),
+                (3, Datum::float(3.5_f32)),
                 (4, Datum::double(3.5)),
                 (5, Datum::string("d")),
                 (6, Datum::binary(vec![122, 122, 122, 122])),
@@ -1854,11 +1854,11 @@ mod tests {
         assert_eq!(*data_file.value_counts(), HashMap::from([(0, 4), (1, 4)]));
         assert_eq!(
             *data_file.lower_bounds(),
-            HashMap::from([(0, Datum::float(1.0)), (1, Datum::double(1.0)),])
+            HashMap::from([(0, Datum::float(1.0_f32)), (1, Datum::double(1.0)),])
         );
         assert_eq!(
             *data_file.upper_bounds(),
-            HashMap::from([(0, Datum::float(2.0)), (1, Datum::double(2.0)),])
+            HashMap::from([(0, Datum::float(2.0_f32)), (1, Datum::double(2.0)),])
         );
         assert_eq!(
             *data_file.null_value_counts(),
@@ -2006,11 +2006,11 @@ mod tests {
         assert_eq!(*data_file.value_counts(), HashMap::from([(4, 4), (7, 4)]));
         assert_eq!(
             *data_file.lower_bounds(),
-            HashMap::from([(4, Datum::float(1.0)), (7, Datum::float(1.0)),])
+            HashMap::from([(4, Datum::float(1.0_f32)), (7, Datum::float(1.0_f32)),])
         );
         assert_eq!(
             *data_file.upper_bounds(),
-            HashMap::from([(4, Datum::float(2.0)), (7, Datum::float(2.0)),])
+            HashMap::from([(4, Datum::float(2.0_f32)), (7, Datum::float(2.0_f32)),])
         );
         assert_eq!(
             *data_file.null_value_counts(),
@@ -2180,11 +2180,11 @@ mod tests {
         assert_eq!(*data_file.value_counts(), HashMap::from([(1, 4), (4, 4)]));
         assert_eq!(
             *data_file.lower_bounds(),
-            HashMap::from([(1, Datum::float(1.0)), (4, Datum::float(1.0))])
+            HashMap::from([(1, Datum::float(1.0_f32)), (4, Datum::float(1.0_f32))])
         );
         assert_eq!(
             *data_file.upper_bounds(),
-            HashMap::from([(1, Datum::float(2.0)), (4, Datum::float(2.0))])
+            HashMap::from([(1, Datum::float(2.0_f32)), (4, Datum::float(2.0_f32))])
         );
         assert_eq!(
             *data_file.null_value_counts(),
@@ -2383,18 +2383,18 @@ mod tests {
             *data_file.lower_bounds(),
             HashMap::from([
                 (1, Datum::int(1)),
-                (2, Datum::float(1.0)),
+                (2, Datum::float(1.0_f32)),
                 (6, Datum::int(1)),
-                (7, Datum::float(1.0))
+                (7, Datum::float(1.0_f32))
             ])
         );
         assert_eq!(
             *data_file.upper_bounds(),
             HashMap::from([
                 (1, Datum::int(4)),
-                (2, Datum::float(2.0)),
+                (2, Datum::float(2.0_f32)),
                 (6, Datum::int(4)),
-                (7, Datum::float(2.0))
+                (7, Datum::float(2.0_f32))
             ])
         );
         assert_eq!(

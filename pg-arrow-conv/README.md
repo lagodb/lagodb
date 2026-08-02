@@ -1,6 +1,6 @@
 # pg-arrow-conv
 
-[![Rust](https://img.shields.io/badge/rust-1.96.0%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
@@ -111,9 +111,9 @@ workspace is layered.
 
 ## Requirements
 
-- Rust 1.96.0 or later
+- Rust 1.97.1 or later
 - PostgreSQL 16 or 17
-- pgrx 0.18.1
+- pgrx 0.19.2
 
 Dependencies are limited to `pgrx`, `pg-lakebase-core`, the `arrow-*` crates, and
 `uuid`. The crate deliberately does **not** depend on any table-format crate.

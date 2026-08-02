@@ -1,6 +1,6 @@
 # pg-lakebase-core
 
-[![Rust](https://img.shields.io/badge/rust-1.96.0%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
@@ -269,9 +269,9 @@ including the PostgreSQL-internals facts it relies on, lives in
 
 ## Requirements
 
-- Rust 1.96.0 or later
+- Rust 1.97.1 or later
 - PostgreSQL 16 or 17
-- pgrx 0.18.1
+- pgrx 0.19.2
 
 ## Testing
 

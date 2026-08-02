@@ -22,6 +22,7 @@ pg15 = []
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakebase-core/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakebase-core/pg17"]
 pg18 = []
+pg19 = []
 pg_test = []
 
 [dependencies]
@@ -42,4 +43,4 @@ pgrx-tests = { workspace = true }
 
 [build-dependencies]
 cc = "1"
-pgrx-pg-config = "=0.18.1"
+pgrx-pg-config = "=0.19.2"

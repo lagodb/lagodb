@@ -34,7 +34,7 @@ proptest = "1.5"
 
 [build-dependencies]
 cc = "1"
-pgrx-pg-config = "=0.18.1"
+pgrx-pg-config = "=0.19.2"
 
 [package.metadata.docs.rs]
 features = ["pg17"]

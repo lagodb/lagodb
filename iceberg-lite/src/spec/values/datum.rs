@@ -485,7 +485,7 @@ impl Datum {
                         ErrorKind::DataInvalid,
                         format!(
                             "PrimitiveLiteral Int128 must be PrimitiveType Decimal but got {}",
-                            &self.r#type
+                            self.r#type
                         ),
                     ));
                 };

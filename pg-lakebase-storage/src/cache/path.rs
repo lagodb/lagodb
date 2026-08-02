@@ -86,12 +86,9 @@ impl CachePathResolver {
             stem_after_prefix.strip_suffix(Self::COMPLETE_SUFFIX)
         {
             (basename, CacheFileKind::Complete)
-        } else if let Some(basename) =
-            stem_after_prefix.strip_suffix(Self::PARTIAL_SUFFIX)
-        {
-            (basename, CacheFileKind::Partial)
         } else {
-            return None;
+            let basename = stem_after_prefix.strip_suffix(Self::PARTIAL_SUFFIX)?;
+            (basename, CacheFileKind::Partial)
         };
 
         let store_id = decode_segment(components[0])?;

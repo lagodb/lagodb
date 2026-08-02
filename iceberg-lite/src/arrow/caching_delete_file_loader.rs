@@ -791,7 +791,7 @@ mod tests {
         )
         .unwrap();
 
-        let path = format!("{}/equality-deletes-1.parquet", &table_location);
+        let path = format!("{}/equality-deletes-1.parquet", table_location);
 
         let file = File::create(&path).unwrap();
 
@@ -897,7 +897,7 @@ mod tests {
             let delete_batch =
                 RecordBatch::try_new(delete_schema.clone(), vec![data_col]).unwrap();
 
-            let path = format!("{}/partial-eq-deletes.parquet", &table_location);
+            let path = format!("{}/partial-eq-deletes.parquet", table_location);
             let file = File::create(&path).unwrap();
             let props = WriterProperties::builder()
                 .set_compression(Compression::SNAPPY)
@@ -1189,7 +1189,7 @@ mod tests {
         let record_batch = RecordBatch::try_new(schema.clone(), vec![col_y]).unwrap();
 
         // Write to file
-        let path = format!("{}/large-eq-deletes.parquet", &table_location);
+        let path = format!("{}/large-eq-deletes.parquet", table_location);
         let file = File::create(&path).unwrap();
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)

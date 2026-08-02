@@ -82,7 +82,7 @@ The wrapper still runs in the Rust test binary, but the body of the
 `#[pg_test]` function runs inside PostgreSQL after the extension has been
 installed and loaded.
 
-In pgrx 0.18, `pgrx-tests` calls test functions through SQL using the
+In pgrx 0.19.2, `pgrx-tests` calls test functions through SQL using the
 `tests` schema:
 
 ```sql

@@ -877,7 +877,7 @@ mod test {
             assert!(
                 result,
                 "Should read if stats are missing for {:?}",
-                &expression
+                expression
             );
         }
     }
@@ -910,7 +910,7 @@ mod test {
             assert!(
                 result,
                 "Should skip if data file has zero records (expression: {:?})",
-                &expression
+                expression
             );
         }
     }

@@ -920,7 +920,7 @@ mod tests {
                     partition: Struct::from_iter(
                         vec![
                             Some(Literal::int(2021)),
-                            Some(Literal::float(1.0)),
+                            Some(Literal::float(1.0_f32)),
                             Some(Literal::double(2.0)),
                         ]
                     ),
@@ -955,7 +955,7 @@ mod tests {
                         partition: Struct::from_iter(
                             vec![
                                 Some(Literal::int(1111)),
-                                Some(Literal::float(15.5)),
+                                Some(Literal::float(15.5_f32)),
                                 Some(Literal::double(25.5)),
                             ]
                         ),
@@ -1084,11 +1084,11 @@ mod tests {
 
         assert_eq!(
             partitions[1].clone().lower_bound.unwrap(),
-            Datum::float(1.0).to_bytes().unwrap()
+            Datum::float(1.0_f32).to_bytes().unwrap()
         );
         assert_eq!(
             partitions[1].clone().upper_bound.unwrap(),
-            Datum::float(15.5).to_bytes().unwrap()
+            Datum::float(15.5_f32).to_bytes().unwrap()
         );
         assert!(partitions[1].clone().contains_null);
         assert_eq!(partitions[1].clone().contains_nan, Some(true));
