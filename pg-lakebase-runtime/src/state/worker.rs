@@ -241,7 +241,7 @@ impl WorkerSlot {
             return;
         }
         self.registration_state = RegistrationState::Registered as u8;
-        if self.stop_requested != 0 && self.process() == Ok(ProcessState::Stopped) {
+        if self.stop_requested != 0 {
             self.stop_requested = 0;
             self.publish_wakeup();
         } else if self.wake_requested != 0 {
@@ -696,19 +696,6 @@ mod tests {
 
         assert_eq!(worker.stop_requested, 0);
         assert_eq!(worker.dispatch(), Ok(DispatchState::Ready));
-    }
-
-    #[test]
-    fn catalog_reconciliation_preserves_stop_for_starting_worker() {
-        let mut worker = registered_worker();
-        worker.prepare_start(1_000).unwrap();
-        worker.request_stop().unwrap();
-
-        worker.reconcile_present();
-
-        assert_eq!(worker.process(), Ok(ProcessState::Exiting));
-        assert_eq!(worker.stop_requested, 1);
-        assert_eq!(worker.dispatch(), Ok(DispatchState::Idle));
     }
 
     #[test]

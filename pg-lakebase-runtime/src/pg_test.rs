@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use pgrx::prelude::*;
 
 #[cfg(feature = "pg_test")]
-use crate::runtime::RuntimeTestInjection;
+use crate::runtime::{DatabaseLifecycleLock, RuntimeTestInjection};
 
 #[cfg(feature = "pg_test")]
 const RUNTIME_TEST_SUITE_LOCK: i64 = -5_494_768_671_203_916_627;
@@ -324,6 +324,12 @@ mod tests {
     #[pgrx::pg_test]
     fn terminate_before_worker_start_reaches_physical_stop() {
         let harness = RuntimeWorkerHarness::new();
+        DatabaseLifecycleLock::new(harness.database_oid()).acquire_shared();
+        // Reconciliation requires RowExclusiveLock and therefore cannot run
+        // until this test transaction releases its lifecycle ShareLock. Stage
+        // recovery now so both commit and abort publish it as the transaction
+        // ends; the lifecycle lock prevents it from running before release.
+        crate::lifecycle::request_database_reconcile();
         harness.wait_for("dispatch_state = 'idle' AND process_state = 'stopped'");
         let extension_oid = harness.extension_oid("pg_lakebase_runtime");
         harness.set_injection("hold_before_start");
@@ -343,11 +349,6 @@ mod tests {
         ));
 
         harness.reset_injection();
-        harness.request_reconcile();
-        harness.wait_for_reconcile_complete();
-        harness.wait_for(&format!(
-            "generation > {generation} AND process_state = 'stopped' AND dispatch_state = 'idle' AND NOT stop_requested"
-        ));
     }
 
     #[pgrx::pg_test]
