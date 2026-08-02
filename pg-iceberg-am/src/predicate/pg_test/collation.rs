@@ -2,27 +2,33 @@
 
 #[pgrx::pg_schema]
 mod tests {
-    use crate::customscan::pg_test::support::fixtures::{
+    use crate::predicate::pg_test::harness::{
         TEXT_ORDERED_OPNOS, TEXTEQ_OPNO, TEXTNE_OPNO,
     };
     use pg_lakebase_core::expr::PgComparisonOp;
     use pgrx::pg_sys;
 
-    use crate::predicate::policy::{PredicateCapability, PredicatePushdownPolicy};
+    use crate::predicate::policy::{
+        CollationSemantics, PgPredicatePushdownPolicy, PredicateCapability,
+    };
 
     fn supported_predicate(
         type_oid: pg_sys::Oid,
         op_key: PgComparisonOp,
     ) -> PredicateCapability {
-        PredicatePushdownPolicy::capability_for(type_oid, op_key.identity())
+        PgPredicatePushdownPolicy::capability_for(type_oid, op_key.identity())
     }
 
     fn is_c_or_posix_collation(oid: pg_sys::Oid) -> bool {
-        PredicatePushdownPolicy::is_c_or_posix_collation(oid)
+        PgPredicatePushdownPolicy::collation_semantics(oid)
+            == CollationSemantics::COrPosix
     }
 
     fn is_deterministic_collation(oid: pg_sys::Oid) -> bool {
-        PredicatePushdownPolicy::is_deterministic_collation(oid)
+        matches!(
+            PgPredicatePushdownPolicy::collation_semantics(oid),
+            CollationSemantics::COrPosix | CollationSemantics::Deterministic
+        )
     }
 
     /// `text` comparison triple; `inputcollid` is what `supported_predicate` reads.

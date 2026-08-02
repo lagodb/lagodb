@@ -44,16 +44,20 @@ The test harness is the generated program that:
 - executes tests and reports `test name ... ok`.
 
 When a crate is compiled in this test mode, Rust enables the cfg flag
-`test`. Therefore this module declaration:
+`test`. A host-only suite can be colocated with the production responsibility:
 
 ```rust
 #[cfg(test)]
-mod tests;
+mod tests {
+    #[test]
+    fn pure_logic() {}
+}
 ```
 
-means: include `tests.rs` only when this crate is being compiled for the
-Rust test harness. The code in that module runs in the host-side test
-process, not inside PostgreSQL.
+The code in that module runs in the host-side test process, not inside
+PostgreSQL. If the suite needs to be split for file-size or responsibility
+reasons, keep the child module next to the production code and retain the same
+`#[cfg(test)]` boundary.
 
 For `pg-iceberg-am`, ordinary `#[test]` functions must only exercise logic
 that can run in a normal process without PostgreSQL backend state.
@@ -128,7 +132,9 @@ Use these cfgs intentionally:
 
 ```rust
 #[cfg(test)]
-mod tests;
+mod tests {
+    // ordinary host-side `#[test]` functions
+}
 ```
 
 This is for ordinary Rust unit tests. These tests run in the host-side Rust
@@ -157,23 +163,72 @@ state, with `#[pg_test]`. Do not replace production callback bodies with
 
 ## Current Module Layout
 
-For `pg-iceberg-am/src/access/conversion`, the intended layout is:
+The physical layout follows the execution boundary while keeping host tests
+with the production code they exercise. A small production module uses:
 
 ```rust
 #[cfg(test)]
-mod tests;
+mod tests {
+    // ordinary host-side `#[test]` functions
+}
 
 #[cfg(feature = "pg_test")]
 mod pg_test;
 ```
 
-The files have distinct responsibilities:
+The host suite may be an inline child module, or a responsibility-focused
+production child module with its own inline tests when the parent file would
+become too large. The backend suite is a separate feature-gated `pg_test`
+module tree, for example:
 
-- `tests.rs`: ordinary Rust unit tests for pure logic.
-- `pg_test.rs`: pgrx backend tests for code paths that require PostgreSQL.
+```text
+src/predicate/
+├── classifier.rs          # classifier + exhaustive host decision matrix
+├── policy.rs              # pure capability policy + host matrix
+├── translator.rs          # translator semantics + host tests
+├── translator/
+│   ├── datum.rs           # Datum FFI + pure temporal conversion tests
+│   └── predicate_algebra.rs # algebra + its host tests
+└── pg_test/               # compiled only with feature = "pg_test"
+    ├── classifier.rs      # raw PG-node parser/classifier smoke
+    ├── collation.rs       # real catalog/syscache behavior
+    ├── datum.rs           # real Datum extraction/varlena behavior
+    ├── harness.rs         # shared synthetic PG-node and pipeline harness
+    ├── translator.rs      # representative cross-layer wiring
+```
 
-This keeps the Rust module names understandable while preserving the pgrx
-execution model.
+`policy.rs` contains a feature-gated `test_opno_table` module. It is shared
+fixture data rather than a test suite, and remains adjacent to the policy that
+owns the operator mapping while both host and backend tests consume the same
+table.
+
+Test-only construction support for types with private fields stays in a
+feature-gated child module of the owning production module, for example
+`relation_binding/pg_test.rs`.
+
+Backend files contain `#[pgrx::pg_test]` functions and declare the SQL schema
+with `#[pgrx::pg_schema] mod tests {}` when using `schema = "tests"`. They do
+not become ordinary host `#[test]` suites merely because pgrx also generates
+host-side wrappers.
+
+This keeps the execution boundary explicit, prevents PostgreSQL-facing test
+support from being owned by `customscan` when it tests predicate behavior,
+and avoids growing a single production source file without a responsibility
+boundary.
+
+Placement follows the behavior under test, not an accidental static-linkage
+property of a large function. If a pure policy matrix can run only in a
+backend because the same function also performs a syscache lookup, separate
+catalog fact resolution from the pure decision before adding more backend
+cases. Likewise, temporal epoch arithmetic is host logic even though extracting
+the raw value from a PostgreSQL `Datum` is backend-facing.
+
+Each rule has one exhaustive owner. The pure capability matrix belongs to
+`policy.rs`; operand-shape and costing matrices belong to `classifier.rs`;
+epoch and infinity boundaries belong to `translator/datum.rs`. Backend suites
+verify their boundary wiring with representative cases and must not repeat
+those matrices through raw-node fixtures. This keeps backend runtime and test
+support proportional to the actual PostgreSQL boundary.
 
 ## Why `pg_test.rs` Declares an Empty `tests` Schema
 
@@ -325,16 +380,20 @@ Use `#[pgrx::pg_test]` when any of the following are true:
 
 - The test calls `pg_sys` backend functions.
 - The test uses SPI.
-- The test depends on Datum conversion, memory contexts, or PostgreSQL error
-  handling.
+- The test exercises PostgreSQL Datum extraction (especially varlena), memory
+  contexts, or PostgreSQL error handling. Pure arithmetic after extraction is
+  still a host-test responsibility.
 - The test depends on PostgreSQL catalogs, runtime type information, or real
   backend OID semantics.
-- The tested function transitively pulls in pgrx code that requires backend
-  symbols.
+- The specific behavior being verified cannot be separated from pgrx code
+  requiring backend symbols without distorting the production boundary.
 
-When in doubt, prefer `#[pg_test]` for PostgreSQL-facing paths. Keep pure
-mapping and parsing logic as ordinary `#[test]` so it stays fast and does not
-require a PostgreSQL cluster.
+When static linkage alone forces a logically pure test into `#[pg_test]`, treat
+that as an architectural signal: resolve backend facts at an adapter boundary
+and pass a small domain value into pure logic. Do not introduce dependency
+injection solely for tests when no production boundary exists; the split must
+also clarify production ownership. Keep pure mapping and decision logic as
+ordinary `#[test]` so it stays fast and does not require a PostgreSQL cluster.
 
 ## Practical Commands
 

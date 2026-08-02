@@ -6,7 +6,7 @@
 //! translation and retains it for the scan lifetime.
 
 #[cfg(feature = "pg_test")]
-mod pg_test_support;
+mod pg_test;
 
 use iceberg_lite::spec::Schema as IcebergSchema;
 use pg_lakebase_core::handles::RelationHandle;

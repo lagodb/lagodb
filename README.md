@@ -8,8 +8,8 @@
 ## A lakehouse database built on PostgreSQL
 
 `pg-lakebase` is building a lakehouse database on
-[PostgreSQL](https://www.postgresql.org/). The goal is to combine PostgreSQL's
-SQL interface, transaction model, and ecosystem with open lakehouse storage.
+[PostgreSQL](https://www.postgresql.org/). The goal is to bring PostgreSQL's SQL
+interface, transaction model, and ecosystem to open lakehouse table formats.
 
 The long-term vision includes first-class support for the
 [Apache Iceberg](https://iceberg.apache.org/),

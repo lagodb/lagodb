@@ -7,7 +7,8 @@ mod tests {
     use pg_lakebase_core::expr::pg::{PgConst, PgExprRef};
     use pg_lakebase_core::expr::translator::PgLiteral;
     use pg_lakebase_core::expr::translator::PgPredicateTranslator;
-    use pgrx::pg_sys;
+    use pg_lakebase_core::expr::{ParamKey, ResolvedParam};
+    use pgrx::{IntoDatum, pg_sys};
 
     use crate::predicate::translator::{
         IcebergPredicateTranslator, IcebergScalar, IcebergTranslationError,
@@ -17,8 +18,6 @@ mod tests {
     /// `text` / `varchar` literals decode to iceberg `string` `Datum`s.
     #[pgrx::pg_test(schema = "tests")]
     fn decode_text_and_varchar_build_string_datum() {
-        use pgrx::IntoDatum;
-
         unsafe {
             let text_datum = "hello".into_datum().expect("text into_datum");
             let got = decode_datum(pg_sys::TEXTOID, text_datum)
@@ -30,6 +29,36 @@ mod tests {
             let got = decode_datum(pg_sys::VARCHAROID, varchar_datum)
                 .expect("varchar must decode to a string Datum");
             assert_eq!(got, Datum::string("world"));
+        }
+    }
+
+    /// Each integer Datum representation reaches its corresponding Iceberg
+    /// scalar width without losing signed values.
+    #[pgrx::pg_test(schema = "tests")]
+    fn decode_integer_datums_preserves_width_and_sign() {
+        let int8_value = i64::from(i32::MIN) - 1;
+        let cases = [
+            (
+                pg_sys::INT2OID,
+                (-123_i16).into_datum().expect("int2 into_datum"),
+                Datum::int(-123),
+            ),
+            (
+                pg_sys::INT4OID,
+                (-123_456_i32).into_datum().expect("int4 into_datum"),
+                Datum::int(-123_456),
+            ),
+            (
+                pg_sys::INT8OID,
+                int8_value.into_datum().expect("int8 into_datum"),
+                Datum::long(int8_value),
+            ),
+        ];
+
+        for (type_oid, datum, expected) in cases {
+            // SAFETY: every Datum was produced by IntoDatum for the integer
+            // type identified by the paired PostgreSQL OID and is non-NULL.
+            assert_eq!(unsafe { decode_datum(type_oid, datum) }, Ok(expected));
         }
     }
 
@@ -76,72 +105,56 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Pass-by-value temporal decode.
-    //
-    // Scope note: the *happy-path* epoch-offset equivalence for date /
-    // timestamp / timestamptz (decoded `Datum` == write-side stored bound) is
-    // owned by the cross-crate write/translator consistency property tests in
-    // `decode::epoch_consistency` (`pushed_*_bound_matches_write_side_offset`
-    // and `*_epoch_consistency_at_unix_epoch`), which exercise the same
-    // `decode_datum` path across the whole representable range. This module
-    // keeps the ±infinity not-representable rejections excluded from those
-    // property ranges.
-    // -------------------------------------------------------------------------
+    #[pgrx::pg_test(schema = "tests")]
+    fn param_value_null_decodes_to_null() {
+        let mut translator = IcebergPredicateTranslator::new_unbound_for_tests();
+        let null_param = unsafe {
+            ResolvedParam::from_raw_parts(
+                ParamKey {
+                    paramkind: pg_sys::ParamKind::PARAM_EXTERN,
+                    param_id: 1,
+                },
+                pg_sys::INT4OID,
+                pg_sys::Oid::INVALID,
+                pg_sys::Datum::from(0usize),
+                true,
+            )
+        };
+
+        assert!(matches!(
+            translator.param_value(null_param.value()),
+            Ok(IcebergScalar::Null { type_oid }) if type_oid == pg_sys::INT4OID
+        ));
+    }
 
     use iceberg_lite::spec::Datum;
+    use pg_lakebase_core::tuple::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 
-    /// Build a PG `date` `Datum` directly from a raw `DateADT` (PG-epoch days).
-    fn date_datum_from_raw(pg_days: i32) -> pg_sys::Datum {
-        pg_sys::Datum::from(pg_days)
-    }
-
-    /// Build a PG `timestamp` / `timestamptz` `Datum` from raw PG-epoch micros.
-    fn ts_datum_from_raw(pg_micros: i64) -> pg_sys::Datum {
-        pg_sys::Datum::from(pg_micros)
-    }
-
+    /// One raw-Datum smoke per temporal representation. Offset arithmetic and
+    /// infinity boundaries are exhaustively owned by host tests in `datum.rs`.
     #[pgrx::pg_test(schema = "tests")]
-    fn decode_date_infinity_is_not_representable() {
-        for raw in [i32::MAX, i32::MIN] {
-            let datum = date_datum_from_raw(raw);
-            assert!(
-                matches!(
-                    unsafe { decode_datum(pg_sys::DATEOID, datum) },
-                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
-                        if type_oid == pg_sys::DATEOID
+    fn decode_temporal_datums_at_unix_epoch() {
+        unsafe {
+            assert_eq!(
+                decode_datum(
+                    pg_sys::DATEOID,
+                    pg_sys::Datum::from(-PG_EPOCH_DAYS_DIFF),
                 ),
-                "±infinity date (raw {raw}) must be ValueNotRepresentable",
+                Ok(Datum::date(0)),
             );
-        }
-    }
-
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_timestamp_infinity_is_not_representable() {
-        for raw in [i64::MAX, i64::MIN] {
-            let datum = ts_datum_from_raw(raw);
-            assert!(
-                matches!(
-                    unsafe { decode_datum(pg_sys::TIMESTAMPOID, datum) },
-                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
-                        if type_oid == pg_sys::TIMESTAMPOID
+            assert_eq!(
+                decode_datum(
+                    pg_sys::TIMESTAMPOID,
+                    pg_sys::Datum::from(-PG_EPOCH_USECS_DIFF),
                 ),
-                "±infinity timestamp (raw {raw}) must be ValueNotRepresentable",
+                Ok(Datum::timestamp_micros(0)),
             );
-        }
-    }
-
-    #[pgrx::pg_test(schema = "tests")]
-    fn decode_timestamptz_infinity_is_not_representable() {
-        for raw in [i64::MAX, i64::MIN] {
-            let datum = ts_datum_from_raw(raw);
-            assert!(
-                matches!(
-                    unsafe { decode_datum(pg_sys::TIMESTAMPTZOID, datum) },
-                    Err(IcebergTranslationError::ValueNotRepresentable { type_oid })
-                        if type_oid == pg_sys::TIMESTAMPTZOID
+            assert_eq!(
+                decode_datum(
+                    pg_sys::TIMESTAMPTZOID,
+                    pg_sys::Datum::from(-PG_EPOCH_USECS_DIFF),
                 ),
-                "±infinity timestamptz (raw {raw}) must be ValueNotRepresentable",
+                Ok(Datum::timestamptz_micros(0)),
             );
         }
     }

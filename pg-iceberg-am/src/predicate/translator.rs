@@ -4,6 +4,7 @@
 //! Datum module isolates PostgreSQL's unsafe scalar decoding boundary.
 
 mod datum;
+mod predicate_algebra;
 
 pub(crate) use datum::decode_datum;
 
@@ -14,15 +15,17 @@ use iceberg_lite::expr::{
 };
 use iceberg_lite::spec::Datum;
 use pg_lakebase_core::expr::ColumnNameResolver;
-use pg_lakebase_core::expr::PgComparisonOp;
 use pg_lakebase_core::expr::translator::{
     PgColumnRef, PgLiteral, PgParamValue, PgPredicateTranslator,
 };
+use pg_lakebase_core::expr::{PgComparisonIdentity, PgComparisonOp};
 use pgrx::pg_sys;
 
 use crate::relation_binding::RelationFieldIndex;
 
-use super::policy::{ComparisonOpClass, PredicatePushdownPolicy};
+use super::policy::{
+    ComparisonOpClass, PgPredicatePushdownPolicy, PredicatePushdownPolicy,
+};
 
 // =============================================================================
 // Scalar leaf model
@@ -188,21 +191,6 @@ impl IcebergPredicateTranslator {
             field_index: Some(field_index),
         }
     }
-
-    /// Combine translated predicates as a left-associative conjunction.
-    /// Empty input means that no provider filter is required.
-    pub(crate) fn conjoin(items: Vec<Predicate>) -> Option<Predicate> {
-        Self::fold(items, Predicate::and)
-    }
-
-    fn fold(
-        items: Vec<Predicate>,
-        combine: impl Fn(Predicate, Predicate) -> Predicate,
-    ) -> Option<Predicate> {
-        let mut iter = items.into_iter();
-        let first = iter.next()?;
-        Some(iter.fold(first, combine))
-    }
 }
 
 impl PgPredicateTranslator for IcebergPredicateTranslator {
@@ -273,52 +261,7 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
         left: Self::Scalar,
         right: Self::Scalar,
     ) -> Result<Self::Predicate, Self::Error> {
-        // SQL three-valued logic: strict comparison with NULL is UNKNOWN → fold to AlwaysFalse.
-        if matches!(left, IcebergScalar::Null { .. })
-            || matches!(right, IcebergScalar::Null { .. })
-        {
-            return Ok(Predicate::AlwaysFalse);
-        }
-
-        let (reference, atttypid, datum, swap_sides) = match (left, right) {
-            (
-                IcebergScalar::Column {
-                    reference,
-                    atttypid,
-                },
-                IcebergScalar::Datum(datum),
-            ) => (reference, atttypid, datum, false),
-            (
-                IcebergScalar::Datum(datum),
-                IcebergScalar::Column {
-                    reference,
-                    atttypid,
-                },
-            ) => (reference, atttypid, datum, true),
-            (l, r) => {
-                return Err(IcebergTranslationError::ComparisonShape {
-                    left: l.kind(),
-                    right: r.kind(),
-                });
-            }
-        };
-
-        if !PredicatePushdownPolicy::can_build(atttypid, op.identity()) {
-            return Err(IcebergTranslationError::UnsupportedType {
-                type_oid: atttypid,
-            });
-        }
-
-        let mut predicate_op = self.map_comparison_operator(op)?;
-        if swap_sides {
-            predicate_op = self.mirror_operator(predicate_op);
-        }
-
-        Ok(Predicate::Binary(BinaryExpression::new(
-            predicate_op,
-            reference,
-            datum,
-        )))
+        self.comparison_with(op, left, right, PgPredicatePushdownPolicy::can_build)
     }
 
     fn is_null(
@@ -364,6 +307,60 @@ impl PgPredicateTranslator for IcebergPredicateTranslator {
 }
 
 impl IcebergPredicateTranslator {
+    fn comparison_with(
+        &self,
+        op: PgComparisonOp,
+        left: IcebergScalar,
+        right: IcebergScalar,
+        can_build: impl Fn(pg_sys::Oid, PgComparisonIdentity) -> bool,
+    ) -> Result<Predicate, IcebergTranslationError> {
+        // SQL three-valued logic: strict comparison with NULL is UNKNOWN → fold to AlwaysFalse.
+        if matches!(left, IcebergScalar::Null { .. })
+            || matches!(right, IcebergScalar::Null { .. })
+        {
+            return Ok(Predicate::AlwaysFalse);
+        }
+
+        let (reference, atttypid, datum, swap_sides) = match (left, right) {
+            (
+                IcebergScalar::Column {
+                    reference,
+                    atttypid,
+                },
+                IcebergScalar::Datum(datum),
+            ) => (reference, atttypid, datum, false),
+            (
+                IcebergScalar::Datum(datum),
+                IcebergScalar::Column {
+                    reference,
+                    atttypid,
+                },
+            ) => (reference, atttypid, datum, true),
+            (l, r) => {
+                return Err(IcebergTranslationError::ComparisonShape {
+                    left: l.kind(),
+                    right: r.kind(),
+                });
+            }
+        };
+
+        if !can_build(atttypid, op.identity()) {
+            return Err(IcebergTranslationError::UnsupportedType {
+                type_oid: atttypid,
+            });
+        }
+
+        let mut predicate_op = self.map_comparison_operator(op)?;
+        if swap_sides {
+            predicate_op = self.mirror_operator(predicate_op);
+        }
+
+        Ok(Predicate::Binary(BinaryExpression::new(
+            predicate_op,
+            reference,
+            datum,
+        )))
+    }
     /// Extract the column [`Reference`] for an `IS NULL` / `IS NOT NULL` test.
     ///
     /// Owns the model→error mapping: a non-column operand is rejected as
@@ -441,40 +438,165 @@ impl IcebergPredicateTranslator {
             }),
         }
     }
+}
 
-    /// Mirror a binary operator for the `literal op column` operand order so it
-    /// reads as `column op literal` (e.g. `7 < col` → `col > 7`).
-    ///
-    /// Translator-only assembly step used by [`Self::comparison`] when
-    /// `swap_sides` holds: self-inverse on directional ops, identity on
-    /// symmetric ones.
-    fn mirror_operator(&self, op: PredicateOperator) -> PredicateOperator {
-        match op {
-            PredicateOperator::LessThan => PredicateOperator::GreaterThan,
-            PredicateOperator::LessThanOrEq => PredicateOperator::GreaterThanOrEq,
-            PredicateOperator::GreaterThan => PredicateOperator::LessThan,
-            PredicateOperator::GreaterThanOrEq => PredicateOperator::LessThanOrEq,
-            _ => op,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pgrx::pg_sys::Oid;
+
+    const INT4_TYPE_OID: u32 = 23;
+
+    fn map_comparison_operator(
+        op: PgComparisonOp,
+    ) -> Result<PredicateOperator, IcebergTranslationError> {
+        IcebergPredicateTranslator::new_unbound_for_tests()
+            .map_comparison_operator(op)
+    }
+
+    fn op_triple(opno: u32) -> PgComparisonOp {
+        PgComparisonOp {
+            opno: Oid::from(opno),
+            opfuncid: Oid::INVALID,
+            opresulttype: Oid::INVALID,
+            opcollid: Oid::INVALID,
+            inputcollid: Oid::INVALID,
         }
     }
 
-    /// Left-associative fold of predicates with `Predicate::and` or
-    /// `Predicate::or`, erroring on an empty children list.
-    ///
-    /// The translator owns the `and` / `or` empty-list semantics through
-    /// [`IcebergTranslationError::EmptyBoolExpr`].
-    fn fold_predicates(
-        &self,
-        items: Vec<Predicate>,
-        and: bool,
-    ) -> Result<Predicate, IcebergTranslationError> {
-        let combine: fn(Predicate, Predicate) -> Predicate =
-            if and { Predicate::and } else { Predicate::or };
-        Self::fold(items, combine).ok_or(IcebergTranslationError::EmptyBoolExpr)
+    fn null_scalar(type_oid: u32) -> IcebergScalar {
+        IcebergScalar::Null {
+            type_oid: Oid::from(type_oid),
+        }
+    }
+
+    fn column_scalar(name: &str, type_oid: u32) -> IcebergScalar {
+        IcebergScalar::Column {
+            reference: Reference::new(name),
+            atttypid: Oid::from(type_oid),
+        }
+    }
+
+    #[test]
+    fn maps_int4_operators() {
+        assert_eq!(
+            map_comparison_operator(op_triple(96)).unwrap(),
+            PredicateOperator::Eq,
+        );
+        assert_eq!(
+            map_comparison_operator(op_triple(518)).unwrap(),
+            PredicateOperator::NotEq,
+        );
+        assert_eq!(
+            map_comparison_operator(op_triple(97)).unwrap(),
+            PredicateOperator::LessThan,
+        );
+        assert_eq!(
+            map_comparison_operator(op_triple(523)).unwrap(),
+            PredicateOperator::LessThanOrEq,
+        );
+        assert_eq!(
+            map_comparison_operator(op_triple(521)).unwrap(),
+            PredicateOperator::GreaterThan,
+        );
+        assert_eq!(
+            map_comparison_operator(op_triple(525)).unwrap(),
+            PredicateOperator::GreaterThanOrEq,
+        );
+    }
+
+    #[test]
+    fn maps_int8_operators() {
+        for opno in [410u32, 411, 412, 413, 414, 415] {
+            assert!(
+                map_comparison_operator(op_triple(opno)).is_ok(),
+                "int8 opno {opno} must be in the consolidated op_class map",
+            );
+        }
+    }
+
+    #[test]
+    fn maps_supported_non_integer_operators() {
+        assert_eq!(
+            map_comparison_operator(op_triple(1098)).unwrap(),
+            PredicateOperator::GreaterThanOrEq,
+        );
+        assert_eq!(
+            map_comparison_operator(op_triple(98)).unwrap(),
+            PredicateOperator::Eq,
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_operator() {
+        assert!(matches!(
+            map_comparison_operator(op_triple(558)),
+            Err(IcebergTranslationError::UnsupportedOperator { .. })
+        ));
+    }
+
+    #[test]
+    fn map_comparison_operator_is_collation_agnostic() {
+        let mut t = op_triple(96);
+        t.inputcollid = Oid::from(100u32);
+        assert_eq!(map_comparison_operator(t).unwrap(), PredicateOperator::Eq);
+
+        let mut t = op_triple(96);
+        t.opcollid = Oid::from(100u32);
+        assert_eq!(map_comparison_operator(t).unwrap(), PredicateOperator::Eq);
+    }
+
+    #[test]
+    fn strict_comparisons_with_null_fold_before_policy_resolution() {
+        for opno in [96, 518, 97, 523, 521, 525, 410, 411, 412, 413, 414, 415] {
+            let type_oid = if (410..=415).contains(&opno) {
+                20
+            } else {
+                INT4_TYPE_OID
+            };
+            for null_on_left in [false, true] {
+                let (left, right) = if null_on_left {
+                    (null_scalar(type_oid), column_scalar("id", type_oid))
+                } else {
+                    (column_scalar("id", type_oid), null_scalar(type_oid))
+                };
+                assert_eq!(
+                    IcebergPredicateTranslator::new_unbound_for_tests()
+                        .comparison_with(op_triple(opno), left, right, |_, _| {
+                            panic!("NULL folding must precede policy resolution")
+                        }),
+                    Ok(Predicate::AlwaysFalse),
+                    "opno {opno}, null_on_left={null_on_left}",
+                );
+            }
+        }
+
+        assert_eq!(
+            IcebergPredicateTranslator::new_unbound_for_tests().comparison_with(
+                op_triple(96),
+                null_scalar(INT4_TYPE_OID),
+                null_scalar(20),
+                |_, _| panic!("NULL folding must precede policy resolution"),
+            ),
+            Ok(Predicate::AlwaysFalse),
+        );
+    }
+
+    #[test]
+    fn is_null_with_null_scalar_fails_closed() {
+        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
+        assert!(matches!(
+            t.is_null(null_scalar(INT4_TYPE_OID)),
+            Err(IcebergTranslationError::NullTestOnNonColumn)
+        ));
+    }
+
+    #[test]
+    fn is_not_null_with_null_scalar_fails_closed() {
+        let mut t = IcebergPredicateTranslator::new_unbound_for_tests();
+        assert!(matches!(
+            t.is_not_null(null_scalar(INT4_TYPE_OID)),
+            Err(IcebergTranslationError::NullTestOnNonColumn)
+        ));
     }
 }
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod predicate_algebra_tests;

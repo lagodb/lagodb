@@ -37,6 +37,22 @@ pub(crate) enum ComparisonOpClass {
     Ge,
 }
 
+/// Collation facts consumed by the pure capability policy.
+///
+/// PostgreSQL catalog lookup belongs to [`PgPredicatePushdownPolicy`]; the
+/// policy itself reasons only about this resolved value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CollationSemantics {
+    /// `InvalidOid`: no collation applies.
+    None,
+    /// Built-in `C` or `POSIX`; byte ordering matches Iceberg string ordering.
+    COrPosix,
+    /// A deterministic non-C PostgreSQL collation.
+    Deterministic,
+    /// A non-deterministic PostgreSQL collation.
+    NonDeterministic,
+}
+
 /// Built-in `pg_operator` OIDs supported by the predicate policy.
 ///
 /// `PgBuiltInOids` models PostgreSQL type/catalog OIDs. `OpExpr.opno` is a
@@ -96,7 +112,7 @@ mod pg_operator_oid {
     pub const TEXT_GE: u32 = pg_sys::TextGreaterEqualOperator;
 }
 
-/// Iceberg predicate pushdown policy shared by planner classification and
+/// Pure Iceberg predicate pushdown policy shared by planner classification and
 /// runtime translation.
 pub(crate) struct PredicatePushdownPolicy;
 
@@ -165,6 +181,7 @@ impl PredicatePushdownPolicy {
     pub(crate) fn capability_for(
         type_oid: pg_sys::Oid,
         op_key: PgComparisonIdentity,
+        input_collation: CollationSemantics,
     ) -> PredicateCapability {
         // Unrecognized opno => never pushable (also rejects cross-category comparisons).
         let Some(class) = Self::op_class(op_key.opno) else {
@@ -195,7 +212,11 @@ impl PredicatePushdownPolicy {
             PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
                 match class {
                     ComparisonOpClass::Eq => {
-                        if Self::is_deterministic_collation(op_key.inputcollid) {
+                        if matches!(
+                            input_collation,
+                            CollationSemantics::COrPosix
+                                | CollationSemantics::Deterministic
+                        ) {
                             PredicateCapability::ConservativePruning
                         } else {
                             PredicateCapability::Unsupported
@@ -205,7 +226,7 @@ impl PredicatePushdownPolicy {
                     | ComparisonOpClass::Le
                     | ComparisonOpClass::Gt
                     | ComparisonOpClass::Ge => {
-                        if Self::is_c_or_posix_collation(op_key.inputcollid) {
+                        if input_collation == CollationSemantics::COrPosix {
                             PredicateCapability::ConservativePruning
                         } else {
                             PredicateCapability::Unsupported
@@ -241,16 +262,6 @@ impl PredicatePushdownPolicy {
         }
     }
 
-    /// Whether the runtime translator should attempt a native predicate build
-    /// for this type/op. Single source of truth: [`Self::capability_for`] — only
-    /// `Unsupported` is non-buildable.
-    pub(crate) fn can_build(type_oid: pg_sys::Oid, op: PgComparisonIdentity) -> bool {
-        !matches!(
-            Self::capability_for(type_oid, op),
-            PredicateCapability::Unsupported
-        )
-    }
-
     /// Types whose const literals lack plan-time datum inspection
     /// (ConservativePruning is uncosted).
     pub(crate) fn is_value_sensitive_type(type_oid: pg_sys::Oid) -> bool {
@@ -262,26 +273,6 @@ impl PredicatePushdownPolicy {
                     | PgBuiltInOids::TIMESTAMPTZOID
             )
         )
-    }
-
-    /// True for built-in `C` or `POSIX` collation (byte order matches PG ordering).
-    pub(crate) fn is_c_or_posix_collation(oid: pg_sys::Oid) -> bool {
-        oid == pg_sys::C_COLLATION_OID || oid == pg_sys::POSIX_COLLATION_OID
-    }
-
-    /// Whether `oid` is deterministic (`pg_collation.collisdeterministic`).
-    pub(crate) fn is_deterministic_collation(oid: pg_sys::Oid) -> bool {
-        if oid == pg_sys::Oid::INVALID {
-            return false;
-        }
-        if Self::is_c_or_posix_collation(oid) {
-            return true;
-        }
-        // SAFETY: non-zero `inputcollid` comes from PostgreSQL's analyzed
-        // expression tree and therefore names a live `pg_collation` row.
-        // `get_collation_isdeterministic` reports catalog corruption through
-        // PostgreSQL ERROR; that error must reach the framework's FFI boundary.
-        unsafe { pg_sys::get_collation_isdeterministic(oid) }
     }
 
     /// Returns [`PredicateCapability::ConservativePruning`] for equality and
@@ -349,8 +340,485 @@ impl PredicatePushdownPolicy {
     }
 }
 
+/// PostgreSQL-facing adapter that resolves catalog-backed collation facts
+/// before delegating to [`PredicatePushdownPolicy`].
+pub(crate) struct PgPredicatePushdownPolicy;
+
+impl PgPredicatePushdownPolicy {
+    pub(crate) fn capability_for(
+        type_oid: pg_sys::Oid,
+        op_key: PgComparisonIdentity,
+    ) -> PredicateCapability {
+        let collation = if matches!(
+            PgOid::from(type_oid),
+            PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID)
+        ) {
+            Self::collation_semantics(op_key.inputcollid)
+        } else {
+            // Non-text policy branches never consume catalog collation facts.
+            // In particular, an invalid synthetic integer tag must be rejected
+            // by the pure `(opcollid, inputcollid)` gate, not looked up in
+            // pg_collation first.
+            CollationSemantics::None
+        };
+        PredicatePushdownPolicy::capability_for(type_oid, op_key, collation)
+    }
+
+    /// Whether the runtime translator should attempt a native predicate build.
+    pub(crate) fn can_build(
+        type_oid: pg_sys::Oid,
+        op_key: PgComparisonIdentity,
+    ) -> bool {
+        !matches!(
+            Self::capability_for(type_oid, op_key),
+            PredicateCapability::Unsupported
+        )
+    }
+
+    /// Resolve `pg_collation.collisdeterministic` for one analyzed expression.
+    pub(crate) fn collation_semantics(oid: pg_sys::Oid) -> CollationSemantics {
+        if oid == pg_sys::Oid::INVALID {
+            return CollationSemantics::None;
+        }
+        if oid == pg_sys::C_COLLATION_OID || oid == pg_sys::POSIX_COLLATION_OID {
+            return CollationSemantics::COrPosix;
+        }
+        // SAFETY: non-zero `inputcollid` comes from PostgreSQL's analyzed
+        // expression tree and therefore names a live `pg_collation` row.
+        // `get_collation_isdeterministic` reports catalog corruption through
+        // PostgreSQL ERROR; that error reaches the framework's FFI boundary.
+        if unsafe { pg_sys::get_collation_isdeterministic(oid) } {
+            CollationSemantics::Deterministic
+        } else {
+            CollationSemantics::NonDeterministic
+        }
+    }
+}
+
 #[cfg(any(test, feature = "pg_test"))]
-pub(crate) mod test_opno_table;
+pub(super) mod test_opno_table {
+    //! Shared comparison-operator fixture data for host and backend tests.
+
+    use pgrx::pg_sys;
+
+    use super::ComparisonOpClass;
+    use super::pg_operator_oid as op;
+
+    // Per-type rows use `[Eq, NotEq, Lt, Le, Gt, Ge]` column order.
+    pub(crate) const INT2: [u32; 6] = [
+        op::INT2_EQ,
+        op::INT2_NE,
+        op::INT2_LT,
+        op::INT2_LE,
+        op::INT2_GT,
+        op::INT2_GE,
+    ];
+    pub(crate) const INT4: [u32; 6] = [
+        op::INT4_EQ,
+        op::INT4_NE,
+        op::INT4_LT,
+        op::INT4_LE,
+        op::INT4_GT,
+        op::INT4_GE,
+    ];
+    pub(crate) const INT8: [u32; 6] = [
+        op::INT8_EQ,
+        op::INT8_NE,
+        op::INT8_LT,
+        op::INT8_LE,
+        op::INT8_GT,
+        op::INT8_GE,
+    ];
+    pub(crate) const DATE: [u32; 6] = [
+        op::DATE_EQ,
+        op::DATE_NE,
+        op::DATE_LT,
+        op::DATE_LE,
+        op::DATE_GT,
+        op::DATE_GE,
+    ];
+    pub(crate) const TIMESTAMP: [u32; 6] = [
+        op::TIMESTAMP_EQ,
+        op::TIMESTAMP_NE,
+        op::TIMESTAMP_LT,
+        op::TIMESTAMP_LE,
+        op::TIMESTAMP_GT,
+        op::TIMESTAMP_GE,
+    ];
+    pub(crate) const TIMESTAMPTZ: [u32; 6] = [
+        op::TIMESTAMPTZ_EQ,
+        op::TIMESTAMPTZ_NE,
+        op::TIMESTAMPTZ_LT,
+        op::TIMESTAMPTZ_LE,
+        op::TIMESTAMPTZ_GT,
+        op::TIMESTAMPTZ_GE,
+    ];
+    pub(crate) const TEXT: [u32; 6] = [
+        op::TEXT_EQ,
+        op::TEXT_NE,
+        op::TEXT_LT,
+        op::TEXT_LE,
+        op::TEXT_GT,
+        op::TEXT_GE,
+    ];
+
+    pub(crate) const CLASS_BY_COLUMN: [ComparisonOpClass; 6] = [
+        ComparisonOpClass::Eq,
+        ComparisonOpClass::NotEq,
+        ComparisonOpClass::Lt,
+        ComparisonOpClass::Le,
+        ComparisonOpClass::Gt,
+        ComparisonOpClass::Ge,
+    ];
+
+    /// Built-in comparison rows mirrored from `pg_operator.dat`.
+    pub(crate) fn opno_table() -> [(pg_sys::Oid, [u32; 6]); 7] {
+        [
+            (pg_sys::INT2OID, INT2),
+            (pg_sys::INT4OID, INT4),
+            (pg_sys::INT8OID, INT8),
+            (pg_sys::DATEOID, DATE),
+            (pg_sys::TIMESTAMPOID, TIMESTAMP),
+            (pg_sys::TIMESTAMPTZOID, TIMESTAMPTZ),
+            (pg_sys::TEXTOID, TEXT),
+        ]
+    }
+}
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    //! Host-only tests for policy logic that does not reference backend symbols.
+
+    use std::collections::HashSet;
+
+    use pg_lakebase_core::expr::PgComparisonOp;
+    use pgrx::pg_sys;
+    use pgrx::pg_sys::Oid;
+    use proptest::prelude::*;
+
+    use super::test_opno_table::{self as op, CLASS_BY_COLUMN, opno_table};
+    use super::{
+        CollationSemantics, ComparisonOpClass, PredicateCapability,
+        PredicatePushdownPolicy,
+    };
+
+    fn op_class(opno: pg_sys::Oid) -> Option<ComparisonOpClass> {
+        PredicatePushdownPolicy::op_class(opno)
+    }
+
+    fn triple(opno: u32) -> PgComparisonOp {
+        PgComparisonOp {
+            opno: Oid::from(opno),
+            opfuncid: Oid::INVALID,
+            opresulttype: Oid::INVALID,
+            opcollid: Oid::INVALID,
+            inputcollid: Oid::INVALID,
+        }
+    }
+
+    fn capability(
+        type_oid: pg_sys::Oid,
+        op: PgComparisonOp,
+        collation: CollationSemantics,
+    ) -> PredicateCapability {
+        PredicatePushdownPolicy::capability_for(type_oid, op.identity(), collation)
+    }
+
+    #[test]
+    fn op_class_maps_every_known_opno() {
+        for (type_oid, opnos) in opno_table() {
+            for (column, &opno) in opnos.iter().enumerate() {
+                assert_eq!(
+                    op_class(Oid::from(opno)),
+                    Some(CLASS_BY_COLUMN[column]),
+                    "opno {opno} (type {}, column {column}) must map to {:?}",
+                    u32::from(type_oid),
+                    CLASS_BY_COLUMN[column],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn op_class_table_has_no_duplicate_opnos() {
+        let mut seen = HashSet::new();
+        for (_, opnos) in opno_table() {
+            for opno in opnos {
+                assert!(seen.insert(opno), "opno {opno} appears twice in the table");
+            }
+        }
+    }
+
+    #[test]
+    fn op_class_rejects_unknown_opnos() {
+        assert_eq!(
+            op_class(Oid::from(558u32)),
+            None,
+            "oidvector <> is not mapped",
+        );
+        assert_eq!(op_class(Oid::INVALID), None, "InvalidOid is not mapped");
+        assert_eq!(
+            op_class(Oid::from(9_999_999u32)),
+            None,
+            "unused OID is not mapped",
+        );
+    }
+
+    #[test]
+    fn supported_predicate_integers_are_exact_under_zero_collation() {
+        for (type_oid, opnos) in opno_table().into_iter().take(3) {
+            for opno in opnos {
+                assert_eq!(
+                    capability(type_oid, triple(opno), CollationSemantics::None),
+                    PredicateCapability::ExactRowFilter,
+                    "integer type {} opno {opno} must be exact",
+                    u32::from(type_oid),
+                );
+            }
+        }
+    }
+
+    const INTEGER_EXACT_SET: &[(pg_sys::Oid, u32)] = &[
+        (pg_sys::INT4OID, op::INT4[0]),
+        (pg_sys::INT4OID, op::INT4[1]),
+        (pg_sys::INT4OID, op::INT4[2]),
+        (pg_sys::INT4OID, op::INT4[3]),
+        (pg_sys::INT4OID, op::INT4[4]),
+        (pg_sys::INT4OID, op::INT4[5]),
+        (pg_sys::INT8OID, op::INT8[0]),
+        (pg_sys::INT8OID, op::INT8[1]),
+        (pg_sys::INT8OID, op::INT8[2]),
+        (pg_sys::INT8OID, op::INT8[3]),
+        (pg_sys::INT8OID, op::INT8[4]),
+        (pg_sys::INT8OID, op::INT8[5]),
+    ];
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn supported_predicate_integer_collation_gate_property(
+            idx in 0usize..INTEGER_EXACT_SET.len(),
+            collid in 1u32..=u32::MAX,
+            tag_input in any::<bool>(),
+        ) {
+            let (type_oid, opno) = INTEGER_EXACT_SET[idx];
+            let mut tagged = triple(opno);
+            if tag_input {
+                tagged.inputcollid = Oid::from(collid);
+            } else {
+                tagged.opcollid = Oid::from(collid);
+            }
+            prop_assert_eq!(
+                capability(type_oid, tagged, CollationSemantics::Deterministic),
+                PredicateCapability::Unsupported,
+            );
+        }
+    }
+
+    #[test]
+    fn supported_predicate_ignores_diagnostic_fields() {
+        let mut tagged_integer = triple(op::INT4[0]);
+        tagged_integer.opcollid = Oid::from(50_000u32);
+        let cases = [
+            (
+                pg_sys::INT4OID,
+                triple(op::INT4[0]),
+                CollationSemantics::None,
+            ),
+            (
+                pg_sys::INT4OID,
+                triple(op::INT4[2]),
+                CollationSemantics::None,
+            ),
+            (pg_sys::INT4OID, tagged_integer, CollationSemantics::None),
+            (pg_sys::NUMERICOID, triple(1752), CollationSemantics::None),
+            (
+                pg_sys::TEXTOID,
+                triple(op::TEXT[0]),
+                CollationSemantics::COrPosix,
+            ),
+            (
+                pg_sys::TEXTOID,
+                triple(op::TEXT[1]),
+                CollationSemantics::COrPosix,
+            ),
+        ];
+
+        for (type_oid, baseline, collation) in cases {
+            let expected = capability(type_oid, baseline, collation);
+            for (opfuncid, opresulttype) in [
+                (Oid::from(65u32), pg_sys::BOOLOID),
+                (Oid::from(9_999u32), Oid::from(9_999u32)),
+            ] {
+                assert_eq!(
+                    capability(
+                        type_oid,
+                        PgComparisonOp {
+                            opfuncid,
+                            opresulttype,
+                            ..baseline
+                        },
+                        collation,
+                    ),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supported_predicate_numeric_temporal_float_matrix() {
+        for (type_oid, opnos) in opno_table().into_iter().skip(3).take(3) {
+            for (column, opno) in opnos.into_iter().enumerate() {
+                let expected = if CLASS_BY_COLUMN[column] == ComparisonOpClass::NotEq
+                {
+                    PredicateCapability::Unsupported
+                } else {
+                    PredicateCapability::ConservativePruning
+                };
+                assert_eq!(
+                    capability(type_oid, triple(opno), CollationSemantics::None),
+                    expected,
+                );
+            }
+        }
+
+        for opno in [1752, 1753, 1754, 1755, 1756, 1757] {
+            assert_eq!(
+                capability(
+                    pg_sys::NUMERICOID,
+                    triple(opno),
+                    CollationSemantics::None
+                ),
+                PredicateCapability::Unsupported,
+            );
+        }
+        for (type_oid, opnos) in [
+            (pg_sys::FLOAT4OID, [620, 621, 622, 624, 623, 625]),
+            (pg_sys::FLOAT8OID, [670, 671, 672, 673, 674, 675]),
+        ] {
+            for opno in opnos {
+                assert_eq!(
+                    capability(type_oid, triple(opno), CollationSemantics::None),
+                    PredicateCapability::Unsupported,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supported_predicate_only_integers_are_exact() {
+        for (type_oid, opnos) in opno_table().into_iter().skip(3) {
+            let collation = if type_oid == pg_sys::TEXTOID {
+                CollationSemantics::COrPosix
+            } else {
+                CollationSemantics::None
+            };
+            for opno in opnos {
+                assert_ne!(
+                    capability(type_oid, triple(opno), collation),
+                    PredicateCapability::ExactRowFilter,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supported_predicate_unknown_inputs_are_unsupported() {
+        for type_oid in [pg_sys::BOOLOID, pg_sys::BYTEAOID] {
+            assert_eq!(
+                capability(type_oid, triple(op::INT4[0]), CollationSemantics::None),
+                PredicateCapability::Unsupported,
+            );
+        }
+        assert_eq!(
+            capability(pg_sys::INT4OID, triple(558), CollationSemantics::None),
+            PredicateCapability::Unsupported,
+        );
+    }
+
+    #[test]
+    fn text_capability_depends_only_on_resolved_collation_semantics() {
+        for type_oid in [pg_sys::TEXTOID, pg_sys::VARCHAROID] {
+            for semantics in [
+                CollationSemantics::COrPosix,
+                CollationSemantics::Deterministic,
+            ] {
+                assert_eq!(
+                    capability(type_oid, triple(op::TEXT[0]), semantics),
+                    PredicateCapability::ConservativePruning,
+                );
+            }
+            for semantics in [
+                CollationSemantics::None,
+                CollationSemantics::NonDeterministic,
+            ] {
+                assert_eq!(
+                    capability(type_oid, triple(op::TEXT[0]), semantics),
+                    PredicateCapability::Unsupported,
+                );
+            }
+            for opno in op::TEXT[2..].iter().copied() {
+                assert_eq!(
+                    capability(type_oid, triple(opno), CollationSemantics::COrPosix),
+                    PredicateCapability::ConservativePruning,
+                );
+                assert_eq!(
+                    capability(
+                        type_oid,
+                        triple(opno),
+                        CollationSemantics::Deterministic
+                    ),
+                    PredicateCapability::Unsupported,
+                );
+            }
+            assert_eq!(
+                capability(
+                    type_oid,
+                    triple(op::TEXT[1]),
+                    CollationSemantics::COrPosix
+                ),
+                PredicateCapability::Unsupported,
+            );
+        }
+    }
+
+    #[test]
+    fn null_tests_admit_supported_types_including_float() {
+        for type_oid in [
+            pg_sys::INT2OID,
+            pg_sys::INT4OID,
+            pg_sys::INT8OID,
+            pg_sys::NUMERICOID,
+            pg_sys::DATEOID,
+            pg_sys::TIMESTAMPOID,
+            pg_sys::TIMESTAMPTZOID,
+            pg_sys::TEXTOID,
+            pg_sys::VARCHAROID,
+            pg_sys::FLOAT4OID,
+            pg_sys::FLOAT8OID,
+        ] {
+            assert!(
+                PredicatePushdownPolicy::supports_null_test(type_oid),
+                "null tests must be supported for type {}",
+                u32::from(type_oid),
+            );
+        }
+    }
+
+    #[test]
+    fn null_tests_reject_unsupported_types() {
+        for type_oid in [pg_sys::BOOLOID, pg_sys::BYTEAOID, Oid::from(9_999_999u32)] {
+            assert!(
+                !PredicatePushdownPolicy::supports_null_test(type_oid),
+                "null tests must be unsupported for type {}",
+                u32::from(type_oid),
+            );
+        }
+    }
+}

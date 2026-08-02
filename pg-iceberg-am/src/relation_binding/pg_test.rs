@@ -5,6 +5,7 @@ use pgrx::pg_sys;
 use super::{LiveColumn, RelationShape};
 
 impl RelationShape {
+    /// Build a synthetic relation shape for backend tests.
     pub(crate) fn for_test(
         live_columns: Vec<LiveColumn>,
         slot_width: usize,

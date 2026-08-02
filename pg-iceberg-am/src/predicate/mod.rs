@@ -6,3 +6,6 @@ pub(crate) mod translator;
 
 pub(crate) use classifier::IcebergPredicateClassifier;
 pub(crate) use translator::IcebergPredicateTranslator;
+
+#[cfg(feature = "pg_test")]
+mod pg_test;
