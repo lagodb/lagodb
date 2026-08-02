@@ -148,7 +148,7 @@ estimated scan fraction from making the path look free to the planner.
 
 - Rust 1.96.0 or later
 - PostgreSQL 17 (current product target; PostgreSQL 16, 18, and 19 are planned
-  targets; see the [root version direction](../README.md#postgresql-version-direction))
+  targets; see [PostgreSQL support](../README.md#postgresql-support))
 - `cargo-pgrx` 0.18.1
 
 The repository-level [build-from-source guide](../docs/build-from-source.md)

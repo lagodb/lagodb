@@ -5,54 +5,76 @@
 [![PostgreSQL](https://img.shields.io/badge/postgresql-17-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Native Apache Iceberg tables for PostgreSQL
+## A lakehouse database built on PostgreSQL
 
-`pg-lakebase` is building an Iceberg-first storage engine for PostgreSQL.
-Today, [`pg-iceberg-am`](./pg-iceberg-am) exposes Apache Iceberg tables through
-PostgreSQL's **Table Access Method (TAM)** interface. Applications use normal
-PostgreSQL SQL and transaction semantics while table metadata and data files
-are managed using Iceberg and Parquet.
+`pg-lakebase` is building a lakehouse database on
+[PostgreSQL](https://www.postgresql.org/). The goal is to combine PostgreSQL's
+SQL interface, transaction model, and ecosystem with open lakehouse storage.
 
-The current product focus is to make this Iceberg path reliable and useful
-before expanding into additional lake-table formats or higher-level workloads.
+The long-term vision includes first-class support for the
+[Apache Iceberg](https://iceberg.apache.org/),
+[Delta Lake](https://delta.io/), and
+[Apache Hudi](https://hudi.apache.org/) lakehouse table formats.
+
+Beyond table formats, one future goal is to add time-series database
+capabilities to `pg-lakebase`, using lake tables as the storage foundation for
+ingesting, managing, and analyzing time-series data at scale. Another future
+goal is to support vector data and exact and approximate nearest-neighbor
+search through the PostgreSQL SQL interface, with lake tables in object storage
+as the durable data layer. Neither the time-series nor vector capabilities are
+implemented today.
+
+Apache Iceberg is the first and currently the only implemented lakehouse table
+format. The other formats and capabilities are planned product directions, not
+current capabilities.
 
 > [!WARNING]
 > This project is under active development and is not recommended for
-> production workloads. The primary runnable extension today is
-> `pg-iceberg-am`. `pg-delta-am` is an experimental skeleton that delegates
-> storage callbacks to PostgreSQL heap; it is not a Delta Lake implementation.
-
-## PostgreSQL version direction
-
-PostgreSQL 17 is the current product target. It is the only version covered by
-the current product build, installation, and full-workspace test instructions.
-
-The framework crates expose a PG16 feature, but the workspace's PostgreSQL C
-forks and product validation are currently PG17-only. PostgreSQL 16 remains a
-planned product target. PostgreSQL 18 and 19 are also planned targets; this
-repository does not currently claim build or runtime support for them.
-
-| PostgreSQL | Status | Boundary |
-|---|---|---|
-| 16 | Planned | Framework feature paths exist; the product access method still needs its compatibility port and full validation |
-| 17 | Current | Current `pg-iceberg-am` product path and full documented source/test path |
-| 18 | Planned | Compatibility scaffolding exists, but there is no complete workspace feature and test path |
-| 19 | Planned | No current implementation or test target |
+> production workloads. [`pg-iceberg-am`](./pg-iceberg-am) is the primary
+> runnable extension. `pg-delta-am` is only a framework skeleton, not a Delta
+> Lake implementation.
 
 ## Why pg-lakebase?
 
-- **PostgreSQL-native tables.** Create an Iceberg table with `USING iceberg`
-  and access it through ordinary SQL, including transactional DML.
-- **Lake-native files.** Iceberg metadata files and Parquet data files live
-  outside the PostgreSQL heap, on the local filesystem or through a configured
-  object storage volume. PostgreSQL still retains the relation and catalog
-  state needed to locate and manage the table.
-- **Storage-aware scans.** The CustomScan path can push supported predicates
-  into the Iceberg scan for file and row-group pruning, while PostgreSQL keeps
-  residual predicate checks where the semantics require them.
-- **Transaction-aware publication.** Writes and schema changes are staged in
-  transaction-local state and published at the PostgreSQL transaction
-  boundary.
+- **PostgreSQL as the database interface.** Use ordinary PostgreSQL SQL,
+  transactions, drivers, and tools instead of adopting a separate interface
+  for lakehouse data.
+- **Writable lakehouse tables.** Work with Iceberg-backed PostgreSQL tables
+  using common DML, transaction control, and supported schema changes, rather
+  than treating lakehouse data as read-only external files.
+- **Local and object storage.** Keep Iceberg metadata and Parquet data on the
+  local filesystem for simple deployments, or place object-backed tables in
+  S3-compatible object storage through storage volumes while using the same
+  PostgreSQL SQL interface. GCS and Azure providers are experimental.
+- **A unified database direction.** Build from the current Iceberg support
+  toward additional open lakehouse formats, time-series database capabilities
+  backed by lake tables, and vector search with lake tables in object storage
+  as the durable data layer.
+
+## Current Iceberg capabilities
+
+The following capabilities are backed by implementation and regression or
+isolation tests in this repository. They do not imply complete coverage of
+every Iceberg specification feature or cross-engine interoperability.
+Format-version terminology follows the
+[Apache Iceberg table specification](https://iceberg.apache.org/spec/#format-versioning),
+and isolation terminology follows the
+[PostgreSQL 17 transaction isolation documentation](https://www.postgresql.org/docs/17/transaction-iso.html).
+
+| Area | What works today | Current boundary |
+|---|---|---|
+| Iceberg format versions | Create Iceberg v1, v2, and v3 tables | Feature coverage varies by version. This is not a blanket claim that every feature in each specification is implemented; for example, row-level `UPDATE` and `DELETE` are rejected for v1 tables. |
+| SQL operations | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Row-level changes use Iceberg delete semantics and therefore depend on the selected format version. |
+| Transactions and isolation | Statement-level Iceberg metadata visibility under `READ COMMITTED`, read-your-own-writes, commit, rollback, and savepoints | `SERIALIZABLE` currently strengthens Iceberg write-conflict validation but does not yet provide full PostgreSQL SSI semantics. `REPEATABLE READ` is not supported. |
+| Schema evolution | `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `DROP NOT NULL` | Other `ALTER TABLE` schema changes are rejected. |
+| Storage | Local filesystem and S3-compatible object storage through storage volumes | S3-compatible storage has repository end-to-end coverage. GCS and Azure providers exist but remain experimental. |
+| Partitioned tables | PostgreSQL declarative partitioning with partition-routed `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Each Iceberg leaf is managed as its own relation. |
+| Scan optimization | Predicate pushdown plus Iceberg file and Parquet row-group pruning for supported expressions | PostgreSQL retains residual predicates when required for correctness; some comparisons are deliberately not pushed when semantics could differ. |
+| Maintenance | `VACUUM`, `VACUUM FULL`, and scheduled automatic Iceberg maintenance | Maintenance remains subject to operational limits while the project is under development. |
+
+External Iceberg catalogs and interoperability validation with engines such as
+Spark, Flink, and Trino are planned. The current SQL-facing implementation uses
+a PostgreSQL-backed Iceberg metadata catalog.
 
 ## Quick start
 
@@ -113,51 +135,8 @@ FROM events
 WHERE device_id = 101;
 ```
 
-This is an Iceberg table, not a PostgreSQL heap table. PostgreSQL provides the
-SQL and transaction boundary; `pg-iceberg-am` manages Iceberg metadata and
-data files. Use `EXPLAIN (VERBOSE)` to inspect whether PostgreSQL selected the
-Iceberg CustomScan path for a supported predicate.
-
-## Current capabilities
-
-The status below reflects code and regression coverage in this repository. It
-does not claim cross-engine interoperability until that is tested explicitly.
-
-| Capability | Status | Evidence or boundary |
-|---|---|---|
-| Create and query tables with `USING iceberg` | Available | `pg-iceberg-am` SQL regression suite |
-| `SELECT` with CustomScan predicate pushdown | Available | Pushdown, projection, parameter, join, and residual-qual regression tests |
-| `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Available | DML and partitioned-write regression tests |
-| PostgreSQL transaction-local visibility, rollback, and savepoint cleanup | Available | Transactional-write and transaction-resource regression tests |
-| Local filesystem storage with optional PostgreSQL WAL integration | Available | Local storage and WAL implementation/tests |
-| Partitioned Iceberg relations and partition-routed writes | Available | Partitioned-write regression tests |
-| `ALTER TABLE` schema evolution | Available, limited | Tested `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `DROP NOT NULL`; unsupported forms are rejected |
-| `VACUUM`, `VACUUM FULL`, and automatic maintenance | Available, limited | Maintenance and vacuum regression tests; operational limits still apply |
-| S3-compatible object storage through storage volumes | Available, tested with the repository's object-storage fixture | Object-storage regression and storage-service E2E tests |
-| GCS and Azure storage providers | Experimental | Provider implementations exist; this repository does not provide the same end-to-end coverage as its S3 fixture |
-| Iceberg format versions 1, 2, and 3 | Available, limited | Version-specific option and maintenance coverage; feature-level compatibility is not a blanket claim |
-| External Iceberg catalog integration | Planned | The current SQL-facing path uses the PostgreSQL-backed Iceberg metadata catalog |
-| Spark/Flink/Trino interoperability | Planned validation | No external-reader interoperability suite is part of this repository yet |
-| DataFusion query offload | Design exploration | [Existing design roadmap](pg-lakebase-core/docs/datafusion-offload-roadmap.md) explicitly has no implementation |
-| Lake-native time-series ingestion policies | Vision | Background batching, file sizing, compaction, retention, and time partitioning are future product work |
-| Delta Lake access method | Experimental skeleton | `pg-delta-am` is loadable for framework coverage but does not store Delta tables |
-
-## Lake-table format direction
-
-Supporting **Apache Iceberg, Delta Lake, and Apache Hudi** through
-PostgreSQL-native lake-table access methods is a long-term `pg-lakebase` goal.
-The formats do not have the same implementation status today:
-
-| Format | Status today | Boundary |
-|---|---|---|
-| Apache Iceberg | Current primary implementation | `pg-iceberg-am` is the runnable SQL-facing access method |
-| Delta Lake | Experimental skeleton | `pg-delta-am` delegates storage callbacks to PostgreSQL heap and does not implement Delta storage |
-| Apache Hudi | Planned | No Hudi access method is implemented in this workspace |
-
-The three-format target describes the product direction, not three currently
-interchangeable implementations. Iceberg remains the product validation path;
-each additional format requires its own metadata, transaction, storage, and
-interoperability validation.
+This creates an Iceberg-backed table that applications can access through
+ordinary PostgreSQL SQL.
 
 ## Use object storage
 
@@ -192,13 +171,41 @@ CREATE TABLE object_events (
 ) USING iceberg TABLESPACE lake_s3;
 ```
 
-The same storage-volume API accepts `gs://` locations for Google Cloud
-Storage and `az://` locations for Azure Blob Storage. Credentials and provider
-options are validated by the runtime and persisted in the PostgreSQL data
-directory's protected storage-volume configuration. They are not encrypted by
-PostgreSQL; use the deployment's credential and filesystem security controls.
+The same storage-volume API includes experimental providers for `gs://`
+locations in Google Cloud Storage and `az://` locations in Azure Blob Storage.
+These providers do not yet have the same end-to-end test coverage as the
+S3-compatible path. Credentials and provider options are validated by the
+runtime and persisted in the PostgreSQL data directory's protected
+storage-volume configuration. They are not encrypted by PostgreSQL; use the
+deployment's credential and filesystem security controls.
 
-## Why this architecture?
+## Roadmap
+
+### Current — Reliable Iceberg tables
+
+Make writable Iceberg tables reliable, interoperable, and straightforward to
+deploy from PostgreSQL, with stronger format coverage, object-storage
+reliability, compatibility testing, packaging, and performance validation.
+
+### Next — Broader lakehouse format support
+
+Expand the database beyond Iceberg with first-class Delta Lake and Apache Hudi
+implementations while preserving a consistent PostgreSQL experience.
+
+### Future — Time-series and vector capabilities
+
+Use lake tables as the storage foundation for time-series ingestion and
+analytics, and add vector data and similarity search through the PostgreSQL SQL
+interface, with lake tables in object storage as the durable data layer.
+
+These roadmap items describe intended product outcomes. Their implementation
+designs will be documented separately as they are validated.
+
+## Architecture
+
+At a high level, `pg-lakebase` integrates lakehouse table implementations with
+PostgreSQL's table access, planning, execution, and transaction lifecycle, then
+routes table data to local or object storage.
 
 ```text
                  PostgreSQL SQL and transactions
@@ -206,76 +213,53 @@ PostgreSQL; use the deployment's credential and filesystem security controls.
                                v
              +--------------------------------------+
              | pg-iceberg-am                        |
-             | Iceberg TAM + CustomScan             |
+             | Iceberg table access method          |
+             | + custom scan paths                  |
              +------------------+-------------------+
                                 |
               +-----------------+------------------+
               |                                    |
               v                                    v
      Local filesystem                         Object storage
-   VFD + optional WAL                    storage volume + runtime
+                                            storage volumes
                                                    |
                                                    v
                                           pg-lakebase-storage
-                                                   |
-                                  S3 / GCS / Azure backend
+                                         S3 / GCS / Azure
 ```
 
-The architecture follows three PostgreSQL and Iceberg boundaries:
+- The PostgreSQL Table Access Method integration makes `USING iceberg` tables
+  PostgreSQL relations rather than a separate query API.
+- Custom scan paths push supported predicates into Iceberg scans for pruning
+  while preserving PostgreSQL evaluation wherever required for correctness.
+- Transaction-local state provides statement-consistent reads and stages data
+  and schema changes until the PostgreSQL transaction boundary.
+- The shared runtime and storage service route object-backed tables through
+  configured storage volumes.
 
-- **Table Access Method integration** makes an Iceberg table a PostgreSQL
-  relation rather than a separate query API.
-- **Transaction-local staging** lets statements in one PostgreSQL transaction
-  see the transaction's staged schema and file changes. Commit materializes
-  the changes and publishes the Iceberg metadata update.
-- **Separate storage paths** keep local tables on PostgreSQL's file path with
-  relation-dependent WAL integration and route object-backed tables through
-  the runtime's storage service and cache.
+## PostgreSQL support
 
-## Roadmap
+PostgreSQL 17 is the only currently supported version. Support for PostgreSQL
+16, 18, and 19 is planned.
 
-The roadmap has three stages.
+## Project components
 
-### 1. Make Iceberg a trustworthy PostgreSQL storage engine
-
-- broaden Iceberg specification and schema/partition coverage;
-- validate snapshot, manifest, delete-file, and metadata correctness;
-- add object-store reliability and external-reader interoperability tests;
-- publish reproducible Docker/package workflows and benchmarks before making
-  production performance claims.
-
-### 2. Build toward lake-native time-series storage
-
-The long-term goal is to make PostgreSQL a high-ingest frontend for
-lake-native time-series data. This requires new capabilities such as
-WAL-backed write buffering, background flush, target file sizing, batched
-Iceberg commits, time partitioning, compaction, retention, and late/out-of-order
-update policies. These are design goals, not current capabilities.
-
-### 3. Prove the reusable lake-table framework
-
-The long-term format target is Apache Iceberg, Delta Lake, and Apache Hudi.
-Reuse across additional formats remains to be validated. Iceberg is the current
-implementation, Delta is an experimental skeleton, and Hudi remains planned
-until its access method exists and passes format-specific compatibility tests.
-
-## Extensible lake-table framework
-
-`pg-iceberg-am` is built on reusable PostgreSQL extension components:
-
-- [`pg-lakebase-core`](pg-lakebase-core) owns the Rust-facing TAM and
-  CustomScan framework, PostgreSQL lifecycle adapters, and transaction/cleanup
+- [`pg-iceberg-am`](pg-iceberg-am) is the current SQL-facing Iceberg table
+  implementation.
+- [`pg-lakebase-core`](pg-lakebase-core) provides the reusable PostgreSQL Table
+  Access Method and CustomScan framework, lifecycle adapters, and transaction
   boundaries.
-- [`pg-lakebase-runtime`](pg-lakebase-runtime) owns shared workers, runtime
-  coordination, and storage-volume administration.
+- [`pg-lakebase-runtime`](pg-lakebase-runtime) provides shared workers,
+  runtime coordination, and storage-volume administration.
 - [`pg-arrow-conv`](pg-arrow-conv) provides Arrow/PostgreSQL value conversion.
 - [`iceberg-lite`](iceberg-lite) is the synchronous, PostgreSQL-oriented
-  Iceberg library derived from [`iceberg-rust`](https://github.com/apache/iceberg-rust).
+  Iceberg library derived from
+  [`iceberg-rust`](https://github.com/apache/iceberg-rust).
 - [`pg-lakebase-storage`](pg-lakebase-storage) provides the local cache and
   object-storage service used by object-backed tables.
 
-`iceberg-lite` is intentionally adapted for PostgreSQL's synchronous model and
-custom IO path. Changes to it must preserve a manageable merge path from the
+`iceberg-lite` is adapted for PostgreSQL's synchronous execution model and
+custom I/O path. Changes to it should preserve a manageable merge path from the
 upstream `iceberg-rust` project.
 
 ## Documentation and development
