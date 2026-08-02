@@ -7,6 +7,7 @@
 
 mod customscan;
 mod expr;
+mod fdw;
 mod storage_service;
 mod support;
 mod tuple;
