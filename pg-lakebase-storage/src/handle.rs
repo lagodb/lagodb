@@ -46,7 +46,7 @@ impl OpenFlags {
 pub struct OpenFileState {
     pub handle: FileHandle,
     pub key: ObjectLocation,
-    pub store: Arc<crate::backend::RegisteredStore>,
+    pub backend: Arc<dyn crate::backend::ObjectBackend>,
     pub size: u64,
     pub etag: Option<String>,
     pub flags: OpenFlags,
@@ -58,7 +58,7 @@ impl fmt::Debug for OpenFileState {
         f.debug_struct("OpenFileState")
             .field("handle", &self.handle)
             .field("key", &self.key)
-            .field("store", &self.store)
+            .field("backend", &"ObjectBackend")
             .field("size", &self.size)
             .field("etag", &self.etag)
             .field("flags", &self.flags)

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::backend::{StorageProbeResult, StoreConfig};
 use crate::error::{StorageError, StorageErrorKind, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
@@ -6,8 +8,7 @@ use crate::handle::{FileHandle, OpenFlags};
 /// are server-private and the client must round-trip the value unchanged.
 ///
 /// A `ListCursor` is bound to the server-side iterator that produced it; it has a
-/// connection-independent lifetime (the cursor stays valid across multiple `List` calls from any
-/// connection until it idles out — see the service-side list session table).
+/// connection-local lifetime. Closing the socket releases the cursor and its backend stream.
 ///
 /// The inner string is intentionally not exposed: a cursor must come from a server response,
 /// never be hand-crafted by the client. The codec layer reaches the inner bytes through
@@ -29,7 +30,7 @@ impl ListCursor {
     }
 }
 
-/// One element of a `List` response: an object key under the requested `(store_id, bucket)` plus
+/// One element of a `List` response: an object key under the attached context's bucket plus
 /// the same `(size, etag)` facts that `head` would have surfaced.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WireListEntry {
@@ -43,18 +44,21 @@ pub struct WireListEntry {
 ///
 /// Staging is invisible on the wire: the database (caller) writes its own files into the staging
 /// tree using [`crate::staging::StagingPathResolver`]. `Upload` is the only staging-related verb
-/// the server exposes; it carries `(store_id, bucket, key)` instead of a [`FileHandle`] so it can
-/// originate from a different connection than the one that wrote the bytes.
+/// the server exposes; it carries `(bucket, key)` instead of a [`FileHandle`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WireRequestPayload {
+    AttachManaged {
+        volume_id: u64,
+    },
+    AttachConfigured {
+        config: Arc<StoreConfig>,
+    },
     Open {
-        store_id: String,
         bucket: String,
         key: String,
         flags: OpenFlags,
     },
     Head {
-        store_id: String,
         bucket: String,
         key: String,
     },
@@ -67,55 +71,38 @@ pub enum WireRequestPayload {
         handle: FileHandle,
     },
     Upload {
-        store_id: String,
         bucket: String,
         key: String,
     },
-    RegisterStore {
-        store_id: String,
-        config: StoreConfig,
-    },
-    UnregisterStore {
-        store_id: String,
-    },
-    PurgeStoreCache {
-        store_id: String,
-    },
-    /// Exercises the registered backend under `root_prefix` without involving cache or staging.
+    /// Exercises the attached backend under `root_prefix` without involving cache or staging.
     ProbeStore {
-        store_id: String,
         bucket: String,
         root_prefix: String,
     },
     InvalidateObjectCache {
-        store_id: String,
         bucket: String,
         key: String,
     },
     /// Deletes a single object from the backend and best-effort invalidates the local cache.
     Delete {
-        store_id: String,
         bucket: String,
         key: String,
     },
     /// Deletes every object whose key starts with `prefix`. The prefix is required to be
     /// non-empty so a stray `""` does not become a "wipe the whole bucket" request.
     DeletePrefix {
-        store_id: String,
         bucket: String,
         prefix: String,
     },
     /// Deletes one bounded set of keys using the backend bulk-delete path.
     DeleteObjects {
-        store_id: String,
         bucket: String,
         keys: Vec<String>,
     },
-    /// Lists objects in `(store_id, bucket)` whose key starts with `prefix`. `cursor` is `None`
+    /// Lists objects in a bucket whose key starts with `prefix`. `cursor` is `None`
     /// for the first page; subsequent calls echo the `next_cursor` returned by the server.
     /// `page_size = 0` means "let the server pick a default".
     List {
-        store_id: String,
         bucket: String,
         prefix: Option<String>,
         page_size: u32,
@@ -137,6 +124,9 @@ pub struct WireRequest {
 /// Server→client body; [`WireResponsePayload::Error`] maps [`StorageErrorKind`] + message for clients.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WireResponsePayload {
+    Attach {
+        backend_identity: String,
+    },
     Open {
         handle: FileHandle,
         size: u64,
@@ -160,13 +150,6 @@ pub enum WireResponsePayload {
         size: u64,
         etag: Option<String>,
     },
-    RegisterStore {
-        replaced: bool,
-    },
-    UnregisterStore {
-        removed: bool,
-    },
-    PurgeStoreCache,
     ProbeStore {
         result: StorageProbeResult,
     },

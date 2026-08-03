@@ -339,7 +339,7 @@ impl WireDecode for i64 {
 //
 // `ListCursor` is a length-prefixed string newtype (server-issued opaque token).
 // `WireListEntry` is encoded as `(key, size, etag, last_modified_ms)`.
-// `(store_id, bucket, key)` carrying message in this codec.
+// bucket/key carrying message in this codec.
 
 impl WireEncode for ListCursor {
     fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {

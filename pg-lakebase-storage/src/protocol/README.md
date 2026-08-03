@@ -38,7 +38,7 @@ control is filesystem permissions on the socket path.
 
   Header:
     magic     u32   0x53544731  ("STG1")
-    version   u16   5
+    version   u16   8
     kind      u8    1 = request, 2 = response
     req_id    u64   correlates request/response pairs
 ```
@@ -56,27 +56,42 @@ ordering assumptions.
 ```
   Code   Name                     Direction
   ----   ----                     ---------
-     1   Open                     request / response
-     2   Read                     request / response
-     3   Close                    request / response
-     4   Upload                   request / response
-     5   RegisterStore            request / response
-     6   UnregisterStore          request / response
-     7   PurgeStoreCache          request / response
-     8   InvalidateObjectCache    request / response
-     9   Delete                   request / response
-    10   DeletePrefix             request / response
-    11   List                     request / response
-    12   Head                     request / response
-    13   DeleteObjects            request / response
-    14   CloseList                request / response
-    15   ProbeStore               request / response
+     1   AttachManaged            request only
+     2   AttachConfigured         request only
+     3   Open                     request / response
+     4   Read                     request / response
+     5   Close                    request / response
+     6   Upload                   request / response
+     7   InvalidateObjectCache    request / response
+     8   Delete                   request / response
+     9   DeletePrefix             request / response
+    10   List                     request / response
+    11   Head                     request / response
+    12   DeleteObjects            request / response
+    13   CloseList                request / response
+    14   ProbeStore               request / response
+    15   Ready                    response only
   1000   Error                    response only
 ```
 
-Responses reuse the request opcode except for errors, which use the
-dedicated Error opcode and carry an error-kind discriminant plus a UTF-8
-message.
+Ordinary responses reuse the request opcode. Both attach request forms return
+`Ready`; errors use the dedicated Error opcode and carry an error-kind
+discriminant plus a UTF-8 message.
+
+Before ordinary pipelining begins, the first and only accepted request is an
+attach operation:
+
+- `AttachManaged { volume_id }` resolves a runtime-owned managed volume.
+- `AttachConfigured { StoreConfig }` materializes or reuses a configured
+  backend.
+
+The response returns the credential-free serialized `BackendDataIdentity` so
+the client can derive cache-compatible staging paths. Attach is covered by
+the same request policy and observer hooks as later requests. A failed attach
+returns an error frame and closes the connection; a second attach is never
+accepted. Once attached, object verbs contain `(bucket, key)` only. READ and
+CLOSE contain only a `FileHandle`, while continuation LIST/CLOSE_LIST use a
+connection-local cursor.
 
 
 4  Field Encoding
@@ -93,8 +108,9 @@ All scalar fields are big-endian:
 - `Option<T>` — 1-byte presence tag (0 = absent, 1 = present) followed by
   the inner encoding when present.
 
-Store configuration variants use a 1-byte tag to select the variant, so new
-backend types can be added without changing the frame envelope.
+Store configuration variants in `AttachConfigured` use a 1-byte tag to select
+the variant. Credentials cross the wire only in this handshake and request
+metadata/observers do not clone or expose the secret-bearing payload.
 
 
 5  FD Side Channel

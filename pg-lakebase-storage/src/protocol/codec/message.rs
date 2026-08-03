@@ -4,6 +4,7 @@
 //! and dispatches to the matching variant. This keeps the binary layout next to each variant's data.
 
 use bytes::{Buf, BufMut};
+use std::sync::Arc;
 
 use crate::error::StorageResult;
 
@@ -19,25 +20,22 @@ use super::traits::{WireDecode, WireEncode, ensure_eof, get_u16};
 impl WireEncode for WireRequestPayload {
     fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {
         match self {
-            Self::Open {
-                store_id,
-                bucket,
-                key,
-                flags,
-            } => {
+            Self::AttachManaged { volume_id } => {
+                out.put_u16(WireOp::AttachManaged.code());
+                volume_id.encode(out)
+            }
+            Self::AttachConfigured { config } => {
+                out.put_u16(WireOp::AttachConfigured.code());
+                config.as_ref().encode(out)
+            }
+            Self::Open { bucket, key, flags } => {
                 out.put_u16(WireOp::Open.code());
                 flags.encode(out)?;
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 key.encode(out)
             }
-            Self::Head {
-                store_id,
-                bucket,
-                key,
-            } => {
+            Self::Head { bucket, key } => {
                 out.put_u16(WireOp::Head.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 key.encode(out)
             }
@@ -55,88 +53,46 @@ impl WireEncode for WireRequestPayload {
                 out.put_u16(WireOp::Close.code());
                 handle.encode(out)
             }
-            Self::Upload {
-                store_id,
-                bucket,
-                key,
-            } => {
+            Self::Upload { bucket, key } => {
                 out.put_u16(WireOp::Upload.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 key.encode(out)
             }
-            Self::RegisterStore { store_id, config } => {
-                out.put_u16(WireOp::RegisterStore.code());
-                store_id.encode(out)?;
-                config.encode(out)
-            }
-            Self::UnregisterStore { store_id } => {
-                out.put_u16(WireOp::UnregisterStore.code());
-                store_id.encode(out)
-            }
-            Self::PurgeStoreCache { store_id } => {
-                out.put_u16(WireOp::PurgeStoreCache.code());
-                store_id.encode(out)
-            }
             Self::ProbeStore {
-                store_id,
                 bucket,
                 root_prefix,
             } => {
                 out.put_u16(WireOp::ProbeStore.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 root_prefix.encode(out)
             }
-            Self::InvalidateObjectCache {
-                store_id,
-                bucket,
-                key,
-            } => {
+            Self::InvalidateObjectCache { bucket, key } => {
                 out.put_u16(WireOp::InvalidateObjectCache.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 key.encode(out)
             }
-            Self::Delete {
-                store_id,
-                bucket,
-                key,
-            } => {
+            Self::Delete { bucket, key } => {
                 out.put_u16(WireOp::Delete.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 key.encode(out)
             }
-            Self::DeletePrefix {
-                store_id,
-                bucket,
-                prefix,
-            } => {
+            Self::DeletePrefix { bucket, prefix } => {
                 out.put_u16(WireOp::DeletePrefix.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 prefix.encode(out)
             }
-            Self::DeleteObjects {
-                store_id,
-                bucket,
-                keys,
-            } => {
+            Self::DeleteObjects { bucket, keys } => {
                 out.put_u16(WireOp::DeleteObjects.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 keys.encode(out)
             }
             Self::List {
-                store_id,
                 bucket,
                 prefix,
                 page_size,
                 cursor,
             } => {
                 out.put_u16(WireOp::List.code());
-                store_id.encode(out)?;
                 bucket.encode(out)?;
                 prefix.encode(out)?;
                 page_size.encode(out)?;
@@ -154,14 +110,18 @@ impl WireDecode for WireRequestPayload {
     fn decode(input: &mut impl Buf) -> StorageResult<Self> {
         let op = WireOp::from_request_code(get_u16(input)?)?;
         Ok(match op {
+            WireOp::AttachManaged => Self::AttachManaged {
+                volume_id: WireDecode::decode(input)?,
+            },
+            WireOp::AttachConfigured => Self::AttachConfigured {
+                config: Arc::new(WireDecode::decode(input)?),
+            },
             WireOp::Open => Self::Open {
                 flags: WireDecode::decode(input)?,
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 key: WireDecode::decode(input)?,
             },
             WireOp::Head => Self::Head {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 key: WireDecode::decode(input)?,
             },
@@ -174,47 +134,30 @@ impl WireDecode for WireRequestPayload {
                 handle: WireDecode::decode(input)?,
             },
             WireOp::Upload => Self::Upload {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 key: WireDecode::decode(input)?,
             },
-            WireOp::RegisterStore => Self::RegisterStore {
-                store_id: WireDecode::decode(input)?,
-                config: WireDecode::decode(input)?,
-            },
-            WireOp::UnregisterStore => Self::UnregisterStore {
-                store_id: WireDecode::decode(input)?,
-            },
-            WireOp::PurgeStoreCache => Self::PurgeStoreCache {
-                store_id: WireDecode::decode(input)?,
-            },
             WireOp::ProbeStore => Self::ProbeStore {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 root_prefix: WireDecode::decode(input)?,
             },
             WireOp::InvalidateObjectCache => Self::InvalidateObjectCache {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 key: WireDecode::decode(input)?,
             },
             WireOp::Delete => Self::Delete {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 key: WireDecode::decode(input)?,
             },
             WireOp::DeletePrefix => Self::DeletePrefix {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 prefix: WireDecode::decode(input)?,
             },
             WireOp::DeleteObjects => Self::DeleteObjects {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 keys: WireDecode::decode(input)?,
             },
             WireOp::List => Self::List {
-                store_id: WireDecode::decode(input)?,
                 bucket: WireDecode::decode(input)?,
                 prefix: WireDecode::decode(input)?,
                 page_size: WireDecode::decode(input)?,
@@ -223,6 +166,7 @@ impl WireDecode for WireRequestPayload {
             WireOp::CloseList => Self::CloseList {
                 cursor: WireDecode::decode(input)?,
             },
+            WireOp::Ready => unreachable!("ready op is not valid in requests"),
             WireOp::Error => unreachable!("error op is not valid in requests"),
         })
     }
@@ -252,6 +196,10 @@ impl WireDecode for WireRequest {
 impl WireEncode for WireResponsePayload {
     fn encode(&self, out: &mut impl BufMut) -> StorageResult<()> {
         match self {
+            Self::Attach { backend_identity } => {
+                out.put_u16(WireOp::Ready.code());
+                backend_identity.encode(out)
+            }
             Self::Open {
                 handle,
                 size,
@@ -280,18 +228,6 @@ impl WireEncode for WireResponsePayload {
                 out.put_u16(WireOp::Upload.code());
                 size.encode(out)?;
                 etag.encode(out)
-            }
-            Self::RegisterStore { replaced } => {
-                out.put_u16(WireOp::RegisterStore.code());
-                replaced.encode(out)
-            }
-            Self::UnregisterStore { removed } => {
-                out.put_u16(WireOp::UnregisterStore.code());
-                removed.encode(out)
-            }
-            Self::PurgeStoreCache => {
-                out.put_u16(WireOp::PurgeStoreCache.code());
-                Ok(())
             }
             Self::ProbeStore { result } => {
                 out.put_u16(WireOp::ProbeStore.code());
@@ -342,6 +278,14 @@ impl WireDecode for WireResponsePayload {
     fn decode(input: &mut impl Buf) -> StorageResult<Self> {
         let op = WireOp::from_response_code(get_u16(input)?)?;
         Ok(match op {
+            WireOp::Ready => Self::Attach {
+                backend_identity: WireDecode::decode(input)?,
+            },
+            WireOp::AttachManaged | WireOp::AttachConfigured => {
+                return Err(crate::error::StorageError::protocol(
+                    "attach response must use the ready op",
+                ));
+            }
             WireOp::Open => Self::Open {
                 handle: WireDecode::decode(input)?,
                 size: WireDecode::decode(input)?,
@@ -360,13 +304,6 @@ impl WireDecode for WireResponsePayload {
                 size: WireDecode::decode(input)?,
                 etag: WireDecode::decode(input)?,
             },
-            WireOp::RegisterStore => Self::RegisterStore {
-                replaced: WireDecode::decode(input)?,
-            },
-            WireOp::UnregisterStore => Self::UnregisterStore {
-                removed: WireDecode::decode(input)?,
-            },
-            WireOp::PurgeStoreCache => Self::PurgeStoreCache,
             WireOp::ProbeStore => Self::ProbeStore {
                 result: crate::backend::StorageProbeResult::from_wire(
                     WireDecode::decode(input)?,

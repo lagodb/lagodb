@@ -21,6 +21,8 @@ pub enum StorageErrorKind {
     Busy,
     CacheFillAborted,
     ExpiredCursor,
+    Conflict,
+    Ambiguous,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +81,12 @@ pub enum StorageError {
 
     #[error("expired cursor: {message}")]
     ExpiredCursor { message: String },
+
+    #[error("storage context conflict: {message}")]
+    Conflict { message: String },
+
+    #[error("ambiguous storage operation {operation}: {message}")]
+    Ambiguous { operation: String, message: String },
 }
 
 impl StorageErrorKind {
@@ -97,6 +105,8 @@ impl StorageErrorKind {
             Self::Busy => 11,
             Self::CacheFillAborted => 12,
             Self::ExpiredCursor => 13,
+            Self::Conflict => 14,
+            Self::Ambiguous => 15,
         }
     }
 
@@ -115,6 +125,8 @@ impl StorageErrorKind {
             11 => Some(Self::Busy),
             12 => Some(Self::CacheFillAborted),
             13 => Some(Self::ExpiredCursor),
+            14 => Some(Self::Conflict),
+            15 => Some(Self::Ambiguous),
             _ => None,
         }
     }
@@ -247,6 +259,22 @@ impl StorageError {
         }
     }
 
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict {
+            message: message.into(),
+        }
+    }
+
+    pub fn ambiguous(
+        operation: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Ambiguous {
+            operation: operation.into(),
+            message: message.into(),
+        }
+    }
+
     pub fn kind(&self) -> StorageErrorKind {
         match self {
             Self::InvalidPath { .. } => StorageErrorKind::InvalidPath,
@@ -262,6 +290,8 @@ impl StorageError {
             Self::Busy { .. } => StorageErrorKind::Busy,
             Self::CacheFillAborted { .. } => StorageErrorKind::CacheFillAborted,
             Self::ExpiredCursor { .. } => StorageErrorKind::ExpiredCursor,
+            Self::Conflict { .. } => StorageErrorKind::Conflict,
+            Self::Ambiguous { .. } => StorageErrorKind::Ambiguous,
         }
     }
 
@@ -282,6 +312,10 @@ impl StorageError {
             | Self::Busy { message }
             | Self::CacheFillAborted { message }
             | Self::ExpiredCursor { message } => message.clone(),
+            Self::Conflict { message } => message.clone(),
+            Self::Ambiguous { operation, message } => {
+                format!("{operation}: {message}")
+            }
         }
     }
 
@@ -309,6 +343,10 @@ impl StorageError {
             StorageErrorKind::Busy => Self::busy(message),
             StorageErrorKind::CacheFillAborted => Self::CacheFillAborted { message },
             StorageErrorKind::ExpiredCursor => Self::expired_cursor(message),
+            StorageErrorKind::Conflict => Self::conflict(message),
+            StorageErrorKind::Ambiguous => {
+                Self::ambiguous("remote operation", message)
+            }
         }
     }
 }

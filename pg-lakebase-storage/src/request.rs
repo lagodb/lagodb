@@ -70,27 +70,26 @@ impl RequestHooks {
 
 /// Correlation metadata for a single in-flight request, passed to [`RequestObserver`] and [`RequestPolicy`].
 ///
-/// The operation payload is a clone of the decoded [`WireRequestPayload`]; for READ requests
-/// (the hot path) this is cheap since the variant carries only `Copy` fields.
-/// Use [`Self::operation_name()`] for a human-readable label and [`Self::payload()`] for
-/// pattern-matching on specific variants.
+/// Only operation metadata is retained. In particular, configured attach
+/// requests carry credentials and must not be cloned merely for logging or
+/// admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestContext {
     request_id: u64,
     client_addr: ClientAddr,
-    payload: WireRequestPayload,
+    operation: RequestOperation,
 }
 
 impl RequestContext {
     pub(crate) fn new(
         request_id: u64,
         client_addr: ClientAddr,
-        payload: WireRequestPayload,
+        payload: &WireRequestPayload,
     ) -> Self {
         Self {
             request_id,
             client_addr,
-            payload,
+            operation: RequestOperation::from(payload),
         }
     }
 
@@ -102,30 +101,20 @@ impl RequestContext {
         &self.client_addr
     }
 
-    /// Returns the wire payload for pattern-matching on specific operation variants.
-    pub fn payload(&self) -> &WireRequestPayload {
-        &self.payload
-    }
-
     /// Human-readable operation name (e.g. `"open"`, `"read"`, `"close"`).
     pub fn operation_name(&self) -> &'static str {
-        self.payload.operation_name()
+        self.operation.operation_name()
     }
 
-    // ---- Backward-compatible convenience: `operation()` returns a reference that supports `.name()` ----
-
-    /// Returns a reference to the payload, which implements [`OperationMeta`].
-    ///
-    /// Prefer [`Self::payload()`] for pattern-matching or [`Self::operation_name()`] for the label.
-    pub fn operation(&self) -> &WireRequestPayload {
-        &self.payload
+    pub fn operation(&self) -> RequestOperation {
+        self.operation
     }
 }
 
 /// Trait providing operation metadata from any request-like type.
 ///
-/// Implemented on [`WireRequestPayload`] so that observers and policies can query the operation
-/// name without needing a separate enum.
+/// Implemented on [`WireRequestPayload`] and [`RequestOperation`] so callers
+/// can query the operation name without retaining a request payload.
 pub trait OperationMeta {
     /// Short human-readable name for the operation (e.g. `"open"`, `"read"`).
     fn operation_name(&self) -> &'static str;
@@ -134,14 +123,13 @@ pub trait OperationMeta {
 impl OperationMeta for WireRequestPayload {
     fn operation_name(&self) -> &'static str {
         match self {
+            Self::AttachManaged { .. } => "attach_managed",
+            Self::AttachConfigured { .. } => "attach_configured",
             Self::Open { .. } => "open",
             Self::Head { .. } => "head",
             Self::Read { .. } => "read",
             Self::Close { .. } => "close",
             Self::Upload { .. } => "upload",
-            Self::RegisterStore { .. } => "register_store",
-            Self::UnregisterStore { .. } => "unregister_store",
-            Self::PurgeStoreCache { .. } => "purge_store_cache",
             Self::ProbeStore { .. } => "probe_store",
             Self::InvalidateObjectCache { .. } => "invalidate_object_cache",
             Self::Delete { .. } => "delete",
@@ -153,9 +141,75 @@ impl OperationMeta for WireRequestPayload {
     }
 }
 
-/// Preserved as a type alias for backward compatibility with external consumers that imported
-/// [`RequestOperation`]. New code should match on [`WireRequestPayload`] directly.
-pub type RequestOperation = WireRequestPayload;
+/// Operation classification retained by request hooks without retaining the
+/// decoded payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestOperation {
+    AttachManaged,
+    AttachConfigured,
+    Open,
+    Head,
+    Read,
+    Close,
+    Upload,
+    ProbeStore,
+    InvalidateObjectCache,
+    Delete,
+    DeletePrefix,
+    DeleteObjects,
+    List,
+    CloseList,
+}
+
+impl RequestOperation {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AttachManaged => "attach_managed",
+            Self::AttachConfigured => "attach_configured",
+            Self::Open => "open",
+            Self::Head => "head",
+            Self::Read => "read",
+            Self::Close => "close",
+            Self::Upload => "upload",
+            Self::ProbeStore => "probe_store",
+            Self::InvalidateObjectCache => "invalidate_object_cache",
+            Self::Delete => "delete",
+            Self::DeletePrefix => "delete_prefix",
+            Self::DeleteObjects => "delete_objects",
+            Self::List => "list",
+            Self::CloseList => "close_list",
+        }
+    }
+}
+
+impl OperationMeta for RequestOperation {
+    fn operation_name(&self) -> &'static str {
+        self.name()
+    }
+}
+
+impl From<&WireRequestPayload> for RequestOperation {
+    fn from(payload: &WireRequestPayload) -> Self {
+        match payload {
+            WireRequestPayload::AttachManaged { .. } => Self::AttachManaged,
+            WireRequestPayload::AttachConfigured { .. } => Self::AttachConfigured,
+            WireRequestPayload::Open { .. } => Self::Open,
+            WireRequestPayload::Head { .. } => Self::Head,
+            WireRequestPayload::Read { .. } => Self::Read,
+            WireRequestPayload::Close { .. } => Self::Close,
+            WireRequestPayload::Upload { .. } => Self::Upload,
+            WireRequestPayload::ProbeStore { .. } => Self::ProbeStore,
+            WireRequestPayload::InvalidateObjectCache { .. } => {
+                Self::InvalidateObjectCache
+            }
+            WireRequestPayload::Delete { .. } => Self::Delete,
+            WireRequestPayload::DeletePrefix { .. } => Self::DeletePrefix,
+            WireRequestPayload::DeleteObjects { .. } => Self::DeleteObjects,
+            WireRequestPayload::List { .. } => Self::List,
+            WireRequestPayload::CloseList { .. } => Self::CloseList,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestOutcome {
@@ -224,7 +278,6 @@ impl RequestObserver for TracingRequestObserver {
             request_id = context.request_id(),
             client_addr = context.client_addr(),
             operation = context.operation_name(),
-            request = ?context.payload(),
             "storage request started",
         );
     }
