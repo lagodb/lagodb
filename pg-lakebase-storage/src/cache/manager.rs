@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{CacheRuntimeHandle, StorageRuntime};
 use crate::error::StorageResult;
 use crate::object::{
-    DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, ObjectLocation, StoreId,
+    DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, ObjectLocation,
     normalize_chunk_size,
 };
 
@@ -28,7 +28,7 @@ use super::startup::StartupRecovery;
 use super::store::{
     CacheStore, FileCacheStore, PhysicalCacheEntryVisitor, SmallObjectStore,
 };
-use super::types::{CacheCleanupPolicy, CacheCleanupReport, CachePurgeReport};
+use super::types::{CacheCleanupPolicy, CacheCleanupReport};
 use super::usage::{
     CacheUsageSnapshot, LogicalCacheUsage, PhysicalCacheUsage, PhysicalUsageVisitor,
 };
@@ -123,26 +123,6 @@ impl<I: CacheIndex> CacheManager<I> {
     /// copy and allocates nothing.
     pub(in crate::cache) fn touch_granularity_ns(&self) -> u64 {
         duration_to_ns(self.runtime.touch_granularity())
-    }
-
-    /// Placeholder for future per-store cache eviction; today it validates the API shape and leaves cache data intact.
-    ///
-    /// TODO(per-store cache lifecycle): implement this as a coordinated cache
-    /// state transition, not as `remove_dir_all(objects/<store_id>)`. A complete
-    /// purge must remove matching metadata, LRU/accounting state, embedded
-    /// small-object payloads, complete files, partial files, and process-local
-    /// object/fill state and serialize with their active leases. The caller's
-    /// store-lifecycle coordinator must fence and quiesce the registry
-    /// generation before invoking the purge so a retired `RegisteredStore`
-    /// cannot admit data afterward; otherwise replacing a backend under the
-    /// same `(store_id, bucket, key)` can expose stale cached bytes. Staging
-    /// files are transaction-owned and follow the separate postmaster-startup
-    /// cleanup policy.
-    pub async fn purge_store_cache(
-        &self,
-        _store_id: &StoreId,
-    ) -> StorageResult<CachePurgeReport> {
-        Ok(CachePurgeReport::default())
     }
 
     #[cfg(test)]

@@ -16,13 +16,14 @@ Every cache decision rests on three non-negotiable invariants:
    lifecycle of that key. The server never reconciles, overwrites, or
    repairs those values from later backend observations.
 
-2. **No generations.** One `(store_id, bucket, key)` maps to at most one
+2. **No object-version generations.** One credential-free physical
+   `(backend identity, bucket, key)` maps to at most one
    cached residency at a time. The system does not introduce a generation
    field and does not support multiple cached versions for the same object
    key.
 
 3. **External invalidation.** Freshness is the caller's responsibility.
-   `invalidate_object_cache(store_id, bucket, key)` is the only explicit
+   `invalidate_object_cache(bucket, key)` on an attached connection is the only explicit
    freshness boundary. Backend object changes are never detected
    automatically — until invalidated, the server assumes the current key's
    identity remains valid. A cache hit does not HEAD the backend.
@@ -30,6 +31,13 @@ Every cache decision rests on three non-negotiable invariants:
 These invariants exist because the upstream object store guarantees immutable
 objects and the database engine already knows which objects are current. They
 eliminate reconciliation logic, version conflicts, and background polling.
+
+`BackendDataIdentity` contains only physical addressing fields and excludes
+credentials. The cache is trusted cluster-local derived data: credentials A
+and B share a residency when they address the same physical service, bucket,
+and key. A hit does not execute backend HEAD to repeat B's remote permission
+check. Endpoint validation prevents userinfo/query/fragment secrets from
+entering this persistent identity.
 
 
 2  On-Disk Layout
@@ -40,22 +48,21 @@ cache_dir/
   db/
     index.redb                            persistent metadata index
   objects/
-    <store>/<bucket>/<parent>/
+    <encoded-backend-identity>/<bucket>/<parent>/
       pgl-cache.<name>.complete           fully cached large object
-  partial/
-    <store>/<bucket>/<parent>/
       pgl-cache.<name>.part               in-progress large object fill
   staging/
-    <store>/<bucket>/<parent>/
+    <encoded-backend-identity>/<bucket>/<parent>/
       pgl-staging.<name>                  write staging (see staging README)
 ```
 
-Small objects (at or below the small-object limit, default 64 KiB) are stored
+Small objects (at or below the small-object limit, default 4 KiB) are stored
 directly in the redb index as embedded KV payloads. They do not have on-disk
 files.
 
 Large objects are fetched in chunks from the backend and written to a partial
-file. Once all chunks are present, the partial file is atomically renamed to
+file next to its complete counterpart. Once all chunks are present, the
+partial file is atomically renamed to
 the complete path, and durable metadata is inserted into the index.
 
 

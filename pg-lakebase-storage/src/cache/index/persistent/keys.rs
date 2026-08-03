@@ -1,20 +1,36 @@
 use crate::error::{StorageError, StorageResult};
 use crate::object::ObjectLocation;
+use crate::object::path_encoding::{decode_segment, encode_segment};
 
 pub(super) fn parse_db_key(key: &str) -> StorageResult<ObjectLocation> {
-    let (store_id, rest) = key
+    let (identity, rest) = key
         .split_once('/')
         .ok_or_else(|| StorageError::cache(format!("invalid cache key {key:?}")))?;
     let (bucket, object_key) = rest
         .split_once('/')
         .ok_or_else(|| StorageError::cache(format!("invalid cache key {key:?}")))?;
-    ObjectLocation::new(store_id, bucket, object_key)
+    let identity = decode_segment(identity)
+        .ok_or_else(|| StorageError::cache(format!("invalid cache key {key:?}")))?;
+    ObjectLocation::new(
+        crate::backend::BackendDataIdentity::from_cache_key(&identity)?,
+        bucket,
+        object_key,
+    )
+}
+
+pub(super) fn db_key(key: &ObjectLocation) -> String {
+    format!(
+        "{}/{}/{}",
+        encode_segment(key.backend_identity().cache_key()),
+        key.bucket(),
+        key.key()
+    )
 }
 
 /// Lexicographic sort by access time: fixed-width hex ns, then NUL so object keys cannot collide with the timestamp
 /// field.
 pub(super) fn lru_key(last_access_ns: u64, key: &ObjectLocation) -> String {
-    format!("{last_access_ns:016x}\0{key}")
+    format!("{last_access_ns:016x}\0{}", db_key(key))
 }
 
 pub(super) fn lru_access_ns(key: &str) -> StorageResult<u64> {

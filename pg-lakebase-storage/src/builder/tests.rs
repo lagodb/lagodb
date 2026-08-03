@@ -6,6 +6,7 @@ use object_store::ObjectStoreExt;
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectStorePath;
 
+use crate::backend::{BackendDataIdentity, ObjectStoreBackend};
 use crate::cache::InMemoryCacheIndex;
 use crate::client::SeekFrom;
 use crate::client::StorageClient;
@@ -14,6 +15,23 @@ use crate::error::{StorageError, StorageErrorKind};
 use crate::object::ObjectLocation;
 
 use super::*;
+
+const TEST_VOLUME_ID: u64 = 1;
+
+fn register_test_store<I: crate::cache::CacheIndex + 'static>(
+    server: &crate::server::StorageServer<I>,
+    name: &str,
+    store: Arc<InMemory>,
+) {
+    server
+        .managed_store_registry()
+        .register_backend(
+            TEST_VOLUME_ID,
+            BackendDataIdentity::memory(name),
+            Arc::new(ObjectStoreBackend::for_bucket(store, "bucket")),
+        )
+        .unwrap();
+}
 
 #[tokio::test]
 async fn builder_starts_redb_backed_object_store_server() {
@@ -33,10 +51,7 @@ async fn builder_starts_redb_backed_object_store_server() {
         .bind()
         .await
         .unwrap();
-    server
-        .store_registry()
-        .register_object_store_bucket("default", store, "bucket")
-        .unwrap();
+    register_test_store(&server, "default", store);
 
     let server_task = tokio::spawn(async move {
         let _ = server.serve_forever().await;
@@ -44,8 +59,9 @@ async fn builder_starts_redb_backed_object_store_server() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let mut file = client.open("default", "bucket", "dir/file.txt").unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut file = client.open("bucket", "dir/file.txt").unwrap();
         let data = file.read(5).unwrap();
         assert_eq!(data, b"hello");
         file.seek(SeekFrom::Start(6));
@@ -53,7 +69,7 @@ async fn builder_starts_redb_backed_object_store_server() {
         assert_eq!(data, b"builder");
         file.close().unwrap();
 
-        let mut file = client.open("default", "bucket", "dir/file.txt").unwrap();
+        let mut file = client.open("bucket", "dir/file.txt").unwrap();
         assert!(file.is_direct_io());
         file.seek(SeekFrom::Start(6));
         let data = file.read(7).unwrap();
@@ -66,7 +82,7 @@ async fn builder_starts_redb_backed_object_store_server() {
 }
 
 #[tokio::test]
-async fn builder_allows_dynamic_store_registration_after_bind() {
+async fn builder_allows_managed_volume_publication_after_bind() {
     let store = Arc::new(InMemory::new());
     store
         .put(
@@ -83,10 +99,7 @@ async fn builder_allows_dynamic_store_registration_after_bind() {
         .bind()
         .await
         .unwrap();
-    server
-        .store_registry()
-        .register_object_store_bucket("dynamic", store, "bucket")
-        .unwrap();
+    register_test_store(&server, "managed", store);
 
     let server_task = tokio::spawn(async move {
         let _ = server.serve_forever().await;
@@ -94,8 +107,9 @@ async fn builder_allows_dynamic_store_registration_after_bind() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let mut file = client.open("dynamic", "bucket", "dir/file.txt").unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut file = client.open("bucket", "dir/file.txt").unwrap();
         let data = file.read(7).unwrap();
         assert_eq!(data, b"dynamic");
     })
@@ -126,10 +140,7 @@ async fn builder_applies_open_handle_limit_per_connection() {
         .bind()
         .await
         .unwrap();
-    server
-        .store_registry()
-        .register_object_store_bucket("default", store, "bucket")
-        .unwrap();
+    register_test_store(&server, "default", store);
 
     let server_task = tokio::spawn(async move {
         let _ = server.serve_forever().await;
@@ -137,9 +148,10 @@ async fn builder_applies_open_handle_limit_per_connection() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let first = client.open("default", "bucket", "dir/file.txt").unwrap();
-        let error = match client.open("default", "bucket", "dir/file.txt") {
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let first = client.open("bucket", "dir/file.txt").unwrap();
+        let error = match client.open("bucket", "dir/file.txt") {
             Ok(_) => {
                 panic!("expected second open to exceed the connection handle limit")
             }
@@ -148,7 +160,7 @@ async fn builder_applies_open_handle_limit_per_connection() {
         assert_eq!(error.kind(), StorageErrorKind::ResourceExhausted);
 
         drop(first);
-        let _second = client.open("default", "bucket", "dir/file.txt").unwrap();
+        let _second = client.open("bucket", "dir/file.txt").unwrap();
     })
     .await
     .unwrap();
@@ -203,10 +215,7 @@ async fn builder_can_bind_with_custom_cache_index() {
         .bind_with_index(InMemoryCacheIndex::new())
         .await
         .unwrap();
-    server
-        .store_registry()
-        .register_object_store_bucket("default", store, "bucket")
-        .unwrap();
+    register_test_store(&server, "default", store);
 
     let server_task = tokio::spawn(async move {
         let _ = server.serve_forever().await;
@@ -214,8 +223,9 @@ async fn builder_can_bind_with_custom_cache_index() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let mut file = client.open("default", "bucket", "dir/file.txt").unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut file = client.open("bucket", "dir/file.txt").unwrap();
         let data = file.read(6).unwrap();
         assert_eq!(data, b"custom");
         file.seek(SeekFrom::Start(7));

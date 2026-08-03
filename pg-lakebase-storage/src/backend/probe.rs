@@ -1,6 +1,6 @@
 //! Explicit object-store connectivity probe.
 //!
-//! The probe runs against a resolved [`super::RegisteredStore`], so it exercises the same
+//! The probe runs against an attached backend, so it exercises the same
 //! credential-bearing backend instance as normal storage operations without involving the
 //! local object cache or staging directory.
 
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::ObjectBackend;
 use crate::error::{StorageError, StorageErrorKind};
-use crate::object::ObjectLocation;
+use crate::object::ObjectPath;
 
 const PROBE_PAYLOAD: &[u8] = b"pg-lakebase-storage-probe-v1";
 
@@ -83,17 +83,16 @@ impl StorageProbeResult {
     }
 }
 
-pub(super) struct BackendProbe<'a> {
-    backend: &'a dyn ObjectBackend,
+pub(super) struct BackendProbe<'a, B: ObjectBackend + ?Sized> {
+    backend: &'a B,
     root_prefix: String,
-    location: ObjectLocation,
+    location: ObjectPath,
     result: StorageProbeResult,
 }
 
-impl<'a> BackendProbe<'a> {
+impl<'a, B: ObjectBackend + ?Sized> BackendProbe<'a, B> {
     pub(super) fn new(
-        backend: &'a dyn ObjectBackend,
-        store_id: &str,
+        backend: &'a B,
         bucket: &str,
         root_prefix: &str,
     ) -> Result<Self, StorageError> {
@@ -106,18 +105,16 @@ impl<'a> BackendProbe<'a> {
         Ok(Self {
             backend,
             root_prefix: root_prefix.to_owned(),
-            location: ObjectLocation::new(store_id, bucket, key)?,
+            location: ObjectPath::new(bucket, key)?,
             result: StorageProbeResult::new(),
         })
     }
 
     pub(super) async fn run(mut self) -> StorageProbeResult {
         let list_prefix = format!("{}/", self.root_prefix);
-        let mut objects = self.backend.list(
-            self.location.store_id().as_str(),
-            self.location.bucket(),
-            Some(&list_prefix),
-        );
+        let mut objects = self
+            .backend
+            .list(self.location.bucket(), Some(&list_prefix));
         if let Some(Err(error)) = objects.next().await {
             self.result.fail("list", error);
             return self.result;

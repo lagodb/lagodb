@@ -123,12 +123,6 @@ pub struct CacheCleanupReport {
 }
 
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
-pub struct CachePurgeReport {
-    pub objects_removed: usize,
-    pub bytes_removed: u64,
-}
-
-#[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
 pub struct CacheInvalidateReport {
     pub removed: bool,
     pub bytes_removed: u64,

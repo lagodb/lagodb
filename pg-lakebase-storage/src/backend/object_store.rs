@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
-use object_store::path::Path as ObjectPath;
+use object_store::path::Path as StoreObjectPath;
 use object_store::{
     Error as ObjectStoreError, MultipartUpload, ObjectStore, ObjectStoreExt, PutMode,
     PutOptions,
@@ -15,7 +15,7 @@ use tokio::io::AsyncReadExt;
 
 use super::ObjectBackend;
 use crate::error::{StorageError, StorageResult};
-use crate::object::{ListEntry, ObjectInfo, ObjectLocation};
+use crate::object::{ListEntry, ObjectInfo, ObjectPath};
 
 /// Adapter that exposes any [`ObjectStore`] client as an [`ObjectBackend`].
 ///
@@ -46,13 +46,13 @@ impl ObjectStoreBackend {
         }
     }
 
-    fn location(&self, key: &ObjectLocation) -> StorageResult<ObjectPath> {
+    fn location(&self, key: &ObjectPath) -> StorageResult<StoreObjectPath> {
         if let Some(bucket) = &self.bucket
             && bucket != key.bucket()
         {
             return Err(StorageError::not_found(key.to_string()));
         }
-        Ok(ObjectPath::from(key.key()))
+        Ok(StoreObjectPath::from(key.key()))
     }
 
     /// Returns `true` when this backend is responsible for `bucket`.
@@ -64,20 +64,20 @@ impl ObjectStoreBackend {
         self.bucket.as_deref().is_none_or(|pinned| pinned == bucket)
     }
 
-    fn prefix_path(&self, prefix: Option<&str>) -> Option<ObjectPath> {
+    fn prefix_path(&self, prefix: Option<&str>) -> Option<StoreObjectPath> {
         // `object_store::Path::from` accepts an empty string and produces an empty path, which is
         // distinct from `None` (= list whole bucket). We collapse `Some("")` to `None` so callers
         // can pass an empty string without surprise.
         match prefix {
             None | Some("") => None,
-            Some(p) => Some(ObjectPath::from(p)),
+            Some(p) => Some(StoreObjectPath::from(p)),
         }
     }
 }
 
 #[async_trait]
 impl ObjectBackend for ObjectStoreBackend {
-    async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, key: &ObjectPath) -> StorageResult<ObjectInfo> {
         let location = self.location(key)?;
         let meta = self.store.head(&location).await.map_err(|error| {
             StorageError::backend_source(format!("head object {key}"), error)
@@ -90,7 +90,7 @@ impl ObjectBackend for ObjectStoreBackend {
 
     async fn get_range(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         let location = self.location(key)?;
@@ -109,7 +109,7 @@ impl ObjectBackend for ObjectStoreBackend {
 
     async fn put_from_file(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         path: &Path,
         len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -148,7 +148,7 @@ impl ObjectBackend for ObjectStoreBackend {
 
     async fn put_if_absent(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         data: bytes::Bytes,
     ) -> StorageResult<ObjectInfo> {
         let location = self.location(key)?;
@@ -181,7 +181,6 @@ impl ObjectBackend for ObjectStoreBackend {
 
     fn list(
         &self,
-        _store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
     ) -> BoxStream<'static, StorageResult<ListEntry>> {
@@ -210,7 +209,7 @@ impl ObjectBackend for ObjectStoreBackend {
             .boxed()
     }
 
-    async fn delete(&self, key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, key: &ObjectPath) -> StorageResult<()> {
         let location = self.location(key)?;
         match self.store.delete(&location).await {
             Ok(()) => Ok(()),
@@ -224,7 +223,6 @@ impl ObjectBackend for ObjectStoreBackend {
 
     fn delete_stream(
         &self,
-        _store_id: &str,
         bucket: &str,
         keys: BoxStream<'static, StorageResult<String>>,
     ) -> BoxStream<'static, StorageResult<String>> {
@@ -244,9 +242,9 @@ impl ObjectBackend for ObjectStoreBackend {
 
         // `ObjectStore::delete_stream` takes a `BoxStream<'static, Result<Path, ObjectStoreError>>`;
         // build that adapter once and forward.
-        let key_paths: BoxStream<'static, object_store::Result<ObjectPath>> = keys
-            .map(|item| match item {
-                Ok(key) => Ok(ObjectPath::from(key)),
+        let key_paths: BoxStream<'static, object_store::Result<StoreObjectPath>> =
+            keys.map(|item| match item {
+                Ok(key) => Ok(StoreObjectPath::from(key)),
                 Err(error) => {
                     // Surface upstream errors back into the object_store stream as a generic
                     // backend error so the bulk-delete machinery propagates them. Using
@@ -332,20 +330,17 @@ mod tests {
     use object_store::memory::InMemory;
 
     use super::*;
-    const TEST_STORE_ID: &str = "test-store";
-
     #[tokio::test]
     async fn adapts_object_store_bucket_reads() {
         let store = Arc::new(InMemory::new());
-        let location = ObjectPath::from("path/file.txt");
+        let location = StoreObjectPath::from("path/file.txt");
         store
             .put(&location, b"hello object store".as_ref().into())
             .await
             .unwrap();
 
         let backend = ObjectStoreBackend::for_bucket(store, "bucket");
-        let key =
-            ObjectLocation::new(TEST_STORE_ID, "bucket", "path/file.txt").unwrap();
+        let key = ObjectPath::new("bucket", "path/file.txt").unwrap();
 
         let info = backend.head(&key).await.unwrap();
         assert_eq!(info.size, 18);
@@ -360,13 +355,13 @@ mod tests {
         let store = Arc::new(InMemory::new());
         for path in ["a/1", "a/2", "b/3"] {
             store
-                .put(&ObjectPath::from(path), b"x".as_ref().into())
+                .put(&StoreObjectPath::from(path), b"x".as_ref().into())
                 .await
                 .unwrap();
         }
         let backend = ObjectStoreBackend::for_bucket(store, "bucket");
 
-        let entries = backend.list(TEST_STORE_ID, "bucket", Some("a/"));
+        let entries = backend.list("bucket", Some("a/"));
         let mut keys: Vec<String> = entries
             .map_ok(|entry| entry.key)
             .try_collect()
@@ -375,7 +370,7 @@ mod tests {
         keys.sort();
         assert_eq!(keys, vec!["a/1".to_string(), "a/2".to_string()]);
 
-        let entries = backend.list(TEST_STORE_ID, "bucket", None);
+        let entries = backend.list("bucket", None);
         let mut keys: Vec<String> = entries
             .map_ok(|entry| entry.key)
             .try_collect()
@@ -394,13 +389,13 @@ mod tests {
 
         let store = Arc::new(InMemory::new());
         store
-            .put(&ObjectPath::from("only-here"), b"x".as_ref().into())
+            .put(&StoreObjectPath::from("only-here"), b"x".as_ref().into())
             .await
             .unwrap();
         let backend = ObjectStoreBackend::for_bucket(store, "bucket-a");
 
         let keys: Vec<String> = backend
-            .list(TEST_STORE_ID, "bucket-b", None)
+            .list("bucket-b", None)
             .map_ok(|entry| entry.key)
             .try_collect()
             .await
@@ -416,12 +411,12 @@ mod tests {
     async fn delete_existing_or_missing_succeeds_idempotently() {
         let store = Arc::new(InMemory::new());
         store
-            .put(&ObjectPath::from("doomed"), b"bye".as_ref().into())
+            .put(&StoreObjectPath::from("doomed"), b"bye".as_ref().into())
             .await
             .unwrap();
 
         let backend = ObjectStoreBackend::for_bucket(store, "bucket");
-        let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "doomed").unwrap();
+        let key = ObjectPath::new("bucket", "doomed").unwrap();
 
         backend.delete(&key).await.unwrap();
         // Second delete is idempotent: backend disagreement on existed-vs-missing is hidden by
@@ -437,7 +432,7 @@ mod tests {
         let store = Arc::new(InMemory::new());
         for path in ["a/1", "a/2", "a/3"] {
             store
-                .put(&ObjectPath::from(path), b"x".as_ref().into())
+                .put(&StoreObjectPath::from(path), b"x".as_ref().into())
                 .await
                 .unwrap();
         }
@@ -455,7 +450,7 @@ mod tests {
         .boxed();
 
         let mut deleted: Vec<String> = backend
-            .delete_stream(TEST_STORE_ID, "bucket", keys)
+            .delete_stream("bucket", keys)
             .try_collect()
             .await
             .unwrap();
@@ -471,7 +466,7 @@ mod tests {
 
         // Surviving object stays.
         let remaining: Vec<String> = backend
-            .list(TEST_STORE_ID, "bucket", None)
+            .list("bucket", None)
             .map_ok(|entry| entry.key)
             .try_collect()
             .await
@@ -507,8 +502,7 @@ mod tests {
 
         let store = Arc::new(InMemory::new());
         let backend = ObjectStoreBackend::for_bucket(store.clone(), "bucket");
-        let key =
-            ObjectLocation::new(TEST_STORE_ID, "bucket", "uploaded.txt").unwrap();
+        let key = ObjectPath::new("bucket", "uploaded.txt").unwrap();
 
         let info = backend
             .put_from_file(&key, &staging_path, data.len() as u64)

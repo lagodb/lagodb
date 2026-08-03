@@ -12,20 +12,24 @@ use super::ObjectBackend;
 use super::config::StoreConfig;
 use super::object_store::ObjectStoreBackend;
 use crate::error::{StorageError, StorageResult};
-use crate::object::{ListEntry, ObjectInfo, ObjectLocation};
+use crate::object::{ListEntry, ObjectInfo, ObjectPath};
 
 /// Backend that materializes and caches one object-store client per bucket.
 pub struct ConfiguredObjectBackend {
-    config: StoreConfig,
+    config: Arc<StoreConfig>,
     stores: RwLock<HashMap<String, Arc<dyn ObjectStore>>>,
 }
 
 impl ConfiguredObjectBackend {
-    pub fn new(config: StoreConfig) -> Self {
+    pub fn new(config: Arc<StoreConfig>) -> Self {
         Self {
             config,
             stores: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn config(&self) -> &StoreConfig {
+        &self.config
     }
 
     fn store_for_bucket(&self, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
@@ -54,7 +58,7 @@ impl ConfiguredObjectBackend {
 
 #[async_trait]
 impl ObjectBackend for ConfiguredObjectBackend {
-    async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, key: &ObjectPath) -> StorageResult<ObjectInfo> {
         let store = self.store_for_bucket(key.bucket())?;
         ObjectStoreBackend::for_bucket(store, key.bucket())
             .head(key)
@@ -63,7 +67,7 @@ impl ObjectBackend for ConfiguredObjectBackend {
 
     async fn get_range(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         let store = self.store_for_bucket(key.bucket())?;
@@ -74,7 +78,7 @@ impl ObjectBackend for ConfiguredObjectBackend {
 
     async fn put_from_file(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         path: &std::path::Path,
         len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -86,7 +90,7 @@ impl ObjectBackend for ConfiguredObjectBackend {
 
     async fn put_if_absent(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         data: bytes::Bytes,
     ) -> StorageResult<ObjectInfo> {
         let store = self.store_for_bucket(key.bucket())?;
@@ -97,18 +101,18 @@ impl ObjectBackend for ConfiguredObjectBackend {
 
     fn list(
         &self,
-        store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
     ) -> BoxStream<'static, StorageResult<ListEntry>> {
         match self.store_for_bucket(bucket) {
-            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket)
-                .list(store_id, bucket, prefix),
+            Ok(store) => {
+                ObjectStoreBackend::for_bucket(store, bucket).list(bucket, prefix)
+            }
             Err(error) => stream::once(async move { Err(error) }).boxed(),
         }
     }
 
-    async fn delete(&self, key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, key: &ObjectPath) -> StorageResult<()> {
         let store = self.store_for_bucket(key.bucket())?;
         ObjectStoreBackend::for_bucket(store, key.bucket())
             .delete(key)
@@ -117,13 +121,12 @@ impl ObjectBackend for ConfiguredObjectBackend {
 
     fn delete_stream(
         &self,
-        store_id: &str,
         bucket: &str,
         keys: BoxStream<'static, StorageResult<String>>,
     ) -> BoxStream<'static, StorageResult<String>> {
         match self.store_for_bucket(bucket) {
             Ok(store) => ObjectStoreBackend::for_bucket(store, bucket)
-                .delete_stream(store_id, bucket, keys),
+                .delete_stream(bucket, keys),
             Err(error) => {
                 let template = error.to_string();
                 keys.map(move |item| {

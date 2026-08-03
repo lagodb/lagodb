@@ -17,6 +17,7 @@ use std::path::{Component, Path};
 use crate::error::{StorageError, StorageResult};
 
 use super::ObjectLocation;
+use crate::backend::BackendDataIdentity;
 
 /// Component placeholder for empty key path segments (e.g. `"a//b"`). We refuse to collapse these
 /// silently because doing so would break reversibility.
@@ -27,6 +28,8 @@ pub(crate) const MAX_COMPONENT_LEN: usize = 255;
 
 /// Portable upper bound on the total path length (including the configured root).
 pub(crate) const MAX_PATH_LEN: usize = 4095;
+
+const IDENTITY_CHUNK_LEN: usize = 180;
 
 /// Percent-encodes a single key segment so it is safe to use as one path component. The encoding
 /// is reversible by [`decode_segment`] and guarantees the result never matches `"."` or `".."` in
@@ -91,7 +94,7 @@ pub(crate) fn normal_components(path: &Path) -> Option<Vec<&str>> {
 
 /// Builds the encoded directory structure for an [`ObjectLocation`] and appends a leaf filename.
 ///
-/// Both the cache and staging resolvers share this layout: `<store_id>/<bucket>/<key_dirs>/<leaf>`,
+/// Both resolvers use identity chunks followed by `<bucket>/<key_dirs>/<leaf>`,
 /// where each component is percent-encoded by [`encode_segment`]. The `leaf_prefix` and optional
 /// `leaf_suffix` are prepended/appended to the encoded final key segment to form the filename.
 pub(crate) fn build_encoded_object_path(
@@ -99,7 +102,15 @@ pub(crate) fn build_encoded_object_path(
     leaf_prefix: &str,
     leaf_suffix: &str,
 ) -> std::path::PathBuf {
-    let mut path = std::path::PathBuf::from(encode_segment(key.store_id().as_str()));
+    let identity = encode_segment(key.backend_identity().cache_key());
+    let chunks = identity.as_bytes().chunks(IDENTITY_CHUNK_LEN);
+    let mut path = std::path::PathBuf::from(format!("i{}", chunks.len()));
+    for chunk in chunks {
+        path.push(
+            std::str::from_utf8(chunk)
+                .expect("percent-encoded backend identity is ASCII"),
+        );
+    }
     path.push(encode_segment(key.bucket()));
     let key_str = key.key();
     let (dir_part, file_segment) = match key_str.rsplit_once('/') {
@@ -116,6 +127,26 @@ pub(crate) fn build_encoded_object_path(
         encode_segment(file_segment)
     ));
     path
+}
+
+pub(crate) fn decode_identity_components(
+    components: &[&str],
+) -> Option<(BackendDataIdentity, usize)> {
+    let count = components
+        .first()?
+        .strip_prefix('i')?
+        .parse::<usize>()
+        .ok()?;
+    if count == 0 || components.len() <= count {
+        return None;
+    }
+    let mut encoded = String::new();
+    for component in components.get(1..=count)? {
+        encoded.push_str(component);
+    }
+    let identity = decode_segment(&encoded)?;
+    let identity = BackendDataIdentity::from_cache_key(&identity).ok()?;
+    Some((identity, count + 1))
 }
 
 /// Ensures `path` stays within [`MAX_COMPONENT_LEN`] per component and [`MAX_PATH_LEN`] overall.

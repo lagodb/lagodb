@@ -13,12 +13,12 @@ All storage operations go through a single async trait:
 
 ```
   ObjectBackend
-    head(key)              -> ObjectInfo (size, etag)
-    get_range(key, range)  -> bytes::Bytes
-    put_from_file(key, path, len) -> ObjectInfo
-    list(store_id, bucket, prefix) -> Stream<ListEntry>
-    delete(key)            -> ()
-    delete_stream(store_id, bucket, keys) -> Stream<String>
+    head(ObjectPath)                 -> ObjectInfo (size, etag)
+    get_range(ObjectPath, range)     -> bytes::Bytes
+    put_from_file(ObjectPath, path, len) -> ObjectInfo
+    list(bucket, prefix)             -> Stream<ListEntry>
+    delete(ObjectPath)               -> ()
+    delete_stream(bucket, keys)      -> Stream<String>
 ```
 
 Implementations must be `Send + Sync`. The trait documents several
@@ -32,29 +32,31 @@ semantic contracts:
 - **delete_stream tolerates NotFound.** Individual key deletions that
   return NotFound are mapped to success, making bulk delete composable
   with racing list operations.
-- **list takes strings, not ObjectLocation.** Listing spans a namespace
-  (`store_id` + `bucket` + optional prefix), so a full `ObjectLocation`
-  is not required.
+- **Backends do not see cache identity.** Keyed operations receive
+  `ObjectPath(bucket, key)`. Listing receives a bucket and optional prefix.
+  `BackendDataIdentity` belongs to cache/staging addressing and is not passed
+  back into an already configured backend.
 
 
 2  Implementation Layers
 ========================
 
 ```
-  StoreRegistry
+  connection attach
        |
-       v
-  RegisteredStore  (store_id + generation + Arc<dyn ObjectBackend>)
+       +--- ManagedStoreSlot -------- runtime-owned volume reference
        |
-       +--- MemoryObjectBackend         (in-memory HashMap, tests)
-       |
-       +--- ObjectStoreBackend          (wraps Arc<dyn ObjectStore>)
-       |
-       +--- ConfiguredObjectBackend     (lazy per-bucket ObjectStore
-                                         built from StoreConfig)
+       +--- BackendPool ------------ weak interning by StoreConfig
+                    |
+                    v
+             Arc<dyn ObjectBackend>
+                    |
+                    +--- MemoryObjectBackend
+                    +--- ObjectStoreBackend
+                    +--- ConfiguredObjectBackend
 ```
 
-**MemoryObjectBackend.** Thread-safe `HashMap<ObjectLocation, Vec<u8>>` (stored as owned bytes internally).
+**MemoryObjectBackend.** Thread-safe `HashMap<ObjectPath, Vec<u8>>` (stored as owned bytes internally).
 Provides head, ranged get, put, list, delete, and delete_stream backed
 entirely by in-memory state. Used for tests and local embedding.
 
@@ -69,26 +71,35 @@ first access. The per-bucket client is cached under a double-checked
 lock.
 
 
-3  Store Registry
-=================
+3  Context Resolution and Sharing
+=================================
 
-`StoreRegistry` is a concurrent map from `StoreId` to
-`Arc<RegisteredStore>`. It provides several registration methods:
+There is no wire-visible backend registry and no dynamic registration
+lifecycle. One mandatory handshake resolves one backend per connection:
 
-- `register_backend` — concrete `ObjectBackend` implementation.
-- `register_shared_backend` — pre-built `Arc<dyn ObjectBackend>`.
-- `register_config` — validates a `StoreConfig`, then wraps it in
-  `ConfiguredObjectBackend`.
-- `register_object_store` — wraps a raw `ObjectStore`.
-- `register_object_store_bucket` — wraps a pinned single-bucket store.
+- `AttachManaged(volume_id)` resolves a `ManagedStoreSlot` published by the
+  runtime reconciler.
+- `AttachConfigured(Arc<StoreConfig>)` validates the supplied config and
+  interns a `ConfiguredObjectBackend` through `BackendPool`.
 
-Resolution: `resolve(&StoreId)` returns `Arc<RegisteredStore>` or
-NotFound. Unregistering a store removes it from the map but does not
-invalidate already-resolved `Arc<RegisteredStore>` references — callers
-that hold a resolved store can continue using it.
+`BackendPool` stores only `Weak<ConfiguredObjectBackend>` references. Equal
+live configurations share the same backend and its lazily built per-bucket
+clients; when no connection or managed slot owns the backend, the backend is
+released naturally. The pool is not a lifecycle registry and does not need
+register/unregister commands.
 
-Each `RegisteredStore` carries a monotonic generation counter so callers
-can detect when a store has been replaced.
+`ManagedStoreRegistry` maps numeric runtime volume IDs to stable
+`ManagedStoreSlot`s. A slot contains an immutable `BackendDataIdentity` and a
+replaceable backend `Arc`. Credential refresh can replace the backend while
+preserving the identity. Changing a slot's provider endpoint or other
+physical identity is rejected, because existing cache and staging paths must
+not silently acquire a different meaning. Already attached connections keep
+their resolved backend; later connections observe the refreshed backend.
+
+`BackendDataIdentity` contains only physical addressing fields. It excludes
+credentials by design, so different credentials for the same endpoint share
+cache residency. Endpoint validation rejects URL userinfo, query strings, and
+fragments to keep credentials and tokens out of persistent keys and logs.
 
 
 4  Store Configuration
@@ -98,18 +109,20 @@ can detect when a store has been replaced.
 
 ```
   StoreConfig
-    S3          { region, endpoint, access_key, secret_key }
-    S3Compatible { region, endpoint, access_key, secret_key }
-    Gcs         { service_account_key | application_default }
-    Azure       { account, access_key | client_secret triple }
+    S3           { region, endpoint, credentials/default chain, transport }
+    S3Compatible { endpoint, region, credentials, transport }
+    Gcs          { base_url, one credential source, skip_signature }
+    Azure        { account/endpoint, one auth source, transport/emulator }
 ```
 
-`StoreConfig::validate()` runs before registration and rejects:
+`StoreConfig::validate()` runs before backend materialization and rejects:
 
 - Empty endpoints (S3-compatible).
 - Ambiguous credential combinations (GCS with both key types).
 - Partial client-secret triples (Azure).
 - Empty secret strings.
+- Endpoint URLs with unsupported schemes, forbidden HTTP, missing hosts,
+  embedded user credentials, query strings, or fragments.
 
 Credentials are stored as `SecretString`, which redacts `Debug` output
 and only exposes the underlying value through `expose_secret()`.
@@ -136,8 +149,8 @@ All backend APIs return `StorageResult<T>`. Error mappings:
   failures.
 - `StorageError::backend_source` — wraps `object_store::Error` with
   context (head, get, list, delete, multipart).
-- `StorageError::not_found` — missing objects, wrong pinned bucket,
-  unknown store id.
+- `StorageError::not_found` — missing objects, wrong pinned bucket, or an
+  unknown managed volume during attach.
 - `StorageError::io` — local file I/O during staging uploads.
 
 Poisoned mutex/RwLock is treated as fatal (`expect` with an explicit

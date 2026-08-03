@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use super::client::PersistentCacheIndex;
+use super::keys::db_key;
 use super::kv::CacheKv;
 use super::ops::{meta, open, small, usage};
 use crate::cache::index::{
@@ -17,7 +18,7 @@ impl<K: CacheKv> CacheIndex for PersistentCacheIndex<K> {
         &self,
         key: &ObjectLocation,
     ) -> StorageResult<Option<CachedObjectMeta>> {
-        let key = key.to_string();
+        let key = db_key(key);
         self.run_kv(move |kv| meta::get_meta(kv, key.as_str()))
             .await
     }
@@ -45,7 +46,7 @@ impl<K: CacheKv> CacheIndex for PersistentCacheIndex<K> {
         &self,
         key: &ObjectLocation,
     ) -> StorageResult<Option<CachedObjectMeta>> {
-        let key = key.to_string();
+        let key = db_key(key);
         self.run_tracked(move |kv, tracking| {
             meta::delete_meta(kv, tracking, key.as_str())
         })
@@ -56,13 +57,13 @@ impl<K: CacheKv> CacheIndex for PersistentCacheIndex<K> {
         &self,
         key: &ObjectLocation,
     ) -> StorageResult<Option<Vec<u8>>> {
-        let key = key.to_string();
+        let key = db_key(key);
         self.run_kv(move |kv| small::get_small(kv, key.as_str()))
             .await
     }
 
     async fn stat_small(&self, key: &ObjectLocation) -> StorageResult<Option<u64>> {
-        let key = key.to_string();
+        let key = db_key(key);
         self.run_kv(move |kv| small::stat_small(kv, key.as_str()))
             .await
     }
@@ -80,7 +81,7 @@ impl<K: CacheKv> CacheIndex for PersistentCacheIndex<K> {
         &self,
         key: &ObjectLocation,
     ) -> StorageResult<()> {
-        let key = key.to_string();
+        let key = db_key(key);
         self.run_kv(move |kv| small::remove_unclaimed_small_payload(kv, key.as_str()))
             .await
     }
@@ -89,7 +90,7 @@ impl<K: CacheKv> CacheIndex for PersistentCacheIndex<K> {
         &self,
         key: &ObjectLocation,
     ) -> StorageResult<Option<CachedObjectMeta>> {
-        let key = key.to_string();
+        let key = db_key(key);
         self.run_tracked(move |kv, tracking| {
             small::delete_meta_and_small(kv, tracking, key.as_str())
         })
@@ -123,7 +124,7 @@ impl<K: CacheKv> CacheIndex for PersistentCacheIndex<K> {
         now_ns: u64,
         touch_granularity_ns: u64,
     ) -> StorageResult<Option<OpenHit>> {
-        let key = key.to_string();
+        let key = db_key(key);
         self.run_tracked(move |kv, tracking| {
             open::open_hit(kv, tracking, key.as_str(), now_ns, touch_granularity_ns)
         })

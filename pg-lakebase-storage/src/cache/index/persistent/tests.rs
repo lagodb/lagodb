@@ -32,8 +32,7 @@ async fn admit_small_if_absent_installs_meta_and_payload() {
         size: 3,
         etag: Some("v1".to_string()),
     };
-    let mut meta = CachedObjectMeta::small(key.clone(), info, 3);
-    meta.generation = 7;
+    let meta = CachedObjectMeta::small(key.clone(), info, 3);
 
     let outcome = index
         .admit_small_if_absent(meta, b"abc".to_vec(), 10)
@@ -45,7 +44,6 @@ async fn admit_small_if_absent_installs_meta_and_payload() {
 
     assert_eq!(meta.cache_state(), CacheState::SmallKv);
     assert_eq!(meta.etag(), Some("v1"));
-    assert_eq!(meta.generation, 7);
     assert_eq!(payload.as_ref(), b"abc");
 
     let racer = CachedObjectMeta::small(

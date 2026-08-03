@@ -1,4 +1,4 @@
-//! Crate-wide object-storage data model: [`StoreId`], [`ObjectLocation`], [`ObjectInfo`], and
+//! Crate-wide object-storage data model: [`ObjectPath`], [`ObjectLocation`], [`ObjectInfo`], and
 //! chunk-coordinate helpers.
 //!
 //! These types are consumed by `backend`, `cache`, `protocol`, and `service`, so they live at the
@@ -12,6 +12,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use crate::backend::BackendDataIdentity;
 use crate::error::{StorageError, StorageResult};
 
 pub(crate) mod path_encoding;
@@ -19,78 +20,17 @@ pub(crate) mod path_encoding;
 pub const DEFAULT_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_SMALL_OBJECT_LIMIT: u64 = 4 * 1024;
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct StoreId(String);
-
-impl StoreId {
-    const MAX_LEN: usize = 128;
-
-    pub fn new(value: impl Into<String>) -> StorageResult<Self> {
-        let value = value.into();
-        if value.is_empty() {
-            return Err(StorageError::invalid_path("missing store id"));
-        }
-        if value.len() > Self::MAX_LEN {
-            return Err(StorageError::invalid_path(format!(
-                "store id exceeds maximum length of {} bytes",
-                Self::MAX_LEN
-            )));
-        }
-        if !value.bytes().all(is_store_id_byte) {
-            return Err(StorageError::invalid_path(
-                "store id may only contain ASCII letters, digits, '.', '_' or '-'",
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for StoreId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl AsRef<str> for StoreId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl From<StoreId> for String {
-    fn from(value: StoreId) -> Self {
-        value.0
-    }
-}
-
-impl Hash for StoreId {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
-fn is_store_id_byte(byte: u8) -> bool {
-    matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ObjectLocation {
-    store_id: StoreId,
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ObjectPath {
     bucket: String,
     key: String,
 }
 
-impl ObjectLocation {
+impl ObjectPath {
     pub fn new(
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<Self> {
-        let store_id = StoreId::new(store_id)?;
         let bucket = bucket.into();
         let key = key.into();
         if bucket.is_empty() {
@@ -102,30 +42,7 @@ impl ObjectLocation {
         if key.is_empty() {
             return Err(StorageError::invalid_path("missing object key"));
         }
-        Ok(Self {
-            store_id,
-            bucket,
-            key,
-        })
-    }
-
-    pub fn parse_path(path: &str) -> StorageResult<Self> {
-        let path = path.trim_start_matches('/');
-        let (store_id, rest) = path.split_once('/').ok_or_else(|| {
-            StorageError::invalid_path(format!(
-                "expected /store_id/bucket/key, got {path:?}"
-            ))
-        })?;
-        let (bucket, key) = rest.split_once('/').ok_or_else(|| {
-            StorageError::invalid_path(format!(
-                "expected /store_id/bucket/key, got {path:?}"
-            ))
-        })?;
-        Self::new(store_id, bucket, key)
-    }
-
-    pub fn store_id(&self) -> &StoreId {
-        &self.store_id
+        Ok(Self { bucket, key })
     }
 
     pub fn bucket(&self) -> &str {
@@ -137,19 +54,106 @@ impl ObjectLocation {
     }
 }
 
+impl fmt::Display for ObjectPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.bucket, self.key)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ObjectLocation {
+    backend_identity: BackendDataIdentity,
+    path: ObjectPath,
+}
+
+impl ObjectLocation {
+    pub fn new(
+        backend_identity: impl Into<BackendDataIdentity>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+    ) -> StorageResult<Self> {
+        Ok(Self {
+            backend_identity: backend_identity.into(),
+            path: ObjectPath::new(bucket, key)?,
+        })
+    }
+
+    pub fn from_path(
+        backend_identity: BackendDataIdentity,
+        path: ObjectPath,
+    ) -> Self {
+        Self {
+            backend_identity,
+            path,
+        }
+    }
+
+    pub fn parse_path(path: &str) -> StorageResult<Self> {
+        let path = path.trim_start_matches('/');
+        let (identity, rest) = path.split_once('/').ok_or_else(|| {
+            StorageError::invalid_path(format!(
+                "expected /backend_identity/bucket/key, got {path:?}"
+            ))
+        })?;
+        let (bucket, key) = rest.split_once('/').ok_or_else(|| {
+            StorageError::invalid_path(format!(
+                "expected /backend_identity/bucket/key, got {path:?}"
+            ))
+        })?;
+        let identity = path_encoding::decode_segment(identity).ok_or_else(|| {
+            StorageError::invalid_path("invalid backend identity encoding")
+        })?;
+        let identity = BackendDataIdentity::from_cache_key(&identity)
+            .map_err(|error| StorageError::invalid_path(error.to_string()))?;
+        Self::new(identity, bucket, key)
+    }
+
+    pub fn backend_identity(&self) -> &BackendDataIdentity {
+        &self.backend_identity
+    }
+
+    pub fn path(&self) -> &ObjectPath {
+        &self.path
+    }
+
+    pub fn into_path(self) -> ObjectPath {
+        self.path
+    }
+
+    pub fn bucket(&self) -> &str {
+        self.path.bucket()
+    }
+
+    pub fn key(&self) -> &str {
+        self.path.key()
+    }
+}
+
+impl From<ObjectLocation> for ObjectPath {
+    fn from(location: ObjectLocation) -> Self {
+        location.into_path()
+    }
+}
+
 impl fmt::Display for ObjectLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}/{}", self.store_id, self.bucket, self.key)
+        write!(
+            f,
+            "{}/{}/{}",
+            path_encoding::encode_segment(self.backend_identity.cache_key()),
+            self.bucket(),
+            self.key()
+        )
     }
 }
 
 impl Hash for ObjectLocation {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.store_id.hash(state);
+        self.backend_identity.hash(state);
         0xfe_u8.hash(state);
-        self.bucket.hash(state);
+        self.path.bucket.hash(state);
         0xff_u8.hash(state);
-        self.key.hash(state);
+        self.path.key.hash(state);
     }
 }
 
@@ -160,10 +164,10 @@ pub struct ObjectInfo {
 }
 
 /// One entry returned by [`crate::backend::ObjectBackend::list`]: an object path under the
-/// requested `(store_id, bucket)` plus the same `(size, etag)` facts surfaced by `head`.
+/// requested bucket plus the same `(size, etag)` facts surfaced by `head`.
 ///
 /// The `key` is the object key relative to the bucket — i.e. it does **not** include the
-/// `store_id` or `bucket` prefix. This mirrors the `object_store::Path` returned by
+/// bucket prefix. This mirrors the `object_store::Path` returned by
 /// `ObjectStore::list`, which is bucket-relative.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListEntry {
@@ -209,8 +213,10 @@ mod tests {
 
     #[test]
     fn parses_object_path() {
-        let key = ObjectLocation::parse_path("/store-a/bucket/path/to/file").unwrap();
-        assert_eq!(key.store_id().as_str(), "store-a");
+        let original =
+            ObjectLocation::new("store-a", "bucket", "path/to/file").unwrap();
+        let key = ObjectLocation::parse_path(&original.to_string()).unwrap();
+        assert_eq!(key.backend_identity(), original.backend_identity());
         assert_eq!(key.bucket(), "bucket");
         assert_eq!(key.key(), "path/to/file");
     }
@@ -227,13 +233,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_store_id() {
-        let error = ObjectLocation::new("store/a", "bucket", "file").unwrap_err();
+    fn rejects_empty_bucket() {
+        let error = ObjectLocation::new("store-a", "", "file").unwrap_err();
 
-        assert_eq!(
-            error.to_string(),
-            "invalid path: store id may only contain ASCII letters, digits, '.', '_' or '-'"
-        );
+        assert_eq!(error.to_string(), "invalid path: missing bucket");
     }
 
     #[test]

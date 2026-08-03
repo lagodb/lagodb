@@ -9,8 +9,7 @@
 //! * [`ConfiguredObjectBackend`] — lazily instantiates per-bucket [`ObjectStoreBackend`] clients
 //!   from a [`StoreConfig`].
 //!
-//! Named backends are looked up through [`StoreRegistry`], which is the binding between
-//! [`crate::object::StoreId`] and the backend that services its reads.
+//! Each connection is attached to one configured backend before object requests are accepted.
 //!
 //! Implementations must **not** cache payloads themselves — that belongs to
 //! [`crate::cache::CacheManager`] plus [`crate::cache::index::CacheIndex`].
@@ -22,14 +21,16 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 
 use crate::error::{StorageError, StorageResult};
-use crate::object::{ListEntry, ObjectInfo, ObjectLocation};
+use crate::object::{ListEntry, ObjectInfo, ObjectPath};
 
 mod config;
 mod configured;
+mod identity;
+mod managed;
 mod memory;
 mod object_store;
+mod pool;
 mod probe;
-mod registry;
 mod secret;
 
 pub use config::{
@@ -37,24 +38,28 @@ pub use config::{
     StoreConfig,
 };
 pub use configured::ConfiguredObjectBackend;
+pub use identity::BackendDataIdentity;
+pub use managed::{ManagedStoreRegistry, ManagedStoreSlot};
+#[cfg(test)]
+pub(crate) type StoreRegistry = ManagedStoreRegistry;
 pub use memory::MemoryObjectBackend;
 pub use object_store::ObjectStoreBackend;
+pub use pool::BackendPool;
 pub use probe::StorageProbeResult;
-pub use registry::{RegisteredStore, StoreRegistry};
 pub use secret::SecretString;
 
 /// Minimal object-storage abstraction backing reads used to populate cache (HEAD metadata +
 /// ranged GET bodies).
 ///
-/// Implementations map [`ObjectLocation`] to backend-specific paths or buckets; they must **not**
+/// Implementations map [`ObjectPath`] to backend-specific paths or buckets; they must **not**
 /// implement caching — that belongs to [`crate::cache::CacheManager`] plus
 /// [`crate::cache::index::CacheIndex`].
 #[async_trait]
 pub trait ObjectBackend: Send + Sync {
-    async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo>;
+    async fn head(&self, key: &ObjectPath) -> StorageResult<ObjectInfo>;
     async fn get_range(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes>;
 
@@ -69,7 +74,7 @@ pub trait ObjectBackend: Send + Sync {
     /// reusing this one.
     async fn put_from_file(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         path: &Path,
         len: u64,
     ) -> StorageResult<ObjectInfo>;
@@ -80,7 +85,7 @@ pub trait ObjectBackend: Send + Sync {
     /// semantics ensure that a probe-key collision cannot overwrite user data.
     async fn put_if_absent(
         &self,
-        _key: &ObjectLocation,
+        _key: &ObjectPath,
         _data: bytes::Bytes,
     ) -> StorageResult<ObjectInfo> {
         Err(StorageError::unsupported(
@@ -88,19 +93,30 @@ pub trait ObjectBackend: Send + Sync {
         ))
     }
 
-    /// Lists objects under `(store_id, bucket)` whose key starts with `prefix` (or the whole
+    /// Exercises the attached backend without involving the cache or staging
+    /// layers.  The probe is composed from the primitive backend operations so
+    /// every implementation uses the same connectivity and credential path.
+    async fn probe(
+        &self,
+        bucket: &str,
+        root_prefix: &str,
+    ) -> StorageResult<StorageProbeResult> {
+        Ok(probe::BackendProbe::new(self, bucket, root_prefix)?
+            .run()
+            .await)
+    }
+
+    /// Lists objects under `bucket` whose key starts with `prefix` (or the whole
     /// bucket when `prefix` is `None`). Listing is recursive: an object at `foo/bar/baz`
     /// matches `prefix = Some("foo/")`.
     ///
     /// The returned stream surfaces backend pagination as a single logical sequence; callers
     /// see one entry per object and do not deal with page tokens. Order is **not** guaranteed.
     ///
-    /// `bucket` is taken as a `&str` instead of an [`ObjectLocation`] because list is the one
-    /// backend operation that has no single key — it spans the whole `(store_id, bucket)`. The
-    /// store id is forwarded so multi-store backends (e.g. routing wrappers) can dispatch.
+    /// `bucket` is taken as a `&str` instead of an [`ObjectPath`] because list is the one
+    /// backend operation that has no single key.
     fn list(
         &self,
-        store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
     ) -> BoxStream<'static, StorageResult<ListEntry>>;
@@ -112,7 +128,7 @@ pub trait ObjectBackend: Send + Sync {
     /// LocalFS / GCP / Azure return `NotFound`. Returning a synthetic `existed: bool` would be
     /// silently wrong on half the backends. Callers that need to know whether a key existed
     /// should `head` first.
-    async fn delete(&self, key: &ObjectLocation) -> StorageResult<()>;
+    async fn delete(&self, key: &ObjectPath) -> StorageResult<()>;
 
     /// Deletes a stream of bucket-relative object keys, returning a stream of per-key outcomes.
     ///
@@ -130,7 +146,6 @@ pub trait ObjectBackend: Send + Sync {
     /// produce the input stream by `.boxed()`-ing a list result or an owned iterator.
     fn delete_stream(
         &self,
-        store_id: &str,
         bucket: &str,
         keys: BoxStream<'static, StorageResult<String>>,
     ) -> BoxStream<'static, StorageResult<String>>;

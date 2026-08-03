@@ -12,7 +12,7 @@ use crate::object::ObjectLocation;
 
 pub(super) fn encode_meta(meta: &CachedObjectMeta) -> Vec<u8> {
     let mut out = Vec::new();
-    write_string(&mut out, meta.key().store_id().as_str());
+    write_string(&mut out, meta.key().backend_identity().cache_key());
     write_string(&mut out, meta.key().bucket());
     write_string(&mut out, meta.key().key());
     out.write_u64::<BigEndian>(meta.size())
@@ -30,8 +30,6 @@ pub(super) fn encode_meta(meta: &CachedObjectMeta) -> Vec<u8> {
         .expect("infallible write to Vec");
     out.write_u64::<BigEndian>(meta.last_access_ns)
         .expect("infallible write to Vec");
-    out.write_u64::<BigEndian>(meta.generation)
-        .expect("infallible write to Vec");
     match meta.residency() {
         CachedResidency::Small { bytes } => out
             .write_u64::<BigEndian>(*bytes)
@@ -43,7 +41,7 @@ pub(super) fn encode_meta(meta: &CachedObjectMeta) -> Vec<u8> {
 
 pub(super) fn decode_meta(bytes: &[u8]) -> StorageResult<CachedObjectMeta> {
     let mut input = Cursor::new(bytes);
-    let store_id = read_string(&mut input)?;
+    let backend_identity = read_string(&mut input)?;
     let bucket = read_string(&mut input)?;
     let key = read_string(&mut input)?;
     let size = input.read_u64::<BigEndian>()?;
@@ -56,7 +54,6 @@ pub(super) fn decode_meta(bytes: &[u8]) -> StorageResult<CachedObjectMeta> {
     };
     let cache_state = CacheState::from_u8(input.read_u8()?)?;
     let last_access_ns = input.read_u64::<BigEndian>()?;
-    let generation = input.read_u64::<BigEndian>()?;
     let residency = match cache_state {
         CacheState::SmallKv => CachedResidency::Small {
             bytes: input.read_u64::<BigEndian>()?,
@@ -65,13 +62,18 @@ pub(super) fn decode_meta(bytes: &[u8]) -> StorageResult<CachedObjectMeta> {
     };
     let meta = CachedObjectMeta::from_residency(
         ObjectIdentity {
-            key: ObjectLocation::new(store_id, bucket, key)?,
+            key: ObjectLocation::new(
+                crate::backend::BackendDataIdentity::from_cache_key(
+                    &backend_identity,
+                )?,
+                bucket,
+                key,
+            )?,
             size,
             etag,
         },
         residency,
         last_access_ns,
-        generation,
     );
     if input.position() as usize != bytes.len() {
         return Err(StorageError::cache("trailing bytes in cache metadata"));
@@ -138,13 +140,15 @@ mod tests {
     #[test]
     fn decode_meta_rejects_trailing_complete_payload() {
         let mut bytes = Vec::new();
-        write_string(&mut bytes, "store-a");
+        write_string(
+            &mut bytes,
+            crate::backend::BackendDataIdentity::memory("store-a").cache_key(),
+        );
         write_string(&mut bytes, "bucket");
         write_string(&mut bytes, "file");
         bytes.write_u64::<BigEndian>(8).unwrap();
         bytes.write_u8(0).unwrap();
         bytes.write_u8(CacheState::CompleteFile.as_u8()).unwrap();
-        bytes.write_u64::<BigEndian>(0).unwrap();
         bytes.write_u64::<BigEndian>(0).unwrap();
         bytes.write_u8(1).unwrap();
 

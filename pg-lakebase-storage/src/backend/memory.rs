@@ -13,14 +13,14 @@ use tokio::io::AsyncReadExt;
 
 use super::ObjectBackend;
 use crate::error::{StorageError, StorageResult};
-use crate::object::{ListEntry, ObjectInfo, ObjectLocation};
+use crate::object::{ListEntry, ObjectInfo, ObjectPath};
 
-/// Thread-safe in-memory backend. Object payloads are stored verbatim keyed by [`ObjectLocation`].
+/// Thread-safe in-memory backend. Object payloads are stored verbatim keyed by [`ObjectPath`].
 ///
 /// Primarily intended for tests and local embedding; not suited to production traffic.
 #[derive(Clone, Default)]
 pub struct MemoryObjectBackend {
-    objects: Arc<Mutex<HashMap<ObjectLocation, Vec<u8>>>>,
+    objects: Arc<Mutex<HashMap<ObjectPath, Vec<u8>>>>,
     head_calls: Arc<AtomicU64>,
 }
 
@@ -29,7 +29,7 @@ impl MemoryObjectBackend {
         Self::default()
     }
 
-    fn lock_objects(&self) -> MutexGuard<'_, HashMap<ObjectLocation, Vec<u8>>> {
+    fn lock_objects(&self) -> MutexGuard<'_, HashMap<ObjectPath, Vec<u8>>> {
         // This in-memory backend is primarily for tests and local embedding. A
         // poisoned lock means the object map may reflect a partially completed
         // mutation, so fail fast instead of serving possibly inconsistent data.
@@ -38,8 +38,8 @@ impl MemoryObjectBackend {
             .expect("memory object backend mutex poisoned; in-memory object state is no longer trustworthy")
     }
 
-    pub fn insert(&self, key: ObjectLocation, data: impl Into<Vec<u8>>) {
-        self.lock_objects().insert(key, data.into());
+    pub fn insert(&self, key: impl Into<ObjectPath>, data: impl Into<Vec<u8>>) {
+        self.lock_objects().insert(key.into(), data.into());
     }
 
     pub fn head_call_count(&self) -> u64 {
@@ -49,7 +49,7 @@ impl MemoryObjectBackend {
 
 #[async_trait]
 impl ObjectBackend for MemoryObjectBackend {
-    async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, key: &ObjectPath) -> StorageResult<ObjectInfo> {
         self.head_calls.fetch_add(1, Ordering::Relaxed);
         let objects = self.lock_objects();
         let data = objects
@@ -63,7 +63,7 @@ impl ObjectBackend for MemoryObjectBackend {
 
     async fn get_range(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         let objects = self.lock_objects();
@@ -82,7 +82,7 @@ impl ObjectBackend for MemoryObjectBackend {
 
     async fn put_from_file(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         path: &Path,
         len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -102,7 +102,7 @@ impl ObjectBackend for MemoryObjectBackend {
 
     async fn put_if_absent(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         data: bytes::Bytes,
     ) -> StorageResult<ObjectInfo> {
         let size = data.len() as u64;
@@ -119,7 +119,6 @@ impl ObjectBackend for MemoryObjectBackend {
 
     fn list(
         &self,
-        store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
     ) -> BoxStream<'static, StorageResult<ListEntry>> {
@@ -129,9 +128,7 @@ impl ObjectBackend for MemoryObjectBackend {
             objects
                 .iter()
                 .filter(|(key, _)| {
-                    key.store_id().as_str() == store_id
-                        && key.bucket() == bucket
-                        && key.key().starts_with(&prefix)
+                    key.bucket() == bucket && key.key().starts_with(&prefix)
                 })
                 .map(|(key, value)| {
                     Ok(ListEntry {
@@ -148,30 +145,28 @@ impl ObjectBackend for MemoryObjectBackend {
         stream::iter(entries).boxed()
     }
 
-    async fn delete(&self, key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, key: &ObjectPath) -> StorageResult<()> {
         self.lock_objects().remove(key);
         Ok(())
     }
 
     fn delete_stream(
         &self,
-        store_id: &str,
         bucket: &str,
         keys: BoxStream<'static, StorageResult<String>>,
     ) -> BoxStream<'static, StorageResult<String>> {
-        // Note: this implementation calls `ObjectLocation::new` which can reject keys with
+        // Note: this implementation calls `ObjectPath::new` which can reject keys with
         // invalid path components. `ObjectStoreBackend::delete_stream` does not have this
         // failure mode (it constructs `ObjectPath::from(key)` directly). The divergence is
         // intentional and harmless in practice: this Memory backend is for tests and local
         // embedding, the keys it sees come from `Self::list` (which never produces an
         // invalid component), and the `?` here gives a precise error if a test ever feeds
         // hand-crafted keys.
-        let store_id = store_id.to_string();
         let bucket = bucket.to_string();
         let objects = self.objects.clone();
         keys.map(move |item| {
             let key = item?;
-            let location = ObjectLocation::new(store_id.clone(), bucket.clone(), key.clone())?;
+            let location = ObjectPath::new(bucket.clone(), key.clone())?;
             objects
                 .lock()
                 .expect("memory object backend mutex poisoned; in-memory object state is no longer trustworthy")
@@ -189,34 +184,16 @@ mod tests {
     use futures::{StreamExt, TryStreamExt};
 
     use super::*;
-    const TEST_STORE_ID: &str = "test-store";
-
     #[tokio::test]
-    async fn list_filters_by_store_bucket_and_prefix() {
+    async fn list_filters_by_bucket_and_prefix() {
         let backend = MemoryObjectBackend::new();
-        backend.insert(
-            ObjectLocation::new("store-a", "bucket", "x/1").unwrap(),
-            b"a".to_vec(),
-        );
-        backend.insert(
-            ObjectLocation::new("store-a", "bucket", "x/2").unwrap(),
-            b"b".to_vec(),
-        );
-        backend.insert(
-            ObjectLocation::new("store-a", "bucket", "y/3").unwrap(),
-            b"c".to_vec(),
-        );
-        backend.insert(
-            ObjectLocation::new("store-b", "bucket", "x/1").unwrap(),
-            b"d".to_vec(),
-        );
-        backend.insert(
-            ObjectLocation::new("store-a", "other", "x/1").unwrap(),
-            b"e".to_vec(),
-        );
+        backend.insert(ObjectPath::new("bucket", "x/1").unwrap(), b"a".to_vec());
+        backend.insert(ObjectPath::new("bucket", "x/2").unwrap(), b"b".to_vec());
+        backend.insert(ObjectPath::new("bucket", "y/3").unwrap(), b"c".to_vec());
+        backend.insert(ObjectPath::new("other", "x/1").unwrap(), b"e".to_vec());
 
         let mut keys: Vec<String> = backend
-            .list("store-a", "bucket", Some("x/"))
+            .list("bucket", Some("x/"))
             .map_ok(|entry| entry.key)
             .try_collect()
             .await
@@ -225,7 +202,7 @@ mod tests {
         assert_eq!(keys, vec!["x/1".to_string(), "x/2".to_string()]);
 
         let mut all_keys: Vec<String> = backend
-            .list("store-a", "bucket", None)
+            .list("bucket", None)
             .map_ok(|entry| entry.key)
             .try_collect()
             .await
@@ -240,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn delete_is_idempotent() {
         let backend = MemoryObjectBackend::new();
-        let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "k").unwrap();
+        let key = ObjectPath::new("bucket", "k").unwrap();
         backend.insert(key.clone(), b"v".to_vec());
 
         backend.delete(&key).await.unwrap();
@@ -250,14 +227,8 @@ mod tests {
     #[tokio::test]
     async fn delete_stream_removes_keys_and_drains_already_missing() {
         let backend = MemoryObjectBackend::new();
-        backend.insert(
-            ObjectLocation::new(TEST_STORE_ID, "bucket", "a").unwrap(),
-            b"1".to_vec(),
-        );
-        backend.insert(
-            ObjectLocation::new(TEST_STORE_ID, "bucket", "b").unwrap(),
-            b"2".to_vec(),
-        );
+        backend.insert(ObjectPath::new("bucket", "a").unwrap(), b"1".to_vec());
+        backend.insert(ObjectPath::new("bucket", "b").unwrap(), b"2".to_vec());
 
         let keys = stream::iter(vec![
             Ok("a".to_string()),
@@ -266,7 +237,7 @@ mod tests {
         ])
         .boxed();
         let mut deleted: Vec<String> = backend
-            .delete_stream(TEST_STORE_ID, "bucket", keys)
+            .delete_stream("bucket", keys)
             .try_collect()
             .await
             .unwrap();
@@ -277,7 +248,7 @@ mod tests {
         );
 
         let remaining: Vec<String> = backend
-            .list(TEST_STORE_ID, "bucket", None)
+            .list("bucket", None)
             .map_ok(|entry| entry.key)
             .try_collect()
             .await

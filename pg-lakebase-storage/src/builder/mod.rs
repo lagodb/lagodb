@@ -11,8 +11,8 @@
 //! 3. **Runtime components** — request hooks (builder-specific concerns that don't belong in a
 //!    serializable config struct).
 //!
-//! Backends are registered dynamically by clients after the server is running (via the
-//! `RegisterStore` protocol message), so the builder does not accept backend configuration.
+//! Managed volume configuration is supplied through the shared managed registry. Inline
+//! configured contexts are attached by clients when their socket is established.
 //!
 //! [`Self::bind`] / [`Self::bind_with_index`] perform the async startup sequence: directory
 //! creation, cache recovery, optional startup cleanup, and finally socket bind.
@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::backend::StoreRegistry;
+use crate::backend::ManagedStoreRegistry;
 use crate::cache::{CacheIndex, CacheManager, RedbCacheIndex};
 use crate::config::{
     StorageRuntime, StorageRuntimeConfig, StorageServerConfig, StorageServiceConfig,
@@ -64,7 +64,7 @@ pub struct StorageServerBuilder {
     db_path: Option<PathBuf>,
     service_config: StorageServiceConfig,
     server_config: StorageServerConfig,
-    registry: StoreRegistry,
+    registry: ManagedStoreRegistry,
     request_hooks: RequestHooks,
     runtime: Option<StorageRuntime>,
 }
@@ -80,7 +80,7 @@ impl StorageServerBuilder {
             db_path: None,
             service_config: StorageServiceConfig::default(),
             server_config: StorageServerConfig::default(),
-            registry: StoreRegistry::new(),
+            registry: ManagedStoreRegistry::new(),
             request_hooks: RequestHooks::default(),
             runtime: None,
         }
@@ -92,16 +92,19 @@ impl StorageServerBuilder {
         self
     }
 
-    /// Use a caller-supplied [`StoreRegistry`] instead of the default empty one.
+    /// Use a caller-supplied [`ManagedStoreRegistry`] instead of the default empty one.
     ///
     /// This lets the embedder pre-populate or share the registry before the
     /// server starts accepting connections, so the first request never observes
     /// a window where the server is bound but no stores are registered.
     ///
     /// The registry's internal state is shared (`Arc<RwLock<...>>`), so later
-    /// `register_config` / `unregister` calls on either the original handle or
+    /// managed registry calls on either the original handle or
     /// the cloned handle held by the running server are observed by both.
-    pub fn with_store_registry(mut self, registry: StoreRegistry) -> Self {
+    pub fn with_managed_store_registry(
+        mut self,
+        registry: ManagedStoreRegistry,
+    ) -> Self {
         self.registry = registry;
         self
     }
@@ -282,7 +285,7 @@ async fn start_server<I>(
     cache_dir: PathBuf,
     service_config: StorageServiceConfig,
     server_config: StorageServerConfig,
-    registry: StoreRegistry,
+    registry: ManagedStoreRegistry,
     index: I,
     request_hooks: RequestHooks,
     runtime: Option<StorageRuntime>,

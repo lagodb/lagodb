@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::error::StorageResult;
 use crate::object::ObjectLocation;
 use crate::object::path_encoding::{
-    build_encoded_object_path, decode_segment, normal_components,
-    validate_portable_path,
+    build_encoded_object_path, decode_identity_components, decode_segment,
+    normal_components, validate_portable_path,
 };
 
 /// Which kind of cache file a path represents. The distinction is carried by the file suffix
@@ -53,7 +53,7 @@ impl CachePathResolver {
     }
 
     /// Single cache-file directory. Complete and partial files both live here, partitioned by
-    /// store / bucket / key segments and distinguished by file suffix.
+    /// backend-identity / bucket / key segments and distinguished by file suffix.
     pub fn objects_dir(&self) -> PathBuf {
         self.root.join(Self::OBJECTS_DIR)
     }
@@ -76,9 +76,12 @@ impl CachePathResolver {
     ) -> Option<(ObjectLocation, CacheFileKind)> {
         let relative = path.strip_prefix(self.objects_dir()).ok()?;
         let components = normal_components(relative)?;
-        if components.len() < 3 {
+        if components.len() < 4 {
             return None;
         }
+
+        let (backend_identity, identity_components) =
+            decode_identity_components(&components)?;
 
         let file_name = components.last()?;
         let stem_after_prefix = file_name.strip_prefix(Self::CACHE_FILE_PREFIX)?;
@@ -91,15 +94,16 @@ impl CachePathResolver {
             (basename, CacheFileKind::Partial)
         };
 
-        let store_id = decode_segment(components[0])?;
-        let bucket = decode_segment(components[1])?;
-        let mut key_parts = Vec::with_capacity(components.len() - 2);
-        for component in &components[2..components.len() - 1] {
+        let bucket = decode_segment(components.get(identity_components)?)?;
+        let key_start = identity_components + 1;
+        let mut key_parts = Vec::with_capacity(components.len() - key_start);
+        for component in &components[key_start..components.len() - 1] {
             key_parts.push(decode_segment(component)?);
         }
         key_parts.push(decode_segment(basename)?);
         let location =
-            ObjectLocation::new(store_id, bucket, key_parts.join("/")).ok()?;
+            ObjectLocation::new(backend_identity, bucket, key_parts.join("/"))
+                .ok()?;
         Some((location, kind))
     }
 
@@ -139,13 +143,13 @@ mod tests {
         assert_eq!(
             complete,
             PathBuf::from(
-                "/tmp/cache-root/objects/store-a/bucket-b/path/to/pgl-cache.file.txt.complete"
+                "/tmp/cache-root/objects/i1/m00000007store-a/bucket-b/path/to/pgl-cache.file.txt.complete"
             )
         );
         assert_eq!(
             partial,
             PathBuf::from(
-                "/tmp/cache-root/objects/store-a/bucket-b/path/to/pgl-cache.file.txt.part"
+                "/tmp/cache-root/objects/i1/m00000007store-a/bucket-b/path/to/pgl-cache.file.txt.part"
             )
         );
         assert_eq!(
@@ -199,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn store_id_partitions_same_bucket_and_object_paths() {
+    fn backend_identity_partitions_same_bucket_and_object_paths() {
         let resolver = CachePathResolver::new("/tmp/cache-root");
         let first =
             ObjectLocation::new("store-a", "bucket", "same/file.txt").unwrap();
@@ -235,7 +239,7 @@ mod tests {
     fn parse_cache_path_rejects_unknown_suffix() {
         let resolver = CachePathResolver::new("/tmp/cache-root");
         let stray = PathBuf::from(
-            "/tmp/cache-root/objects/store/bucket/dir/pgl-cache.file.tmp",
+            "/tmp/cache-root/objects/i1/m00000005store/bucket/dir/pgl-cache.file.tmp",
         );
         assert!(resolver.parse_cache_path(&stray).is_none());
     }

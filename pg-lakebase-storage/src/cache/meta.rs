@@ -81,7 +81,6 @@ pub struct CachedObjectMeta {
     identity: ObjectIdentity,
     residency: CachedResidency,
     pub last_access_ns: u64,
-    pub generation: u64,
 }
 
 impl CachedObjectMeta {
@@ -89,7 +88,6 @@ impl CachedObjectMeta {
         Self::from_residency(
             ObjectIdentity::new(key, info),
             CachedResidency::Small { bytes },
-            0,
             0,
         )
     }
@@ -99,7 +97,6 @@ impl CachedObjectMeta {
             ObjectIdentity::new(key, info),
             CachedResidency::Complete,
             0,
-            0,
         )
     }
 
@@ -107,13 +104,11 @@ impl CachedObjectMeta {
         identity: ObjectIdentity,
         residency: CachedResidency,
         last_access_ns: u64,
-        generation: u64,
     ) -> Self {
         Self {
             identity,
             residency,
             last_access_ns,
-            generation,
         }
         .normalized()
     }

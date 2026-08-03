@@ -88,6 +88,7 @@ pub(super) mod open {
 
 pub(super) mod meta {
     use super::super::codec::decode_meta;
+    use super::super::keys::db_key;
     use super::super::kv::{CacheKv, KvReadTxn, KvTable, KvWriteTxn};
     use super::super::tracking::RuntimeCacheTracking;
     use super::super::txn::MetaTxn;
@@ -112,7 +113,7 @@ pub(super) mod meta {
         let mut metas = Vec::new();
         let mut next_cursor = None;
         let limit = limit.max(1);
-        let after_key = cursor.map(|cursor| cursor.key.to_string());
+        let after_key = cursor.map(|cursor| db_key(&cursor.key));
         let rows = txn.scan_page(KvTable::Meta, after_key.as_deref(), limit)?;
         for row in rows {
             let meta = decode_meta(&row.value)?;
@@ -177,7 +178,7 @@ pub(super) mod meta {
 pub(super) mod small {
     use std::sync::Arc;
 
-    use super::super::keys::parse_db_key;
+    use super::super::keys::{db_key, parse_db_key};
     use super::super::kv::{CacheKv, KvReadTxn, KvTable, KvWriteTxn};
     use super::super::tracking::RuntimeCacheTracking;
     use super::super::txn::MetaTxn;
@@ -217,7 +218,7 @@ pub(super) mod small {
         now_ns: u64,
     ) -> StorageResult<AdmitSmallOutcome> {
         let mut txn = kv.begin_write()?;
-        let db_key = meta.key().to_string();
+        let db_key = db_key(meta.key());
 
         let existing = {
             let meta_txn = MetaTxn::new(&mut txn);
@@ -263,7 +264,7 @@ pub(super) mod small {
         let mut entries = Vec::new();
         let mut next_cursor = None;
         let limit = limit.max(1);
-        let after_key = cursor.map(|cursor| cursor.key.to_string());
+        let after_key = cursor.map(|cursor| db_key(&cursor.key));
         let rows = txn.scan_page(KvTable::Small, after_key.as_deref(), limit)?;
         for row in rows {
             let object_key = parse_db_key(&row.key)?;

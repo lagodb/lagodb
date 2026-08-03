@@ -47,7 +47,7 @@ pub use store::{
 };
 pub use types::{
     BestEffortInvalidateOutcome, CacheCleanupPolicy, CacheCleanupReport,
-    CacheDeleteReason, CacheInvalidateReport, CachePurgeReport, CacheRecoveryReport,
+    CacheDeleteReason, CacheInvalidateReport, CacheRecoveryReport,
     DEFAULT_CACHE_CLEANUP_BATCH_BYTES, DEFAULT_CACHE_CLEANUP_BATCH_ITEMS,
     DEFAULT_CACHE_CLEANUP_INTERVAL, DEFAULT_CACHE_CLEANUP_START_PERCENT,
     DEFAULT_CACHE_CLEANUP_TARGET_PERCENT,

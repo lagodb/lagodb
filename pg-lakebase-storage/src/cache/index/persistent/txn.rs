@@ -1,7 +1,7 @@
 //! Low-level metadata writes: keeps `lru_by_access` rows in sync with `object_meta` inside one write txn.
 
 use super::codec::{decode_meta, encode_meta};
-use super::keys::lru_key;
+use super::keys::{db_key, lru_key};
 use super::kv::{KvTable, KvWriteTxn};
 use super::tracking::TrackingDelta;
 use crate::cache::meta::CachedObjectMeta;
@@ -29,7 +29,7 @@ impl<'a, T: KvWriteTxn> MetaTxn<'a, T> {
         meta: &CachedObjectMeta,
     ) -> StorageResult<TrackingDelta> {
         let meta = meta.clone().normalized();
-        let db_key = meta.key().to_string();
+        let db_key = db_key(meta.key());
         self.txn.put(
             KvTable::Meta,
             db_key.as_str(),
@@ -52,7 +52,7 @@ impl<'a, T: KvWriteTxn> MetaTxn<'a, T> {
             )));
         }
 
-        let db_key = meta.key().to_string();
+        let db_key = db_key(meta.key());
         self.txn.put(
             KvTable::Meta,
             db_key.as_str(),
@@ -101,7 +101,7 @@ impl<'a, T: KvWriteTxn> MetaTxn<'a, T> {
             self.txn.put(
                 KvTable::Lru,
                 lru_key(new.last_access_ns, new.key()).as_str(),
-                new.key().to_string().as_bytes(),
+                db_key(new.key()).as_bytes(),
             )?;
         }
 

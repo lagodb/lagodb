@@ -1,7 +1,7 @@
 //! Provider-specific [`object_store`] configuration and validation facade.
 //!
 //! [`StoreConfig`] is the user-facing enum that wraps one of the provider configs. It owns both
-//! the validation rules exercised at registration time and the actual builder invocations that
+//! the validation rules exercised when attaching a context and the actual builder invocations that
 //! hand back an [`ObjectStore`] client for a given bucket.
 //!
 use std::sync::Arc;
@@ -157,6 +157,16 @@ pub(super) fn validate_endpoint(
             "{name} must include a host"
         )));
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(StorageError::configuration(format!(
+            "{name} must not contain URL user credentials"
+        )));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(StorageError::configuration(format!(
+            "{name} must not contain a query or fragment"
+        )));
+    }
     Ok(())
 }
 
@@ -189,8 +199,7 @@ pub(super) fn finish_store_build<O: ObjectStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::registry::StoreRegistry;
-    use crate::object::StoreId;
+    use crate::backend::ManagedStoreRegistry;
 
     #[test]
     fn secret_string_debug_is_redacted() {
@@ -208,12 +217,12 @@ mod tests {
     }
 
     #[test]
-    fn register_config_rejects_invalid_provider_config() {
-        let registry = StoreRegistry::new();
+    fn replace_managed_config_rejects_invalid_provider_config() {
+        let registry = ManagedStoreRegistry::new();
 
         let error = registry
-            .register_config(
-                "bad-s3-compatible",
+            .replace_config(
+                1,
                 StoreConfig::S3Compatible(S3CompatibleStoreConfig {
                     endpoint: " ".to_string(),
                     region: None,
@@ -229,7 +238,7 @@ mod tests {
 
         assert!(matches!(&error, StorageError::Configuration { .. }));
         assert!(error.wire_message().contains("endpoint"));
-        assert!(!registry.contains(&StoreId::new("bad-s3-compatible").unwrap()));
+        assert!(registry.resolve(1).is_err());
     }
 
     #[test]
@@ -279,5 +288,18 @@ mod tests {
         assert!(gcs.validate_for_bucket("bucket").is_err());
         assert!(azure.validate().is_ok());
         assert!(azure.validate_for_bucket("container").is_err());
+    }
+
+    #[test]
+    fn endpoint_rejects_embedded_credentials_and_query_tokens() {
+        for endpoint in [
+            "https://user:password@example.test",
+            "https://example.test?token=secret",
+            "https://example.test/#secret",
+        ] {
+            let error =
+                validate_endpoint("test endpoint", endpoint, false).unwrap_err();
+            assert!(matches!(error, StorageError::Configuration { .. }));
+        }
     }
 }

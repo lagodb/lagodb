@@ -11,28 +11,35 @@ representations.
 =============
 
 ```
-  StoreId          validated string (≤128 bytes, ASCII alphanumeric + ._-)
-  ObjectLocation   (store_id, bucket, key) — the logical identity of an object
+  BackendDataIdentity  credential-free identity of a physical storage service
+  ObjectPath           (bucket, key) — path understood by a configured backend
+  ObjectLocation       (backend identity, ObjectPath) — cache/staging identity
   ObjectInfo       { size: u64, etag: Option<String> }
-  ListEntry        { key, size, etag } — bucket-relative, no store_id prefix
+  ListEntry        { key, size, etag, last_modified_ms } — bucket-relative
 ```
 
-**StoreId** is a newtype around `String`. Validation rejects empty values
-and bytes outside the allowed charset (ASCII letters, digits, `.`, `_`,
-`-`). The 128-byte limit prevents filesystem path overflow when the store
-id is encoded into cache or staging paths.
+**BackendDataIdentity** is derived from physical provider/addressing fields:
+S3 region/endpoint, an S3-compatible endpoint, a GCS base URL, or Azure
+account/endpoint/emulator mode. Credentials, tokens, and database logical
+identities are deliberately excluded so two credentials addressing the same
+physical object share cache residency. It has a length-prefixed stable
+serialization used by persistent cache keys and filesystem paths.
 
-**ObjectLocation** is the three-part identity used everywhere in the
-crate. Construction via `new()` validates the store id, requires
-non-empty bucket and key, and forbids `/` in the bucket name (buckets are
-single path segments). `parse_path` reconstructs a location from a
-`/store_id/bucket/key` string.
+**ObjectPath** requires a non-empty bucket and key and forbids `/` in the
+bucket name. It is the only object identity passed to an already configured
+`ObjectBackend`; the backend does not need to know how cache namespaces are
+formed.
+
+**ObjectLocation** adds `BackendDataIdentity` to an `ObjectPath`. It is used
+by cache and staging, where two physical services with the same bucket/key
+must not collide. `parse_path` reconstructs a location from the encoded
+`/backend_identity/bucket/key` representation used by persistent paths.
 
 The `Hash` implementation uses explicit sentinel bytes (`0xfe`, `0xff`)
-between the three fields so that `("a", "bc", "d")` and `("ab", "c",
-"d")` produce distinct hashes.
+between backend identity, bucket, and key so adjacent variable-length fields
+cannot produce ambiguous hashes.
 
-**ListEntry** keys are bucket-relative (no store id or bucket prefix),
+**ListEntry** keys are bucket-relative (no backend identity or bucket prefix),
 matching the semantics of `object_store` list APIs.
 
 
@@ -63,8 +70,9 @@ Default constants:
 ================
 
 `path_encoding` provides deterministic, reversible filesystem-safe
-encoding for object path segments. It is used by both `cache/path.rs` and
-`staging/path.rs` to build on-disk paths from logical object keys.
+encoding for object path segments and the serialized backend identity. It is
+used by both `cache/path.rs` and `staging/path.rs` to build on-disk paths from
+physical object identities.
 
 Encoding rules:
 
@@ -96,7 +104,9 @@ validation. Directory layout details live in `cache/path.rs` and
 - **Layer-neutral model.** Object identity and chunk math live here so
   HTTP/service code, backends, and cache agree without circular
   dependencies.
-- **Bucket is a single segment.** `ObjectLocation` forbids `/` in
+- **Backend/cache boundary is explicit.** Backend methods accept
+  `ObjectPath`; cache and staging methods accept `ObjectLocation`.
+- **Bucket is a single segment.** `ObjectPath` forbids `/` in
   bucket names. Keys can contain `/` (multi-segment logical paths).
 - **Defensive chunk math.** Zero chunk size is normalized internally so
   public functions never panic or divide by zero.
