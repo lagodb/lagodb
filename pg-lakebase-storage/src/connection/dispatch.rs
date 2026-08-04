@@ -14,10 +14,10 @@ use crate::protocol::{
 };
 use crate::request::{RequestContext, RequestOutcome};
 use crate::service::command::{
-    CloseCommand, CloseListCommand, DeleteCommand, DeleteObjectsCommand,
-    DeletePrefixCommand, HeadCommand, InvalidateObjectCacheCommand, ListCommand,
-    OpenCommand, ProbeStoreCommand, PurgeStoreCacheCommand, ReadCommand,
-    RegisterStoreCommand, StorageCommand, UnregisterStoreCommand, UploadCommand,
+    AttachConfiguredCommand, AttachManagedCommand, CloseCommand, CloseListCommand,
+    DeleteCommand, DeleteObjectsCommand, DeletePrefixCommand, HeadCommand,
+    InvalidateObjectCacheCommand, ListCommand, OpenCommand, ProbeStoreCommand,
+    ReadCommand, StorageCommand, UploadCommand,
 };
 use crate::service::reply::{
     CommandOutput, ReadBody, ResponseAttachment, ServiceReply,
@@ -125,7 +125,7 @@ impl RequestDispatcher {
         let request_context = RequestContext::new(
             request_id,
             context.client_addr.clone(),
-            request.payload.clone(),
+            &request.payload,
         );
         let started = Instant::now();
         context
@@ -203,12 +203,7 @@ impl RequestDispatcher {
                     unreachable!("Read command dispatched without prior admit")
                 }
             },
-            command => {
-                context
-                    .service
-                    .execute(context.handles.as_ref(), command)
-                    .await
-            }
+            command => context.service.execute(context, command).await,
         }
     }
 }
@@ -218,26 +213,18 @@ impl RequestDispatcher {
 impl From<WireRequestPayload> for StorageCommand {
     fn from(payload: WireRequestPayload) -> Self {
         match payload {
-            WireRequestPayload::Open {
-                store_id,
-                bucket,
-                key,
-                flags,
-            } => Self::Open(OpenCommand {
-                store_id,
-                bucket,
-                key,
-                flags,
-            }),
-            WireRequestPayload::Head {
-                store_id,
-                bucket,
-                key,
-            } => Self::Head(HeadCommand {
-                store_id,
-                bucket,
-                key,
-            }),
+            WireRequestPayload::AttachManaged { volume_id } => {
+                Self::AttachManaged(AttachManagedCommand { volume_id })
+            }
+            WireRequestPayload::AttachConfigured { config } => {
+                Self::AttachConfigured(AttachConfiguredCommand { config })
+            }
+            WireRequestPayload::Open { bucket, key, flags } => {
+                Self::Open(OpenCommand { bucket, key, flags })
+            }
+            WireRequestPayload::Head { bucket, key } => {
+                Self::Head(HeadCommand { bucket, key })
+            }
             WireRequestPayload::Read {
                 handle,
                 offset,
@@ -250,77 +237,37 @@ impl From<WireRequestPayload> for StorageCommand {
             WireRequestPayload::Close { handle } => {
                 Self::Close(CloseCommand { handle })
             }
-            WireRequestPayload::Upload {
-                store_id,
-                bucket,
-                key,
-            } => Self::Upload(UploadCommand {
-                store_id,
-                bucket,
-                key,
-            }),
-            WireRequestPayload::RegisterStore { store_id, config } => {
-                Self::RegisterStore(RegisterStoreCommand { store_id, config })
-            }
-            WireRequestPayload::UnregisterStore { store_id } => {
-                Self::UnregisterStore(UnregisterStoreCommand { store_id })
-            }
-            WireRequestPayload::PurgeStoreCache { store_id } => {
-                Self::PurgeStoreCache(PurgeStoreCacheCommand { store_id })
+            WireRequestPayload::Upload { bucket, key } => {
+                Self::Upload(UploadCommand { bucket, key })
             }
             WireRequestPayload::ProbeStore {
-                store_id,
                 bucket,
                 root_prefix,
             } => Self::ProbeStore(ProbeStoreCommand {
-                store_id,
                 bucket,
                 root_prefix,
             }),
-            WireRequestPayload::InvalidateObjectCache {
-                store_id,
-                bucket,
-                key,
-            } => Self::InvalidateObjectCache(InvalidateObjectCacheCommand {
-                store_id,
-                bucket,
-                key,
-            }),
-            WireRequestPayload::Delete {
-                store_id,
-                bucket,
-                key,
-            } => Self::Delete(DeleteCommand {
-                store_id,
-                bucket,
-                key,
-            }),
-            WireRequestPayload::DeletePrefix {
-                store_id,
-                bucket,
-                prefix,
-            } => Self::DeletePrefix(DeletePrefixCommand {
-                store_id,
-                bucket,
-                prefix,
-            }),
-            WireRequestPayload::DeleteObjects {
-                store_id,
-                bucket,
-                keys,
-            } => Self::DeleteObjects(DeleteObjectsCommand {
-                store_id,
-                bucket,
-                keys,
-            }),
+            WireRequestPayload::InvalidateObjectCache { bucket, key } => {
+                Self::InvalidateObjectCache(InvalidateObjectCacheCommand {
+                    bucket,
+                    key,
+                })
+            }
+            WireRequestPayload::Delete { bucket, key } => {
+                Self::Delete(DeleteCommand { bucket, key })
+            }
+            WireRequestPayload::DeletePrefix { bucket, prefix } => {
+                Self::DeletePrefix(DeletePrefixCommand { bucket, prefix })
+            }
+            WireRequestPayload::DeleteObjects { bucket, keys } => {
+                Self::DeleteObjects(DeleteObjectsCommand { bucket, keys })
+            }
             WireRequestPayload::List {
-                store_id,
                 bucket,
                 prefix,
                 page_size,
                 cursor,
             } => Self::List(ListCommand {
-                store_id,
                 bucket,
                 prefix,
                 page_size,
@@ -336,6 +283,9 @@ impl From<WireRequestPayload> for StorageCommand {
 impl From<CommandOutput> for StorageHandlerPayload {
     fn from(output: CommandOutput) -> Self {
         match output {
+            CommandOutput::Attach { backend_identity } => {
+                Self::Wire(WireResponsePayload::Attach { backend_identity })
+            }
             CommandOutput::Open(output) => Self::Wire(WireResponsePayload::Open {
                 handle: output.handle,
                 size: output.size,
@@ -355,19 +305,6 @@ impl From<CommandOutput> for StorageHandlerPayload {
                     size: output.size,
                     etag: output.etag,
                 })
-            }
-            CommandOutput::RegisterStore(output) => {
-                Self::Wire(WireResponsePayload::RegisterStore {
-                    replaced: output.replaced,
-                })
-            }
-            CommandOutput::UnregisterStore(output) => {
-                Self::Wire(WireResponsePayload::UnregisterStore {
-                    removed: output.removed,
-                })
-            }
-            CommandOutput::PurgeStoreCache => {
-                Self::Wire(WireResponsePayload::PurgeStoreCache)
             }
             CommandOutput::ProbeStore(result) => {
                 Self::Wire(WireResponsePayload::ProbeStore { result })
@@ -420,8 +357,8 @@ mod tests {
     use crate::object::ObjectLocation;
     use crate::protocol::{WireRequest, WireRequestPayload, WireResponsePayload};
     use crate::request::{
-        RequestContext, RequestHooks, RequestObserver, RequestOutcome, RequestPolicy,
-        RequestStatus,
+        RequestContext, RequestHooks, RequestObserver, RequestOperation,
+        RequestOutcome, RequestPolicy, RequestStatus,
     };
     use crate::service::StorageService;
     use crate::session::StorageContext;
@@ -438,7 +375,6 @@ mod tests {
         let request = WireRequest {
             request_id: 7,
             payload: WireRequestPayload::Open {
-                store_id: TEST_STORE_ID.to_string(),
                 bucket: "bucket".to_string(),
                 key: "file".to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -522,7 +458,12 @@ mod tests {
             .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
             .unwrap();
         let service = Arc::new(StorageService::with_registry(registry, cache));
-        StorageContext::new_with_hooks("test-client", service, hooks)
+        let slot = service.managed_stores().resolve(1).unwrap();
+        let context = StorageContext::new_with_hooks("test-client", service, hooks);
+        context
+            .attach(crate::session::AttachedStorageContext::Managed(slot))
+            .unwrap();
+        context
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -590,7 +531,7 @@ mod tests {
 
     impl RequestPolicy for DenyReads {
         fn before_dispatch(&self, context: &RequestContext) -> StorageResult<()> {
-            if matches!(context.payload(), WireRequestPayload::Read { .. }) {
+            if context.operation() == RequestOperation::Read {
                 Err(StorageError::unsupported("read denied by request policy"))
             } else {
                 Ok(())

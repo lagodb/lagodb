@@ -1,6 +1,6 @@
 //! Filesystem layout for staging files.
 //!
-//! Staging files mirror the `objects/` layout (same segment encoding, same store / bucket / key
+//! Staging files mirror the `objects/` layout (same segment encoding, same backend identity / bucket / key
 //! partitioning) so operator debugging is obvious, but live under a completely separate root
 //! (`<cache_dir>/staging/`) that the cache never scans. That separation is how we get the
 //! external lifecycle for staging without teaching the cache layer anything new.
@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from(
-                "/tmp/root/staging/store-a/bucket/dir/pgl-staging.file.txt"
+                "/tmp/root/staging/i1/m00000007store-a/bucket/dir/pgl-staging.file.txt"
             )
         );
     }
@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn paths_for_different_store_ids_do_not_collide() {
+    fn paths_for_different_backend_identities_do_not_collide() {
         let resolver = StagingPathResolver::new("/tmp/root");
         let a = ObjectLocation::new("store-a", "bucket", "file.txt").unwrap();
         let b = ObjectLocation::new("store-b", "bucket", "file.txt").unwrap();

@@ -5,14 +5,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backend::{
-    MemoryObjectBackend, ObjectBackend, S3CompatibleStoreConfig, SecretString,
-    StoreConfig, StoreRegistry,
+    BackendDataIdentity, ManagedStoreRegistry, MemoryObjectBackend, ObjectBackend,
+    S3CompatibleStoreConfig, SecretString, StoreConfig,
 };
-use crate::cache::{CacheCleanupPolicy, CacheManager, InMemoryCacheIndex};
+use crate::cache::{
+    CacheCleanupPolicy, CacheIndex, CacheManager, CachedObjectMeta,
+    InMemoryCacheIndex,
+};
 use crate::config::{StorageRuntime, StorageRuntimeConfig, StorageServerConfig};
 use crate::error::StorageErrorKind;
-use crate::object::ObjectLocation;
-use crate::protocol::{WireResponse, encode_response};
+use crate::object::{ObjectInfo, ObjectLocation};
+use crate::protocol::{
+    WireRequestPayload, WireResponse, WireResponsePayload, decode_request,
+    encode_response,
+};
 use crate::server::StorageServer;
 use crate::service::StorageService;
 use crate::staging::{StagingPathResolver, StagingUploader};
@@ -21,6 +27,31 @@ use crate::transport::{read_frame_blocking, write_frame_blocking};
 use super::*;
 
 const TEST_STORE_ID: &str = "test-store";
+const TEST_VOLUME_ID: u64 = 1;
+
+fn test_identity() -> BackendDataIdentity {
+    BackendDataIdentity::memory(TEST_STORE_ID)
+}
+
+trait TestManagedRegistryExt {
+    fn register_shared_backend<B: ObjectBackend + 'static>(
+        &self,
+        _name: &str,
+        backend: Arc<B>,
+    ) -> StorageResult<()>;
+}
+
+impl TestManagedRegistryExt for ManagedStoreRegistry {
+    fn register_shared_backend<B: ObjectBackend + 'static>(
+        &self,
+        _name: &str,
+        backend: Arc<B>,
+    ) -> StorageResult<()> {
+        self.register_backend(TEST_VOLUME_ID, test_identity(), backend)
+    }
+}
+
+type StoreRegistry = ManagedStoreRegistry;
 
 #[derive(Clone)]
 struct CountingFdPolicy {
@@ -89,8 +120,9 @@ async fn client_reads_through_unix_socket_server() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let mut file = client.open(TEST_STORE_ID, "bucket", "hello.txt").unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut file = client.open("bucket", "hello.txt").unwrap();
         file.seek(SeekFrom::Start(6));
         let mut data = [0_u8; 4];
         let n = file.read_into(&mut data).unwrap();
@@ -132,15 +164,12 @@ async fn client_head_and_exists_do_not_admit_cache() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let info = client.head(TEST_STORE_ID, "bucket", "head.txt").unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let info = client.head("bucket", "head.txt").unwrap();
         assert_eq!(info.size, b"hello metadata".len() as u64);
-        assert!(client.exists(TEST_STORE_ID, "bucket", "head.txt").unwrap());
-        assert!(
-            !client
-                .exists(TEST_STORE_ID, "bucket", "missing.txt")
-                .unwrap()
-        );
+        assert!(client.exists("bucket", "head.txt").unwrap());
+        assert!(!client.exists("bucket", "missing.txt").unwrap());
     })
     .await
     .unwrap();
@@ -182,18 +211,19 @@ async fn client_head_returns_from_cache_after_open() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
 
         // Open admits the object into the cache (triggers one backend head during establishment).
-        let mut file = client.open(TEST_STORE_ID, "bucket", "cached.txt").unwrap();
+        let mut file = client.open("bucket", "cached.txt").unwrap();
         file.close().unwrap();
         let heads_after_open = backend.head_call_count();
 
         // Subsequent head calls should be served from the cache index — no new backend heads.
-        let info = client.head(TEST_STORE_ID, "bucket", "cached.txt").unwrap();
+        let info = client.head("bucket", "cached.txt").unwrap();
         assert_eq!(info.size, data.len() as u64);
 
-        let info2 = client.head(TEST_STORE_ID, "bucket", "cached.txt").unwrap();
+        let info2 = client.head("bucket", "cached.txt").unwrap();
         assert_eq!(info2.size, data.len() as u64);
 
         assert_eq!(
@@ -244,24 +274,30 @@ async fn client_stage_write_upload_roundtrip_uploads_to_backend() {
     let client_socket = socket.clone();
     let upload_info = tokio::task::spawn_blocking(move || {
         let resolver = StagingPathResolver::new(staging_root);
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let mut staging_file =
-            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "uploaded.txt")
-                .unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut staging_file = StagingFile::create(
+            &resolver,
+            client.backend_identity(),
+            "bucket",
+            "uploaded.txt",
+        )
+        .unwrap();
         staging_file.write(b"hello ").unwrap();
         staging_file.write(b"upload").unwrap();
         staging_file.sync().unwrap();
         drop(staging_file);
-        client
-            .upload(TEST_STORE_ID, "bucket", "uploaded.txt")
-            .unwrap()
+        client.upload("bucket", "uploaded.txt").unwrap()
     })
     .await
     .unwrap();
 
     assert_eq!(upload_info.size, b"hello upload".len() as u64);
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "uploaded.txt").unwrap();
-    let data = backend.get_range(&key, 0..upload_info.size).await.unwrap();
+    let data = backend
+        .get_range(key.path(), 0..upload_info.size)
+        .await
+        .unwrap();
     assert_eq!(&data[..], b"hello upload");
 
     server_task.abort();
@@ -306,10 +342,15 @@ async fn caller_unlinks_staging_file_to_discard_without_upload() {
     let client_socket = socket.clone();
     let staging_path = tokio::task::spawn_blocking(move || {
         let resolver = StagingPathResolver::new(staging_root);
-        let _client = StorageClient::connect(&client_socket).unwrap();
-        let mut staging_file =
-            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "discarded.txt")
-                .unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut staging_file = StagingFile::create(
+            &resolver,
+            client.backend_identity(),
+            "bucket",
+            "discarded.txt",
+        )
+        .unwrap();
         staging_file.write(b"doomed").unwrap();
         let path = staging_file.path().to_path_buf();
         drop(staging_file);
@@ -327,7 +368,7 @@ async fn caller_unlinks_staging_file_to_discard_without_upload() {
     );
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "discarded.txt").unwrap();
     assert!(
-        backend.get_range(&key, 0..1).await.is_err(),
+        backend.get_range(key.path(), 0..1).await.is_err(),
         "discarded key must not have been uploaded to the backend"
     );
 
@@ -369,9 +410,13 @@ async fn client_upload_can_be_issued_from_a_different_connection() {
 
     tokio::task::spawn_blocking(move || {
         let resolver = StagingPathResolver::new(staging_root);
-        let mut staging_file =
-            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "cross-conn.txt")
-                .unwrap();
+        let mut staging_file = StagingFile::create(
+            &resolver,
+            &test_identity(),
+            "bucket",
+            "cross-conn.txt",
+        )
+        .unwrap();
         staging_file.write(b"cross-connection upload").unwrap();
         drop(staging_file);
     })
@@ -380,17 +425,20 @@ async fn client_upload_can_be_issued_from_a_different_connection() {
 
     let socket_for_uploader = socket.clone();
     let upload_info = tokio::task::spawn_blocking(move || {
-        let uploader = StorageClient::connect(&socket_for_uploader).unwrap();
-        uploader
-            .upload(TEST_STORE_ID, "bucket", "cross-conn.txt")
-            .unwrap()
+        let uploader =
+            StorageClient::connect_managed(&socket_for_uploader, TEST_VOLUME_ID)
+                .unwrap();
+        uploader.upload("bucket", "cross-conn.txt").unwrap()
     })
     .await
     .unwrap();
 
     assert_eq!(upload_info.size, b"cross-connection upload".len() as u64);
     let key = ObjectLocation::new(TEST_STORE_ID, "bucket", "cross-conn.txt").unwrap();
-    let readback = backend.get_range(&key, 0..upload_info.size).await.unwrap();
+    let readback = backend
+        .get_range(key.path(), 0..upload_info.size)
+        .await
+        .unwrap();
     assert_eq!(&readback[..], b"cross-connection upload");
 
     server_task.abort();
@@ -401,12 +449,20 @@ async fn stage_twice_without_finalize_returns_busy() {
     let root = test_root("staging-busy-cache");
     tokio::task::spawn_blocking(move || {
         let resolver = StagingPathResolver::new(root);
-        let _first =
-            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "duplicate.txt")
-                .unwrap();
-        let error =
-            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", "duplicate.txt")
-                .unwrap_err();
+        let _first = StagingFile::create(
+            &resolver,
+            &test_identity(),
+            "bucket",
+            "duplicate.txt",
+        )
+        .unwrap();
+        let error = StagingFile::create(
+            &resolver,
+            &test_identity(),
+            "bucket",
+            "duplicate.txt",
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), StorageErrorKind::Busy);
     })
     .await
@@ -425,7 +481,7 @@ fn staging_file_holds_external_fd_lease_until_drop() {
 
     let staging = StagingFile::create_with_fd_policy(
         &resolver,
-        TEST_STORE_ID,
+        &test_identity(),
         "bucket",
         "accounted.txt",
         &policy,
@@ -438,7 +494,7 @@ fn staging_file_holds_external_fd_lease_until_drop() {
 
     let error = StagingFile::create_with_fd_policy(
         &resolver,
-        TEST_STORE_ID,
+        &test_identity(),
         "bucket",
         "accounted.txt",
         &policy,
@@ -478,8 +534,9 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
     let active_fds_for_client = Arc::clone(&active_fds);
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect_with_fd_policy(
+        let client = StorageClient::connect_managed_with_fd_policy(
             &client_socket,
+            TEST_VOLUME_ID,
             Box::new(CountingFdPolicy {
                 active: Arc::clone(&active_fds_for_client),
                 limit: None,
@@ -488,17 +545,13 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
         .unwrap();
         assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 1);
 
-        let mut file = client
-            .open(TEST_STORE_ID, "bucket", "drop-close.txt")
-            .unwrap();
+        let mut file = client.open("bucket", "drop-close.txt").unwrap();
         let data = file.read(16).unwrap();
         assert_eq!(data, b"abcdefghijklmnop");
         file.close().unwrap();
         assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 1);
 
-        let mut file = client
-            .open(TEST_STORE_ID, "bucket", "drop-close.txt")
-            .unwrap();
+        let mut file = client.open("bucket", "drop-close.txt").unwrap();
         assert!(file.is_direct_io());
         assert_eq!(active_fds_for_client.load(Ordering::SeqCst), 2);
         file.close().unwrap();
@@ -532,22 +585,21 @@ async fn dropping_storage_file_closes_server_handle_best_effort() {
     let limited_fds_for_client = Arc::clone(&limited_fds);
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect_with_fd_policy(
+        let client = StorageClient::connect_managed_with_fd_policy(
             &client_socket,
+            TEST_VOLUME_ID,
             Box::new(CountingFdPolicy {
                 active: Arc::clone(&limited_fds_for_client),
                 limit: Some(1),
             }),
         )
         .unwrap();
-        let mut warming_file = client
-            .open(TEST_STORE_ID, "bucket", "drop-close.txt")
-            .unwrap();
+        let mut warming_file = client.open("bucket", "drop-close.txt").unwrap();
         assert!(!warming_file.is_direct_io());
         assert_eq!(warming_file.read(16).unwrap(), b"abcdefghijklmnop");
         warming_file.close().unwrap();
 
-        let error = match client.open(TEST_STORE_ID, "bucket", "drop-close.txt") {
+        let error = match client.open("bucket", "drop-close.txt") {
             Ok(_) => panic!("direct open unexpectedly exceeded the FD budget"),
             Err(error) => error,
         };
@@ -597,20 +649,18 @@ async fn panic_unwind_poisons_connection_and_allows_reconnect() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _file = client
-                .open(TEST_STORE_ID, "bucket", "unwind-close.txt")
-                .unwrap();
+            let _file = client.open("bucket", "unwind-close.txt").unwrap();
             panic!("injected error-report unwind");
         }));
         assert!(unwind.is_err());
         assert!(!client.is_usable());
 
-        let replacement = StorageClient::connect(&client_socket).unwrap();
-        let mut reopened = replacement
-            .open(TEST_STORE_ID, "bucket", "unwind-close.txt")
-            .unwrap();
+        let replacement =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut reopened = replacement.open("bucket", "unwind-close.txt").unwrap();
         assert_eq!(reopened.read(12).unwrap(), b"small object");
         reopened.close().unwrap();
     })
@@ -621,7 +671,7 @@ async fn panic_unwind_poisons_connection_and_allows_reconnect() {
 }
 
 #[tokio::test]
-async fn client_registers_unregisters_and_purges_store_over_wire() {
+async fn cached_bytes_are_shared_across_credentials_for_one_physical_identity() {
     let root = test_root("client-store-cache");
     let socket = test_root("client-store.sock");
     let cache = Arc::new(
@@ -633,6 +683,44 @@ async fn client_registers_unregisters_and_purges_store_over_wire() {
         .with_limits(4, 4),
     );
     cache.spawn_large_fill_reaper();
+    let config_a = StoreConfig::S3Compatible(S3CompatibleStoreConfig {
+        endpoint: "http://127.0.0.1:9".to_string(),
+        region: Some("us-east-1".to_string()),
+        access_key_id: Some(SecretString::new("access-a")),
+        secret_access_key: Some(SecretString::new("secret-a")),
+        token: None,
+        allow_http: true,
+        virtual_hosted_style_request: false,
+        skip_signature: false,
+    });
+    let config_b = StoreConfig::S3Compatible(S3CompatibleStoreConfig {
+        access_key_id: Some(SecretString::new("access-b")),
+        secret_access_key: Some(SecretString::new("secret-b")),
+        ..match config_a.clone() {
+            StoreConfig::S3Compatible(config) => config,
+            _ => unreachable!(),
+        }
+    });
+    let identity = BackendDataIdentity::from_config(&config_a);
+    assert_eq!(identity, BackendDataIdentity::from_config(&config_b));
+    let location = ObjectLocation::new(identity, "bucket", "file").unwrap();
+    let cached_bytes = b"shared-cache-body".to_vec();
+    cache
+        .index()
+        .admit_small_if_absent(
+            CachedObjectMeta::small(
+                location,
+                ObjectInfo {
+                    size: cached_bytes.len() as u64,
+                    etag: Some("cached".to_string()),
+                },
+                cached_bytes.len() as u64,
+            ),
+            cached_bytes.clone(),
+            1,
+        )
+        .await
+        .unwrap();
     let service =
         Arc::new(StorageService::with_registry(StoreRegistry::new(), cache));
     let server = StorageServer::bind(&socket, service).await.unwrap();
@@ -642,45 +730,16 @@ async fn client_registers_unregisters_and_purges_store_over_wire() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let config = StoreConfig::S3Compatible(S3CompatibleStoreConfig {
-            endpoint: "http://127.0.0.1:9000".to_string(),
-            region: Some("us-east-1".to_string()),
-            access_key_id: Some(SecretString::new("access")),
-            secret_access_key: Some(SecretString::new("secret")),
-            token: None,
-            allow_http: true,
-            virtual_hosted_style_request: false,
-            skip_signature: false,
-        });
-
-        assert!(!client.register_store("store-a", config.clone()).unwrap());
-        assert!(client.register_store("store-a", config).unwrap());
-        client.purge_store_cache("store-a").unwrap();
-        assert!(
-            !client
-                .invalidate_object_cache("store-a", "bucket", "file")
-                .unwrap()
-        );
-        assert!(client.unregister_store("store-a").unwrap());
-        assert!(!client.unregister_store("store-a").unwrap());
-
-        let error = client
-            .register_store(
-                "bad-store",
-                StoreConfig::S3Compatible(S3CompatibleStoreConfig {
-                    endpoint: String::new(),
-                    region: None,
-                    access_key_id: None,
-                    secret_access_key: None,
-                    token: None,
-                    allow_http: false,
-                    virtual_hosted_style_request: false,
-                    skip_signature: false,
-                }),
-            )
-            .unwrap_err();
-        assert_eq!(error.kind(), StorageErrorKind::Configuration);
+        let first =
+            StorageClient::connect_configured(&client_socket, Arc::new(config_a))
+                .unwrap();
+        let second =
+            StorageClient::connect_configured(&client_socket, Arc::new(config_b))
+                .unwrap();
+        let mut first_file = first.open("bucket", "file").unwrap();
+        let mut second_file = second.open("bucket", "file").unwrap();
+        assert_eq!(first_file.read(64).unwrap(), cached_bytes);
+        assert_eq!(second_file.read(64).unwrap(), cached_bytes);
     })
     .await
     .unwrap();
@@ -717,8 +776,9 @@ async fn read_at_returns_bytes_without_advancing_cursor() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let file = client.open(TEST_STORE_ID, "bucket", "read-at.txt").unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let file = client.open("bucket", "read-at.txt").unwrap();
         assert_eq!(file.position(), 0);
 
         // read_at at offset 4 returns 4 bytes
@@ -773,10 +833,9 @@ async fn read_at_into_fills_buffer_without_advancing_cursor() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let file = client
-            .open(TEST_STORE_ID, "bucket", "read-at-into.txt")
-            .unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let file = client.open("bucket", "read-at-into.txt").unwrap();
         let mut buf = [0u8; 5];
         let n = file.read_at_into(3, &mut buf).unwrap();
         assert_eq!(n, 5);
@@ -823,10 +882,9 @@ async fn read_at_and_cursor_read_are_independent() {
 
     let client_socket = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&client_socket).unwrap();
-        let mut file = client
-            .open(TEST_STORE_ID, "bucket", "read-at-indep.txt")
-            .unwrap();
+        let client =
+            StorageClient::connect_managed(&client_socket, TEST_VOLUME_ID).unwrap();
+        let mut file = client.open("bucket", "read-at-indep.txt").unwrap();
 
         // Advance cursor to offset 5 via seek + cursor-based read
         file.seek(SeekFrom::Start(5));
@@ -858,12 +916,30 @@ fn test_root(name: &str) -> PathBuf {
     PathBuf::from("/tmp").join(format!("pss-{name}-{stamp}"))
 }
 
+fn complete_mock_attach(stream: &mut std::os::unix::net::UnixStream) {
+    let frame = read_frame_blocking(stream).unwrap().unwrap();
+    let request = decode_request(&frame).unwrap();
+    assert!(matches!(
+        request.payload,
+        WireRequestPayload::AttachManaged { .. }
+    ));
+    let response = encode_response(&WireResponse {
+        request_id: request.request_id,
+        payload: WireResponsePayload::Attach {
+            backend_identity: test_identity().cache_key().to_owned(),
+        },
+    })
+    .unwrap();
+    write_frame_blocking(stream, &response).unwrap();
+}
+
 #[test]
 fn client_poisons_connection_after_response_id_mismatch() {
     let socket = test_root("poison-mismatched-response.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        complete_mock_attach(&mut stream);
         let _request = read_frame_blocking(&mut stream).unwrap().unwrap();
         let response = encode_response(&WireResponse {
             request_id: 99,
@@ -877,8 +953,9 @@ fn client_poisons_connection_after_response_id_mismatch() {
     });
 
     let active_fds = Arc::new(AtomicUsize::new(0));
-    let client = StorageClient::connect_with_fd_policy(
+    let client = StorageClient::connect_managed_with_fd_policy(
         &socket,
+        TEST_VOLUME_ID,
         Box::new(CountingFdPolicy {
             active: Arc::clone(&active_fds),
             limit: None,
@@ -886,12 +963,12 @@ fn client_poisons_connection_after_response_id_mismatch() {
     )
     .unwrap();
     assert_eq!(active_fds.load(Ordering::SeqCst), 1);
-    let error = client.head(TEST_STORE_ID, "bucket", "object").unwrap_err();
+    let error = client.head("bucket", "object").unwrap_err();
     assert_eq!(error.kind(), StorageErrorKind::Protocol);
     assert!(!client.is_usable());
     assert_eq!(active_fds.load(Ordering::SeqCst), 0);
 
-    let second = client.head(TEST_STORE_ID, "bucket", "object").unwrap_err();
+    let second = client.head("bucket", "object").unwrap_err();
     assert_eq!(second.kind(), StorageErrorKind::Protocol);
     server.join().unwrap();
 }
@@ -902,9 +979,10 @@ fn client_keeps_connection_after_remote_operation_error() {
     let listener = UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        complete_mock_attach(&mut stream);
         let _first = read_frame_blocking(&mut stream).unwrap().unwrap();
         let not_found = encode_response(&WireResponse::error(
-            1,
+            2,
             StorageError::not_found("missing"),
         ))
         .unwrap();
@@ -912,7 +990,7 @@ fn client_keeps_connection_after_remote_operation_error() {
 
         let _second = read_frame_blocking(&mut stream).unwrap().unwrap();
         let found = encode_response(&WireResponse {
-            request_id: 2,
+            request_id: 3,
             payload: WireResponsePayload::Head {
                 size: 7,
                 etag: None,
@@ -922,17 +1000,11 @@ fn client_keeps_connection_after_remote_operation_error() {
         write_frame_blocking(&mut stream, &found).unwrap();
     });
 
-    let client = StorageClient::connect(&socket).unwrap();
-    let error = client.head(TEST_STORE_ID, "bucket", "missing").unwrap_err();
+    let client = StorageClient::connect_managed(&socket, TEST_VOLUME_ID).unwrap();
+    let error = client.head("bucket", "missing").unwrap_err();
     assert_eq!(error.kind(), StorageErrorKind::NotFound);
     assert!(client.is_usable());
-    assert_eq!(
-        client
-            .head(TEST_STORE_ID, "bucket", "present")
-            .unwrap()
-            .size,
-        7
-    );
+    assert_eq!(client.head("bucket", "present").unwrap().size, 7);
     server.join().unwrap();
 }
 
@@ -963,20 +1035,18 @@ async fn client_delete_removes_object_from_backend_and_is_idempotent() {
 
     let socket_for_client = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&socket_for_client).unwrap();
-        client
-            .delete(TEST_STORE_ID, "bucket", "doomed.txt")
-            .unwrap();
+        let client =
+            StorageClient::connect_managed(&socket_for_client, TEST_VOLUME_ID)
+                .unwrap();
+        client.delete("bucket", "doomed.txt").unwrap();
         // Second delete is idempotent regardless of backend's missing-key behavior.
-        client
-            .delete(TEST_STORE_ID, "bucket", "doomed.txt")
-            .unwrap();
+        client.delete("bucket", "doomed.txt").unwrap();
     })
     .await
     .unwrap();
 
     assert!(
-        backend.get_range(&key, 0..1).await.is_err(),
+        backend.get_range(key.path(), 0..1).await.is_err(),
         "deleted key must not survive in the backend"
     );
 
@@ -1015,16 +1085,14 @@ async fn client_delete_prefix_removes_all_matching_objects_and_rejects_empty_pre
 
     let socket_for_client = socket.clone();
     let deleted = tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&socket_for_client).unwrap();
+        let client =
+            StorageClient::connect_managed(&socket_for_client, TEST_VOLUME_ID)
+                .unwrap();
 
-        let empty_prefix_error = client
-            .delete_prefix(TEST_STORE_ID, "bucket", "")
-            .unwrap_err();
+        let empty_prefix_error = client.delete_prefix("bucket", "").unwrap_err();
         assert_eq!(empty_prefix_error.kind(), StorageErrorKind::InvalidPath);
 
-        client
-            .delete_prefix(TEST_STORE_ID, "bucket", "scope/")
-            .unwrap()
+        client.delete_prefix("bucket", "scope/").unwrap()
     })
     .await
     .unwrap();
@@ -1032,13 +1100,13 @@ async fn client_delete_prefix_removes_all_matching_objects_and_rejects_empty_pre
     assert_eq!(deleted, 3);
     let surviving = ObjectLocation::new(TEST_STORE_ID, "bucket", "other/d").unwrap();
     assert!(
-        backend.get_range(&surviving, 0..1).await.is_ok(),
+        backend.get_range(surviving.path(), 0..1).await.is_ok(),
         "delete_prefix must not touch keys outside the prefix"
     );
     for gone in ["scope/a", "scope/b", "scope/nested/c"] {
         let key = ObjectLocation::new(TEST_STORE_ID, "bucket", gone).unwrap();
         assert!(
-            backend.get_range(&key, 0..1).await.is_err(),
+            backend.get_range(key.path(), 0..1).await.is_err(),
             "key {gone} should have been deleted by delete_prefix",
         );
     }
@@ -1077,20 +1145,19 @@ async fn client_bulk_delete_and_explicit_cursor_close_are_end_to_end() {
 
     let socket_for_client = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&socket_for_client).unwrap();
-        let first_page = client
-            .list_page(TEST_STORE_ID, "bucket", Some("scope/"), None, 1)
-            .unwrap();
+        let client =
+            StorageClient::connect_managed(&socket_for_client, TEST_VOLUME_ID)
+                .unwrap();
+        let first_page = client.list_page("bucket", Some("scope/"), None, 1).unwrap();
         let cursor = first_page.next_cursor.expect("more objects must remain");
         client.close_list_cursor(cursor.clone()).unwrap();
         let closed = client
-            .list_page(TEST_STORE_ID, "bucket", Some("scope/"), Some(cursor), 1)
+            .list_page("bucket", Some("scope/"), Some(cursor), 1)
             .unwrap_err();
         assert_eq!(closed.kind(), StorageErrorKind::ExpiredCursor);
 
         let deleted = client
             .delete_objects(
-                TEST_STORE_ID,
                 "bucket",
                 vec!["scope/a".to_owned(), "scope/b".to_owned()],
             )
@@ -1102,10 +1169,10 @@ async fn client_bulk_delete_and_explicit_cursor_close_are_end_to_end() {
 
     for gone in ["scope/a", "scope/b"] {
         let key = ObjectLocation::new(TEST_STORE_ID, "bucket", gone).unwrap();
-        assert!(backend.get_range(&key, 0..1).await.is_err());
+        assert!(backend.get_range(key.path(), 0..1).await.is_err());
     }
     let survivor = ObjectLocation::new(TEST_STORE_ID, "bucket", "scope/c").unwrap();
-    assert!(backend.get_range(&survivor, 0..1).await.is_ok());
+    assert!(backend.get_range(survivor.path(), 0..1).await.is_ok());
 
     server_task.abort();
 }
@@ -1145,9 +1212,11 @@ async fn client_list_iterates_pages_and_returns_every_object() {
 
     let socket_for_client = socket.clone();
     let listed = tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&socket_for_client).unwrap();
+        let client =
+            StorageClient::connect_managed(&socket_for_client, TEST_VOLUME_ID)
+                .unwrap();
         let mut keys: Vec<String> = client
-            .list(TEST_STORE_ID, "bucket", Some("scope/"))
+            .list("bucket", Some("scope/"))
             .map(|item| item.unwrap().key)
             .collect();
         keys.sort();
@@ -1192,22 +1261,22 @@ async fn client_list_page_drives_pagination_explicitly() {
 
     let socket_for_client = socket.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&socket_for_client).unwrap();
+        let client =
+            StorageClient::connect_managed(&socket_for_client, TEST_VOLUME_ID)
+                .unwrap();
 
-        let page1 = client
-            .list_page(TEST_STORE_ID, "bucket", Some("k/"), None, 2)
-            .unwrap();
+        let page1 = client.list_page("bucket", Some("k/"), None, 2).unwrap();
         assert_eq!(page1.entries.len(), 2);
         let cursor1 = page1.next_cursor.expect("more pages must remain");
 
         let page2 = client
-            .list_page(TEST_STORE_ID, "bucket", Some("k/"), Some(cursor1), 2)
+            .list_page("bucket", Some("k/"), Some(cursor1), 2)
             .unwrap();
         assert_eq!(page2.entries.len(), 2);
         let cursor2 = page2.next_cursor.expect("one entry should remain");
 
         let page3 = client
-            .list_page(TEST_STORE_ID, "bucket", Some("k/"), Some(cursor2), 2)
+            .list_page("bucket", Some("k/"), Some(cursor2), 2)
             .unwrap();
         assert_eq!(page3.entries.len(), 1);
         assert!(

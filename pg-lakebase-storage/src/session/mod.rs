@@ -6,5 +6,6 @@
 mod context;
 pub mod handle_table;
 
+pub(crate) use context::AttachedStorageContext;
 pub use context::StorageContext;
 pub use handle_table::HandleTable;

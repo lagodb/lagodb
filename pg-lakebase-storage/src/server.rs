@@ -12,10 +12,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::backend::StoreRegistry;
+use crate::backend::ManagedStoreRegistry;
 use crate::cache::CacheIndex;
 use crate::config::StorageServerConfig;
-use crate::connection::process_connection_with_drain_timeout;
+use crate::connection::{attach, process_connection_with_drain_timeout};
 use crate::error::{StorageError, StorageResult};
 use crate::request::RequestHooks;
 use crate::service::StorageService;
@@ -92,8 +92,8 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
         &self.socket_path
     }
 
-    pub fn store_registry(&self) -> StoreRegistry {
-        self.service.registry().clone()
+    pub fn managed_store_registry(&self) -> ManagedStoreRegistry {
+        self.service.managed_stores().clone()
     }
 
     /// Accept connections until `shutdown` is cancelled, then stop accepting.
@@ -148,25 +148,32 @@ impl<I: CacheIndex + 'static> StorageServer<I> {
         permit: OwnedSemaphorePermit,
     ) {
         let config = self.config.clone();
-        let context = StorageContext::new_with_hooks_and_handle_limit(
-            "unix",
-            self.service.clone(),
-            self.request_hooks.clone(),
-            config.max_open_handles_per_connection,
-        );
-
-        info!(
-            client_addr = &*context.client_addr,
-            "accepted storage connection"
-        );
+        let service = self.service.clone();
+        let request_hooks = self.request_hooks.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
+            let client_addr: Arc<str> = Arc::from("unix");
+            let (stream, attached) =
+                attach(stream, &service, &request_hooks, Arc::clone(&client_addr))
+                    .await?;
+            let context = StorageContext::new_attached_with_hooks_and_handle_limit(
+                client_addr,
+                service,
+                request_hooks,
+                config.max_open_handles_per_connection,
+                attached,
+            );
+            info!(
+                client_addr = &*context.client_addr,
+                "accepted storage connection"
+            );
             if let Err(error) =
                 process_connection_with_drain_timeout(stream, context, config).await
             {
                 debug!("storage connection closed: {error}");
             }
+            Ok::<(), StorageError>(())
         });
     }
 }

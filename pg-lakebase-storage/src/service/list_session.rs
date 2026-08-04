@@ -2,8 +2,8 @@
 //!
 //! A [`ListSession`] owns the `'static` [`BoxStream`] returned by
 //! [`crate::backend::ObjectBackend::list`] plus enough context to drain the next page on demand.
-//! Sessions are stored in [`ListSessionTable`] keyed by an opaque [`ListCursor`]; clients echo
-//! the cursor back to fetch the next page from any connection.
+//! Sessions are stored in the owning connection's [`ListSessionTable`] keyed by an opaque
+//! [`ListCursor`]; clients echo the cursor on that same connection to fetch the next page.
 //!
 //! ## Lifecycle
 //!
@@ -22,8 +22,8 @@
 //! `continuation-token`, GCS `pageToken`, Azure `marker`, in-memory iterator) and gives us a
 //! single uniform paging surface.
 //!
-//! Sessions are tied to the [`crate::service::StorageService`] (not to a connection) so a client
-//! that drops its connection mid-listing can resume from a different connection within the TTL.
+//! Sessions are connection-local. Dropping the connection releases its streams, and a cursor
+//! cannot be resumed through a different attached context.
 //!
 //! ## Resource accounting
 //!
@@ -79,10 +79,10 @@ struct ListSession {
     last_used: Instant,
 }
 
-/// Server-wide table of live list sessions.
+/// Connection-local table of live list sessions.
 ///
 /// Cheap to construct; cloning is intentionally not supported to make ownership explicit (the
-/// table lives on the [`crate::service::StorageService`] for as long as the service does).
+/// table lives on one [`crate::session::StorageContext`] for the socket lifetime).
 pub(crate) struct ListSessionTable {
     inner: Mutex<HashMap<ListCursor, ListSession>>,
     next_id: AtomicU64,

@@ -5,12 +5,23 @@ Each accepted Unix socket connection is managed by a self-contained pipeline
 that handles request decoding, concurrent dispatch, response ordering, and
 graceful shutdown.
 
+Before this pipeline starts, `connection/attach.rs` reads exactly one
+`AttachManaged` or `AttachConfigured` frame, runs the normal request policy
+and observer hooks, resolves the physical backend context, and sends the
+attach response. A failed handshake closes the connection. This serial phase
+ensures all request tasks see a fully initialized, immutable storage context;
+ordinary dispatch never checks whether credentials or registry selection have
+changed.
+
 
 1  Pipeline Structure
 =====================
 
 ```
   Unix socket
+       |
+       v
+  mandatory attach (single request, no multiplexing)
        |
        v
   +----------+     spawn per request     +------------------+

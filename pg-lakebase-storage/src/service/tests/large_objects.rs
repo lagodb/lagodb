@@ -13,7 +13,6 @@ use crate::service::StorageService;
 use crate::service::command::{
     CloseCommand, OpenCommand, ReadCommand, StorageCommand,
 };
-use crate::session::handle_table::HandleTable;
 
 use super::fixtures::{
     BUCKET, BlockingRangeBackend, CountingCompleteIndex, DEFAULT_STORE, LARGE_KEY,
@@ -33,7 +32,7 @@ async fn large_partial_read_does_not_persist_metadata() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let read = read(&service, &handles, open.handle, 3, 5).await;
@@ -59,7 +58,7 @@ async fn invalidate_large_fill_is_busy_while_handle_is_open() {
             .unwrap(),
         cache,
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let error = match service.execute(&handles, invalidate_cmd(LARGE_KEY)).await {
@@ -98,7 +97,7 @@ async fn stale_reap_request_does_not_clobber_newer_session() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     // Partially fill so a partial file exists and a reap would have something to delete.
@@ -150,7 +149,7 @@ async fn last_large_fill_close_deletes_incomplete_partial() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let read = read(&service, &handles, open.handle, 0, 4).await;
@@ -191,7 +190,7 @@ async fn aborted_large_fill_rejects_new_open_until_last_close_finalizes() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let old_open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     assert_eq!(
@@ -209,7 +208,6 @@ async fn aborted_large_fill_rejects_new_open_until_last_close_finalizes() {
         .execute(
             &handles,
             StorageCommand::Open(OpenCommand {
-                store_id: DEFAULT_STORE.to_string(),
                 bucket: BUCKET.to_string(),
                 key: LARGE_KEY.to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -262,7 +260,7 @@ async fn stale_partial_from_failed_unlink_is_truncated_on_next_fill() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     // Plant a stale partial twice the object size with a recognizable byte pattern. If the new
     // session failed to truncate on first write, chunk 0 would leave trailing stale bytes that
@@ -313,7 +311,7 @@ async fn abort_large_fill_wakes_waiting_chunk_followers() {
             .unwrap(),
         cache.clone(),
     ));
-    let handles = Arc::new(HandleTable::new());
+    let handles = service.test_context();
 
     let leader_open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let follower_open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -402,13 +400,13 @@ async fn large_open_joins_live_fill_without_second_head() {
             .unwrap(),
         cache,
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let second = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
 
-    let first_state = handles.get(first.handle).unwrap();
-    let second_state = handles.get(second.handle).unwrap();
+    let first_state = handles.handles.get(first.handle).unwrap();
+    let second_state = handles.handles.get(second.handle).unwrap();
     assert_eq!(backend.head_call_count(), 1);
     let first_session = first_state
         .residency
@@ -438,12 +436,13 @@ async fn read_rejects_large_handle_without_bound_fill_session() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
-    let store = service.registry().resolve(key.store_id()).unwrap();
+    let handles = service.test_context();
+    let backend = handles.attached().unwrap().backend();
     let state = handles
+        .handles
         .open(
             key.clone(),
-            store,
+            backend,
             ObjectInfo {
                 size: 10,
                 etag: None,
@@ -485,7 +484,7 @@ async fn live_large_fill_is_removed_after_last_open_close() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let second = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
@@ -510,7 +509,7 @@ async fn large_full_read_commits_complete_metadata() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let partial = cache.live_large_fill_partial_path(&key).unwrap();
@@ -544,7 +543,7 @@ async fn large_full_read_replaces_unclaimed_complete_payload() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let read = read(&service, &handles, open.handle, 0, 10).await;
@@ -588,7 +587,7 @@ async fn concurrent_large_reads_commit_complete_metadata_once() {
             .unwrap(),
         cache.clone(),
     ));
-    let handles = Arc::new(HandleTable::new());
+    let handles = service.test_context();
 
     let first = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let second = open_file(&service, &handles, BUCKET, LARGE_KEY).await;

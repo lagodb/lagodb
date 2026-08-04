@@ -21,14 +21,6 @@ pub struct StorageServiceConfig {
     pub max_read_size: u32,
     pub small_object_limit: u64,
     pub chunk_size: u64,
-    /// When `true`, the service rejects wire-level `RegisterStore` and
-    /// `UnregisterStore` requests because the [`crate::backend::StoreRegistry`]
-    /// is being driven by an external owner (such as the `pg-lakebase-core`
-    /// storage bgworker's tablespace reconciler).
-    ///
-    /// The default is `false` so that standalone deployments and tests that
-    /// register stores via the wire protocol keep working.
-    pub registry_managed_externally: bool,
 }
 
 impl Default for StorageServiceConfig {
@@ -37,7 +29,6 @@ impl Default for StorageServiceConfig {
             max_read_size: DEFAULT_MAX_READ_SIZE,
             small_object_limit: DEFAULT_SMALL_OBJECT_LIMIT,
             chunk_size: DEFAULT_CHUNK_SIZE,
-            registry_managed_externally: false,
         }
     }
 }
@@ -58,15 +49,6 @@ impl StorageServiceConfig {
         self
     }
 
-    /// Mark the [`crate::backend::StoreRegistry`] as managed by an external
-    /// owner. The service will reject wire-level `RegisterStore` /
-    /// `UnregisterStore` requests so the external owner stays the single
-    /// writer.
-    pub fn with_externally_managed_registry(mut self) -> Self {
-        self.registry_managed_externally = true;
-        self
-    }
-
     pub fn normalized(mut self) -> Self {
         self.max_read_size = self.max_read_size.max(1);
         self.chunk_size = normalize_chunk_size(self.chunk_size);
@@ -84,7 +66,6 @@ mod tests {
             max_read_size: 0,
             small_object_limit: 7,
             chunk_size: 0,
-            registry_managed_externally: false,
         }
         .normalized();
 

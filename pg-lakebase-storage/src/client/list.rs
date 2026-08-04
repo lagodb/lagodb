@@ -2,9 +2,66 @@
 
 use crate::error::StorageResult;
 use crate::object::ListEntry;
-use crate::protocol::ListCursor;
+use crate::protocol::{ListCursor, WireRequestPayload, WireResponsePayload};
 
-use super::StorageClient;
+use super::{ListPage, StorageClient};
+
+impl StorageClient {
+    /// Fetches a single page of a `list` operation.
+    ///
+    /// `page_size = 0` lets the server pick a default. A returned cursor is
+    /// connection-local and must be passed to this same client generation.
+    pub fn list_page(
+        &self,
+        bucket: impl Into<String>,
+        prefix: Option<&str>,
+        cursor: Option<ListCursor>,
+        page_size: u32,
+    ) -> StorageResult<ListPage> {
+        let (response, _) = self.request(WireRequestPayload::List {
+            bucket: bucket.into(),
+            prefix: prefix.map(str::to_string),
+            page_size,
+            cursor,
+        })?;
+        match response {
+            WireResponsePayload::List {
+                entries,
+                next_cursor,
+            } => Ok(ListPage {
+                entries: entries
+                    .into_iter()
+                    .map(|entry| ListEntry {
+                        key: entry.key,
+                        size: entry.size,
+                        etag: entry.etag,
+                        last_modified_ms: entry.last_modified_ms,
+                    })
+                    .collect(),
+                next_cursor,
+            }),
+            other => self.reject_unexpected("list", &other),
+        }
+    }
+
+    /// Releases a retained list cursor. Closing an expired cursor is idempotent.
+    pub fn close_list_cursor(&self, cursor: ListCursor) -> StorageResult<()> {
+        let (response, _) = self.request(WireRequestPayload::CloseList { cursor })?;
+        match response {
+            WireResponsePayload::CloseList => Ok(()),
+            other => self.reject_unexpected("close-list", &other),
+        }
+    }
+
+    /// Returns an iterator over every object whose key starts with `prefix`.
+    pub fn list(
+        &self,
+        bucket: impl Into<String>,
+        prefix: Option<&str>,
+    ) -> ListIter<'_> {
+        ListIter::new(self, bucket.into(), prefix.map(str::to_string))
+    }
+}
 
 /// Streaming iterator over a `list` operation. Constructed via [`StorageClient::list`].
 ///
@@ -17,7 +74,6 @@ use super::StorageClient;
 /// the first error. Once exhausted, [`Iterator::next`] returns `None` indefinitely.
 pub struct ListIter<'a> {
     client: &'a StorageClient,
-    store_id: String,
     bucket: String,
     prefix: Option<String>,
     /// Pagination state. `BeforeFirstPage` is the initial state; the iterator transitions to
@@ -38,13 +94,11 @@ enum ListIterState {
 impl<'a> ListIter<'a> {
     pub(super) fn new(
         client: &'a StorageClient,
-        store_id: String,
         bucket: String,
         prefix: Option<String>,
     ) -> Self {
         Self {
             client,
-            store_id,
             bucket,
             prefix,
             state: ListIterState::BeforeFirstPage,
@@ -61,7 +115,6 @@ impl<'a> ListIter<'a> {
             }
         };
         let page = self.client.list_page(
-            self.store_id.clone(),
             self.bucket.clone(),
             self.prefix.as_deref(),
             cursor,

@@ -6,6 +6,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::backend::BackendDataIdentity;
 use crate::error::{StorageError, StorageResult};
 use crate::object::ObjectLocation;
 use crate::staging::StagingPathResolver;
@@ -28,8 +29,8 @@ use super::{ExternalFdLease, ExternalFdPolicy};
 /// rather than as server-enforced invariants:
 ///
 /// * **Append-only.** The local file is opened with `O_APPEND`, so bytes always land at EOF.
-/// * **Single writer.** Only one `StagingFile` should exist for a given `(store_id, bucket,
-///   key)` at a time. Duplicate creates surface as `Busy` because [`StagingFile::create`]
+/// * **Single writer.** Only one `StagingFile` should exist for a given physical
+///   `(backend identity, bucket, key)` at a time. Duplicate creates surface as `Busy` because [`StagingFile::create`]
 ///   uses `O_CREAT | O_EXCL`.
 /// * **No readers before upload/publication.** The staged bytes are not referenced anywhere
 ///   outside the staging tree until the caller uploads them and publishes metadata through its
@@ -51,7 +52,7 @@ pub struct StagingFile {
 }
 
 impl StagingFile {
-    /// Atomically creates an empty staging file for `(store_id, bucket, key)` and returns a
+    /// Atomically creates an empty staging file for one physical object and returns a
     /// handle for appending bytes.
     ///
     /// The path is derived from `resolver` (a [`StagingPathResolver`] rooted at the same
@@ -62,11 +63,11 @@ impl StagingFile {
     /// `O_APPEND` enforces the documented append-only contract.
     pub fn create(
         resolver: &StagingPathResolver,
-        store_id: &str,
+        backend_identity: &BackendDataIdentity,
         bucket: &str,
         key: &str,
     ) -> StorageResult<Self> {
-        Self::create_inner(resolver, store_id, bucket, key, None)
+        Self::create_inner(resolver, backend_identity, bucket, key, None)
     }
 
     /// Creates a staging file while accounting for its descriptor through the
@@ -76,23 +77,23 @@ impl StagingFile {
     /// the returned `StagingFile`. An open failure releases it immediately.
     pub fn create_with_fd_policy(
         resolver: &StagingPathResolver,
-        store_id: &str,
+        backend_identity: &BackendDataIdentity,
         bucket: &str,
         key: &str,
         fd_policy: &dyn ExternalFdPolicy,
     ) -> StorageResult<Self> {
         let fd_lease = fd_policy.acquire()?;
-        Self::create_inner(resolver, store_id, bucket, key, Some(fd_lease))
+        Self::create_inner(resolver, backend_identity, bucket, key, Some(fd_lease))
     }
 
     fn create_inner(
         resolver: &StagingPathResolver,
-        store_id: &str,
+        backend_identity: &BackendDataIdentity,
         bucket: &str,
         key: &str,
         fd_lease: Option<Box<dyn ExternalFdLease>>,
     ) -> StorageResult<Self> {
-        let location = ObjectLocation::new(store_id, bucket, key)?;
+        let location = ObjectLocation::new(backend_identity.clone(), bucket, key)?;
         let path = resolver.path_for(&location)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -132,7 +133,7 @@ impl StagingFile {
     }
 
     /// Absolute path of the staging file on disk. The caller (database) records this so it can
-    /// later issue an `Upload` for the same `(store_id, bucket, key)` and unlink the file once
+    /// later issue an `Upload` for the same physical object and unlink the file once
     /// the surrounding transaction settles.
     pub fn path(&self) -> &Path {
         &self.path

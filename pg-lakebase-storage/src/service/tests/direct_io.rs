@@ -13,7 +13,6 @@ use crate::object::ObjectInfo;
 use crate::service::StorageService;
 use crate::service::command::{OpenCommand, StorageCommand};
 use crate::service::reply::{CommandOutput, ResponseAttachment};
-use crate::session::handle_table::HandleTable;
 
 use super::fixtures::{
     BUCKET, DEFAULT_STORE, LARGE_KEY, close, default_location, invalidate_cmd,
@@ -34,13 +33,12 @@ async fn complete_file_open_uses_direct_io() {
             .unwrap(),
         cache,
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let reply = service
         .execute(
             &handles,
             StorageCommand::Open(OpenCommand {
-                store_id: DEFAULT_STORE.to_string(),
                 bucket: BUCKET.to_string(),
                 key: LARGE_KEY.to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -94,13 +92,12 @@ async fn complete_file_open_hit_touches_access_time_for_direct_io() {
         cache.clone(),
         crate::config::StorageServiceConfig::default(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let reply = service
         .execute(
             &handles,
             StorageCommand::Open(OpenCommand {
-                store_id: DEFAULT_STORE.to_string(),
                 bucket: BUCKET.to_string(),
                 key: LARGE_KEY.to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -140,7 +137,7 @@ async fn invalidate_complete_file_cache_is_busy_while_direct_handle_is_open() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let error = match service.execute(&handles, invalidate_cmd(LARGE_KEY)).await {
@@ -181,12 +178,12 @@ async fn cache_hit_uses_cached_body_until_explicit_invalidate() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
 
     assert!(open.direct_io);
-    let state = handles.get(open.handle).unwrap();
+    let state = handles.handles.get(open.handle).unwrap();
     assert_eq!(state.size, 8);
     assert_eq!(
         residency_hint(&handles, open.handle),

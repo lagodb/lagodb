@@ -7,7 +7,6 @@ use crate::error::StorageError;
 use crate::handle::OpenFlags;
 use crate::service::StorageService;
 use crate::service::command::{OpenCommand, StorageCommand};
-use crate::session::handle_table::HandleTable;
 
 use super::fixtures::{
     BUCKET, DEFAULT_STORE, LARGE_KEY, close, default_location,
@@ -25,14 +24,13 @@ async fn open_handle_limit_rejects_until_existing_handle_is_closed() {
             .unwrap(),
         cache,
     );
-    let handles = HandleTable::with_max_open_handles(1);
+    let handles = service.test_context_with_handle_limit(1);
 
     let open = open_file(&service, &handles, BUCKET, LARGE_KEY).await;
     let error = match service
         .execute(
             &handles,
             StorageCommand::Open(OpenCommand {
-                store_id: DEFAULT_STORE.to_string(),
                 bucket: BUCKET.to_string(),
                 key: LARGE_KEY.to_string(),
                 flags: OpenFlags::READ_ONLY,

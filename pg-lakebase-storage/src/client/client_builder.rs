@@ -3,12 +3,21 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::backend::StoreConfig;
 use crate::error::{StorageError, StorageResult};
+use crate::protocol::WireRequestPayload;
+use std::sync::Arc;
 
 use super::StorageClient;
 use super::fd::ExternalFdPolicy;
 use super::socket::ClientTransport;
 use super::socket_wait::{PollSocketWait, SocketWait};
+
+type ClientBuilderParts = (
+    ClientTransport,
+    Option<Box<dyn ExternalFdPolicy>>,
+    WireRequestPayload,
+);
 
 /// Maximum time spent closing a server-side handle from `Drop`.
 ///
@@ -23,6 +32,7 @@ pub struct StorageClientBuilder {
     waiter: Box<dyn SocketWait>,
     operation_timeout: Option<Duration>,
     cleanup_timeout: Duration,
+    attach: Option<WireRequestPayload>,
 }
 
 impl StorageClientBuilder {
@@ -33,7 +43,20 @@ impl StorageClientBuilder {
             waiter: Box::new(PollSocketWait),
             operation_timeout: None,
             cleanup_timeout: DEFAULT_CLIENT_CLEANUP_TIMEOUT,
+            attach: None,
         }
+    }
+
+    #[must_use]
+    pub fn managed_volume(mut self, volume_id: u64) -> Self {
+        self.attach = Some(WireRequestPayload::AttachManaged { volume_id });
+        self
+    }
+
+    #[must_use]
+    pub fn configured(mut self, config: Arc<StoreConfig>) -> Self {
+        self.attach = Some(WireRequestPayload::AttachConfigured { config });
+        self
     }
 
     /// Accounts for the connection socket and received direct-I/O descriptors.
@@ -71,9 +94,7 @@ impl StorageClientBuilder {
         StorageClient::from_builder(self)
     }
 
-    pub(super) fn into_parts(
-        self,
-    ) -> StorageResult<(ClientTransport, Option<Box<dyn ExternalFdPolicy>>)> {
+    pub(super) fn into_parts(self) -> StorageResult<ClientBuilderParts> {
         if self.operation_timeout == Some(Duration::ZERO) {
             return Err(StorageError::configuration(
                 "storage client operation timeout must be greater than zero",
@@ -85,6 +106,11 @@ impl StorageClientBuilder {
             ));
         }
 
+        let attach = self.attach.ok_or_else(|| {
+            StorageError::configuration(
+                "storage client requires a managed or configured context",
+            )
+        })?;
         let socket_lease = self
             .fd_policy
             .as_ref()
@@ -97,6 +123,6 @@ impl StorageClientBuilder {
             self.operation_timeout,
             self.cleanup_timeout,
         )?;
-        Ok((transport, self.fd_policy))
+        Ok((transport, self.fd_policy, attach))
     }
 }

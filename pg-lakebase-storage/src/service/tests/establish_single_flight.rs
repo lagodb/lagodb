@@ -25,7 +25,7 @@ use tokio::task::JoinSet;
 use crate::backend::{MemoryObjectBackend, StoreRegistry};
 use crate::error::{StorageError, StorageErrorKind};
 use crate::service::StorageService;
-use crate::session::handle_table::HandleTable;
+use crate::session::StorageContext;
 
 use super::fixtures::{
     BUCKET, BlockingHeadBackend, DEFAULT_STORE, LARGE_KEY, SMALL_KEY, close,
@@ -50,7 +50,7 @@ async fn concurrent_small_opens_share_a_single_head() {
             .unwrap(),
         cache.clone(),
     ));
-    let handles = Arc::new(HandleTable::new());
+    let handles = service.test_context();
 
     // Kick off the leader, then stall it inside the blocked HEAD.
     let leader_service = service.clone();
@@ -126,7 +126,7 @@ async fn concurrent_large_opens_share_a_single_head() {
             .unwrap(),
         cache.clone(),
     ));
-    let handles = Arc::new(HandleTable::new());
+    let handles = service.test_context();
 
     let leader_service = service.clone();
     let leader_handles = handles.clone();
@@ -193,7 +193,7 @@ async fn follower_receives_equivalent_error_when_leader_head_fails() {
             .unwrap(),
         cache.clone(),
     ));
-    let handles = Arc::new(HandleTable::new());
+    let handles = service.test_context();
 
     let leader_service = service.clone();
     let leader_handles = handles.clone();
@@ -236,19 +236,18 @@ async fn follower_receives_equivalent_error_when_leader_head_fails() {
 
 async fn service_open_result<I: crate::cache::CacheIndex + 'static>(
     service: &StorageService<I>,
-    handles: &HandleTable,
+    context: &StorageContext<I>,
     key: &str,
 ) -> Result<crate::service::tests::fixtures::OpenResult, StorageError> {
     use crate::handle::OpenFlags;
     use crate::service::command::{OpenCommand, StorageCommand};
     use crate::service::reply::CommandOutput;
-    use crate::service::tests::fixtures::{BUCKET, DEFAULT_STORE, OpenResult};
+    use crate::service::tests::fixtures::{BUCKET, OpenResult};
 
     let reply = service
         .execute(
-            handles,
+            context,
             StorageCommand::Open(OpenCommand {
-                store_id: DEFAULT_STORE.to_string(),
                 bucket: BUCKET.to_string(),
                 key: key.to_string(),
                 flags: OpenFlags::READ_ONLY,

@@ -23,7 +23,7 @@ use crate::service::command::{
     StorageCommand,
 };
 use crate::service::reply::CommandOutput;
-use crate::session::handle_table::HandleTable;
+use crate::session::StorageContext;
 
 pub(crate) use super::test_doubles::{
     BlockingHeadBackend, BlockingRangeBackend, CountingCompleteIndex,
@@ -31,6 +31,7 @@ pub(crate) use super::test_doubles::{
 
 /// Default store id used by almost every service test.
 pub(crate) const DEFAULT_STORE: &str = "default";
+pub(crate) const TEST_VOLUME_ID: u64 = 1;
 /// Default bucket — kept as a constant so tests read as prose rather than string soup.
 pub(crate) const BUCKET: &str = "bucket";
 /// Canonical key for objects large enough to take the ranged-GET / large-fill path.
@@ -94,26 +95,24 @@ pub(crate) struct ReadResult {
 /// Opens `(DEFAULT_STORE, BUCKET, key)` in read-only mode and returns its handle.
 pub(crate) async fn open_file<I: CacheIndex + 'static>(
     service: &StorageService<I>,
-    handles: &HandleTable,
+    context: &StorageContext<I>,
     bucket: &str,
     key: &str,
 ) -> OpenResult {
-    open_named_file(service, handles, DEFAULT_STORE, bucket, key).await
+    open_named_file(service, context, bucket, key).await
 }
 
-/// Same as [`open_file`] but lets the caller pick a non-default store id (registry tests).
+/// Same as [`open_file`] with an explicit bucket and key.
 pub(crate) async fn open_named_file<I: CacheIndex + 'static>(
     service: &StorageService<I>,
-    handles: &HandleTable,
-    store_id: &str,
+    context: &StorageContext<I>,
     bucket: &str,
     key: &str,
 ) -> OpenResult {
     let reply = service
         .execute(
-            handles,
+            context,
             StorageCommand::Open(OpenCommand {
-                store_id: store_id.to_string(),
                 bucket: bucket.to_string(),
                 key: key.to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -133,14 +132,14 @@ pub(crate) async fn open_named_file<I: CacheIndex + 'static>(
 /// Issues a `Read` command against the given handle and drains the attachment into bytes.
 pub(crate) async fn read<I: CacheIndex + 'static>(
     service: &StorageService<I>,
-    handles: &HandleTable,
+    context: &StorageContext<I>,
     handle: FileHandle,
     offset: u64,
     len: u32,
 ) -> ReadResult {
     let reply = service
         .execute(
-            handles,
+            context,
             StorageCommand::Read(ReadCommand {
                 handle,
                 offset,
@@ -159,11 +158,11 @@ pub(crate) async fn read<I: CacheIndex + 'static>(
 /// Closes `handle` through the service (releases large-fill leases and cache activity).
 pub(crate) async fn close<I: CacheIndex + 'static>(
     service: &StorageService<I>,
-    handles: &HandleTable,
+    context: &StorageContext<I>,
     handle: FileHandle,
 ) {
     service
-        .execute(handles, StorageCommand::Close(CloseCommand { handle }))
+        .execute(context, StorageCommand::Close(CloseCommand { handle }))
         .await
         .unwrap();
 }
@@ -171,10 +170,11 @@ pub(crate) async fn close<I: CacheIndex + 'static>(
 /// Returns the residency variant hint bound to `handle`, or `None` when the handle has no
 /// residency (test-only direct-open path).
 pub(crate) fn residency_hint(
-    handles: &HandleTable,
+    context: &StorageContext<impl CacheIndex>,
     handle: FileHandle,
 ) -> Option<crate::cache::ResidencyStateHint> {
-    handles
+    context
+        .handles
         .get(handle)
         .unwrap()
         .residency
@@ -185,7 +185,6 @@ pub(crate) fn residency_hint(
 /// Builds an `InvalidateObjectCache` command for `(DEFAULT_STORE, BUCKET, key)`.
 pub(crate) fn invalidate_cmd(key: &str) -> StorageCommand {
     StorageCommand::InvalidateObjectCache(InvalidateObjectCacheCommand {
-        store_id: DEFAULT_STORE.to_string(),
         bucket: BUCKET.to_string(),
         key: key.to_string(),
     })

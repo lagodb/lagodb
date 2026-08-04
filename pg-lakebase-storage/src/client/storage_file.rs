@@ -73,6 +73,20 @@ impl StorageFile {
         self.direct_io
     }
 
+    /// Returns whether the connection that owns this server-side handle is
+    /// still usable locally.
+    ///
+    /// A false result means the next operation must reopen the object through
+    /// a fresh client generation. Direct-I/O reads do not need the connection,
+    /// but callers may still use this method to decide whether cleanup RPCs
+    /// can be attempted.
+    pub fn is_connection_usable(&self) -> bool {
+        match &self.state {
+            StorageFileState::Open { client, .. } => client.is_usable(),
+            StorageFileState::Closed => false,
+        }
+    }
+
     /// Current cursor position (byte offset from start).
     pub fn position(&self) -> u64 {
         self.cursor

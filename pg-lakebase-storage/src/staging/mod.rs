@@ -14,7 +14,7 @@
 //! lifetime to a TCP-style handle or a connection would force the caller to keep one live
 //! connection for the duration of the transaction. With local creation the staging file outlives
 //! any particular connection, and `Upload` can be issued from any future connection against the
-//! same `(store_id, bucket, key)`.
+//! same physical `(backend identity, bucket, key)`.
 //!
 //! # Lifecycle and cleanup ownership
 //!
@@ -36,7 +36,7 @@
 //! Upload does **not** touch the cache. The three cache invariants
 //! (immutable size/etag per key, no generations, external invalidation only) therefore apply
 //! to staging in the only way that matters: if a resident cached copy of the same
-//! `(store, bucket, key)` exists when an Upload succeeds, the cached copy is left alone. If the
+//! `(backend identity, bucket, key)` exists when an Upload succeeds, the cached copy is left alone. If the
 //! caller wants to read the just-uploaded content, they must call `InvalidateObjectCache`
 //! explicitly before the next `Open`, which is the same contract used for any externally
 //! modified object.
@@ -47,7 +47,7 @@ use std::path::PathBuf;
 
 use tracing::info;
 
-use crate::backend::RegisteredStore;
+use crate::backend::ObjectBackend;
 use crate::error::{StorageError, StorageResult};
 use crate::object::{ObjectInfo, ObjectLocation};
 
@@ -84,7 +84,7 @@ impl StagingUploader {
     pub(crate) async fn upload(
         &self,
         key: &ObjectLocation,
-        store: &RegisteredStore,
+        backend: &dyn ObjectBackend,
     ) -> StorageResult<ObjectInfo> {
         let path = self.paths.path_for(key)?;
         let metadata = match tokio::fs::metadata(&path).await {
@@ -103,7 +103,7 @@ impl StagingUploader {
         };
         let size = metadata.len();
 
-        let info = store.put_from_file(key, &path, size).await?;
+        let info = backend.put_from_file(key.path(), &path, size).await?;
         info!(key = %key, size, "staging file uploaded");
 
         Ok(info)
@@ -116,8 +116,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::backend::{MemoryObjectBackend, ObjectBackend, StoreRegistry};
+    use crate::backend::{BackendDataIdentity, MemoryObjectBackend, ObjectBackend};
     use crate::client::StagingFile;
+    use crate::object::ObjectPath;
 
     static NONCE: AtomicU64 = AtomicU64::new(0);
     const TEST_STORE_ID: &str = "test-store";
@@ -140,24 +141,21 @@ mod tests {
 
     fn create_staging_file(root: PathBuf, key: &str, data: &[u8]) -> PathBuf {
         let resolver = StagingPathResolver::new(root);
-        let mut staging_file =
-            StagingFile::create(&resolver, TEST_STORE_ID, "bucket", key).unwrap();
+        let mut staging_file = StagingFile::create(
+            &resolver,
+            &BackendDataIdentity::memory(TEST_STORE_ID),
+            "bucket",
+            key,
+        )
+        .unwrap();
         staging_file.write(data).unwrap();
         let path = staging_file.path().to_path_buf();
         drop(staging_file);
         path
     }
 
-    fn memory_store() -> (StoreRegistry, MemoryObjectBackend) {
-        let registry = StoreRegistry::new();
-        let backend = MemoryObjectBackend::new();
-        registry
-            .register_shared_backend(
-                TEST_STORE_ID,
-                std::sync::Arc::new(backend.clone()),
-            )
-            .unwrap();
-        (registry, backend)
+    fn memory_store() -> MemoryObjectBackend {
+        MemoryObjectBackend::new()
     }
 
     #[tokio::test]
@@ -167,10 +165,9 @@ mod tests {
         let key = test_key("upload.txt");
         let path = create_staging_file(root, "upload.txt", b"hello upload");
 
-        let (registry, backend) = memory_store();
-        let store = registry.resolve(key.store_id()).unwrap();
+        let backend = memory_store();
 
-        let info = staging.upload(&key, &store).await.unwrap();
+        let info = staging.upload(&key, &backend).await.unwrap();
 
         assert_eq!(info.size, b"hello upload".len() as u64);
         // Upload never unlinks. The caller (database) decides when to remove the staging file.
@@ -178,7 +175,7 @@ mod tests {
             tokio::fs::try_exists(&path).await.unwrap(),
             "upload must not unlink the staging file; the database owns staging cleanup",
         );
-        let readback = backend.get_range(&key, 0..info.size).await.unwrap();
+        let readback = backend.get_range(key.path(), 0..info.size).await.unwrap();
         assert_eq!(&readback[..], b"hello upload");
     }
 
@@ -200,7 +197,7 @@ mod tests {
 
         #[async_trait]
         impl ObjectBackend for FlakyBackend {
-            async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+            async fn head(&self, _key: &ObjectPath) -> StorageResult<ObjectInfo> {
                 Ok(ObjectInfo {
                     size: 0,
                     etag: None,
@@ -208,14 +205,14 @@ mod tests {
             }
             async fn get_range(
                 &self,
-                key: &ObjectLocation,
+                key: &ObjectPath,
                 range: Range<u64>,
             ) -> StorageResult<bytes::Bytes> {
                 self.inner.get_range(key, range).await
             }
             async fn put_from_file(
                 &self,
-                key: &ObjectLocation,
+                key: &ObjectPath,
                 path: &std::path::Path,
                 len: u64,
             ) -> StorageResult<ObjectInfo> {
@@ -229,7 +226,6 @@ mod tests {
             }
             fn list(
                 &self,
-                _store_id: &str,
                 _bucket: &str,
                 _prefix: Option<&str>,
             ) -> futures::stream::BoxStream<
@@ -238,12 +234,11 @@ mod tests {
             > {
                 unreachable!("FlakyBackend does not participate in list")
             }
-            async fn delete(&self, _key: &ObjectLocation) -> StorageResult<()> {
+            async fn delete(&self, _key: &ObjectPath) -> StorageResult<()> {
                 unreachable!("FlakyBackend does not participate in delete")
             }
             fn delete_stream(
                 &self,
-                _store_id: &str,
                 _bucket: &str,
                 _keys: futures::stream::BoxStream<'static, StorageResult<String>>,
             ) -> futures::stream::BoxStream<'static, StorageResult<String>>
@@ -263,13 +258,7 @@ mod tests {
             succeed_on_attempt: 2,
             inner,
         });
-        let registry = StoreRegistry::new();
-        registry
-            .register_shared_backend(TEST_STORE_ID, backend.clone())
-            .unwrap();
-        let store = registry.resolve(key.store_id()).unwrap();
-
-        let first = staging.upload(&key, &store).await.unwrap_err();
+        let first = staging.upload(&key, backend.as_ref()).await.unwrap_err();
         assert!(
             matches!(first, StorageError::Backend { .. }),
             "first attempt must bubble backend failure"
@@ -279,14 +268,14 @@ mod tests {
             "staging file must survive a failed upload so the client can retry without re-writing bytes",
         );
 
-        let info = staging.upload(&key, &store).await.unwrap();
+        let info = staging.upload(&key, backend.as_ref()).await.unwrap();
         assert_eq!(info.size, b"retry-me".len() as u64);
         assert!(
             tokio::fs::try_exists(&path).await.unwrap(),
             "successful retry must not unlink the staging file; the database owns staging cleanup",
         );
 
-        let readback = backend.get_range(&key, 0..info.size).await.unwrap();
+        let readback = backend.get_range(key.path(), 0..info.size).await.unwrap();
         assert_eq!(&readback[..], b"retry-me");
     }
 }

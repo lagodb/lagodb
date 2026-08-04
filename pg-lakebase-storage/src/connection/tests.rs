@@ -16,14 +16,13 @@ use crate::cache::{CacheManager, InMemoryCacheIndex};
 use crate::config::{StorageRuntime, StorageRuntimeConfig, StorageServerConfig};
 use crate::error::StorageResult;
 use crate::handle::OpenFlags;
-use crate::object::{ObjectInfo, ObjectLocation};
+use crate::object::{ObjectInfo, ObjectLocation, ObjectPath};
 use crate::protocol::{
     WireRequest, WireRequestPayload, WireResponsePayload, decode_response,
     encode_request,
 };
 use crate::service::StorageService;
 use crate::service::reply::ReadBody;
-use crate::session::StorageContext;
 use crate::transport::{read_frame, write_frame};
 
 use super::dispatch::{StorageHandlerPayload, StorageHandlerResponse};
@@ -58,7 +57,7 @@ async fn disconnect_aborts_in_flight_request_tasks() {
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
         .unwrap();
     let service = Arc::new(StorageService::with_registry(registry, cache));
-    let context = StorageContext::new("test-client", service);
+    let context = service.test_context();
     let server_task = tokio::spawn(process_connection_with_shutdown(
         server_stream,
         context,
@@ -71,7 +70,6 @@ async fn disconnect_aborts_in_flight_request_tasks() {
         WireRequest {
             request_id: 1,
             payload: WireRequestPayload::Open {
-                store_id: TEST_STORE_ID.to_string(),
                 bucket: "bucket".to_string(),
                 key: "file".to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -135,7 +133,7 @@ async fn write_half_shutdown_still_receives_in_flight_response() {
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
         .unwrap();
     let service = Arc::new(StorageService::with_registry(registry, cache));
-    let context = StorageContext::new("test-client", service);
+    let context = service.test_context();
     let server_task = tokio::spawn(process_connection_with_shutdown(
         server_stream,
         context,
@@ -148,7 +146,6 @@ async fn write_half_shutdown_still_receives_in_flight_response() {
         WireRequest {
             request_id: 1,
             payload: WireRequestPayload::Open {
-                store_id: TEST_STORE_ID.to_string(),
                 bucket: "bucket".to_string(),
                 key: "file".to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -205,7 +202,7 @@ async fn close_waits_for_prior_read_on_same_handle() {
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
         .unwrap();
     let service = Arc::new(StorageService::with_registry(registry, cache));
-    let context = StorageContext::new("test-client", service);
+    let context = service.test_context();
     let server_task = tokio::spawn(process_connection_with_shutdown(
         server_stream,
         context,
@@ -218,7 +215,6 @@ async fn close_waits_for_prior_read_on_same_handle() {
         WireRequest {
             request_id: 1,
             payload: WireRequestPayload::Open {
-                store_id: TEST_STORE_ID.to_string(),
                 bucket: "bucket".to_string(),
                 key: "file".to_string(),
                 flags: OpenFlags::READ_ONLY,
@@ -306,13 +302,13 @@ async fn read_admission_precedes_response_budget_wait() {
         .with_shared_backend(TEST_STORE_ID, Arc::new(backend))
         .unwrap();
     let service = Arc::new(StorageService::with_registry(registry, cache));
-    let context = StorageContext::new("test-client", service);
-    let store = context.service.registry().resolve(key.store_id()).unwrap();
+    let context = service.test_context();
+    let backend = context.attached().unwrap().backend();
     let state = context
         .handles
         .open(
             key,
-            store,
+            backend,
             ObjectInfo {
                 size: 10,
                 etag: None,
@@ -476,7 +472,7 @@ struct HangingBackend {
 
 #[async_trait]
 impl ObjectBackend for HangingBackend {
-    async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, _key: &ObjectPath) -> StorageResult<ObjectInfo> {
         Ok(ObjectInfo {
             size: 10,
             etag: None,
@@ -485,7 +481,7 @@ impl ObjectBackend for HangingBackend {
 
     async fn get_range(
         &self,
-        _key: &ObjectLocation,
+        _key: &ObjectPath,
         _range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         if let Some(started) =
@@ -501,7 +497,7 @@ impl ObjectBackend for HangingBackend {
 
     async fn put_from_file(
         &self,
-        _key: &ObjectLocation,
+        _key: &ObjectPath,
         _path: &std::path::Path,
         _len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -510,7 +506,6 @@ impl ObjectBackend for HangingBackend {
 
     fn list(
         &self,
-        _store_id: &str,
         _bucket: &str,
         _prefix: Option<&str>,
     ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
@@ -518,13 +513,12 @@ impl ObjectBackend for HangingBackend {
         unreachable!("HangingBackend does not participate in list")
     }
 
-    async fn delete(&self, _key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, _key: &ObjectPath) -> StorageResult<()> {
         unreachable!("HangingBackend does not participate in delete")
     }
 
     fn delete_stream(
         &self,
-        _store_id: &str,
         _bucket: &str,
         _keys: futures::stream::BoxStream<'static, StorageResult<String>>,
     ) -> futures::stream::BoxStream<'static, StorageResult<String>> {
@@ -558,7 +552,7 @@ struct DelayedRangeBackend {
 
 #[async_trait]
 impl ObjectBackend for DelayedHeadBackend {
-    async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, _key: &ObjectPath) -> StorageResult<ObjectInfo> {
         if let Some(started) =
             self.started.lock().expect("started mutex poisoned").take()
         {
@@ -576,7 +570,7 @@ impl ObjectBackend for DelayedHeadBackend {
 
     async fn get_range(
         &self,
-        _key: &ObjectLocation,
+        _key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         Ok(bytes::Bytes::from(vec![
@@ -587,7 +581,7 @@ impl ObjectBackend for DelayedHeadBackend {
 
     async fn put_from_file(
         &self,
-        _key: &ObjectLocation,
+        _key: &ObjectPath,
         _path: &std::path::Path,
         _len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -596,7 +590,6 @@ impl ObjectBackend for DelayedHeadBackend {
 
     fn list(
         &self,
-        _store_id: &str,
         _bucket: &str,
         _prefix: Option<&str>,
     ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
@@ -604,13 +597,12 @@ impl ObjectBackend for DelayedHeadBackend {
         unreachable!("DelayedHeadBackend does not participate in list")
     }
 
-    async fn delete(&self, _key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, _key: &ObjectPath) -> StorageResult<()> {
         unreachable!("DelayedHeadBackend does not participate in delete")
     }
 
     fn delete_stream(
         &self,
-        _store_id: &str,
         _bucket: &str,
         _keys: futures::stream::BoxStream<'static, StorageResult<String>>,
     ) -> futures::stream::BoxStream<'static, StorageResult<String>> {
@@ -620,7 +612,7 @@ impl ObjectBackend for DelayedHeadBackend {
 
 #[async_trait]
 impl ObjectBackend for DelayedRangeBackend {
-    async fn head(&self, _key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, _key: &ObjectPath) -> StorageResult<ObjectInfo> {
         Ok(ObjectInfo {
             size: 10,
             etag: None,
@@ -629,7 +621,7 @@ impl ObjectBackend for DelayedRangeBackend {
 
     async fn get_range(
         &self,
-        _key: &ObjectLocation,
+        _key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         if let Some(started) =
@@ -648,7 +640,7 @@ impl ObjectBackend for DelayedRangeBackend {
 
     async fn put_from_file(
         &self,
-        _key: &ObjectLocation,
+        _key: &ObjectPath,
         _path: &std::path::Path,
         _len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -657,7 +649,6 @@ impl ObjectBackend for DelayedRangeBackend {
 
     fn list(
         &self,
-        _store_id: &str,
         _bucket: &str,
         _prefix: Option<&str>,
     ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
@@ -665,13 +656,12 @@ impl ObjectBackend for DelayedRangeBackend {
         unreachable!("DelayedRangeBackend does not participate in list")
     }
 
-    async fn delete(&self, _key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, _key: &ObjectPath) -> StorageResult<()> {
         unreachable!("DelayedRangeBackend does not participate in delete")
     }
 
     fn delete_stream(
         &self,
-        _store_id: &str,
         _bucket: &str,
         _keys: futures::stream::BoxStream<'static, StorageResult<String>>,
     ) -> futures::stream::BoxStream<'static, StorageResult<String>> {

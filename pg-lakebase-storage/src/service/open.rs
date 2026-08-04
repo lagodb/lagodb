@@ -1,6 +1,7 @@
 //! OPEN command handler.
 //!
-//! Resolves `(store, bucket, key)` against the registry, validates cache paths, and then either
+//! Combines the attached physical backend identity with `(bucket, key)`, validates cache paths,
+//! and then either
 //! binds a cached [`Residency`] or admits a fresh one (small-KV via a single insert-if-absent
 //! transaction, or a large-fill lease). The result is materialized as an `OpenFileState` slot in
 //! the connection's [`HandleTable`], plus an optional direct-IO file attachment when the backing
@@ -16,7 +17,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::backend::RegisteredStore;
+use crate::backend::ObjectBackend;
 use crate::cache::{
     CacheIndex, EstablishLeader, OpenOutcome, Residency, ResidencyStateHint,
 };
@@ -27,23 +28,36 @@ use crate::service::command::OpenCommand;
 use crate::service::reply::{
     CommandOutput, OpenOutput, ResponseAttachment, ServiceReply,
 };
+use crate::session::StorageContext;
 use crate::session::handle_table::{HandleTable, ReservedOpen};
 
-impl<I: CacheIndex + 'static> StorageService<I> {
+impl<I: CacheIndex> StorageService<I> {
     pub(super) async fn handle_open(
         &self,
-        handles: &HandleTable,
+        context: &StorageContext<I>,
         command: OpenCommand,
     ) -> StorageResult<ServiceReply> {
-        let key = ObjectLocation::new(command.store_id, command.bucket, command.key)?;
-        let store = self.registry().resolve(key.store_id())?;
+        let attached = context.attached()?;
+        let key = ObjectLocation::new(
+            attached.identity().clone(),
+            command.bucket,
+            command.key,
+        )?;
+        let backend = attached.backend();
         self.cache.validate_file_cache_paths(&key)?;
-        let open_slot = handles.reserve_open()?;
+        let open_slot = context.handles.reserve_open()?;
 
-        let residency = self.establish_residency(&key, &store).await?;
+        let residency = self.establish_residency(&key, &backend).await?;
 
-        self.bind_residency(handles, open_slot, key, store, command.flags, residency)
-            .await
+        self.bind_residency(
+            &context.handles,
+            open_slot,
+            key,
+            backend,
+            command.flags,
+            residency,
+        )
+        .await
     }
 
     /// Drives the lookup / single-flight loop that turns a key into a [`Residency`].
@@ -75,7 +89,7 @@ impl<I: CacheIndex + 'static> StorageService<I> {
     async fn establish_residency(
         &self,
         key: &ObjectLocation,
-        store: &Arc<RegisteredStore>,
+        backend: &Arc<dyn ObjectBackend>,
     ) -> StorageResult<Residency> {
         loop {
             match self.cache.lookup_for_open(key).await? {
@@ -84,7 +98,7 @@ impl<I: CacheIndex + 'static> StorageService<I> {
                     waiter.wait().await?;
                 }
                 OpenOutcome::Establish(leader) => {
-                    return self.populate_as_leader(store, leader).await;
+                    return self.populate_as_leader(backend, leader).await;
                 }
             }
         }
@@ -109,10 +123,10 @@ impl<I: CacheIndex + 'static> StorageService<I> {
     /// See [`crate::cache::establish`] for the broader single-flight contract.
     async fn populate_as_leader(
         &self,
-        store: &Arc<RegisteredStore>,
+        backend: &Arc<dyn ObjectBackend>,
         leader: EstablishLeader,
     ) -> StorageResult<Residency> {
-        let result = self.run_establishment(store, &leader).await;
+        let result = self.run_establishment(backend, &leader).await;
         match &result {
             Ok(_) => leader.succeed(),
             Err(error) => leader.fail(error),
@@ -122,13 +136,13 @@ impl<I: CacheIndex + 'static> StorageService<I> {
 
     async fn run_establishment(
         &self,
-        store: &Arc<RegisteredStore>,
+        backend: &Arc<dyn ObjectBackend>,
         leader: &EstablishLeader,
     ) -> StorageResult<Residency> {
         let key = leader.key();
-        let info = store.head(key).await?;
+        let info = backend.head(key.path()).await?;
         if info.size <= self.cache.small_object_limit() {
-            let data = store.get_range(key, 0..info.size).await?;
+            let data = backend.get_range(key.path(), 0..info.size).await?;
             self.cache.admit_small(leader, data.to_vec(), info).await
         } else {
             self.cache.admit_large(leader, info).await
@@ -140,7 +154,7 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         handles: &HandleTable,
         open_slot: crate::session::handle_table::OpenHandleSlot,
         key: ObjectLocation,
-        store: Arc<RegisteredStore>,
+        backend: Arc<dyn ObjectBackend>,
         flags: crate::handle::OpenFlags,
         residency: Residency,
     ) -> StorageResult<ServiceReply> {
@@ -164,7 +178,7 @@ impl<I: CacheIndex + 'static> StorageService<I> {
         let state = handles.open_reserved(ReservedOpen {
             slot: open_slot,
             key,
-            store,
+            backend,
             info: crate::object::ObjectInfo { size, etag },
             flags,
             residency: Some(residency),

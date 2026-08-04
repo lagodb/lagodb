@@ -44,16 +44,16 @@ file.
 ============
 
 ```
-  StagingFile::create(store_id, bucket, key)
+  StagingFile::create(backend_identity, bucket, key)
    |
    +--- caller: create empty file with O_CREAT | O_EXCL
-   |    path: <cache_dir>/staging/<store>/<bucket>/<parent>/pgl-staging.<name>
+   |    path: <cache_dir>/staging/<encoded-backend-identity>/<bucket>/<parent>/pgl-staging.<name>
    |
    v
   Client: open path with O_APPEND, write bytes, close file
    |
    v
-  Upload(store_id, bucket, key)
+  Upload(bucket, key) on a connection attached to that physical backend
    |
    +--- server reads the staging file
    |    uploads to backend
@@ -78,8 +78,9 @@ are enforced or documented on the client side:
   always land at EOF. A misbehaving caller cannot rewind over bytes already
   written.
 
-- **Single writer.** Only one staging file exists per `(store_id, bucket,
-  key)` at any time. `StagingFile::create` uses `O_EXCL`, so a second create
+- **Single writer.** Only one staging file exists per
+  `(backend identity, bucket, key)` at any time. `StagingFile::create` uses
+  `O_EXCL`, so a second create
   for the same key returns `Busy`. The caller is expected to remove a stale
   staging file before re-staging the same key.
 
@@ -103,7 +104,7 @@ Upload does **not** invalidate or update the cache. The three cache
 invariants (immutable size/etag, no generations, external invalidation)
 apply to staging as follows:
 
-- If a cached copy of `(store_id, bucket, key)` exists when Upload
+- If a cached copy of `(backend identity, bucket, key)` exists when Upload
   succeeds, the cached copy is left untouched.
 - If the caller wants to read the just-uploaded bytes, they must call
   `invalidate_object_cache` before the next `Open`.
@@ -166,17 +167,25 @@ only uploads caller-created files.
 ===================
 
 Staging paths mirror the cache `objects/` layout (same path encoding, same
-store/bucket/key partitioning) but live under a separate root:
+physical-backend/bucket/key partitioning) but live under a separate root:
 
 ```
-  <cache_dir>/staging/<store>/<bucket>/<parent>/pgl-staging.<name>
+  <cache_dir>/staging/<encoded-backend-identity>/<bucket>/<parent>/pgl-staging.<name>
 ```
 
 The full path is derived by `StagingPathResolver` and is the caller's handle
 for filesystem-level cleanup. The encoding helpers
 (`StagingPathResolver::path_for`) are exposed publicly so callers can compute
-the path from `(store_id, bucket, key)` during ordinary writes or crash
+the path from `(backend identity, bucket, key)` during ordinary writes or crash
 recovery. Path components are
 encoded with the same segment-encoding and length-validation rules as
 cache paths, preventing traversal attacks and rejecting paths that would
 exceed portable filesystem limits.
+
+The client obtains the stable serialized `BackendDataIdentity` from the
+mandatory attach response. It is credential-free, so a staging file remains
+addressable after credential rotation or from another connection configured
+for the same physical service. The upload connection must still attach a
+backend whose physical identity matches the staging path; the server derives
+the path from its attached context rather than trusting an identity supplied
+on every Upload request.

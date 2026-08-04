@@ -2,7 +2,7 @@
 
 use pg_lakebase_storage::{SeekFrom, StagingFile, StagingPathResolver};
 
-use crate::harness::{CacheIndexKind, E2eHarness, STORE_ID, TEST_BUCKET};
+use crate::harness::{CacheIndexKind, E2eHarness, TEST_BUCKET};
 
 #[tokio::test]
 async fn stage_upload_then_read_back() {
@@ -25,7 +25,7 @@ async fn stage_upload_then_read_back_on(kind: CacheIndexKind) {
 
         let mut staging = StagingFile::create(
             &resolver,
-            STORE_ID,
+            client.backend_identity(),
             TEST_BUCKET,
             "staged/object.bin",
         )
@@ -34,18 +34,14 @@ async fn stage_upload_then_read_back_on(kind: CacheIndexKind) {
         staging.sync().unwrap();
         drop(staging);
 
-        let info = client
-            .upload(STORE_ID, TEST_BUCKET, "staged/object.bin")
-            .unwrap();
+        let info = client.upload(TEST_BUCKET, "staged/object.bin").unwrap();
         assert_eq!(info.size, payload.len() as u64);
 
         client
-            .invalidate_object_cache(STORE_ID, TEST_BUCKET, "staged/object.bin")
+            .invalidate_object_cache(TEST_BUCKET, "staged/object.bin")
             .unwrap();
 
-        let mut file = client
-            .open(STORE_ID, TEST_BUCKET, "staged/object.bin")
-            .unwrap();
+        let mut file = client.open(TEST_BUCKET, "staged/object.bin").unwrap();
         assert_eq!(file.size(), payload.len() as u64);
         assert_eq!(file.read(payload.len() as u32).unwrap(), payload.as_ref());
         file.close().unwrap();
@@ -65,7 +61,7 @@ async fn caller_unlinks_staging_file_to_discard_without_upload() {
 
         let mut staging = StagingFile::create(
             &resolver,
-            STORE_ID,
+            client.backend_identity(),
             TEST_BUCKET,
             "discarded/file.txt",
         )
@@ -78,7 +74,7 @@ async fn caller_unlinks_staging_file_to_discard_without_upload() {
 
         std::fs::remove_file(&path).unwrap();
 
-        let result = client.open(STORE_ID, TEST_BUCKET, "discarded/file.txt");
+        let result = client.open(TEST_BUCKET, "discarded/file.txt");
         assert!(result.is_err(), "expected open to fail without upload");
     })
     .await
@@ -107,26 +103,28 @@ async fn upload_overwrites_and_readback_sees_new_data_on(kind: CacheIndexKind) {
         let resolver = StagingPathResolver::new(cache_dir);
         let client = h.connect();
 
-        let mut f = client.open(STORE_ID, TEST_BUCKET, "overwrite.txt").unwrap();
+        let mut f = client.open(TEST_BUCKET, "overwrite.txt").unwrap();
         assert_eq!(f.read(original.len() as u32).unwrap(), original.as_ref());
         f.close().unwrap();
 
-        let mut staging =
-            StagingFile::create(&resolver, STORE_ID, TEST_BUCKET, "overwrite.txt")
-                .unwrap();
+        let mut staging = StagingFile::create(
+            &resolver,
+            client.backend_identity(),
+            TEST_BUCKET,
+            "overwrite.txt",
+        )
+        .unwrap();
         staging.write(replacement).unwrap();
         drop(staging);
 
-        let info = client
-            .upload(STORE_ID, TEST_BUCKET, "overwrite.txt")
-            .unwrap();
+        let info = client.upload(TEST_BUCKET, "overwrite.txt").unwrap();
         assert_eq!(info.size, replacement.len() as u64);
 
         client
-            .invalidate_object_cache(STORE_ID, TEST_BUCKET, "overwrite.txt")
+            .invalidate_object_cache(TEST_BUCKET, "overwrite.txt")
             .unwrap();
 
-        let mut f = client.open(STORE_ID, TEST_BUCKET, "overwrite.txt").unwrap();
+        let mut f = client.open(TEST_BUCKET, "overwrite.txt").unwrap();
         assert_eq!(f.size(), replacement.len() as u64);
         f.seek(SeekFrom::Start(0));
         assert_eq!(
@@ -156,14 +154,12 @@ async fn delete_removes_object_on(kind: CacheIndexKind) {
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
 
-        let mut f = client.open(STORE_ID, TEST_BUCKET, "deleteme.txt").unwrap();
+        let mut f = client.open(TEST_BUCKET, "deleteme.txt").unwrap();
         f.close().unwrap();
 
-        client
-            .delete(STORE_ID, TEST_BUCKET, "deleteme.txt")
-            .unwrap();
+        client.delete(TEST_BUCKET, "deleteme.txt").unwrap();
 
-        let result = client.open(STORE_ID, TEST_BUCKET, "deleteme.txt");
+        let result = client.open(TEST_BUCKET, "deleteme.txt");
         assert!(result.is_err(), "expected open to fail after delete");
     })
     .await

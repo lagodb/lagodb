@@ -9,7 +9,6 @@ use crate::object::{ObjectInfo, ObjectLocation};
 use crate::service::StorageService;
 use crate::service::command::{OpenCommand, ReadCommand, StorageCommand};
 use crate::service::reply::CommandOutput;
-use crate::session::handle_table::HandleTable;
 
 use super::fixtures::{
     BUCKET, DEFAULT_STORE, SMALL_KEY, close, default_location, invalidate_cmd,
@@ -28,7 +27,7 @@ async fn open_small_object_populates_small_kv() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
 
@@ -57,7 +56,7 @@ async fn small_cache_hit_open_does_not_head_backend() {
             .unwrap(),
         cache,
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let first = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
     assert_eq!(backend.head_call_count(), 1);
@@ -141,7 +140,7 @@ async fn invalidate_small_object_cache_is_busy_while_handle_is_open() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
     let error = match service.execute(&handles, invalidate_cmd(SMALL_KEY)).await {
@@ -185,10 +184,10 @@ async fn small_read_keeps_residency_bytes_after_durable_rewrite() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
-    assert_eq!(handles.get(open.handle).unwrap().size, 3);
+    assert_eq!(handles.handles.get(open.handle).unwrap().size, 3);
 
     cache.index().delete_meta_and_small(&key).await.unwrap();
     cache
@@ -231,7 +230,7 @@ async fn invalidate_object_cache_from_task_after_close_removes_small_kv() {
             .unwrap(),
         cache.clone(),
     ));
-    let handles = std::sync::Arc::new(HandleTable::new());
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
     let (tx, rx) = oneshot::channel::<()>();
@@ -269,7 +268,7 @@ async fn explicit_invalidate_allows_next_open_to_refresh_small_object() {
             .unwrap(),
         cache.clone(),
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
     close(&service, &handles, open.handle).await;
@@ -305,13 +304,12 @@ async fn open_rejects_unrepresentable_cache_paths_before_small_kv_cache() {
             .unwrap(),
         cache,
     );
-    let handles = HandleTable::new();
+    let handles = service.test_context();
 
     let error = service
         .execute(
             &handles,
             StorageCommand::Open(OpenCommand {
-                store_id: DEFAULT_STORE.to_string(),
                 bucket: BUCKET.to_string(),
                 key: object_name,
                 flags: OpenFlags::READ_ONLY,
@@ -340,12 +338,13 @@ async fn read_rejects_handle_without_bound_residency() {
             .unwrap(),
         cache,
     );
-    let handles = HandleTable::new();
-    let store = service.registry().resolve(key.store_id()).unwrap();
+    let handles = service.test_context();
+    let backend = handles.attached().unwrap().backend();
     let state = handles
+        .handles
         .open(
             key.clone(),
-            store,
+            backend,
             ObjectInfo {
                 size: 3,
                 etag: None,

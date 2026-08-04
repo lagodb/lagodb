@@ -35,7 +35,6 @@ const OBJECT_STORAGE_DEFAULTS_PATH: &str =
     "tests/e2e/config/object_storage.defaults.env";
 
 pub const TEST_BUCKET: &str = "test-bucket";
-pub const STORE_ID: &str = "minio";
 
 #[derive(Clone, Debug)]
 struct MinioDockerConfig {
@@ -320,11 +319,6 @@ impl ServerFixture {
         &self.workspace.cache_dir
     }
 
-    pub fn connect(&self) -> StorageClient {
-        StorageClient::connect(&self.workspace.socket_path)
-            .expect("failed to connect client")
-    }
-
     /// Restarts the server in the same workspace, preserving cache files and redb state.
     pub async fn restart(&mut self) {
         self.shutdown().await;
@@ -384,8 +378,8 @@ impl Drop for ServerFixture {
 // E2eHarness
 // ---------------------------------------------------------------------------
 
-/// Full E2E harness: MinIO container + storage server + store registered via
-/// the client wire protocol (`RegisterStore` RPC).
+/// Full E2E harness: MinIO container plus a storage server. Each client attaches
+/// the MinIO configuration while connecting.
 ///
 /// Drop order: server first (abort task, clean temp dir), then MinIO container.
 pub struct E2eHarness {
@@ -394,8 +388,7 @@ pub struct E2eHarness {
 }
 
 impl E2eHarness {
-    /// Starts MinIO + an in-memory-index server and registers the store via the
-    /// client wire path.
+    /// Starts MinIO plus an in-memory-index server.
     pub async fn start() -> Self {
         Self::start_with_index(CacheIndexKind::InMemory).await
     }
@@ -410,37 +403,31 @@ impl E2eHarness {
         let minio = MinioFixture::start().await;
         minio.create_bucket(TEST_BUCKET).await;
         let server = ServerFixture::start_with_index(kind).await;
-        Self::register_store_via_wire(&server, &minio).await;
         Self { server, minio }
     }
 
-    /// Restarts the storage server in-place and re-registers the MinIO store through the wire path.
+    /// Restarts the storage server in-place. Configured contexts are attached
+    /// again by each new client connection.
     pub async fn restart_server(&mut self) {
         self.server.restart().await;
-        Self::register_store_via_wire(&self.server, &self.minio).await;
-    }
-
-    /// Registers the MinIO store through the `RegisterStore` wire protocol —
-    /// the same path production clients use.
-    async fn register_store_via_wire(server: &ServerFixture, minio: &MinioFixture) {
-        let socket = server.socket_path().to_path_buf();
-        let config = minio.store_config();
-        tokio::task::spawn_blocking(move || {
-            let client = StorageClient::connect(&socket).unwrap();
-            client.register_store(STORE_ID, config).unwrap();
-        })
-        .await
-        .expect("register_store via wire panicked");
     }
 
     /// Creates a blocking [`StorageClient`] connected to the server.
     pub fn connect(&self) -> StorageClient {
-        self.server.connect()
+        StorageClient::connect_configured(
+            self.server.socket_path(),
+            Arc::new(self.minio.store_config()),
+        )
+        .expect("failed to connect configured client")
     }
 
     /// Socket path (for concurrent tests that open many connections).
     pub fn socket_path(&self) -> &Path {
         self.server.socket_path()
+    }
+
+    pub fn store_config(&self) -> StoreConfig {
+        self.minio.store_config()
     }
 
     /// Cache directory (for constructing a [`StagingPathResolver`] in tests).

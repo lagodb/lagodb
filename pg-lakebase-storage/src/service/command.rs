@@ -4,20 +4,21 @@
 //! (and their attachments) live in [`crate::service::reply`] so the input and result vocabularies
 //! stay on opposite sides of the service boundary.
 
+use std::sync::Arc;
+
 use crate::backend::StoreConfig;
 use crate::handle::{FileHandle, OpenFlags};
 use crate::protocol::ListCursor;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StorageCommand {
+    AttachManaged(AttachManagedCommand),
+    AttachConfigured(AttachConfiguredCommand),
     Open(OpenCommand),
     Head(HeadCommand),
     Read(ReadCommand),
     Close(CloseCommand),
     Upload(UploadCommand),
-    RegisterStore(RegisterStoreCommand),
-    UnregisterStore(UnregisterStoreCommand),
-    PurgeStoreCache(PurgeStoreCacheCommand),
     ProbeStore(ProbeStoreCommand),
     InvalidateObjectCache(InvalidateObjectCacheCommand),
     Delete(DeleteCommand),
@@ -27,9 +28,18 @@ pub(crate) enum StorageCommand {
     CloseList(CloseListCommand),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AttachManagedCommand {
+    pub volume_id: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AttachConfiguredCommand {
+    pub config: Arc<StoreConfig>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OpenCommand {
-    pub store_id: String,
     pub bucket: String,
     pub key: String,
     pub flags: OpenFlags,
@@ -37,37 +47,18 @@ pub(crate) struct OpenCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HeadCommand {
-    pub store_id: String,
     pub bucket: String,
     pub key: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RegisterStoreCommand {
-    pub store_id: String,
-    pub config: StoreConfig,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct UnregisterStoreCommand {
-    pub store_id: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PurgeStoreCacheCommand {
-    pub store_id: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProbeStoreCommand {
-    pub store_id: String,
     pub bucket: String,
     pub root_prefix: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InvalidateObjectCacheCommand {
-    pub store_id: String,
     pub bucket: String,
     pub key: String,
 }
@@ -84,7 +75,7 @@ pub(crate) struct CloseCommand {
     pub handle: FileHandle,
 }
 
-/// `Upload` is addressed by `(store_id, bucket, key)` rather than a server-side handle: staging
+/// `Upload` is addressed by `(bucket, key)` rather than a server-side handle: staging
 /// is intentionally stateless on the server. The database (caller) wrote the file directly into
 /// the staging directory through the filesystem (paths derived via
 /// [`crate::staging::StagingPathResolver`]) and Upload just asks the server to upload that local
@@ -92,35 +83,30 @@ pub(crate) struct CloseCommand {
 /// server has neither a stage-create nor an abort verb.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UploadCommand {
-    pub store_id: String,
     pub bucket: String,
     pub key: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeleteCommand {
-    pub store_id: String,
     pub bucket: String,
     pub key: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeletePrefixCommand {
-    pub store_id: String,
     pub bucket: String,
     pub prefix: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeleteObjectsCommand {
-    pub store_id: String,
     pub bucket: String,
     pub keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ListCommand {
-    pub store_id: String,
     pub bucket: String,
     pub prefix: Option<String>,
     pub page_size: u32,

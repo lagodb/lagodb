@@ -1,8 +1,10 @@
 //! Read-path E2E tests: client → Unix socket → server → cache → MinIO.
 
+use std::sync::Arc;
+
 use pg_lakebase_storage::{SeekFrom, StorageClient};
 
-use crate::harness::{CacheIndexKind, E2eHarness, STORE_ID, TEST_BUCKET};
+use crate::harness::{CacheIndexKind, E2eHarness, TEST_BUCKET};
 
 #[tokio::test]
 async fn open_and_read_object() {
@@ -12,7 +14,7 @@ async fn open_and_read_object() {
 
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
-        let mut file = client.open(STORE_ID, TEST_BUCKET, "dir/file.txt").unwrap();
+        let mut file = client.open(TEST_BUCKET, "dir/file.txt").unwrap();
         assert_eq!(file.size(), payload.len() as u64);
 
         let data = file.read(5).unwrap();
@@ -34,7 +36,7 @@ async fn seek_and_read() {
 
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
-        let mut f = client.open(STORE_ID, TEST_BUCKET, "seek.bin").unwrap();
+        let mut f = client.open(TEST_BUCKET, "seek.bin").unwrap();
 
         f.seek(SeekFrom::Start(5));
         assert_eq!(f.read(4).unwrap(), b"BBBB");
@@ -60,7 +62,7 @@ async fn read_into_buffer() {
 
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
-        let mut file = client.open(STORE_ID, TEST_BUCKET, "buf.txt").unwrap();
+        let mut file = client.open(TEST_BUCKET, "buf.txt").unwrap();
 
         let mut buf = [0u8; 64];
         let n = file.read_into(&mut buf).unwrap();
@@ -81,11 +83,11 @@ async fn second_open_uses_direct_io_after_cache_fill() {
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
 
-        let mut f1 = client.open(STORE_ID, TEST_BUCKET, "dio.txt").unwrap();
+        let mut f1 = client.open(TEST_BUCKET, "dio.txt").unwrap();
         assert_eq!(f1.read(payload.len() as u32).unwrap(), payload.as_ref());
         f1.close().unwrap();
 
-        let mut f2 = client.open(STORE_ID, TEST_BUCKET, "dio.txt").unwrap();
+        let mut f2 = client.open(TEST_BUCKET, "dio.txt").unwrap();
         assert!(f2.is_direct_io(), "expected direct-IO on cached re-open");
         assert_eq!(f2.read(payload.len() as u32).unwrap(), payload.as_ref());
         f2.close().unwrap();
@@ -104,7 +106,7 @@ async fn list_objects() {
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
         let entries: Vec<_> = client
-            .list(STORE_ID, TEST_BUCKET, Some("list/"))
+            .list(TEST_BUCKET, Some("list/"))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
@@ -136,13 +138,13 @@ async fn small_object_uses_kv_path() {
 
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
-        let mut f = client.open(STORE_ID, TEST_BUCKET, "small.txt").unwrap();
+        let mut f = client.open(TEST_BUCKET, "small.txt").unwrap();
         assert_eq!(f.size(), 4);
         assert_eq!(f.read(4).unwrap(), payload.as_ref());
         f.close().unwrap();
 
         // Second open — SmallKV objects may not promote to direct-IO.
-        let mut f2 = client.open(STORE_ID, TEST_BUCKET, "small.txt").unwrap();
+        let mut f2 = client.open(TEST_BUCKET, "small.txt").unwrap();
         assert_eq!(f2.read(4).unwrap(), payload.as_ref());
         f2.close().unwrap();
     })
@@ -160,11 +162,11 @@ async fn redb_index_read_path() {
 
     tokio::task::spawn_blocking(move || {
         let client = h.connect();
-        let mut f = client.open(STORE_ID, TEST_BUCKET, "redb.txt").unwrap();
+        let mut f = client.open(TEST_BUCKET, "redb.txt").unwrap();
         assert_eq!(f.read(payload.len() as u32).unwrap(), payload.as_ref());
         f.close().unwrap();
 
-        let mut f2 = client.open(STORE_ID, TEST_BUCKET, "redb.txt").unwrap();
+        let mut f2 = client.open(TEST_BUCKET, "redb.txt").unwrap();
         assert!(
             f2.is_direct_io(),
             "expected direct-IO on redb cached re-open"
@@ -184,18 +186,19 @@ async fn redb_restart_recovers_cached_complete_file() {
     h.seed_object(key, &payload).await;
 
     let socket = h.socket_path().to_path_buf();
+    let config = Arc::new(h.store_config());
     let expected = payload.clone();
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&socket).unwrap();
+        let client = StorageClient::connect_configured(&socket, config).unwrap();
 
-        let mut cold = client.open(STORE_ID, TEST_BUCKET, key).unwrap();
+        let mut cold = client.open(TEST_BUCKET, key).unwrap();
         assert_eq!(
             cold.read(expected.len() as u32).unwrap(),
             expected.as_slice()
         );
         cold.close().unwrap();
 
-        let mut cached = client.open(STORE_ID, TEST_BUCKET, key).unwrap();
+        let mut cached = client.open(TEST_BUCKET, key).unwrap();
         assert!(cached.is_direct_io(), "expected direct-IO before restart");
         assert_eq!(
             cached.read(expected.len() as u32).unwrap(),
@@ -209,9 +212,10 @@ async fn redb_restart_recovers_cached_complete_file() {
     h.restart_server().await;
 
     let socket = h.socket_path().to_path_buf();
+    let config = Arc::new(h.store_config());
     tokio::task::spawn_blocking(move || {
-        let client = StorageClient::connect(&socket).unwrap();
-        let mut file = client.open(STORE_ID, TEST_BUCKET, key).unwrap();
+        let client = StorageClient::connect_configured(&socket, config).unwrap();
+        let mut file = client.open(TEST_BUCKET, key).unwrap();
         assert!(
             file.is_direct_io(),
             "expected direct-IO from persisted redb cache after restart"

@@ -17,7 +17,7 @@ use crate::cache::{
     SmallScanCursor, SmallScanPage,
 };
 use crate::error::StorageResult;
-use crate::object::{ObjectInfo, ObjectLocation};
+use crate::object::{ObjectInfo, ObjectLocation, ObjectPath};
 
 /// [`ObjectBackend`] wrapper that blocks the first `get_range` until the test releases it.
 pub(crate) struct BlockingRangeBackend {
@@ -54,13 +54,13 @@ impl BlockingRangeBackend {
 
 #[async_trait]
 impl ObjectBackend for BlockingRangeBackend {
-    async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, key: &ObjectPath) -> StorageResult<ObjectInfo> {
         self.inner.head(key).await
     }
 
     async fn get_range(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         self.range_gets.fetch_add(1, Ordering::AcqRel);
@@ -73,7 +73,7 @@ impl ObjectBackend for BlockingRangeBackend {
 
     async fn put_from_file(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         path: &std::path::Path,
         len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -82,25 +82,23 @@ impl ObjectBackend for BlockingRangeBackend {
 
     fn list(
         &self,
-        store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
     ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
     {
-        self.inner.list(store_id, bucket, prefix)
+        self.inner.list(bucket, prefix)
     }
 
-    async fn delete(&self, key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, key: &ObjectPath) -> StorageResult<()> {
         self.inner.delete(key).await
     }
 
     fn delete_stream(
         &self,
-        store_id: &str,
         bucket: &str,
         keys: futures::stream::BoxStream<'static, StorageResult<String>>,
     ) -> futures::stream::BoxStream<'static, StorageResult<String>> {
-        self.inner.delete_stream(store_id, bucket, keys)
+        self.inner.delete_stream(bucket, keys)
     }
 }
 
@@ -153,7 +151,7 @@ impl BlockingHeadBackend {
 
 #[async_trait]
 impl ObjectBackend for BlockingHeadBackend {
-    async fn head(&self, key: &ObjectLocation) -> StorageResult<ObjectInfo> {
+    async fn head(&self, key: &ObjectPath) -> StorageResult<ObjectInfo> {
         self.head_calls.fetch_add(1, Ordering::AcqRel);
         let is_first = self.block_next_head.swap(false, Ordering::AcqRel);
         if is_first {
@@ -168,7 +166,7 @@ impl ObjectBackend for BlockingHeadBackend {
 
     async fn get_range(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
         self.inner.get_range(key, range).await
@@ -176,7 +174,7 @@ impl ObjectBackend for BlockingHeadBackend {
 
     async fn put_from_file(
         &self,
-        key: &ObjectLocation,
+        key: &ObjectPath,
         path: &std::path::Path,
         len: u64,
     ) -> StorageResult<ObjectInfo> {
@@ -185,25 +183,23 @@ impl ObjectBackend for BlockingHeadBackend {
 
     fn list(
         &self,
-        store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
     ) -> futures::stream::BoxStream<'static, StorageResult<crate::object::ListEntry>>
     {
-        self.inner.list(store_id, bucket, prefix)
+        self.inner.list(bucket, prefix)
     }
 
-    async fn delete(&self, key: &ObjectLocation) -> StorageResult<()> {
+    async fn delete(&self, key: &ObjectPath) -> StorageResult<()> {
         self.inner.delete(key).await
     }
 
     fn delete_stream(
         &self,
-        store_id: &str,
         bucket: &str,
         keys: futures::stream::BoxStream<'static, StorageResult<String>>,
     ) -> futures::stream::BoxStream<'static, StorageResult<String>> {
-        self.inner.delete_stream(store_id, bucket, keys)
+        self.inner.delete_stream(bucket, keys)
     }
 }
 

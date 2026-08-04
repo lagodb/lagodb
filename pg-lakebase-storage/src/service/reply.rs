@@ -51,14 +51,12 @@ pub(crate) enum ResponseAttachment {
 
 #[derive(Debug)]
 pub(crate) enum CommandOutput {
+    Attach { backend_identity: String },
     Open(OpenOutput),
     Head(HeadOutput),
     Read(ReadOutput),
     Close,
     Upload(UploadOutput),
-    RegisterStore(RegisterStoreOutput),
-    UnregisterStore(UnregisterStoreOutput),
-    PurgeStoreCache,
     ProbeStore(crate::backend::StorageProbeResult),
     InvalidateObjectCache(InvalidateObjectCacheOutput),
     Delete,
@@ -109,16 +107,6 @@ pub(crate) struct OpenOutput {
 pub(crate) struct HeadOutput {
     pub size: u64,
     pub etag: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RegisterStoreOutput {
-    pub replaced: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct UnregisterStoreOutput {
-    pub removed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

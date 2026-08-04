@@ -5,7 +5,7 @@
 //! * [`direct_io`]       — `CompleteFile` direct-IO open/read path and associated invalidation.
 //! * [`large_objects`]   — large-fill lease lifecycle, aborts, partial-file semantics.
 //! * [`limits`]          — open-handle capacity enforcement.
-//! * [`registry`]        — routing opens to named backends through [`crate::backend::StoreRegistry`].
+//! * [`registry`]        — managed/configured attach semantics and physical context isolation.
 //! * [`small_objects`]   — `SmallKV` open/read/invalidate semantics.
 
 mod fixtures;

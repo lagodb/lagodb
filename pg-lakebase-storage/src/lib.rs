@@ -20,17 +20,18 @@ pub mod staging;
 pub mod transport;
 
 pub use backend::{
-    AzureStoreConfig, ConfiguredObjectBackend, GcsStoreConfig, MemoryObjectBackend,
-    ObjectBackend, ObjectStoreBackend, RegisteredStore, S3CompatibleStoreConfig,
-    S3StoreConfig, SecretString, StorageProbeResult, StoreConfig, StoreRegistry,
+    AzureStoreConfig, BackendDataIdentity, BackendPool, ConfiguredObjectBackend,
+    GcsStoreConfig, ManagedStoreRegistry, ManagedStoreSlot, MemoryObjectBackend,
+    ObjectBackend, ObjectStoreBackend, S3CompatibleStoreConfig, S3StoreConfig,
+    SecretString, StorageProbeResult, StoreConfig,
 };
 pub use builder::StorageServerBuilder;
 pub use cache::{
     CacheCleanupPolicy, CacheCleanupReport, CacheDeleteReason, CacheIndex,
-    CacheInvalidateReport, CacheManager, CachePathResolver, CachePurgeReport,
-    CacheRecoveryReport, CacheState, CacheStore, CacheStoreKind, CacheUsageSnapshot,
-    CachedObjectMeta, InMemoryCacheIndex, LogicalCacheUsage, PhysicalCacheEntry,
-    PhysicalCacheId, PhysicalCacheStat, PhysicalCacheUsage, RedbCacheIndex,
+    CacheInvalidateReport, CacheManager, CachePathResolver, CacheRecoveryReport,
+    CacheState, CacheStore, CacheStoreKind, CacheUsageSnapshot, CachedObjectMeta,
+    InMemoryCacheIndex, LogicalCacheUsage, PhysicalCacheEntry, PhysicalCacheId,
+    PhysicalCacheStat, PhysicalCacheUsage, RedbCacheIndex,
 };
 pub use client::{
     DEFAULT_CLIENT_CLEANUP_TIMEOUT, ExternalFdLease, ExternalFdPolicy, ListIter,
@@ -52,7 +53,7 @@ pub use error::{StorageError, StorageErrorKind, StorageResult};
 pub use handle::{FileHandle, OpenFileState, OpenFlags};
 pub use object::{
     DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, ListEntry, ObjectInfo,
-    ObjectLocation, StoreId,
+    ObjectLocation, ObjectPath,
 };
 pub use protocol::ListCursor;
 pub use request::{

@@ -19,7 +19,7 @@ use crate::service::command::ReadCommand;
 use crate::service::reply::{CommandOutput, ServiceReply};
 use crate::session::handle_table::{HandleTable, ReadHandleGuard};
 
-impl<I: CacheIndex + 'static> StorageService<I> {
+impl<I: CacheIndex> StorageService<I> {
     pub(super) async fn handle_read(
         &self,
         handles: &HandleTable,
@@ -65,7 +65,7 @@ struct RangeReader<'a, I: CacheIndex> {
     len: u32,
 }
 
-impl<I: CacheIndex + 'static> RangeReader<'_, I> {
+impl<I: CacheIndex> RangeReader<'_, I> {
     async fn run(self) -> StorageResult<ServiceReply> {
         let Some(residency) = self.state.residency.clone() else {
             return Err(StorageError::cache(format!(
@@ -154,8 +154,11 @@ impl<I: CacheIndex + 'static> RangeReader<'_, I> {
                         self.service.cache.download_guard(&self.state.key).await;
                     let info = session.info();
                     let range = self.service.cache.chunk_range_for(info.size, chunk);
-                    let data =
-                        self.state.store.get_range(&self.state.key, range).await?;
+                    let data = self
+                        .state
+                        .backend
+                        .get_range(self.state.key.path(), range)
+                        .await?;
                     self.service
                         .cache
                         .store_large_chunk_for_session(

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tracing::warn;
 
-use crate::backend::RegisteredStore;
+use crate::backend::ObjectBackend;
 use crate::cache::Residency;
 use crate::config::DEFAULT_MAX_OPEN_HANDLES_PER_CONNECTION;
 use crate::error::{StorageError, StorageResult};
@@ -64,7 +64,7 @@ pub(crate) struct OpenHandleSlot {
 pub(crate) struct ReservedOpen {
     pub(crate) slot: OpenHandleSlot,
     pub(crate) key: ObjectLocation,
-    pub(crate) store: Arc<RegisteredStore>,
+    pub(crate) backend: Arc<dyn ObjectBackend>,
     pub(crate) info: ObjectInfo,
     pub(crate) flags: OpenFlags,
     pub(crate) residency: Option<Arc<Residency>>,
@@ -133,7 +133,7 @@ impl HandleTable {
     pub fn open(
         &self,
         key: ObjectLocation,
-        store: Arc<RegisteredStore>,
+        backend: Arc<dyn ObjectBackend>,
         info: ObjectInfo,
         flags: OpenFlags,
     ) -> StorageResult<OpenFileState> {
@@ -141,7 +141,7 @@ impl HandleTable {
         Ok(self.open_reserved(ReservedOpen {
             slot,
             key,
-            store,
+            backend,
             info,
             flags,
             residency: None,
@@ -153,7 +153,7 @@ impl HandleTable {
         let ReservedOpen {
             slot,
             key,
-            store,
+            backend,
             info,
             flags,
             residency,
@@ -161,7 +161,7 @@ impl HandleTable {
         let state = OpenFileState {
             handle,
             key,
-            store,
+            backend,
             size: info.size,
             etag: info.etag,
             flags,
@@ -322,8 +322,7 @@ mod tests {
 
     use tokio::time::timeout;
 
-    use crate::backend::{MemoryObjectBackend, StoreRegistry};
-    use crate::object::StoreId;
+    use crate::backend::MemoryObjectBackend;
 
     use super::*;
 
@@ -385,20 +384,12 @@ mod tests {
     }
 
     fn open_test_handle(handles: &HandleTable) -> OpenFileState {
-        let registry = StoreRegistry::new();
-        registry
-            .register_shared_backend(
-                TEST_STORE_ID,
-                Arc::new(MemoryObjectBackend::new()),
-            )
-            .unwrap();
-        let registered = registry
-            .resolve(&StoreId::new(TEST_STORE_ID).unwrap())
-            .unwrap();
+        let backend: Arc<dyn crate::backend::ObjectBackend> =
+            Arc::new(MemoryObjectBackend::new());
         handles
             .open(
                 ObjectLocation::new(TEST_STORE_ID, "bucket", "file").unwrap(),
-                registered,
+                backend,
                 ObjectInfo {
                     size: 8,
                     etag: None,

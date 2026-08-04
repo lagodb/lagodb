@@ -19,14 +19,16 @@
 use std::cell::{RefCell, RefMut};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::{StorageProbeResult, StoreConfig};
+use crate::backend::{BackendDataIdentity, StorageProbeResult, StoreConfig};
 use crate::error::{StorageError, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::object::ObjectInfo;
 use crate::protocol::{ListCursor, WireRequestPayload, WireResponsePayload};
 
+mod attach;
 mod client_builder;
 mod connection;
 mod fd;
@@ -78,16 +80,15 @@ pub struct StorageClient {
     // One client is one blocking protocol state machine. Clones share it within one thread
     // without pretending the connection is safe for concurrent use.
     inner: Rc<RefCell<ClientConnection>>,
+    backend_identity: Arc<BackendDataIdentity>,
 }
 
-// SAFETY: this is a temporary compatibility boundary for `pg-iceberg-am`, whose
-// `iceberg-lite` storage traits inherit upstream `Send + Sync` bounds. The
-// PostgreSQL AM integration uses `StorageClient` only from one backend thread with
-// blocking, non-multiplexed calls. `StorageClient` must not be moved to a worker
-// thread or shared for concurrent use; doing so would violate the `Rc<RefCell<_>>`
-// invariants and PostgreSQL FD-accounting thread affinity. This remains an
-// acknowledged soundness risk until the Parquet `ChunkReader` boundary is
-// redesigned without per-read owner-thread checks.
+// SAFETY: this implementation relies on the embedding PostgreSQL extension's
+// closed-world execution invariant. `iceberg-lite` retains upstream `Send +
+// Sync` storage-trait bounds, while the adapted synchronous execution model
+// performs every operation, clone, and drop on one backend main thread.
+// Moving or sharing a client across threads violates this contract. No runtime
+// owner-thread check is placed in READ or other object-operation hot paths.
 unsafe impl Send for StorageClient {}
 unsafe impl Sync for StorageClient {}
 
@@ -121,8 +122,20 @@ impl StorageClient {
         StorageClientBuilder::new(socket_path)
     }
 
-    pub fn connect(socket_path: impl AsRef<Path>) -> StorageResult<Self> {
-        Self::builder(socket_path).connect()
+    pub fn connect_managed(
+        socket_path: impl AsRef<Path>,
+        volume_id: u64,
+    ) -> StorageResult<Self> {
+        Self::builder(socket_path)
+            .managed_volume(volume_id)
+            .connect()
+    }
+
+    pub fn connect_configured(
+        socket_path: impl AsRef<Path>,
+        config: Arc<StoreConfig>,
+    ) -> StorageResult<Self> {
+        Self::builder(socket_path).configured(config).connect()
     }
 
     /// Connect with descriptor accounting supplied by the embedding runtime.
@@ -130,11 +143,15 @@ impl StorageClient {
     /// The policy reserves one descriptor before the socket is opened and is
     /// retained by the shared connection state. It is also used before each
     /// direct-I/O descriptor is received.
-    pub fn connect_with_fd_policy(
+    pub fn connect_managed_with_fd_policy(
         socket_path: impl AsRef<Path>,
+        volume_id: u64,
         fd_policy: Box<dyn ExternalFdPolicy>,
     ) -> StorageResult<Self> {
-        Self::builder(socket_path).fd_policy(fd_policy).connect()
+        Self::builder(socket_path)
+            .managed_volume(volume_id)
+            .fd_policy(fd_policy)
+            .connect()
     }
 
     /// Connect synchronously, then use bounded nonblocking socket operations.
@@ -144,21 +161,30 @@ impl StorageClient {
     /// One absolute deadline covers each complete request/response exchange;
     /// the initial Unix-socket connect remains blocking. A zero timeout is
     /// rejected as invalid configuration.
-    pub fn connect_with_timeout(
+    pub fn connect_managed_with_timeout(
         socket_path: impl AsRef<Path>,
+        volume_id: u64,
         timeout: Duration,
     ) -> StorageResult<Self> {
         Self::builder(socket_path)
+            .managed_volume(volume_id)
             .operation_timeout(timeout)
             .cleanup_timeout(timeout)
             .connect()
     }
 
     fn from_builder(builder: StorageClientBuilder) -> StorageResult<Self> {
-        let (transport, fd_policy) = builder.into_parts()?;
+        let (transport, fd_policy, attach) = builder.into_parts()?;
+        let mut connection = ClientConnection::new(transport, fd_policy);
+        let backend_identity = attach::attach(&mut connection, attach)?;
         Ok(Self {
-            inner: Rc::new(RefCell::new(ClientConnection::new(transport, fd_policy))),
+            inner: Rc::new(RefCell::new(connection)),
+            backend_identity: Arc::new(backend_identity),
         })
+    }
+
+    pub fn backend_identity(&self) -> &BackendDataIdentity {
+        &self.backend_identity
     }
 
     fn connection(&self) -> StorageResult<RefMut<'_, ClientConnection>> {
@@ -201,6 +227,19 @@ impl StorageClient {
         Ok(())
     }
 
+    /// Returns whether this usable client is owned only by a connection cache.
+    ///
+    /// This is intended for cold-path connection-cache eviction. Open
+    /// [`StorageFile`] values retain a client clone, so they make the result
+    /// false without adding any check to READ operations.
+    pub fn is_unshared_and_usable(&self) -> bool {
+        Rc::strong_count(&self.inner) == 1
+            && self
+                .inner
+                .try_borrow()
+                .is_ok_and(|connection| connection.is_usable())
+    }
+
     fn reject_unexpected<T>(
         &self,
         operation: &str,
@@ -213,12 +252,10 @@ impl StorageClient {
 
     pub fn open(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<StorageFile> {
         let (response, direct_fd) = self.request(WireRequestPayload::Open {
-            store_id: store_id.into(),
             bucket: bucket.into(),
             key: key.into(),
             flags: OpenFlags::READ_ONLY,
@@ -252,12 +289,10 @@ impl StorageClient {
     /// into the cache.
     pub fn head(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<ObjectInfo> {
         let (response, _) = self.request(WireRequestPayload::Head {
-            store_id: store_id.into(),
             bucket: bucket.into(),
             key: key.into(),
         })?;
@@ -271,11 +306,10 @@ impl StorageClient {
     /// protocol errors are returned to the caller unchanged.
     pub fn exists(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<bool> {
-        match self.head(store_id, bucket, key) {
+        match self.head(bucket, key) {
             Ok(_) => Ok(true),
             Err(error)
                 if error.kind() == crate::error::StorageErrorKind::NotFound =>
@@ -295,17 +329,15 @@ impl StorageClient {
     /// no longer needs the local bytes: after a successful upload, on transaction abort before
     /// upload, or during crash recovery on database restart.
     ///
-    /// Upload does **not** invalidate any cached copy of `(store_id, bucket, key)`. If the
+    /// Upload does **not** invalidate the cached physical object. If the
     /// caller wants new opens to observe the just-uploaded bytes they must call
     /// [`Self::invalidate_object_cache`] explicitly.
     pub fn upload(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<UploadInfo> {
         let (response, _) = self.request(WireRequestPayload::Upload {
-            store_id: store_id.into(),
             bucket: bucket.into(),
             key: key.into(),
         })?;
@@ -317,60 +349,17 @@ impl StorageClient {
         }
     }
 
-    pub fn register_store(
-        &self,
-        store_id: impl Into<String>,
-        config: StoreConfig,
-    ) -> StorageResult<bool> {
-        let (response, _) = self.request(WireRequestPayload::RegisterStore {
-            store_id: store_id.into(),
-            config,
-        })?;
-        match response {
-            WireResponsePayload::RegisterStore { replaced } => Ok(replaced),
-            other => self.reject_unexpected("register-store", &other),
-        }
-    }
-
-    pub fn unregister_store(
-        &self,
-        store_id: impl Into<String>,
-    ) -> StorageResult<bool> {
-        let (response, _) = self.request(WireRequestPayload::UnregisterStore {
-            store_id: store_id.into(),
-        })?;
-        match response {
-            WireResponsePayload::UnregisterStore { removed } => Ok(removed),
-            other => self.reject_unexpected("unregister-store", &other),
-        }
-    }
-
-    pub fn purge_store_cache(
-        &self,
-        store_id: impl Into<String>,
-    ) -> StorageResult<()> {
-        let (response, _) = self.request(WireRequestPayload::PurgeStoreCache {
-            store_id: store_id.into(),
-        })?;
-        match response {
-            WireResponsePayload::PurgeStoreCache => Ok(()),
-            other => self.reject_unexpected("purge-store-cache", &other),
-        }
-    }
-
-    /// Runs an explicit end-to-end probe against an already-registered backend.
+    /// Runs an explicit end-to-end probe against the attached backend.
     ///
     /// The server checks listing, a create-only temporary write, metadata/read-back, and
     /// deletion under `root_prefix`. Backend operation failures are returned in the structured
     /// result; request/protocol failures remain [`StorageError`] values.
     pub fn probe_store(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         root_prefix: impl Into<String>,
     ) -> StorageResult<StorageProbeResult> {
         let (response, _) = self.request(WireRequestPayload::ProbeStore {
-            store_id: store_id.into(),
             bucket: bucket.into(),
             root_prefix: root_prefix.into(),
         })?;
@@ -382,13 +371,11 @@ impl StorageClient {
 
     pub fn invalidate_object_cache(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<bool> {
         let (response, _) =
             self.request(WireRequestPayload::InvalidateObjectCache {
-                store_id: store_id.into(),
                 bucket: bucket.into(),
                 key: key.into(),
             })?;
@@ -405,12 +392,10 @@ impl StorageClient {
     /// (skipped if the cache entry is currently active; the janitor will reclaim it later).
     pub fn delete(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> StorageResult<()> {
         let (response, _) = self.request(WireRequestPayload::Delete {
-            store_id: store_id.into(),
             bucket: bucket.into(),
             key: key.into(),
         })?;
@@ -438,12 +423,10 @@ impl StorageClient {
     /// in bounded batches. `delete_prefix` is a convenience method, not a bulk-throughput tool.
     pub fn delete_prefix(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         prefix: impl Into<String>,
     ) -> StorageResult<u64> {
         let (response, _) = self.request(WireRequestPayload::DeletePrefix {
-            store_id: store_id.into(),
             bucket: bucket.into(),
             prefix: prefix.into(),
         })?;
@@ -456,12 +439,10 @@ impl StorageClient {
     /// Deletes one bounded group of object keys through the backend bulk-delete path.
     pub fn delete_objects(
         &self,
-        store_id: impl Into<String>,
         bucket: impl Into<String>,
         keys: Vec<String>,
     ) -> StorageResult<u32> {
         let (response, _) = self.request(WireRequestPayload::DeleteObjects {
-            store_id: store_id.into(),
             bucket: bucket.into(),
             keys,
         })?;
@@ -469,84 +450,6 @@ impl StorageClient {
             WireResponsePayload::DeleteObjects { deleted } => Ok(deleted),
             other => self.reject_unexpected("delete-objects", &other),
         }
-    }
-
-    /// Fetches a single page of a `list` operation.
-    ///
-    /// Most callers should prefer [`Self::list`], which wraps this in an `Iterator` that pages
-    /// transparently. `list_page` is the lower-level handle for callers that need to drive
-    /// pagination explicitly (e.g. to persist cursors across process restarts or to interleave
-    /// list with other work without blocking on a long iteration).
-    ///
-    /// `page_size = 0` lets the server pick a default. The server may clamp very large page
-    /// sizes downwards.
-    pub fn list_page(
-        &self,
-        store_id: impl Into<String>,
-        bucket: impl Into<String>,
-        prefix: Option<&str>,
-        cursor: Option<ListCursor>,
-        page_size: u32,
-    ) -> StorageResult<ListPage> {
-        let (response, _) = self.request(WireRequestPayload::List {
-            store_id: store_id.into(),
-            bucket: bucket.into(),
-            prefix: prefix.map(str::to_string),
-            page_size,
-            cursor,
-        })?;
-        match response {
-            WireResponsePayload::List {
-                entries,
-                next_cursor,
-            } => Ok(ListPage {
-                entries: entries
-                    .into_iter()
-                    .map(|entry| ListEntry {
-                        key: entry.key,
-                        size: entry.size,
-                        etag: entry.etag,
-                        last_modified_ms: entry.last_modified_ms,
-                    })
-                    .collect(),
-                next_cursor,
-            }),
-            other => self.reject_unexpected("list", &other),
-        }
-    }
-
-    /// Releases a retained list cursor. Closing an expired cursor is idempotent.
-    pub fn close_list_cursor(&self, cursor: ListCursor) -> StorageResult<()> {
-        let (response, _) = self.request(WireRequestPayload::CloseList { cursor })?;
-        match response {
-            WireResponsePayload::CloseList => Ok(()),
-            other => self.reject_unexpected("close-list", &other),
-        }
-    }
-
-    /// Returns an iterator over every object whose key starts with `prefix` (or the entire
-    /// `(store_id, bucket)` namespace when `prefix` is `None`).
-    ///
-    /// The iterator buffers one page at a time and refills transparently when the buffer
-    /// drains. Pages are fetched at the server's default page size; for explicit control use
-    /// [`Self::list_page`].
-    ///
-    /// Per-entry iteration: `Item = StorageResult<ListEntry>`. Iteration stops at the first
-    /// `Err` (the underlying server-side cursor is dropped on the next refill); callers that
-    /// want to keep going after a transient backend error should use [`Self::list_page`]
-    /// directly so they can inspect and resume.
-    pub fn list(
-        &self,
-        store_id: impl Into<String>,
-        bucket: impl Into<String>,
-        prefix: Option<&str>,
-    ) -> ListIter<'_> {
-        ListIter::new(
-            self,
-            store_id.into(),
-            bucket.into(),
-            prefix.map(str::to_string),
-        )
     }
 
     fn read_into(

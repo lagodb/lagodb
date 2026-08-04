@@ -9,6 +9,7 @@ use crate::config::StorageServerConfig;
 use crate::error::StorageResult;
 use crate::session::StorageContext;
 
+mod attach;
 mod dispatch;
 mod inbound;
 mod pipeline;
@@ -17,6 +18,7 @@ mod response_budget;
 mod shutdown;
 mod writer;
 
+pub(crate) use attach::attach;
 use pipeline::process_connection_with_shutdown;
 use shutdown::ConnectionShutdown;
 

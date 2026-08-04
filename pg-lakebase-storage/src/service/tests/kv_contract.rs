@@ -44,7 +44,7 @@ use crate::service::command::{
     CloseCommand, OpenCommand, ReadCommand, StorageCommand,
 };
 use crate::service::reply::CommandOutput;
-use crate::session::handle_table::HandleTable;
+use crate::session::StorageContext;
 
 use super::fixtures::{BUCKET, DEFAULT_STORE, LARGE_KEY, SMALL_KEY, test_cache_dir};
 
@@ -58,7 +58,9 @@ type InstrumentedService = StorageService<
 
 struct Harness {
     service: InstrumentedService,
-    handles: HandleTable,
+    handles: StorageContext<
+        crate::cache::index::persistent::PersistentCacheIndex<CountingKv<RedbKv>>,
+    >,
     counts: Arc<KvCounts>,
 }
 
@@ -86,7 +88,7 @@ impl Harness {
             cache,
             crate::config::StorageServiceConfig::default(),
         );
-        let handles = HandleTable::new();
+        let handles = service.test_context();
         Self {
             service,
             handles,
@@ -100,7 +102,6 @@ impl Harness {
             .execute(
                 &self.handles,
                 StorageCommand::Open(OpenCommand {
-                    store_id: DEFAULT_STORE.to_string(),
                     bucket: BUCKET.to_string(),
                     key: key.to_string(),
                     flags: OpenFlags::READ_ONLY,

@@ -16,12 +16,26 @@ both subsystems depend on it.
   client_addr     Arc<str>                 peer identity for logging
   service         Arc<StorageService<I>>   shared across all connections
   handles         Arc<HandleTable>         per-connection handle registry
+  list_sessions   Arc<ListSessionTable>    per-connection list continuations
+  attached        OnceLock<AttachedStorageContext> one physical backend
   request_hooks   RequestHooks             per-connection hook callbacks
 ```
 
 One `StorageContext` is created per accepted socket. It is cheaply
 cloneable (all fields are `Arc` or `Clone`) so spawned request tasks can
 hold their own copy with shared underlying state.
+
+`AttachedStorageContext` has two construction sources: a managed volume slot
+or an inline configured backend plus its `BackendDataIdentity`. Attach is
+single-assignment. The connection handshake initializes the `OnceLock` before
+spawning request tasks; a second attach is a conflict and a data operation on
+an unattached context is a protocol error. Backend methods receive only
+`ObjectPath(bucket, key)`, while cache and staging derive `ObjectLocation`
+from the attached credential-free identity.
+
+Managed contexts retain the slot so later operations can observe a refreshed
+credential backend without changing physical cache identity. Configured
+contexts retain the resolved backend `Arc` for the connection lifetime.
 
 
 2  Handle Table
