@@ -1,144 +1,159 @@
 //! PostgreSQL-backend-local access to the runtime storage service.
 //!
-//! A backend uses one healthy foreground connection generation for every
-//! distributed tablespace. Object identity remains request-local; the socket
-//! is bound only to the cluster-local storage service endpoint.
+//! A backend caches one healthy foreground connection for each active managed
+//! volume or foreign user mapping. Every socket is attached to one physical
+//! storage context before object operations begin.
 //!
 //! The cached socket is deliberately backend-scoped rather than transaction-
 //! or `ResourceOwner`-scoped: PostgreSQL error unwinding drops open Rust file
 //! objects, while a healthy connection remains reusable after abort. A local
-//! transport/protocol failure poisons and closes its generation immediately;
-//! the next service operation installs a new generation.
+//! transport/protocol failure poisons and closes it immediately; the next
+//! replay-safe service operation attaches a replacement connection.
 
-use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use pg_lakebase_storage::{
-    ExternalFdLease, ExternalFdPolicy, ListCursor, ListPage, ObjectInfo, StagingFile,
-    StagingPathResolver, StorageClient, StorageError, StorageFile,
-    StorageProbeResult, StorageResult, UploadInfo,
+    ListCursor, ListPage, ObjectInfo, StagingFile, StagingPathResolver,
+    StorageClient, StorageError, StorageFile, StorageProbeResult, StorageResult,
+    StoreConfig, UploadInfo,
 };
 use pgrx::pg_sys;
 
 use super::StorageEndpoint;
+use super::connection::{
+    BackendAttach, BackendAttachedContext, BackendContextKey,
+    PostgresExternalFdPolicy, acquire_attached_client, attached_context,
+};
 use super::injection_points::StorageServiceInjectionPoints;
-use super::socket_wait::PostgresSocketWait;
-
-thread_local! {
-    static FOREGROUND_CONNECTION: RefCell<BackendConnectionManager> =
-        const { RefCell::new(BackendConnectionManager::new()) };
-}
 
 /// Cloneable PostgreSQL-facing storage service handle.
 ///
-/// This type stores only the stable endpoint. Each operation acquires the
-/// current healthy backend-local connection generation; open file handles stay
-/// bound to the generation that issued their server-side handle.
+/// Clones share one backend-local attached context. Foreign contexts are weakly
+/// interned, so their cache entries and open handles define the socket/config
+/// lifetime. Managed contexts remain strongly cached by their bounded volume
+/// ID. Both kinds of socket participate in the same bounded idle cache.
 #[derive(Clone)]
 pub struct BackendStorageService {
-    socket_path: Arc<PathBuf>,
+    context: Rc<BackendAttachedContext>,
 }
 
-impl std::fmt::Debug for BackendStorageService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+// SAFETY: this implementation relies on the extension's closed-world execution
+// invariant: PostgreSQL executes this service, every `StorageClient` operation,
+// and every clone/drop on one backend main thread. The upstream Iceberg storage
+// traits require `Send + Sync`, but the extension never moves or shares these
+// values across threads. Keeping `Rc` here avoids atomic reference counting on
+// the single-threaded database hot path.
+unsafe impl Send for BackendStorageService {}
+unsafe impl Sync for BackendStorageService {}
+
+impl fmt::Debug for BackendStorageService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BackendStorageService")
-            .field("socket_path", &self.socket_path)
+            .field("context_key", &self.context.key())
             .finish()
     }
 }
 
 impl BackendStorageService {
-    pub fn from_endpoint(endpoint: &StorageEndpoint) -> Self {
-        Self {
-            socket_path: Arc::new(endpoint.socket_path().to_path_buf()),
-        }
+    pub fn for_managed(
+        endpoint: &StorageEndpoint,
+        volume_id: u64,
+    ) -> StorageResult<Self> {
+        let context = attached_context(
+            endpoint.socket_path(),
+            BackendContextKey::Managed(volume_id),
+            BackendAttach::Managed(volume_id),
+            endpoint.max_idle_connections(),
+        )?;
+        Ok(Self { context })
     }
 
-    pub fn open(
-        &self,
-        store_id: &str,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<StorageFile> {
+    pub(crate) fn for_foreign(
+        endpoint: &StorageEndpoint,
+        umid: pg_sys::Oid,
+        config: Arc<StoreConfig>,
+    ) -> StorageResult<Self> {
+        let context = attached_context(
+            endpoint.socket_path(),
+            BackendContextKey::Foreign(u32::from(umid) as u64),
+            BackendAttach::Configured(config),
+            endpoint.max_idle_connections(),
+        )?;
+        Ok(Self { context })
+    }
+
+    pub fn open(&self, bucket: &str, key: &str) -> StorageResult<StorageFile> {
         self.with_replay_safe_client(|client| {
             StorageServiceInjectionPoints::FOREGROUND_BEFORE_OPEN.run();
-            client.open(store_id, bucket, key)
+            client.open(bucket, key)
         })
     }
 
-    pub fn head(
-        &self,
-        store_id: &str,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<ObjectInfo> {
-        self.with_replay_safe_client(|client| client.head(store_id, bucket, key))
+    pub fn head(&self, bucket: &str, key: &str) -> StorageResult<ObjectInfo> {
+        self.with_replay_safe_client(|client| client.head(bucket, key))
     }
 
-    pub fn upload(
-        &self,
-        store_id: &str,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<UploadInfo> {
-        self.with_client(|client| client.upload(store_id, bucket, key))
+    pub fn upload(&self, bucket: &str, key: &str) -> StorageResult<UploadInfo> {
+        self.with_non_replayable_client("upload", |client| client.upload(bucket, key))
     }
 
     pub fn probe_store(
         &self,
-        store_id: &str,
         bucket: &str,
         root_prefix: &str,
     ) -> StorageResult<StorageProbeResult> {
-        self.with_client(|client| client.probe_store(store_id, bucket, root_prefix))
+        self.with_client(|client| client.probe_store(bucket, root_prefix))
     }
 
     pub fn create_staging_file(
         &self,
         resolver: &StagingPathResolver,
-        store_id: &str,
         bucket: &str,
         key: &str,
     ) -> StorageResult<StagingFile> {
+        let client = self.acquire_client()?;
         StagingFile::create_with_fd_policy(
             resolver,
-            store_id,
+            client.backend_identity(),
             bucket,
             key,
             &PostgresExternalFdPolicy,
         )
     }
 
-    pub fn delete(
+    pub fn object_location(
         &self,
-        store_id: &str,
         bucket: &str,
         key: &str,
-    ) -> StorageResult<()> {
-        self.with_replay_safe_client(|client| client.delete(store_id, bucket, key))
+    ) -> StorageResult<pg_lakebase_storage::ObjectLocation> {
+        let client = self.acquire_client()?;
+        pg_lakebase_storage::ObjectLocation::new(
+            client.backend_identity().clone(),
+            bucket,
+            key,
+        )
     }
 
-    pub fn delete_prefix(
-        &self,
-        store_id: &str,
-        bucket: &str,
-        prefix: &str,
-    ) -> StorageResult<u64> {
-        self.with_client(|client| client.delete_prefix(store_id, bucket, prefix))
+    pub fn delete(&self, bucket: &str, key: &str) -> StorageResult<()> {
+        self.with_non_replayable_client("delete", |client| client.delete(bucket, key))
+    }
+
+    pub fn delete_prefix(&self, bucket: &str, prefix: &str) -> StorageResult<u64> {
+        self.with_non_replayable_client("delete prefix", |client| {
+            client.delete_prefix(bucket, prefix)
+        })
     }
 
     pub fn list_page(
         &self,
-        store_id: &str,
         bucket: &str,
         prefix: Option<&str>,
         cursor: Option<ListCursor>,
         page_size: u32,
     ) -> StorageResult<ListPage> {
-        self.with_client(|client| {
-            client.list_page(store_id, bucket, prefix, cursor, page_size)
-        })
+        self.with_client(|client| client.list_page(bucket, prefix, cursor, page_size))
     }
 
     fn with_client<T>(
@@ -147,6 +162,22 @@ impl BackendStorageService {
     ) -> StorageResult<T> {
         let client = self.acquire_client()?;
         operation(&client)
+    }
+
+    /// Runs an operation whose externally visible result cannot be inferred
+    /// after the request connection fails. The operation is never replayed.
+    fn with_non_replayable_client<T>(
+        &self,
+        operation_name: &'static str,
+        operation: impl FnOnce(&StorageClient) -> StorageResult<T>,
+    ) -> StorageResult<T> {
+        let client = self.acquire_client()?;
+        match operation(&client) {
+            Err(error) if !client.is_usable() => {
+                Err(StorageError::ambiguous(operation_name, error.to_string()))
+            }
+            result => result,
+        }
     }
 
     /// Runs an operation that is safe to replay once after a connection
@@ -167,163 +198,6 @@ impl BackendStorageService {
     }
 
     fn acquire_client(&self) -> StorageResult<StorageClient> {
-        FOREGROUND_CONNECTION.with(|manager| {
-            manager
-                .try_borrow_mut()
-                .map_err(|_| {
-                    StorageError::protocol(
-                        "backend storage connection manager is already in use",
-                    )
-                })?
-                .acquire(&self.socket_path)
-        })
-    }
-}
-
-struct BackendConnectionManager {
-    current: Option<CachedConnection>,
-}
-
-impl BackendConnectionManager {
-    const fn new() -> Self {
-        Self { current: None }
-    }
-
-    fn acquire(&mut self, socket_path: &Path) -> StorageResult<StorageClient> {
-        self.acquire_with(socket_path, |path| {
-            StorageClient::builder(path)
-                .fd_policy(Box::new(PostgresExternalFdPolicy))
-                .socket_waiter(Box::new(PostgresSocketWait::new()))
-                .connect()
-        })
-    }
-
-    fn acquire_with(
-        &mut self,
-        socket_path: &Path,
-        connect: impl FnOnce(&Path) -> StorageResult<StorageClient>,
-    ) -> StorageResult<StorageClient> {
-        if self.current.as_ref().is_some_and(|current| {
-            current.socket_path == socket_path && current.client.is_usable()
-        }) {
-            return Ok(self
-                .current
-                .as_ref()
-                .expect("healthy cached connection checked above")
-                .client
-                .clone());
-        }
-
-        if let Some(stale) = self.current.take() {
-            let _ = stale.client.invalidate();
-        }
-
-        let client = connect(socket_path)?;
-        self.current = Some(CachedConnection {
-            socket_path: socket_path.to_path_buf(),
-            client: client.clone(),
-        });
-        Ok(client)
-    }
-}
-
-struct CachedConnection {
-    socket_path: PathBuf,
-    client: StorageClient,
-}
-
-struct PostgresExternalFdPolicy;
-
-impl ExternalFdPolicy for PostgresExternalFdPolicy {
-    fn acquire(&self) -> StorageResult<Box<dyn ExternalFdLease>> {
-        // SAFETY: BackendStorageService is used only by the PostgreSQL backend
-        // main thread. AcquireExternalFD updates backend-local fd.c accounting.
-        if unsafe { pg_sys::AcquireExternalFD() } {
-            Ok(Box::new(PostgresExternalFdLease))
-        } else {
-            Err(StorageError::resource_exhausted(
-                "PostgreSQL external file descriptor budget exhausted",
-            ))
-        }
-    }
-}
-
-struct PostgresExternalFdLease;
-
-impl ExternalFdLease for PostgresExternalFdLease {}
-
-impl Drop for PostgresExternalFdLease {
-    fn drop(&mut self) {
-        // SAFETY: every lease is created only after AcquireExternalFD
-        // succeeds. BackendStorageService and the surrounding PostgreSQL
-        // extension remain confined to the owning backend thread.
-        unsafe {
-            pg_sys::ReleaseExternalFD();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::os::unix::net::UnixListener;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use super::*;
-
-    fn socket_path(name: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock must be after Unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "pg-lakebase-{name}-{}-{stamp}.sock",
-            std::process::id()
-        ))
-    }
-
-    #[test]
-    fn manager_reuses_one_healthy_connection_generation() {
-        let path = socket_path("reuse");
-        let listener = UnixListener::bind(&path).unwrap();
-        let accept = std::thread::spawn(move || listener.accept().unwrap().0);
-
-        let mut manager = BackendConnectionManager::new();
-        let first = manager
-            .acquire_with(&path, |path| StorageClient::connect(path))
-            .unwrap();
-        let _accepted = accept.join().unwrap();
-        let second = manager
-            .acquire_with(&path, |path| StorageClient::connect(path))
-            .unwrap();
-
-        first.invalidate().unwrap();
-        assert!(!second.is_usable());
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn manager_reconnects_after_generation_is_poisoned() {
-        let path = socket_path("reconnect");
-        let listener = UnixListener::bind(&path).unwrap();
-        let accept = std::thread::spawn(move || {
-            let first = listener.accept().unwrap().0;
-            drop(first);
-            listener.accept().unwrap().0
-        });
-
-        let mut manager = BackendConnectionManager::new();
-        let first = manager
-            .acquire_with(&path, |path| StorageClient::connect(path))
-            .unwrap();
-        assert!(first.head("store", "bucket", "key").is_err());
-        assert!(!first.is_usable());
-        let second = manager
-            .acquire_with(&path, |path| StorageClient::connect(path))
-            .unwrap();
-        let _accepted = accept.join().unwrap();
-
-        assert!(!first.is_usable());
-        assert!(second.is_usable());
-        std::fs::remove_file(path).unwrap();
+        acquire_attached_client(&self.context)
     }
 }

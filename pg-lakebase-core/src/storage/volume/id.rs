@@ -3,7 +3,6 @@
 use std::fmt;
 use std::num::NonZeroU64;
 
-use pg_lakebase_storage::StoreId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -13,8 +12,8 @@ const CROCKFORD_BASE32: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 /// Cluster-unique, monotonic storage-volume identity.
 ///
 /// IDs are positive PostgreSQL `bigint` values and are never reused. The
-/// compact Crockford Base32 representation is the sole conversion into the
-/// existing storage-service [`StoreId`] namespace.
+/// compact Crockford Base32 representation is used only in database-visible
+/// paths; the storage protocol uses the numeric volume identity at attach.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StorageVolumeId(NonZeroU64);
 
@@ -45,9 +44,9 @@ impl StorageVolumeId {
 
     /// Encode this ID once at a control-plane/context boundary.
     ///
-    /// The output is at most 13 lower-case ASCII characters and therefore
-    /// always satisfies `StoreId` validation.
-    pub fn to_store_id(self) -> StoreId {
+    /// The output is at most 13 lower-case ASCII characters and is used only
+    /// for database-visible diagnostics and derived object prefixes.
+    pub fn to_compact_string(self) -> String {
         let mut value = self.get();
         let mut encoded = [0_u8; 13];
         let mut start = encoded.len();
@@ -61,7 +60,7 @@ impl StorageVolumeId {
         }
         let value = std::str::from_utf8(&encoded[start..])
             .expect("Crockford alphabet is valid UTF-8");
-        StoreId::new(value).expect("Crockford volume ID satisfies StoreId")
+        value.to_owned()
     }
 }
 
@@ -129,20 +128,13 @@ mod tests {
 
     #[test]
     fn encodes_known_crockford_values() {
-        assert_eq!(StorageVolumeId::new(1).unwrap().to_store_id().as_str(), "1");
-        assert_eq!(
-            StorageVolumeId::new(31).unwrap().to_store_id().as_str(),
-            "z"
-        );
-        assert_eq!(
-            StorageVolumeId::new(32).unwrap().to_store_id().as_str(),
-            "10"
-        );
+        assert_eq!(StorageVolumeId::new(1).unwrap().to_compact_string(), "1");
+        assert_eq!(StorageVolumeId::new(31).unwrap().to_compact_string(), "z");
+        assert_eq!(StorageVolumeId::new(32).unwrap().to_compact_string(), "10");
         assert!(
             StorageVolumeId::new(StorageVolumeId::MAX)
                 .unwrap()
-                .to_store_id()
-                .as_str()
+                .to_compact_string()
                 .len()
                 <= 13
         );

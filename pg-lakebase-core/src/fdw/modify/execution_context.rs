@@ -25,6 +25,7 @@ pub struct ForeignModifyBeginContext<'a, D: ForeignModifyPrivate> {
     return_slot_required: bool,
     subplan_index: c_int,
     eflags: c_int,
+    effective_user_id: pg_sys::Oid,
 }
 
 impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
@@ -42,6 +43,7 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
         return_slot_required: bool,
         subplan_index: c_int,
         eflags: c_int,
+        effective_user_id: pg_sys::Oid,
     ) -> Self {
         Self {
             private_data,
@@ -57,6 +59,7 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
             return_slot_required,
             subplan_index,
             eflags,
+            effective_user_id,
         }
     }
 
@@ -124,6 +127,12 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
     pub fn eflags(&self) -> c_int {
         self.eflags
     }
+
+    /// The role PostgreSQL selected for the foreign modify's user mapping.
+    #[inline]
+    pub fn effective_user_id(&self) -> pg_sys::Oid {
+        self.effective_user_id
+    }
 }
 
 /// Executor context for INSERTs started through PostgreSQL routed or COPY
@@ -132,17 +141,20 @@ pub struct ForeignInsertBeginContext<'a> {
     relation: RelationHandle<'a>,
     returned_identity: ForeignReturnedIdentity,
     returned_item_pointer_required: bool,
+    effective_user_id: pg_sys::Oid,
 }
 
 impl<'a> ForeignInsertBeginContext<'a> {
     pub(crate) fn new(
         relation: RelationHandle<'a>,
         returned_item_pointer_required: bool,
+        effective_user_id: pg_sys::Oid,
     ) -> Self {
         Self {
             relation,
             returned_identity: ForeignReturnedIdentity::None,
             returned_item_pointer_required,
+            effective_user_id,
         }
     }
 
@@ -156,6 +168,12 @@ impl<'a> ForeignInsertBeginContext<'a> {
     #[inline]
     pub fn returned_item_pointer_required(&self) -> bool {
         self.returned_item_pointer_required
+    }
+
+    /// The role PostgreSQL selected for the foreign insert's user mapping.
+    #[inline]
+    pub fn effective_user_id(&self) -> pg_sys::Oid {
+        self.effective_user_id
     }
 
     /// Declare that routed inserts can provide the returned ItemPointer needed

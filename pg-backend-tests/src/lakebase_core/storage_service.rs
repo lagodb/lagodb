@@ -21,17 +21,19 @@ mod tests {
             true,
             Some(PathBuf::from("/tmp/lakebase.sock")),
             Some(PathBuf::from("/tmp/lakebase-cache")),
+            8,
         )
         .expect("explicit paths resolve without consulting the data directory");
 
         assert!(endpoint.is_enabled());
         assert_eq!(endpoint.socket_path(), Path::new("/tmp/lakebase.sock"));
         assert_eq!(endpoint.cache_dir(), Path::new("/tmp/lakebase-cache"));
+        assert_eq!(endpoint.max_idle_connections(), 8);
     }
 
     #[pg_test]
     fn missing_paths_fall_back_to_the_data_directory() {
-        let endpoint = StorageEndpoint::from_config(true, None, None)
+        let endpoint = StorageEndpoint::from_config(true, None, None, 8)
             .expect("default paths resolve from the backend data directory");
 
         assert!(endpoint.is_enabled());

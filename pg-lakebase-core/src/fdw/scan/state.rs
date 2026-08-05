@@ -119,6 +119,13 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         let snapshot = unsafe { (*estate).es_snapshot };
         let query_context = unsafe { (*estate).es_query_cxt };
         let per_tuple_context = unsafe { (*econtext).ecxt_per_tuple_memory };
+        let effective_user_id = unsafe {
+            if (*plan).checkAsUser != pg_sys::InvalidOid {
+                (*plan).checkAsUser
+            } else {
+                pg_sys::GetUserId()
+            }
+        };
         if snapshot.is_null()
             || query_context.is_null()
             || per_tuple_context.is_null()
@@ -152,6 +159,7 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
                 estate,
                 econtext,
                 eflags: self.eflags,
+                effective_user_id,
             };
             unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
             let result = P::begin(begin_context);

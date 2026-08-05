@@ -282,6 +282,21 @@ impl RelationGuard {
         Ok(Self { rel, lock_mode })
     }
 
+    /// Opens a relation while retaining its lock until transaction end.
+    ///
+    /// Closing the relcache handle with `NoLock` leaves PostgreSQL's lock
+    /// manager to release the originally acquired lock at commit or abort.
+    pub fn open_retain_lock(
+        oid: pg_sys::Oid,
+        lock_mode: pg_sys::LOCKMODE,
+    ) -> Result<Self, PgError> {
+        let rel = PgWrapper::table_open(oid, lock_mode)?;
+        Ok(Self {
+            rel,
+            lock_mode: pg_sys::NoLock as _,
+        })
+    }
+
     /// Get a `RelationHandle` from this guard.
     ///
     /// The returned handle borrows from this guard, ensuring the relation

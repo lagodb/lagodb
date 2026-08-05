@@ -12,6 +12,7 @@ use pg_lakebase_storage::{StorageError, StorageResult};
 use pgrx::pg_sys;
 
 mod backend;
+mod connection;
 mod injection_points;
 mod socket_wait;
 
@@ -20,6 +21,8 @@ pub use backend::BackendStorageService;
 const ENABLED_GUC: &CStr = c"pg_lakebase.storage_server_enabled";
 const SOCKET_PATH_GUC: &CStr = c"pg_lakebase.storage_server_socket_path";
 const CACHE_DIR_GUC: &CStr = c"pg_lakebase.storage_server_cache_dir";
+const MAX_IDLE_CONNECTIONS_GUC: &CStr =
+    c"pg_lakebase.storage_backend_max_idle_connections";
 const DEFAULT_SOCKET_FILE: &str = "storage.sock";
 const DEFAULT_CACHE_DIR: &str = "storage-cache";
 
@@ -29,6 +32,7 @@ pub struct StorageEndpoint {
     enabled: bool,
     socket_path: PathBuf,
     cache_dir: PathBuf,
+    max_idle_connections: usize,
 }
 
 impl StorageEndpoint {
@@ -44,6 +48,7 @@ impl StorageEndpoint {
             read_bool_guc(ENABLED_GUC)?,
             read_optional_path_guc(SOCKET_PATH_GUC)?,
             read_optional_path_guc(CACHE_DIR_GUC)?,
+            read_positive_usize_guc(MAX_IDLE_CONNECTIONS_GUC)?,
         )
     }
 
@@ -61,7 +66,13 @@ impl StorageEndpoint {
         enabled: bool,
         socket_path: Option<PathBuf>,
         cache_dir: Option<PathBuf>,
+        max_idle_connections: usize,
     ) -> StorageResult<Self> {
+        if max_idle_connections == 0 {
+            return Err(StorageError::configuration(
+                "storage backend max idle connections must be positive",
+            ));
+        }
         let (socket_path, cache_dir) = match (socket_path, cache_dir) {
             (Some(socket_path), Some(cache_dir)) => (socket_path, cache_dir),
             (socket_path, cache_dir) => {
@@ -77,6 +88,7 @@ impl StorageEndpoint {
             enabled,
             socket_path,
             cache_dir,
+            max_idle_connections,
         })
     }
 
@@ -108,6 +120,10 @@ impl StorageEndpoint {
         &self.cache_dir
     }
 
+    pub const fn max_idle_connections(&self) -> usize {
+        self.max_idle_connections
+    }
+
     pub fn into_parts(self) -> (bool, PathBuf, PathBuf) {
         (self.enabled, self.socket_path, self.cache_dir)
     }
@@ -134,6 +150,21 @@ fn read_optional_path_guc(name: &CStr) -> StorageResult<Option<PathBuf>> {
             Some(PathBuf::from(value))
         }
     })
+}
+
+fn read_positive_usize_guc(name: &CStr) -> StorageResult<usize> {
+    let value = read_required_guc(name)?;
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            StorageError::configuration(format!(
+                "unexpected positive integer value '{}' for {}",
+                value,
+                name.to_string_lossy(),
+            ))
+        })
 }
 
 fn read_required_guc(name: &CStr) -> StorageResult<String> {

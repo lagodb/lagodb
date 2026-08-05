@@ -173,6 +173,8 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 return_slot_required_for_modify(mtstate, rinfo, plan, operation)
             };
         let per_tuple_context = unsafe { Self::per_tuple_context(estate)? };
+        let effective_user_id =
+            unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
         // SAFETY: `relation` is the live executor result relation validated
         // above and remains open for the modify state.
         let mut wrapper = unsafe {
@@ -205,6 +207,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             return_slot_required,
             subplan_index,
             eflags,
+            effective_user_id,
         );
         let entry_context = unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
         let provider_state = P::begin_modify(context);
@@ -309,9 +312,12 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         let return_slot_required =
             return_slot_required_for_modify(mtstate, rinfo, plan, operation);
         let per_tuple_context = unsafe { Self::per_tuple_context(estate)? };
+        let effective_user_id =
+            unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
         let mut context = ForeignInsertBeginContext::new(
             unsafe { RelationHandle::from_raw(relation) },
             returned_item_pointer_required,
+            effective_user_id,
         );
         let entry_context = unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
         let provider_state = P::begin_insert(&mut context);

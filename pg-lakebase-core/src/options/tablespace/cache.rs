@@ -14,7 +14,6 @@ use crate::diag::{PgError, SqlStateError};
 use crate::runtime_api::{RuntimeClient, StorageVolumeRouteLookupError};
 use crate::storage::volume::{StorageVolumeId, StorageVolumeRoute};
 use crate::wrapper::CacheRegisterSyscacheCallback;
-use pg_lakebase_storage::StoreId;
 
 #[derive(Debug, Error)]
 pub enum TablespaceCacheError {
@@ -53,16 +52,11 @@ impl SqlStateError for TablespaceCacheError {
 pub struct CachedTablespaceOpts {
     binding: TablespaceBinding,
     route: StorageVolumeRoute,
-    store_id: StoreId,
 }
 
 impl CachedTablespaceOpts {
     pub const fn volume_id(&self) -> StorageVolumeId {
         self.binding.volume_id()
-    }
-
-    pub fn store_id(&self) -> &StoreId {
-        &self.store_id
     }
 
     pub fn object_namespace(&self) -> &str {
@@ -93,12 +87,7 @@ impl CachedTablespaceOpts {
         let route = RuntimeClient::connect()
             .map_err(StorageVolumeRouteLookupError::from)?
             .storage_volume_route(volume_id)?;
-        let store_id = volume_id.to_store_id();
-        Ok(Some(Self {
-            binding,
-            route,
-            store_id,
-        }))
+        Ok(Some(Self { binding, route }))
     }
 }
 

@@ -135,6 +135,17 @@ impl CatalogScanKey {
         }
     }
 
+    pub fn i64_eq(attribute_number: pg_sys::AttrNumber, value: i64) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_INT8EQ),
+                value.into_datum().expect("i64 should convert to Datum"),
+            )
+        }
+    }
+
     pub fn bool_eq(attribute_number: pg_sys::AttrNumber, value: bool) -> Self {
         unsafe {
             Self::new(
@@ -152,6 +163,17 @@ impl CatalogScanKey {
             value,
             pg_sys::DEFAULT_COLLATION_OID,
         )
+    }
+
+    pub fn name_eq_text(attribute_number: pg_sys::AttrNumber, value: &str) -> Self {
+        unsafe {
+            Self::new(
+                attribute_number,
+                pg_sys::BTEqualStrategyNumber as _,
+                pg_sys::Oid::from(pg_sys::F_NAMEEQTEXT),
+                value.into_datum().expect("str should convert to Datum"),
+            )
+        }
     }
 
     pub fn text_eq_with_collation(
@@ -203,6 +225,16 @@ impl CatalogRelation {
     ) -> Result<Self, PgError> {
         Ok(Self {
             guard: RelationGuard::open(oid, lock_mode)?,
+        })
+    }
+
+    /// Opens a catalog relation and retains its lock until transaction end.
+    pub fn open_retain_lock(
+        oid: pg_sys::Oid,
+        lock_mode: pg_sys::LOCKMODE,
+    ) -> Result<Self, PgError> {
+        Ok(Self {
+            guard: RelationGuard::open_retain_lock(oid, lock_mode)?,
         })
     }
 

@@ -11,6 +11,7 @@ PostgreSQL's global GUC registry by name:
 - `pg_lakebase.storage_server_enabled`
 - `pg_lakebase.storage_server_socket_path`
 - `pg_lakebase.storage_server_cache_dir`
+- `pg_lakebase.storage_backend_max_idle_connections`
 
 This avoids rlib static duplication: AM crates never read a `GucSetting` static
 compiled into their own shared object.

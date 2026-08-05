@@ -284,6 +284,15 @@ pub struct BeginForeignScanContext<'a, D: ForeignPlanPrivate> {
     pub estate: *mut pg_sys::EState,
     pub econtext: *mut pg_sys::ExprContext,
     pub eflags: c_int,
+    pub(crate) effective_user_id: pg_sys::Oid,
+}
+
+impl<'a, D: ForeignPlanPrivate> BeginForeignScanContext<'a, D> {
+    /// The role PostgreSQL selected for the foreign scan's user mapping.
+    #[inline]
+    pub fn effective_user_id(&self) -> pg_sys::Oid {
+        self.effective_user_id
+    }
 }
 
 /// ReScan callback context.  Runtime expressions are reevaluated before the

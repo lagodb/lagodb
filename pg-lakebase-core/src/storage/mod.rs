@@ -5,5 +5,6 @@
 //! volumes. The two domains share a parent namespace but do not share
 //! implementation state.
 
+pub mod foreign;
 pub mod service;
 pub mod volume;
