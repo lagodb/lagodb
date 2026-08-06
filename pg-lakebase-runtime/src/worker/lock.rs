@@ -14,13 +14,13 @@ impl DatabaseLifecycleLock {
         Self { database_oid }
     }
 
-    /// Coordinate a registration transaction or launcher handoff.
+    /// Coordinate a registration transaction or supervisor handoff.
     pub(crate) fn acquire_shared(self) {
         let acquired = self.acquire(pg_sys::ShareLock as _, true);
         debug_assert!(acquired);
     }
 
-    /// Avoid launching a database reconciler while DROP owns the lifecycle.
+    /// Avoid launching a coordinator while DROP owns the lifecycle.
     pub(crate) fn try_acquire_shared(self) -> bool {
         self.acquire(pg_sys::ShareLock as _, false)
     }
@@ -31,7 +31,7 @@ impl DatabaseLifecycleLock {
         debug_assert!(acquired);
     }
 
-    /// Exclude launcher/reconciler activity for DROP EXTENSION or DROP DATABASE.
+    /// Exclude supervisor/coordinator activity for DROP EXTENSION or DROP DATABASE.
     pub(crate) fn acquire_drop(self) {
         let acquired = self.acquire(pg_sys::ExclusiveLock as _, true);
         debug_assert!(acquired);

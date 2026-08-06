@@ -10,22 +10,31 @@ static SIGHUP_RECEIVED: AtomicBool = AtomicBool::new(false);
 pub(super) struct BackgroundWorkerSignals;
 
 impl BackgroundWorkerSignals {
-    pub(super) fn install_launcher() {
+    pub(super) fn install_supervisor() {
+        Self::install_control_process();
+    }
+
+    pub(super) fn install_coordinator() {
+        Self::install_control_process();
+    }
+
+    pub(super) fn install_extension_worker() {
+        Self::install(false);
+    }
+
+    fn install_control_process() {
         Self::install(true);
     }
 
-    pub(super) fn install_dynamic_worker() {
-        Self::install(true);
-    }
-
-    fn install(handle_sighup: bool) {
+    fn install(ignore_sigint: bool) {
         // SAFETY: PostgreSQL starts background-worker entrypoints with signals
         // blocked. Install every final handler before unblocking once.
         unsafe {
-            if handle_sighup {
+            pg_sys::pqsignal(pg_sys::SIGHUP as i32, Some(background_worker_sighup));
+            if ignore_sigint {
                 pg_sys::pqsignal(
-                    pg_sys::SIGHUP as i32,
-                    Some(background_worker_sighup),
+                    pg_sys::SIGINT as i32,
+                    Some(background_worker_sigint_ignored),
                 );
             }
             pg_sys::pqsignal(pg_sys::SIGTERM as i32, Some(background_worker_sigterm));
@@ -98,3 +107,5 @@ unsafe extern "C-unwind" fn background_worker_sigterm(signal: i32) {
     // has the signal-handler ABI installed through pqsignal.
     unsafe { pg_sys::die(signal) };
 }
+
+unsafe extern "C-unwind" fn background_worker_sigint_ignored(_signal: i32) {}
