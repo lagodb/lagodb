@@ -3,25 +3,21 @@ use std::rc::Rc;
 
 use pgrx::datum::Internal;
 
-const WORKER_CONTEXT_MAGIC: u64 = 0x5047_4c42_5743_5458;
-const WORKER_CONTEXT_ABI_VERSION: u32 = 3;
 const MAX_WORKER_NAME_BYTES: usize = 255;
 
 /// Runtime-owned wire representation passed through PostgreSQL's `internal`
-/// datum. Extension callbacks must validate it into [`WorkerContext`] before
-/// accessing any invocation capability.
+/// datum. Runtime and provider are built against the same core definition.
 #[doc(hidden)]
 #[derive(Debug)]
 #[repr(C)]
 pub struct WorkerContextRaw {
-    magic: u64,
-    abi_version: u32,
-    struct_size: u32,
     database_oid: u32,
     extension_oid: u32,
+    worker_id: i32,
     worker_name_len: u16,
-    _padding: [u8; 6],
+    _padding: [u8; 2],
     process_config_reload: extern "C-unwind" fn() -> bool,
+    deregister_self: extern "C-unwind" fn(i32),
     worker_name: [u8; MAX_WORKER_NAME_BYTES],
 }
 
@@ -30,34 +26,26 @@ impl WorkerContextRaw {
     pub fn new(
         database_oid: u32,
         extension_oid: u32,
+        worker_id: i32,
         worker_name: &str,
         process_config_reload: extern "C-unwind" fn() -> bool,
+        deregister_self: extern "C-unwind" fn(i32),
     ) -> Self {
         let bytes = worker_name.as_bytes();
         assert!(bytes.len() <= MAX_WORKER_NAME_BYTES);
         let mut context = Self {
-            magic: WORKER_CONTEXT_MAGIC,
-            abi_version: WORKER_CONTEXT_ABI_VERSION,
-            struct_size: u32::try_from(std::mem::size_of::<Self>())
-                .expect("worker context exceeds u32"),
             database_oid,
             extension_oid,
+            worker_id,
             worker_name_len: u16::try_from(bytes.len())
                 .expect("validated worker name exceeds u16"),
-            _padding: [0; 6],
+            _padding: [0; 2],
             process_config_reload,
+            deregister_self,
             worker_name: [0; MAX_WORKER_NAME_BYTES],
         };
         context.worker_name[..bytes.len()].copy_from_slice(bytes);
         context
-    }
-
-    fn validate_abi(&self) -> bool {
-        self.magic == WORKER_CONTEXT_MAGIC
-            && self.abi_version == WORKER_CONTEXT_ABI_VERSION
-            && usize::try_from(self.struct_size).ok()
-                == Some(std::mem::size_of::<Self>())
-            && usize::from(self.worker_name_len) <= MAX_WORKER_NAME_BYTES
     }
 }
 
@@ -74,43 +62,42 @@ pub struct WorkerContext<'a> {
 }
 
 impl<'a> WorkerContext<'a> {
-    /// Validate a context supplied through PostgreSQL's `internal` type.
+    /// Borrow a context supplied through PostgreSQL's `internal` type.
     ///
     /// # Safety
     ///
     /// The caller must be the Lakebase background-worker main thread.
     /// `internal` must come directly from the Lakebase worker runtime and point
     /// to a live [`WorkerContextRaw`] for the entire lifetime of `internal`.
-    pub unsafe fn from_internal(
-        internal: &'a Internal,
-    ) -> Result<Self, WorkerContextError> {
-        // SAFETY: the caller guarantees that this datum was created by the
-        // Lakebase runtime. No field is exposed until the ABI header and all
-        // bounds used by safe accessors have been validated.
-        let raw = unsafe { internal.get::<WorkerContextRaw>() }
-            .ok_or(WorkerContextError::Missing)?;
-        if !raw.validate_abi() {
-            return Err(WorkerContextError::AbiMismatch);
-        }
-        Ok(Self {
+    pub unsafe fn from_internal(internal: &'a Internal) -> Self {
+        // SAFETY: the caller guarantees that this non-null datum was created by
+        // the Lakebase runtime from a live WorkerContextRaw.
+        let raw = unsafe { internal.get::<WorkerContextRaw>().unwrap_unchecked() };
+        Self {
             raw,
             _main_thread: PhantomData,
-        })
+        }
     }
 
     pub const fn database_oid(&self) -> u32 {
         self.raw.database_oid
     }
 
+    /// OID of the extension that owns this worker registration.
+    ///
+    /// The registered entry-point function may belong to another extension.
     pub const fn extension_oid(&self) -> u32 {
         self.raw.extension_oid
     }
 
+    pub const fn worker_id(&self) -> i32 {
+        self.raw.worker_id
+    }
+
     pub fn worker_name(&self) -> &str {
         let len = usize::from(self.raw.worker_name_len);
-        // Construction accepts only UTF-8 `&str`, and ABI validation rejects a
-        // length outside the fixed buffer.
-        std::str::from_utf8(&self.raw.worker_name[..len]).unwrap_or("<invalid utf8>")
+        // SAFETY: WorkerContextRaw::new copied this prefix from a Rust `&str`.
+        unsafe { std::str::from_utf8_unchecked(&self.raw.worker_name[..len]) }
     }
 
     /// Process one pending SIGHUP through the runtime-owned signal state.
@@ -120,40 +107,12 @@ impl<'a> WorkerContext<'a> {
     pub fn process_config_reload_if_pending(&self) -> bool {
         (self.raw.process_config_reload)()
     }
-}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum WorkerContextError {
-    #[error("Lakebase worker context is missing")]
-    Missing,
-    #[error("Lakebase worker context ABI mismatch")]
-    AbiMismatch,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    extern "C-unwind" fn no_config_reload() -> bool {
-        false
-    }
-
-    #[test]
-    fn raw_context_validates_identity_and_bounds() {
-        let mut context = WorkerContextRaw::new(42, 8, "worker", no_config_reload);
-        assert!(context.validate_abi());
-        assert_eq!(context.database_oid, 42);
-        assert_eq!(context.extension_oid, 8);
-
-        context.worker_name_len = u16::try_from(MAX_WORKER_NAME_BYTES + 1)
-            .expect("test length exceeds u16");
-        assert!(!context.validate_abi());
-    }
-
-    #[test]
-    fn raw_context_rejects_header_mismatch() {
-        let mut context = WorkerContextRaw::new(42, 8, "worker", no_config_reload);
-        context.abi_version += 1;
-        assert!(!context.validate_abi());
+    /// Transactionally remove this worker registration after one successful run.
+    ///
+    /// Call this inside the worker transaction and then return normally. An abort
+    /// restores the registration; a commit makes the invocation one-shot.
+    pub fn deregister_self(&self) {
+        (self.raw.deregister_self)(self.raw.worker_id);
     }
 }

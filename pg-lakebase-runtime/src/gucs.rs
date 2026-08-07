@@ -8,14 +8,13 @@ use pg_lakebase_storage::{
 };
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
 
-use crate::state::{MAX_RECONCILERS, MAX_WORKERS};
-
-static MAX_REGISTRATIONS: GucSetting<i32> = GucSetting::<i32>::new(256);
-static MAX_ACTIVE_WORKERS: GucSetting<i32> = GucSetting::<i32>::new(8);
-static LAUNCHER_NAPTIME_MS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
+static SUPERVISOR_NAPTIME_MS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
 static RECONCILE_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
-static STOP_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(10_000);
-static MAX_DATABASE_RECONCILERS: GucSetting<i32> = GucSetting::<i32>::new(4);
+static WORKER_RESTART_BACKOFF_INITIAL_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(5_000);
+static WORKER_RESTART_BACKOFF_MAX_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(60_000);
+static WORKER_RESTART_HEALTHY_MS: GucSetting<i32> = GucSetting::<i32>::new(60_000);
 static MAINTENANCE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 static MAINTENANCE_ACTOR_THREADS: GucSetting<i32> = GucSetting::<i32>::new(1);
 static MAINTENANCE_BATCH_ITEMS: GucSetting<i32> = GucSetting::<i32>::new(128);
@@ -70,40 +69,10 @@ pub(crate) fn maintenance_config()
 
 pub(crate) fn init() {
     init_shared_framework_gucs();
-    GucRegistry::define_int_guc(
-        c"pg_lakebase.max_worker_registrations",
-        c"Maximum database-local worker registrations tracked by Lakebase",
-        c"Bounds shared scheduling state; restart required.",
-        &MAX_REGISTRATIONS,
-        1,
-        MAX_WORKERS as i32,
-        GucContext::Postmaster,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        c"pg_lakebase.max_database_reconcilers",
-        c"Maximum concurrent Lakebase database reconcilers",
-        c"Bounds transient worker usage while databases are discovered.",
-        &MAX_DATABASE_RECONCILERS,
-        1,
-        MAX_RECONCILERS as i32,
-        GucContext::Sighup,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        c"pg_lakebase.max_active_workers",
-        c"Maximum concurrent database-local Lakebase workers",
-        c"Bounds dynamic background-worker usage across all databases.",
-        &MAX_ACTIVE_WORKERS,
-        1,
-        MAX_WORKERS as i32,
-        GucContext::Sighup,
-        GucFlags::default(),
-    );
     define_ms(
-        c"pg_lakebase.worker_launcher_naptime_ms",
-        c"Lakebase worker launcher idle polling interval",
-        &LAUNCHER_NAPTIME_MS,
+        c"pg_lakebase.worker_supervisor_naptime_ms",
+        c"Lakebase worker supervisor idle polling interval",
+        &SUPERVISOR_NAPTIME_MS,
         10,
         60_000,
         GucContext::Sighup,
@@ -117,11 +86,27 @@ pub(crate) fn init() {
         GucContext::Sighup,
     );
     define_ms(
-        c"pg_lakebase.worker_stop_timeout_ms",
-        c"Maximum wait for Lakebase workers to stop before DDL continues",
-        &STOP_TIMEOUT_MS,
-        100,
-        300_000,
+        c"pg_lakebase.worker_restart_backoff_initial_ms",
+        c"Initial delay before restarting a failed Lakebase worker",
+        &WORKER_RESTART_BACKOFF_INITIAL_MS,
+        0,
+        i32::MAX,
+        GucContext::Sighup,
+    );
+    define_ms(
+        c"pg_lakebase.worker_restart_backoff_max_ms",
+        c"Maximum delay before restarting a repeatedly failing Lakebase worker",
+        &WORKER_RESTART_BACKOFF_MAX_MS,
+        0,
+        i32::MAX,
+        GucContext::Sighup,
+    );
+    define_ms(
+        c"pg_lakebase.worker_restart_healthy_ms",
+        c"Runtime after which a Lakebase worker failure is treated as fresh",
+        &WORKER_RESTART_HEALTHY_MS,
+        0,
+        i32::MAX,
         GucContext::Sighup,
     );
 }
@@ -273,26 +258,22 @@ fn define_ms(
     );
 }
 
-pub(crate) fn max_registrations() -> usize {
-    MAX_REGISTRATIONS.get() as usize
-}
-
-pub(crate) fn max_active_workers() -> usize {
-    MAX_ACTIVE_WORKERS.get() as usize
-}
-
-pub(crate) fn launcher_naptime() -> Duration {
-    Duration::from_millis(LAUNCHER_NAPTIME_MS.get() as u64)
+pub(crate) fn supervisor_naptime() -> Duration {
+    Duration::from_millis(SUPERVISOR_NAPTIME_MS.get() as u64)
 }
 
 pub(crate) fn reconcile_interval() -> Duration {
     Duration::from_millis(RECONCILE_INTERVAL_MS.get() as u64)
 }
 
-pub(crate) fn stop_timeout() -> Duration {
-    Duration::from_millis(STOP_TIMEOUT_MS.get() as u64)
+pub(crate) fn worker_restart_backoff_initial() -> Duration {
+    Duration::from_millis(WORKER_RESTART_BACKOFF_INITIAL_MS.get() as u64)
 }
 
-pub(crate) fn max_database_reconcilers() -> usize {
-    MAX_DATABASE_RECONCILERS.get() as usize
+pub(crate) fn worker_restart_backoff_max() -> Duration {
+    Duration::from_millis(WORKER_RESTART_BACKOFF_MAX_MS.get() as u64)
+}
+
+pub(crate) fn worker_restart_healthy() -> Duration {
+    Duration::from_millis(WORKER_RESTART_HEALTHY_MS.get() as u64)
 }

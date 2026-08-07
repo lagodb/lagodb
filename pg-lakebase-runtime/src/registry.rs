@@ -1,22 +1,20 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 
-use pg_lakebase_core::catalog::{
-    self, CatalogRelation, CatalogScanKey, CatalogSnapshot, LAKEBASE_SCHEMA,
+use pg_lakebase_core::catalog;
+use pgrx::{IntoDatum, pg_sys};
+
+use crate::catalog::worker::{
+    NewWorkerRegistration, WorkerCatalog, WorkerId, WorkerRegistrationRow,
 };
-use pg_lakebase_core::handles::HeapTupleGuard;
-use pgrx::{FromDatum, IntoDatum, pg_sys};
-
 use crate::error::{
     LakebaseError, LakebaseResult, WorkerCatalogOperation as CatalogOperation,
 };
-
-const WORKERS_TABLE: &CStr = c"workers";
 
 struct WorkerEntrypointContract;
 
 impl WorkerEntrypointContract {
     fn accepts(procedure: &pg_sys::FormData_pg_proc) -> bool {
-        procedure.prokind == pg_sys::PROKIND_FUNCTION as std::ffi::c_char
+        procedure.prokind == pg_sys::PROKIND_FUNCTION as c_char
             && !procedure.proretset
             && procedure.pronargs == 1
             // SAFETY: pronargs == 1 guarantees that the first oidvector element
@@ -27,264 +25,69 @@ impl WorkerEntrypointContract {
     }
 }
 
-mod column {
-    pub const EXTENSION_NAME: i16 = 1;
-    pub const WORKER_NAME: i16 = 2;
-    pub const ENTRYPOINT_SCHEMA: i16 = 3;
-    pub const ENTRYPOINT_FUNCTION: i16 = 4;
-    pub const COUNT: usize = 4;
-}
-
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct WorkerRegistration {
-    pub(crate) extension_oid: pg_sys::Oid,
+    pub(crate) worker_id: i32,
+    pub(crate) registration_owner_oid: pg_sys::Oid,
     pub(crate) worker_name: String,
     pub(crate) function_oid: pg_sys::Oid,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct RegisteredWorker {
-    pub(crate) extension_oid: pg_sys::Oid,
-    pub(crate) worker_name: String,
-}
-
-#[derive(Clone, Debug)]
-struct WorkerRegistrationRow {
-    extension_name: String,
-    worker_name: String,
-    entrypoint_schema: String,
-    entrypoint_function: String,
-}
-
-struct WorkerCatalog {
-    relation: CatalogRelation,
-}
-
-impl WorkerCatalog {
-    fn open(lock_mode: pg_sys::LOCKMODE) -> LakebaseResult<Self> {
-        Ok(Self {
-            relation: open_workers(lock_mode)?,
-        })
-    }
-
-    fn rows(&self) -> LakebaseResult<Vec<WorkerRegistrationRow>> {
-        let tuple_desc = self.relation.as_handle().tuple_desc();
-        let mut scan = self
-            .relation
-            .begin_scan(
-                pg_sys::InvalidOid,
-                false,
-                CatalogSnapshot::Default,
-                std::iter::empty(),
-            )
-            .map_err(|source| LakebaseError::WorkerCatalog {
-                operation: CatalogOperation::Scan,
-                source,
-            })?;
-        let mut rows = Vec::new();
-        while let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LakebaseError::WorkerCatalog {
-                    operation: CatalogOperation::Scan,
-                    source,
-                })?
-        {
-            rows.push(unsafe {
-                WorkerRegistrationRow::decode(tuple.as_raw(), tuple_desc)
-            });
-        }
-        Ok(rows)
-    }
-
-    fn insert(&self, row: WorkerRegistrationRow) -> LakebaseResult<()> {
-        let tuple_desc = self.relation.as_handle().tuple_desc();
-        let tuple = row.encode(tuple_desc);
-        self.relation.catalog_insert(&tuple).map_err(|source| {
-            LakebaseError::WorkerCatalog {
-                operation: CatalogOperation::Insert,
-                source,
-            }
-        })
-    }
-
-    fn delete_by_extension_name(&self, extension_name: &CStr) -> LakebaseResult<()> {
-        let tuple_desc = self.relation.as_handle().tuple_desc();
-        let mut scan = self
-            .relation
-            .begin_scan(
-                pg_sys::InvalidOid,
-                false,
-                CatalogSnapshot::Default,
-                std::iter::empty(),
-            )
-            .map_err(|source| LakebaseError::WorkerCatalog {
-                operation: CatalogOperation::Scan,
-                source,
-            })?;
-        while let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LakebaseError::WorkerCatalog {
-                    operation: CatalogOperation::Scan,
-                    source,
-                })?
-        {
-            if unsafe {
-                name_attr(
-                    tuple.as_raw(),
-                    tuple_desc,
-                    column::EXTENSION_NAME,
-                    "extension_name",
-                )
-            }
-            .as_bytes()
-                == extension_name.to_bytes()
-            {
-                self.relation.catalog_delete(tuple).map_err(|source| {
-                    LakebaseError::WorkerCatalog {
-                        operation: CatalogOperation::Delete,
-                        source,
-                    }
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    fn delete(
-        &self,
-        extension_name: &str,
-        worker_name: &str,
-    ) -> LakebaseResult<bool> {
-        let tuple_desc = self.relation.as_handle().tuple_desc();
-        let mut scan = self
-            .relation
-            .begin_scan(
-                pg_sys::InvalidOid,
-                false,
-                CatalogSnapshot::Default,
-                std::iter::empty(),
-            )
-            .map_err(|source| LakebaseError::WorkerCatalog {
-                operation: CatalogOperation::Scan,
-                source,
-            })?;
-        while let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LakebaseError::WorkerCatalog {
-                    operation: CatalogOperation::Scan,
-                    source,
-                })?
-        {
-            let row =
-                unsafe { WorkerRegistrationRow::decode(tuple.as_raw(), tuple_desc) };
-            if row.extension_name == extension_name && row.worker_name == worker_name
-            {
-                self.relation.catalog_delete(tuple).map_err(|source| {
-                    LakebaseError::WorkerCatalog {
-                        operation: CatalogOperation::Delete,
-                        source,
-                    }
-                })?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-}
-
-impl WorkerRegistrationRow {
-    unsafe fn decode(
-        tuple: pg_sys::HeapTuple,
-        tuple_desc: pg_sys::TupleDesc,
-    ) -> Self {
-        Self {
-            extension_name: unsafe {
-                name_attr(tuple, tuple_desc, column::EXTENSION_NAME, "extension_name")
-            },
-            worker_name: unsafe {
-                required_attr(tuple, tuple_desc, column::WORKER_NAME, "worker_name")
-            },
-            entrypoint_schema: unsafe {
-                name_attr(
-                    tuple,
-                    tuple_desc,
-                    column::ENTRYPOINT_SCHEMA,
-                    "entrypoint_schema",
-                )
-            },
-            entrypoint_function: unsafe {
-                name_attr(
-                    tuple,
-                    tuple_desc,
-                    column::ENTRYPOINT_FUNCTION,
-                    "entrypoint_function",
-                )
-            },
-        }
-    }
-
-    fn encode(&self, tuple_desc: pg_sys::TupleDesc) -> HeapTupleGuard {
-        let extension_name = PgName::new(&self.extension_name);
-        let entrypoint_schema = PgName::new(&self.entrypoint_schema);
-        let entrypoint_function = PgName::new(&self.entrypoint_function);
-        let mut values = [pg_sys::Datum::from(0_usize); column::COUNT];
-        let mut nulls = [false; column::COUNT];
-        values[idx(column::EXTENSION_NAME)] = extension_name.datum();
-        values[idx(column::WORKER_NAME)] = self
-            .worker_name
-            .as_str()
-            .into_datum()
-            .expect("str converts to Datum");
-        values[idx(column::ENTRYPOINT_SCHEMA)] = entrypoint_schema.datum();
-        values[idx(column::ENTRYPOINT_FUNCTION)] = entrypoint_function.datum();
-        unsafe {
-            HeapTupleGuard::new(pg_sys::heap_form_tuple(
-                tuple_desc,
-                values.as_mut_ptr(),
-                nulls.as_mut_ptr(),
-            ))
-        }
-    }
-}
-
-struct PgName {
-    data: pg_sys::NameData,
-}
-
-impl PgName {
-    fn new(value: &str) -> Self {
-        let cstring =
-            CString::new(value).expect("PostgreSQL names cannot contain NUL");
-        let mut data = pg_sys::NameData::default();
-        unsafe { pg_sys::namestrcpy(&mut data, cstring.as_ptr()) };
-        Self { data }
-    }
-
-    fn datum(&self) -> pg_sys::Datum {
-        unsafe { pg_sys::NameGetDatum(&self.data) }
-    }
-}
-
 pub(crate) fn load_all() -> LakebaseResult<Vec<WorkerRegistration>> {
     let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
-    let mut registrations = Vec::new();
-    for row in catalog.rows()? {
-        if let Some(registration) = resolve_registration(&row)? {
+    let rows = catalog.rows()?;
+    let mut registrations = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(registration) = resolve_registration(row)? {
             registrations.push(registration);
         }
     }
-    registrations.sort_by(|left, right| {
-        (left.extension_oid.to_u32(), left.worker_name.as_str())
-            .cmp(&(right.extension_oid.to_u32(), right.worker_name.as_str()))
-    });
+    registrations.sort_by_key(|registration| registration.worker_id);
     Ok(registrations)
+}
+
+pub(crate) fn runtime_catalog_exists() -> LakebaseResult<bool> {
+    // SAFETY: called inside the coordinator's lifecycle transaction. The
+    // missing-ok extension lookup and the worker-table OID lookup do not open
+    // or lock the runtime worker relation.
+    let extension_oid =
+        unsafe { pg_sys::get_extension_oid(c"pg_lakebase_runtime".as_ptr(), true) };
+    if extension_oid == pg_sys::InvalidOid {
+        return Ok(false);
+    }
+    WorkerCatalog::exists()
+}
+
+pub(crate) fn database_is_template(database_oid: u32) -> bool {
+    // SAFETY: database_oid is the current backend database OID and Oid has a
+    // stable scalar Datum representation.
+    let tuple = unsafe {
+        pg_sys::SearchSysCache1(
+            pg_sys::SysCacheIdentifier::DATABASEOID as i32,
+            pg_sys::Oid::from(database_oid)
+                .into_datum()
+                .expect("Oid has a Datum representation"),
+        )
+    };
+    assert!(
+        !tuple.is_null(),
+        "current database must have a pg_database syscache entry",
+    );
+    // SAFETY: DATABASEOID returned a pinned pg_database tuple, which remains
+    // valid until ReleaseSysCache below.
+    let is_template = unsafe {
+        (*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_database)).datistemplate
+    };
+    // SAFETY: tuple is the pinned syscache tuple returned above.
+    unsafe { pg_sys::ReleaseSysCache(tuple) };
+    is_template
 }
 
 pub(crate) fn load_if_runtime_installed()
 -> LakebaseResult<Option<Vec<WorkerRegistration>>> {
-    // SAFETY: called inside the reconciler's database transaction. The
-    // missing-ok lookup uses the extension syscache and does not raise ERROR
-    // for databases where pg_lakebase_runtime is not installed.
+    // SAFETY: called inside the coordinator's database transaction. The
+    // missing-ok lookup does not raise ERROR for databases where
+    // pg_lakebase_runtime is not installed.
     let extension_oid =
         unsafe { pg_sys::get_extension_oid(c"pg_lakebase_runtime".as_ptr(), true) };
     if extension_oid == pg_sys::InvalidOid {
@@ -294,36 +97,22 @@ pub(crate) fn load_if_runtime_installed()
     }
 }
 
-pub(crate) fn load_one(
-    extension_oid: pg_sys::Oid,
-    worker_name: &str,
-) -> LakebaseResult<Option<WorkerRegistration>> {
+pub(crate) fn load_one(worker_id: i32) -> LakebaseResult<Option<WorkerRegistration>> {
     let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
-    for row in catalog.rows()? {
-        if row.worker_name != worker_name {
-            continue;
-        }
-        let Some(registration) = resolve_registration(&row)? else {
-            continue;
-        };
-        if registration.extension_oid == extension_oid {
-            return Ok(Some(registration));
-        }
-    }
-    Ok(None)
+    let Some(row) = catalog.row_by_id(WorkerId::new(worker_id))? else {
+        return Ok(None);
+    };
+    resolve_registration(row)
 }
 
-pub(crate) fn registration_extension_oid(
+pub(crate) fn registration_worker_id(
     extension_name: &str,
     worker_name: &str,
-) -> LakebaseResult<Option<pg_sys::Oid>> {
+) -> LakebaseResult<Option<i32>> {
     let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
-    for row in catalog.rows()? {
-        if row.extension_name == extension_name && row.worker_name == worker_name {
-            return extension_oid_by_name(&row.extension_name);
-        }
-    }
-    Ok(None)
+    catalog
+        .worker_id_by_name(extension_name, worker_name)
+        .map(|worker_id| worker_id.map(WorkerId::as_i32))
 }
 
 pub(crate) fn delete_extension_registrations(
@@ -345,10 +134,7 @@ pub(crate) fn extension_has_registrations(
 pub(crate) fn register(
     worker_name: &str,
     function_oid: pg_sys::Oid,
-) -> LakebaseResult<RegisteredWorker> {
-    if !unsafe { pg_sys::superuser() } {
-        return Err(LakebaseError::WorkerRegistrationRequiresSuperuser);
-    }
+) -> LakebaseResult<i32> {
     if !unsafe { pg_sys::creating_extension } {
         return Err(LakebaseError::WorkerRegistrationRequiresExtensionScript);
     }
@@ -357,58 +143,55 @@ pub(crate) fn register(
     }
 
     let extension_oid = unsafe { pg_sys::CurrentExtensionObject };
-    let owner_oid = unsafe {
-        pg_sys::getExtensionOfObject(pg_sys::ProcedureRelationId, function_oid)
-    };
-    if owner_oid != extension_oid {
-        return Err(LakebaseError::EntryPointNotOwnedByExtension);
-    }
-
     let (entrypoint_schema, entrypoint_function) = validate_entrypoint(function_oid)?;
     let extension_name = current_extension_name(extension_oid)?;
     let catalog = WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?;
-    catalog.insert(WorkerRegistrationRow {
-        extension_name,
-        worker_name: worker_name.to_owned(),
-        entrypoint_schema,
-        entrypoint_function,
+    let worker_id = catalog.insert(NewWorkerRegistration {
+        extension_name: &extension_name,
+        worker_name,
+        entrypoint_schema: &entrypoint_schema,
+        entrypoint_function: &entrypoint_function,
     })?;
-    Ok(RegisteredWorker {
-        extension_oid,
-        worker_name: worker_name.to_owned(),
-    })
+    Ok(worker_id.as_i32())
 }
 
-pub(crate) fn deregister(worker_name: &str) -> LakebaseResult<bool> {
-    if !unsafe { pg_sys::superuser() } {
-        return Err(LakebaseError::WorkerDeregistrationRequiresSuperuser);
-    }
-    if !unsafe { pg_sys::creating_extension } {
-        return Err(LakebaseError::WorkerDeregistrationRequiresExtensionScript);
-    }
-    let extension_oid = unsafe { pg_sys::CurrentExtensionObject };
-    let extension_name = current_extension_name(extension_oid)?;
+pub(crate) fn deregister(worker_name: &str) -> LakebaseResult<Option<i32>> {
+    let catalog = WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?;
+    catalog
+        .delete_by_name(worker_name)
+        .map(|worker_id| worker_id.map(WorkerId::as_i32))
+}
+
+pub(crate) fn deregister_by_id(worker_id: i32) -> LakebaseResult<bool> {
     WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?
-        .delete(&extension_name, worker_name)
+        .delete_by_id(WorkerId::new(worker_id))
+}
+
+pub(crate) fn deregister_self(worker_id: i32) -> LakebaseResult<()> {
+    let deleted = WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?
+        .delete_by_id(WorkerId::new(worker_id))?;
+    if deleted {
+        Ok(())
+    } else {
+        Err(LakebaseError::WorkerIdNotRegistered { worker_id })
+    }
 }
 
 fn resolve_registration(
-    row: &WorkerRegistrationRow,
+    row: WorkerRegistrationRow,
 ) -> LakebaseResult<Option<WorkerRegistration>> {
     let Some(extension_oid) = extension_oid_by_name(&row.extension_name)? else {
         return Ok(None);
     };
-    let Some(function_oid) = resolve_entrypoint(
-        &row.entrypoint_schema,
-        &row.entrypoint_function,
-        extension_oid,
-    )?
+    let Some(function_oid) =
+        resolve_entrypoint(&row.entrypoint_schema, &row.entrypoint_function)?
     else {
         return Ok(None);
     };
     Ok(Some(WorkerRegistration {
-        extension_oid,
-        worker_name: row.worker_name.clone(),
+        worker_id: row.worker_id.as_i32(),
+        registration_owner_oid: extension_oid,
+        worker_name: row.worker_name,
         function_oid,
     }))
 }
@@ -425,7 +208,6 @@ fn extension_oid_by_name(
 fn resolve_entrypoint(
     schema_name: &str,
     function_name: &str,
-    extension_oid: pg_sys::Oid,
 ) -> LakebaseResult<Option<pg_sys::Oid>> {
     let schema_name = CString::new(schema_name)
         .expect("PostgreSQL schema names cannot contain NUL");
@@ -437,78 +219,31 @@ fn resolve_entrypoint(
     if schema_oid == pg_sys::InvalidOid {
         return Ok(None);
     }
-
-    let relation = CatalogRelation::open(
-        pg_sys::ProcedureRelationId,
-        pg_sys::AccessShareLock as _,
-    )
-    .map_err(|source| LakebaseError::WorkerCatalog {
-        operation: CatalogOperation::ResolveEntrypoint,
-        source,
-    })?;
-    let mut scan = relation
-        .begin_scan(
-            pg_sys::InvalidOid,
-            false,
-            CatalogSnapshot::Default,
-            [CatalogScanKey::oid_eq(
-                pg_sys::Anum_pg_proc_pronamespace as _,
-                schema_oid,
-            )],
+    let function_name = CString::new(function_name)
+        .expect("PostgreSQL function names cannot contain NUL");
+    let argument_types = [pg_sys::INTERNALOID];
+    // SAFETY: buildoidvector copies the single live OID. PROCNAMEARGSNSP uses
+    // (proname, proargtypes, pronamespace), exactly matching this lookup.
+    let argument_vector = unsafe {
+        pg_sys::buildoidvector(argument_types.as_ptr(), argument_types.len() as i32)
+    };
+    let tuple = unsafe {
+        pg_sys::SearchSysCache3(
+            pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as i32,
+            pg_sys::Datum::from(function_name.as_ptr() as usize),
+            pg_sys::Datum::from(argument_vector as usize),
+            pg_sys::Datum::from(schema_oid),
         )
-        .map_err(|source| LakebaseError::WorkerCatalog {
-            operation: CatalogOperation::ResolveEntrypoint,
-            source,
-        })?;
-    while let Some(tuple) =
-        scan.get_next()
-            .map_err(|source| LakebaseError::WorkerCatalog {
-                operation: CatalogOperation::ResolveEntrypoint,
-                source,
-            })?
-    {
-        let procedure =
-            unsafe { &*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_proc) };
-        let matches = unsafe {
-            let proname = CStr::from_ptr(procedure.proname.data.as_ptr());
-            proname.to_bytes() == function_name.as_bytes()
-                && WorkerEntrypointContract::accepts(procedure)
-                && pg_sys::getExtensionOfObject(
-                    pg_sys::ProcedureRelationId,
-                    procedure.oid,
-                ) == extension_oid
-        };
-        if matches {
-            return Ok(Some(procedure.oid));
-        }
+    };
+    unsafe { pg_sys::pfree(argument_vector.cast()) };
+    if tuple.is_null() {
+        return Ok(None);
     }
-    Ok(None)
-}
-
-fn open_workers(lock_mode: pg_sys::LOCKMODE) -> LakebaseResult<CatalogRelation> {
-    let schema_oid =
-        catalog::get_namespace_oid(LAKEBASE_SCHEMA, false).map_err(|source| {
-            LakebaseError::WorkerCatalog {
-                operation: CatalogOperation::ResolveSchema,
-                source,
-            }
-        })?;
-    let relation_oid =
-        catalog::get_relation_oid(WORKERS_TABLE, schema_oid).map_err(|source| {
-            LakebaseError::WorkerCatalog {
-                operation: CatalogOperation::ResolveRelation,
-                source,
-            }
-        })?;
-    if relation_oid == pg_sys::InvalidOid {
-        return Err(LakebaseError::WorkersTableMissing);
-    }
-    CatalogRelation::open(relation_oid, lock_mode).map_err(|source| {
-        LakebaseError::WorkerCatalog {
-            operation: CatalogOperation::Open,
-            source,
-        }
-    })
+    let procedure = unsafe { &*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc) };
+    let matches = WorkerEntrypointContract::accepts(procedure);
+    let function_oid = matches.then_some(procedure.oid);
+    unsafe { pg_sys::ReleaseSysCache(tuple) };
+    Ok(function_oid)
 }
 
 fn validate_entrypoint(
@@ -555,39 +290,4 @@ fn current_extension_name(extension_oid: pg_sys::Oid) -> LakebaseResult<String> 
             .to_string_lossy()
             .into_owned())
     }
-}
-
-unsafe fn required_attr<T: FromDatum>(
-    tuple: pg_sys::HeapTuple,
-    tuple_desc: pg_sys::TupleDesc,
-    attno: i16,
-    name: &str,
-) -> T {
-    let mut is_null = false;
-    let datum =
-        unsafe { pg_sys::heap_getattr(tuple, attno as _, tuple_desc, &mut is_null) };
-    assert!(!is_null, "workers.{name} must not be null");
-    unsafe { T::from_datum(datum, false) }
-        .unwrap_or_else(|| panic!("workers.{name} has invalid Datum"))
-}
-
-unsafe fn name_attr(
-    tuple: pg_sys::HeapTuple,
-    tuple_desc: pg_sys::TupleDesc,
-    attno: i16,
-    name: &str,
-) -> String {
-    let mut is_null = false;
-    let datum =
-        unsafe { pg_sys::heap_getattr(tuple, attno as _, tuple_desc, &mut is_null) };
-    assert!(!is_null, "workers.{name} must not be null");
-    let actual = unsafe {
-        let name = datum.cast_mut_ptr::<pg_sys::NameData>();
-        CStr::from_ptr((*name).data.as_ptr())
-    };
-    actual.to_string_lossy().into_owned()
-}
-
-fn idx(attno: i16) -> usize {
-    usize::try_from(attno - 1).expect("attribute numbers are positive")
 }

@@ -1,4 +1,4 @@
-comment = 'Shared runtime for Lakebase table access method extensions'
+comment = 'Shared Lakebase worker and storage services for table access method extensions'
 default_version = '@CARGO_VERSION@'
 module_pathname = '$libdir/pg_lakebase_runtime'
 relocatable = false

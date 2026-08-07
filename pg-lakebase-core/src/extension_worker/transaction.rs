@@ -1,4 +1,4 @@
-use std::panic::{RefUnwindSafe, UnwindSafe};
+use std::panic::AssertUnwindSafe;
 
 use pgrx::PgTryBuilder;
 use pgrx::pg_sys;
@@ -18,9 +18,10 @@ use crate::diag::PgReportError;
 pub struct WorkerTransaction;
 
 impl WorkerTransaction {
-    pub fn run<T, F>(body: F) -> Result<T, PgReportError>
+    pub fn run<T, E, F>(body: F) -> Result<T, PgReportError>
     where
-        F: FnOnce() -> Result<T, PgReportError> + UnwindSafe + RefUnwindSafe,
+        E: Into<PgReportError>,
+        F: FnOnce() -> Result<T, E>,
     {
         unsafe {
             assert!(
@@ -28,7 +29,7 @@ impl WorkerTransaction {
                 "WorkerTransaction can only run in a registered background worker"
             );
         }
-        PgTryBuilder::new(move || {
+        PgTryBuilder::new(AssertUnwindSafe(move || {
             unsafe {
                 pg_sys::SetCurrentStatementStartTimestamp();
                 pg_sys::StartTransactionCommand();
@@ -47,10 +48,10 @@ impl WorkerTransaction {
                 }
                 Err(error) => {
                     unsafe { pg_sys::AbortCurrentTransaction() };
-                    Err(error)
+                    Err(error.into())
                 }
             }
-        })
+        }))
         .catch_others(|caught| match caught {
             caught @ CaughtError::RustPanic { .. } => {
                 unsafe { pg_sys::AbortCurrentTransaction() };

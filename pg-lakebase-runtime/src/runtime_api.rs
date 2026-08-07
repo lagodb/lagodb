@@ -17,6 +17,7 @@ use pg_lakebase_core::runtime_api::{
 };
 use pgrx::pg_sys;
 
+use crate::object_access;
 use storage_volume::resolve_storage_volume_route;
 
 thread_local! {
@@ -257,7 +258,7 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
     extension_name: *const c_char,
     worker_name: *const c_char,
 ) -> u32 {
-    if crate::runtime::ensure_preloaded().is_err() {
+    if crate::worker::ensure_preloaded().is_err() {
         return STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED;
     }
     if extension_name.is_null() || worker_name.is_null() {
@@ -267,22 +268,22 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
     let worker_name = unsafe { CStr::from_ptr(worker_name) };
     if extension_name.is_empty()
         || worker_name.is_empty()
-        || worker_name.to_bytes().len() > crate::state::MAX_WORKER_NAME_BYTES
+        || worker_name.to_bytes().len() > crate::worker::MAX_WORKER_NAME_BYTES
     {
         return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
     }
-    let Ok(worker_name) = worker_name.to_str() else {
+    let (Ok(extension_name), Ok(worker_name)) =
+        (extension_name.to_str(), worker_name.to_str())
+    else {
         return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
     };
-    // Resolve the extension through PostgreSQL's syscache rather than scanning
-    // lakebase.workers. Lifecycle publishes the wake only after commit. A
-    // missing shared-memory slot triggers conservative database reconciliation.
-    let extension_oid =
-        unsafe { pg_sys::get_extension_oid(extension_name.as_ptr(), true) };
-    if extension_oid == pg_sys::InvalidOid {
+    let Some(worker_id) =
+        crate::registry::registration_worker_id(extension_name, worker_name)
+            .unwrap_or_else(|error| error.report())
+    else {
         return STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND;
-    }
-    crate::lifecycle::request_wakeup(u32::from(extension_oid), worker_name);
+    };
+    crate::lifecycle::request_wakeup(worker_id);
     STAGE_WORKER_WAKEUP_OK
 }
 
@@ -393,6 +394,9 @@ impl PreparedAmRegistration {
 unsafe extern "C-unwind" fn register_am(
     registration: *const AmRegistrationV1,
 ) -> u32 {
+    if unsafe { pg_sys::IsBinaryUpgrade } {
+        return REGISTER_OK;
+    }
     let Some(registration) = (unsafe { AmRegistrationRef::from_raw(registration) })
     else {
         return REGISTER_INVALID_DESCRIPTOR;
@@ -437,6 +441,10 @@ pub(crate) fn init() {
             .cast_mut()
             .cast::<c_void>();
     }
+    if unsafe { pg_sys::IsBinaryUpgrade } {
+        return;
+    }
+    object_access::init();
     crate::process_utility::init();
 }
 

@@ -1,30 +1,15 @@
 use std::cell::RefCell;
+use std::ffi::c_void;
+use std::mem;
+use std::ptr::null_mut;
 
 use pgrx::pg_sys;
 
-use crate::error::LakebaseResult;
-use crate::runtime;
-use crate::state::INVALID_OID;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct WorkerActionKey {
-    extension_oid: u32,
-    worker_name: String,
-}
-
-impl WorkerActionKey {
-    fn new(extension_oid: u32, worker_name: &str) -> Self {
-        Self {
-            extension_oid,
-            worker_name: worker_name.to_owned(),
-        }
-    }
-}
+use crate::worker::{self, INVALID_OID, WorkerKey};
 
 #[derive(Clone, Debug)]
 enum PendingActionKind {
-    ReserveRegistration(runtime::RegistrationReservation),
-    Wake(WorkerActionKey),
+    Wake(WorkerKey),
     ReconcileDatabase,
     WakeDatabaseWorkers,
     DropDatabase,
@@ -46,30 +31,16 @@ pub(crate) fn init() {
     // SAFETY: callbacks have PostgreSQL's required ABI and remain loaded for
     // the postmaster/backend lifetime because pg_lakebase_runtime is preloaded.
     unsafe {
-        pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
-        pg_sys::RegisterSubXactCallback(Some(subxact_callback), std::ptr::null_mut());
+        pg_sys::RegisterXactCallback(Some(xact_callback), null_mut());
+        pg_sys::RegisterSubXactCallback(Some(subxact_callback), null_mut());
     }
 }
 
-pub(crate) fn reserve_registration(
-    extension_oid: u32,
-    worker_name: &str,
-) -> LakebaseResult<()> {
-    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
-    let reservation =
-        runtime::reserve_registration(database_oid, extension_oid, worker_name)?;
-    push(
-        database_oid,
-        PendingActionKind::ReserveRegistration(reservation),
-    );
-    Ok(())
-}
-
-pub(crate) fn request_wakeup(extension_oid: u32, worker_name: &str) {
+pub(crate) fn request_wakeup(worker_id: i32) {
     let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
     push(
         database_oid,
-        PendingActionKind::Wake(WorkerActionKey::new(extension_oid, worker_name)),
+        PendingActionKind::Wake(WorkerKey::new(database_oid, worker_id)),
     );
 }
 
@@ -129,33 +100,26 @@ impl PendingActions {
     }
 
     fn apply(&mut self, committed: bool) -> bool {
-        let actions = std::mem::take(&mut self.actions);
-        let mut needs_signal = false;
+        let actions = mem::take(&mut self.actions);
+        let mut needs_supervisor_wake = false;
         for action in actions {
-            needs_signal |= action.apply(committed);
+            needs_supervisor_wake |= action.apply(committed);
         }
-        needs_signal
+        needs_supervisor_wake
     }
 
     fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }
 
-    fn abort_subtransaction(&mut self, level: i32) -> bool {
+    fn abort_subtransaction(&mut self, level: i32) {
         let aborted: Vec<_> = self
             .actions
             .extract_if(.., |action| action.nest_level >= level)
             .collect();
         let parent_level = level.saturating_sub(1);
-        let mut needs_signal = false;
         for action in aborted {
             match action.kind {
-                PendingActionKind::ReserveRegistration(reservation) => {
-                    needs_signal |= runtime::finish_registration(
-                        reservation,
-                        runtime::RegistrationCompletion::Abort,
-                    );
-                }
                 PendingActionKind::ReconcileDatabase => {
                     self.record(
                         action.database_oid,
@@ -186,7 +150,6 @@ impl PendingActions {
                 PendingActionKind::Wake(_) => {}
             }
         }
-        needs_signal
     }
 
     fn commit_subtransaction(&mut self, level: i32) {
@@ -204,37 +167,25 @@ impl PendingActions {
 impl PendingAction {
     fn apply(self, committed: bool) -> bool {
         match self.kind {
-            PendingActionKind::ReserveRegistration(reservation) => {
-                runtime::finish_registration(
-                    reservation,
-                    if committed {
-                        runtime::RegistrationCompletion::Commit
-                    } else {
-                        runtime::RegistrationCompletion::Abort
-                    },
-                )
+            PendingActionKind::Wake(worker) if committed => {
+                worker::wake_worker(worker)
             }
-            PendingActionKind::Wake(worker) if committed => runtime::wake_worker(
-                self.database_oid,
-                worker.extension_oid,
-                &worker.worker_name,
-            ),
             PendingActionKind::Wake(_) => false,
             PendingActionKind::ReconcileDatabase => {
-                runtime::request_database_reconcile(self.database_oid)
+                worker::request_database_reconcile(self.database_oid)
             }
             PendingActionKind::WakeDatabaseWorkers if committed => {
-                runtime::wake_database_workers(self.database_oid)
+                worker::wake_database_workers(self.database_oid)
             }
             PendingActionKind::WakeDatabaseWorkers => false,
             PendingActionKind::DropDatabase if committed => {
-                runtime::request_full_rescan()
+                worker::request_full_rescan()
             }
             PendingActionKind::DropDatabase => {
-                runtime::request_database_reconcile(self.database_oid)
-                    | runtime::request_full_rescan()
+                worker::request_database_reconcile(self.database_oid)
+                    | worker::request_full_rescan()
             }
-            PendingActionKind::RescanAll => runtime::request_full_rescan(),
+            PendingActionKind::RescanAll => worker::request_full_rescan(),
         }
     }
 }
@@ -259,7 +210,7 @@ fn same_action(left: &PendingActionKind, right: &PendingActionKind) -> bool {
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn xact_callback(
     event: pg_sys::XactEvent::Type,
-    _arg: *mut std::ffi::c_void,
+    _arg: *mut c_void,
 ) {
     use pg_sys::XactEvent::*;
 
@@ -278,7 +229,7 @@ unsafe extern "C-unwind" fn xact_callback(
 
 fn apply(committed: bool) {
     if ACTIONS.with(|actions| actions.borrow_mut().apply(committed)) {
-        runtime::signal_launcher();
+        worker::signal_supervisor();
     }
 }
 
@@ -287,16 +238,14 @@ unsafe extern "C-unwind" fn subxact_callback(
     event: pg_sys::SubXactEvent::Type,
     _my_subid: pg_sys::SubTransactionId,
     _parent_subid: pg_sys::SubTransactionId,
-    _arg: *mut std::ffi::c_void,
+    _arg: *mut c_void,
 ) {
     use pg_sys::SubXactEvent::*;
 
     let level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
     ACTIONS.with(|actions| match event {
         SUBXACT_EVENT_ABORT_SUB => {
-            if actions.borrow_mut().abort_subtransaction(level) {
-                runtime::signal_launcher();
-            }
+            actions.borrow_mut().abort_subtransaction(level);
         }
         SUBXACT_EVENT_COMMIT_SUB => {
             actions.borrow_mut().commit_subtransaction(level);
