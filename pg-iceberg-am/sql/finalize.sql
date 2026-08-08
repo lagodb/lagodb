@@ -2,9 +2,9 @@
 
 CREATE ACCESS METHOD iceberg TYPE TABLE HANDLER iceberg_table_am_handler;
 
-REVOKE ALL ON FUNCTION iceberg.automatic_maintenance_worker(internal) FROM PUBLIC;
+REVOKE ALL ON FUNCTION iceberg.maintenance_worker(internal) FROM PUBLIC;
 
 SELECT lakebase.register_worker(
-    'iceberg_automatic_maintenance',
-    'iceberg.automatic_maintenance_worker(internal)'::regprocedure
+    'iceberg_maintenance',
+    'iceberg.maintenance_worker(internal)'::regprocedure
 );

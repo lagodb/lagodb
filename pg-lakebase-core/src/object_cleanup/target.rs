@@ -1,17 +1,22 @@
 //! Validated physical storage targets consumed by the cleanup executor.
 
-use pg_lakebase_storage::{ObjectLocation, StorageError, StoreId};
+use pg_lakebase_storage::{ObjectPath, StorageError};
+
+use crate::storage::volume::StorageVolumeId;
 
 const MAX_NAMESPACE_BYTES: usize = 255;
 pub const MAX_OBJECT_PATH_BYTES: usize = 1_024;
 
 /// A validated single-object deletion target.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ObjectTarget(ObjectLocation);
+pub struct ObjectTarget {
+    volume_id: StorageVolumeId,
+    path: ObjectPath,
+}
 
 impl ObjectTarget {
     pub fn new(
-        store_id: impl Into<String>,
+        volume_id: StorageVolumeId,
         namespace: impl Into<String>,
         path: impl Into<String>,
     ) -> Result<Self, StorageError> {
@@ -19,19 +24,22 @@ impl ObjectTarget {
         let path = path.into();
         validate_lengths(&namespace, &path)?;
         validate_relative_path(&path, "object path")?;
-        ObjectLocation::new(store_id, namespace, path).map(Self)
+        Ok(Self {
+            volume_id,
+            path: ObjectPath::new(namespace, path)?,
+        })
     }
 
-    pub fn store_id(&self) -> &StoreId {
-        self.0.store_id()
+    pub const fn volume_id(&self) -> StorageVolumeId {
+        self.volume_id
     }
 
     pub fn namespace(&self) -> &str {
-        self.0.bucket()
+        self.path.bucket()
     }
 
     pub fn path(&self) -> &str {
-        self.0.key()
+        self.path.key()
     }
 }
 
@@ -41,14 +49,14 @@ impl ObjectTarget {
 /// accidentally match a sibling whose name merely starts with the same bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectTreeTarget {
-    store_id: StoreId,
+    volume_id: StorageVolumeId,
     namespace: String,
     prefix: String,
 }
 
 impl ObjectTreeTarget {
     pub fn new(
-        store_id: impl Into<String>,
+        volume_id: StorageVolumeId,
         namespace: impl Into<String>,
         prefix: impl Into<String>,
     ) -> Result<Self, StorageError> {
@@ -66,17 +74,16 @@ impl ObjectTreeTarget {
         }
         validate_lengths(&namespace, &prefix)?;
 
-        // Reuse the storage layer's store-id/namespace/key validation.
-        let validated = ObjectLocation::new(store_id, namespace, &prefix)?;
+        let validated = ObjectPath::new(namespace, &prefix)?;
         Ok(Self {
-            store_id: validated.store_id().clone(),
+            volume_id,
             namespace: validated.bucket().to_owned(),
             prefix,
         })
     }
 
-    pub fn store_id(&self) -> &StoreId {
-        &self.store_id
+    pub const fn volume_id(&self) -> StorageVolumeId {
+        self.volume_id
     }
 
     pub fn namespace(&self) -> &str {
@@ -118,31 +125,37 @@ fn validate_lengths(namespace: &str, path: &str) -> Result<(), StorageError> {
 mod tests {
     use super::*;
 
+    fn volume_id() -> StorageVolumeId {
+        StorageVolumeId::new(1).expect("valid test volume ID")
+    }
+
     #[test]
     fn tree_prefix_is_normalized_once() {
-        let target = ObjectTreeTarget::new("store", "bucket", "/table/root")
+        let target = ObjectTreeTarget::new(volume_id(), "bucket", "/table/root")
             .expect("valid target");
         assert_eq!(target.prefix(), "table/root/");
     }
 
     #[test]
     fn tree_rejects_namespace_root_and_parent_segments() {
-        assert!(ObjectTreeTarget::new("store", "bucket", "/").is_err());
-        assert!(ObjectTreeTarget::new("store", "bucket", "table/../other").is_err());
+        assert!(ObjectTreeTarget::new(volume_id(), "bucket", "/").is_err());
+        assert!(
+            ObjectTreeTarget::new(volume_id(), "bucket", "table/../other").is_err()
+        );
     }
 
     #[test]
     fn object_rejects_non_normalized_paths() {
-        assert!(ObjectTarget::new("store", "bucket", "/table/file").is_err());
-        assert!(ObjectTarget::new("store", "bucket", "table/../other").is_err());
+        assert!(ObjectTarget::new(volume_id(), "bucket", "/table/file").is_err());
+        assert!(ObjectTarget::new(volume_id(), "bucket", "table/../other").is_err());
     }
 
     #[test]
     fn object_and_tree_targets_are_distinct_types() {
-        let object =
-            ObjectTarget::new("store", "bucket", "table/file").expect("valid object");
-        let tree =
-            ObjectTreeTarget::new("store", "bucket", "table").expect("valid tree");
+        let object = ObjectTarget::new(volume_id(), "bucket", "table/file")
+            .expect("valid object");
+        let tree = ObjectTreeTarget::new(volume_id(), "bucket", "table")
+            .expect("valid tree");
         assert_eq!(object.path(), "table/file");
         assert_eq!(tree.prefix(), "table/");
     }
@@ -150,24 +163,25 @@ mod tests {
     #[test]
     fn object_path_limit_is_measured_after_tree_normalization() {
         let object_path = "x".repeat(MAX_OBJECT_PATH_BYTES);
-        assert!(ObjectTarget::new("store", "bucket", &object_path).is_ok());
+        assert!(ObjectTarget::new(volume_id(), "bucket", &object_path).is_ok());
         assert!(
-            ObjectTarget::new("store", "bucket", format!("{object_path}x")).is_err()
+            ObjectTarget::new(volume_id(), "bucket", format!("{object_path}x"))
+                .is_err()
         );
 
         let tree_without_slash = "x".repeat(MAX_OBJECT_PATH_BYTES - 1);
         assert!(
-            ObjectTreeTarget::new("store", "bucket", &tree_without_slash).is_ok()
+            ObjectTreeTarget::new(volume_id(), "bucket", &tree_without_slash).is_ok()
         );
-        assert!(ObjectTreeTarget::new("store", "bucket", object_path).is_err());
+        assert!(ObjectTreeTarget::new(volume_id(), "bucket", object_path).is_err());
     }
 
     #[test]
     fn object_path_limit_counts_utf8_bytes() {
         let within_limit = "界".repeat(MAX_OBJECT_PATH_BYTES / 3);
-        assert!(ObjectTarget::new("store", "bucket", within_limit).is_ok());
+        assert!(ObjectTarget::new(volume_id(), "bucket", within_limit).is_ok());
 
         let over_limit = "界".repeat(MAX_OBJECT_PATH_BYTES / 3 + 1);
-        assert!(ObjectTarget::new("store", "bucket", over_limit).is_err());
+        assert!(ObjectTarget::new(volume_id(), "bucket", over_limit).is_err());
     }
 }

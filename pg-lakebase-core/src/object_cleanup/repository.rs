@@ -26,7 +26,7 @@ const COLUMN_COUNT: usize = 14;
 mod column {
     pub const ITEM_ID: i16 = 1;
     pub const OPERATION: i16 = 2;
-    pub const STORE_ID: i16 = 3;
+    pub const VOLUME_ID: i16 = 3;
     pub const OBJECT_NAMESPACE: i16 = 4;
     pub const OBJECT_PATH: i16 = 5;
     pub const PRODUCER: i16 = 6;
@@ -43,39 +43,6 @@ mod column {
 pub struct ObjectCleanupQueue;
 
 impl ObjectCleanupQueue {
-    /// Return whether the queue contains any unresolved cleanup obligation.
-    ///
-    /// This deliberately includes permanently failed items: they are no longer
-    /// runnable by the worker, but still require operator resolution or an
-    /// explicit decision to discard the cleanup obligation.
-    pub fn has_unresolved_items() -> Result<bool, ObjectCleanupError> {
-        let catalog =
-            ObjectCleanupQueueCatalog::open_required(pg_sys::AccessShareLock as _)?;
-        let mut scan = catalog
-            .relation
-            .begin_scan(
-                catalog.ids.pkey,
-                true,
-                CatalogSnapshot::Default,
-                std::iter::empty(),
-            )
-            .map_err(|source| {
-                ObjectCleanupError::catalog(
-                    ObjectCleanupCatalogOperation::Scan,
-                    source,
-                )
-            })?;
-        Ok(scan
-            .get_next()
-            .map_err(|source| {
-                ObjectCleanupError::catalog(
-                    ObjectCleanupCatalogOperation::Scan,
-                    source,
-                )
-            })?
-            .is_some())
-    }
-
     pub fn enqueue(
         item: ObjectCleanupItemRef<'_>,
     ) -> Result<ObjectCleanupItemId, ObjectCleanupError> {
@@ -141,7 +108,7 @@ impl ObjectCleanupQueue {
                 CatalogSnapshot::Default,
                 target_keys(
                     ObjectCleanupOperation::DeleteTree,
-                    target.store_id().as_str(),
+                    target.volume_id().as_i64(),
                     target.namespace(),
                     target.prefix(),
                 ),
@@ -594,7 +561,7 @@ impl ObjectCleanupQueueCatalog {
 struct QueueRow {
     id: ObjectCleanupItemId,
     operation: i16,
-    store_id: String,
+    volume_id: i64,
     namespace: String,
     path: String,
     producer: String,
@@ -610,12 +577,12 @@ struct QueueRow {
 
 impl QueueRow {
     fn new(item: &ObjectCleanupItemRef<'_>) -> Self {
-        let (store_id, namespace, path, context) = item.fields();
+        let (volume_id, namespace, path, context) = item.fields();
         let now = current_timestamp();
         Self {
             id: ObjectCleanupItemId::new(),
             operation: item.operation() as i16,
-            store_id: store_id.to_owned(),
+            volume_id: volume_id as i64,
             namespace: namespace.to_owned(),
             path: path.to_owned(),
             producer: context.producer.to_owned(),
@@ -641,7 +608,7 @@ impl QueueRow {
             // Keep the replacement permanently invalid even if an operator
             // retries it without first repairing the damaged catalog fields.
             operation: INVALID_OPERATION,
-            store_id: QUARANTINED_VALUE.to_owned(),
+            volume_id: 0,
             namespace: QUARANTINED_VALUE.to_owned(),
             path: QUARANTINED_VALUE.to_owned(),
             producer: QUARANTINED_PRODUCER.to_owned(),
@@ -660,7 +627,7 @@ impl QueueRow {
         let mut fields = TupleFields::new();
         fields.set(column::ITEM_ID, Some(self.id.0));
         fields.set(column::OPERATION, Some(self.operation));
-        fields.set(column::STORE_ID, Some(self.store_id.as_str()));
+        fields.set(column::VOLUME_ID, Some(self.volume_id));
         fields.set(column::OBJECT_NAMESPACE, Some(self.namespace.as_str()));
         fields.set(column::OBJECT_PATH, Some(self.path.as_str()));
         fields.set(column::PRODUCER, Some(self.producer.as_str()));
@@ -697,8 +664,8 @@ impl QueueRow {
             operation: unsafe {
                 required_attr(tuple, tuple_desc, column::OPERATION, "operation")?
             },
-            store_id: unsafe {
-                required_attr(tuple, tuple_desc, column::STORE_ID, "store_id")?
+            volume_id: unsafe {
+                required_attr(tuple, tuple_desc, column::VOLUME_ID, "volume_id")?
             },
             namespace: unsafe {
                 required_attr(
@@ -773,9 +740,17 @@ impl QueueRow {
                     "unknown maintenance operation {raw}"
                 ))
             })?;
+        let volume_id =
+            crate::storage::volume::StorageVolumeId::try_from(self.volume_id)
+                .map_err(|_| {
+                    ObjectCleanupError::InvalidRecord(
+                        "invalid storage volume id".to_owned(),
+                    )
+                })?
+                .get();
         let target = match operation {
             ObjectCleanupOperation::DeleteObject => ObjectCleanupTarget::Object {
-                store_id: self.store_id,
+                volume_id,
                 namespace: self.namespace,
                 path: self.path,
             },
@@ -791,7 +766,7 @@ impl QueueRow {
                     ));
                 }
                 ObjectCleanupTarget::Tree {
-                    store_id: self.store_id,
+                    volume_id,
                     namespace: self.namespace,
                     prefix: self.path,
                 }
@@ -833,13 +808,13 @@ impl TupleFields {
 
 fn target_keys(
     operation: ObjectCleanupOperation,
-    store_id: &str,
+    volume_id: i64,
     namespace: &str,
     path: &str,
 ) -> [CatalogScanKey; 4] {
     [
         CatalogScanKey::i16_eq(column::OPERATION as _, operation as i16),
-        CatalogScanKey::text_eq(column::STORE_ID as _, store_id),
+        CatalogScanKey::i64_eq(column::VOLUME_ID as _, volume_id),
         CatalogScanKey::text_eq(column::OBJECT_NAMESPACE as _, namespace),
         CatalogScanKey::text_eq(column::OBJECT_PATH as _, path),
     ]

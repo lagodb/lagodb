@@ -144,11 +144,7 @@ impl StorageResource {
                 state,
             } => {
                 let remote_deleted = if *state == ObjectFileState::Uploaded {
-                    match service.delete(
-                        location.store_id().as_str(),
-                        location.bucket(),
-                        location.key(),
-                    ) {
+                    match service.delete(location.bucket(), location.key()) {
                         Ok(()) => true,
                         Err(error) if error.kind() == StorageErrorKind::NotFound => {
                             true

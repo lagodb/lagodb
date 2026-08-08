@@ -411,7 +411,9 @@ fn storage_sql_error_code(error: &StorageError) -> PgSqlErrorCode {
         | StorageErrorKind::CacheFillAborted => PgSqlErrorCode::ERRCODE_IO_ERROR,
         StorageErrorKind::Protocol
         | StorageErrorKind::ClosedHandle
-        | StorageErrorKind::ExpiredCursor => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        | StorageErrorKind::ExpiredCursor
+        | StorageErrorKind::Conflict => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        StorageErrorKind::Ambiguous => PgSqlErrorCode::ERRCODE_IO_ERROR,
     }
 }
 

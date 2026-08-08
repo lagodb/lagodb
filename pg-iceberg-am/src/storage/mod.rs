@@ -77,7 +77,8 @@ impl StorageContext {
         };
 
         let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
-        let service = BackendStorageService::from_endpoint(&endpoint);
+        let service =
+            BackendStorageService::for_managed(&endpoint, opts.volume_id().get())?;
         let resolver = StagingPathResolver::new(endpoint.cache_dir());
         Self::distributed(&opts, service, resolver)
     }
@@ -127,7 +128,7 @@ impl StorageContext {
         let base_path = opts.effective_base_uri().to_owned();
         let storage = ObjectStorage::new(
             base_path.clone(),
-            opts.store_id().clone(),
+            opts.volume_id(),
             opts.object_namespace(),
             storage_service,
             staging_resolver,

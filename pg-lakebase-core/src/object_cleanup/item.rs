@@ -73,16 +73,16 @@ impl ObjectCleanupItemRef<'_> {
         }
     }
 
-    pub(crate) fn fields(&self) -> (&str, &str, &str, &ObjectCleanupContext<'_>) {
+    pub(crate) fn fields(&self) -> (u64, &str, &str, &ObjectCleanupContext<'_>) {
         match self {
             Self::DeleteObject { target, context } => (
-                target.store_id().as_str(),
+                target.volume_id().get(),
                 target.namespace(),
                 target.path(),
                 context,
             ),
             Self::DeleteTree { target, context } => (
-                target.store_id().as_str(),
+                target.volume_id().get(),
                 target.namespace(),
                 target.prefix(),
                 context,
@@ -99,15 +99,24 @@ pub(crate) struct ObjectCleanupItem {
     pub(crate) revision: i64,
 }
 
+impl ObjectCleanupItem {
+    pub(crate) const fn volume_id(&self) -> u64 {
+        match &self.target {
+            ObjectCleanupTarget::Object { volume_id, .. }
+            | ObjectCleanupTarget::Tree { volume_id, .. } => *volume_id,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum ObjectCleanupTarget {
     Object {
-        store_id: String,
+        volume_id: u64,
         namespace: String,
         path: String,
     },
     Tree {
-        store_id: String,
+        volume_id: u64,
         namespace: String,
         prefix: String,
     },

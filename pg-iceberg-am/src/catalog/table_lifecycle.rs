@@ -48,7 +48,7 @@ impl<'a> IcebergTableLifecycle<'a> {
         if let Some(opts) = get_tablespace(rel.tablespace_oid())? {
             let object_path = opts.rooted_object_key(&distributed_table_key(rel));
             let target = ObjectTreeTarget::new(
-                opts.store_id().as_str(),
+                opts.volume_id(),
                 opts.object_namespace(),
                 object_path,
             )?;

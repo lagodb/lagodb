@@ -16,33 +16,33 @@ pub struct ObjectTreeStats {
 
 /// Paginated, format-neutral observer for a validated storage prefix.
 pub struct ObjectTreeObserver {
-    client: StorageClient,
+    socket_path: std::path::PathBuf,
+    timeout: Duration,
 }
 
 impl ObjectTreeObserver {
     pub fn connect(timeout: Duration) -> StorageResult<Self> {
         let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
         Ok(Self {
-            client: StorageClient::connect_with_timeout(
-                endpoint.socket_path(),
-                timeout,
-            )?,
+            socket_path: endpoint.socket_path().to_path_buf(),
+            timeout,
         })
     }
 
     pub fn observe(
         &self,
-        store_id: &str,
+        volume_id: crate::storage::volume::StorageVolumeId,
         namespace: &str,
         prefix: &str,
     ) -> StorageResult<ObjectTreeStats> {
-        let target = ObjectTreeTarget::new(store_id, namespace, prefix)?;
+        let target = ObjectTreeTarget::new(volume_id, namespace, prefix)?;
+        let client = StorageClient::connect_managed_with_timeout(
+            &self.socket_path,
+            volume_id.get(),
+            self.timeout,
+        )?;
         let mut result = ObjectTreeStats::default();
-        for entry in self.client.list(
-            target.store_id().as_str(),
-            target.namespace(),
-            Some(target.prefix()),
-        ) {
+        for entry in client.list(target.namespace(), Some(target.prefix())) {
             let entry = entry?;
             result.objects = result.objects.checked_add(1).ok_or_else(|| {
                 pg_lakebase_storage::StorageError::resource_exhausted(

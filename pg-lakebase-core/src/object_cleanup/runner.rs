@@ -47,34 +47,29 @@ impl ObjectCleanupExecutor {
     ) -> ObjectCleanupExecutionOutcome {
         match &item.target {
             ObjectCleanupTarget::Object {
-                store_id,
+                volume_id: _,
                 namespace,
                 path,
             } => {
                 if cancelled.load(Ordering::Acquire) {
                     return ObjectCleanupExecutionOutcome::Cancelled;
                 }
-                match client.delete(
-                    store_id.as_str(),
-                    namespace.as_str(),
-                    path.as_str(),
-                ) {
+                match client.delete(namespace.as_str(), path.as_str()) {
                     Ok(()) => ObjectCleanupExecutionOutcome::Complete,
                     Err(error) => classify(error),
                 }
             }
             ObjectCleanupTarget::Tree {
-                store_id,
+                volume_id: _,
                 namespace,
                 prefix,
-            } => self.delete_tree(client, store_id, namespace, prefix, cancelled),
+            } => self.delete_tree(client, namespace, prefix, cancelled),
         }
     }
 
     fn delete_tree(
         &self,
         client: &StorageClient,
-        store_id: &str,
         namespace: &str,
         prefix: &str,
         cancelled: &AtomicBool,
@@ -88,7 +83,6 @@ impl ObjectCleanupExecutor {
 
             let request_cursor = cursor.clone();
             let page = match client.list_page(
-                store_id,
                 namespace,
                 Some(prefix),
                 request_cursor.clone(),
@@ -111,7 +105,7 @@ impl ObjectCleanupExecutor {
                 let keys: Vec<String> =
                     page.entries.into_iter().map(|entry| entry.key).collect();
                 let expected = u32::try_from(keys.len()).unwrap_or(u32::MAX);
-                match client.delete_objects(store_id, namespace, keys) {
+                match client.delete_objects(namespace, keys) {
                     Ok(deleted) if deleted == expected => {}
                     Ok(deleted) => {
                         close_cursor(client, cursor);

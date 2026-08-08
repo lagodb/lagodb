@@ -2,9 +2,9 @@ use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
 use pg_lakebase_core::object_cleanup::ObjectTarget;
 use pg_lakebase_core::storage::service::BackendStorageService;
+use pg_lakebase_core::storage::volume::StorageVolumeId;
 use pg_lakebase_storage::{
-    ListCursor, ObjectLocation, StagingFile, StagingPathResolver, StorageError,
-    StorageFile, StoreId,
+    ListCursor, StagingFile, StagingPathResolver, StorageError, StorageFile,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ fn storage_err(e: StorageError) -> Error {
 #[derive(Clone)]
 pub struct ObjectStorage {
     effective_base_uri: Arc<str>,
-    store_id: Arc<StoreId>,
+    volume_id: StorageVolumeId,
     bucket: Arc<str>,
     service: BackendStorageService,
     staging_resolver: StagingPathResolver,
@@ -48,7 +48,7 @@ impl fmt::Debug for ObjectStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ObjectStorage")
             .field("scheme", &self.scheme())
-            .field("store_id", &self.store_id)
+            .field("volume_id", &self.volume_id)
             .field("bucket", &self.bucket)
             .finish()
     }
@@ -57,7 +57,7 @@ impl fmt::Debug for ObjectStorage {
 impl ObjectStorage {
     pub fn new(
         effective_base_uri: impl Into<String>,
-        store_id: StoreId,
+        volume_id: StorageVolumeId,
         bucket: impl Into<String>,
         service: BackendStorageService,
         staging_resolver: StagingPathResolver,
@@ -66,7 +66,7 @@ impl ObjectStorage {
         let bucket = bucket.into();
         Self {
             effective_base_uri: Arc::from(effective_base_uri.into_boxed_str()),
-            store_id: Arc::new(store_id),
+            volume_id,
             bucket: Arc::from(bucket.into_boxed_str()),
             service,
             staging_resolver,
@@ -79,7 +79,7 @@ impl ObjectStorage {
     ) -> Result<ObjectTarget> {
         let relative_path_pos = resolve_object_uri(&self.effective_base_uri, &uri)?;
         let path = uri.split_off(relative_path_pos);
-        ObjectTarget::new(self.store_id.as_str(), self.bucket.as_ref(), path)
+        ObjectTarget::new(self.volume_id, self.bucket.as_ref(), path)
             .map_err(storage_err)
     }
 
@@ -97,13 +97,7 @@ impl ObjectStorage {
         loop {
             let page = self
                 .service
-                .list_page(
-                    self.store_id.as_str(),
-                    self.bucket.as_ref(),
-                    Some(&prefix),
-                    cursor,
-                    0,
-                )
+                .list_page(self.bucket.as_ref(), Some(&prefix), cursor, 0)
                 .map_err(storage_err)?;
             for entry in page.entries {
                 if entry
@@ -136,22 +130,19 @@ impl Storage for ObjectStorage {
 
     fn delete(&self, path: &str) -> Result<()> {
         self.service
-            .delete(self.store_id.as_str(), self.bucket.as_ref(), path)
+            .delete(self.bucket.as_ref(), path)
             .map_err(storage_err)
     }
 
     fn remove_dir_all(&self, path: &str) -> Result<()> {
         self.service
-            .delete_prefix(self.store_id.as_str(), self.bucket.as_ref(), path)
+            .delete_prefix(self.bucket.as_ref(), path)
             .map(|_| ())
             .map_err(storage_err)
     }
 
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
-        match self
-            .service
-            .head(self.store_id.as_str(), self.bucket.as_ref(), path)
-        {
+        match self.service.head(self.bucket.as_ref(), path) {
             Ok(info) => Ok(Some(FileMetadata { size: info.size })),
             Err(e) if e.kind() == pg_lakebase_storage::StorageErrorKind::NotFound => {
                 Ok(None)
@@ -163,14 +154,13 @@ impl Storage for ObjectStorage {
     fn open_reader(&self, path: &str) -> Result<OpenedFile> {
         let file = self
             .service
-            .open(self.store_id.as_str(), self.bucket.as_ref(), path)
+            .open(self.bucket.as_ref(), path)
             .map_err(storage_err)?;
         let metadata = FileMetadata { size: file.size() };
         Ok(OpenedFile {
             metadata,
             reader: Box::new(ObjectReader::new(
                 self.service.clone(),
-                Arc::clone(&self.store_id),
                 Arc::clone(&self.bucket),
                 Arc::from(path),
                 file,
@@ -181,17 +171,13 @@ impl Storage for ObjectStorage {
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
         let staging = self
             .service
-            .create_staging_file(
-                &self.staging_resolver,
-                self.store_id.as_str(),
-                self.bucket.as_ref(),
-                path,
-            )
+            .create_staging_file(&self.staging_resolver, self.bucket.as_ref(), path)
             .map_err(storage_err)?;
 
-        let location =
-            ObjectLocation::new(self.store_id.as_str(), self.bucket.as_ref(), path)
-                .map_err(storage_err)?;
+        let location = self
+            .service
+            .object_location(self.bucket.as_ref(), path)
+            .map_err(storage_err)?;
         register_object_file_staged(
             location,
             staging.path().to_path_buf(),
@@ -204,9 +190,10 @@ impl Storage for ObjectStorage {
     }
 
     fn finalize_write(&self, path: &str) -> Result<()> {
-        let location =
-            ObjectLocation::new(self.store_id.as_str(), self.bucket.as_ref(), path)
-                .map_err(storage_err)?;
+        let location = self
+            .service
+            .object_location(self.bucket.as_ref(), path)
+            .map_err(storage_err)?;
 
         // 1. Pre-check: staged entry MUST exist before we attempt upload.
         ensure_object_file_staged(&location)
@@ -218,7 +205,7 @@ impl Storage for ObjectStorage {
         {
             let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectUpload);
             self.service
-                .upload(self.store_id.as_str(), self.bucket.as_ref(), path)
+                .upload(self.bucket.as_ref(), path)
                 .map_err(storage_err)?;
         }
 
@@ -248,7 +235,6 @@ impl Storage for ObjectStorage {
 
 pub struct ObjectReader {
     service: BackendStorageService,
-    store_id: Arc<StoreId>,
     bucket: Arc<str>,
     key: Arc<str>,
     file: StorageFile,
@@ -257,14 +243,12 @@ pub struct ObjectReader {
 impl ObjectReader {
     fn new(
         service: BackendStorageService,
-        store_id: Arc<StoreId>,
         bucket: Arc<str>,
         key: Arc<str>,
         file: StorageFile,
     ) -> Self {
         Self {
             service,
-            store_id,
             bucket,
             key,
             file,
@@ -407,16 +391,11 @@ impl FileRead for ObjectReader {
         let pos = self.file.position();
         let mut new_file = self
             .service
-            .open(
-                self.store_id.as_str(),
-                self.bucket.as_ref(),
-                self.key.as_ref(),
-            )
+            .open(self.bucket.as_ref(), self.key.as_ref())
             .map_err(std::io::Error::other)?;
         new_file.seek(pg_lakebase_storage::SeekFrom::Start(pos));
         Ok(Box::new(ObjectReader::new(
             self.service.clone(),
-            Arc::clone(&self.store_id),
             Arc::clone(&self.bucket),
             Arc::clone(&self.key),
             new_file,

@@ -74,7 +74,7 @@ pub fn init() {
     GucRegistry::define_bool_guc(
         c"pg_iceberg_am.auto_maintenance_enabled",
         c"Enable Iceberg logical-table automatic maintenance",
-        c"The runtime worker uses one short transaction per selected table.",
+        c"The maintenance worker uses one short transaction per selected table.",
         &AUTO_MAINTENANCE_ENABLED,
         GucContext::Userset,
         GucFlags::default(),

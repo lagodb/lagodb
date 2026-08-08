@@ -12,6 +12,8 @@ use pg_lakebase_core::runtime_api::{
 };
 use pgrx::{pg_guard, pg_sys};
 
+use crate::hooks;
+
 static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
     OnceLock::new();
 
@@ -371,7 +373,7 @@ unsafe extern "C-unwind" fn process_utility_router(
 
         // Lifecycle preflight is deliberately first and is a no-op unless the
         // runtime was initialized from shared_preload_libraries.
-        crate::hooks::preflight(target_node);
+        hooks::preflight(target_node);
 
         let tag = (*target_node).type_;
         let hooks = UTILITY_HOOKS.with(|directory| directory.snapshot(tag));

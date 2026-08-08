@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use pg_lakebase_core::diag::{PgReportError, report_warning};
 use pg_lakebase_core::extension_worker::{
-    WorkerContext, WorkerDirective, WorkerTransaction,
+    WorkerContext, WorkerSchedule, WorkerTransaction,
 };
 use pg_lakebase_core::handles::RelationGuard;
 use pg_lakebase_core::table_maintenance::{
@@ -130,24 +130,24 @@ fn defer_candidate(
         .map_err(PgReportError::from_domain_error)
 }
 
-fn next_worker_directive() -> Result<WorkerDirective, PgReportError> {
+fn next_worker_schedule() -> Result<WorkerSchedule, PgReportError> {
     let next = IcebergMetadata::next_maintenance_due_at()
         .map_err(PgReportError::from_domain_error)?;
     Ok(match next {
-        None => WorkerDirective::Idle,
+        None => WorkerSchedule::Idle,
         Some(timestamp) if timestamp <= unsafe { pg_sys::GetCurrentTimestamp() } => {
-            WorkerDirective::RunImmediately
+            WorkerSchedule::RunImmediately
         }
         Some(timestamp) => {
-            WorkerDirective::RunAfter(SchedulerPolicy::delay_until(timestamp))
+            WorkerSchedule::RunAfter(SchedulerPolicy::delay_until(timestamp))
         }
     })
 }
 
-fn run(worker_context: &WorkerContext<'_>) -> WorkerDirective {
+fn run(worker_context: &WorkerContext<'_>) -> WorkerSchedule {
     worker_context.process_config_reload_if_pending();
     if !crate::gucs::auto_maintenance_enabled() {
-        return WorkerDirective::Idle;
+        return WorkerSchedule::Idle;
     }
     let policy = SchedulerPolicy::configured();
     let candidates = match WorkerTransaction::run(|| load_candidates(policy)) {
@@ -156,7 +156,7 @@ fn run(worker_context: &WorkerContext<'_>) -> WorkerDirective {
             report_warning(format_args!(
                 "automatic Iceberg maintenance could not load due tables: {error}"
             ));
-            return WorkerDirective::RunAfter(policy.naptime);
+            return WorkerSchedule::RunAfter(policy.naptime);
         }
     };
 
@@ -198,11 +198,11 @@ fn run(worker_context: &WorkerContext<'_>) -> WorkerDirective {
         pg_sys::check_for_interrupts!();
     }
 
-    WorkerTransaction::run(next_worker_directive).unwrap_or_else(|error| {
+    WorkerTransaction::run(next_worker_schedule).unwrap_or_else(|error| {
         report_warning(format_args!(
             "automatic Iceberg maintenance could not determine its next deadline: {error}"
         ));
-        WorkerDirective::RunAfter(policy.naptime)
+        WorkerSchedule::RunAfter(policy.naptime)
     })
 }
 
@@ -211,18 +211,10 @@ mod iceberg {
     use super::*;
 
     #[pg_extern]
-    fn automatic_maintenance_worker(worker_context: Internal) -> i64 {
+    fn maintenance_worker(worker_context: Internal) -> i64 {
         // SAFETY: this SQL-inaccessible `internal` argument is supplied only
         // by the pg-lakebase runtime extension-worker wrapper.
         let worker_context = unsafe { WorkerContext::from_internal(&worker_context) };
-        let worker_context = worker_context
-            .map_err(|source| {
-                PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    format!("invalid Iceberg maintenance worker context: {source}"),
-                )
-            })
-            .unwrap_or_else(|error| error.report());
-        run(&worker_context).encode()
+        run(&worker_context).into_raw()
     }
 }

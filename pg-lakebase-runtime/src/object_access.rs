@@ -1,9 +1,11 @@
-//! Lazily installed runtime-owned object-access hook routers.
+//! Runtime-owned object-access hook routers.
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
+use crate::{hooks, storage::volume_config::on_object_access};
+use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::runtime_api::{
     HOOK_DESCRIPTOR_VERSION, OBJECT_ACCESS_EVENTS_KNOWN,
     ObjectAccessHookDescriptorV1, ObjectAccessStrHookDescriptorV1,
@@ -224,6 +226,12 @@ pub(crate) struct PreparedObjectAccessHooks {
     str_nodes: Vec<Box<ObjectAccessStrHookNode>>,
 }
 
+pub(crate) fn init() {
+    if unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
+        install_router();
+    }
+}
+
 fn valid_filter(event_mask: u32) -> bool {
     event_mask != 0 && event_mask & !OBJECT_ACCESS_EVENTS_KNOWN == 0
 }
@@ -285,11 +293,7 @@ pub(crate) fn commit_hooks(prepared: PreparedObjectAccessHooks) {
     let install_str = OBJECT_ACCESS_STR_HOOKS
         .with(|directory| directory.commit(prepared.str_nodes));
     if install {
-        PREV_OBJECT_ACCESS_HOOK.get_or_init(|| unsafe {
-            let previous = pg_sys::object_access_hook;
-            pg_sys::object_access_hook = Some(object_access_router);
-            previous
-        });
+        install_router();
     }
     if install_str {
         PREV_OBJECT_ACCESS_STR_HOOK.get_or_init(|| unsafe {
@@ -298,6 +302,14 @@ pub(crate) fn commit_hooks(prepared: PreparedObjectAccessHooks) {
             previous
         });
     }
+}
+
+fn install_router() {
+    PREV_OBJECT_ACCESS_HOOK.get_or_init(|| unsafe {
+        let previous = pg_sys::object_access_hook;
+        pg_sys::object_access_hook = Some(object_access_router);
+        previous
+    });
 }
 
 #[cfg(test)]
@@ -359,8 +371,21 @@ unsafe extern "C-unwind" fn object_access_router(
     arg: *mut c_void,
 ) {
     unsafe {
-        let hooks = OBJECT_ACCESS_HOOKS.with(ObjectAccessHookDirectory::snapshot);
+        if let Some(Some(previous)) = PREV_OBJECT_ACCESS_HOOK.get() {
+            previous(access, class_id, object_id, sub_id, arg);
+        }
         let mut denied = namespace_result(access, arg) == Some(false);
+
+        if access == pg_sys::ObjectAccessType::OAT_DROP
+            && class_id == pg_sys::ExtensionRelationId
+            && let Err(error) = hooks::drop_extension_workers(object_id)
+        {
+            PgReportError::from_domain_error(error).report();
+        }
+        if let Err(error) = on_object_access(access, class_id, object_id, sub_id) {
+            PgReportError::from_domain_error(error).report();
+        }
+        let hooks = OBJECT_ACCESS_HOOKS.with(ObjectAccessHookDirectory::snapshot);
         hooks.for_each_matching(access, class_id, |descriptor| {
             descriptor.on_access.expect("validated object-access hook")(
                 descriptor.context,
@@ -373,11 +398,6 @@ unsafe extern "C-unwind" fn object_access_router(
             preserve_namespace_denial(access, arg, denied);
             denied |= namespace_result(access, arg) == Some(false);
         });
-
-        if let Some(Some(previous)) = PREV_OBJECT_ACCESS_HOOK.get() {
-            previous(access, class_id, object_id, sub_id, arg);
-            preserve_namespace_denial(access, arg, denied);
-        }
     }
 }
 
@@ -390,9 +410,12 @@ unsafe extern "C-unwind" fn object_access_str_router(
     arg: *mut c_void,
 ) {
     unsafe {
+        if let Some(Some(previous)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
+            previous(access, class_id, object_name, sub_id, arg);
+        }
+        let mut denied = namespace_result(access, arg) == Some(false);
         let hooks =
             OBJECT_ACCESS_STR_HOOKS.with(ObjectAccessStrHookDirectory::snapshot);
-        let mut denied = namespace_result(access, arg) == Some(false);
         hooks.for_each_matching(access, class_id, |descriptor| {
             descriptor
                 .on_access
@@ -407,11 +430,6 @@ unsafe extern "C-unwind" fn object_access_str_router(
             preserve_namespace_denial(access, arg, denied);
             denied |= namespace_result(access, arg) == Some(false);
         });
-
-        if let Some(Some(previous)) = PREV_OBJECT_ACCESS_STR_HOOK.get() {
-            previous(access, class_id, object_name, sub_id, arg);
-            preserve_namespace_denial(access, arg, denied);
-        }
     }
 }
 

@@ -169,29 +169,31 @@ fn actor_loop(
     commands: mpsc::Receiver<ActorCommand>,
     results: mpsc::SyncSender<ActorResult>,
 ) {
-    let mut client: Option<(Duration, StorageClient)> = None;
+    let mut client: Option<(u64, Duration, StorageClient)> = None;
     while let Ok(command) = commands.recv() {
         match command {
             ActorCommand::Shutdown => break,
             ActorCommand::Execute(item) => {
                 let item_id = item.id;
+                let volume_id = item.volume_id();
                 let config = runtime_config
                     .read()
                     .expect("maintenance actor config lock poisoned")
                     .clone();
-                if client
-                    .as_ref()
-                    .is_some_and(|(timeout, _)| *timeout != config.request_timeout)
-                {
+                if client.as_ref().is_some_and(|(current_volume, timeout, _)| {
+                    *current_volume != volume_id || *timeout != config.request_timeout
+                }) {
                     client = None;
                 }
                 if client.is_none() && !shutdown.load(Ordering::Acquire) {
-                    match StorageClient::connect_with_timeout(
+                    match StorageClient::connect_managed_with_timeout(
                         &socket_path,
+                        volume_id,
                         config.request_timeout,
                     ) {
                         Ok(connected) => {
-                            client = Some((config.request_timeout, connected));
+                            client =
+                                Some((volume_id, config.request_timeout, connected));
                         }
                         Err(error) => {
                             let _ = results.send(ActorResult {
@@ -207,7 +209,7 @@ fn actor_loop(
                 }
 
                 let outcome = match client.as_ref() {
-                    Some((_, client)) => {
+                    Some((_, _, client)) => {
                         let executor = ObjectCleanupExecutor::new(config.page_size);
                         match panic::catch_unwind(AssertUnwindSafe(|| {
                             executor.execute(client, item.as_ref(), &shutdown)

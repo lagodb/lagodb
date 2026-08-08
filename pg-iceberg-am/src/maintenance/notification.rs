@@ -9,7 +9,7 @@ pub(crate) struct AutomaticMaintenanceNotifier;
 impl AutomaticMaintenanceNotifier {
     const NOTIFIER: WorkerNotifier = WorkerNotifier::new(WorkerIdentity::new(
         c"pg_iceberg_am",
-        c"iceberg_automatic_maintenance",
+        c"iceberg_maintenance",
     ));
 
     pub(crate) fn stage_wakeup() -> IcebergResult<()> {
