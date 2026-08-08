@@ -13,22 +13,18 @@ use super::reconciler::{ReconcileError, ReconcileReport, StoreConfigReconciler};
 pub(super) type StorageReconciler = StoreConfigReconciler<VolumeConfigSource>;
 pub(super) type StorageReconcileError = ReconcileError;
 
+const VOLUME_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
 pub(super) struct SupervisorReloadState {
     config: StorageWorkerRuntimeConfig,
-    reconcile_interval: Option<Duration>,
-    next_periodic_reconcile: Option<Instant>,
+    next_volume_sweep: Instant,
 }
 
 impl SupervisorReloadState {
     pub(super) fn new(config: StorageWorkerRuntimeConfig) -> Self {
-        let reconcile_interval = config.volume_reconcile_interval;
         Self {
             config,
-            reconcile_interval,
-            next_periodic_reconcile: Self::next_deadline(
-                reconcile_interval,
-                Instant::now(),
-            ),
+            next_volume_sweep: Instant::now() + VOLUME_SWEEP_INTERVAL,
         }
     }
 
@@ -36,33 +32,23 @@ impl SupervisorReloadState {
         self.config.shutdown_timeout
     }
 
-    pub(super) fn periodic_reconcile_due(&self, now: Instant) -> bool {
-        self.next_periodic_reconcile
-            .is_some_and(|deadline| now >= deadline)
+    pub(super) fn volume_sweep_due(&self, now: Instant) -> bool {
+        now >= self.next_volume_sweep
     }
 
-    pub(super) fn schedule_next_reconcile(&mut self, now: Instant) {
-        self.next_periodic_reconcile =
-            Self::next_deadline(self.reconcile_interval, now);
+    pub(super) fn schedule_volume_sweep(&mut self, now: Instant) {
+        self.next_volume_sweep = now + VOLUME_SWEEP_INTERVAL;
     }
 
     pub(super) fn wait_timeout(&self) -> Duration {
         let base = Duration::from_millis(100);
-        let Some(interval) = self.reconcile_interval else {
-            return base;
-        };
-        let until_periodic = self
-            .next_periodic_reconcile
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-            .unwrap_or(interval);
-        base.min(until_periodic.max(Duration::from_millis(1)))
+        let until_sweep = self
+            .next_volume_sweep
+            .saturating_duration_since(Instant::now());
+        base.min(until_sweep.max(Duration::from_millis(1)))
     }
 
-    pub(super) fn reload_from_gucs(
-        &mut self,
-        storage_runtime: &StorageRuntime,
-        now: Instant,
-    ) {
+    pub(super) fn reload_from_gucs(&mut self, storage_runtime: &StorageRuntime) {
         let new_config = StorageWorkerRuntimeConfig::from_gucs();
         if new_config == self.config {
             logging::emit_pg_log(
@@ -74,8 +60,6 @@ impl SupervisorReloadState {
 
         let old_config = self.config.clone();
         let old_storage = old_config.storage.clone();
-        let interval_changed = new_config.volume_reconcile_interval
-            != old_config.volume_reconcile_interval;
         let applied_storage = if new_config.storage != old_config.storage {
             Self::apply_storage_config(storage_runtime, new_config.storage.clone())
         } else {
@@ -85,12 +69,6 @@ impl SupervisorReloadState {
         self.config = new_config;
         self.config.storage = applied_storage.unwrap_or(old_storage);
         Self::log_config_change(&old_config, &self.config);
-
-        if interval_changed {
-            self.reconcile_interval = self.config.volume_reconcile_interval;
-            self.next_periodic_reconcile =
-                Self::next_deadline(self.reconcile_interval, now);
-        }
     }
 
     /// Load and apply one complete machine-managed volume snapshot without a
@@ -108,7 +86,7 @@ impl SupervisorReloadState {
                 pg_sys::WARNING as i32,
                 &format!(
                     "storage volume store {} apply failed ({}): {}",
-                    failure.store_id,
+                    failure.volume_id,
                     failure.state.as_str(),
                     failure.message,
                 ),
@@ -176,10 +154,6 @@ impl SupervisorReloadState {
         }
     }
 
-    fn next_deadline(interval: Option<Duration>, now: Instant) -> Option<Instant> {
-        interval.map(|duration| now + duration)
-    }
-
     fn log_config_change(
         old: &StorageWorkerRuntimeConfig,
         new: &StorageWorkerRuntimeConfig,
@@ -190,17 +164,6 @@ impl SupervisorReloadState {
                 "shutdown_timeout: {}ms -> {}ms",
                 old.shutdown_timeout.as_millis(),
                 new.shutdown_timeout.as_millis(),
-            ));
-        }
-        if old.volume_reconcile_interval != new.volume_reconcile_interval {
-            let format_duration = |value: &Option<Duration>| match value {
-                Some(duration) => format!("{}ms", duration.as_millis()),
-                None => "disabled".to_owned(),
-            };
-            parts.push(format!(
-                "volume_reconcile_interval: {} -> {}",
-                format_duration(&old.volume_reconcile_interval),
-                format_duration(&new.volume_reconcile_interval),
             ));
         }
         if old.storage != new.storage {

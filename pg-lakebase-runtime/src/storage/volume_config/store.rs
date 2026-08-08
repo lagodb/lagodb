@@ -8,12 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::domain::{StorageVolumeError, StorageVolumeSnapshot};
 use super::error::ConfigSecurityError;
+use super::lifecycle::UnixMillis;
+use pgrx::pg_sys;
 
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const CONFIG_WRITER_LOCK_CLASS: u16 = 0x4c43;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 pub(crate) struct StorageVolumeConfigStore {
     directory: PathBuf,
     config_path: PathBuf,
@@ -66,15 +69,15 @@ impl StorageVolumeConfigStore {
         Ok(snapshot)
     }
 
-    /// Serialize PostgreSQL mutation writers with a cluster-wide transaction
-    /// lock and atomically publish a complete snapshot when the value changes.
+    /// Serialize mutation writers with a short-lived cluster-wide session lock
+    /// and atomically publish a complete snapshot when the value changes.
     pub(crate) fn update<T>(
         &self,
         mutation: impl FnOnce(
             &mut StorageVolumeSnapshot,
         ) -> Result<(T, bool), StorageVolumeError>,
     ) -> Result<(T, bool), StorageVolumeError> {
-        ConfigWriterLock::acquire();
+        let _guard = ConfigWriteGuard::acquire();
         self.ensure_directory()?;
         let mut snapshot = self.read()?;
         let (value, changed) = mutation(&mut snapshot)?;
@@ -85,6 +88,14 @@ impl StorageVolumeConfigStore {
             self.write_snapshot(&snapshot)?;
         }
         Ok((value, changed))
+    }
+
+    pub(crate) fn sweep_due_volumes(&self) -> Result<(), StorageVolumeError> {
+        let _ = self.update(|snapshot| {
+            let now = UnixMillis::now()?;
+            Ok(((), snapshot.sweep_due(now)))
+        })?;
+        Ok(())
     }
 
     fn ensure_directory(&self) -> Result<(), StorageVolumeError> {
@@ -181,38 +192,57 @@ impl StorageVolumeConfigStore {
         })?;
         temp.published = true;
         let directory = File::open(&self.directory).map_err(|source| {
-            StorageVolumeError::config_io("open directory", &self.directory, source)
+            StorageVolumeError::config_io_published(
+                "open directory",
+                &self.directory,
+                source,
+            )
         })?;
         directory.sync_all().map_err(|source| {
-            StorageVolumeError::config_io("sync directory", &self.directory, source)
+            StorageVolumeError::config_io_published(
+                "sync directory",
+                &self.directory,
+                source,
+            )
         })?;
         Ok(())
     }
 }
 
-struct ConfigWriterLock;
+struct ConfigWriteGuard;
 
-impl ConfigWriterLock {
-    fn acquire() {
-        let tag = pgrx::pg_sys::LOCKTAG {
-            locktag_field1: pgrx::pg_sys::InvalidOid.to_u32(),
+impl ConfigWriteGuard {
+    fn acquire() -> Self {
+        let tag = Self::lock_tag();
+        // SAFETY: all callers run on a PostgreSQL backend or background-worker
+        // main thread. A session lock is released explicitly by this guard.
+        let result = unsafe {
+            pg_sys::LockAcquire(&tag, pg_sys::ExclusiveLock as _, true, false)
+        };
+        debug_assert!(result != pg_sys::LockAcquireResult::LOCKACQUIRE_NOT_AVAIL);
+        Self
+    }
+
+    fn lock_tag() -> pg_sys::LOCKTAG {
+        pg_sys::LOCKTAG {
+            locktag_field1: pg_sys::InvalidOid.to_u32(),
             locktag_field2: 0,
             locktag_field3: 0,
             locktag_field4: CONFIG_WRITER_LOCK_CLASS,
-            locktag_type: pgrx::pg_sys::LockTagType::LOCKTAG_ADVISORY as u8,
-            locktag_lockmethodid: pgrx::pg_sys::USER_LOCKMETHOD as u8,
-        };
-        // SAFETY: update() is only called by PostgreSQL backend main threads.
-        // sessionLock=false makes PostgreSQL release this cluster-wide lock at
-        // top-level transaction end, including ERROR/abort paths.
-        unsafe {
-            pgrx::pg_sys::LockAcquire(
-                &tag,
-                pgrx::pg_sys::ExclusiveLock as _,
-                false,
-                false,
-            );
+            locktag_type: pg_sys::LockTagType::LOCKTAG_ADVISORY as u8,
+            locktag_lockmethodid: pg_sys::USER_LOCKMETHOD as u8,
         }
+    }
+}
+
+impl Drop for ConfigWriteGuard {
+    fn drop(&mut self) {
+        let tag = Self::lock_tag();
+        // SAFETY: this guard acquired the same session-scoped advisory lock and
+        // is dropped before callers report any returned storage error.
+        let released =
+            unsafe { pg_sys::LockRelease(&tag, pg_sys::ExclusiveLock as _, true) };
+        debug_assert!(released);
     }
 }
 

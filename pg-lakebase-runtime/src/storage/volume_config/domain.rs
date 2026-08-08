@@ -1,16 +1,19 @@
 use std::collections::{BTreeMap, HashSet};
 
 use pg_lakebase_core::options::TablespaceBinding;
-use pg_lakebase_core::storage::volume::{StorageVolumeId, StorageVolumeRoute};
+use pg_lakebase_core::storage::volume::StorageVolumeId;
+use pg_lakebase_core::storage::volume::StorageVolumeRoute;
+use pgrx::pg_sys;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::credential::CredentialConfig;
 pub(crate) use super::error::StorageVolumeError;
 use super::error::{LocationValidationError, SnapshotValidationError};
+pub(crate) use super::lifecycle::{StorageVolumeLifecycle, UnixMillis};
 pub(crate) use super::name::StorageVolumeName;
 
-pub(crate) const FORMAT_VERSION: u32 = 1;
+pub(crate) const FORMAT_VERSION: u32 = 2;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "provider", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum StorageLocation {
@@ -176,26 +179,23 @@ impl StorageLocation {
         }
     }
 
-    pub(crate) fn effective_root_for_store_id(
-        &self,
-        store_id: &pg_lakebase_storage::StoreId,
-    ) -> String {
+    pub(crate) fn effective_root_for_compact_id(&self, compact_id: &str) -> String {
         if self.configured_root_prefix().is_empty() {
-            format!("lakebase/{store_id}")
+            format!("lakebase/{compact_id}")
         } else {
-            format!("{}/lakebase/{store_id}", self.configured_root_prefix())
+            format!("{}/lakebase/{compact_id}", self.configured_root_prefix())
         }
     }
 
-    pub(crate) fn effective_location_for_store_id(
+    pub(crate) fn effective_location_for_compact_id(
         &self,
-        store_id: &pg_lakebase_storage::StoreId,
+        compact_id: &str,
     ) -> String {
         format!(
             "{}://{}/{}",
             self.scheme(),
             self.namespace(),
-            self.effective_root_for_store_id(store_id)
+            self.effective_root_for_compact_id(compact_id)
         )
     }
 
@@ -213,9 +213,10 @@ impl StorageLocation {
 #[serde(deny_unknown_fields)]
 pub(crate) struct StorageVolumeConfig {
     pub(crate) id: StorageVolumeId,
+    pub(crate) created_at_ms: UnixMillis,
     pub(crate) location: StorageLocation,
     pub(crate) credential: CredentialConfig,
-    pub(crate) bound_tablespace_oid: Option<u32>,
+    pub(crate) lifecycle: StorageVolumeLifecycle,
 }
 
 impl StorageVolumeConfig {
@@ -224,10 +225,10 @@ impl StorageVolumeConfig {
     }
 
     pub(crate) fn route(&self) -> Result<StorageVolumeRoute, StorageVolumeError> {
-        let store_id = self.id.to_store_id();
+        let compact_id = self.id.to_compact_string();
         StorageVolumeRoute::new(
             self.location.namespace(),
-            self.location.effective_location_for_store_id(&store_id),
+            self.location.effective_location_for_compact_id(&compact_id),
         )
         .map_err(|_| {
             StorageVolumeError::Invariant(
@@ -242,13 +243,8 @@ impl StorageVolumeConfig {
 pub(crate) struct StorageVolumeSnapshot {
     pub(crate) format_version: u32,
     pub(crate) next_volume_id: u64,
-    // DESIGN DEBT(storage-volume-safe-delete): Storage Volumes currently have no safe deletion
-    // lifecycle. This append-only collection makes single-file JSON reads, validation,
-    // serialization, reconciliation, and cache-miss linear ID lookup grow permanently with the
-    // historical Volume count; retired credentials also cannot be removed from durable config.
-    // Safe deletion must prove across databases that maintenance queues, uncommitted producers,
-    // and existing storage operations no longer depend on the StoreId, then drain the registry.
-    // A simple `unregister` is not a correct implementation of that lifecycle.
+    // Volume IDs remain monotonic even though expired Unbound and Retiring entries
+    // are removed from this snapshot.
     pub(crate) volumes: BTreeMap<StorageVolumeName, StorageVolumeConfig>,
 }
 
@@ -275,7 +271,11 @@ impl StorageVolumeSnapshot {
             return Err(SnapshotValidationError::InvalidNextVolumeId);
         }
         let mut ids = HashSet::with_capacity(self.volumes.len());
+        let mut bound_tablespaces = HashSet::new();
         for volume in self.volumes.values() {
+            if !volume.created_at_ms.is_positive() {
+                return Err(SnapshotValidationError::InvalidCreatedAt(volume.id));
+            }
             volume.location.validate().map_err(|source| {
                 SnapshotValidationError::InvalidLocation {
                     volume_id: volume.id,
@@ -295,10 +295,51 @@ impl StorageVolumeSnapshot {
             if volume.id.get() >= self.next_volume_id {
                 return Err(SnapshotValidationError::IdNotBelowNext(volume.id));
             }
-            if volume.bound_tablespace_oid == Some(0) {
-                return Err(SnapshotValidationError::InvalidBoundTablespace(
-                    volume.id,
-                ));
+            match &volume.lifecycle {
+                StorageVolumeLifecycle::Unbound { expires_at_ms } => {
+                    if expires_at_ms
+                        .is_some_and(|expires_at| expires_at < volume.created_at_ms)
+                    {
+                        return Err(SnapshotValidationError::InvalidExpiration(
+                            volume.id,
+                        ));
+                    }
+                }
+                StorageVolumeLifecycle::Bound { tablespace_oid } => {
+                    if *tablespace_oid == pg_sys::InvalidOid.to_u32() {
+                        return Err(SnapshotValidationError::InvalidTablespaceOid(
+                            volume.id,
+                        ));
+                    }
+                    if !bound_tablespaces.insert(*tablespace_oid) {
+                        return Err(
+                            SnapshotValidationError::DuplicateBoundTablespace(
+                                *tablespace_oid,
+                            ),
+                        );
+                    }
+                }
+                StorageVolumeLifecycle::Retiring {
+                    former_tablespace_oid,
+                    marked_at_ms,
+                    purge_after_ms,
+                } => {
+                    if *former_tablespace_oid == pg_sys::InvalidOid.to_u32() {
+                        return Err(SnapshotValidationError::InvalidTablespaceOid(
+                            volume.id,
+                        ));
+                    }
+                    if *marked_at_ms < volume.created_at_ms {
+                        return Err(SnapshotValidationError::InvalidRetirementMark(
+                            volume.id,
+                        ));
+                    }
+                    if *purge_after_ms < *marked_at_ms {
+                        return Err(SnapshotValidationError::InvalidRetirementPurge(
+                            volume.id,
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -320,15 +361,31 @@ impl StorageVolumeSnapshot {
         self.volumes.values().find(|volume| volume.id == id)
     }
 
+    pub(crate) fn find_bound_by_tablespace_oid(
+        &self,
+        tablespace_oid: u32,
+    ) -> Option<StorageVolumeId> {
+        self.volumes.values().find_map(|volume| {
+            (volume.lifecycle.bound_tablespace_oid() == Some(tablespace_oid))
+                .then_some(volume.id)
+        })
+    }
+
     pub(crate) fn create(
         &mut self,
         name: StorageVolumeName,
         location: StorageLocation,
         credential: CredentialConfig,
+        expires_after_seconds: Option<i64>,
     ) -> Result<(StorageVolumeId, bool), StorageVolumeError> {
+        if let Some(seconds) = expires_after_seconds {
+            UnixMillis::ttl_millis(seconds)?;
+        }
         location.validate_for_persistence(&credential)?;
         if let Some(existing) = self.volumes.get(&name) {
             if existing.location == location && existing.credential == credential {
+                // TTL is a creation-time property; idempotent create must not
+                // mutate an existing lifecycle.
                 return Ok((existing.id, false));
             }
             return Err(StorageVolumeError::NameConflict(name.as_str().to_owned()));
@@ -336,6 +393,10 @@ impl StorageVolumeSnapshot {
         if self.next_volume_id > StorageVolumeId::MAX {
             return Err(StorageVolumeError::IdExhausted);
         }
+        let created_at_ms = UnixMillis::now()?;
+        let expires_at_ms = expires_after_seconds
+            .map(|seconds| created_at_ms.checked_add_seconds(seconds))
+            .transpose()?;
         let id = StorageVolumeId::new(self.next_volume_id).map_err(|_| {
             StorageVolumeError::Invariant(
                 "validated next_volume_id is outside the allocation range",
@@ -343,9 +404,10 @@ impl StorageVolumeSnapshot {
         })?;
         let volume = StorageVolumeConfig {
             id,
+            created_at_ms,
             location,
             credential,
-            bound_tablespace_oid: None,
+            lifecycle: StorageVolumeLifecycle::Unbound { expires_at_ms },
         };
         self.next_volume_id = self
             .next_volume_id
@@ -367,11 +429,29 @@ impl StorageVolumeSnapshot {
         if self.volumes.contains_key(&new) {
             return Err(StorageVolumeError::NameConflict(new.as_str().to_owned()));
         }
+        if self.find(old)?.lifecycle.is_retiring() {
+            return Err(StorageVolumeError::LifecycleOperation {
+                operation: "renamed",
+            });
+        }
         let volume = self
             .volumes
             .remove(old)
             .ok_or_else(|| StorageVolumeError::NotFound(old.as_str().to_owned()))?;
         self.volumes.insert(new, volume);
+        Ok(true)
+    }
+
+    pub(crate) fn remove(
+        &mut self,
+        name: &StorageVolumeName,
+    ) -> Result<bool, StorageVolumeError> {
+        if !self.find(name)?.lifecycle.is_unbound() {
+            return Err(StorageVolumeError::LifecycleOperation {
+                operation: "removed",
+            });
+        }
+        self.volumes.remove(name);
         Ok(true)
     }
 
@@ -397,22 +477,76 @@ impl StorageVolumeSnapshot {
         &mut self,
         id: StorageVolumeId,
         tablespace_oid: u32,
+        now: UnixMillis,
+    ) -> Result<bool, StorageVolumeError> {
+        if self.find_by_id(id).is_none() {
+            return Err(StorageVolumeError::NotFoundId(id));
+        }
+        if let Some(existing_id) = self.find_bound_by_tablespace_oid(tablespace_oid)
+            && existing_id != id
+        {
+            return Err(StorageVolumeError::TablespaceAlreadyBound(tablespace_oid));
+        }
+        let volume = self
+            .volumes
+            .values_mut()
+            .find(|volume| volume.id == id)
+            .ok_or(StorageVolumeError::NotFoundId(id))?;
+        volume.lifecycle.bind(tablespace_oid, now)
+    }
+
+    pub(crate) fn retire(
+        &mut self,
+        id: StorageVolumeId,
+        tablespace_oid: u32,
+        marked_at_ms: UnixMillis,
+        retirement_grace_ms: u64,
     ) -> Result<bool, StorageVolumeError> {
         let volume = self
             .volumes
             .values_mut()
             .find(|volume| volume.id == id)
-            .ok_or(StorageVolumeError::Invariant(
-                "resolved storage volume id disappeared before binding",
-            ))?;
-        match volume.bound_tablespace_oid {
-            None => {
-                volume.bound_tablespace_oid = Some(tablespace_oid);
-                Ok(true)
-            }
-            Some(existing) if existing == tablespace_oid => Ok(false),
-            Some(existing) => Err(StorageVolumeError::AlreadyBound(existing)),
-        }
+            .ok_or(StorageVolumeError::NotFoundId(id))?;
+        volume.lifecycle.retire(
+            tablespace_oid,
+            volume.created_at_ms,
+            marked_at_ms,
+            retirement_grace_ms,
+        )
+    }
+
+    pub(crate) fn repair(
+        &mut self,
+        name: &StorageVolumeName,
+        marked_at_ms: UnixMillis,
+        retirement_grace_ms: u64,
+    ) -> Result<bool, StorageVolumeError> {
+        let volume = self
+            .volumes
+            .get_mut(name)
+            .ok_or_else(|| StorageVolumeError::NotFound(name.as_str().to_owned()))?;
+        let Some(tablespace_oid) = volume.lifecycle.bound_tablespace_oid() else {
+            return Err(StorageVolumeError::NotBound);
+        };
+        volume.lifecycle.retire(
+            tablespace_oid,
+            volume.created_at_ms,
+            marked_at_ms,
+            retirement_grace_ms,
+        )
+    }
+
+    pub(crate) fn sweep_due(&mut self, now: UnixMillis) -> bool {
+        let before = self.volumes.len();
+        self.volumes.retain(|_, volume| {
+            let due = volume
+                .lifecycle
+                .expires_at_ms()
+                .or_else(|| volume.lifecycle.purge_after_ms())
+                .is_some_and(|deadline| deadline <= now);
+            !due
+        });
+        self.volumes.len() != before
     }
 }
 

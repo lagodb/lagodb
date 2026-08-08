@@ -9,8 +9,8 @@ use super::credential::CredentialConfig;
 use super::domain::{StorageLocation, StorageVolumeConfig, StorageVolumeError};
 
 impl StorageVolumeConfig {
-    pub(crate) fn store_id(&self) -> pg_lakebase_storage::StoreId {
-        self.id.to_store_id()
+    pub(crate) fn compact_id(&self) -> String {
+        self.id.to_compact_string()
     }
 }
 

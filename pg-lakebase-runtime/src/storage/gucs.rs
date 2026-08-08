@@ -29,10 +29,13 @@ static LOG_CHANNEL_CAPACITY: GucSetting<i32> = GucSetting::<i32>::new(4096);
 
 static MAX_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(1024);
 
+static BACKEND_MAX_IDLE_CONNECTIONS: GucSetting<i32> = GucSetting::<i32>::new(8);
+
 static MAX_READ_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1024 * 1024);
 
-/// Periodic full-resync interval for the machine-managed volume config.
-static VOLUME_RECONCILE_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
+/// Grace period retained after a tablespace-backed volume is dropped.
+static STORAGE_VOLUME_RETIREMENT_GRACE_PERIOD_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(604_800);
 
 // --- Cache runtime GUCs (Sighup-reloadable) ---
 
@@ -135,12 +138,23 @@ pub fn init() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_lakebase.storage_server_volume_reconcile_interval_ms",
-        c"Periodic full-resync interval for storage volume configuration",
-        c"How often the storage worker rereads the complete machine-managed volume snapshot. 0 disables the periodic safety net.",
-        &VOLUME_RECONCILE_INTERVAL_MS,
-        0,
-        3_600_000,
+        c"pg_lakebase.storage_backend_max_idle_connections",
+        c"Maximum idle storage connections cached by each PostgreSQL backend",
+        c"Bounds reusable per-context sockets without closing active file handles.",
+        &BACKEND_MAX_IDLE_CONNECTIONS,
+        1,
+        1024,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_lakebase.storage_volume_retirement_grace_period_seconds",
+        c"Grace period for retired storage volumes",
+        c"How long a dropped tablespace volume remains available to maintenance before its configuration is purged.",
+        &STORAGE_VOLUME_RETIREMENT_GRACE_PERIOD_SECONDS,
+        1,
+        i32::MAX,
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -266,19 +280,20 @@ pub fn max_connections() -> usize {
     MAX_CONNECTIONS.get().max(1) as usize
 }
 
+pub fn backend_max_idle_connections() -> usize {
+    BACKEND_MAX_IDLE_CONNECTIONS.get().max(1) as usize
+}
+
 pub fn max_read_size() -> u32 {
     MAX_READ_SIZE.get().max(1) as u32
 }
 
-/// Periodic full-resync interval as `Some(Duration)`, or `None` when
-/// `pg_lakebase.storage_server_volume_reconcile_interval_ms` is `0`.
-pub fn volume_reconcile_interval() -> Option<std::time::Duration> {
-    let raw = VOLUME_RECONCILE_INTERVAL_MS.get();
-    if raw <= 0 {
-        None
-    } else {
-        Some(std::time::Duration::from_millis(raw as u64))
-    }
+pub fn storage_volume_retirement_grace_period_ms() -> u64 {
+    let seconds = u64::try_from(STORAGE_VOLUME_RETIREMENT_GRACE_PERIOD_SECONDS.get())
+        .expect("storage volume retirement grace period GUC is positive");
+    seconds
+        .checked_mul(1_000)
+        .expect("storage volume retirement grace period fits in milliseconds")
 }
 
 pub fn cache_touch_granularity() -> std::time::Duration {

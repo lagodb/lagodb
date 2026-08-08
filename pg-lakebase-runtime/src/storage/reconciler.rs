@@ -5,13 +5,13 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use pg_lakebase_core::diag::error_source_chain_detail;
-use pg_lakebase_storage::{StoreConfig, StoreId, StoreRegistry};
+use pg_lakebase_storage::{ManagedStoreRegistry, StorageError, StoreConfig};
 
 use super::volume_config::{CredentialConfig, StorageLocation, StorageVolumeError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VolumeStoreSpec {
-    pub store_id: StoreId,
+    pub volume_id: u64,
     pub location: StorageLocation,
     pub credential: CredentialConfig,
     pub reload_on_force: bool,
@@ -32,8 +32,7 @@ pub(crate) trait StoreConfigSource {
 #[derive(Debug)]
 pub(crate) enum ReconcileError {
     Source(StorageVolumeError),
-    DuplicateStoreId(StoreId),
-    RemovedStore(StoreId),
+    DuplicateVolumeId(u64),
 }
 
 impl fmt::Display for ReconcileError {
@@ -42,11 +41,8 @@ impl fmt::Display for ReconcileError {
             Self::Source(error) => {
                 write!(f, "failed to load storage volume config: {error}")
             }
-            Self::DuplicateStoreId(id) => {
-                write!(f, "duplicate storage volume store id {id}")
-            }
-            Self::RemovedStore(id) => {
-                write!(f, "storage volume store {id} disappeared from config")
+            Self::DuplicateVolumeId(id) => {
+                write!(f, "duplicate storage volume id {id}")
             }
         }
     }
@@ -56,7 +52,7 @@ impl StdError for ReconcileError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Source(error) => Some(error),
-            Self::DuplicateStoreId(_) | Self::RemovedStore(_) => None,
+            Self::DuplicateVolumeId(_) => None,
         }
     }
 }
@@ -87,7 +83,7 @@ impl VolumeApplyState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VolumeApplyFailure {
-    pub store_id: StoreId,
+    pub volume_id: u64,
     pub state: VolumeApplyState,
     pub message: String,
 }
@@ -108,7 +104,7 @@ pub(crate) struct ReconcileReport {
 #[derive(Debug)]
 enum VolumeApplyError {
     Prepare(StorageVolumeError),
-    Register(pg_lakebase_storage::StorageError),
+    Register(StorageError),
 }
 
 impl fmt::Display for VolumeApplyError {
@@ -144,13 +140,13 @@ impl VolumeApplyError {
 
 pub(crate) struct StoreConfigReconciler<S> {
     source: S,
-    registry: StoreRegistry,
-    applied: HashMap<StoreId, VolumeStoreSpec>,
-    rejected: HashMap<StoreId, VolumeStoreSpec>,
+    registry: ManagedStoreRegistry,
+    applied: HashMap<u64, VolumeStoreSpec>,
+    rejected: HashMap<u64, VolumeStoreSpec>,
 }
 
 impl<S: StoreConfigSource> StoreConfigReconciler<S> {
-    pub(crate) fn new(source: S, registry: StoreRegistry) -> Self {
+    pub(crate) fn new(source: S, registry: ManagedStoreRegistry) -> Self {
         Self {
             source,
             registry,
@@ -161,12 +157,12 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
 
     pub(crate) fn load_desired(
         &mut self,
-    ) -> Result<HashMap<StoreId, VolumeStoreSpec>, ReconcileError> {
+    ) -> Result<HashMap<u64, VolumeStoreSpec>, ReconcileError> {
         let mut desired = HashMap::new();
         for spec in self.source.load().map_err(ReconcileError::Source)? {
-            let id = spec.store_id.clone();
-            if desired.insert(id.clone(), spec).is_some() {
-                return Err(ReconcileError::DuplicateStoreId(id));
+            let id = spec.volume_id;
+            if desired.insert(id, spec).is_some() {
+                return Err(ReconcileError::DuplicateVolumeId(id));
             }
         }
         Ok(desired)
@@ -176,24 +172,38 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
     /// registration when its desired replacement cannot be materialized.
     pub(crate) fn apply_desired(
         &mut self,
-        desired: HashMap<StoreId, VolumeStoreSpec>,
+        desired: HashMap<u64, VolumeStoreSpec>,
         force_default_chain: bool,
     ) -> Result<ReconcileReport, ReconcileError> {
-        for id in self.applied.keys() {
-            if !desired.contains_key(id) {
-                return Err(ReconcileError::RemovedStore(id.clone()));
-            }
-        }
-        for id in self.rejected.keys() {
-            if !self.applied.contains_key(id) && !desired.contains_key(id) {
-                return Err(ReconcileError::RemovedStore(id.clone()));
-            }
-        }
-
         let mut report = ReconcileReport {
             desired: desired.len(),
             ..ReconcileReport::default()
         };
+
+        let removed_applied: Vec<u64> = self
+            .applied
+            .keys()
+            .filter(|id| !desired.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in removed_applied {
+            self.registry.remove(id);
+            self.applied.remove(&id);
+            self.rejected.remove(&id);
+            report.removed += 1;
+        }
+
+        let removed_rejected: Vec<u64> = self
+            .rejected
+            .keys()
+            .filter(|id| !desired.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in removed_rejected {
+            self.rejected.remove(&id);
+            report.removed += 1;
+        }
+
         for (id, spec) in desired {
             let rejected_same = self.rejected.get(&id) == Some(&spec);
             let applied_same = self.applied.get(&id) == Some(&spec);
@@ -214,14 +224,16 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
                 .materialize_store_config()
                 .map_err(VolumeApplyError::Prepare)
                 .and_then(|config| {
-                    self.registry
-                        .register_config(id.clone(), config)
-                        .map(|_| ())
-                        .map_err(VolumeApplyError::Register)
+                    let result = if force_reload {
+                        self.registry.refresh_config(id, config)
+                    } else {
+                        self.registry.replace_config(id, config)
+                    };
+                    result.map(|_| ()).map_err(VolumeApplyError::Register)
                 });
             match apply_result {
                 Ok(()) => {
-                    if self.applied.insert(id.clone(), spec).is_some() {
+                    if self.applied.insert(id, spec).is_some() {
                         report.replaced += 1;
                     } else {
                         report.added += 1;
@@ -235,9 +247,9 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
                         VolumeApplyState::Unavailable
                     };
                     let message = error.diagnostic_message();
-                    self.rejected.insert(id.clone(), spec);
+                    self.rejected.insert(id, spec);
                     report.failures.push(VolumeApplyFailure {
-                        store_id: id,
+                        volume_id: id,
                         state,
                         message,
                     });

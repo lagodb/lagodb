@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use pg_lakebase_storage::{StoreId, StoreRegistry};
+use pg_lakebase_storage::ManagedStoreRegistry;
 
 use super::{
     ReconcileReport, StoreConfigReconciler, StoreConfigSource, VolumeApplyState,
@@ -20,12 +21,12 @@ impl StoreConfigSource for EmptySource {
 
 struct ReconcileFixture {
     reconciler: StoreConfigReconciler<EmptySource>,
-    registry: StoreRegistry,
+    registry: ManagedStoreRegistry,
 }
 
 impl ReconcileFixture {
     fn new() -> Self {
-        let registry = StoreRegistry::new();
+        let registry = ManagedStoreRegistry::new();
         Self {
             reconciler: StoreConfigReconciler::new(EmptySource, registry.clone()),
             registry,
@@ -39,16 +40,16 @@ impl ReconcileFixture {
     ) -> ReconcileReport {
         let desired = specs
             .into_iter()
-            .map(|spec| (spec.store_id.clone(), spec))
+            .map(|spec| (spec.volume_id, spec))
             .collect::<HashMap<_, _>>();
         self.reconciler
             .apply_desired(desired, force_default_chain)
             .unwrap()
     }
 
-    fn valid_spec(id: &str) -> VolumeStoreSpec {
+    fn valid_spec(volume_id: u64) -> VolumeStoreSpec {
         VolumeStoreSpec {
-            store_id: StoreId::new(id).unwrap(),
+            volume_id,
             location: StorageLocation::S3 {
                 bucket: "bucket".to_owned(),
                 configured_root_prefix: String::new(),
@@ -62,9 +63,9 @@ impl ReconcileFixture {
         }
     }
 
-    fn invalid_default_chain_spec(id: &str) -> VolumeStoreSpec {
+    fn invalid_default_chain_spec(volume_id: u64) -> VolumeStoreSpec {
         VolumeStoreSpec {
-            store_id: StoreId::new(id).unwrap(),
+            volume_id,
             location: StorageLocation::Azure {
                 container: "container".to_owned(),
                 configured_root_prefix: String::new(),
@@ -77,13 +78,20 @@ impl ReconcileFixture {
             reload_on_force: true,
         }
     }
+
+    fn valid_default_chain_spec(volume_id: u64) -> VolumeStoreSpec {
+        let mut spec = Self::valid_spec(volume_id);
+        spec.credential = CredentialConfig::DefaultChain;
+        spec.reload_on_force = true;
+        spec
+    }
 }
 
 #[test]
 fn invalid_volume_does_not_block_valid_volume() {
     let mut fixture = ReconcileFixture::new();
-    let valid = ReconcileFixture::valid_spec("valid");
-    let invalid = ReconcileFixture::invalid_default_chain_spec("invalid");
+    let valid = ReconcileFixture::valid_spec(1);
+    let invalid = ReconcileFixture::invalid_default_chain_spec(2);
 
     let report = fixture.apply([valid.clone(), invalid.clone()], false);
 
@@ -94,14 +102,14 @@ fn invalid_volume_does_not_block_valid_volume() {
     assert_eq!(report.stale, 0);
     assert_eq!(report.failures.len(), 1);
     assert_eq!(report.failures[0].state, VolumeApplyState::Unavailable);
-    assert!(fixture.registry.contains(&valid.store_id));
-    assert!(!fixture.registry.contains(&invalid.store_id));
+    assert!(fixture.registry.resolve(valid.volume_id).is_ok());
+    assert!(fixture.registry.resolve(invalid.volume_id).is_err());
 }
 
 #[test]
 fn rejected_spec_is_retried_only_after_force_or_change() {
     let mut fixture = ReconcileFixture::new();
-    let invalid = ReconcileFixture::invalid_default_chain_spec("volume");
+    let invalid = ReconcileFixture::invalid_default_chain_spec(1);
     let initial = fixture.apply([invalid.clone()], false);
     assert_eq!(initial.failures.len(), 1);
 
@@ -113,32 +121,47 @@ fn rejected_spec_is_retried_only_after_force_or_change() {
     assert_eq!(forced.failures.len(), 1);
     assert_eq!(forced.unavailable, 1);
 
-    let corrected = ReconcileFixture::valid_spec("volume");
+    let corrected = ReconcileFixture::valid_spec(1);
     let recovered = fixture.apply([corrected.clone()], false);
     assert_eq!(recovered.added, 1);
     assert_eq!(recovered.loaded, 1);
     assert_eq!(recovered.unavailable, 0);
     assert!(recovered.failures.is_empty());
-    assert!(fixture.registry.contains(&corrected.store_id));
+    assert!(fixture.registry.resolve(corrected.volume_id).is_ok());
 }
 
 #[test]
 fn failed_replacement_keeps_last_known_good_store() {
     let mut fixture = ReconcileFixture::new();
-    let valid = ReconcileFixture::valid_spec("volume");
+    let valid = ReconcileFixture::valid_spec(1);
     let initial = fixture.apply([valid.clone()], false);
     assert_eq!(initial.added, 1);
 
-    let invalid = ReconcileFixture::invalid_default_chain_spec("volume");
+    let invalid = ReconcileFixture::invalid_default_chain_spec(1);
     let degraded = fixture.apply([invalid], false);
     assert_eq!(degraded.loaded, 1);
     assert_eq!(degraded.stale, 1);
     assert_eq!(degraded.unavailable, 0);
     assert_eq!(degraded.failures[0].state, VolumeApplyState::Stale);
-    assert!(fixture.registry.contains(&valid.store_id));
+    assert!(fixture.registry.resolve(valid.volume_id).is_ok());
 
     let reverted = fixture.apply([valid], false);
     assert_eq!(reverted.unchanged, 1);
     assert_eq!(reverted.stale, 0);
     assert!(reverted.failures.is_empty());
+}
+
+#[test]
+fn forced_default_chain_reload_publishes_a_fresh_backend() {
+    let mut fixture = ReconcileFixture::new();
+    let spec = ReconcileFixture::valid_default_chain_spec(1);
+    fixture.apply([spec.clone()], false);
+    let slot = fixture.registry.resolve(spec.volume_id).unwrap();
+    let before = slot.backend();
+
+    let report = fixture.apply([spec], true);
+    let after = slot.backend();
+
+    assert_eq!(report.replaced, 1);
+    assert!(!Arc::ptr_eq(&before, &after));
 }

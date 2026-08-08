@@ -5,7 +5,7 @@
 //! drains logs, and drives reconcile cycles.
 //!
 //! All PostgreSQL FFI is confined to this thread. The Tokio runtime only sees
-//! plain Rust values and the `StoreRegistry` (which is internally a
+//! plain Rust values and the `ManagedStoreRegistry` (which is internally a
 //! synchronized handle that is safe to share across threads).
 
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use pgrx::pg_sys;
 use tokio_util::sync::CancellationToken;
 
 use pg_lakebase_core::pg_latch::BackendLatch;
-use pg_lakebase_storage::{StorageRuntime, StoreRegistry};
+use pg_lakebase_storage::{ManagedStoreRegistry, StorageRuntime};
 
 use super::catalog::VolumeConfigSource;
 use super::config::StorageWorkerConfig;
@@ -80,8 +80,17 @@ impl StorageWorkerSupervisor {
         }
 
         let runtime = self.build_runtime();
-        let registry = StoreRegistry::new();
-        let mut reconciler = Self::build_reconciler(registry.clone(), config_store);
+        let registry = ManagedStoreRegistry::new();
+        let mut reconciler =
+            Self::build_reconciler(registry.clone(), config_store.clone());
+        if let Err(error) = config_store.sweep_due_volumes() {
+            let message = format!(
+                "storage volume lifecycle sweep failed at startup: {}",
+                error.diagnostic_message(),
+            );
+            StorageStatusStore::new().record_error(&message);
+            logging::emit_pg_log(pg_sys::WARNING as i32, &message);
+        }
         self.initial_reconcile_or_exit(&mut reconciler);
 
         let storage_runtime = self.storage_runtime_or_exit();
@@ -101,6 +110,7 @@ impl StorageWorkerSupervisor {
             &runtime,
             &mut server_handle,
             &mut reconciler,
+            &config_store,
             &storage_runtime_control,
             &mut runtime_state,
         );
@@ -120,7 +130,7 @@ impl StorageWorkerSupervisor {
     }
 
     fn build_reconciler(
-        registry: StoreRegistry,
+        registry: ManagedStoreRegistry,
         config_store: StorageVolumeConfigStore,
     ) -> StorageReconciler {
         StorageReconciler::new(VolumeConfigSource::new(config_store), registry)
@@ -160,7 +170,7 @@ impl StorageWorkerSupervisor {
     fn spawn_storage_server(
         &self,
         runtime: &tokio::runtime::Runtime,
-        registry: StoreRegistry,
+        registry: ManagedStoreRegistry,
         storage_runtime: StorageRuntime,
     ) -> ServerTask {
         let shutdown = self.shutdown.clone();
@@ -177,8 +187,8 @@ impl StorageWorkerSupervisor {
                 &cache_dir,
             )
             .with_server_config(server_config)
-            .with_service_config(service_config.with_externally_managed_registry())
-            .with_store_registry(registry)
+            .with_service_config(service_config)
+            .with_managed_store_registry(registry)
             .with_runtime(storage_runtime)
             .with_tracing_request_observer()
             .bind()
@@ -193,6 +203,7 @@ impl StorageWorkerSupervisor {
         runtime: &tokio::runtime::Runtime,
         server_handle: &mut Option<ServerTask>,
         reconciler: &mut StorageReconciler,
+        config_store: &StorageVolumeConfigStore,
         storage_runtime: &StorageRuntime,
         runtime_state: &mut SupervisorReloadState,
     ) {
@@ -200,14 +211,40 @@ impl StorageWorkerSupervisor {
             self.log_bridge.drain_to_pg_log();
             self.exit_if_server_finished(runtime, server_handle);
 
+            let now = Instant::now();
+            if runtime_state.volume_sweep_due(now) {
+                if let Err(error) = config_store.sweep_due_volumes() {
+                    let message = format!(
+                        "storage volume lifecycle sweep failed: {}",
+                        error.diagnostic_message(),
+                    );
+                    StorageStatusStore::new().record_error(&message);
+                    logging::emit_pg_log(pg_sys::WARNING as i32, &message);
+                }
+                // The fixed lifecycle tick is also the eventual-consistency
+                // safety net for config changes whose reload hint was not
+                // delivered or whose earlier reconcile failed.
+                match SupervisorReloadState::reconcile(reconciler, "periodic", false)
+                {
+                    Ok(report) => StorageStatusStore::new().mark_reload(&report),
+                    Err(error) => {
+                        let message = format!(
+                            "storage worker periodic reconcile failed: {}",
+                            error.diagnostic_message(),
+                        );
+                        StorageStatusStore::new().record_error(&message);
+                        logging::emit_pg_log(pg_sys::WARNING as i32, &message);
+                    }
+                }
+                runtime_state.schedule_volume_sweep(now);
+            }
+
             let reload_request = StorageStatusStore::new().take_reload_request();
-            if reload_request.is_some()
-                || runtime_state.periodic_reconcile_due(Instant::now())
-            {
+            if let Some(force_default_chain) = reload_request {
                 match SupervisorReloadState::reconcile(
                     reconciler,
                     "runtime",
-                    reload_request.unwrap_or(false),
+                    force_default_chain,
                 ) {
                     Ok(report) => {
                         StorageStatusStore::new().mark_reload(&report);
@@ -215,8 +252,8 @@ impl StorageWorkerSupervisor {
                     Err(error) => {
                         // Snapshot-level runtime failures are non-fatal: keep
                         // the current registry and re-read on the next reload
-                        // request or periodic timer. Per-Volume apply failures
-                        // are isolated inside a successful report.
+                        // request or periodic reconcile. Per-volume apply
+                        // failures are isolated inside a successful report.
                         let message = format!(
                             "storage worker reconcile failed: {}",
                             error.diagnostic_message(),
@@ -225,8 +262,6 @@ impl StorageWorkerSupervisor {
                         logging::emit_pg_log(pg_sys::WARNING as i32, &message);
                     }
                 }
-
-                runtime_state.schedule_next_reconcile(Instant::now());
             }
 
             let timeout = runtime_state.wait_timeout();
@@ -234,7 +269,7 @@ impl StorageWorkerSupervisor {
 
             if BackgroundWorker::sighup_received() {
                 unsafe { SupervisorReloadState::reload_postgres_config() };
-                runtime_state.reload_from_gucs(storage_runtime, Instant::now());
+                runtime_state.reload_from_gucs(storage_runtime);
                 match SupervisorReloadState::reconcile(reconciler, "SIGHUP", true) {
                     Ok(report) => StorageStatusStore::new().mark_reload(&report),
                     Err(error) => {

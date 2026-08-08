@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use pgrx::{PGRXSharedMemory, PgLwLock};
 
 use super::reconciler::ReconcileReport;
+use super::volume_config::UnixMillis;
 
 const STORAGE_MAGIC: u64 = 0x5047_4c42_5354_4f52;
 const MAX_ERROR_BYTES: usize = 512;
@@ -52,6 +53,7 @@ pub(crate) struct StorageSharedState {
     last_start_ms: i64,
     last_stop_ms: i64,
     last_reload_at_ms: i64,
+    reload_generation: i64,
     last_reload_added: u32,
     last_reload_removed: u32,
     last_reload_replaced: u32,
@@ -80,6 +82,7 @@ impl Default for StorageSharedState {
             last_start_ms: 0,
             last_stop_ms: 0,
             last_reload_at_ms: 0,
+            reload_generation: 0,
             last_reload_added: 0,
             last_reload_removed: 0,
             last_reload_replaced: 0,
@@ -165,7 +168,7 @@ impl StorageSharedState {
 unsafe impl PGRXSharedMemory for StorageSharedState {}
 
 pub(crate) static STORAGE_STATE: PgLwLock<StorageSharedState> =
-    unsafe { PgLwLock::new(c"pg_lakebase_runtime storage runtime") };
+    unsafe { PgLwLock::new(c"pg_lakebase storage state") };
 
 pub(super) struct StorageStatusStore;
 
@@ -196,6 +199,10 @@ impl StorageStatusStore {
         let mut state = STORAGE_STATE.exclusive();
         state.reset_if_invalid();
         state.last_reload_at_ms = timestamp_ms();
+        state.reload_generation = state
+            .reload_generation
+            .checked_add(1)
+            .expect("storage reload generation exhausted");
         state.last_reload_added = count_to_u32(report.added);
         state.last_reload_removed = count_to_u32(report.removed);
         state.last_reload_replaced = count_to_u32(report.replaced);
@@ -207,7 +214,7 @@ impl StorageStatusStore {
         if let Some(failure) = report.failures.first() {
             state.set_error(&format!(
                 "storage volume store {} is {}: {}",
-                failure.store_id,
+                failure.volume_id,
                 failure.state.as_str(),
                 failure.message,
             ));
@@ -285,6 +292,7 @@ pub(crate) struct StorageRuntimeStatus {
     pub(crate) last_start_ms: Option<i64>,
     pub(crate) last_stop_ms: Option<i64>,
     pub(crate) last_reload_at_ms: Option<i64>,
+    pub(crate) reload_generation: i64,
     pub(crate) last_reload_added: i64,
     pub(crate) last_reload_removed: i64,
     pub(crate) last_reload_replaced: i64,
@@ -323,6 +331,7 @@ pub(crate) fn snapshot(
         last_start_ms: positive_timestamp(state.last_start_ms),
         last_stop_ms: positive_timestamp(state.last_stop_ms),
         last_reload_at_ms: positive_timestamp(state.last_reload_at_ms),
+        reload_generation: state.reload_generation,
         last_reload_added: i64::from(state.last_reload_added),
         last_reload_removed: i64::from(state.last_reload_removed),
         last_reload_replaced: i64::from(state.last_reload_replaced),
@@ -364,7 +373,9 @@ fn count_to_u32(value: usize) -> u32 {
 }
 
 fn timestamp_ms() -> i64 {
-    unsafe { pgrx::pg_sys::GetCurrentTimestamp() / 1_000 }
+    UnixMillis::now()
+        .expect("PostgreSQL timestamp must fit Unix millisecond range")
+        .get()
 }
 
 #[cfg(test)]

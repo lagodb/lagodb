@@ -42,9 +42,6 @@ pub struct StorageWorkerStartupConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageWorkerRuntimeConfig {
     pub shutdown_timeout: Duration,
-    /// `Some(d)` enables a periodic full-resync of the volume config.
-    /// `None` disables the periodic safety net.
-    pub volume_reconcile_interval: Option<Duration>,
     /// Runtime configuration for the storage server (cache parameters).
     /// Pushed to `StorageRuntime::apply()` after SIGHUP.
     pub storage: StorageRuntimeConfig,
@@ -61,6 +58,7 @@ impl StorageWorkerConfig {
             gucs::enabled(),
             gucs::socket_path().map(PathBuf::from),
             gucs::cache_dir().map(PathBuf::from),
+            gucs::backend_max_idle_connections(),
         )
         .expect(
             "PostgreSQL DataDir must be initialized before resolving storage paths",
@@ -90,7 +88,6 @@ impl StorageWorkerRuntimeConfig {
     pub fn from_gucs() -> Self {
         Self {
             shutdown_timeout: Duration::from_millis(gucs::shutdown_timeout_ms()),
-            volume_reconcile_interval: gucs::volume_reconcile_interval(),
             storage: StorageRuntimeConfig {
                 cache: CacheRuntimeConfig {
                     touch_granularity: gucs::cache_touch_granularity(),

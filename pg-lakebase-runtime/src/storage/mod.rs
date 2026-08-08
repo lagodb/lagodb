@@ -21,10 +21,17 @@ use pg_lakebase_core::storage::service::StorageEndpoint;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 
-pub(crate) use state::{STORAGE_STATE, StorageRuntimeStatus};
+use crate::diag;
+
+use state::STORAGE_STATE;
+pub(crate) use state::StorageRuntimeStatus;
 
 const LIBRARY_NAME: &str = "pg_lakebase_runtime";
 const WORKER_FUNCTION: &str = "pg_lakebase_runtime_storage_bgworker_main";
+
+pub(crate) fn init_shared_memory() {
+    pgrx::pg_shmem_init!(STORAGE_STATE);
+}
 
 /// Register storage GUCs and the static storage background worker.
 ///
@@ -34,10 +41,13 @@ const WORKER_FUNCTION: &str = "pg_lakebase_runtime_storage_bgworker_main";
 pub(crate) fn init() {
     gucs::init();
 
-    // Static workers and postmaster-wide staging cleanup are valid only while
-    // PostgreSQL is processing shared_preload_libraries. A backend that loads
-    // the SQL extension must not disturb files owned by live transactions.
-    if !unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
+    // Static workers and postmaster-wide staging cleanup are valid only during
+    // normal shared preload. Binary upgrade loads libraries but must not start
+    // services, and a backend LOAD must not disturb live transaction files.
+    if unsafe {
+        !pg_sys::process_shared_preload_libraries_in_progress
+            || pg_sys::IsBinaryUpgrade
+    } {
         return;
     }
 
@@ -76,11 +86,11 @@ fn cleanup_staging_dir() {
         return;
     }
     match std::fs::remove_dir_all(&staging_dir) {
-        Ok(()) => crate::diag::info(format_args!(
+        Ok(()) => diag::info(format_args!(
             "cleaned Lakebase staging directory at postmaster startup: {}",
             staging_dir.display()
         )),
-        Err(error) => crate::diag::warning(format_args!(
+        Err(error) => diag::warning(format_args!(
             "failed to clean Lakebase staging directory {} at postmaster startup: {error}",
             staging_dir.display()
         )),
@@ -92,6 +102,7 @@ fn resolved_endpoint() -> StorageEndpoint {
         gucs::enabled(),
         gucs::socket_path().map(PathBuf::from),
         gucs::cache_dir().map(PathBuf::from),
+        gucs::backend_max_idle_connections(),
     )
     .expect("PostgreSQL DataDir must be initialized before resolving storage paths")
 }

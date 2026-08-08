@@ -51,8 +51,18 @@ pub(crate) enum SnapshotValidationError {
     DuplicateId(StorageVolumeId),
     #[error("allocated storage volume id {0} is not below next_volume_id")]
     IdNotBelowNext(StorageVolumeId),
-    #[error("storage volume id {0} has an invalid bound tablespace OID")]
-    InvalidBoundTablespace(StorageVolumeId),
+    #[error("storage volume id {0} has an invalid creation timestamp")]
+    InvalidCreatedAt(StorageVolumeId),
+    #[error("storage volume id {0} has an expiration before creation")]
+    InvalidExpiration(StorageVolumeId),
+    #[error("storage volume id {0} has an invalid tablespace OID")]
+    InvalidTablespaceOid(StorageVolumeId),
+    #[error("tablespace OID {0} is bound to more than one storage volume")]
+    DuplicateBoundTablespace(u32),
+    #[error("storage volume id {0} has a retirement mark before creation")]
+    InvalidRetirementMark(StorageVolumeId),
+    #[error("storage volume id {0} has a purge deadline before retirement")]
+    InvalidRetirementPurge(StorageVolumeId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -77,16 +87,41 @@ pub(crate) enum StorageVolumeError {
     InvalidCredential(#[from] CredentialValidationError),
     #[error("storage volume {0:?} does not exist")]
     NotFound(String),
+    #[error("storage volume id {0} does not exist")]
+    NotFoundId(StorageVolumeId),
+    #[error(
+        "storage volume binding target changed while CREATE TABLESPACE was in progress (expected id {expected_id}, found id {actual_id})"
+    )]
+    BindingConflict {
+        expected_id: StorageVolumeId,
+        actual_id: StorageVolumeId,
+    },
     #[error("storage volume name {0:?} conflicts with a different configuration")]
     NameConflict(String),
     #[error("storage volume id space is exhausted")]
     IdExhausted,
     #[error("storage volume is already bound to tablespace OID {0}")]
     AlreadyBound(u32),
+    #[error("tablespace OID {0} is already bound to another storage volume")]
+    TablespaceAlreadyBound(u32),
+    #[error("storage volume is not bound to a tablespace")]
+    NotBound,
+    #[error("storage volume has expired and cannot be bound")]
+    Expired,
+    #[error("tablespace OID is invalid")]
+    InvalidTablespaceOid,
+    #[error("storage volume cannot be {operation} in its current lifecycle")]
+    LifecycleOperation { operation: &'static str },
+    #[error("storage volume expiration must be a positive number of seconds")]
+    InvalidTtl,
+    #[error("storage volume timestamp arithmetic overflowed")]
+    TimestampOverflow,
     #[error("storage volume config {operation} failed for {path:?}")]
     ConfigIo {
         operation: &'static str,
         path: PathBuf,
+        // `true` means rename completed; only the following durability step failed.
+        published: bool,
         #[source]
         source: std::io::Error,
     },
@@ -116,11 +151,39 @@ impl StorageVolumeError {
         path: impl Into<PathBuf>,
         source: std::io::Error,
     ) -> Self {
+        Self::config_io_with_publish(operation, path, false, source)
+    }
+
+    pub(crate) fn config_io_published(
+        operation: &'static str,
+        path: impl Into<PathBuf>,
+        source: std::io::Error,
+    ) -> Self {
+        Self::config_io_with_publish(operation, path, true, source)
+    }
+
+    fn config_io_with_publish(
+        operation: &'static str,
+        path: impl Into<PathBuf>,
+        published: bool,
+        source: std::io::Error,
+    ) -> Self {
         Self::ConfigIo {
             operation,
             path: path.into(),
+            published,
             source,
         }
+    }
+
+    pub(crate) const fn was_published(&self) -> bool {
+        matches!(
+            self,
+            Self::ConfigIo {
+                published: true,
+                ..
+            }
+        )
     }
 
     pub(crate) fn diagnostic_message(&self) -> String {
@@ -134,15 +197,30 @@ impl StorageVolumeError {
 impl SqlStateError for StorageVolumeError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            Self::NotFound(_) => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            Self::NotFound(_) | Self::NotFoundId(_) => {
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
+            }
+            Self::BindingConflict { .. } => {
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+            }
             Self::NameConflict(_) => PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
-            Self::AlreadyBound(_) => PgSqlErrorCode::ERRCODE_OBJECT_IN_USE,
+            Self::AlreadyBound(_) | Self::TablespaceAlreadyBound(_) => {
+                PgSqlErrorCode::ERRCODE_OBJECT_IN_USE
+            }
+            Self::NotBound | Self::LifecycleOperation { .. } => {
+                PgSqlErrorCode::ERRCODE_OBJECT_IN_USE
+            }
+            Self::Expired => PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             Self::IdExhausted => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            Self::InvalidTablespaceOid | Self::InvalidTtl => {
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
+            }
             Self::ConfigIo { .. } => PgSqlErrorCode::ERRCODE_IO_ERROR,
             Self::ConfigJson { .. } | Self::ConfigSecurity { .. } => {
                 PgSqlErrorCode::ERRCODE_CONFIG_FILE_ERROR
             }
             Self::InvalidSnapshot(_) => PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            Self::TimestampOverflow => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::Invariant(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::InvalidName
             | Self::InvalidLocation(_)
