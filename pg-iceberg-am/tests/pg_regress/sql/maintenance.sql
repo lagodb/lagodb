@@ -1,7 +1,7 @@
 -- Runtime physical maintenance: remote DROP cleanup and queue semantics.
 
 \set ECHO none
--- End-to-end asynchronous remote DROP. 000_regression_setup provisions
+-- End-to-end asynchronous remote DROP. setup.sql provisions
 -- the MinIO fixture and records its connection details in the test database.
 
 -- pg_regress unsets PGDATABASE and passes the database only via psql -d. Export
@@ -48,13 +48,13 @@ CREATE TABLESPACE regress_object
 LOCATION '/tmp/iceberg_regress_object'
 WITH (lakebase_storage_volume = :'volume_name');
 
-SELECT internal_store_id AS store_id,
+SELECT internal_volume_id AS volume_id,
        regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
 FROM lakebase.storage_volumes
 WHERE storage_volume_name = :'volume_name'
 \gset
 
-\setenv LAKEBASE_REGRESS_STORE_ID :store_id
+\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :lakebase_regress_bucket
 \! bin/wait_for_object_store 30
 
@@ -72,7 +72,7 @@ USING iceberg TABLESPACE regress_object;
 INSERT INTO maintenance_remote_drop
 SELECT generate_series(1, 1000);
 
-SELECT :'store_id' AS store_id,
+SELECT :'volume_id' AS volume_id,
        :'lakebase_regress_bucket' AS object_namespace,
        :'effective_root' || '/'
        || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
@@ -81,12 +81,12 @@ SELECT :'store_id' AS store_id,
        || '_iceberg/' AS object_path
 \gset
 
-\setenv LAKEBASE_REGRESS_STORE_ID :store_id
+\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
 SELECT objects > 0 AS tree_exists_before_drop
 FROM lakebase.observe_object_tree(
-    :'store_id', :'object_namespace', :'object_path'
+    :'volume_id', :'object_namespace', :'object_path'
 );
 
 DROP TABLE maintenance_remote_drop;
@@ -95,12 +95,12 @@ DROP TABLE maintenance_remote_drop;
 
 SELECT objects = 0 AS tree_empty_after_drop
 FROM lakebase.observe_object_tree(
-    :'store_id', :'object_namespace', :'object_path'
+    :'volume_id', :'object_namespace', :'object_path'
 );
 SELECT count(*) AS relation_gone
 FROM pg_class WHERE relname = 'maintenance_remote_drop';
-SELECT process_state || '/' || dispatch_state AS maintenance_worker_state
-FROM lakebase.worker_runtime_status
+SELECT process_state AS maintenance_worker_state
+FROM lakebase.worker_status
 WHERE database_oid = (SELECT oid FROM pg_catalog.pg_database
                       WHERE datname = pg_catalog.current_database())
   AND extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
@@ -116,7 +116,7 @@ ROLLBACK;
 SELECT array_agg(id ORDER BY id) AS rows_after_drop_rollback
 FROM maintenance_remote_rollback;
 
-SELECT :'store_id' AS store_id,
+SELECT :'volume_id' AS volume_id,
        :'lakebase_regress_bucket' AS object_namespace,
        :'effective_root' || '/'
        || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
@@ -124,7 +124,7 @@ SELECT :'store_id' AS store_id,
        || '/' || pg_relation_filenode('maintenance_remote_rollback')::text
        || '_iceberg/' AS object_path
 \gset
-\setenv LAKEBASE_REGRESS_STORE_ID :store_id
+\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
 DROP TABLE maintenance_remote_rollback;
@@ -133,7 +133,7 @@ DROP TABLE maintenance_remote_rollback;
 
 SELECT objects = 0 AS rollback_tree_empty_after_cleanup
 FROM lakebase.observe_object_tree(
-    :'store_id', :'object_namespace', :'object_path'
+    :'volume_id', :'object_namespace', :'object_path'
 );
 
 DROP TABLESPACE regress_object;
@@ -150,12 +150,12 @@ ORDER BY item_id;
 
 BEGIN;
 INSERT INTO lakebase.maintenance_queue
-    (item_id, operation, store_id, object_namespace, object_path, producer,
+    (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, created_at)
 VALUES
-    (gen_random_uuid(), 1, 'regress-store', 'bucket', 'data/a.parquet',
+    (gen_random_uuid(), 1, 1, 'bucket', 'data/a.parquet',
      'synthetic-iceberg', 0, clock_timestamp(), false, clock_timestamp()),
-    (gen_random_uuid(), 1, 'regress-store', 'bucket', 'data/a.parquet',
+    (gen_random_uuid(), 1, 1, 'bucket', 'data/a.parquet',
      'synthetic-delta', 0, clock_timestamp(), false, clock_timestamp());
 SELECT count(*) AS duplicate_objects_are_distinct
 FROM lakebase.maintenance_queue;
@@ -167,14 +167,14 @@ FROM lakebase.maintenance_queue;
 BEGIN;
 SAVEPOINT maintenance_sp;
 INSERT INTO lakebase.maintenance_queue
-    (item_id, operation, store_id, object_namespace, object_path, producer,
+    (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, created_at)
-VALUES (gen_random_uuid(), 2, 'regress-store', 'bucket', 'table-root/',
+VALUES (gen_random_uuid(), 2, 1, 'bucket', 'table-root/',
         'synthetic-drop', 0, clock_timestamp(), false, clock_timestamp());
 INSERT INTO lakebase.maintenance_queue
-    (item_id, operation, store_id, object_namespace, object_path, producer,
+    (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, created_at)
-VALUES (gen_random_uuid(), 2, 'regress-store', 'bucket', 'table-root/',
+VALUES (gen_random_uuid(), 2, 1, 'bucket', 'table-root/',
         'synthetic-drop', 0, clock_timestamp(), false, clock_timestamp());
 SELECT count(*) AS duplicate_trees_are_distinct
 FROM lakebase.maintenance_queue;
@@ -190,9 +190,9 @@ FROM lakebase.maintenance_queue;
 SELECT gen_random_uuid() AS retry_id \gset
 BEGIN;
 INSERT INTO lakebase.maintenance_queue
-    (item_id, operation, store_id, object_namespace, object_path, producer,
+    (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, last_error, created_at)
-VALUES (:'retry_id', 1, 'regress-store', 'bucket', 'retry/object',
+VALUES (:'retry_id', 1, 1, 'bucket', 'retry/object',
         'synthetic-retry', 7, clock_timestamp(), true, 'forced failure',
         clock_timestamp());
 SELECT lakebase.retry_maintenance_item(:'retry_id') AS failed_item_retried;

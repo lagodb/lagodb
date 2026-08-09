@@ -1,0 +1,110 @@
+-- Exercise the worker framework's transaction, scheduling, process, and
+-- cancellation lifecycles. SQL owns every database assertion and fixture;
+-- the pause guard below performs only SIGSTOP/SIGCONT process control.
+\set ECHO none
+ pg_sleep 
+----------
+ 
+(1 row)
+
+ request_worker_wakeup 
+-----------------------
+ 
+(1 row)
+
+ pg_sleep 
+----------
+ 
+(1 row)
+
+ pg_sleep 
+----------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ pg_sleep 
+----------
+ 
+(1 row)
+
+ cascade_rollback_restored_sql_state 
+-------------------------------------
+ t
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+ deregister_worker 
+-------------------
+ 
+(1 row)
+
+worker_deregister_id_abort: true
+worker_deregister_id_commit: true
+worker_deregister_id_savepoint_rollback: true
+worker_deregister_name_abort: true
+worker_deregister_name_commit: true
+worker_deregister_name_savepoint_rollback: true
+
+
+
+
+
+
+
+
+worker_test_restored_iceberg_registration: true
+worker_create_rollback: true
+worker_savepoint_rollback: true
+worker_savepoint_commit: true
+worker_drop_rollback: true
+worker_drop_savepoint_rollback: true
+worker_drop_commit: true
+worker_drop_native_restrict: true
+worker_drop_cascade_rollback: true
+worker_drop_queue_discard: true
+worker_non_superuser_guard: true
+worker_non_superuser_wakeup: true
+worker_scheduled_wakeup: true
+worker_template_database_excluded: true
+worker_drop_database: true
+worker_cancel_entered_backoff: true
+worker_cancel_recovered: true

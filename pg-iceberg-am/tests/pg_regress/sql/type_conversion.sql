@@ -7,13 +7,7 @@ CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
 
 SET timezone = 'UTC';
 
--- Attempt to disable lz4 if the environment doesn't support it
-DO $$
-BEGIN
-    EXECUTE 'SET default_toast_compression = pglz';
-EXCEPTION WHEN OTHERS THEN
-    -- Ignore if the setting doesn't exist
-END $$;
+SET default_toast_compression = pglz;
 
 -- ============================================================================
 -- 1. All Primitive Types Test

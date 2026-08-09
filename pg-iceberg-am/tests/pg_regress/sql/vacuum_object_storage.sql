@@ -38,13 +38,13 @@ CREATE TABLESPACE regress_vacuum_object_matrix
 LOCATION '/tmp/iceberg_regress_vacuum_object_matrix'
 WITH (lakebase_storage_volume = :'volume_name');
 
-SELECT internal_store_id AS store_id,
+SELECT internal_volume_id AS volume_id,
        regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
 FROM lakebase.storage_volumes
 WHERE storage_volume_name = :'volume_name'
 \gset
 
-\setenv LAKEBASE_REGRESS_STORE_ID :store_id
+\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :lakebase_regress_bucket
 \! bin/wait_for_object_store 30
 
@@ -157,7 +157,7 @@ WITH relations(format, relid) AS (
 SELECT roots.*, observed.objects AS objects_before
 FROM roots
 CROSS JOIN LATERAL lakebase.observe_object_tree(
-    :'store_id',
+    :'volume_id',
     :'lakebase_regress_bucket',
     roots.prefix
 ) AS observed;
@@ -234,7 +234,7 @@ WITH observations AS (
            stats.retained_data_objects
     FROM object_matrix_roots AS roots
     CROSS JOIN LATERAL lakebase.observe_object_tree(
-        :'store_id',
+        :'volume_id',
         :'lakebase_regress_bucket',
         roots.prefix
     ) AS observed

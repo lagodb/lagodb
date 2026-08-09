@@ -1,0 +1,185 @@
+#!/usr/bin/env sh
+set -eu
+
+FAILSAFE_SECONDS=120
+START_TIMEOUT_SECONDS=5
+RELEASE_TIMEOUT_SECONDS=5
+
+storage_pid=${LAKEBASE_REGRESS_STORAGE_PID:-}
+backend_pid=${LAKEBASE_REGRESS_BACKEND_PID:-}
+slot=${LAKEBASE_REGRESS_SLOT:-}
+
+validate_pid() {
+    name=$1
+    value=$2
+    case "$value" in
+        ''|*[!0-9]*|0)
+            echo "$name must be a positive decimal process ID" >&2
+            exit 2
+            ;;
+    esac
+}
+
+validate_slot() {
+    case "$slot" in
+        ''|*[!A-Za-z0-9_.-]*)
+            echo "LAKEBASE_REGRESS_SLOT contains unsupported characters" >&2
+            exit 2
+            ;;
+    esac
+}
+
+state_root() {
+    printf '/tmp/storage_worker_pause_guard_%s\n' "$slot"
+}
+
+read_active_run() {
+    root=$1
+    active="$root/active"
+    [ -f "$active" ] || return 1
+    IFS= read -r run_dir < "$active"
+    case "$run_dir" in
+        "$root"/run-*) printf '%s\n' "$run_dir" ;;
+        *)
+            echo "pause guard contains an invalid active-run path" >&2
+            return 1
+            ;;
+    esac
+}
+
+wait_for_guard_exit() {
+    run_dir=$1
+    deadline=$(( $(date +%s) + RELEASE_TIMEOUT_SECONDS ))
+    while [ -f "$run_dir/guard.pid" ] && [ ! -f "$run_dir/done" ]; do
+        IFS= read -r guard_pid < "$run_dir/guard.pid"
+        case "$guard_pid" in
+            ''|*[!0-9]*|0) break ;;
+        esac
+        if ! kill -0 "$guard_pid" 2>/dev/null; then
+            break
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
+daemon() {
+    daemon_storage_pid=$1
+    daemon_backend_pid=$2
+    run_dir=$3
+
+    resume_storage() {
+        kill -CONT "$daemon_storage_pid" 2>/dev/null || true
+        : > "$run_dir/done"
+    }
+
+    trap resume_storage EXIT
+    trap 'exit 0' HUP INT TERM
+
+    kill -STOP "$daemon_storage_pid"
+    : > "$run_dir/ready"
+    deadline=$(( $(date +%s) + FAILSAFE_SECONDS ))
+    while [ ! -f "$run_dir/release" ]; do
+        if ! kill -0 "$daemon_backend_pid" 2>/dev/null; then
+            exit 0
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            exit 0
+        fi
+        sleep 0.1
+    done
+}
+
+start() {
+    validate_pid LAKEBASE_REGRESS_STORAGE_PID "$storage_pid"
+    validate_pid LAKEBASE_REGRESS_BACKEND_PID "$backend_pid"
+    validate_slot
+    kill -0 "$storage_pid"
+    kill -0 "$backend_pid"
+
+    root=$(state_root)
+    mkdir -p "$root"
+    if [ -f "$root/active" ]; then
+        echo "a storage pause guard is already active for this regression slot" >&2
+        exit 1
+    fi
+
+    run_dir="$root/run-${backend_pid}-$$"
+    mkdir "$run_dir"
+    printf '%s\n' "$run_dir" > "$root/active.tmp.$$"
+    mv "$root/active.tmp.$$" "$root/active"
+
+    daemon "$storage_pid" "$backend_pid" "$run_dir" \
+        </dev/null >"$run_dir/guard.log" 2>&1 &
+    guard_pid=$!
+    printf '%s\n' "$guard_pid" > "$run_dir/guard.pid"
+
+    deadline=$(( $(date +%s) + START_TIMEOUT_SECONDS ))
+    while [ ! -f "$run_dir/ready" ]; do
+        if ! kill -0 "$guard_pid" 2>/dev/null; then
+            echo "storage pause guard exited before publishing readiness" >&2
+            exit 1
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            : > "$run_dir/release"
+            echo "storage pause guard did not become ready" >&2
+            exit 1
+        fi
+        sleep 0.05
+    done
+}
+
+release() {
+    validate_pid LAKEBASE_REGRESS_STORAGE_PID "$storage_pid"
+    validate_slot
+    root=$(state_root)
+    if run_dir=$(read_active_run "$root"); then
+        : > "$run_dir/release"
+        if ! wait_for_guard_exit "$run_dir"; then
+            kill -CONT "$storage_pid" 2>/dev/null || true
+            echo "storage pause guard did not exit after release" >&2
+            exit 1
+        fi
+        kill -CONT "$storage_pid" 2>/dev/null || true
+        rm -rf "$run_dir"
+        rm -f "$root/active"
+    else
+        kill -CONT "$storage_pid" 2>/dev/null || true
+    fi
+}
+
+recover() {
+    validate_pid LAKEBASE_REGRESS_STORAGE_PID "$storage_pid"
+    validate_slot
+    root=$(state_root)
+    if run_dir=$(read_active_run "$root"); then
+        : > "$run_dir/release"
+        wait_for_guard_exit "$run_dir" || true
+    fi
+
+    # The current target PID comes from the caller's fresh process discovery.
+    # Never signal a target PID persisted by an earlier run.
+    kill -CONT "$storage_pid"
+    rm -rf "$root"
+}
+
+case "${1:-}" in
+    start)
+        [ "$#" -eq 1 ] || exit 2
+        start
+        ;;
+    release)
+        [ "$#" -eq 1 ] || exit 2
+        release
+        ;;
+    recover)
+        [ "$#" -eq 1 ] || exit 2
+        recover
+        ;;
+    *)
+        echo "usage: storage_worker_pause_guard start|release|recover" >&2
+        exit 2
+        ;;
+esac

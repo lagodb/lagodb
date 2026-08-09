@@ -6,7 +6,7 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 
-store_id=${LAKEBASE_REGRESS_STORE_ID:?LAKEBASE_REGRESS_STORE_ID is required}
+volume_id=${LAKEBASE_REGRESS_VOLUME_ID:?LAKEBASE_REGRESS_VOLUME_ID is required}
 namespace=${LAKEBASE_REGRESS_OBJECT_NAMESPACE:?LAKEBASE_REGRESS_OBJECT_NAMESPACE is required}
 object_path=${LAKEBASE_REGRESS_OBJECT_PATH:?LAKEBASE_REGRESS_OBJECT_PATH is required}
 timeout_seconds=$1
@@ -15,13 +15,13 @@ last_error=""
 
 while :; do
     if complete=$(psql -XAtq -v ON_ERROR_STOP=1 \
-        --set=store_id="$store_id" \
+        --set=volume_id="$volume_id" \
         --set=namespace="$namespace" \
         --set=object_path="$object_path" 2>&1 <<'SQL'
 SELECT NOT EXISTS (
     SELECT 1
     FROM lakebase.maintenance_queue
-    WHERE store_id = :'store_id'
+    WHERE volume_id = :'volume_id'
       AND object_namespace = :'namespace'
       AND (
           (operation = 1
@@ -42,7 +42,7 @@ SQL
 
     if [ "$(date +%s)" -ge "$deadline" ]; then
         psql -X -v ON_ERROR_STOP=1 \
-            --set=store_id="$store_id" \
+            --set=volume_id="$volume_id" \
             --set=namespace="$namespace" \
             --set=object_path="$object_path" >&2 <<'SQL' || true
 SELECT item_id,
@@ -56,7 +56,7 @@ SELECT item_id,
        not_before,
        last_error
 FROM lakebase.maintenance_status
-WHERE store_id = :'store_id'
+WHERE volume_id = :'volume_id'
   AND object_namespace = :'namespace'
   AND (
       (operation = 'delete_object'
@@ -68,14 +68,12 @@ ORDER BY created_at, item_id;
 SELECT extension_name,
        worker_name,
        registration_state,
-       dispatch_state,
        process_state,
        pid,
-       generation,
-       not_before_ms,
-       stop_requested,
-       recovery_state
-FROM lakebase.worker_runtime_status
+       needs_restart,
+       restart_after_ms,
+       stop_requested
+FROM lakebase.worker_status
 WHERE database_oid = (
     SELECT oid
     FROM pg_catalog.pg_database
@@ -87,10 +85,9 @@ WHERE database_oid = (
 SELECT process_kind,
        database_oid,
        state,
-       pid,
-       recovery_backend_count
-FROM lakebase.process_runtime_status
-WHERE process_kind IN ('launcher', 'database_reconciler')
+       pid
+FROM lakebase.process_status
+WHERE process_kind IN ('supervisor', 'coordinator')
   AND (database_oid IS NULL
        OR database_oid = (
            SELECT oid

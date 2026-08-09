@@ -1,7 +1,7 @@
 \set ECHO none
 worker_running: t
 socket_exists: true
-volume_reload_interval_default: t
+volume_retirement_grace_period_default: t
 config_visible: t
 registry_loaded: t
 rename_visible: t

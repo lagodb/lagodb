@@ -7,4 +7,4 @@ native_reset_rejected: t
 internal_id_unchanged: t
 internal_id_only: t
 binding_visible: t
-binding_retained_after_drop: t
+retirement_visible_after_drop: t

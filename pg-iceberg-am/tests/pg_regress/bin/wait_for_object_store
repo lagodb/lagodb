@@ -6,7 +6,7 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 
-store_id=${LAKEBASE_REGRESS_STORE_ID:?LAKEBASE_REGRESS_STORE_ID is required}
+volume_id=${LAKEBASE_REGRESS_VOLUME_ID:?LAKEBASE_REGRESS_VOLUME_ID is required}
 namespace=${LAKEBASE_REGRESS_OBJECT_NAMESPACE:?LAKEBASE_REGRESS_OBJECT_NAMESPACE is required}
 timeout_seconds=$1
 deadline=$(( $(date +%s) + timeout_seconds ))
@@ -14,11 +14,11 @@ last_error=""
 
 while :; do
     if output=$(psql -XAtq -v ON_ERROR_STOP=1 \
-        --set=store_id="$store_id" \
+        --set=volume_id="$volume_id" \
         --set=namespace="$namespace" 2>&1 <<'SQL'
 SELECT objects = 0
 FROM lakebase.observe_object_tree(
-    :'store_id', :'namespace', '__lakebase_regress_probe__'
+    :'volume_id', :'namespace', '__lakebase_regress_probe__'
 );
 SQL
     ); then

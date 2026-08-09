@@ -1,4 +1,4 @@
--- Exercise the due-index-driven runtime worker.
+-- Exercise the due-index-driven maintenance worker.
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
 CREATE SCHEMA automatic_maintenance_test;

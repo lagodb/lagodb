@@ -14,19 +14,19 @@ TO '/tmp/_regress_socket_path.txt';
 \! rm -f /tmp/_regress_socket_path.txt
 
 SELECT current_setting(
-           'pg_lakebase.storage_server_volume_reconcile_interval_ms'
-) = '30000' AS volume_reload_interval_default
+           'pg_lakebase.storage_volume_retirement_grace_period_seconds'
+) = '604800' AS volume_retirement_grace_period_default
 \gset
-\echo volume_reload_interval_default: :volume_reload_interval_default
+\echo volume_retirement_grace_period_default: :volume_retirement_grace_period_default
 
 SELECT loaded_volume_count AS loaded_before
-FROM lakebase.storage_runtime_status
+FROM lakebase.storage_service_status
 \gset
 
 CREATE TEMP TABLE storage_volume_reload_baseline AS
-SELECT last_reload_at_ms,
+SELECT reload_generation,
        loaded_volume_count::bigint AS initial_loaded_volume_count
-FROM lakebase.storage_runtime_status;
+FROM lakebase.storage_service_status;
 
 CREATE FUNCTION pg_temp.storage_volume_wait_for_reload(
     require_loaded boolean,
@@ -41,11 +41,10 @@ BEGIN
     LOOP
         SELECT *
         INTO current_status
-        FROM lakebase.storage_runtime_status;
+        FROM lakebase.storage_service_status;
 
-        EXIT WHEN current_status.last_reload_at_ms IS NOT NULL
-                  AND current_status.last_reload_at_ms IS DISTINCT FROM (
-                      SELECT last_reload_at_ms
+        EXIT WHEN current_status.reload_generation > (
+                      SELECT reload_generation
                       FROM storage_volume_reload_baseline
                   )
                   AND (
@@ -64,7 +63,7 @@ BEGIN
         IF clock_timestamp() >= deadline THEN
             RAISE EXCEPTION 'storage volume registry reload timed out'
                 USING DETAIL = format(
-                    'storage_runtime_status=%s',
+                    'storage_service_status=%s',
                     row_to_json(current_status)
                 );
         END IF;
@@ -98,7 +97,7 @@ SELECT pg_temp.storage_volume_wait_for_reload(true, false) AS ignored
 
 SELECT loaded_volume_count >= :loaded_before::bigint + 1
            AND last_error IS NULL AS registry_loaded
-FROM lakebase.storage_runtime_status
+FROM lakebase.storage_service_status
 \gset
 \echo registry_loaded: :registry_loaded
 
@@ -115,8 +114,8 @@ WHERE storage_volume_name = :'renamed_volume'
 \echo rename_visible: :rename_visible
 
 UPDATE storage_volume_reload_baseline AS baseline
-SET last_reload_at_ms = status.last_reload_at_ms
-FROM lakebase.storage_runtime_status AS status;
+SET reload_generation = status.reload_generation
+FROM lakebase.storage_service_status AS status;
 
 SELECT lakebase.update_storage_volume_credentials(
     :'renamed_volume',
@@ -137,13 +136,13 @@ SELECT pg_temp.storage_volume_wait_for_reload(true, true) AS ignored
 SELECT loaded_volume_count >= :loaded_before::bigint + 1
            AND last_reload_replaced >= 1
            AND last_error IS NULL AS replacement_loaded
-FROM lakebase.storage_runtime_status
+FROM lakebase.storage_service_status
 \gset
 \echo replacement_loaded: :replacement_loaded
 
 UPDATE storage_volume_reload_baseline AS baseline
-SET last_reload_at_ms = status.last_reload_at_ms
-FROM lakebase.storage_runtime_status AS status;
+SET reload_generation = status.reload_generation
+FROM lakebase.storage_service_status AS status;
 
 SELECT lakebase.reload_storage_volumes() AS ignored
 \gset

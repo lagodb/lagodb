@@ -95,7 +95,7 @@ step s2_retry {
   SET maintenance_due_at = '-infinity'
   WHERE relid = 'automatic_worker_iso.t'::regclass;
   SELECT lakebase.request_worker_wakeup(
-    'pg_iceberg_am', 'iceberg_automatic_maintenance'
+    'pg_iceberg_am', 'iceberg_maintenance'
   );
 }
 step s2_wait_maintained {

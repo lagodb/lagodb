@@ -8,7 +8,7 @@ CREATE SCHEMA vacuum_correctness_test;
 SELECT extension_name, worker_name
 FROM lakebase.workers
 WHERE extension_name = 'pg_iceberg_am'
-  AND worker_name = 'iceberg_automatic_maintenance';
+  AND worker_name = 'iceberg_maintenance';
 SELECT current_setting('pg_iceberg_am.auto_maintenance_enabled') AS auto_enabled,
        current_setting('pg_iceberg_am.auto_maintenance_naptime_s')
            AS auto_naptime_s;

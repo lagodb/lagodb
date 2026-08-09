@@ -160,10 +160,12 @@ WHERE volume.storage_volume_name = :'volume_name'
 \echo binding_visible: :binding_visible
 
 DROP TABLESPACE iceberg_volume_test;
-SELECT count(*) = 1 AS binding_retained_after_drop
+SELECT count(*) = 1 AS retirement_visible_after_drop
 FROM lakebase.storage_volumes
 WHERE storage_volume_name = :'volume_name'
-  AND bound_tablespace_oid IS NOT NULL
-  AND bound_tablespace_name IS NULL
+  AND lifecycle = 'retiring'
+  AND bound_tablespace_oid IS NULL
+  AND retired_tablespace_oid IS NOT NULL
+  AND binding_present = false
 \gset
-\echo binding_retained_after_drop: :binding_retained_after_drop
+\echo retirement_visible_after_drop: :retirement_visible_after_drop
