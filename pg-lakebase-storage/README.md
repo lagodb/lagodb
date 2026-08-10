@@ -26,13 +26,13 @@ Architecture
   |               service                       |   command routing, open/read
   +-----+-----------------------------------+---+
         |                                   |
-  +-----v-----+                       +-----v-----+
-  |  backend  |                       |   cache   |
-  +-----------+                       +-----------+
-  | registry  |                       | index     |
-  | obj store |                       | chunks    |
-  | memory    |                       | store     |
-  +-----------+                       | eviction  |
+  +-----v---------------+             +-----v-----+
+  | backend/context     |             |   cache   |
+  +---------------------+             +-----------+
+  | managed volume slot |             | index     |
+  | configured pool     |             | chunks    |
+  | object_store        |             | store     |
+  +---------------------+             | eviction  |
                                       | staging   |
                                       +-----------+
 ```
@@ -42,10 +42,17 @@ One process accepts many Unix socket connections. Each connection decodes
 requests concurrently but sends responses through a single writer, keeping
 frame and file-descriptor ordering predictable.
 
+Every socket performs one mandatory attach handshake before request
+multiplexing starts. A connection attaches either to a runtime-managed volume
+or to an inline `StoreConfig`; after attach, both sources become the same
+connection-local backend context. Object requests therefore carry only
+`(bucket, key)`, never a registry name or database catalog identity.
+
 Read requests are served from an on-disk cache (backed by redb for metadata
 and small objects) or fetched from a remote object store on miss. A separate
 staging tree lets clients write files locally and upload them to the backend
-with a single `upload(store_id, bucket, key)` request. Upload is not a
+with a single `upload(bucket, key)` request on a connection attached to the
+same physical backend. Upload is not a
 database transaction commit; it only copies the closed staging file into the
 object backend and returns object facts such as size and etag.
 
@@ -53,16 +60,20 @@ API
 ===
 
 **Reads:**
-`open(store_id, bucket, key)` / `read(len)` / `seek(offset)` / `close()`
+attach once / `open(bucket, key)` / `read(len)` / `seek(offset)` / `close()`
 
 **Staging writes:**
-`StagingFile::create(...)` / local writes / close / `upload(store_id, bucket, key)` / caller-side unlink
+`StagingFile::create(backend_identity, bucket, key)` / local writes / close /
+`upload(bucket, key)` / caller-side unlink
 
-**Store management:**
-`register_store(store_id, config)` / `unregister_store(store_id)` /
-`purge_store_cache(store_id)` / `invalidate_object_cache(store_id, bucket, key)`
+**Connection setup and cache control:**
+`connect_managed(volume_id)` or `connect_configured(config)` /
+`invalidate_object_cache(bucket, key)`
 
-Object identity is the explicit tuple `(store_id, bucket, key)`.
+Backend operations use `ObjectPath(bucket, key)`. Cache and staging identity is
+the credential-free tuple `(BackendDataIdentity, bucket, key)`. Consequently,
+two credentials that address the same physical service share cached bytes;
+cache hits do not re-run remote authorization or HEAD.
 
 Quick Start
 ===========
@@ -71,12 +82,22 @@ Quick Start
 use std::sync::Arc;
 
 use pg_lakebase_storage::{
-    CacheCleanupConfig, CacheRuntimeConfig, StorageRuntime, StorageRuntimeConfig,
-    StorageServerBuilder, StorageServerConfig, StorageServiceConfig,
+    BackendDataIdentity, CacheCleanupConfig, CacheRuntimeConfig,
+    ManagedStoreRegistry, MemoryObjectBackend, StorageRuntime,
+    StorageRuntimeConfig, StorageServerBuilder, StorageServerConfig,
+    StorageServiceConfig,
 };
 
 async fn run() -> pg_lakebase_storage::StorageResult<()> {
-    // 1. Build and bind the server (no backend at this point).
+    // 1. Publish runtime-owned managed volumes before accepting clients.
+    let managed = ManagedStoreRegistry::new();
+    managed.register_backend(
+        42,
+        BackendDataIdentity::memory("demo"),
+        Arc::new(MemoryObjectBackend::new()),
+    )?;
+
+    // 2. Build and bind the server.
     let runtime = StorageRuntime::new(StorageRuntimeConfig {
         cache: CacheRuntimeConfig {
             cleanup: CacheCleanupConfig::default()
@@ -95,16 +116,13 @@ async fn run() -> pg_lakebase_storage::StorageResult<()> {
             StorageServiceConfig::default()
                 .with_max_read_size(1024 * 1024),
         )
+        .with_managed_store_registry(managed)
         .with_runtime(runtime)
         .bind()
         .await?;
 
-    // 2. Register backends dynamically after bind.
-    //    Clients can also register stores at runtime via the RegisterStore wire message.
-    let store = Arc::new(object_store::memory::InMemory::new());
-    server.store_registry().register_object_store_bucket("default", store, "my-bucket")?;
-
-    // 3. Serve.
+    // 3. Clients attach volume 42 with StorageClient::connect_managed.
+    //    Foreign/component callers instead use connect_configured.
     server.serve_forever().await
 }
 ```
@@ -130,8 +148,10 @@ same time):
   together; standalone callers using `StorageRuntimeConfig::default()` get
   periodic cleanup disabled until they explicitly configure a cache budget.
 
-Both triggers use `try_lock` on an internal gate so concurrent cleanup
-traversals from different triggers never pile up.
+All cleanup triggers feed one `CleanupScheduler`. Write-path nudges are
+allocation-free and coalesced by the actor; periodic, reload, and manual
+passes share one async gate so janitor traversals never overlap. A trigger
+arriving during manual cleanup waits behind the gate instead of being lost.
 
 Configuration
 =============
@@ -152,8 +172,8 @@ Configuration
 | Knob                | Default  | Description                        |
 |---------------------|----------|------------------------------------|
 | max_read_size       | 1 MiB   | Server clamps each READ to this    |
-| small_object_limit  | 64 KiB  | Objects at or below this go to KV  |
-| chunk_size          | 4 MiB   | Large-object fetch granularity     |
+| small_object_limit  | 4 KiB   | Objects at or below this go to KV  |
+| chunk_size          | 32 MiB  | Large-object fetch granularity     |
 
 **Runtime (hot-reloadable via `StorageRuntime::apply`)**
 

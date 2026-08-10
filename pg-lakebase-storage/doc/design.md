@@ -21,7 +21,7 @@ It is not a filesystem, not a FUSE mount, not a general HTTP proxy. The
 design optimizes for a narrow workload:
 
 - Objects are immutable once uploaded. The object store guarantees that a
-  given `(bucket, key)` pair always returns the same bytes and the same
+  given physical `(backend identity, bucket, key)` always returns the same bytes and the same
   `(size, etag)`.
 - Reads are sequential or range-sequential within a single object.
 - Writes go through an explicit stage→upload flow: the database creates a
@@ -47,13 +47,15 @@ The cache enforces three invariants:
    lifecycle of that key. The server does not reconcile, overwrite, or
    repair those values from later backend observations.
 
-2. **No generations.** One `(store_id, bucket, key)` maps to at most one
+2. **No generations.** One credential-free physical
+   `(backend identity, bucket, key)` maps to at most one
    cached residency at a time. The system does not support multiple
    concurrent versions for the same object key.
 
 3. **External invalidation.** Cache freshness is the caller's
    responsibility. The only boundary that retires a cached residency is an
-   explicit `invalidate_object_cache(store_id, bucket, key)` call (or
+   explicit `invalidate_object_cache(bucket, key)` call on an attached
+   connection (or
    capacity-driven eviction, which is not a freshness event). A cache hit
    never issues a backend HEAD to check whether a newer version exists.
 
@@ -61,6 +63,12 @@ These invariants eliminate reconciliation logic, version conflict resolution,
 and background polling — complexity that is unnecessary when the upstream
 object store guarantees immutable objects and the database engine already
 tracks which objects are current.
+
+The cache is a trusted cluster-local resource, not a replay of remote
+credential authorization. `BackendDataIdentity` deliberately excludes
+credentials. Two attached contexts with different credentials but the same
+physical provider endpoint share cache residency, and a cache hit does not
+perform remote HEAD merely to re-authorize the second credential.
 
 2.2  The cache is derived data
 ------------------------------
@@ -127,6 +135,29 @@ This design means:
 
 See `src/staging/README.md` for the full staging lifecycle.
 
+2.7  One attached storage context per connection
+-------------------------------------------------
+
+Before the concurrent request pipeline starts, every socket must attach
+exactly one storage context:
+
+- `AttachManaged(volume_id)` resolves a runtime-owned managed volume slot.
+- `AttachConfigured(StoreConfig)` builds or reuses a configured backend from
+  the service-wide weak backend pool.
+
+Attach returns the credential-free physical backend identity used by client
+staging paths. After attach, both sources use the same data protocol and
+service handlers. No request carries a `StoreId`, database OID, foreign-server
+identity, or credential. This keeps PostgreSQL logical storage objects above
+the storage-service boundary and avoids registration/unregistration
+lifecycles.
+
+A managed slot may refresh credentials while preserving its immutable
+physical identity. Existing connections and file handles retain their old
+`Arc<dyn ObjectBackend>`; new connections observe the refreshed backend. A
+change to provider endpoint or another physical-identity field is rejected
+instead of silently reusing an existing cache namespace.
+
 
 3  Layered Architecture
 =======================
@@ -146,13 +177,13 @@ See `src/staging/README.md` for the full staging lifecycle.
   |               service                       |   command routing, open/read
   +-----+-----------------------------------+---+
         |                                   |
-  +-----v-----+                       +-----v-----+
-  |  backend  |                       |   cache   |
-  +-----------+                       +-----------+
-  | registry  |                       | index     |
-  | obj store |                       | chunks    |
-  | memory    |                       | store     |
-  +-----------+                       | eviction  |
+  +-----v---------------+             +-----v-----+
+  | backend/context     |             |   cache   |
+  +---------------------+             +-----------+
+  | managed volume slot |             | index     |
+  | configured pool     |             | chunks    |
+  | object_store        |             | store     |
+  +---------------------+             | eviction  |
                                       | staging   |
                                       +-----------+
 ```
@@ -164,7 +195,8 @@ Each layer has a single responsibility:
 - **Connection** manages per-socket lifetime: concurrent request tasks,
   backpressure via a bounded response queue, and graceful shutdown on reader
   EOF.
-- **Service** translates typed commands into cache and backend operations.
+- **Service** translates typed commands into operations on the connection's
+  already attached backend and the shared cache.
 - **Backend** wraps `object_store` crate clients behind a trait so tests can
   use in-memory stores and production can use S3/GCS/Azure.
 - **Cache** owns the on-disk layout, metadata index, small-object KV, large
@@ -216,7 +248,7 @@ reads zero-KV-operation after the initial open.
 =======================
 
 ```
-  StagingFile::create(store_id, bucket, key)
+  StagingFile::create(backend_identity, bucket, key)
    |
    +--- caller creates empty file under staging/
    |    using StagingPathResolver-derived path
@@ -227,7 +259,7 @@ reads zero-KV-operation after the initial open.
    +--- close local staging file
    |
    v
-  Upload(store_id, bucket, key)
+  Upload(bucket, key) on a connection attached to that backend identity
    |
    +--- server reads staging file
    |    uploads to backend via put_from_file
@@ -249,7 +281,8 @@ reads zero-KV-operation after the initial open.
 Staging semantic contract (client-side):
 
 - **Append-only.** The client opens the staging file with `O_APPEND`.
-- **Single writer.** Only one staging file per `(store_id, bucket, key)` at
+- **Single writer.** Only one staging file per
+  `(backend identity, bucket, key)` at
   a time (`StagingFile::create` uses `O_EXCL`).
 - **No readers before upload/publication.** Staged bytes are invisible to the
   database until `Upload` succeeds; metadata publication is still controlled
@@ -300,13 +333,9 @@ a missing complete file, the I/O error is returned to the caller — the
 server does not attempt repair.
 
 
-8  Future Directions
-====================
+8  Known Capacity Improvements
+==============================
 
-- **Generation-addressed residency.** Supporting old and new versions of the
-  same key concurrently (for zero-downtime schema migrations) would require a
-  generation dimension in the cache key and residency leases that outlive the
-  current single-version model.
 - **Filesystem block accounting.** Eviction currently uses logical payload
   bytes. Accounting for filesystem block overhead would give more accurate
   capacity decisions.

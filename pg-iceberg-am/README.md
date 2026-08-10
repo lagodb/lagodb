@@ -110,7 +110,7 @@ metadata and storage logic:
   then publishes the Iceberg metadata update at the PostgreSQL transaction
   boundary.
 - **Storage routing** uses PostgreSQL's local file path for local tables and the
-  shared runtime/storage service for object-backed tables.
+  shared worker/storage service for object-backed tables.
 - **WAL integration** connects local Iceberg file operations to PostgreSQL WAL
   where the relation's WAL policy requires it, including standby/archive replay
   and post-commit cleanup.
@@ -176,7 +176,7 @@ restarting PostgreSQL, create `pg_lakebase_runtime` before
 registration require postmaster startup.
 
 > `cargo pgrx run pg17` is useful for isolated pgrx function work, but it does
-> not configure the shared runtime workers and Iceberg WAL resource manager.
+> not configure the shared Lakebase workers and Iceberg WAL resource manager.
 > Use the source-install path with explicit preload settings for a realistic
 > `pg-iceberg-am` run.
 

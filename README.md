@@ -88,7 +88,7 @@ Initialize PostgreSQL 17 with pgrx using an existing `pg_config`:
 cargo pgrx init --pg17=/path/to/pg_config
 ```
 
-Install the shared runtime and the Iceberg access method into that PostgreSQL
+Install the shared Lakebase services and the Iceberg access method into that PostgreSQL
 installation:
 
 ```bash
@@ -234,7 +234,7 @@ routes table data to local or object storage.
   while preserving PostgreSQL evaluation wherever required for correctness.
 - Transaction-local state provides statement-consistent reads and stages data
   and schema changes until the PostgreSQL transaction boundary.
-- The shared runtime and storage service route object-backed tables through
+- The shared worker and storage services route object-backed tables through
   configured storage volumes.
 
 ## PostgreSQL support

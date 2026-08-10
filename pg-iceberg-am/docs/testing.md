@@ -325,9 +325,51 @@ tests therefore follow these rules:
   per storage write.
 
 The SQL regression files are passed to `pg_regress` as positional tests and run
-serially. Existing `pg_test`-only runtime barriers remain appropriate for
-fine-grained state-machine races; native injection points complement rather
-than replace them.
+serially. Runtime framework tests must not add `pg_test`-only fields to shared
+state or feature-gated branches to production control flow. Use native
+injection points at genuine production lifecycle boundaries when a precise
+cross-process window is required. If no such boundary exists, test the
+externally observable scenario instead of adding a test-only production hook.
+
+### pg_regress fixture lifecycle
+
+With cargo-pgrx 0.19.2, `setup.sql` is the standard suite setup file. The
+remaining SQL files run serially in filename order; cargo-pgrx does not pass a
+schedule file to `pg_regress`. `zzz_finish.sql` is therefore the suite teardown
+for a complete run. Do not add a schedule until the runner actually supports
+one and the shared database, worker state, maintenance queue, and object-store
+fixtures have been proven independent.
+
+The worker framework has one feature-level regression file, `worker.sql`.
+Database assertions and fixture ownership stay in SQL. Its only process helper,
+`storage_worker_pause_guard`, accepts PIDs discovered by SQL and performs only
+SIGSTOP/SIGCONT plus fail-safe recovery; it does not connect to PostgreSQL or
+make worker-framework assertions. `setup.sql` and `zzz_finish.sql` resolve the
+current storage singleton PID before asking the guard to recover, so neither
+path signals a PID persisted by an earlier run.
+
+Run the complete SQL regression suite through `xtask`:
+
+```bash
+cargo xtask regress pg17
+```
+
+Pass one or more test names for a filtered run:
+
+```bash
+cargo xtask regress pg17 worker
+cargo xtask regress pg17 worker type_conversion
+```
+
+The `xtask` entry point prepares PostgreSQL's `injection_points` module,
+installs the production runtime and the pg_test-enabled Delta AM, prepends the
+selected PostgreSQL `bindir` to `PATH`, configures the required shared preload
+libraries, and always passes `--resetdb`. Reusing an existing regression
+database does not rerun `setup.sql`. A filtered worker run cleans its own SQL
+fixtures and releases its pause guard, while the next setup reclaims any MinIO
+container or paused singleton left by process termination. Run
+`cargo xtask regress pg17 zzz_finish` explicitly when immediate suite-level
+teardown is desired after a filtered run.
 
 ## Root Cause in `access::conversion`
 

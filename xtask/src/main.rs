@@ -37,6 +37,13 @@ fn run() -> Result<(), String> {
             ensure_no_extra_args(args)?;
             run_test_all(&pg_version)
         }
+        Some(command) if command == OsStr::new("regress") => {
+            let pg_version = args
+                .next()
+                .ok_or_else(|| usage_error("missing PostgreSQL version"))?;
+            let tests: Vec<OsString> = args.collect();
+            run_regress_standalone(&pg_version, &tests)
+        }
         Some(command) => Err(usage_error(&format!(
             "unknown command '{}'",
             command.to_string_lossy()
@@ -50,9 +57,12 @@ fn usage_error(message: &str) -> String {
         "{message}\n\n\
          usage:\n  \
            cargo xtask test-all <pg-version>\n  \
+           cargo xtask regress <pg-version> [test ...]\n  \
            cargo xtask isolation <pg-version> [spec ...]\n\n\
          examples:\n  \
            cargo xtask test-all pg17\n  \
+           cargo xtask regress pg17\n  \
+           cargo xtask regress pg17 worker\n  \
            cargo xtask isolation pg17\n  \
            cargo xtask isolation pg17 cas_retry_stress"
     )
@@ -137,7 +147,7 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     )?;
 
     println!("\n=== Phase 4: pg-iceberg-am SQL regression (PostgreSQL) ===\n");
-    run_regress(pg_version)?;
+    run_regress(pg_version, &[])?;
 
     println!("\n=== Phase 5: Isolation tests (PostgreSQL) ===\n");
     run_isolation(pg_version, &[])?;
@@ -236,7 +246,15 @@ fn prepare_injection_points(pg_version: &OsStr) -> Result<(), String> {
 //  regress: run pg_regress
 // ============================================================================
 
-fn run_regress(pg_version: &OsStr) -> Result<(), String> {
+fn run_regress_standalone(
+    pg_version: &OsStr,
+    tests: &[OsString],
+) -> Result<(), String> {
+    prepare_injection_points(pg_version)?;
+    run_regress(pg_version, tests)
+}
+
+fn run_regress(pg_version: &OsStr, tests: &[OsString]) -> Result<(), String> {
     install_runtime(pg_version)?;
 
     let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
@@ -265,6 +283,7 @@ fn run_regress(pg_version: &OsStr) -> Result<(), String> {
         .arg(format!(
             "shared_preload_libraries='{RUNTIME_NAME},{EXTENSION_NAME}'"
         ));
+    command.args(tests);
     prepend_path_env(&mut command, &bindir)?;
 
     run_command(&mut command)

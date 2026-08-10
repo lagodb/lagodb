@@ -19,5 +19,5 @@ a persistent background-worker session there would block `CREATE DATABASE`.
 
 The storage worker is not stored in `lakebase.workers`; that table is reserved
 for database-local extension workers. Storage observability is exposed through
-`lakebase.storage_runtime_status()`, backed by this module's own shared-memory
-state rather than `RuntimeStore`.
+`lakebase.storage_service_status()`, backed by this module's own shared-memory
+state rather than the worker subsystem's `Store`.
