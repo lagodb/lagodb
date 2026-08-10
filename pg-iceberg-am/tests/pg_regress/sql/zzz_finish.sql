@@ -40,8 +40,8 @@ WHERE storage_volume_name = :'cancel_volume_name';
 RESET client_min_messages;
 \set QUIET 0
 SET client_min_messages = warning;
-DROP TABLE IF EXISTS maintenance_remote_drop;
-DROP TABLE IF EXISTS maintenance_remote_rollback;
+DROP TABLE IF EXISTS remote_cleanup_drop;
+DROP TABLE IF EXISTS remote_cleanup_rollback;
 DROP TABLESPACE IF EXISTS regress_object;
 DROP TABLE IF EXISTS lakebase_regress.object_storage_fixture;
 DROP SCHEMA IF EXISTS lakebase_regress;
