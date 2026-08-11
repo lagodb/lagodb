@@ -20,6 +20,8 @@ struct DeltaMaintenanceProvider;
 
 impl LakebaseTableMaintenanceProvider for DeltaMaintenanceProvider {
     const NAME: &'static std::ffi::CStr = c"delta";
+    const EXTENSION_NAME: &'static std::ffi::CStr = c"pg_delta_am";
+    const LIBRARY_NAME: &'static std::ffi::CStr = c"pg_delta_am";
     const ACCESS_METHOD_NAME: &'static std::ffi::CStr = c"delta";
 
     fn access_method_oid() -> Option<pg_sys::Oid> {

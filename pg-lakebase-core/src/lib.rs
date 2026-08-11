@@ -51,6 +51,9 @@ pub mod customscan;
 /// Generic PostgreSQL Foreign Data Wrapper planning and scan framework.
 pub mod fdw;
 
+/// PostgreSQL COPY execution primitives shared by utility consumers.
+pub mod copy;
+
 /// Registration logic for Table Access Method routines
 pub mod registry;
 
@@ -66,7 +69,7 @@ pub mod wal;
 /// ResourceOwner-scoped cleanup callbacks.  Distinct from transaction events.
 pub mod resource;
 
-/// Versioned C ABI published by `pg-lakebase-runtime` through rendezvous.
+/// Exact-build C ABI published by `pg-lakebase-runtime` through rendezvous.
 pub mod runtime_api;
 
 /// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.

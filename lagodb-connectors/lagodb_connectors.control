@@ -1,0 +1,6 @@
+comment = 'LagoDB connector FDW skeleton'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/lagodb_connectors'
+requires = 'pg_lakebase_runtime'
+relocatable = false
+superuser = true

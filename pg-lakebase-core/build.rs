@@ -7,6 +7,7 @@ struct PgFeature {
     environment: &'static str,
     pgrx_config: &'static str,
     c_forks_supported: bool,
+    copy_bridge_supported: bool,
     native_injection_points_supported: bool,
 }
 
@@ -16,12 +17,16 @@ static PG_FEATURES: [PgFeature; 2] = [
         pgrx_config: "pg16",
         // PG16 TableAM callbacks require a separate compatibility port.
         c_forks_supported: false,
+        // The COPY bridge is intentionally not compiled for PG16. A future
+        // PostgreSQL port will enable it after its C ABI is audited.
+        copy_bridge_supported: false,
         native_injection_points_supported: false,
     },
     PgFeature {
         environment: "CARGO_FEATURE_PG17",
         pgrx_config: "pg17",
         c_forks_supported: true,
+        copy_bridge_supported: true,
         native_injection_points_supported: true,
     },
 ];
@@ -52,15 +57,12 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/compat/lakebase_pg_compat.h");
     println!("cargo:rerun-if-changed=csrc/compat/lakebase_injection_point.c");
     println!("cargo:rerun-if-changed=csrc/compat/lakebase_injection_point.h");
+    println!("cargo:rerun-if-changed=csrc/copy/lakebase_copy.c");
+    println!("cargo:rerun-if-changed=csrc/copy/lakebase_copy.h");
 
     let Some(pg_feature) = active_pg_config() else {
         return;
     };
-    if !pg_feature.c_forks_supported && !pg_feature.native_injection_points_supported
-    {
-        return;
-    }
-
     if std::env::var_os("PGRX_PG_CONFIG_PATH").is_none() {
         let pgrx_config = Pgrx::config_toml()
             .expect("failed to locate the pgrx configuration file");
@@ -97,22 +99,41 @@ fn main() {
     }
 
     let mut build = cc::Build::new();
-    build
-        .file("csrc/compat/lakebase_injection_point.c")
-        .include(PathBuf::from("csrc/compat"))
-        .include(include)
-        .flag_if_supported("-Wno-unused-function")
-        .flag_if_supported("-Wno-unused-parameter");
+    build.include(include);
+    let mut has_sources = false;
+    // `lakebase_copy.c` mirrors private COPY state preparation around the
+    // public PG17 COPY functions. The source is selected per PostgreSQL
+    // feature here; the C header applies the shared major-version gate.
+    if pg_feature.copy_bridge_supported {
+        build
+            .file("csrc/copy/lakebase_copy.c")
+            .include(PathBuf::from("csrc/copy"))
+            .include(PathBuf::from("csrc/compat"))
+            .flag_if_supported("-Wno-unused-function")
+            .flag_if_supported("-Wno-unused-parameter");
+        has_sources = true;
+    }
+
+    if pg_feature.native_injection_points_supported {
+        build
+            .file("csrc/compat/lakebase_injection_point.c")
+            .include(PathBuf::from("csrc/compat"));
+        has_sources = true;
+    }
 
     if pg_feature.c_forks_supported {
         build
             .file("csrc/modify/lakebase_node_modify_table.c")
             .file("csrc/analyze/lakebase_analyze.c")
             .include(PathBuf::from("csrc/modify"))
-            .include(PathBuf::from("csrc/analyze"));
+            .include(PathBuf::from("csrc/analyze"))
+            .include(PathBuf::from("csrc/compat"));
+        has_sources = true;
     }
 
-    build.compile("lakebase_pg_bridges");
+    if has_sources {
+        build.compile("lakebase_pg_bridges");
+    }
 }
 
 fn injection_points_enabled(pg_config_header: &Path) -> bool {

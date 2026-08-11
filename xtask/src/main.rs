@@ -9,6 +9,8 @@ const EXTENSION_NAME: &str = "pg_iceberg_am";
 const RUNTIME_PACKAGE: &str = "pg-lakebase-runtime";
 const RUNTIME_NAME: &str = "pg_lakebase_runtime";
 const DELTA_AM_PACKAGE: &str = "pg-delta-am";
+const DELTA_AM_NAME: &str = "pg_delta_am";
+const CONNECTORS_PACKAGE: &str = "lagodb-connectors";
 
 fn main() -> ExitCode {
     match run() {
@@ -104,6 +106,8 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg(EXTENSION_PACKAGE)
             .arg("--exclude")
             .arg(DELTA_AM_PACKAGE)
+            .arg("--exclude")
+            .arg(CONNECTORS_PACKAGE)
             .arg("--no-default-features")
             .arg("--features")
             .arg(&pg_feature),
@@ -144,6 +148,18 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg(pg_version)
             .arg("--package")
             .arg(EXTENSION_PACKAGE),
+    )?;
+    // Connectors are also a pgrx extension and their tests exercise error and
+    // option paths that reference backend symbols. Run them in PostgreSQL,
+    // never as a standalone host test executable.
+    install_runtime(pg_version)?;
+    run_command(
+        Command::new("cargo")
+            .arg("pgrx")
+            .arg("test")
+            .arg(pg_version)
+            .arg("--package")
+            .arg(CONNECTORS_PACKAGE),
     )?;
 
     println!("\n=== Phase 4: pg-iceberg-am SQL regression (PostgreSQL) ===\n");
@@ -280,8 +296,10 @@ fn run_regress(pg_version: &OsStr, tests: &[OsString]) -> Result<(), String> {
         .arg(EXTENSION_PACKAGE)
         .arg("--resetdb")
         .arg("--postgresql-conf")
+        .arg(format!("shared_preload_libraries='{RUNTIME_NAME}'"))
+        .arg("--postgresql-conf")
         .arg(format!(
-            "shared_preload_libraries='{RUNTIME_NAME},{EXTENSION_NAME}'"
+            "pg_lakebase.provider_libraries='{EXTENSION_NAME},{DELTA_AM_NAME}'"
         ));
     command.args(tests);
     prepend_path_env(&mut command, &bindir)?;
@@ -362,7 +380,9 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
     })?;
     fs::write(
         &temp_config,
-        format!("shared_preload_libraries = '{RUNTIME_NAME},{EXTENSION_NAME}'\n"),
+        format!(
+            "shared_preload_libraries = '{RUNTIME_NAME}'\npg_lakebase.provider_libraries = '{EXTENSION_NAME}'\n"
+        ),
     )
     .map_err(|error| format!("failed to write {}: {error}", temp_config.display()))?;
 

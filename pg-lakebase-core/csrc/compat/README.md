@@ -24,21 +24,25 @@ The Rust facade also checks the target installation's `pg_config.h`: standard
 PostgreSQL builds that do not define `USE_INJECTION_POINTS` compile Rust call
 sites to an inline no-op and do not retain an FFI call.
 
-The `pg16` Cargo feature currently keeps its pre-existing Rust-only path and
-does not compile these forks. Its TableAM ANALYZE callback ABI needs a separate
-port. PostgreSQL 18 predicates and the injection-point ABI branch are retained
-so known version differences are not lost, but the complete PG18 port still
-belongs in a separate audited change.
+The `pg16` Cargo feature remains a build-selection entry and does not compile
+these forks. Its TableAM and ANALYZE callback ABIs need a separate port; this
+layer does not add Rust fallbacks for an unsupported major. A PG16 build may
+therefore fail during Rust compilation, linking, or runtime initialization.
+PostgreSQL 18 predicates and the injection-point ABI branch are retained as
+compatibility scaffolding, but the complete PG18 port still belongs in a
+separate audited change.
 
 Adding a PostgreSQL version requires:
 
-1. adding local compatibility branches to ANALYZE, ModifyTable and VACUUM FULL;
+1. auditing the COPY internal contract and adding local compatibility branches
+   to ANALYZE, ModifyTable and VACUUM FULL;
 2. adding its Cargo feature and `build.rs` version entry with C forks disabled;
 3. recording provenance and source hashes in each module's `README.md`, plus
    pristine sources in `upstream/` when a complete upstream file is forked;
 4. running that version's complete regression matrix;
 5. only then extending `LAKEBASE_SUPPORTED_PG_MAJOR` and marking the Cargo
-   feature's `c_forks_supported` entry in `build.rs` as true.
+   feature's `c_forks_supported` and any bridge-specific support entries in
+   `build.rs` as true.
 
 Release binaries should be built against the target installation's headers.
 Source compatibility is maintained across supported minors, but Lakebase does

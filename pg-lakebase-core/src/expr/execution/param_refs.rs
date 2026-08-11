@@ -45,14 +45,14 @@ impl RuntimeParamRefs {
 
     /// # Safety
     ///
-    /// `target_ctx` must be a live PostgreSQL memory context.
+    /// `query_context` must be a live PostgreSQL query memory context.
     pub(crate) unsafe fn relocate_exec_param_ids_to(
         &mut self,
-        target_ctx: pg_sys::MemoryContext,
+        query_context: pg_sys::MemoryContext,
     ) {
         let original = self.exec_param_ids;
         self.exec_param_ids =
-            unsafe { relocate_bitmap_to_context(self.exec_param_ids, target_ctx) };
+            unsafe { relocate_bitmap_to_context(self.exec_param_ids, query_context) };
         if !original.is_null() {
             unsafe { pg_sys::bms_free(original) };
         }
@@ -109,12 +109,12 @@ unsafe extern "C-unwind" fn param_refs_walker(
 
 unsafe fn relocate_bitmap_to_context(
     bitmap: *mut pg_sys::Bitmapset,
-    target_ctx: pg_sys::MemoryContext,
+    query_context: pg_sys::MemoryContext,
 ) -> *mut pg_sys::Bitmapset {
     if bitmap.is_null() {
         return ptr::null_mut();
     }
-    let old = unsafe { pg_sys::MemoryContextSwitchTo(target_ctx) };
+    let old = unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
     let copied = unsafe { pg_sys::bms_copy(bitmap) };
     let _ = unsafe { pg_sys::MemoryContextSwitchTo(old) };
     copied

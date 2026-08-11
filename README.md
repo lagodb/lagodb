@@ -100,11 +100,25 @@ cargo pgrx install --package pg-iceberg-am --pg-config /path/to/pg_config
 installs the package named by `--package`, so both commands are required;
 installing the access method does not install the runtime artifacts.
 
-Add both extensions to `postgresql.conf` and restart PostgreSQL:
+Preload the runtime, configure the provider libraries it owns, and restart
+PostgreSQL:
 
 ```conf
-shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'
+shared_preload_libraries = 'pg_lakebase_runtime'
+pg_lakebase.provider_libraries = 'pg_iceberg_am'
 ```
+
+List every enabled Lakebase AM and FDW provider in the second setting. For
+example, a cluster using Iceberg and the LagoDB connectors uses:
+
+```conf
+pg_lakebase.provider_libraries = 'pg_iceberg_am,lagodb_connectors'
+```
+
+Provider libraries are loaded by the runtime during the same postmaster
+startup window. Adding or removing one requires a PostgreSQL restart.
+An object-URI COPY that no configured provider claims fails explicitly; it is
+never passed to PostgreSQL's server-local file COPY implementation.
 
 Then connect to a database and run:
 

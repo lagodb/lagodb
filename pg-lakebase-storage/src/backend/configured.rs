@@ -17,7 +17,13 @@ use crate::object::{ListEntry, ObjectInfo, ObjectPath};
 /// Backend that materializes and caches one object-store client per bucket.
 pub struct ConfiguredObjectBackend {
     config: Arc<StoreConfig>,
-    stores: RwLock<HashMap<String, Arc<dyn ObjectStore>>>,
+    stores: RwLock<HashMap<String, BucketStores>>,
+}
+
+#[derive(Clone)]
+struct BucketStores {
+    default: Arc<dyn ObjectStore>,
+    upload: Arc<dyn ObjectStore>,
 }
 
 impl ConfiguredObjectBackend {
@@ -32,18 +38,21 @@ impl ConfiguredObjectBackend {
         &self.config
     }
 
-    fn store_for_bucket(&self, bucket: &str) -> StorageResult<Arc<dyn ObjectStore>> {
-        if let Some(store) = self
+    fn stores_for_bucket(&self, bucket: &str) -> StorageResult<BucketStores> {
+        if let Some(stores) = self
             .stores
             .read()
             .expect("configured object backend rwlock poisoned; bucket clients are no longer trustworthy")
             .get(bucket)
             .cloned()
         {
-            return Ok(store);
+            return Ok(stores);
         }
 
-        let store = self.config.build_store(bucket)?;
+        let bucket_stores = BucketStores {
+            default: self.config.build_store(bucket)?,
+            upload: self.config.build_upload_store(bucket)?,
+        };
         let mut stores = self
             .stores
             .write()
@@ -51,16 +60,16 @@ impl ConfiguredObjectBackend {
         if let Some(existing) = stores.get(bucket).cloned() {
             return Ok(existing);
         }
-        stores.insert(bucket.to_owned(), Arc::clone(&store));
-        Ok(store)
+        stores.insert(bucket.to_owned(), bucket_stores.clone());
+        Ok(bucket_stores)
     }
 }
 
 #[async_trait]
 impl ObjectBackend for ConfiguredObjectBackend {
     async fn head(&self, key: &ObjectPath) -> StorageResult<ObjectInfo> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
+        let stores = self.stores_for_bucket(key.bucket())?;
+        ObjectStoreBackend::for_bucket(stores.default, key.bucket())
             .head(key)
             .await
     }
@@ -70,8 +79,8 @@ impl ObjectBackend for ConfiguredObjectBackend {
         key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
+        let stores = self.stores_for_bucket(key.bucket())?;
+        ObjectStoreBackend::for_bucket(stores.default, key.bucket())
             .get_range(key, range)
             .await
     }
@@ -82,8 +91,8 @@ impl ObjectBackend for ConfiguredObjectBackend {
         path: &std::path::Path,
         len: u64,
     ) -> StorageResult<ObjectInfo> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
+        let stores = self.stores_for_bucket(key.bucket())?;
+        ObjectStoreBackend::for_bucket(stores.upload, key.bucket())
             .put_from_file(key, path, len)
             .await
     }
@@ -93,8 +102,8 @@ impl ObjectBackend for ConfiguredObjectBackend {
         key: &ObjectPath,
         data: bytes::Bytes,
     ) -> StorageResult<ObjectInfo> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
+        let stores = self.stores_for_bucket(key.bucket())?;
+        ObjectStoreBackend::for_bucket(stores.default, key.bucket())
             .put_if_absent(key, data)
             .await
     }
@@ -104,17 +113,16 @@ impl ObjectBackend for ConfiguredObjectBackend {
         bucket: &str,
         prefix: Option<&str>,
     ) -> BoxStream<'static, StorageResult<ListEntry>> {
-        match self.store_for_bucket(bucket) {
-            Ok(store) => {
-                ObjectStoreBackend::for_bucket(store, bucket).list(bucket, prefix)
-            }
+        match self.stores_for_bucket(bucket) {
+            Ok(stores) => ObjectStoreBackend::for_bucket(stores.default, bucket)
+                .list(bucket, prefix),
             Err(error) => stream::once(async move { Err(error) }).boxed(),
         }
     }
 
     async fn delete(&self, key: &ObjectPath) -> StorageResult<()> {
-        let store = self.store_for_bucket(key.bucket())?;
-        ObjectStoreBackend::for_bucket(store, key.bucket())
+        let stores = self.stores_for_bucket(key.bucket())?;
+        ObjectStoreBackend::for_bucket(stores.default, key.bucket())
             .delete(key)
             .await
     }
@@ -124,8 +132,8 @@ impl ObjectBackend for ConfiguredObjectBackend {
         bucket: &str,
         keys: BoxStream<'static, StorageResult<String>>,
     ) -> BoxStream<'static, StorageResult<String>> {
-        match self.store_for_bucket(bucket) {
-            Ok(store) => ObjectStoreBackend::for_bucket(store, bucket)
+        match self.stores_for_bucket(bucket) {
+            Ok(stores) => ObjectStoreBackend::for_bucket(stores.default, bucket)
                 .delete_stream(bucket, keys),
             Err(error) => {
                 let template = error.to_string();

@@ -28,7 +28,7 @@ mod session;
 pub(crate) mod trigger_rows;
 
 pub use binding::ModifyScanBinding;
-pub use lifecycle::init_lifecycle_hooks;
+pub use lifecycle::{CopyFromLifecycleGuard, begin_copy_from_lifecycle};
 pub(crate) use modify_query::acquire as acquire_modify_query_state;
 
 use crate::api::TableAccessMethod;

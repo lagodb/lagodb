@@ -16,13 +16,13 @@ pub const VOLUME_ROUTE_ERROR: u32 = 3;
 /// Call-scoped output allocated in the caller's current PostgreSQL context.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct StorageVolumeRouteV1 {
+pub struct StorageVolumeRouteOutput {
     pub object_namespace: *const c_char,
     pub effective_base_uri: *const c_char,
     pub error_message: *const c_char,
 }
 
-impl Default for StorageVolumeRouteV1 {
+impl Default for StorageVolumeRouteOutput {
     fn default() -> Self {
         Self {
             object_namespace: std::ptr::null(),
@@ -34,7 +34,7 @@ impl Default for StorageVolumeRouteV1 {
 
 pub type ResolveStorageVolumeRouteCallback = unsafe extern "C-unwind" fn(
     volume_id: u64,
-    output: *mut StorageVolumeRouteV1,
+    output: *mut StorageVolumeRouteOutput,
 ) -> u32;
 
 #[derive(Debug, thiserror::Error)]
@@ -65,7 +65,7 @@ impl RuntimeClient {
         self,
         volume_id: StorageVolumeId,
     ) -> Result<StorageVolumeRoute, StorageVolumeRouteLookupError> {
-        let mut output = StorageVolumeRouteV1::default();
+        let mut output = StorageVolumeRouteOutput::default();
         let status = unsafe {
             (self.api.resolve_storage_volume_route)(
                 volume_id.get(),

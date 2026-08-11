@@ -28,8 +28,8 @@ Every cache decision rests on three non-negotiable invariants:
    automatically — until invalidated, the server assumes the current key's
    identity remains valid. A cache hit does not HEAD the backend.
 
-These invariants exist because the upstream object store guarantees immutable
-objects and the database engine already knows which objects are current. They
+These invariants exist because callers track which object keys are current and
+explicitly invalidate a key when its remote contents are replaced. They
 eliminate reconciliation logic, version conflicts, and background polling.
 
 `BackendDataIdentity` contains only physical addressing fields and excludes

@@ -23,17 +23,10 @@ pub use execution::{exec, explain, state};
 pub use plan_data::{custom_exprs, custom_private};
 pub use planning::{candidate, hook, tuple_planner};
 
-#[cfg(feature = "pg17")]
 pub mod modify;
 
-#[cfg(feature = "pg17")]
 pub(crate) fn has_modify_provider_for(context: &RelationContext<'_>) -> bool {
     modify::has_provider_for(context)
-}
-
-#[cfg(not(feature = "pg17"))]
-pub(crate) fn has_modify_provider_for(_context: &RelationContext<'_>) -> bool {
-    false
 }
 
 /// Install the `set_rel_pathlist_hook` router. Shared GUCs are runtime-owned.

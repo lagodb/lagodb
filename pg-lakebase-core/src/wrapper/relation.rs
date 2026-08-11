@@ -3,7 +3,7 @@ use crate::diag::PgError;
 use pgrx::{PgTryBuilder, pg_sys};
 use std::panic::AssertUnwindSafe;
 
-unsafe extern "C" {
+unsafe extern "C-unwind" {
     fn find_all_inheritors(
         parent_rel_id: pg_sys::Oid,
         lock_mode: i32,
@@ -69,11 +69,9 @@ impl PgWrapper {
     ) -> Result<Vec<pg_sys::Oid>, PgError> {
         unsafe {
             PgTryBuilder::new(move || {
-                let relations = find_all_inheritors(
-                    parent_rel_id,
-                    lockmode,
-                    std::ptr::null_mut(),
-                );
+                let relations = pg_sys::ffi::pg_guard_ffi_boundary(|| {
+                    unsafe { find_all_inheritors(parent_rel_id, lockmode, std::ptr::null_mut()) }
+                });
                 let len = pg_sys::list_length(relations);
                 let mut result = Vec::with_capacity(len as usize);
                 for index in 0..len {

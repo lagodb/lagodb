@@ -15,9 +15,11 @@ mod hooks;
 mod lifecycle;
 mod object_access;
 mod process_utility;
+mod provider_bootstrap;
 mod registry;
 mod runtime_api;
 mod storage;
+mod utility_consumer;
 mod worker;
 
 pg_module_magic!();
@@ -29,6 +31,7 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 extern "C-unwind" fn _PG_init() {
     gucs::init();
     storage::init();
+    provider_bootstrap::init();
     runtime_api::init();
 
     if unsafe {
@@ -40,6 +43,7 @@ extern "C-unwind" fn _PG_init() {
         lifecycle::init();
         hooks::init();
         worker::init();
+        provider_bootstrap::load_configured();
     }
 }
 

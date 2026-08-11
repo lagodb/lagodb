@@ -4,7 +4,7 @@ use pg_lakebase_core::object_cleanup::ObjectTarget;
 use pg_lakebase_core::storage::service::BackendStorageService;
 use pg_lakebase_core::storage::volume::StorageVolumeId;
 use pg_lakebase_storage::{
-    ListCursor, StagingFile, StagingPathResolver, StorageError, StorageFile,
+    StagingFile, StagingPathResolver, StorageError, StorageFile,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -93,13 +93,15 @@ impl ObjectStorage {
         let uses_absolute_uris = table_location.contains("://");
         let scheme = self.scheme();
         let mut paths = std::collections::HashSet::new();
-        let mut cursor: Option<ListCursor> = None;
+        let mut listing = self
+            .service
+            .list_session(self.bucket.as_ref(), Some(&prefix), 0)
+            .map_err(storage_err)?;
         loop {
-            let page = self
-                .service
-                .list_page(self.bucket.as_ref(), Some(&prefix), cursor, 0)
-                .map_err(storage_err)?;
-            for entry in page.entries {
+            let Some(entries) = listing.next_page().map_err(storage_err)? else {
+                break;
+            };
+            for entry in entries {
                 if entry
                     .last_modified_ms
                     .is_some_and(|modified| modified < cutoff_ms)
@@ -114,10 +116,9 @@ impl ObjectStorage {
                     }
                 }
             }
-            let Some(next_cursor) = page.next_cursor else {
+            if listing.is_exhausted() {
                 break;
-            };
-            cursor = Some(next_cursor);
+            }
         }
         Ok(paths)
     }

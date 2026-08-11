@@ -8,11 +8,11 @@ use pgrx::pg_sys;
 use super::super::row_identity::ModifyPlanSlot;
 use super::contract::ForeignModifyState;
 use super::contract::{FdwModify, ForeignModifyOperation};
-use super::error::ForeignModifyPhase;
+use super::error::{ForeignModifyError, ForeignModifyPhase};
 use super::executor::{
     end_modify, map_outcome, state_wrapper_unchecked, with_modify_per_tuple_context,
 };
-use super::slot::ModifySlot;
+use super::slot::{ForeignInsertBatch, ModifySlot};
 use super::state::ForeignModifyStateWrapper;
 
 #[pg_guard]
@@ -108,6 +108,114 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_insert<P: FdwModify>(
         Ok(slot) => slot,
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::Insert)
+            .report_after_switch(prior_context),
+    }
+}
+
+#[pg_guard]
+/// # Safety
+///
+/// PostgreSQL supplies a live input-slot array and count for a foreign INSERT
+/// state initialized by `BeginForeignModify` or `BeginForeignInsert`.
+pub(crate) unsafe extern "C-unwind" fn exec_foreign_batch_insert<P: FdwModify>(
+    _estate: *mut pg_sys::EState,
+    rinfo: *mut pg_sys::ResultRelInfo,
+    slots: *mut *mut pg_sys::TupleTableSlot,
+    _plan_slots: *mut *mut pg_sys::TupleTableSlot,
+    num_slots: *mut c_int,
+) -> *mut *mut pg_sys::TupleTableSlot {
+    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
+    let result = {
+        let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
+        debug_assert_eq!(wrapper.operation, ForeignModifyOperation::Insert);
+        let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
+        let per_tuple_context = wrapper.per_tuple_context;
+        let input_count = unsafe { *num_slots };
+        debug_assert!(input_count >= 0);
+        let input_count = input_count as usize;
+        unsafe {
+            with_modify_per_tuple_context(per_tuple_context, |conversion_context| {
+                let mut batch = ForeignInsertBatch::from_raw(
+                    slots,
+                    input_count,
+                    &mut wrapper.row_layout,
+                    conversion_context,
+                    wrapper.returned_item_pointer_required,
+                    wrapper.return_slot_required,
+                );
+                (&mut *state_ptr).insert_batch(&mut batch)?;
+                Ok(batch.finish())
+            })
+        }
+    };
+
+    match result {
+        Ok((slots, output_count)) => {
+            // `output_count` cannot exceed the input count supplied by
+            // PostgreSQL, which is represented by c_int at this ABI.
+            let output_count = c_int::try_from(output_count)
+                .expect("foreign batch output count exceeds PostgreSQL c_int");
+            unsafe { *num_slots = output_count };
+            slots
+        }
+        Err(error) => error
+            .with_provider_phase::<P>(ForeignModifyPhase::BatchInsert)
+            .report_after_switch(prior_context),
+    }
+}
+
+#[pg_guard]
+/// # Safety
+///
+/// PostgreSQL invokes this callback after the matching foreign INSERT state
+/// has been initialized. In `EXPLAIN` without execution PostgreSQL may leave
+/// `ri_FdwState` NULL; that path intentionally returns the conservative
+/// single-row size without calling the provider.
+pub(crate) unsafe extern "C-unwind" fn get_foreign_modify_batch_size<P: FdwModify>(
+    rinfo: *mut pg_sys::ResultRelInfo,
+) -> c_int {
+    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
+    let result = (|| {
+        let state = unsafe { (*rinfo).ri_FdwState };
+        if state.is_null() {
+            return Ok(1);
+        }
+
+        let wrapper = unsafe { &mut *(state as *mut ForeignModifyStateWrapper<P>) };
+        debug_assert_eq!(wrapper.operation, ForeignModifyOperation::Insert);
+        let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
+        let requested = unsafe { (&*state_ptr).batch_size()? };
+        if requested < 1 {
+            return Err(ForeignModifyError::framework(
+                "foreign provider returned a batch size smaller than one",
+            ));
+        }
+
+        // BEFORE ROW triggers must observe rows already inserted by this
+        // statement, and INSTEAD OF ROW triggers replace the FDW insert path.
+        // Keep those paths on PostgreSQL's ordinary row execution. AFTER ROW
+        // triggers do support batching: the executor queues one event for each
+        // slot returned by ExecForeignBatchInsert, and the wrapper's
+        // `return_slot_required` contract preserves those relation-shaped slots.
+        let has_pre_fdw_row_trigger = unsafe {
+            let triggers = (*rinfo).ri_TrigDesc;
+            !triggers.is_null()
+                && ((*triggers).trig_insert_before_row
+                    || (*triggers).trig_insert_instead_row)
+        };
+        let batching_forbidden = unsafe {
+            !(*rinfo).ri_projectReturning.is_null()
+                || !(*rinfo).ri_WithCheckOptions.is_null()
+        } || has_pre_fdw_row_trigger
+            || !wrapper.row_layout.has_live_attributes()
+            || wrapper.returned_item_pointer_required;
+        Ok(if batching_forbidden { 1 } else { requested })
+    })();
+
+    match result {
+        Ok(size) => size,
+        Err(error) => error
+            .with_provider_phase::<P>(ForeignModifyPhase::BatchInsert)
             .report_after_switch(prior_context),
     }
 }

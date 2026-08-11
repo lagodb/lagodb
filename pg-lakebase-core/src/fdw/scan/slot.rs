@@ -237,7 +237,10 @@ impl<'a> ScanSlotWriter<'a> {
     /// This method may be called at most once for a produced row and must not be
     /// mixed with [`Self::store_heap_tuple`] for that row. Before the provider
     /// returns that row, it must write every column from the scan's
-    /// [`ScanOutputLayout::columns`] exactly once.
+    /// [`ScanOutputLayout::columns`] exactly once. PostgreSQL enters the
+    /// provider's iterate callback with the scan expression context's
+    /// per-tuple memory context selected; pass-by-reference datums written
+    /// through the returned writer must be allocated in that current context.
     #[inline]
     pub unsafe fn datum_writer(&mut self) -> ScanDatumWriter<'_, 'a> {
         unsafe { self.begin_datum_output() };

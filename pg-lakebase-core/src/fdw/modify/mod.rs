@@ -31,11 +31,12 @@ pub use planning_context::{
     ForeignModifyPlanContext, ForeignModifyRelationContext,
     ForeignUpdateTargetContext,
 };
-pub use slot::ModifySlot;
+pub use slot::{ForeignInsertBatch, ModifySlot};
 
 pub(crate) use callbacks::{
     begin_foreign_insert, begin_foreign_modify, end_foreign_insert,
-    end_foreign_modify, exec_foreign_insert, exec_foreign_update,
+    end_foreign_modify, exec_foreign_batch_insert, exec_foreign_insert,
+    exec_foreign_update, get_foreign_modify_batch_size,
 };
 pub(crate) use delete::exec_foreign_delete;
 pub(crate) use planning::{

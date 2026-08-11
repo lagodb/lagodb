@@ -20,9 +20,9 @@ database process and one or more remote object stores (S3, GCS, Azure Blob).
 It is not a filesystem, not a FUSE mount, not a general HTTP proxy. The
 design optimizes for a narrow workload:
 
-- Objects are immutable once uploaded. The object store guarantees that a
-  given physical `(backend identity, bucket, key)` always returns the same bytes and the same
-  `(size, etag)`.
+- A physical `(backend identity, bucket, key)` may be replaced by an external
+  operation. The cache does not discover that replacement; the caller that
+  knows the key changed explicitly invalidates it.
 - Reads are sequential or range-sequential within a single object.
 - Writes go through an explicit stage→upload flow: the database creates a
   local staging file, writes bytes, and then asks the server to upload the
@@ -30,7 +30,7 @@ design optimizes for a narrow workload:
 - The caller (database engine) knows when cached content is stale and
   explicitly invalidates.
 
-These assumptions let the cache skip expensive freshness probes and version
+This contract lets the cache skip expensive freshness probes and version
 reconciliation that a general-purpose cache would need.
 
 
@@ -60,9 +60,8 @@ The cache enforces three invariants:
    never issues a backend HEAD to check whether a newer version exists.
 
 These invariants eliminate reconciliation logic, version conflict resolution,
-and background polling — complexity that is unnecessary when the upstream
-object store guarantees immutable objects and the database engine already
-tracks which objects are current.
+and background polling — complexity that is unnecessary when the caller
+already tracks which object keys are current.
 
 The cache is a trusted cluster-local resource, not a replay of remote
 credential authorization. `BackendDataIdentity` deliberately excludes

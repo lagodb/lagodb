@@ -35,7 +35,7 @@ pub use cache::{
 };
 pub use client::{
     DEFAULT_CLIENT_CLEANUP_TIMEOUT, ExternalFdLease, ExternalFdPolicy, ListIter,
-    ListPage, SeekFrom, SocketInterest, SocketWait, SocketWaitContext, StagingFile,
+    ListSession, SeekFrom, SocketInterest, SocketWait, SocketWaitContext, StagingFile,
     StorageClient, StorageClientBuilder, StorageFile, UploadInfo,
 };
 pub use config::{
@@ -55,7 +55,6 @@ pub use object::{
     DEFAULT_CHUNK_SIZE, DEFAULT_SMALL_OBJECT_LIMIT, ListEntry, ObjectInfo,
     ObjectLocation, ObjectPath,
 };
-pub use protocol::ListCursor;
 pub use request::{
     NoopRequestObserver, NoopRequestPolicy, OperationMeta, RequestContext,
     RequestHooks, RequestObserver, RequestOperation, RequestOutcome, RequestPolicy,

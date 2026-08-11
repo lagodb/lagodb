@@ -66,9 +66,12 @@ keyed operations on the wrong bucket return NotFound, and list on the
 wrong bucket returns an empty stream.
 
 **ConfiguredObjectBackend.** Takes a `StoreConfig` (S3, S3-compatible,
-GCS, or Azure) and lazily builds one `ObjectStore` client per bucket on
-first access. The per-bucket client is cached under a double-checked
-lock.
+GCS, or Azure) and lazily builds one `ObjectStore` client set per bucket on
+first access. It keeps a default client for reads and administrative
+operations and a zero-retry client for caller-controlled staging uploads.
+This prevents an Upload protocol request from being replayed invisibly by
+the object-store SDK; the ordinary upload result is returned to the database.
+The per-bucket clients are cached under a double-checked lock.
 
 
 3  Context Resolution and Sharing
@@ -136,8 +139,9 @@ with 8 MiB parts. If an I/O or network error occurs mid-upload, the
 multipart upload is aborted. Parallel part uploads are noted as a future
 optimization.
 
-`ConfiguredObjectBackend` resolves the per-bucket store first, then
-delegates to `ObjectStoreBackend::for_bucket`.
+`ConfiguredObjectBackend` resolves the per-bucket clients first, then
+delegates to `ObjectStoreBackend::for_bucket`; only `put_from_file` selects
+the zero-retry upload client.
 
 
 6  Error Handling
@@ -147,8 +151,8 @@ All backend APIs return `StorageResult<T>`. Error mappings:
 
 - `StorageError::configuration` — config validation and client build
   failures.
-- `StorageError::backend_source` — wraps `object_store::Error` with
-  context (head, get, list, delete, multipart).
+- `StorageError::backend_source` — wraps `object_store::Error` with context
+  (head, get, list, delete, multipart setup/parts/completion).
 - `StorageError::not_found` — missing objects, wrong pinned bucket, or an
   unknown managed volume during attach.
 - `StorageError::io` — local file I/O during staging uploads.

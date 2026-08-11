@@ -40,12 +40,13 @@ are managed as Iceberg and Parquet.
 Build and install the runtime and access method by following the repository
 [build-from-source guide](../docs/build-from-source.md). The runtime is a
 separate extension and is required by `pg-iceberg-am`; install both packages
-and preload both libraries before creating the extensions.
+and configure Iceberg as a runtime-loaded provider before creating the extensions.
 
 After PostgreSQL has been restarted with:
 
 ```conf
-shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'
+shared_preload_libraries = 'pg_lakebase_runtime'
+pg_lakebase.provider_libraries = 'pg_iceberg_am'
 ```
 
 Create the extensions and an Iceberg table:
@@ -160,10 +161,12 @@ contains the installation, package, and pgrx-managed-server commands.
 PostgreSQL extension dependencies do not install Cargo/pgrx artifacts. Install
 `pg-lakebase-runtime` and `pg-iceberg-am` separately.
 
-Both extensions must be loaded at postmaster start:
+The runtime must be preloaded and must load the Iceberg provider at postmaster
+start:
 
 ```conf
-shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'
+shared_preload_libraries = 'pg_lakebase_runtime'
+pg_lakebase.provider_libraries = 'pg_iceberg_am'
 ```
 
 `pg_lakebase_runtime` owns the shared workers and storage service;
@@ -171,9 +174,9 @@ shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'
 restarting PostgreSQL, create `pg_lakebase_runtime` before
 `pg_iceberg_am` in each database that uses Iceberg tables.
 
-`LOAD` and creating the extensions after server start do not replace
-`shared_preload_libraries`: the background workers and WAL resource-manager
-registration require postmaster startup.
+`LOAD` and creating the extensions after server start do not replace the
+runtime bootstrap configuration: the background workers and WAL
+resource-manager registration require postmaster startup.
 
 > `cargo pgrx run pg17` is useful for isolated pgrx function work, but it does
 > not configure the shared Lakebase workers and Iceberg WAL resource manager.

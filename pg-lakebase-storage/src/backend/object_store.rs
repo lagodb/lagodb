@@ -12,6 +12,7 @@ use object_store::{
     PutOptions,
 };
 use tokio::io::AsyncReadExt;
+use tracing::warn;
 
 use super::ObjectBackend;
 use crate::error::{StorageError, StorageResult};
@@ -133,12 +134,26 @@ impl ObjectBackend for ObjectStoreBackend {
             ));
         }
 
-        let result = upload.complete().await.map_err(|error| {
-            StorageError::backend_source(
-                format!("complete multipart upload for {key}"),
-                error,
-            )
-        })?;
+        let result = match upload.complete().await {
+            Ok(result) => result,
+            Err(error) => {
+                // Dropping a multipart handle cannot release parts on stores such as S3 and GCS.
+                // Without a successful completion result, make a best-effort attempt to abort any
+                // multipart session that remains. Preserve the completion error as the operation
+                // result; lifecycle rules remain the fallback when cleanup also fails.
+                if let Err(abort_error) = upload.abort().await {
+                    warn!(
+                        key = %key,
+                        error = %abort_error,
+                        "failed to abort multipart upload after completion error",
+                    );
+                }
+                return Err(StorageError::backend_source(
+                    format!("complete multipart upload for {key}"),
+                    error,
+                ));
+            }
+        };
 
         Ok(ObjectInfo {
             size: len,

@@ -84,7 +84,7 @@ fn next_copy_id() -> u64 {
     })
 }
 
-fn abort_copy_frame(id: u64) {
+pub(super) fn abort_copy_frame(id: u64) {
     let frame = COPY_FRAMES.with(|frames| {
         let mut frames = frames.borrow_mut();
         frames
@@ -95,7 +95,7 @@ fn abort_copy_frame(id: u64) {
     drop(frame);
 }
 
-pub(crate) fn begin_copy_from_frame() {
+pub(crate) fn begin_copy_from_frame() -> u64 {
     let id = next_copy_id();
     let resource = resource::remember_resource(move || abort_copy_frame(id));
     COPY_FRAMES.with(|frames| {
@@ -107,12 +107,22 @@ pub(crate) fn begin_copy_from_frame() {
             last_session: None,
         });
     });
+    id
 }
 
-pub(crate) fn finish_current_copy_frame() -> Result<(), PgReportError> {
+pub(crate) fn finish_copy_frame(id: u64) -> Result<(), PgReportError> {
     let mut frame = COPY_FRAMES
-        .with(|frames| frames.borrow_mut().pop())
-        .ok_or_else(|| internal_error("COPY FROM lifecycle stack is empty"))?;
+        .with(|frames| {
+            let mut frames = frames.borrow_mut();
+            if frames.last().is_some_and(|frame| frame.id == id) {
+                frames.pop()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            internal_error("COPY FROM lifecycle stack is not at the expected frame")
+        })?;
     resource::forget_resource(frame.resource);
     for (_, session) in &mut frame.sessions {
         session.finish()?;

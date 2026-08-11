@@ -19,6 +19,47 @@ use pgrx::{Array as PgArray, FromDatum, pg_sys};
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 
+/// Detoast one PostgreSQL array and reject shape information that a single
+/// Arrow `List` cannot preserve.
+///
+/// # Safety
+///
+/// `raw` must be a valid non-NULL PostgreSQL array datum.
+unsafe fn linear_array_datum(
+    raw: pg_sys::Datum,
+) -> ArrowConversionResult<pg_sys::Datum> {
+    let array = unsafe {
+        pg_sys::pg_detoast_datum(raw.cast_mut_ptr::<pg_sys::varlena>())
+            .cast::<pg_sys::ArrayType>()
+    };
+    let dimensions = unsafe { (*array).ndim };
+    if dimensions > 1 {
+        return Err(ArrowConversionError::IncompatibleColumnType(
+            "PostgreSQL multidimensional array".to_owned(),
+            "a single Arrow List cannot preserve array dimensions".to_owned(),
+        ));
+    }
+    if dimensions == 1 {
+        // PostgreSQL stores `ndim` dimensions followed by `ndim` lower bounds
+        // immediately after ArrayType. Arrow List has an implicit lower bound
+        // of one, so accepting another value would silently change subscripts.
+        let lower_bounds = unsafe {
+            array
+                .cast::<u8>()
+                .add(size_of::<pg_sys::ArrayType>())
+                .cast::<i32>()
+                .add(dimensions as usize)
+        };
+        if unsafe { *lower_bounds } != 1 {
+            return Err(ArrowConversionError::IncompatibleColumnType(
+                "PostgreSQL array with a non-one lower bound".to_owned(),
+                "Arrow List cannot preserve PostgreSQL array lower bounds".to_owned(),
+            ));
+        }
+    }
+    Ok(pg_sys::Datum::from(array))
+}
+
 /// Element-specific part of a relation-bound PostgreSQL array codec.
 ///
 /// The marker type is selected while the bound write plan is built.  The
@@ -57,6 +98,7 @@ macro_rules! primitive_bound_list_element {
                 values: &mut Self::Values,
                 raw: pg_sys::Datum,
             ) -> ArrowConversionResult<usize> {
+                let raw = unsafe { linear_array_datum(raw) }?;
                 let array = unsafe { PgArray::<$pg_type>::from_datum(raw, false) }
                     .ok_or(ArrowConversionError::InvariantViolated(
                         "List encoder: incompatible bound source",
@@ -128,6 +170,7 @@ macro_rules! string_bound_list_element {
                 values: &mut Self::Values,
                 raw: pg_sys::Datum,
             ) -> ArrowConversionResult<usize> {
+                let raw = unsafe { linear_array_datum(raw) }?;
                 let array = unsafe { PgArray::<$pg_type>::from_datum(raw, false) }
                     .ok_or(ArrowConversionError::InvariantViolated(
                         "List encoder: incompatible bound source",

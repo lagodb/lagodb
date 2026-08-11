@@ -1,4 +1,4 @@
-//! Small PostgreSQL-version adapters kept out of provider-facing code.
+//! Small PostgreSQL adapters kept out of provider-facing code.
 
 use core::ptr;
 
@@ -6,9 +6,9 @@ use pgrx::pg_sys;
 
 use super::error::ForeignScanError;
 
-/// Construct a base ForeignPath.  PG17 added `fdw_restrictinfo` to the
-/// ForeignPath constructor; the framework uses NIL for the base-scan field on
-/// both versions because join pushdown is not part of this facet.
+/// Construct a base ForeignPath. PG17 added `fdw_restrictinfo` to the
+/// ForeignPath constructor; the framework uses NIL for the base-scan field
+/// because join pushdown is not part of this facet.
 ///
 /// # Safety
 ///
@@ -25,7 +25,6 @@ pub(crate) unsafe fn create_foreign_path(
     required_outer: pg_sys::Relids,
     fdw_private: *mut pg_sys::List,
 ) -> *mut pg_sys::ForeignPath {
-    #[cfg(feature = "pg17")]
     let path = {
         // SAFETY: the current planner callback owns all pointer arguments;
         // PostgreSQL retains them in the planner memory context.
@@ -40,26 +39,6 @@ pub(crate) unsafe fn create_foreign_path(
                 pathkeys,
                 required_outer,
                 ptr::null_mut(),
-                ptr::null_mut(),
-                fdw_private,
-            )
-        }
-    };
-
-    #[cfg(feature = "pg16")]
-    let path = {
-        // SAFETY: the current planner callback owns all pointer arguments;
-        // PostgreSQL retains them in the planner memory context.
-        unsafe {
-            pg_sys::create_foreignscan_path(
-                root,
-                baserel,
-                ptr::null_mut(),
-                rows,
-                startup_cost,
-                total_cost,
-                pathkeys,
-                required_outer,
                 ptr::null_mut(),
                 fdw_private,
             )

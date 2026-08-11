@@ -447,6 +447,8 @@ impl IcebergTableMaintenanceProvider {
 
 impl LakebaseTableMaintenanceProvider for IcebergTableMaintenanceProvider {
     const NAME: &'static CStr = c"iceberg";
+    const EXTENSION_NAME: &'static CStr = c"pg_iceberg_am";
+    const LIBRARY_NAME: &'static CStr = c"pg_iceberg_am";
     const ACCESS_METHOD_NAME: &'static CStr = ICEBERG_AM_NAME;
     const SUPPORTS_ANALYZE: bool = true;
 

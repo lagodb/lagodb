@@ -18,7 +18,7 @@ pub(crate) enum CredentialConfig {
         access_key_id: String,
         secret_access_key: String,
         #[serde(default)]
-        session_token: Option<String>,
+        token: Option<String>,
     },
     GcsServiceAccount {
         service_account: ServiceAccountJson,
@@ -88,11 +88,11 @@ impl CredentialConfig {
             Self::S3AccessKey {
                 access_key_id,
                 secret_access_key,
-                session_token,
+                token,
             } => {
                 !access_key_id.is_empty()
                     && !secret_access_key.is_empty()
-                    && session_token.as_ref().is_none_or(|value| !value.is_empty())
+                    && token.as_ref().is_none_or(|value| !value.is_empty())
             }
             Self::GcsServiceAccount { service_account } => {
                 !service_account.is_empty()

@@ -16,7 +16,7 @@ pub(super) use crate::customscan::provider::WHOLEROW_NAME;
 static PREV_PLANNER: OnceLock<pg_sys::planner_hook_type> = OnceLock::new();
 static PREV_UPPER: OnceLock<pg_sys::create_upper_paths_hook_type> = OnceLock::new();
 
-unsafe extern "C" {
+unsafe extern "C-unwind" {
     fn find_all_inheritors(
         parent_rel_id: pg_sys::Oid,
         lock_mode: i32,
@@ -163,7 +163,9 @@ impl WholeRowPlanner {
         // for DELETE and can introduce an avoidable upgrade deadlock.
         let lockmode = unsafe { (*self.rte).rellockmode };
         let relations = unsafe {
-            find_all_inheritors((*self.rte).relid, lockmode, ptr::null_mut())
+            pg_sys::ffi::pg_guard_ffi_boundary(|| {
+                unsafe { find_all_inheritors((*self.rte).relid, lockmode, ptr::null_mut()) }
+            })
         };
         let count = unsafe { pg_sys::list_length(relations) };
         for index in 0..count {

@@ -21,6 +21,7 @@ pub(crate) struct ModifyRowLayout {
     tuple_desc: pg_sys::TupleDesc,
     attributes: Box<[ModifyAttribute]>,
     codecs: Box<[Option<ColumnDatumCodec>]>,
+    has_live_attributes: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -57,6 +58,7 @@ impl ModifyRowLayout {
             tuple_desc,
             codecs: vec![None; natts].into_boxed_slice(),
             attributes,
+            has_live_attributes: attrs.iter().any(|attr| !attr.attisdropped),
         }
     }
 
@@ -66,6 +68,7 @@ impl ModifyRowLayout {
             tuple_desc: ptr::null_mut(),
             attributes: Vec::new().into_boxed_slice(),
             codecs: Vec::new().into_boxed_slice(),
+            has_live_attributes: false,
         }
     }
 
@@ -82,6 +85,11 @@ impl ModifyRowLayout {
     #[inline]
     pub(crate) fn natts(&self) -> usize {
         self.attributes.len()
+    }
+
+    #[inline]
+    pub(crate) fn has_live_attributes(&self) -> bool {
+        self.has_live_attributes
     }
 
     /// Return metadata for a provider column derived from this relation layout.

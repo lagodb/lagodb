@@ -9,8 +9,11 @@ use std::fmt::Debug;
 use std::rc::Rc;
 
 use pgrx::pg_sys;
+use pgrx::prelude::PgSqlErrorCode;
 
-use super::{TransactionResource, register_resource};
+use crate::diag::PgReportError;
+
+use super::{TransactionResource, TransactionResult, register_resource};
 
 /// When a transaction-scoped cleanup action should run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,17 @@ impl TransactionResource for PendingDeleteResource {
             // The outer subtransaction callback removes resources registered
             // at or above this aborted nesting level after this hook returns.
         }
+    }
+
+    fn on_pre_prepare(&self) -> TransactionResult<()> {
+        // Pending actions are backend-local trait objects and have no durable
+        // representation in PostgreSQL's two-phase state. Allowing PREPARE
+        // would silently lose both abort cleanup for newly created objects and
+        // commit cleanup for retired objects when the backend exits.
+        Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "cannot prepare a transaction with pending external-object cleanup",
+        ))
     }
 
     fn nest_level(&self) -> i32 {

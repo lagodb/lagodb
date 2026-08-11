@@ -33,8 +33,6 @@ pub(crate) struct AnalyzePreparation {
     population: AnalyzePopulation,
     decoder: ArrowColumnDecoder,
     virtual_blocks: u64,
-    #[cfg(not(feature = "pg17"))]
-    target_rows: u64,
 }
 impl AnalyzePreparation {
     pub(crate) fn try_new(
@@ -42,7 +40,6 @@ impl AnalyzePreparation {
         tasks: Vec<FileScanTask>,
         decoder: ArrowColumnDecoder,
         storage_bytes: u64,
-        #[cfg(not(feature = "pg17"))] statistics_target: i32,
     ) -> IcebergResult<Self> {
         let population = AnalyzePopulation::try_new(tasks)?;
         let page_size = pg_sys::BLCKSZ as u64;
@@ -53,30 +50,11 @@ impl AnalyzePreparation {
                 "non-empty Iceberg population has zero virtual ANALYZE blocks",
             ));
         }
-        #[cfg(not(feature = "pg17"))]
-        let target_rows = {
-            const MIN_ANALYZE_SAMPLE_ROWS: u64 = 100;
-            const SAMPLE_ROWS_PER_STATISTICS_TARGET: u64 = 300;
-            let statistics_target =
-                u64::try_from(statistics_target).map_err(|_| {
-                    IcebergError::InvariantViolated(
-                        "ANALYZE statistics target must not be negative",
-                    )
-                })?;
-            statistics_target
-                .checked_mul(SAMPLE_ROWS_PER_STATISTICS_TARGET)
-                .ok_or(IcebergError::InvariantViolated(
-                    "ANALYZE statistics sample target overflowed",
-                ))?
-                .max(MIN_ANALYZE_SAMPLE_ROWS)
-        };
         Ok(Self {
             scan,
             population,
             decoder,
             virtual_blocks,
-            #[cfg(not(feature = "pg17"))]
-            target_rows,
         })
     }
 
@@ -145,13 +123,11 @@ impl AnalyzeScanState {
                 preparation.take().ok_or(IcebergError::InvariantViolated(
                     "ANALYZE preparation was consumed more than once",
                 ))?;
-            #[cfg(feature = "pg17")]
             let initial_sampler = stream.analyze_sampler_state().ok_or(
                 IcebergError::InvariantViolated(
                     "ANALYZE ReadStream is missing valid PG17 BlockSampler state",
                 ),
             )?;
-            #[cfg(feature = "pg17")]
             if initial_sampler.visited_blocks() != 0
                 || initial_sampler.selected_blocks() != 0
             {
@@ -169,13 +145,11 @@ impl AnalyzeScanState {
                             "PostgreSQL ANALYZE ticket count overflowed",
                         ))?;
             }
-            #[cfg(feature = "pg17")]
             let completed_sampler = stream.analyze_sampler_state().ok_or(
                 IcebergError::InvariantViolated(
                     "ANALYZE ReadStream lost its PG17 BlockSampler state",
                 ),
             )?;
-            #[cfg(feature = "pg17")]
             {
                 let population_blocks = initial_sampler.population_blocks();
                 let target_rows = initial_sampler.target_rows();
@@ -197,10 +171,7 @@ impl AnalyzeScanState {
                 return Ok(false);
             }
             let seed = rand::rng().random::<u64>();
-            #[cfg(feature = "pg17")]
             let target_rows = initial_sampler.target_rows();
-            #[cfg(not(feature = "pg17"))]
-            let target_rows = preparation.target_rows;
             self.phase = AnalyzeScanPhase::Ready(preparation.start(
                 tickets,
                 target_rows,

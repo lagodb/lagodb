@@ -158,6 +158,9 @@ async fn delete_removes_object_on(kind: CacheIndexKind) {
         f.close().unwrap();
 
         client.delete(TEST_BUCKET, "deleteme.txt").unwrap();
+        client
+            .invalidate_object_cache(TEST_BUCKET, "deleteme.txt")
+            .unwrap();
 
         let result = client.open(TEST_BUCKET, "deleteme.txt");
         assert!(result.is_err(), "expected open to fail after delete");

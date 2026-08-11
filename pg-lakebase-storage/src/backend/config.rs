@@ -6,7 +6,7 @@
 //!
 use std::sync::Arc;
 
-use object_store::ObjectStore;
+use object_store::{ObjectStore, RetryConfig};
 
 use super::secret::SecretString;
 use crate::error::{StorageError, StorageResult};
@@ -39,6 +39,50 @@ pub struct S3CompatibleStoreConfig {
     pub allow_http: bool,
     pub virtual_hosted_style_request: bool,
     pub skip_signature: bool,
+}
+
+impl S3StoreConfig {
+    /// Converts the S3 configuration into the canonical backend variant.
+    ///
+    /// An endpoint selects the custom-endpoint builder regardless of which
+    /// catalog-facing adapter supplied the configuration. Keeping that rule
+    /// here makes a storage volume and a ForeignServer address the same
+    /// physical service with the same [`StoreConfig`] variant and backend
+    /// identity.
+    pub fn into_canonical(self) -> StoreConfig {
+        let Self {
+            region,
+            endpoint,
+            access_key_id,
+            secret_access_key,
+            token,
+            allow_http,
+            virtual_hosted_style_request,
+            skip_signature,
+        } = self;
+        match endpoint {
+            Some(endpoint) => StoreConfig::S3Compatible(S3CompatibleStoreConfig {
+                endpoint,
+                region,
+                access_key_id,
+                secret_access_key,
+                token,
+                allow_http,
+                virtual_hosted_style_request,
+                skip_signature,
+            }),
+            None => StoreConfig::S3(S3StoreConfig {
+                region,
+                endpoint: None,
+                access_key_id,
+                secret_access_key,
+                token,
+                allow_http,
+                virtual_hosted_style_request,
+                skip_signature,
+            }),
+        }
+    }
 }
 
 /// Google Cloud Storage credentials. At most one credential source may be set.
@@ -101,11 +145,35 @@ impl StoreConfig {
         &self,
         bucket: &str,
     ) -> StorageResult<Arc<dyn ObjectStore>> {
+        self.build_store_with_retry(bucket, RetryConfig::default())
+    }
+
+    /// Builds the client used by caller-controlled staging uploads.
+    ///
+    /// The database chooses whether to retry a failed command. Disable hidden
+    /// SDK retries so one protocol Upload request performs one upload attempt
+    /// and returns its ordinary success or failure result to that caller.
+    pub(super) fn build_upload_store(
+        &self,
+        bucket: &str,
+    ) -> StorageResult<Arc<dyn ObjectStore>> {
+        let retry = RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        };
+        self.build_store_with_retry(bucket, retry)
+    }
+
+    fn build_store_with_retry(
+        &self,
+        bucket: &str,
+        retry_config: RetryConfig,
+    ) -> StorageResult<Arc<dyn ObjectStore>> {
         match self {
-            Self::S3(config) => config.build_store(bucket),
-            Self::S3Compatible(config) => config.build_store(bucket),
-            Self::Gcs(config) => config.build_store(bucket),
-            Self::Azure(config) => config.build_store(bucket),
+            Self::S3(config) => config.build_store(bucket, retry_config),
+            Self::S3Compatible(config) => config.build_store(bucket, retry_config),
+            Self::Gcs(config) => config.build_store(bucket, retry_config),
+            Self::Azure(config) => config.build_store(bucket, retry_config),
         }
     }
 }
@@ -157,7 +225,7 @@ pub(super) fn validate_endpoint(
             "{name} must include a host"
         )));
     }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
+    if endpoint_has_userinfo(value) || parsed.password().is_some() {
         return Err(StorageError::configuration(format!(
             "{name} must not contain URL user credentials"
         )));
@@ -168,6 +236,15 @@ pub(super) fn validate_endpoint(
         )));
     }
     Ok(())
+}
+
+fn endpoint_has_userinfo(value: &str) -> bool {
+    let Some(scheme_end) = value.find("://") else {
+        return false;
+    };
+    let authority = &value[(scheme_end + 3)..];
+    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
+    authority[..authority_end].contains('@')
 }
 
 pub(super) fn validate_optional_secret(

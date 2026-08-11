@@ -40,6 +40,30 @@ pub struct BoundWriteColumnPlan {
     requires_utf8: bool,
 }
 
+/// One validated PostgreSQL-datum input plan without a tuple-slot position.
+///
+/// This is the companion to [`BoundWriteColumnPlan`] for adapters that already
+/// own a typed datum stream, such as a COPY bridge.  The PostgreSQL source OID
+/// and Arrow rule are bound once; row appends perform no OID lookup or Arrow
+/// type dispatch.
+pub struct BoundDatumColumnPlan {
+    plan: BoundEncoderPlan,
+    requires_utf8: bool,
+}
+
+impl BoundDatumColumnPlan {
+    pub fn bind(
+        rule: ColumnRule,
+        source_oid: pg_sys::Oid,
+    ) -> ArrowConversionResult<Self> {
+        let requires_utf8 = rule.requires_utf8_server_encoding();
+        Ok(Self {
+            plan: BoundEncoderPlan::bind(rule, source_oid)?,
+            requires_utf8,
+        })
+    }
+}
+
 impl BoundWriteColumnPlan {
     /// Bind one output rule to an optional source slot.
     ///
@@ -155,6 +179,114 @@ pub struct BoundWriteBuffer {
     columns: Box<[BoundWriteColumn]>,
     rows: usize,
     estimated_bytes: usize,
+}
+
+/// Arrow batch buffer for an already-bound stream of PostgreSQL datums.
+///
+/// Unlike [`BoundWriteBuffer`], this buffer is not tied to a relation slot.
+/// Callers establish the row width and datum OIDs while constructing
+/// [`BoundDatumColumnPlan`] values, then append callback-scoped datums without
+/// constructing an intermediate slot or owned row.
+pub struct BoundDatumBuffer {
+    schema: Arc<Schema>,
+    columns: Box<[BoundColumnEncoder]>,
+    rows: usize,
+    estimated_bytes: usize,
+}
+
+impl BoundDatumBuffer {
+    pub fn new(
+        schema: Arc<Schema>,
+        plans: Box<[BoundDatumColumnPlan]>,
+    ) -> ArrowConversionResult<Self> {
+        if plans.len() != schema.fields().len() {
+            return Err(ArrowConversionError::InvariantViolated(
+                "bound datum column and Arrow schema counts differ",
+            ));
+        }
+        if plans.iter().any(|plan| plan.requires_utf8) {
+            ColumnDatumTarget::validate_utf8_server_encoding()
+                .map_err(ArrowConversionError::from)?;
+        }
+        let columns = plans
+            .into_vec()
+            .into_iter()
+            .map(|plan| plan.plan.materialize(DEFAULT_ROW_CAPACITY))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(Self {
+            schema,
+            columns,
+            rows: 0,
+            estimated_bytes: 0,
+        })
+    }
+
+    /// Append one row through the fixed column plan.
+    ///
+    /// # Safety
+    ///
+    /// `values` must yield exactly one value per bound column. Every non-NULL
+    /// datum must be valid for the source OID supplied to the corresponding
+    /// [`BoundDatumColumnPlan`]. Any referenced memory must remain valid until
+    /// this call returns. The unchecked width contract keeps a duplicate row
+    /// validation out of adapters that already parse a fixed-width protocol.
+    pub unsafe fn append_row_unchecked(
+        &mut self,
+        values: impl Iterator<Item = Option<pg_sys::Datum>>,
+    ) -> ArrowConversionResult<()> {
+        for (column, value) in self.columns.iter_mut().zip(values) {
+            match value {
+                Some(datum) => {
+                    self.estimated_bytes += unsafe { column.append(datum) }?;
+                }
+                None => column.append_null(),
+            }
+        }
+        self.rows += 1;
+        Ok(())
+    }
+
+    fn finish_columns(&mut self) -> ArrowConversionResult<Vec<ArrayRef>> {
+        let rows = self.rows;
+        let mut arrays = Vec::with_capacity(self.columns.len());
+        for column in &mut self.columns {
+            assert_eq!(column.len(), rows);
+            arrays.push(column.finish()?);
+        }
+        self.rows = 0;
+        self.estimated_bytes = 0;
+        Ok(arrays)
+    }
+}
+
+impl BatchBuffer for BoundDatumBuffer {
+    type Batch = RecordBatch;
+    type Error = ArrowConversionError;
+
+    fn finish_batch(&mut self) -> ArrowConversionResult<RecordBatch> {
+        if self.rows == 0 {
+            return Ok(RecordBatch::new_empty(self.schema.clone()));
+        }
+        let arrays = self.finish_columns()?;
+        Ok(RecordBatch::try_new(self.schema.clone(), arrays)?)
+    }
+
+    fn clear(&mut self) {
+        for column in &mut self.columns {
+            column.clear();
+        }
+        self.rows = 0;
+        self.estimated_bytes = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.rows
+    }
+
+    fn estimated_size(&self) -> usize {
+        self.estimated_bytes
+    }
 }
 
 impl BoundWriteBuffer {

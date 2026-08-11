@@ -13,7 +13,10 @@ use crate::diag::{PgReportError, ReportableError};
 use crate::resource::{ResourceHandle, forget_resource, remember_resource};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{pg_guard, pg_sys};
+use pgrx::{
+    pg_guard,
+    pg_sys::{self, ffi::pg_guard_ffi_boundary},
+};
 
 use super::bridge::{LakebaseModifyBridge, ModifyNodeCell};
 use super::execution::ModifyNodeState;
@@ -379,14 +382,14 @@ pub(super) unsafe extern "C-unwind" fn exec<P: LakebaseCustomModifyProvider>(
     if !instrument.is_null() {
         unsafe { pg_sys::InstrStartNode(instrument) };
     }
+    let bridge = state
+        .bridge
+        .as_mut()
+        .expect("BeginCustomScan initialized bridge");
     let result = unsafe {
-        lakebase_exec_modify_table(
-            state.inner,
-            state
-                .bridge
-                .as_mut()
-                .expect("BeginCustomScan initialized bridge"),
-        )
+        pg_guard_ffi_boundary(|| unsafe {
+            lakebase_exec_modify_table(state.inner, bridge)
+        })
     };
     if !instrument.is_null() {
         unsafe {

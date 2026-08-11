@@ -118,6 +118,12 @@ impl<I: CacheIndex> CacheManager<I> {
         }
     }
 
+    /// Retires the cache lifecycle for one caller-identified physical object.
+    ///
+    /// The cache does not discover same-key backend changes. Callers that know
+    /// a remote object was replaced or removed invoke this method explicitly.
+    /// It rejects active readers or fills with `Busy` instead of invalidating
+    /// underneath a live handle.
     pub async fn invalidate_object_cache(
         &self,
         key: &ObjectLocation,
@@ -173,11 +179,10 @@ impl<I: CacheIndex> CacheManager<I> {
         Ok(report)
     }
 
-    /// Best-effort variant of [`Self::invalidate_object_cache`] for the
-    /// `delete` / `delete_prefix` paths, where the responsibility for keeping the cache
+    /// Best-effort variant of [`Self::invalidate_object_cache`] for callers that
+    /// already know the backend object changed. The responsibility for keeping the cache
     /// consistent with the backend belongs to the **caller** (per the cache invariants documented
-    /// in `src/cache/README.md`): they have just removed `key` from the backend, so any
-    /// surviving cache entry is already stale.
+    /// in `src/cache/README.md`); this helper only makes that explicit invalidation non-fatal.
     ///
     /// Compared to [`Self::invalidate_object_cache`] this method differs only in failure
     /// handling. It never propagates errors:

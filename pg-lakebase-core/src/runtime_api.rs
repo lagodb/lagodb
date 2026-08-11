@@ -1,8 +1,8 @@
-//! Versioned PostgreSQL rendezvous ABI for runtime-owned backend services.
+//! Exact-build PostgreSQL rendezvous ABI for runtime-owned backend services.
 //!
 //! # Trust model
 //!
-//! This is an internal ABI between `pg-lakebase-runtime` and AM DSOs built
+//! This is an internal ABI between `pg-lakebase-runtime` and provider DSOs built
 //! against the same `pg-lakebase-core` SDK release. It is not a general C
 //! plugin interface and does not attempt to make arbitrary addresses or
 //! malformed foreign allocations safe to inspect.
@@ -11,14 +11,11 @@
 //! values of the declared `#[repr(C)]` types. Pointer/count pairs must describe
 //! live arrays of the exact element type, callback and C-string pointers must
 //! be valid, and registered callbacks and contexts must remain live for the
-//! backend lifetime. Version and size fields reject logical ABI mismatches
+//! backend lifetime. Size fields reject layouts built from a different SDK
 //! after those memory-safety preconditions hold; they do not validate an
-//! otherwise invalid pointer.
-//!
-//! Only independently published or registered API tables and descriptors carry
-//! their own version/size header. Call-scoped maintenance request, report,
-//! stats, and configuration payloads are versioned by their enclosing runtime
-//! API or provider descriptor.
+//! otherwise invalid pointer. Every runtime API type is an exact-build
+//! contract: the runtime and every consuming extension must be rebuilt
+//! together after an ABI change.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::mem::MaybeUninit;
@@ -30,20 +27,20 @@ use crate::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
     TableMaintenanceOptions, TableMaintenanceReport, TableMaintenanceStats,
 };
+mod registration;
 mod storage_volume;
 
+pub use registration::*;
 pub use storage_volume::{
     ResolveStorageVolumeRouteCallback, StorageVolumeRouteLookupError,
-    StorageVolumeRouteV1, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
+    StorageVolumeRouteOutput, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
 
-pub const RUNTIME_API_VERSION: u32 = 1;
-pub const RUNTIME_API_RENDEZVOUS: &CStr = c"pg_lakebase.runtime_api.v1";
-// The initial provider ABI includes capability flags so the router can reject
+pub const RUNTIME_API_RENDEZVOUS: &CStr = c"pg_lakebase.runtime_api";
+// The provider descriptor includes capability flags so the router can reject
 // unsupported compound operations before any provider performs irreversible
 // work.
-pub const MAINTENANCE_PROVIDER_VERSION: u32 = 1;
 pub const FORMAT_NAME_CAPACITY: usize = 32;
 
 pub const STAGE_WORKER_WAKEUP_OK: u32 = 0;
@@ -58,16 +55,17 @@ pub const REGISTER_OK: u32 = 0;
 pub const REGISTER_INVALID_DESCRIPTOR: u32 = 1;
 pub const REGISTER_DUPLICATE_NAME: u32 = 2;
 pub const REGISTER_DUPLICATE_ACCESS_METHOD: u32 = 3;
+pub const REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP: u32 = 4;
+pub const REGISTER_PROVIDER_LIBRARY_MISMATCH: u32 = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AbiHeader {
-    pub abi_version: u32,
     pub struct_size: u32,
 }
 
-pub const HOOK_DESCRIPTOR_VERSION: u32 = 1;
-pub const AM_REGISTRATION_VERSION: u32 = 1;
+pub const UTILITY_ROUTE_PASS_THROUGH: u8 = 0;
+pub const UTILITY_ROUTE_CONSUMED: u8 = 1;
 
 pub const OBJECT_ACCESS_POST_CREATE: u32 = 1 << 0;
 pub const OBJECT_ACCESS_DROP: u32 = 1 << 1;
@@ -99,89 +97,6 @@ pub fn object_access_event_mask(
         pg_sys::ObjectAccessType::OAT_TRUNCATE => Some(OBJECT_ACCESS_TRUNCATE),
         _ => None,
     }
-}
-
-pub type RoutedUtilityPreHook =
-    unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::Node);
-pub type RoutedUtilityPostHook =
-    unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::Node);
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct UtilityHookDescriptorV1 {
-    pub abi_version: u32,
-    pub struct_size: u32,
-    pub tag: u32,
-    pub context: *mut c_void,
-    pub on_pre: Option<RoutedUtilityPreHook>,
-    pub on_post: Option<RoutedUtilityPostHook>,
-}
-
-pub type RoutedObjectAccessHook = unsafe extern "C-unwind" fn(
-    context: *mut c_void,
-    access: pg_sys::ObjectAccessType::Type,
-    class_id: pg_sys::Oid,
-    object_id: pg_sys::Oid,
-    sub_id: i32,
-    arg: *mut c_void,
-);
-
-pub type RoutedObjectAccessStrHook = unsafe extern "C-unwind" fn(
-    context: *mut c_void,
-    access: pg_sys::ObjectAccessType::Type,
-    class_id: pg_sys::Oid,
-    object_name: *const c_char,
-    sub_id: i32,
-    arg: *mut c_void,
-);
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ObjectAccessHookDescriptorV1 {
-    pub abi_version: u32,
-    pub struct_size: u32,
-    pub event_mask: u32,
-    /// `InvalidOid` matches every PostgreSQL object class.
-    pub class_id: pg_sys::Oid,
-    pub context: *mut c_void,
-    pub on_access: Option<RoutedObjectAccessHook>,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ObjectAccessStrHookDescriptorV1 {
-    pub abi_version: u32,
-    pub struct_size: u32,
-    pub event_mask: u32,
-    /// `InvalidOid` matches every PostgreSQL object class.
-    pub class_id: pg_sys::Oid,
-    pub context: *mut c_void,
-    pub on_access: Option<RoutedObjectAccessStrHook>,
-}
-
-/// One AM's complete runtime registration transaction.
-///
-/// The runtime validates and prepares the optional maintenance provider and
-/// every hook descriptor before publishing any of them. Pointer fields may be
-/// null only when the corresponding count is zero; descriptor storage only
-/// needs to live for the registration call.
-///
-/// The raw pointers are part of the trusted internal ABI described in this
-/// module's trust model. Construct registrations through the core hook/provider
-/// APIs rather than assembling this type in application code.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct AmRegistrationV1 {
-    pub abi_version: u32,
-    pub struct_size: u32,
-    /// Optional maintenance provider staged by the same AM. Null means none.
-    pub maintenance_provider: *const MaintenanceProviderV1,
-    pub utility_hooks: *const UtilityHookDescriptorV1,
-    pub utility_hook_count: u32,
-    pub object_access_hooks: *const ObjectAccessHookDescriptorV1,
-    pub object_access_hook_count: u32,
-    pub object_access_str_hooks: *const ObjectAccessStrHookDescriptorV1,
-    pub object_access_str_hook_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,7 +135,7 @@ impl ObjectAccessFilter {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RuntimeMaintenanceConfigV1 {
+pub struct RuntimeMaintenanceConfig {
     pub enabled: u8,
     pub _padding: [u8; 3],
     pub actor_threads: i32,
@@ -243,7 +158,7 @@ const OPTION_PROCESS_MAIN: u32 = 1 << 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct MaintenanceRequestV1 {
+pub struct MaintenanceRequest {
     pub relation: pg_sys::Relation,
     pub mode: u32,
     pub option_flags: u32,
@@ -254,7 +169,7 @@ pub struct MaintenanceRequestV1 {
     pub command_time_ms: i64,
 }
 
-impl MaintenanceRequestV1 {
+impl MaintenanceRequest {
     pub fn new(
         relation: pg_sys::Relation,
         mode: TableMaintenanceMode,
@@ -311,7 +226,7 @@ impl MaintenanceRequestV1 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct MaintenanceReportV1 {
+pub struct MaintenanceReport {
     pub groups_rewritten: u64,
     pub input_objects: u64,
     pub input_bytes: u64,
@@ -323,7 +238,7 @@ pub struct MaintenanceReportV1 {
     pub cas_retries: u64,
 }
 
-impl From<TableMaintenanceReport> for MaintenanceReportV1 {
+impl From<TableMaintenanceReport> for MaintenanceReport {
     fn from(report: TableMaintenanceReport) -> Self {
         Self {
             groups_rewritten: report.groups_rewritten,
@@ -339,10 +254,10 @@ impl From<TableMaintenanceReport> for MaintenanceReportV1 {
     }
 }
 
-impl From<MaintenanceReportV1> for TableMaintenanceReport {
-    fn from(report: MaintenanceReportV1) -> Self {
-        // V1 carries only common counters. Start from Default so the private
-        // provider-metrics collection remains valid and empty.
+impl From<MaintenanceReport> for TableMaintenanceReport {
+    fn from(report: MaintenanceReport) -> Self {
+        // The runtime ABI carries only common counters. Start from Default so
+        // the private provider-metrics collection remains valid and empty.
         let mut result = Self::default();
         result.groups_rewritten = report.groups_rewritten;
         result.input_objects = report.input_objects;
@@ -359,7 +274,7 @@ impl From<MaintenanceReportV1> for TableMaintenanceReport {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct MaintenanceStatsV1 {
+pub struct MaintenanceStats {
     pub format: [u8; FORMAT_NAME_CAPACITY],
     pub history_points: u64,
     pub current_content_objects: u64,
@@ -372,7 +287,7 @@ pub struct MaintenanceStatsV1 {
     pub retained_data_bytes: u64,
 }
 
-impl MaintenanceStatsV1 {
+impl MaintenanceStats {
     pub fn try_from_stats(stats: TableMaintenanceStats) -> Option<Self> {
         let mut format = [0; FORMAT_NAME_CAPACITY];
         if let Some(value) = stats.format.as_deref() {
@@ -422,27 +337,26 @@ impl MaintenanceStatsV1 {
 
 pub type AccessMethodOidCallback = unsafe extern "C-unwind" fn() -> pg_sys::Oid;
 pub type ExecuteCallback = unsafe extern "C-unwind" fn(
-    request: *const MaintenanceRequestV1,
-    report: *mut MaintenanceReportV1,
+    request: *const MaintenanceRequest,
+    report: *mut MaintenanceReport,
 );
 pub type InspectCallback = unsafe extern "C-unwind" fn(
     relation: pg_sys::Relation,
-    stats: *mut MaintenanceStatsV1,
+    stats: *mut MaintenanceStats,
 );
 pub type StageWorkerWakeupCallback = unsafe extern "C-unwind" fn(
     extension_name: *const c_char,
     worker_name: *const c_char,
 ) -> u32;
 
-/// Versioned maintenance-provider descriptor published by an AM DSO.
+/// Exact-build maintenance-provider descriptor published by an AM DSO.
 ///
 /// Values are constructed by the core provider adapter. Callback and string
 /// pointers are required to be valid under the module-level internal ABI
 /// contract and remain live for the PostgreSQL backend lifetime.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct MaintenanceProviderV1 {
-    pub abi_version: u32,
+pub struct MaintenanceProvider {
     pub struct_size: u32,
     pub name: *const c_char,
     /// Stable catalog name of the table access method owned by this provider.
@@ -458,21 +372,21 @@ pub struct MaintenanceProviderV1 {
 
 /// Runtime-owned rendezvous function table.
 ///
-/// The runtime publishes one static instance. AM clients may only interpret a
-/// slot as this type after matching the rendezvous name, ABI version, and
-/// minimum size under the module-level internal ABI contract.
+/// The runtime publishes one static instance. Provider clients may only interpret a
+/// slot as this type after matching the rendezvous name and exact size under
+/// the module-level internal ABI contract.
 #[repr(C)]
 #[derive(Debug)]
-pub struct RuntimeApiV1 {
-    pub abi_version: u32,
+pub struct RuntimeApi {
     pub struct_size: u32,
-    pub register_am: unsafe extern "C-unwind" fn(*const AmRegistrationV1) -> u32,
+    pub register_provider:
+        unsafe extern "C-unwind" fn(*const ProviderRegistration) -> u32,
     pub has_providers: unsafe extern "C-unwind" fn() -> u8,
     pub provider_for_am:
-        unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const MaintenanceProviderV1,
+        unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const MaintenanceProvider,
     pub customscan_mode: unsafe extern "C-unwind" fn() -> u32,
     pub maintenance_config:
-        unsafe extern "C-unwind" fn(*mut RuntimeMaintenanceConfigV1),
+        unsafe extern "C-unwind" fn(*mut RuntimeMaintenanceConfig),
     pub stage_worker_wakeup: StageWorkerWakeupCallback,
     pub resolve_storage_volume_route: ResolveStorageVolumeRouteCallback,
 }
@@ -487,38 +401,44 @@ unsafe extern "C" {
 ///
 /// PostgreSQL must be initialized in the current backend process. The returned
 /// slot is backend-lifetime memory; callers must validate any published pointer
-/// and ABI version before dereferencing it.
+/// and exact ABI size before dereferencing it.
 pub unsafe fn rendezvous_slot() -> *mut *mut c_void {
     unsafe { find_rendezvous_variable(RUNTIME_API_RENDEZVOUS.as_ptr()) }
 }
 
-static RUNTIME_API_CACHE: OnceLock<&'static RuntimeApiV1> = OnceLock::new();
+static RUNTIME_API_CACHE: OnceLock<&'static RuntimeApi> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeApiError {
     #[error(
-        "pg_lakebase runtime API is not published; load pg_lakebase_runtime before loading AM extensions"
+        "pg_lakebase runtime API is not published; load pg_lakebase_runtime before loading provider extensions"
     )]
     Unavailable,
     #[error(
-        "incompatible pg_lakebase runtime API: version {actual_version}, size {actual_size}; expected version {expected_version}, size at least {expected_size}"
+        "incompatible pg_lakebase runtime API size {actual_size}; expected exactly {expected_size}"
     )]
     Incompatible {
-        actual_version: u32,
         actual_size: u32,
-        expected_version: u32,
         expected_size: u32,
     },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RuntimeRegistrationError {
-    #[error("runtime already has a different maintenance provider with this name")]
+    #[error("runtime already has a different provider with this name")]
     DuplicateProviderName,
     #[error("runtime already has a maintenance provider for this access method")]
     DuplicateAccessMethod,
-    #[error("runtime rejected an invalid AM registration")]
-    InvalidAmRegistration,
+    #[error("runtime rejected an invalid provider registration")]
+    InvalidProviderRegistration,
+    #[error(
+        "provider registration is only allowed during runtime bootstrap; add its library to pg_lakebase.provider_libraries and restart PostgreSQL"
+    )]
+    OutsideProviderBootstrap,
+    #[error(
+        "provider registered a library name different from the library being loaded"
+    )]
+    ProviderLibraryMismatch,
     #[error("runtime returned unknown {operation} registration status {status}")]
     UnknownStatus {
         operation: &'static str,
@@ -540,7 +460,7 @@ pub enum WorkerWakeupError {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeClient {
-    api: &'static RuntimeApiV1,
+    api: &'static RuntimeApi,
 }
 
 impl RuntimeClient {
@@ -560,24 +480,20 @@ impl RuntimeClient {
         let Some(header) = (unsafe { published.cast::<AbiHeader>().as_ref() }) else {
             return Err(RuntimeApiError::Unavailable);
         };
-        let expected_size = u32::try_from(std::mem::size_of::<RuntimeApiV1>())
+        let expected_size = u32::try_from(std::mem::size_of::<RuntimeApi>())
             .expect("runtime API size exceeds u32");
-        if header.abi_version != RUNTIME_API_VERSION
-            || header.struct_size < expected_size
-        {
+        if header.struct_size != expected_size {
             return Err(RuntimeApiError::Incompatible {
-                actual_version: header.abi_version,
                 actual_size: header.struct_size,
-                expected_version: RUNTIME_API_VERSION,
                 expected_size,
             });
         }
-        let api = unsafe { &*published.cast::<RuntimeApiV1>() };
+        let api = unsafe { &*published.cast::<RuntimeApi>() };
         let _ = RUNTIME_API_CACHE.set(api);
         Ok(Self { api })
     }
 
-    /// Register one complete AM-owned provider/hook batch.
+    /// Register one complete provider-owned hook and maintenance batch.
     ///
     /// # Safety
     ///
@@ -586,15 +502,15 @@ impl RuntimeClient {
     /// pointer/count pairs must identify live, correctly aligned arrays of the
     /// exact current descriptor types. On success, callback functions and
     /// opaque contexts must remain valid until backend exit.
-    pub unsafe fn register_am(
+    pub unsafe fn register_provider(
         self,
-        registration: &AmRegistrationV1,
+        registration: &ProviderRegistration,
     ) -> Result<(), RuntimeRegistrationError> {
-        let status = unsafe { (self.api.register_am)(registration) };
+        let status = unsafe { (self.api.register_provider)(registration) };
         match status {
             REGISTER_OK => Ok(()),
             REGISTER_INVALID_DESCRIPTOR => {
-                Err(RuntimeRegistrationError::InvalidAmRegistration)
+                Err(RuntimeRegistrationError::InvalidProviderRegistration)
             }
             REGISTER_DUPLICATE_NAME => {
                 Err(RuntimeRegistrationError::DuplicateProviderName)
@@ -602,8 +518,14 @@ impl RuntimeClient {
             REGISTER_DUPLICATE_ACCESS_METHOD => {
                 Err(RuntimeRegistrationError::DuplicateAccessMethod)
             }
+            REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP => {
+                Err(RuntimeRegistrationError::OutsideProviderBootstrap)
+            }
+            REGISTER_PROVIDER_LIBRARY_MISMATCH => {
+                Err(RuntimeRegistrationError::ProviderLibraryMismatch)
+            }
             status => Err(RuntimeRegistrationError::UnknownStatus {
-                operation: "AM",
+                operation: "provider",
                 status,
             }),
         }
@@ -616,7 +538,7 @@ impl RuntimeClient {
     pub fn provider_for_am(
         self,
         access_method_oid: pg_sys::Oid,
-    ) -> Option<&'static MaintenanceProviderV1> {
+    ) -> Option<&'static MaintenanceProvider> {
         let provider = unsafe { (self.api.provider_for_am)(access_method_oid) };
         unsafe { provider.as_ref() }
     }
@@ -625,7 +547,7 @@ impl RuntimeClient {
         unsafe { (self.api.customscan_mode)() }
     }
 
-    pub fn maintenance_config(self) -> RuntimeMaintenanceConfigV1 {
+    pub fn maintenance_config(self) -> RuntimeMaintenanceConfig {
         let mut config = MaybeUninit::uninit();
         unsafe {
             (self.api.maintenance_config)(config.as_mut_ptr());
@@ -665,7 +587,7 @@ impl RuntimeClient {
 /// # Safety
 ///
 /// A non-null `provider.name` must point to a live NUL-terminated C string.
-pub unsafe fn provider_name(provider: &MaintenanceProviderV1) -> Option<&CStr> {
+pub unsafe fn provider_name(provider: &MaintenanceProvider) -> Option<&CStr> {
     (!provider.name.is_null()).then(|| unsafe { CStr::from_ptr(provider.name) })
 }
 
@@ -676,7 +598,7 @@ pub unsafe fn provider_name(provider: &MaintenanceProviderV1) -> Option<&CStr> {
 /// A non-null `provider.access_method_name` must point to a live
 /// NUL-terminated C string.
 pub unsafe fn provider_access_method_name(
-    provider: &MaintenanceProviderV1,
+    provider: &MaintenanceProvider,
 ) -> Option<&CStr> {
     (!provider.access_method_name.is_null())
         .then(|| unsafe { CStr::from_ptr(provider.access_method_name) })

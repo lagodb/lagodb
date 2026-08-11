@@ -160,10 +160,10 @@ impl<'a, P: LakebaseCustomScanProvider> NextSlotContext<'a, P> {
         F: FnOnce(&mut SlotColumns<'_>) -> crate::api::AmResult<bool>,
     {
         let slot = self.slot;
-        let target_ctx = self.per_tuple_memory_context;
+        let datum_context = self.per_tuple_memory_context;
         emit_into_slot(
             || {
-                let mut columns = unsafe { SlotColumns::new(slot, target_ctx) };
+                let mut columns = unsafe { SlotColumns::new(slot, datum_context) };
                 advance(&mut columns)
             },
             || unsafe {

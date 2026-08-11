@@ -143,7 +143,8 @@ Stream errors consume the session (no partial progress on the wire).
 7  Delete Operations
 ====================
 
-- **Delete** — backend delete, then best-effort cache invalidation.
-- **DeletePrefix** — streams backend list into delete_stream; per
-  deleted key, attempts local cache invalidation (errors swallowed).
+- **Delete** — backend delete only. The caller that knows the key changed must
+  explicitly request cache invalidation.
+- **DeletePrefix** — streams backend list into delete_stream; it does not
+  implicitly invalidate the deleted keys.
   Empty prefix is rejected.

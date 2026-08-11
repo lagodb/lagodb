@@ -1,8 +1,7 @@
 //! Conversion from validated volume domain objects to storage backends.
 
 use pg_lakebase_storage::{
-    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig,
-    SecretString, StoreConfig,
+    AzureStoreConfig, GcsStoreConfig, S3StoreConfig, SecretString, StoreConfig,
 };
 
 use super::credential::CredentialConfig;
@@ -24,7 +23,7 @@ impl StorageLocation {
             (
                 StorageLocation::S3 {
                     region,
-                    endpoint: None,
+                    endpoint,
                     allow_http,
                     virtual_hosted_style_request,
                     ..
@@ -33,39 +32,17 @@ impl StorageLocation {
             ) => {
                 let (access_key_id, secret_access_key, token, skip_signature) =
                     credential.s3_store_credentials();
-                StoreConfig::S3(S3StoreConfig {
+                S3StoreConfig {
                     region: region.clone(),
-                    endpoint: None,
-                    access_key_id,
-                    secret_access_key,
-                    token,
-                    allow_http: *allow_http,
-                    virtual_hosted_style_request: *virtual_hosted_style_request,
-                    skip_signature,
-                })
-            }
-            (
-                StorageLocation::S3 {
-                    region,
-                    endpoint: Some(endpoint),
-                    allow_http,
-                    virtual_hosted_style_request,
-                    ..
-                },
-                credential,
-            ) => {
-                let (access_key_id, secret_access_key, token, skip_signature) =
-                    credential.s3_store_credentials();
-                StoreConfig::S3Compatible(S3CompatibleStoreConfig {
                     endpoint: endpoint.clone(),
-                    region: region.clone(),
                     access_key_id,
                     secret_access_key,
                     token,
                     allow_http: *allow_http,
                     virtual_hosted_style_request: *virtual_hosted_style_request,
                     skip_signature,
-                })
+                }
+                .into_canonical()
             }
             (StorageLocation::Gcs { base_url, .. }, credential) => {
                 let (service_account_key, skip_signature) = match credential {
@@ -158,11 +135,11 @@ impl CredentialConfig {
             Self::S3AccessKey {
                 access_key_id,
                 secret_access_key,
-                session_token,
+                token,
             } => (
                 Some(SecretString::new(access_key_id.clone())),
                 Some(SecretString::new(secret_access_key.clone())),
-                session_token.clone().map(SecretString::new),
+                token.clone().map(SecretString::new),
                 false,
             ),
             _ => unreachable!("validated S3 credential"),

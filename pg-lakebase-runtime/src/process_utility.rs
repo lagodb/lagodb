@@ -1,15 +1,15 @@
 //! Runtime-owned `ProcessUtility_hook` router.
 
-#[cfg(feature = "pg17")]
+mod copy_route;
 mod full_router;
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
-use pg_lakebase_core::runtime_api::{
-    HOOK_DESCRIPTOR_VERSION, UtilityHookDescriptorV1,
-};
+use pg_lakebase_core::access::mutation::begin_copy_from_lifecycle;
+use pg_lakebase_core::diag::ReportableError;
+use pg_lakebase_core::runtime_api::UtilityHookDescriptor;
 use pgrx::{pg_guard, pg_sys};
 
 use crate::hooks;
@@ -18,7 +18,7 @@ static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
     OnceLock::new();
 
 struct UtilityHookNode {
-    descriptor: UtilityHookDescriptorV1,
+    descriptor: UtilityHookDescriptor,
     next: Cell<*const UtilityHookNode>,
 }
 
@@ -48,7 +48,7 @@ impl UtilityHookDirectory {
     }
 
     #[cfg(test)]
-    fn append(&self, descriptor: UtilityHookDescriptorV1) {
+    fn append(&self, descriptor: UtilityHookDescriptor) {
         self.append_node(Box::new(UtilityHookNode {
             descriptor,
             next: Cell::new(std::ptr::null()),
@@ -71,8 +71,10 @@ impl UtilityHookDirectory {
 }
 
 pub(crate) struct PreparedUtilityHooks {
-    // Nodes are allocated during prepare so commit only publishes stable
-    // addresses and cannot partially register after a later allocation fails.
+    // Each node is allocated before the runtime registration transaction is
+    // committed. The box keeps its address stable while the directory stores
+    // a raw backend-lifetime pointer; commit therefore cannot allocate or
+    // publish only part of this prepared batch.
     #[allow(clippy::vec_box)]
     nodes: Vec<Box<UtilityHookNode>>,
 }
@@ -91,7 +93,7 @@ impl UtilityHookSnapshot {
         matched
     }
 
-    fn for_each(self, mut callback: impl FnMut(UtilityHookDescriptorV1)) {
+    fn for_each(self, mut callback: impl FnMut(UtilityHookDescriptor)) {
         let mut current = self.first;
         while !current.is_null() {
             // SAFETY: nodes are leaked for the backend lifetime. The copied
@@ -112,17 +114,15 @@ thread_local! {
     static UTILITY_HOOKS: UtilityHookDirectory = const { UtilityHookDirectory::new() };
 }
 
-fn valid_descriptor(descriptor: &UtilityHookDescriptorV1) -> bool {
-    descriptor.abi_version == HOOK_DESCRIPTOR_VERSION
-        && descriptor.struct_size
-            >= std::mem::size_of::<UtilityHookDescriptorV1>() as u32
+fn valid_descriptor(descriptor: &UtilityHookDescriptor) -> bool {
+    descriptor.struct_size == std::mem::size_of::<UtilityHookDescriptor>() as u32
         && !descriptor.context.is_null()
         && descriptor.on_pre.is_some()
         && descriptor.on_post.is_some()
 }
 
 pub(crate) fn prepare_hooks(
-    descriptors: &[UtilityHookDescriptorV1],
+    descriptors: &[UtilityHookDescriptor],
 ) -> Option<PreparedUtilityHooks> {
     if !descriptors.iter().all(valid_descriptor) {
         return None;
@@ -170,10 +170,9 @@ mod tests {
     ) {
     }
 
-    fn descriptor(tag: pg_sys::NodeTag) -> UtilityHookDescriptorV1 {
-        UtilityHookDescriptorV1 {
-            abi_version: HOOK_DESCRIPTOR_VERSION,
-            struct_size: std::mem::size_of::<UtilityHookDescriptorV1>() as u32,
+    fn descriptor(tag: pg_sys::NodeTag) -> UtilityHookDescriptor {
+        UtilityHookDescriptor {
+            struct_size: std::mem::size_of::<UtilityHookDescriptor>() as u32,
             tag: tag as u32,
             context: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
             on_pre: Some(pre),
@@ -182,16 +181,16 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_validation_rejects_invalid_abi_and_callbacks() {
+    fn descriptor_validation_rejects_invalid_size_and_callbacks() {
         let mut candidate = descriptor(pg_sys::NodeTag::T_CommentStmt);
         assert!(valid_descriptor(&candidate));
 
-        candidate.abi_version += 1;
-        assert!(!valid_descriptor(&candidate));
-        candidate.abi_version = HOOK_DESCRIPTOR_VERSION;
         candidate.struct_size = 0;
         assert!(!valid_descriptor(&candidate));
-        candidate.struct_size = std::mem::size_of::<UtilityHookDescriptorV1>() as u32;
+        candidate.struct_size =
+            std::mem::size_of::<UtilityHookDescriptor>() as u32 + 1;
+        assert!(!valid_descriptor(&candidate));
+        candidate.struct_size = std::mem::size_of::<UtilityHookDescriptor>() as u32;
         candidate.on_post = None;
         assert!(!valid_descriptor(&candidate));
     }
@@ -260,19 +259,41 @@ type ProcessUtilityHookFn = unsafe extern "C-unwind" fn(
 
 #[derive(Clone, Copy)]
 pub(super) struct ProcessUtilityArgs {
-    pstmt: *mut pg_sys::PlannedStmt,
-    query_string: *const c_char,
-    read_only_tree: bool,
-    context: pg_sys::ProcessUtilityContext::Type,
-    params: *mut pg_sys::ParamListInfoData,
-    query_env: *mut pg_sys::QueryEnvironment,
-    dest: *mut pg_sys::DestReceiver,
-    completion_tag: *mut pg_sys::QueryCompletion,
+    pub(crate) pstmt: *mut pg_sys::PlannedStmt,
+    pub(crate) query_string: *const c_char,
+    pub(crate) read_only_tree: bool,
+    pub(crate) context: pg_sys::ProcessUtilityContext::Type,
+    pub(crate) params: *mut pg_sys::ParamListInfoData,
+    pub(crate) query_env: *mut pg_sys::QueryEnvironment,
+    pub(crate) dest: *mut pg_sys::DestReceiver,
+    pub(crate) completion_tag: *mut pg_sys::QueryCompletion,
 }
 
 impl ProcessUtilityArgs {
     unsafe fn target_node(self) -> *mut pg_sys::Node {
         unsafe { (*self.pstmt).utilityStmt }
+    }
+
+    /// Give a utility callback the same writable-tree guarantee as
+    /// PostgreSQL's `standard_ProcessUtility` path.
+    ///
+    /// `read_only_tree` means the `PlannedStmt` belongs to a caller that may
+    /// reuse it. A pre-hook or consumer can transform expressions or analyze
+    /// a raw query, so it must not mutate that original tree. Callers invoke
+    /// this only after routing establishes that a mutable callback will run.
+    unsafe fn writable_copy(self) -> Self {
+        if !self.read_only_tree {
+            return self;
+        }
+        let pstmt = unsafe {
+            pg_sys::copyObjectImpl(self.pstmt.cast::<c_void>())
+                .cast::<pg_sys::PlannedStmt>()
+        };
+        Self {
+            pstmt,
+            read_only_tree: false,
+            ..self
+        }
     }
 
     unsafe fn call_standard(self) {
@@ -378,19 +399,32 @@ unsafe extern "C-unwind" fn process_utility_router(
         let tag = (*target_node).type_;
         let hooks = UTILITY_HOOKS.with(|directory| directory.snapshot(tag));
         let has_matching_hooks = hooks.has_matching_hooks();
+        let has_matching_consumers =
+            crate::utility_consumer::has_registered_consumer(tag);
         let runtime_handles = crate::storage::volume_config::handles_utility(tag);
-        #[cfg(feature = "pg17")]
-        let may_consume = tag == pg_sys::NodeTag::T_VacuumStmt;
-        #[cfg(not(feature = "pg17"))]
-        let may_consume = false;
+        let copy_from_route = tag == pg_sys::NodeTag::T_CopyStmt
+            && (*target_node.cast::<pg_sys::CopyStmt>()).is_from;
+        let may_consume_vacuum = tag == pg_sys::NodeTag::T_VacuumStmt;
 
-        if !has_matching_hooks && !runtime_handles && !may_consume {
+        if !has_matching_hooks
+            && !has_matching_consumers
+            && !runtime_handles
+            && !may_consume_vacuum
+            && !copy_from_route
+        {
+            if tag == pg_sys::NodeTag::T_CopyStmt {
+                // SAFETY: `tag` proves that `target_node` is the live CopyStmt
+                // for this ProcessUtility invocation.
+                if let Some(error) = copy_route::unclaimed_uri_error(target_node) {
+                    error.report();
+                }
+            }
             args.call_parent();
             return;
         }
 
-        let copied_node = (has_matching_hooks || runtime_handles).then(|| {
-            let old_context = if may_consume {
+        let original_node = (has_matching_hooks || runtime_handles).then(|| {
+            let old_context = if may_consume_vacuum {
                 Some(pg_sys::MemoryContextSwitchTo(pg_sys::PortalContext))
             } else {
                 None
@@ -402,6 +436,13 @@ unsafe extern "C-unwind" fn process_utility_router(
             }
             copied
         });
+
+        let args = if read_only_tree && (has_matching_hooks || runtime_handles) {
+            args.writable_copy()
+        } else {
+            args
+        };
+        let target_node = args.target_node();
 
         if runtime_handles {
             crate::storage::volume_config::utility_pre(
@@ -417,28 +458,59 @@ unsafe extern "C-unwind" fn process_utility_router(
             );
         });
 
-        #[cfg(feature = "pg17")]
-        let consumed = may_consume
-            && full_router::try_route_vacuum_full(
-                target_node.cast(),
-                args,
-                context == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
-            );
-        #[cfg(not(feature = "pg17"))]
-        let consumed = false;
+        // A pre-hook is allowed to rewrite the utility node. Native routes,
+        // lifecycle, and consumer selection must therefore use the final
+        // utility tag and COPY direction, not the pre-hook input.
+        let target_node = args.target_node();
+        let final_tag = (*target_node).type_;
+        let copy_from = final_tag == pg_sys::NodeTag::T_CopyStmt
+            && (*target_node.cast::<pg_sys::CopyStmt>()).is_from;
+        let may_consume_vacuum = final_tag == pg_sys::NodeTag::T_VacuumStmt;
+        let selected_consumer =
+            crate::utility_consumer::select(final_tag, args).report_unwrap();
+        let consumer_consumed = selected_consumer.is_some();
+        if final_tag == pg_sys::NodeTag::T_CopyStmt && !consumer_consumed {
+            // SAFETY: `final_tag` proves that the current utility node is the
+            // live PostgreSQL CopyStmt supplied to this invocation.
+            if let Some(error) = copy_route::unclaimed_uri_error(target_node) {
+                error.report();
+            }
+        }
+        if let Some(consumer) = selected_consumer {
+            let consumer_args = args.writable_copy();
+            // SAFETY: the selection points to a backend-lifetime directory
+            // node and is consumed within the same ProcessUtility callback.
+            consumer.consume(consumer_args).report_unwrap();
+        }
+        let consumed = consumer_consumed
+            || (may_consume_vacuum
+                && full_router::try_route_vacuum_full(
+                    target_node.cast(),
+                    args,
+                    context
+                        == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
+                ));
         if !consumed {
+            // A pass-through COPY FROM must still create the relation-local
+            // Table-AM frame used by Iceberg and other custom table AMs. A
+            // consuming utility handler owns this guard itself only when it
+            // deliberately invokes the standard CopyFrom driver.
+            let lifecycle = copy_from.then(begin_copy_from_lifecycle);
             args.call_parent();
+            if let Some(lifecycle) = lifecycle {
+                lifecycle.finish().report_unwrap();
+            }
         }
 
-        if let Some(copied_node) = copied_node {
+        if let Some(original_node) = original_node {
             hooks.for_each(|descriptor| {
                 descriptor.on_post.expect("validated utility post-hook")(
                     descriptor.context,
-                    copied_node,
+                    original_node,
                 );
             });
             if runtime_handles {
-                crate::storage::volume_config::utility_post(copied_node);
+                crate::storage::volume_config::utility_post(original_node);
             }
         }
     }

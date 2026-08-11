@@ -1,7 +1,7 @@
 //! Object metadata, staging publication, invalidation, and delete handlers.
 
 use futures::StreamExt;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::StorageService;
 use super::command::{
@@ -12,7 +12,6 @@ use super::reply::{
     CommandOutput, DeleteObjectsOutput, DeletePrefixOutput, HeadOutput,
     InvalidateObjectCacheOutput, ServiceReply, UploadOutput,
 };
-use crate::backend::BackendDataIdentity;
 use crate::cache::CacheIndex;
 use crate::error::{StorageError, StorageResult};
 use crate::object::ObjectLocation;
@@ -56,6 +55,9 @@ impl<I: CacheIndex> StorageService<I> {
             command.key,
         )?;
         let backend = attached.backend();
+        // Upload does not infer cache freshness. The caller owns the knowledge
+        // that this physical key was replaced and must explicitly request
+        // invalidation when a subsequent open must observe the new object.
         let info = self.staging_uploader.upload(&key, backend.as_ref()).await?;
         Ok(ServiceReply::new(CommandOutput::Upload(UploadOutput {
             size: info.size,
@@ -110,8 +112,10 @@ impl<I: CacheIndex> StorageService<I> {
             command.key,
         )?;
         attached.backend().delete(key.path()).await?;
-        let outcome = self.cache.invalidate_object_cache_best_effort(&key).await;
-        info!(key = %key, ?outcome, "delete completed");
+        // DELETE intentionally does not invalidate cache state. The caller
+        // that knows this key changed chooses whether and when to issue the
+        // explicit invalidation request.
+        info!(key = %key, "delete completed");
         Ok(ServiceReply::new(CommandOutput::Delete))
     }
 
@@ -127,7 +131,6 @@ impl<I: CacheIndex> StorageService<I> {
         }
         let DeletePrefixCommand { bucket, prefix } = command;
         let attached = context.attached()?;
-        let identity = attached.identity().clone();
         let backend = attached.backend();
         let key_stream = backend
             .list(&bucket, Some(&prefix))
@@ -137,12 +140,11 @@ impl<I: CacheIndex> StorageService<I> {
 
         let mut deleted = 0_u64;
         while let Some(result) = deleted_stream.next().await {
-            self.try_invalidate_local_cache_for_key(&identity, &bucket, result?)
-                .await;
+            result?;
             deleted = deleted.saturating_add(1);
         }
         info!(
-            backend_identity = %identity,
+            backend_identity = %attached.identity(),
             bucket = bucket.as_str(),
             prefix = prefix.as_str(),
             deleted,
@@ -172,7 +174,6 @@ impl<I: CacheIndex> StorageService<I> {
 
         let DeleteObjectsCommand { bucket, keys } = command;
         let attached = context.attached()?;
-        let identity = attached.identity().clone();
         let backend = attached.backend();
         let key_stream =
             futures::stream::iter(keys.into_iter().map(Ok::<_, StorageError>))
@@ -180,37 +181,11 @@ impl<I: CacheIndex> StorageService<I> {
         let mut deleted_stream = backend.delete_stream(&bucket, key_stream);
         let mut deleted = 0_u32;
         while let Some(result) = deleted_stream.next().await {
-            self.try_invalidate_local_cache_for_key(&identity, &bucket, result?)
-                .await;
+            result?;
             deleted = deleted.saturating_add(1);
         }
         Ok(ServiceReply::new(CommandOutput::DeleteObjects(
             DeleteObjectsOutput { deleted },
         )))
-    }
-
-    /// Best-effort cleanup of derived cache state after backend deletion.
-    async fn try_invalidate_local_cache_for_key(
-        &self,
-        identity: &BackendDataIdentity,
-        bucket: &str,
-        key: String,
-    ) {
-        match ObjectLocation::new(identity.clone(), bucket, key) {
-            Ok(location) => {
-                let _ = self
-                    .cache
-                    .invalidate_object_cache_best_effort(&location)
-                    .await;
-            }
-            Err(error) => {
-                warn!(
-                    backend_identity = %identity,
-                    bucket = %bucket,
-                    %error,
-                    "skipping cache invalidation for an unrepresentable deleted object path",
-                );
-            }
-        }
     }
 }

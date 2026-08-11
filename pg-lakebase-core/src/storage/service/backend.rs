@@ -15,9 +15,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use pg_lakebase_storage::{
-    ListCursor, ListPage, ObjectInfo, StagingFile, StagingPathResolver,
-    StorageClient, StorageError, StorageFile, StorageProbeResult, StorageResult,
-    StoreConfig, UploadInfo,
+    ListSession, ObjectInfo, StagingFile, StagingPathResolver, StorageClient,
+    StorageError, StorageFile, StorageProbeResult, StorageResult, StoreConfig,
+    UploadInfo,
 };
 use pgrx::pg_sys;
 
@@ -96,7 +96,20 @@ impl BackendStorageService {
     }
 
     pub fn upload(&self, bucket: &str, key: &str) -> StorageResult<UploadInfo> {
-        self.with_non_replayable_client("upload", |client| client.upload(bucket, key))
+        // Upload is deliberately neither retried nor classified as Ambiguous. A missing or
+        // unsuccessful reply fails the current database operation and transaction, even when a
+        // lost reply follows successful remote publication. Raw-file writes do not promise to
+        // roll back that external side effect, and no caller branches on a distinct uncertain
+        // outcome. Keeping the original error is therefore the complete caller contract.
+        self.with_client(|client| client.upload(bucket, key))
+    }
+
+    pub fn invalidate_object_cache(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<bool> {
+        self.with_client(|client| client.invalidate_object_cache(bucket, key))
     }
 
     pub fn probe_store(
@@ -146,14 +159,14 @@ impl BackendStorageService {
         })
     }
 
-    pub fn list_page(
+    pub fn list_session(
         &self,
         bucket: &str,
         prefix: Option<&str>,
-        cursor: Option<ListCursor>,
         page_size: u32,
-    ) -> StorageResult<ListPage> {
-        self.with_client(|client| client.list_page(bucket, prefix, cursor, page_size))
+    ) -> StorageResult<ListSession> {
+        let client = self.acquire_client()?;
+        Ok(client.list_session(bucket, prefix, page_size))
     }
 
     fn with_client<T>(

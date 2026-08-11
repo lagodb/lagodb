@@ -4,7 +4,6 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use std::fmt;
 
-#[cfg(feature = "pg17")]
 #[repr(C)]
 #[derive(Debug, Default)]
 struct RawAnalyzeSamplerState {
@@ -14,7 +13,6 @@ struct RawAnalyzeSamplerState {
     selected_blocks: core::ffi::c_int,
 }
 
-#[cfg(feature = "pg17")]
 unsafe extern "C" {
     fn lakebase_read_stream_analyze_sampler_state(
         stream: *mut pg_sys::ReadStream,
@@ -27,7 +25,6 @@ unsafe extern "C" {
 /// `target_rows` is the `targrows` passed to `acquire_sample_rows()`. During
 /// inherited ANALYZE PostgreSQL has already replaced it with this relation's
 /// proportional `childtargrows` before constructing the `ReadStream`.
-#[cfg(feature = "pg17")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalyzeSamplerState {
     population_blocks: u64,
@@ -36,7 +33,6 @@ pub struct AnalyzeSamplerState {
     selected_blocks: u64,
 }
 
-#[cfg(feature = "pg17")]
 impl AnalyzeSamplerState {
     #[inline]
     pub fn population_blocks(self) -> u64 {
@@ -387,7 +383,6 @@ impl<'a> AnalyzeReadStreamHandle<'a> {
     /// cannot silently change the sample size. The C bridge selects the known
     /// PG17 minor layout epoch; its private ABI must be audited when PostgreSQL
     /// is upgraded.
-    #[cfg(feature = "pg17")]
     pub fn analyze_sampler_state(&self) -> Option<AnalyzeSamplerState> {
         let mut raw = RawAnalyzeSamplerState::default();
         // SAFETY: the handle owns a non-null PostgreSQL ReadStream borrow for

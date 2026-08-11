@@ -20,8 +20,8 @@
 //!    residency (small-KV row, complete file, or live fill session) at a time. Cross-variant
 //!    transitions go through commit/promote, not through parallel residencies.
 //! 3. The only way to retire a residency is an external
-//!    [`CacheManager::invalidate_object_cache`] call (which waits for every activity guard to
-//!    drop) or capacity-driven eviction.
+//!    [`CacheManager::invalidate_object_cache`] call (which rejects an active residency with
+//!    `Busy`) or capacity-driven eviction.
 //!
 //! # Design rationale
 //!

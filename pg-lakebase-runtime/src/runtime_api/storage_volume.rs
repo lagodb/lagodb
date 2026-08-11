@@ -1,7 +1,7 @@
 //! Runtime-owned storage-volume route resolver.
 
 use pg_lakebase_core::runtime_api::{
-    StorageVolumeRouteV1, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
+    StorageVolumeRouteOutput, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
 use pg_lakebase_core::storage::volume::StorageVolumeId;
@@ -10,12 +10,12 @@ use pgrx::PgMemoryContexts;
 #[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn resolve_storage_volume_route(
     volume_id: u64,
-    output: *mut StorageVolumeRouteV1,
+    output: *mut StorageVolumeRouteOutput,
 ) -> u32 {
     let Some(output) = (unsafe { output.as_mut() }) else {
         return VOLUME_ROUTE_INVALID_REQUEST;
     };
-    *output = StorageVolumeRouteV1::default();
+    *output = StorageVolumeRouteOutput::default();
     let Ok(volume_id) = StorageVolumeId::new(volume_id) else {
         output.error_message = unsafe {
             PgMemoryContexts::CurrentMemoryContext

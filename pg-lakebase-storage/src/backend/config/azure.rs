@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use object_store::ObjectStore;
 use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
+use object_store::{ObjectStore, RetryConfig};
 
 use super::{
     AzureStoreConfig, finish_store_build, validate_endpoint,
@@ -101,6 +101,7 @@ impl AzureStoreConfig {
     pub(super) fn build_store(
         &self,
         container: &str,
+        retry_config: RetryConfig,
     ) -> StorageResult<Arc<dyn ObjectStore>> {
         self.validate()?;
         let mut builder = MicrosoftAzureBuilder::new();
@@ -136,6 +137,7 @@ impl AzureStoreConfig {
         if self.use_emulator {
             builder = builder.with_use_emulator(true);
         }
+        builder = builder.with_retry(retry_config);
         finish_store_build(builder.build(), "Azure", "container", container)
     }
 }

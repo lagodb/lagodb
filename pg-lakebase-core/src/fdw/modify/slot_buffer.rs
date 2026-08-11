@@ -13,7 +13,7 @@ pub(crate) struct ModifySlotBuffer {
     values: *mut pg_sys::Datum,
     nulls: *mut bool,
     natts: usize,
-    target_ctx: pg_sys::MemoryContext,
+    conversion_context: pg_sys::MemoryContext,
 }
 
 impl ModifySlotBuffer {
@@ -21,7 +21,7 @@ impl ModifySlotBuffer {
     ///
     /// `slot` must remain live for the lifetime of the returned buffer, and
     /// its descriptor must have the same attribute count as `layout`.
-    /// `target_ctx` must be a live PostgreSQL memory context. The PostgreSQL
+    /// `conversion_context` must be a live PostgreSQL memory context. The PostgreSQL
     /// modify callback contract supplies the row-type compatibility. The caller
     /// must not create Rust references to the arrays while this buffer is used:
     /// PostgreSQL may deform the slot in `slot_getattr`, and the buffer only
@@ -31,11 +31,11 @@ impl ModifySlotBuffer {
     pub(crate) unsafe fn from_raw(
         slot: *mut pg_sys::TupleTableSlot,
         layout: &ModifyRowLayout,
-        target_ctx: pg_sys::MemoryContext,
+        conversion_context: pg_sys::MemoryContext,
     ) -> Self {
         // SAFETY: the modify callback contract supplies a live, relation-shaped
         // slot matching the Begin-time layout and conversion context.
-        unsafe { Self::from_raw_parts_unchecked(slot, layout, target_ctx) }
+        unsafe { Self::from_raw_parts_unchecked(slot, layout, conversion_context) }
     }
 
     /// Build the returned-row buffer used by PostgreSQL's DELETE callback.
@@ -45,19 +45,19 @@ impl ModifySlotBuffer {
     ///
     /// # Safety
     ///
-    /// `slot` and `layout` must be live for the callback, and `target_ctx` must
+    /// `slot` and `layout` must be live for the callback, and `conversion_context` must
     /// be a live PostgreSQL memory context. The returned slot must be the
     /// relation-shaped slot supplied by PostgreSQL for this DELETE callback.
     #[inline]
     pub(crate) unsafe fn from_delete_raw(
         slot: *mut pg_sys::TupleTableSlot,
         layout: &ModifyRowLayout,
-        target_ctx: pg_sys::MemoryContext,
+        conversion_context: pg_sys::MemoryContext,
     ) -> Self {
         // SAFETY: PostgreSQL supplies the relation-shaped DELETE returning
         // slot, which may be empty before this callback initializes it.
         let buffer =
-            unsafe { Self::from_raw_parts_unchecked(slot, layout, target_ctx) };
+            unsafe { Self::from_raw_parts_unchecked(slot, layout, conversion_context) };
         // SAFETY: `from_raw_parts_unchecked` requires the live relation-shaped
         // slot and its arrays before PostgreSQL clears the row representation.
         unsafe { pg_sys::ExecStoreAllNullTuple(slot) };
@@ -67,21 +67,21 @@ impl ModifySlotBuffer {
     /// # Safety
     ///
     /// `slot` and `layout` must be live callback objects with matching relation
-    /// widths and valid Datum arrays. `target_ctx` must be a live PostgreSQL
+    /// widths and valid Datum arrays. `conversion_context` must be a live PostgreSQL
     /// memory context. The slot may be empty. The caller has already established
     /// these invariants from PostgreSQL's modify callback contract, so this
     /// constructor only records raw views.
     unsafe fn from_raw_parts_unchecked(
         slot: *mut pg_sys::TupleTableSlot,
         layout: &ModifyRowLayout,
-        target_ctx: pg_sys::MemoryContext,
+        conversion_context: pg_sys::MemoryContext,
     ) -> Self {
         Self {
             slot,
             values: unsafe { (*slot).tts_values },
             nulls: unsafe { (*slot).tts_isnull },
             natts: layout.natts(),
-            target_ctx,
+            conversion_context,
         }
     }
 
@@ -96,8 +96,8 @@ impl ModifySlotBuffer {
     }
 
     #[inline]
-    pub(crate) fn target_context(&self) -> pg_sys::MemoryContext {
-        self.target_ctx
+    pub(crate) fn conversion_context(&self) -> pg_sys::MemoryContext {
+        self.conversion_context
     }
 
     /// Deform the input slot up to the provider-supplied `index`. PostgreSQL

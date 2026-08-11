@@ -14,7 +14,7 @@ use super::row_codec::RowDatumCodec;
 
 /// Per-column slot writer.
 ///
-/// `target_ctx` is taken explicitly so the memory-context discipline lives at
+/// `datum_context` is taken explicitly so the memory-context discipline lives at
 /// the call site (the TableAM seqscan passes its per-row `tmp_ctx`; the
 /// CustomScan emit path passes the scan node's per-tuple context), never
 /// scattered into an access method.
@@ -27,7 +27,7 @@ pub struct SlotColumns<'a> {
     values: &'a mut [pg_sys::Datum],
     nulls: &'a mut [bool],
     slot: *mut pg_sys::TupleTableSlot,
-    target_ctx: pg_sys::MemoryContext,
+    datum_context: pg_sys::MemoryContext,
     _marker: PhantomData<&'a mut pg_sys::TupleTableSlot>,
 }
 
@@ -35,12 +35,12 @@ impl<'a> SlotColumns<'a> {
     /// # Safety
     ///
     /// `slot` must be a valid, initialized slot with a non-NULL tuple
-    /// descriptor; `target_ctx` must be the context the caller wants varlena
+    /// descriptor; `datum_context` must be the context the caller wants varlena
     /// datums palloc'd into. The slice width is derived only from that live
     /// descriptor, never from provider-supplied metadata.
     pub unsafe fn new(
         slot: *mut pg_sys::TupleTableSlot,
-        target_ctx: pg_sys::MemoryContext,
+        datum_context: pg_sys::MemoryContext,
     ) -> Self {
         let tuple_desc = unsafe { (*slot).tts_tupleDescriptor };
         let natts = unsafe { (*tuple_desc).natts as usize };
@@ -58,7 +58,7 @@ impl<'a> SlotColumns<'a> {
                 values: slice::from_raw_parts_mut((*slot).tts_values, natts),
                 nulls: slice::from_raw_parts_mut((*slot).tts_isnull, natts),
                 slot,
-                target_ctx,
+                datum_context,
                 _marker: PhantomData,
             }
         }
@@ -66,11 +66,6 @@ impl<'a> SlotColumns<'a> {
 
     pub fn natts(&self) -> usize {
         self.values.len()
-    }
-
-    /// Memory context in which varlena values for this output slot must live.
-    pub fn target_context(&self) -> pg_sys::MemoryContext {
-        self.target_ctx
     }
 
     /// Set the tuple identity carried by this slot.
@@ -142,7 +137,7 @@ impl<'a> SlotColumns<'a> {
     }
 
     /// Row-world bridge: materialize an owned [`Row`] into the slot. Cells are
-    /// converted under `target_ctx` and written into the slot arrays by the
+    /// converted under `datum_context` and written into the slot arrays by the
     /// bound row codec; the caller (core scan shim) owns the single
     /// `ExecStoreVirtualTuple`.
     ///
@@ -158,7 +153,7 @@ impl<'a> SlotColumns<'a> {
     ) -> Result<(), PgReportError> {
         let natts = self.values.len();
         unsafe {
-            PgMemoryContexts::For(self.target_ctx).switch_to(|_| {
+            PgMemoryContexts::For(self.datum_context).switch_to(|_| {
                 let cells = (0..natts).map(|index| row.take_cell(index));
                 codec
                     .cells_to_datums(cells, self.values, self.nulls)

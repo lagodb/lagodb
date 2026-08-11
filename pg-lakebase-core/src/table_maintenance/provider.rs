@@ -11,9 +11,9 @@ use super::{
     TableMaintenanceStats,
 };
 use crate::runtime_api::{
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV1, MaintenanceReportV1,
-    MaintenanceRequestV1, MaintenanceStatsV1, PROVIDER_CAPABILITY_ANALYZE,
-    RuntimeApiError, RuntimeClient, RuntimeRegistrationError, provider_name,
+    MaintenanceProvider, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
+    PROVIDER_CAPABILITY_ANALYZE, ProviderIdentity, RuntimeApiError, RuntimeClient,
+    RuntimeRegistrationError, provider_name,
 };
 
 pub struct TableMaintenanceRequest<'a> {
@@ -26,6 +26,8 @@ pub struct TableMaintenanceRequest<'a> {
 
 pub trait LakebaseTableMaintenanceProvider: 'static {
     const NAME: &'static CStr;
+    const EXTENSION_NAME: &'static CStr;
+    const LIBRARY_NAME: &'static CStr;
     const ACCESS_METHOD_NAME: &'static CStr;
     /// Whether PostgreSQL can obtain a statistically valid ANALYZE sample
     /// through this provider's table-AM callbacks.
@@ -52,8 +54,8 @@ where
 
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn provider_execute<P>(
-    request: *const MaintenanceRequestV1,
-    report: *mut MaintenanceReportV1,
+    request: *const MaintenanceRequest,
+    report: *mut MaintenanceReport,
 ) where
     P: LakebaseTableMaintenanceProvider,
 {
@@ -93,7 +95,7 @@ unsafe extern "C-unwind" fn provider_execute<P>(
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn provider_inspect<P>(
     relation: pg_sys::Relation,
-    stats: *mut MaintenanceStatsV1,
+    stats: *mut MaintenanceStats,
 ) where
     P: LakebaseTableMaintenanceProvider,
 {
@@ -108,7 +110,7 @@ unsafe extern "C-unwind" fn provider_inspect<P>(
         .map_err(|error| error.with_provider(P::NAME))
         .unwrap_or_else(|error| PgReportError::from_domain_error(error).report());
     let inspected =
-        MaintenanceStatsV1::try_from_stats(inspected).unwrap_or_else(|| {
+        MaintenanceStats::try_from_stats(inspected).unwrap_or_else(|| {
             PgReportError::from_domain_error(TableMaintenanceError::framework(
                 "provider format name exceeds the maintenance ABI bound",
             ))
@@ -125,9 +127,8 @@ pub fn register_provider<P>()
 where
     P: LakebaseTableMaintenanceProvider,
 {
-    let descriptor = MaintenanceProviderV1 {
-        abi_version: MAINTENANCE_PROVIDER_VERSION,
-        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV1>())
+    let descriptor = MaintenanceProvider {
+        struct_size: u32::try_from(std::mem::size_of::<MaintenanceProvider>())
             .expect("maintenance provider descriptor size exceeds u32"),
         name: P::NAME.as_ptr(),
         access_method_name: P::ACCESS_METHOD_NAME.as_ptr(),
@@ -140,7 +141,9 @@ where
         execute: provider_execute::<P>,
         inspect: provider_inspect::<P>,
     };
-    match crate::hooks::freeze_hooks_with_provider(Some(&descriptor)) {
+    let identity =
+        ProviderIdentity::access_method(P::NAME, P::EXTENSION_NAME, P::LIBRARY_NAME);
+    match crate::hooks::freeze_hooks_with_provider(&identity, Some(&descriptor)) {
         Ok(()) => {}
         Err(crate::hooks::HookRegistrationError::Registration(
             RuntimeRegistrationError::DuplicateProviderName,
@@ -168,7 +171,7 @@ impl TableMaintenanceRouter {
 
     fn provider_for_am(
         access_method_oid: pg_sys::Oid,
-    ) -> Result<&'static MaintenanceProviderV1, TableMaintenanceError> {
+    ) -> Result<&'static MaintenanceProvider, TableMaintenanceError> {
         let runtime = RuntimeClient::connect()
             .map_err(|error| TableMaintenanceError::framework(error.to_string()))?;
         runtime.provider_for_am(access_method_oid).ok_or_else(|| {
@@ -199,14 +202,14 @@ impl TableMaintenanceRouter {
         request: TableMaintenanceRequest<'_>,
     ) -> Result<TableMaintenanceReport, TableMaintenanceError> {
         let provider = Self::provider_for_am(request.relation.access_method_oid())?;
-        let wire_request = MaintenanceRequestV1::new(
+        let wire_request = MaintenanceRequest::new(
             request.relation.as_raw(),
             request.mode,
             request.options,
             request.budget,
             request.command_time,
         );
-        let mut report = MaintenanceReportV1::default();
+        let mut report = MaintenanceReport::default();
         unsafe { (provider.execute)(&wire_request, &mut report) };
         Ok(report.into())
     }
@@ -221,7 +224,7 @@ impl TableMaintenanceRouter {
             .ok_or_else(|| TableMaintenanceError::framework("provider has no name"))?
             .to_string_lossy()
             .into_owned();
-        let mut stats = MaintenanceStatsV1::default();
+        let mut stats = MaintenanceStats::default();
         unsafe { (provider.inspect)(relation.as_raw(), &mut stats) };
         Ok(stats.into_stats(name))
     }

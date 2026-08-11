@@ -1,3 +1,4 @@
+use crate::copy::CopyError;
 use crate::diag::{
     PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
 };
@@ -10,6 +11,7 @@ use pgrx::prelude::*;
 pub enum UtilityHookPhase {
     Pre,
     PostSuccess,
+    Consume,
 }
 
 impl UtilityHookPhase {
@@ -17,6 +19,7 @@ impl UtilityHookPhase {
         match self {
             Self::Pre => "pre",
             Self::PostSuccess => "post-success",
+            Self::Consume => "consume",
         }
     }
 }
@@ -155,6 +158,13 @@ impl HookError {
             postgres_hint: None,
             source: Some(Box::new(source)),
         }))
+    }
+
+    pub(crate) fn from_copy_error(error: CopyError) -> Self {
+        match error {
+            CopyError::Postgres(error) => error.into(),
+            error => Self::with_source(error.sql_error_code(), error),
+        }
     }
 
     #[doc(hidden)]

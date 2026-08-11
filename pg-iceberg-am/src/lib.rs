@@ -96,6 +96,9 @@ pub mod pg_test {
     }
 
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["shared_preload_libraries = 'pg_lakebase_runtime,pg_iceberg_am'"]
+        vec![
+            "shared_preload_libraries = 'pg_lakebase_runtime'",
+            "pg_lakebase.provider_libraries = 'pg_iceberg_am'",
+        ]
     }
 }

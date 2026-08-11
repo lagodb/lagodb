@@ -17,12 +17,13 @@ pub use crate::plan_data::{
     PlanDataReader as ForeignPrivateReader, PlanDataWriter as ForeignPrivateWriter,
 };
 pub use modify::{
-    FdwModify, ForeignInsertBeginContext, ForeignModifyBeginContext,
-    ForeignModifyCapabilities, ForeignModifyError, ForeignModifyOperation,
-    ForeignModifyOutcome, ForeignModifyPhase, ForeignModifyPlanContext,
-    ForeignModifyPlanSpec, ForeignModifyPrivate, ForeignModifyRelationContext,
-    ForeignModifyState, ForeignReturnedIdentity, ForeignRowIdentity,
-    ForeignRowIdentityKind, ForeignUpdateTargetContext, ModifyPlanSlot, ModifySlot,
+    FdwModify, ForeignInsertBatch, ForeignInsertBeginContext,
+    ForeignModifyBeginContext, ForeignModifyCapabilities, ForeignModifyError,
+    ForeignModifyOperation, ForeignModifyOutcome, ForeignModifyPhase,
+    ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyPrivate,
+    ForeignModifyRelationContext, ForeignModifyState, ForeignReturnedIdentity,
+    ForeignRowIdentity, ForeignRowIdentityKind, ForeignUpdateTargetContext,
+    ModifyPlanSlot, ModifySlot,
 };
 pub use provider::ForeignDataWrapper;
 pub use routine::{FdwRoutine, register_modify, register_scan};
@@ -48,7 +49,7 @@ pub mod __private {
 /// Common imports for FDW providers.
 pub mod prelude {
     pub use super::{
-        FdwModify, FdwRoutine, FdwScan, ForeignDataWrapper, ForeignValidationError,
-        register_modify, register_scan,
+        FdwModify, FdwRoutine, FdwScan, ForeignDataWrapper, ForeignInsertBatch,
+        ForeignValidationError, register_modify, register_scan,
     };
 }

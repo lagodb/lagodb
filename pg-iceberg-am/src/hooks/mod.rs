@@ -17,14 +17,11 @@
 //! module only routes PostgreSQL hook events into those parsers and into the
 //! Iceberg catalog.
 
-use pg_lakebase_core::access::mutation;
-
 mod column_drop_guard;
 pub mod object_access;
 pub mod table_ddl;
 
 pub fn init_hooks() {
-    mutation::init_lifecycle_hooks();
     table_ddl::init_hook();
     object_access::init_hook();
 }

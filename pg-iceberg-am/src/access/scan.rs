@@ -61,10 +61,7 @@ impl ScanRelation {
 
 enum ScanPurpose {
     Query,
-    Analyze {
-        #[cfg(not(feature = "pg17"))]
-        statistics_target: i32,
-    },
+    Analyze,
 }
 
 impl ScanPurpose {
@@ -77,19 +74,13 @@ impl ScanPurpose {
             Self::Query => Ok(IcebergScanState::Query(QueryScanState::begin(
                 relation, keys,
             )?)),
-            Self::Analyze {
-                #[cfg(not(feature = "pg17"))]
-                statistics_target,
-            } => {
+            Self::Analyze => {
                 let spec = ScanSpec::build_for_analyze(
                     relation.oid,
                     relation.tablespace_oid,
                     &relation.shape,
                 )?;
-                let preparation = spec.prepare_analyze(
-                    #[cfg(not(feature = "pg17"))]
-                    statistics_target,
-                )?;
+                let preparation = spec.prepare_analyze()?;
                 Ok(IcebergScanState::Analyze(Box::new(
                     AnalyzeScanState::pending(preparation),
                 )))
@@ -152,10 +143,7 @@ impl AmScanSession for IcebergScan {
         Ok(IcebergScan {
             relation: ScanRelation::from_relation(rel),
             state: IcebergScanState::Pending(if flags.is_analyze() {
-                ScanPurpose::Analyze {
-                    #[cfg(not(feature = "pg17"))]
-                    statistics_target: rel.max_statistics_target()?,
-                }
+                ScanPurpose::Analyze
             } else {
                 ScanPurpose::Query
             }),

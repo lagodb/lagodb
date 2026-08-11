@@ -7,14 +7,13 @@ use std::sync::OnceLock;
 use crate::{hooks, storage::volume_config::on_object_access};
 use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::runtime_api::{
-    HOOK_DESCRIPTOR_VERSION, OBJECT_ACCESS_EVENTS_KNOWN,
-    ObjectAccessHookDescriptorV1, ObjectAccessStrHookDescriptorV1,
-    object_access_event_mask,
+    OBJECT_ACCESS_EVENTS_KNOWN, ObjectAccessHookDescriptor,
+    ObjectAccessStrHookDescriptor, object_access_event_mask,
 };
 use pgrx::{pg_guard, pg_sys};
 
 struct ObjectAccessHookNode {
-    descriptor: ObjectAccessHookDescriptorV1,
+    descriptor: ObjectAccessHookDescriptor,
     next: Cell<*const ObjectAccessHookNode>,
 }
 
@@ -43,7 +42,7 @@ impl ObjectAccessHookDirectory {
     }
 
     #[cfg(test)]
-    fn append(&self, descriptor: ObjectAccessHookDescriptorV1) {
+    fn append(&self, descriptor: ObjectAccessHookDescriptor) {
         self.append_node(Box::new(ObjectAccessHookNode {
             descriptor,
             next: Cell::new(std::ptr::null()),
@@ -60,7 +59,7 @@ impl ObjectAccessHookDirectory {
     }
 
     #[cfg(test)]
-    fn register(&self, descriptor: ObjectAccessHookDescriptorV1) -> bool {
+    fn register(&self, descriptor: ObjectAccessHookDescriptor) -> bool {
         let first = self.head.get().is_null();
         self.append(descriptor);
         first
@@ -85,7 +84,7 @@ impl ObjectAccessHookSnapshot {
         self,
         access: pg_sys::ObjectAccessType::Type,
         class_id: pg_sys::Oid,
-        mut callback: impl FnMut(ObjectAccessHookDescriptorV1),
+        mut callback: impl FnMut(ObjectAccessHookDescriptor),
     ) {
         let Some(event) = object_access_event_mask(access) else {
             return;
@@ -111,7 +110,7 @@ impl ObjectAccessHookSnapshot {
 }
 
 struct ObjectAccessStrHookNode {
-    descriptor: ObjectAccessStrHookDescriptorV1,
+    descriptor: ObjectAccessStrHookDescriptor,
     next: Cell<*const ObjectAccessStrHookNode>,
 }
 
@@ -140,7 +139,7 @@ impl ObjectAccessStrHookDirectory {
     }
 
     #[cfg(test)]
-    fn append(&self, descriptor: ObjectAccessStrHookDescriptorV1) {
+    fn append(&self, descriptor: ObjectAccessStrHookDescriptor) {
         self.append_node(Box::new(ObjectAccessStrHookNode {
             descriptor,
             next: Cell::new(std::ptr::null()),
@@ -157,7 +156,7 @@ impl ObjectAccessStrHookDirectory {
     }
 
     #[cfg(test)]
-    fn register(&self, descriptor: ObjectAccessStrHookDescriptorV1) -> bool {
+    fn register(&self, descriptor: ObjectAccessStrHookDescriptor) -> bool {
         let first = self.head.get().is_null();
         self.append(descriptor);
         first
@@ -182,7 +181,7 @@ impl ObjectAccessStrHookSnapshot {
         self,
         access: pg_sys::ObjectAccessType::Type,
         class_id: pg_sys::Oid,
-        mut callback: impl FnMut(ObjectAccessStrHookDescriptorV1),
+        mut callback: impl FnMut(ObjectAccessStrHookDescriptor),
     ) {
         let Some(event) = object_access_event_mask(access) else {
             return;
@@ -236,27 +235,24 @@ fn valid_filter(event_mask: u32) -> bool {
     event_mask != 0 && event_mask & !OBJECT_ACCESS_EVENTS_KNOWN == 0
 }
 
-fn valid_descriptor(descriptor: &ObjectAccessHookDescriptorV1) -> bool {
-    descriptor.abi_version == HOOK_DESCRIPTOR_VERSION
-        && descriptor.struct_size
-            >= std::mem::size_of::<ObjectAccessHookDescriptorV1>() as u32
+fn valid_descriptor(descriptor: &ObjectAccessHookDescriptor) -> bool {
+    descriptor.struct_size == std::mem::size_of::<ObjectAccessHookDescriptor>() as u32
         && valid_filter(descriptor.event_mask)
         && !descriptor.context.is_null()
         && descriptor.on_access.is_some()
 }
 
-fn valid_str_descriptor(descriptor: &ObjectAccessStrHookDescriptorV1) -> bool {
-    descriptor.abi_version == HOOK_DESCRIPTOR_VERSION
-        && descriptor.struct_size
-            >= std::mem::size_of::<ObjectAccessStrHookDescriptorV1>() as u32
+fn valid_str_descriptor(descriptor: &ObjectAccessStrHookDescriptor) -> bool {
+    descriptor.struct_size
+        == std::mem::size_of::<ObjectAccessStrHookDescriptor>() as u32
         && valid_filter(descriptor.event_mask)
         && !descriptor.context.is_null()
         && descriptor.on_access.is_some()
 }
 
 pub(crate) fn prepare_hooks(
-    descriptors: &[ObjectAccessHookDescriptorV1],
-    str_descriptors: &[ObjectAccessStrHookDescriptorV1],
+    descriptors: &[ObjectAccessHookDescriptor],
+    str_descriptors: &[ObjectAccessStrHookDescriptor],
 ) -> Option<PreparedObjectAccessHooks> {
     if !descriptors.iter().all(valid_descriptor)
         || !str_descriptors.iter().all(valid_str_descriptor)
@@ -463,10 +459,9 @@ mod tests {
     fn descriptor(
         event_mask: u32,
         class_id: pg_sys::Oid,
-    ) -> ObjectAccessHookDescriptorV1 {
-        ObjectAccessHookDescriptorV1 {
-            abi_version: HOOK_DESCRIPTOR_VERSION,
-            struct_size: std::mem::size_of::<ObjectAccessHookDescriptorV1>() as u32,
+    ) -> ObjectAccessHookDescriptor {
+        ObjectAccessHookDescriptor {
+            struct_size: std::mem::size_of::<ObjectAccessHookDescriptor>() as u32,
             event_mask,
             class_id,
             context: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
@@ -477,11 +472,9 @@ mod tests {
     fn str_descriptor(
         event_mask: u32,
         class_id: pg_sys::Oid,
-    ) -> ObjectAccessStrHookDescriptorV1 {
-        ObjectAccessStrHookDescriptorV1 {
-            abi_version: HOOK_DESCRIPTOR_VERSION,
-            struct_size: std::mem::size_of::<ObjectAccessStrHookDescriptorV1>()
-                as u32,
+    ) -> ObjectAccessStrHookDescriptor {
+        ObjectAccessStrHookDescriptor {
+            struct_size: std::mem::size_of::<ObjectAccessStrHookDescriptor>() as u32,
             event_mask,
             class_id,
             context: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
@@ -507,7 +500,10 @@ mod tests {
         candidate.struct_size = 0;
         assert!(!valid_descriptor(&candidate));
         candidate.struct_size =
-            std::mem::size_of::<ObjectAccessHookDescriptorV1>() as u32;
+            std::mem::size_of::<ObjectAccessHookDescriptor>() as u32 + 1;
+        assert!(!valid_descriptor(&candidate));
+        candidate.struct_size =
+            std::mem::size_of::<ObjectAccessHookDescriptor>() as u32;
         candidate.on_access = None;
         assert!(!valid_descriptor(&candidate));
         candidate.on_access = Some(object_callback);

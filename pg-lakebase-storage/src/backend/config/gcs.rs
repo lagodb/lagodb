@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use object_store::ObjectStore;
 use object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
+use object_store::{ObjectStore, RetryConfig};
 
 use super::{
     GcsStoreConfig, finish_store_build, validate_endpoint, validate_optional_secret,
@@ -60,12 +60,18 @@ impl GcsStoreConfig {
                 "GCS config must use at most one credential source: service_account_path, service_account_key or application_credentials_path",
             ));
         }
+        if self.skip_signature && credential_sources != 0 {
+            return Err(StorageError::configuration(
+                "GCS skip_signature cannot be combined with explicit credentials",
+            ));
+        }
         Ok(())
     }
 
     pub(super) fn build_store(
         &self,
         bucket: &str,
+        retry_config: RetryConfig,
     ) -> StorageResult<Arc<dyn ObjectStore>> {
         self.validate()?;
         let mut builder = GoogleCloudStorageBuilder::new();
@@ -91,6 +97,7 @@ impl GcsStoreConfig {
         if self.skip_signature {
             builder = builder.with_skip_signature(true);
         }
+        builder = builder.with_retry(retry_config);
         finish_store_build(builder.build(), "GCS", "bucket", bucket)
     }
 }

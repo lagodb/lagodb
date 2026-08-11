@@ -14,7 +14,7 @@ use super::planning_context::{
     ForeignModifyPlanContext, ForeignModifyRelationContext,
     ForeignUpdateTargetContext,
 };
-use super::slot::ModifySlot;
+use super::slot::{ForeignInsertBatch, ModifySlot};
 use crate::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 
 /// PostgreSQL modify operations exposed to providers.
@@ -195,6 +195,16 @@ pub trait ForeignModifyPrivate: Sized + 'static {
 
 /// Relation-local provider state. PostgreSQL serializes calls on one state.
 pub trait ForeignModifyState: 'static {
+    /// Maximum number of INSERT rows the state can encode in one PostgreSQL
+    /// batch callback. The core adapter clamps this to one for BEFORE/INSTEAD
+    /// OF ROW triggers, RETURNING, WCO, zero-column relations, and returned
+    /// item-pointer requirements. AFTER ROW triggers remain batchable because
+    /// the adapter returns one relation-shaped slot for every accepted row, as
+    /// required by PostgreSQL's `ExecForeignBatchInsert` contract.
+    fn batch_size(&self) -> Result<c_int, ForeignModifyError> {
+        Ok(1)
+    }
+
     fn prepare_insert(
         &mut self,
         _slot: &mut ModifySlot<'_>,
@@ -206,6 +216,21 @@ pub trait ForeignModifyState: 'static {
         &mut self,
         slot: &mut ModifySlot<'_>,
     ) -> Result<ForeignModifyOutcome, ForeignModifyError>;
+
+    /// Insert one batch of rows. The default preserves the row contract while
+    /// keeping the PostgreSQL callback and provider state at batch scope.
+    /// Format writers can override this method to encode the batch and commit
+    /// it through their own sink once, using [`ForeignInsertBatch`] to access
+    /// the relation-shaped input slots.
+    fn insert_batch(
+        &mut self,
+        batch: &mut ForeignInsertBatch<'_>,
+    ) -> Result<(), ForeignModifyError> {
+        batch.process_each(|_, slot| {
+            self.prepare_insert(slot)?;
+            self.insert(slot)
+        })
+    }
 
     fn prepare_update(
         &mut self,

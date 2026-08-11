@@ -407,7 +407,6 @@ impl AlterTableIcebergOperations {
                         "column constraints, identity, and generated columns are not supported for Iceberg relations",
                     );
                 }
-                #[cfg(feature = "pg17")]
                 pg_sys::AlterTableType::AT_SetExpression => {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
                     result.reject_schema_operation(

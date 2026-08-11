@@ -2,9 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pg_lakebase_storage::{
-    ListCursor, StorageClient, StorageError, StorageErrorKind,
-};
+use pg_lakebase_storage::{StorageClient, StorageError, StorageErrorKind};
 
 use super::item::{ObjectCleanupItem, ObjectCleanupTarget};
 
@@ -74,62 +72,40 @@ impl ObjectCleanupExecutor {
         prefix: &str,
         cancelled: &AtomicBool,
     ) -> ObjectCleanupExecutionOutcome {
-        let mut cursor: Option<ListCursor> = None;
+        let mut listing = client.list_session(namespace, Some(prefix), self.page_size);
         loop {
             if cancelled.load(Ordering::Acquire) {
-                close_cursor(client, cursor);
                 return ObjectCleanupExecutionOutcome::Cancelled;
             }
 
-            let request_cursor = cursor.clone();
-            let page = match client.list_page(
-                namespace,
-                Some(prefix),
-                request_cursor.clone(),
-                self.page_size,
-            ) {
-                Ok(page) => page,
-                Err(error) => {
-                    close_cursor(client, request_cursor);
-                    return classify(error);
-                }
+            let entries = match listing.next_page() {
+                Ok(Some(entries)) => entries,
+                Ok(None) => return ObjectCleanupExecutionOutcome::Complete,
+                Err(error) => return classify(error),
             };
-            cursor = page.next_cursor;
 
             if cancelled.load(Ordering::Acquire) {
-                close_cursor(client, cursor);
                 return ObjectCleanupExecutionOutcome::Cancelled;
             }
 
-            if !page.entries.is_empty() {
-                let keys: Vec<String> =
-                    page.entries.into_iter().map(|entry| entry.key).collect();
+            if !entries.is_empty() {
+                let keys: Vec<String> = entries.into_iter().map(|entry| entry.key).collect();
                 let expected = u32::try_from(keys.len()).unwrap_or(u32::MAX);
                 match client.delete_objects(namespace, keys) {
                     Ok(deleted) if deleted == expected => {}
                     Ok(deleted) => {
-                        close_cursor(client, cursor);
                         return classify(StorageError::protocol(format!(
                             "bulk delete acknowledged {deleted} of {expected} objects"
                         )));
                     }
-                    Err(error) => {
-                        close_cursor(client, cursor);
-                        return classify(error);
-                    }
+                    Err(error) => return classify(error),
                 }
             }
 
-            if cursor.is_none() {
+            if listing.is_exhausted() {
                 return ObjectCleanupExecutionOutcome::Complete;
             }
         }
-    }
-}
-
-fn close_cursor(client: &StorageClient, cursor: Option<ListCursor>) {
-    if let Some(cursor) = cursor {
-        let _ = client.close_list_cursor(cursor);
     }
 }
 

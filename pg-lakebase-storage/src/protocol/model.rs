@@ -83,7 +83,7 @@ pub enum WireRequestPayload {
         bucket: String,
         key: String,
     },
-    /// Deletes a single object from the backend and best-effort invalidates the local cache.
+    /// Deletes a single object from the backend. Cache invalidation is an explicit caller action.
     Delete {
         bucket: String,
         key: String,

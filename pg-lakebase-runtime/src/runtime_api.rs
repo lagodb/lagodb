@@ -6,14 +6,12 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 
 use pg_lakebase_core::runtime_api::{
-    AM_REGISTRATION_VERSION, AbiHeader, AmRegistrationV1,
-    MAINTENANCE_PROVIDER_VERSION, MaintenanceProviderV1, PROVIDER_CAPABILITIES_KNOWN,
-    REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
-    REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RUNTIME_API_VERSION, RuntimeApiV1,
-    RuntimeMaintenanceConfigV1, STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND,
-    STAGE_WORKER_WAKEUP_INVALID_REQUEST, STAGE_WORKER_WAKEUP_OK,
-    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, provider_access_method_name,
-    provider_name, rendezvous_slot,
+    AbiHeader, MaintenanceProvider, PROVIDER_CAPABILITIES_KNOWN,
+    ProviderRegistration, REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
+    REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RuntimeApi, RuntimeMaintenanceConfig,
+    STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND, STAGE_WORKER_WAKEUP_INVALID_REQUEST,
+    STAGE_WORKER_WAKEUP_OK, STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED,
+    provider_access_method_name, provider_name, rendezvous_slot,
 };
 use pgrx::pg_sys;
 
@@ -21,19 +19,19 @@ use crate::object_access;
 use storage_volume::resolve_storage_volume_route;
 
 thread_local! {
-    static PROVIDERS: RefCell<ProviderDirectory> =
-        const { RefCell::new(ProviderDirectory::new()) };
+    static MAINTENANCE_PROVIDERS: RefCell<MaintenanceProviderDirectory> =
+        const { RefCell::new(MaintenanceProviderDirectory::new()) };
 }
 
-struct StoredProvider {
-    descriptor: Box<MaintenanceProviderV1>,
+struct StoredMaintenanceProvider {
+    descriptor: Box<MaintenanceProvider>,
     _name: CString,
     _access_method_name: CString,
 }
 
-impl StoredProvider {
+impl StoredMaintenanceProvider {
     fn new(
-        descriptor: &MaintenanceProviderV1,
+        descriptor: &MaintenanceProvider,
         name: &CStr,
         access_method_name: &CStr,
     ) -> Self {
@@ -50,15 +48,15 @@ impl StoredProvider {
     }
 }
 
-struct ProviderDirectory {
-    providers: Vec<StoredProvider>,
+struct MaintenanceProviderDirectory {
+    providers: Vec<StoredMaintenanceProvider>,
 }
 
-struct PreparedProviderRegistration {
-    provider: Option<StoredProvider>,
+struct PreparedMaintenanceProviderRegistration {
+    provider: Option<StoredMaintenanceProvider>,
 }
 
-impl ProviderDirectory {
+impl MaintenanceProviderDirectory {
     const fn new() -> Self {
         Self {
             providers: Vec::new(),
@@ -67,14 +65,14 @@ impl ProviderDirectory {
 
     fn prepare(
         &mut self,
-        descriptor: &MaintenanceProviderV1,
+        descriptor: &MaintenanceProvider,
         name: &CStr,
         access_method_name: &CStr,
-    ) -> Result<PreparedProviderRegistration, u32> {
+    ) -> Result<PreparedMaintenanceProviderRegistration, u32> {
         for existing in &self.providers {
             let existing_descriptor = existing.descriptor.as_ref();
             // SAFETY: stored descriptors were validated on registration and
-            // point at the `CString`s owned by `StoredProvider`.
+            // point at the `CString`s owned by `StoredMaintenanceProvider`.
             let existing_name = unsafe { provider_name(existing_descriptor) }
                 .expect("validated provider name");
             // SAFETY: same invariant as `existing_name` above.
@@ -99,7 +97,7 @@ impl ProviderDirectory {
                         descriptor.inspect,
                     );
                 return if same_descriptor {
-                    Ok(PreparedProviderRegistration { provider: None })
+                    Ok(PreparedMaintenanceProviderRegistration { provider: None })
                 } else {
                     Err(REGISTER_DUPLICATE_NAME)
                 };
@@ -112,12 +110,16 @@ impl ProviderDirectory {
         // therefore allocation-free and cannot leave provider and hook
         // directories partially published.
         self.providers.reserve(1);
-        Ok(PreparedProviderRegistration {
-            provider: Some(StoredProvider::new(descriptor, name, access_method_name)),
+        Ok(PreparedMaintenanceProviderRegistration {
+            provider: Some(StoredMaintenanceProvider::new(
+                descriptor,
+                name,
+                access_method_name,
+            )),
         })
     }
 
-    fn commit(&mut self, prepared: PreparedProviderRegistration) {
+    fn commit(&mut self, prepared: PreparedMaintenanceProviderRegistration) {
         if let Some(provider) = prepared.provider {
             debug_assert!(self.providers.len() < self.providers.capacity());
             self.providers.push(provider);
@@ -127,7 +129,7 @@ impl ProviderDirectory {
     #[cfg(test)]
     fn register(
         &mut self,
-        descriptor: &MaintenanceProviderV1,
+        descriptor: &MaintenanceProvider,
         name: &CStr,
         access_method_name: &CStr,
     ) -> u32 {
@@ -144,32 +146,30 @@ impl ProviderDirectory {
         self.providers.len()
     }
 
-    fn descriptor(&self, index: usize) -> *const MaintenanceProviderV1 {
+    fn descriptor(&self, index: usize) -> *const MaintenanceProvider {
         self.providers[index].descriptor.as_ref()
     }
 }
 
 struct ValidatedProvider<'a> {
-    descriptor: &'a MaintenanceProviderV1,
+    descriptor: &'a MaintenanceProvider,
     name: &'a CStr,
     access_method_name: &'a CStr,
 }
 
 unsafe fn validate_provider<'a>(
-    descriptor: *const MaintenanceProviderV1,
+    descriptor: *const MaintenanceProvider,
 ) -> Option<ValidatedProvider<'a>> {
     // SAFETY: callers uphold the module's trusted internal-ABI pointer and
     // alignment contract; `as_ref` handles the permitted null input.
     let header = unsafe { descriptor.cast::<AbiHeader>().as_ref() }?;
-    let expected_size = u32::try_from(std::mem::size_of::<MaintenanceProviderV1>())
+    let expected_size = u32::try_from(std::mem::size_of::<MaintenanceProvider>())
         .expect("maintenance descriptor size exceeds u32");
-    if header.abi_version != MAINTENANCE_PROVIDER_VERSION
-        || header.struct_size < expected_size
-    {
+    if header.struct_size != expected_size {
         return None;
     }
     // SAFETY: the validated header states that the caller supplied the full
-    // descriptor layout for this ABI version.
+    // exact descriptor layout expected by this build.
     let descriptor = unsafe { &*descriptor };
     if descriptor.name.is_null()
         || descriptor.access_method_name.is_null()
@@ -200,10 +200,11 @@ unsafe extern "C-unwind" fn has_providers() -> u8 {
     // method OIDs necessarily exist. Resolve the callbacks only when routing a
     // command in a connected database, and never invoke provider code while a
     // RefCell borrow is live.
-    let provider_count = PROVIDERS.with_borrow(ProviderDirectory::len);
+    let provider_count =
+        MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderDirectory::len);
     for index in 0..provider_count {
-        let descriptor =
-            PROVIDERS.with_borrow(|providers| providers.descriptor(index));
+        let descriptor = MAINTENANCE_PROVIDERS
+            .with_borrow(|providers| providers.descriptor(index));
         let descriptor = unsafe { &*descriptor };
         if unsafe { (descriptor.access_method_oid)() } != pg_sys::InvalidOid {
             return 1;
@@ -215,15 +216,16 @@ unsafe extern "C-unwind" fn has_providers() -> u8 {
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn provider_for_am(
     access_method_oid: pg_sys::Oid,
-) -> *const MaintenanceProviderV1 {
+) -> *const MaintenanceProvider {
     // AM OIDs are database-local and do not exist yet during shared-preload
     // registration. Copy one stable descriptor pointer at a time, release the
     // RefCell borrow, and only then invoke catalog-reading provider callbacks.
-    let provider_count = PROVIDERS.with_borrow(ProviderDirectory::len);
-    let mut matched: *const MaintenanceProviderV1 = std::ptr::null();
+    let provider_count =
+        MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderDirectory::len);
+    let mut matched: *const MaintenanceProvider = std::ptr::null();
     for index in 0..provider_count {
-        let descriptor =
-            PROVIDERS.with_borrow(|providers| providers.descriptor(index));
+        let descriptor = MAINTENANCE_PROVIDERS
+            .with_borrow(|providers| providers.descriptor(index));
         let descriptor = unsafe { &*descriptor };
         if unsafe { (descriptor.access_method_oid)() } != access_method_oid {
             continue;
@@ -245,7 +247,7 @@ unsafe extern "C-unwind" fn customscan_mode() -> u32 {
 
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn maintenance_config(
-    config: *mut RuntimeMaintenanceConfigV1,
+    config: *mut RuntimeMaintenanceConfig,
 ) {
     let Some(config) = (unsafe { config.as_mut() }) else {
         panic!("runtime maintenance config output pointer is null");
@@ -287,16 +289,18 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
     STAGE_WORKER_WAKEUP_OK
 }
 
-struct AmRegistrationRef<'a> {
+struct ProviderRegistrationRef<'a> {
+    provider: crate::provider_bootstrap::ValidatedProviderIdentity<'a>,
     maintenance_provider: Option<ValidatedProvider<'a>>,
-    utility: &'a [pg_lakebase_core::runtime_api::UtilityHookDescriptorV1],
-    object_access:
-        &'a [pg_lakebase_core::runtime_api::ObjectAccessHookDescriptorV1],
+    utility: &'a [pg_lakebase_core::runtime_api::UtilityHookDescriptor],
+    utility_consumers:
+        &'a [pg_lakebase_core::runtime_api::UtilityConsumerDescriptor],
+    object_access: &'a [pg_lakebase_core::runtime_api::ObjectAccessHookDescriptor],
     object_access_str:
-        &'a [pg_lakebase_core::runtime_api::ObjectAccessStrHookDescriptorV1],
+        &'a [pg_lakebase_core::runtime_api::ObjectAccessStrHookDescriptor],
 }
 
-impl<'a> AmRegistrationRef<'a> {
+impl<'a> ProviderRegistrationRef<'a> {
     unsafe fn descriptor_slice<T>(pointer: *const T, count: u32) -> Option<&'a [T]> {
         if count == 0 {
             return Some(&[]);
@@ -308,27 +312,38 @@ impl<'a> AmRegistrationRef<'a> {
         Some(unsafe { std::slice::from_raw_parts(pointer, count) })
     }
 
-    unsafe fn from_raw(registration: *const AmRegistrationV1) -> Option<Self> {
-        let header = unsafe { registration.cast::<AbiHeader>().as_ref() }?;
+    unsafe fn from_raw(registration: *const ProviderRegistration) -> Option<Self> {
+        let registration = unsafe { registration.as_ref() }?;
         let expected_size =
-            u32::try_from(std::mem::size_of::<AmRegistrationV1>()).ok()?;
-        if header.abi_version != AM_REGISTRATION_VERSION
-            || header.struct_size < expected_size
-        {
+            u32::try_from(std::mem::size_of::<ProviderRegistration>()).ok()?;
+        if registration.struct_size != expected_size {
             return None;
         }
-        let registration = unsafe { &*registration };
+        // SAFETY: the registration pointer is governed by the same trusted
+        // internal ABI contract validated by this constructor.
+        let provider = unsafe {
+            crate::provider_bootstrap::ValidatedProviderIdentity::from_raw(
+                registration.provider,
+            )
+        }?;
         let maintenance_provider = if registration.maintenance_provider.is_null() {
             None
         } else {
             Some(unsafe { validate_provider(registration.maintenance_provider) }?)
         };
         Some(Self {
+            provider,
             maintenance_provider,
             utility: unsafe {
                 Self::descriptor_slice(
                     registration.utility_hooks,
                     registration.utility_hook_count,
+                )?
+            },
+            utility_consumers: unsafe {
+                Self::descriptor_slice(
+                    registration.utility_consumers,
+                    registration.utility_consumer_count,
                 )?
             },
             object_access: unsafe {
@@ -347,61 +362,80 @@ impl<'a> AmRegistrationRef<'a> {
     }
 }
 
-struct PreparedAmRegistration {
-    maintenance_provider: PreparedProviderRegistration,
+struct PreparedProviderRegistration {
+    maintenance_provider: PreparedMaintenanceProviderRegistration,
+    provider: crate::provider_bootstrap::PreparedProviderIdentity,
     utility: crate::process_utility::PreparedUtilityHooks,
+    utility_consumers: crate::utility_consumer::PreparedUtilityConsumers,
     object_access: crate::object_access::PreparedObjectAccessHooks,
 }
 
-impl PreparedAmRegistration {
-    fn new(registration: AmRegistrationRef<'_>) -> Result<Self, u32> {
+impl PreparedProviderRegistration {
+    fn new(registration: ProviderRegistrationRef<'_>) -> Result<Self, u32> {
         // Every module finishes validation and all heap allocation before this
         // value can be committed. Returning an error therefore leaves every
         // logical runtime directory and PostgreSQL hook pointer unchanged.
         let maintenance_provider = match registration.maintenance_provider {
-            Some(provider) => PROVIDERS.with_borrow_mut(|providers| {
+            Some(provider) => MAINTENANCE_PROVIDERS.with_borrow_mut(|providers| {
                 providers.prepare(
                     provider.descriptor,
                     provider.name,
                     provider.access_method_name,
                 )
             })?,
-            None => PreparedProviderRegistration { provider: None },
+            None => PreparedMaintenanceProviderRegistration { provider: None },
         };
         let utility = crate::process_utility::prepare_hooks(registration.utility)
             .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
+        let utility_consumers = crate::utility_consumer::prepare_consumers(
+            registration.utility_consumers,
+        )
+        .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
         let object_access = crate::object_access::prepare_hooks(
             registration.object_access,
             registration.object_access_str,
         )
         .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
+        // Validate bootstrap ownership only after the complete batch has been
+        // validated. This preserves the more specific duplicate-provider and
+        // invalid-descriptor results while still preventing every directory
+        // from being committed outside the bootstrap window.
+        let provider =
+            crate::provider_bootstrap::prepare_identity(registration.provider)?;
         Ok(Self {
             maintenance_provider,
+            provider,
             utility,
+            utility_consumers,
             object_access,
         })
     }
 
     fn commit(self) {
-        PROVIDERS
+        MAINTENANCE_PROVIDERS
             .with_borrow_mut(|providers| providers.commit(self.maintenance_provider));
         crate::process_utility::commit_hooks(self.utility);
+        crate::utility_consumer::commit_consumers(self.utility_consumers);
         crate::object_access::commit_hooks(self.object_access);
+        crate::provider_bootstrap::commit_identity(self.provider);
     }
 }
 
 #[pgrx::pg_guard]
-unsafe extern "C-unwind" fn register_am(
-    registration: *const AmRegistrationV1,
+unsafe extern "C-unwind" fn register_provider(
+    registration: *const ProviderRegistration,
 ) -> u32 {
     if unsafe { pg_sys::IsBinaryUpgrade } {
         return REGISTER_OK;
     }
-    let Some(registration) = (unsafe { AmRegistrationRef::from_raw(registration) })
+    // SAFETY: callers of this runtime ABI entry point must supply a live exact-
+    // build registration descriptor as documented by the core API.
+    let Some(registration) =
+        (unsafe { ProviderRegistrationRef::from_raw(registration) })
     else {
         return REGISTER_INVALID_DESCRIPTOR;
     };
-    let prepared = match PreparedAmRegistration::new(registration) {
+    let prepared = match PreparedProviderRegistration::new(registration) {
         Ok(prepared) => prepared,
         Err(status) => return status,
     };
@@ -409,10 +443,9 @@ unsafe extern "C-unwind" fn register_am(
     REGISTER_OK
 }
 
-static RUNTIME_API: RuntimeApiV1 = RuntimeApiV1 {
-    abi_version: RUNTIME_API_VERSION,
-    struct_size: std::mem::size_of::<RuntimeApiV1>() as u32,
-    register_am,
+static RUNTIME_API: RuntimeApi = RuntimeApi {
+    struct_size: std::mem::size_of::<RuntimeApi>() as u32,
+    register_provider,
     has_providers,
     provider_for_am,
     customscan_mode,
@@ -430,14 +463,14 @@ pub(crate) fn init() {
     let published = unsafe { *slot };
     if !published.is_null()
         && published
-            != (&RUNTIME_API as *const RuntimeApiV1)
+            != (&RUNTIME_API as *const RuntimeApi)
                 .cast_mut()
                 .cast::<c_void>()
     {
         panic!("a different pg_lakebase runtime API is already published");
     }
     unsafe {
-        *slot = (&RUNTIME_API as *const RuntimeApiV1)
+        *slot = (&RUNTIME_API as *const RuntimeApi)
             .cast_mut()
             .cast::<c_void>();
     }
@@ -452,8 +485,8 @@ pub(crate) fn init() {
 mod tests {
     use super::*;
     use pg_lakebase_core::runtime_api::{
-        HOOK_DESCRIPTOR_VERSION, MaintenanceReportV1, MaintenanceRequestV1,
-        MaintenanceStatsV1, UtilityHookDescriptorV1,
+        MaintenanceReport, MaintenanceRequest, MaintenanceStats, ProviderIdentity,
+        UtilityHookDescriptor,
     };
 
     unsafe extern "C-unwind" fn access_method_oid() -> pg_sys::Oid {
@@ -461,14 +494,14 @@ mod tests {
     }
 
     unsafe extern "C-unwind" fn execute(
-        _request: *const MaintenanceRequestV1,
-        _report: *mut MaintenanceReportV1,
+        _request: *const MaintenanceRequest,
+        _report: *mut MaintenanceReport,
     ) {
     }
 
     unsafe extern "C-unwind" fn inspect(
         _relation: pg_sys::Relation,
-        _stats: *mut MaintenanceStatsV1,
+        _stats: *mut MaintenanceStats,
     ) {
     }
 
@@ -481,10 +514,9 @@ mod tests {
     fn descriptor(
         name: &'static CStr,
         access_method_name: &'static CStr,
-    ) -> MaintenanceProviderV1 {
-        MaintenanceProviderV1 {
-            abi_version: MAINTENANCE_PROVIDER_VERSION,
-            struct_size: std::mem::size_of::<MaintenanceProviderV1>() as u32,
+    ) -> MaintenanceProvider {
+        MaintenanceProvider {
+            struct_size: std::mem::size_of::<MaintenanceProvider>() as u32,
             name: name.as_ptr(),
             access_method_name: access_method_name.as_ptr(),
             capability_flags: 0,
@@ -494,9 +526,17 @@ mod tests {
         }
     }
 
+    fn identity() -> ProviderIdentity {
+        ProviderIdentity::access_method(
+            c"runtime-api-test",
+            c"pg_lakebase_runtime",
+            c"pg_lakebase_runtime",
+        )
+    }
+
     #[test]
     fn rejects_distinct_providers_for_the_same_access_method() {
-        let mut directory = ProviderDirectory::new();
+        let mut directory = MaintenanceProviderDirectory::new();
         let iceberg = descriptor(c"iceberg", c"iceberg");
         let competing = descriptor(c"other", c"iceberg");
 
@@ -511,8 +551,16 @@ mod tests {
     }
 
     #[test]
+    fn provider_validation_requires_exact_size() {
+        let mut provider = descriptor(c"iceberg", c"iceberg");
+        assert!(unsafe { validate_provider(&provider) }.is_some());
+        provider.struct_size = std::mem::size_of::<MaintenanceProvider>() as u32 + 1;
+        assert!(unsafe { validate_provider(&provider) }.is_none());
+    }
+
+    #[test]
     fn exact_registration_is_idempotent() {
-        let mut directory = ProviderDirectory::new();
+        let mut directory = MaintenanceProviderDirectory::new();
         let iceberg = descriptor(c"iceberg", c"iceberg");
 
         assert_eq!(
@@ -528,7 +576,7 @@ mod tests {
 
     #[test]
     fn rejects_one_provider_name_claiming_two_access_methods() {
-        let mut directory = ProviderDirectory::new();
+        let mut directory = MaintenanceProviderDirectory::new();
         let iceberg = descriptor(c"shared", c"iceberg");
         let delta = descriptor(c"shared", c"delta");
 
@@ -543,40 +591,46 @@ mod tests {
     }
 
     #[test]
-    fn invalid_hook_preparation_does_not_publish_any_am_state() {
-        let before_providers = PROVIDERS.with_borrow(ProviderDirectory::len);
+    fn invalid_hook_preparation_does_not_publish_any_provider_state() {
+        let before_providers =
+            MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderDirectory::len);
         let before_utility = crate::process_utility::registered_hook_count();
         let before_object = crate::object_access::registered_hook_counts();
         let provider = descriptor(c"atomic-invalid", c"atomic-invalid-am");
         let mut context = 0_u8;
-        let invalid_utility = UtilityHookDescriptorV1 {
-            abi_version: HOOK_DESCRIPTOR_VERSION,
-            struct_size: std::mem::size_of::<UtilityHookDescriptorV1>() as u32,
+        let invalid_utility = UtilityHookDescriptor {
+            struct_size: std::mem::size_of::<UtilityHookDescriptor>() as u32,
             tag: pg_sys::NodeTag::T_CommentStmt as u32,
             context: std::ptr::from_mut(&mut context).cast(),
             on_pre: Some(utility_pre),
             on_post: None,
         };
-        let registration = AmRegistrationV1 {
-            abi_version: AM_REGISTRATION_VERSION,
-            struct_size: std::mem::size_of::<AmRegistrationV1>() as u32,
+        let identity = identity();
+        let registration = ProviderRegistration {
+            struct_size: std::mem::size_of::<ProviderRegistration>() as u32,
+            provider: &identity,
             maintenance_provider: &provider,
             utility_hooks: &invalid_utility,
             utility_hook_count: 1,
+            utility_consumers: std::ptr::null(),
+            utility_consumer_count: 0,
             object_access_hooks: std::ptr::null(),
             object_access_hook_count: 0,
             object_access_str_hooks: std::ptr::null(),
             object_access_str_hook_count: 0,
         };
 
-        let registration = unsafe { AmRegistrationRef::from_raw(&registration) }
-            .expect("registration header and pointers are valid");
+        // SAFETY: all local descriptors and pointer/count pairs remain live
+        // for this synchronous validation and preparation.
+        let registration =
+            unsafe { ProviderRegistrationRef::from_raw(&registration) }
+                .expect("registration header and pointers are valid");
         assert_eq!(
-            PreparedAmRegistration::new(registration).err(),
+            PreparedProviderRegistration::new(registration).err(),
             Some(REGISTER_INVALID_DESCRIPTOR)
         );
         assert_eq!(
-            PROVIDERS.with_borrow(ProviderDirectory::len),
+            MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderDirectory::len),
             before_providers
         );
         assert_eq!(
@@ -591,18 +645,53 @@ mod tests {
 
     #[test]
     fn registration_rejects_nonzero_count_with_null_pointer() {
-        let registration = AmRegistrationV1 {
-            abi_version: AM_REGISTRATION_VERSION,
-            struct_size: std::mem::size_of::<AmRegistrationV1>() as u32,
+        let identity = identity();
+        let registration = ProviderRegistration {
+            struct_size: std::mem::size_of::<ProviderRegistration>() as u32,
+            provider: &identity,
             maintenance_provider: std::ptr::null(),
             utility_hooks: std::ptr::null(),
             utility_hook_count: 1,
+            utility_consumers: std::ptr::null(),
+            utility_consumer_count: 0,
             object_access_hooks: std::ptr::null(),
             object_access_hook_count: 0,
             object_access_str_hooks: std::ptr::null(),
             object_access_str_hook_count: 0,
         };
 
-        assert!(unsafe { AmRegistrationRef::from_raw(&registration) }.is_none());
+        // SAFETY: the local identity and registration remain live for this
+        // synchronous validation call.
+        assert!(
+            unsafe { ProviderRegistrationRef::from_raw(&registration) }.is_none()
+        );
+    }
+
+    #[test]
+    fn registration_requires_exact_size() {
+        let identity = identity();
+        let mut registration = ProviderRegistration {
+            struct_size: std::mem::size_of::<ProviderRegistration>() as u32 + 1,
+            provider: &identity,
+            maintenance_provider: std::ptr::null(),
+            utility_hooks: std::ptr::null(),
+            utility_hook_count: 0,
+            utility_consumers: std::ptr::null(),
+            utility_consumer_count: 0,
+            object_access_hooks: std::ptr::null(),
+            object_access_hook_count: 0,
+            object_access_str_hooks: std::ptr::null(),
+            object_access_str_hook_count: 0,
+        };
+
+        // SAFETY: the local identity and registration remain live for both
+        // synchronous validation calls below.
+        assert!(
+            unsafe { ProviderRegistrationRef::from_raw(&registration) }.is_none()
+        );
+        registration.struct_size = std::mem::size_of::<ProviderRegistration>() as u32;
+        assert!(
+            unsafe { ProviderRegistrationRef::from_raw(&registration) }.is_some()
+        );
     }
 }

@@ -1231,7 +1231,7 @@ async fn client_list_iterates_pages_and_returns_every_object() {
 }
 
 #[tokio::test]
-async fn client_list_page_drives_pagination_explicitly() {
+async fn client_list_session_owns_connection_and_drives_pages() {
     let root = test_root("list-page-cache");
     let socket = test_root("list-page.sock");
     let backend = Arc::new(MemoryObjectBackend::new());
@@ -1264,25 +1264,27 @@ async fn client_list_page_drives_pagination_explicitly() {
         let client =
             StorageClient::connect_managed(&socket_for_client, TEST_VOLUME_ID)
                 .unwrap();
+        let mut listing = client.list_session("bucket", Some("k/"), 2);
+        drop(client);
 
-        let page1 = client.list_page("bucket", Some("k/"), None, 2).unwrap();
-        assert_eq!(page1.entries.len(), 2);
-        let cursor1 = page1.next_cursor.expect("more pages must remain");
+        let page1 = listing
+            .next_page()
+            .unwrap()
+            .expect("first page must exist");
+        assert_eq!(page1.len(), 2);
 
-        let page2 = client
-            .list_page("bucket", Some("k/"), Some(cursor1), 2)
-            .unwrap();
-        assert_eq!(page2.entries.len(), 2);
-        let cursor2 = page2.next_cursor.expect("one entry should remain");
+        let page2 = listing
+            .next_page()
+            .unwrap()
+            .expect("second page must exist");
+        assert_eq!(page2.len(), 2);
 
-        let page3 = client
-            .list_page("bucket", Some("k/"), Some(cursor2), 2)
-            .unwrap();
-        assert_eq!(page3.entries.len(), 1);
-        assert!(
-            page3.next_cursor.is_none(),
-            "final page must not return a cursor"
-        );
+        let page3 = listing
+            .next_page()
+            .unwrap()
+            .expect("final page must exist");
+        assert_eq!(page3.len(), 1);
+        assert!(listing.next_page().unwrap().is_none());
     })
     .await
     .unwrap();

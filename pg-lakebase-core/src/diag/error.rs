@@ -23,6 +23,12 @@ pub struct PgReportError {
 }
 
 impl PgReportError {
+    /// Preserve an error caught by a provider-owned `PgTryBuilder` so it can
+    /// travel through the provider Result path to the single outer report.
+    pub fn from_caught(err: CaughtError) -> Self {
+        Self::from_pg_error(PgError::from_caught(err))
+    }
+
     /// Build from a domain error with a single SQLSTATE and full `source` chain in DETAIL.
     #[inline]
     pub fn from_domain_error<E>(err: E) -> Self
@@ -89,6 +95,26 @@ impl PgReportError {
     pub fn report(self) -> ! {
         self.into_report().report(PgLogLevel::ERROR);
         unreachable!()
+    }
+
+    /// Preserve a PostgreSQL error's structured SQLSTATE, DETAIL, and HINT.
+    ///
+    /// This is deliberately a named conversion rather than `From<PgError>`:
+    /// the blanket domain-error conversion below also applies to `PgError`,
+    /// and Rust does not permit overlapping `From` implementations.
+    pub fn from_pg_error(error: PgError) -> Self {
+        match error {
+            PgError::PostgresError(report) => Self::from_parts(
+                report.sql_error_code(),
+                report.message().to_owned(),
+                report.detail().map(str::to_owned),
+                report.hint().map(str::to_owned),
+            ),
+            PgError::NulError(error) => Self::from_message(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                error.to_string(),
+            ),
+        }
     }
 }
 

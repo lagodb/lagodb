@@ -6,9 +6,8 @@ use std::cell::RefCell;
 use std::ffi::{CStr, c_void};
 
 use crate::runtime_api::{
-    HOOK_DESCRIPTOR_VERSION, ObjectAccessFilter, ObjectAccessHookDescriptorV1,
-    ObjectAccessStrHookDescriptorV1, RoutedObjectAccessHook,
-    RoutedObjectAccessStrHook,
+    ObjectAccessFilter, ObjectAccessHookDescriptor, ObjectAccessStrHookDescriptor,
+    RoutedObjectAccessHook, RoutedObjectAccessStrHook,
 };
 
 #[derive(Debug)]
@@ -248,18 +247,18 @@ pub(super) struct PreparedObjectAccessHooks {
     // and moved. The boxes are therefore required for stable pointee addresses.
     #[allow(clippy::vec_box)]
     contexts: Vec<Box<ExternalObjectAccessContext>>,
-    descriptors: Vec<ObjectAccessHookDescriptorV1>,
+    descriptors: Vec<ObjectAccessHookDescriptor>,
     #[allow(clippy::vec_box)]
     str_contexts: Vec<Box<ExternalObjectAccessStrContext>>,
-    str_descriptors: Vec<ObjectAccessStrHookDescriptorV1>,
+    str_descriptors: Vec<ObjectAccessStrHookDescriptor>,
 }
 
 impl PreparedObjectAccessHooks {
-    pub(super) fn descriptors(&self) -> &[ObjectAccessHookDescriptorV1] {
+    pub(super) fn descriptors(&self) -> &[ObjectAccessHookDescriptor] {
         &self.descriptors
     }
 
-    pub(super) fn str_descriptors(&self) -> &[ObjectAccessStrHookDescriptorV1] {
+    pub(super) fn str_descriptors(&self) -> &[ObjectAccessStrHookDescriptor] {
         &self.str_descriptors
     }
 
@@ -335,11 +334,10 @@ pub(super) fn prepare_object_access_hooks(
     for hook in entries {
         let filter = hook.filter();
         let mut context = Box::new(ExternalObjectAccessContext { hook });
-        descriptors.push(ObjectAccessHookDescriptorV1 {
-            abi_version: HOOK_DESCRIPTOR_VERSION,
-            struct_size: u32::try_from(std::mem::size_of::<
-                ObjectAccessHookDescriptorV1,
-            >())
+        descriptors.push(ObjectAccessHookDescriptor {
+            struct_size: u32::try_from(
+                std::mem::size_of::<ObjectAccessHookDescriptor>(),
+            )
             .expect("object-access hook descriptor size exceeds u32"),
             event_mask: filter.event_mask(),
             class_id: filter.class_id(),
@@ -355,10 +353,9 @@ pub(super) fn prepare_object_access_hooks(
     for hook in entries {
         let filter = hook.filter();
         let mut context = Box::new(ExternalObjectAccessStrContext { hook });
-        str_descriptors.push(ObjectAccessStrHookDescriptorV1 {
-            abi_version: HOOK_DESCRIPTOR_VERSION,
+        str_descriptors.push(ObjectAccessStrHookDescriptor {
             struct_size: u32::try_from(std::mem::size_of::<
-                ObjectAccessStrHookDescriptorV1,
+                ObjectAccessStrHookDescriptor,
             >())
             .expect("object-access-str hook descriptor size exceeds u32"),
             event_mask: filter.event_mask(),

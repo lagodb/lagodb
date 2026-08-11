@@ -3169,6 +3169,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "lagodb-connectors"
+version = "0.1.0"
+dependencies = [
+ "apache-avro",
+ "arrow-array",
+ "arrow-schema",
+ "bytes",
+ "chrono",
+ "flate2",
+ "parquet",
+ "percent-encoding",
+ "pg-arrow-conv",
+ "pg-lakebase-core",
+ "pg-lakebase-storage",
+ "pgrx",
+ "pgrx-tests",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "url",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

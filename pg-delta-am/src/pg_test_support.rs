@@ -6,9 +6,8 @@ use pg_lakebase_core::hooks::{
     UtilityNode,
 };
 use pg_lakebase_core::runtime_api::{
-    AM_REGISTRATION_VERSION, AmRegistrationV1, MAINTENANCE_PROVIDER_VERSION,
-    MaintenanceProviderV1, MaintenanceReportV1, MaintenanceRequestV1,
-    MaintenanceStatsV1, RuntimeClient, RuntimeRegistrationError,
+    MaintenanceProvider, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
+    ProviderIdentity, ProviderRegistration, RuntimeClient, RuntimeRegistrationError,
 };
 use pgrx::prelude::*;
 
@@ -66,14 +65,14 @@ unsafe extern "C-unwind" fn duplicate_am_oid() -> pg_sys::Oid {
 }
 
 unsafe extern "C-unwind" fn duplicate_execute(
-    _request: *const MaintenanceRequestV1,
-    _report: *mut MaintenanceReportV1,
+    _request: *const MaintenanceRequest,
+    _report: *mut MaintenanceReport,
 ) {
 }
 
 unsafe extern "C-unwind" fn duplicate_inspect(
     _relation: pg_sys::Relation,
-    _stats: *mut MaintenanceStatsV1,
+    _stats: *mut MaintenanceStats,
 ) {
 }
 
@@ -86,9 +85,8 @@ mod delta {
     fn duplicate_iceberg_registration_rejected() -> bool {
         let runtime =
             RuntimeClient::connect().expect("runtime API must be published");
-        let descriptor = MaintenanceProviderV1 {
-            abi_version: MAINTENANCE_PROVIDER_VERSION,
-            struct_size: u32::try_from(std::mem::size_of::<MaintenanceProviderV1>())
+        let descriptor = MaintenanceProvider {
+            struct_size: u32::try_from(std::mem::size_of::<MaintenanceProvider>())
                 .expect("maintenance provider descriptor size exceeds u32"),
             name: c"delta-duplicate".as_ptr(),
             access_method_name: c"iceberg".as_ptr(),
@@ -97,13 +95,20 @@ mod delta {
             execute: duplicate_execute,
             inspect: duplicate_inspect,
         };
-        let registration = AmRegistrationV1 {
-            abi_version: AM_REGISTRATION_VERSION,
-            struct_size: u32::try_from(std::mem::size_of::<AmRegistrationV1>())
-                .expect("AM registration size exceeds u32"),
+        let identity = ProviderIdentity::access_method(
+            c"delta-duplicate",
+            c"pg_delta_am",
+            c"pg_delta_am",
+        );
+        let registration = ProviderRegistration {
+            struct_size: u32::try_from(std::mem::size_of::<ProviderRegistration>())
+                .expect("provider registration size exceeds u32"),
+            provider: &identity,
             maintenance_provider: &descriptor,
             utility_hooks: std::ptr::null(),
             utility_hook_count: 0,
+            utility_consumers: std::ptr::null(),
+            utility_consumer_count: 0,
             object_access_hooks: std::ptr::null(),
             object_access_hook_count: 0,
             object_access_str_hooks: std::ptr::null(),
@@ -112,7 +117,7 @@ mod delta {
         // SAFETY: this test registration uses current ABI values backed by
         // local descriptors that remain live for the synchronous call. The
         // duplicate registration is rejected and publishes no context.
-        let result = unsafe { runtime.register_am(&registration) };
+        let result = unsafe { runtime.register_provider(&registration) };
         result == Err(RuntimeRegistrationError::DuplicateAccessMethod)
     }
 

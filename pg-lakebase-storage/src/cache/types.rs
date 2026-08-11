@@ -20,9 +20,9 @@
 //!    happen *inside* the same variant payload (see [`LargeFillSession::complete_meta`]) without
 //!    creating a second residency.
 //! 3. External [`crate::cache::CacheManager::invalidate_object_cache`] is the only freshness
-//!    boundary. It waits for every `Residency` (and therefore every activity guard) to drop
-//!    before retiring the cache lifecycle, so a handle can keep reading its observed snapshot
-//!    without re-validating against the index.
+//!    boundary. It rejects an active key rather than retiring a lifecycle under a live handle;
+//!    callers must retry after the activity drains, so a handle can keep reading its observed
+//!    snapshot without re-validating against the index.
 
 use std::sync::Arc;
 use std::time::Duration;

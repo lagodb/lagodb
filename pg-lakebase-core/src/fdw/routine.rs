@@ -42,6 +42,9 @@ pub fn register_modify<P: FdwModify>(routine: &mut FdwRoutine) {
     routine.PlanForeignModify = Some(modify::plan_foreign_modify::<P>);
     routine.BeginForeignModify = Some(modify::begin_foreign_modify::<P>);
     routine.ExecForeignInsert = Some(modify::exec_foreign_insert::<P>);
+    routine.ExecForeignBatchInsert = Some(modify::exec_foreign_batch_insert::<P>);
+    routine.GetForeignModifyBatchSize =
+        Some(modify::get_foreign_modify_batch_size::<P>);
     routine.ExecForeignUpdate = Some(modify::exec_foreign_update::<P>);
     routine.ExecForeignDelete = Some(modify::exec_foreign_delete::<P>);
     routine.EndForeignModify = Some(modify::end_foreign_modify::<P>);

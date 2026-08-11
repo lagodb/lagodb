@@ -1,15 +1,15 @@
-//! PostgreSQL catalog identity for one effective foreign storage context.
+//! PostgreSQL catalog identity for one effective storage context.
 
 use pgrx::pg_sys;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ForeignStoreIdentity {
+pub struct StorageIdentity {
     database_oid: pg_sys::Oid,
     server_oid: pg_sys::Oid,
     umid: pg_sys::Oid,
 }
 
-impl ForeignStoreIdentity {
+impl StorageIdentity {
     pub(crate) const fn new(
         database_oid: pg_sys::Oid,
         server_oid: pg_sys::Oid,

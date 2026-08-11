@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use object_store::ObjectStore;
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::{ObjectStore, RetryConfig};
 
 use super::{
     S3CompatibleStoreConfig, S3StoreConfig, finish_store_build, validate_endpoint,
@@ -70,12 +70,22 @@ impl S3StoreConfig {
             self.access_key_id.is_some(),
             self.secret_access_key.is_some(),
             self.token.is_some(),
-        )
+        )?;
+        let credential_sources = usize::from(self.access_key_id.is_some())
+            + usize::from(self.secret_access_key.is_some())
+            + usize::from(self.token.is_some());
+        if self.skip_signature && credential_sources != 0 {
+            return Err(StorageError::configuration(
+                "S3 skip_signature cannot be combined with explicit credentials",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn build_store(
         &self,
         bucket: &str,
+        retry_config: RetryConfig,
     ) -> StorageResult<Arc<dyn ObjectStore>> {
         self.validate()?;
         let mut builder = AmazonS3Builder::new();
@@ -108,6 +118,7 @@ impl S3StoreConfig {
         if self.skip_signature {
             builder = builder.with_skip_signature(true);
         }
+        builder = builder.with_retry(retry_config);
         finish_store_build(builder.build(), "S3", "bucket", bucket)
     }
 }
@@ -136,12 +147,22 @@ impl S3CompatibleStoreConfig {
             self.access_key_id.is_some(),
             self.secret_access_key.is_some(),
             self.token.is_some(),
-        )
+        )?;
+        let credential_sources = usize::from(self.access_key_id.is_some())
+            + usize::from(self.secret_access_key.is_some())
+            + usize::from(self.token.is_some());
+        if self.skip_signature && credential_sources != 0 {
+            return Err(StorageError::configuration(
+                "S3-compatible skip_signature cannot be combined with explicit credentials",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn build_store(
         &self,
         bucket: &str,
+        retry_config: RetryConfig,
     ) -> StorageResult<Arc<dyn ObjectStore>> {
         self.validate()?;
         let mut builder = AmazonS3Builder::new();
@@ -173,6 +194,7 @@ impl S3CompatibleStoreConfig {
         if self.skip_signature {
             builder = builder.with_skip_signature(true);
         }
+        builder = builder.with_retry(retry_config);
         finish_store_build(builder.build(), "S3-compatible", "bucket", bucket)
     }
 }

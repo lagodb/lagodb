@@ -8,9 +8,10 @@ use pgrx::pg_sys;
 
 use crate::diag::PgReportError;
 use crate::handles::ValidItemPointer;
-use crate::tuple::{Cell, PgDatumRef};
+use crate::tuple::{Cell, PgDatumRef, TupleSlotRow};
 use crate::wrapper::PgWrapper;
 
+use super::contract::ForeignModifyOutcome;
 use super::error::ForeignModifyError;
 use super::return_layout::ForeignModifyReturnColumn;
 use super::row_layout::ModifyRowLayout;
@@ -104,6 +105,19 @@ impl<'slot> ModifySlot<'slot> {
         self.columns.as_raw()
     }
 
+    /// Borrow the callback's input row in the slot-first representation used
+    /// by relation-bound columnar encoders.
+    ///
+    /// The view cannot outlive this mutable borrow, so a provider cannot retain
+    /// PostgreSQL-owned datum pointers across modify callbacks. Descriptor and
+    /// source-OID validation remains a Begin-time responsibility of the bound
+    /// encoder; no per-datum type check is added here.
+    pub fn tuple_row(&mut self) -> TupleSlotRow<'_> {
+        // SAFETY: ModifySlot was constructed from this live callback slot and
+        // the returned lifetime is bounded by the exclusive borrow of self.
+        unsafe { TupleSlotRow::from_raw(self.columns.as_raw()) }
+    }
+
     /// Read a provider column derived from this slot's relation metadata.
     ///
     /// # Safety
@@ -149,7 +163,7 @@ impl<'slot> ModifySlot<'slot> {
             Some(cell) => {
                 let codec = unsafe { self.layout.codec_for_unchecked(index) }?;
                 let converted = unsafe {
-                    PgMemoryContexts::For(self.columns.target_context())
+                    PgMemoryContexts::For(self.columns.conversion_context())
                         .switch_to(|_| codec.cell_to_datum(cell))
                 };
                 Some(converted.map_err(PgReportError::from_domain_error)?)
@@ -359,5 +373,182 @@ impl<'slot> ModifySlot<'slot> {
             }
         }
         self.representation_dirty = false;
+    }
+}
+
+/// Callback-scoped view of the slots supplied to `ExecForeignBatchInsert`.
+///
+/// The batch owns only the compacted output pointer list and the count of
+/// accepted rows. PostgreSQL continues to own every input slot and its
+/// arrays. A provider can inspect or encode each slot through
+/// [`Self::with_slot_unchecked`] and then retain the rows that were accepted.
+/// The accepted-row count is kept separately because PostgreSQL consumes it
+/// even when no returned slot is required. The default
+/// [`crate::fdw::ForeignModifyState::insert_batch`] implementation
+/// uses [`Self::process_each`], while a format writer can override it and
+/// encode the whole batch before committing one provider-side write.
+pub struct ForeignInsertBatch<'layout> {
+    slots: *mut *mut pg_sys::TupleTableSlot,
+    len: usize,
+    layout: &'layout mut ModifyRowLayout,
+    conversion_context: pg_sys::MemoryContext,
+    returned_item_pointer_required: bool,
+    return_slot_required: bool,
+    accepted_rows: usize,
+    output_slots: Vec<*mut pg_sys::TupleTableSlot>,
+}
+
+impl<'layout> ForeignInsertBatch<'layout> {
+    /// # Safety
+    ///
+    /// PostgreSQL supplies a live array of `len` relation-shaped slots and a
+    /// conversion context valid for the callback. `layout` must describe the
+    /// same relation and remain live until the batch is finished.
+    pub(crate) unsafe fn from_raw(
+        slots: *mut *mut pg_sys::TupleTableSlot,
+        len: usize,
+        layout: &'layout mut ModifyRowLayout,
+        conversion_context: pg_sys::MemoryContext,
+        returned_item_pointer_required: bool,
+        return_slot_required: bool,
+    ) -> Self {
+        debug_assert!(!slots.is_null());
+        Self {
+            slots,
+            len,
+            layout,
+            conversion_context,
+            returned_item_pointer_required,
+            return_slot_required,
+            accepted_rows: 0,
+            // COPY/Modify batches normally do not return slots. Avoid an
+            // allocation for that hot path; PostgreSQL only consumes the
+            // compacted output array when a returned row is required. The
+            // accepted-row count remains available for *num_slots.
+            output_slots: if return_slot_required {
+                Vec::with_capacity(len)
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Whether the PostgreSQL executor requires the provider to return a
+    /// relation-shaped slot after each accepted row.
+    #[inline]
+    pub fn return_slot_required(&self) -> bool {
+        self.return_slot_required
+    }
+
+    /// Process every input slot with the ordinary row contract and retain all
+    /// rows whose provider outcome is [`ForeignModifyOutcome::Applied`].
+    ///
+    /// This method is the correctness-preserving default for providers that
+    /// have not implemented a format-native batch encoder. It keeps the
+    /// callback and state lifecycle at batch scope; it does not add a format
+    /// lookup, catalog lookup, or allocation to the individual row operation.
+    pub fn process_each<F>(&mut self, operation: F) -> Result<(), ForeignModifyError>
+    where
+        F: FnMut(
+            usize,
+            &mut ModifySlot<'_>,
+        ) -> Result<ForeignModifyOutcome, ForeignModifyError>,
+    {
+        self.process_each_with(operation, |error| error)
+    }
+
+    /// Process every input slot while allowing an adapter to preserve its own
+    /// provider error type. Only framework errors produced while materializing
+    /// an accepted output slot are passed to `map_framework_error`.
+    pub fn process_each_with<E, F, M>(
+        &mut self,
+        mut operation: F,
+        mut map_framework_error: M,
+    ) -> Result<(), E>
+    where
+        F: FnMut(usize, &mut ModifySlot<'_>) -> Result<ForeignModifyOutcome, E>,
+        M: FnMut(ForeignModifyError) -> E,
+    {
+        let return_slot_required = self.return_slot_required;
+        for index in 0..self.len {
+            let returned_slot = unsafe {
+                self.with_slot_unchecked(index, |slot| {
+                    let outcome = operation(index, slot)?;
+                    super::executor::map_outcome(return_slot_required, slot, outcome)
+                        .map_err(&mut map_framework_error)
+                })?
+            };
+            if !returned_slot.is_null() {
+                self.accepted_rows += 1;
+                if return_slot_required {
+                    self.output_slots.push(returned_slot);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs one provider operation against an input slot without performing a
+    /// per-call bounds or relation-shape check.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be less than [`Self::len`]. The PostgreSQL callback contract
+    /// must hold for the slot at that index, and the provider must not retain
+    /// the `ModifySlot` or any borrow derived from it after `operation` returns.
+    pub unsafe fn with_slot_unchecked<R, E>(
+        &mut self,
+        index: usize,
+        operation: impl FnOnce(&mut ModifySlot<'_>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let slot = unsafe { *self.slots.add(index) };
+        let mut row = unsafe {
+            ModifySlot::from_raw(
+                slot,
+                self.conversion_context,
+                self.layout,
+                self.returned_item_pointer_required,
+            )
+        };
+        operation(&mut row)
+    }
+
+    /// Retain one original input slot after a provider-side batch operation.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be less than [`Self::len`], each accepted index must be
+    /// retained at most once, and the provider must have completed any slot
+    /// representation work required by [`Self::return_slot_required`].
+    pub unsafe fn retain_input_slot_unchecked(&mut self, index: usize) {
+        self.accepted_rows += 1;
+        if self.return_slot_required {
+            self.output_slots.push(unsafe { *self.slots.add(index) });
+        }
+    }
+
+    pub(crate) fn finish(self) -> (*mut *mut pg_sys::TupleTableSlot, usize) {
+        let Self {
+            slots,
+            accepted_rows,
+            output_slots,
+            ..
+        } = self;
+        for (index, slot) in output_slots.iter().copied().enumerate() {
+            // SAFETY: PostgreSQL owns the input slot array for this callback;
+            // the output array is allowed to be a compacted prefix of it.
+            unsafe { slots.add(index).write(slot) };
+        }
+        (slots, accepted_rows)
     }
 }

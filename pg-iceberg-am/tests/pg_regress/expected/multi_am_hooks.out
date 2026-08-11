@@ -1,7 +1,6 @@
--- A second provider cdylib must join Lakebase's one backend-local directory.
+-- A second provider loaded by the runtime must join the unified directory.
 DROP EXTENSION IF EXISTS pg_iceberg_am CASCADE;
 CREATE EXTENSION pg_iceberg_am;
-LOAD '$libdir/pg_delta_am';
 CREATE EXTENSION pg_delta_am;
 CREATE TABLE multi_am_delta (id integer) USING delta;
 INSERT INTO multi_am_delta VALUES (1), (2);
@@ -17,7 +16,7 @@ FROM delta.utility_hook_counts();
  t
 (1 row)
 
--- Loading Delta must not replace the Iceberg callbacks already registered in
+-- Bootstrapping Delta must not replace the Iceberg callbacks registered in
 -- the same Lakebase hook directories.
 CREATE TABLE multi_am_iceberg (id integer) USING iceberg;
 INSERT INTO multi_am_iceberg VALUES (1);

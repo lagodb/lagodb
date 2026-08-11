@@ -40,7 +40,6 @@ pub use relation::{
     AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationGuard,
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
 };
-#[cfg(feature = "pg17")]
 pub use scan::AnalyzeSamplerState;
 pub use scan::{
     AnalyzeReadStreamHandle, OwnedScanKeys, ParallelTableScanDescHandle,

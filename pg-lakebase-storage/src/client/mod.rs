@@ -1,9 +1,11 @@
 //! Blocking Unix peer for tests / tools / foreign-language wrappers.
 //!
-//! The client exposes three surfaces:
+//! The client exposes four surfaces:
 //!
 //! * [`StorageClient`] — connection-bound request/response primitive. Cloneable; all clones
 //!   share one underlying non-multiplexed Unix connection for single-threaded blocking use.
+//! * [`ListSession`] / [`ListIter`] — page-oriented and entry-oriented views over one
+//!   connection-bound object listing.
 //! * [`StorageFile`]   — open read handle returned by [`StorageClient::open`]. Seek / read / close.
 //! * [`StagingFile`]   — local file handle constructed by the caller via
 //!   [`StagingFile::create`](crate::client::StagingFile::create) using a
@@ -26,7 +28,7 @@ use crate::backend::{BackendDataIdentity, StorageProbeResult, StoreConfig};
 use crate::error::{StorageError, StorageResult};
 use crate::handle::{FileHandle, OpenFlags};
 use crate::object::ObjectInfo;
-use crate::protocol::{ListCursor, WireRequestPayload, WireResponsePayload};
+use crate::protocol::{WireRequestPayload, WireResponsePayload};
 
 mod attach;
 mod client_builder;
@@ -43,7 +45,7 @@ mod tests;
 
 pub use client_builder::{DEFAULT_CLIENT_CLEANUP_TIMEOUT, StorageClientBuilder};
 pub use fd::{ExternalFdLease, ExternalFdPolicy};
-pub use list::ListIter;
+pub use list::{ListIter, ListSession};
 pub use socket_wait::{SocketInterest, SocketWait, SocketWaitContext};
 pub use staging_file::StagingFile;
 pub use storage_file::{SeekFrom, StorageFile};
@@ -99,23 +101,12 @@ pub struct UploadInfo {
     pub etag: Option<String>,
 }
 
-/// One element returned by [`StorageClient::list`] / [`StorageClient::list_page`].
+/// One element returned by [`StorageClient::list`] or [`ListSession::next_page`].
 ///
 /// Re-exported from [`crate::object::ListEntry`] (the same type the backend trait surfaces) to
 /// keep the client and backend vocabularies aligned: a list entry has exactly one shape across
 /// the codebase.
 pub use crate::object::ListEntry;
-
-/// One page of a [`StorageClient::list_page`] call.
-///
-/// `next_cursor.is_none()` means the listing is complete; otherwise the same cursor must be
-/// passed back in to fetch the next page. The cursor is opaque — callers should not parse or
-/// modify its contents.
-#[derive(Clone, Debug)]
-pub struct ListPage {
-    pub entries: Vec<ListEntry>,
-    pub next_cursor: Option<ListCursor>,
-}
 
 impl StorageClient {
     pub fn builder(socket_path: impl AsRef<Path>) -> StorageClientBuilder {
@@ -285,8 +276,13 @@ impl StorageClient {
         }
     }
 
-    /// Fetches object metadata without opening a server-side read handle or admitting the object
+    /// Returns object metadata without opening a server-side read handle or admitting the object
     /// into the cache.
+    ///
+    /// If the object already has a cache residency, the service returns that
+    /// residency's frozen metadata. The storage cache does not probe the
+    /// backend for same-key changes; callers that know the object changed must
+    /// call [`Self::invalidate_object_cache`] before requesting fresh metadata.
     pub fn head(
         &self,
         bucket: impl Into<String>,
@@ -369,6 +365,13 @@ impl StorageClient {
         }
     }
 
+    /// Explicitly retires the local cache residency for one physical object.
+    ///
+    /// Cache freshness is caller-owned: this operation is not triggered by
+    /// `upload`, `delete`, or `head`, and it must be issued by the caller that
+    /// knows the remote key was replaced or removed. An active residency is
+    /// rejected with `Busy` so an existing handle never observes a lifecycle
+    /// that was retired underneath it.
     pub fn invalidate_object_cache(
         &self,
         bucket: impl Into<String>,
@@ -388,8 +391,8 @@ impl StorageClient {
     /// Deletes a single object from the backend.
     ///
     /// Idempotent: deleting a missing key is `Ok(())` regardless of the backend's native
-    /// missing-key behavior. The server best-effort invalidates any local cache row for the key
-    /// (skipped if the cache entry is currently active; the janitor will reclaim it later).
+    /// missing-key behavior. Deletion does not invalidate the local cache; the caller that knows
+    /// the key changed must call [`Self::invalidate_object_cache`] explicitly.
     pub fn delete(
         &self,
         bucket: impl Into<String>,
@@ -421,6 +424,10 @@ impl StorageClient {
     /// (millions of objects, or interleaving with concurrent reads on the same client), prefer
     /// driving the deletion explicitly via [`Self::list_page`] + [`Self::delete_objects`]
     /// in bounded batches. `delete_prefix` is a convenience method, not a bulk-throughput tool.
+    ///
+    /// Deletion does not invalidate local cache entries. A caller that knows which keys changed
+    /// must explicitly invalidate those keys; this operation does not infer cache freshness from
+    /// the deleted prefix.
     pub fn delete_prefix(
         &self,
         bucket: impl Into<String>,
@@ -437,6 +444,9 @@ impl StorageClient {
     }
 
     /// Deletes one bounded group of object keys through the backend bulk-delete path.
+    ///
+    /// Deletion does not invalidate local cache entries. A caller that knows these keys changed
+    /// must explicitly invalidate the affected keys.
     pub fn delete_objects(
         &self,
         bucket: impl Into<String>,

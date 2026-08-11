@@ -349,10 +349,7 @@ impl ScanSpec {
 
     /// Plan the whole logical snapshot for PostgreSQL ANALYZE. Sampling is
     /// intentionally deferred until PostgreSQL supplies its ReadStream tickets.
-    pub(crate) fn prepare_analyze(
-        &self,
-        #[cfg(not(feature = "pg17"))] statistics_target: i32,
-    ) -> IcebergResult<AnalyzePreparation> {
+    pub(crate) fn prepare_analyze(&self) -> IcebergResult<AnalyzePreparation> {
         let scan = self.build_scan(RowLocationProjection::Include, None)?;
         let tasks = scan.plan_files()?;
         AnalyzePreparation::try_new(
@@ -362,8 +359,6 @@ impl ScanSpec {
             self.storage_bytes.ok_or(IcebergError::InvariantViolated(
                 "ANALYZE ScanSpec is missing storage-byte statistics",
             ))?,
-            #[cfg(not(feature = "pg17"))]
-            statistics_target,
         )
     }
 

@@ -7,8 +7,7 @@ use std::ffi::c_void;
 use std::marker::PhantomData;
 
 use crate::runtime_api::{
-    HOOK_DESCRIPTOR_VERSION, RoutedUtilityPostHook, RoutedUtilityPreHook,
-    UtilityHookDescriptorV1,
+    RoutedUtilityPostHook, RoutedUtilityPreHook, UtilityHookDescriptor,
 };
 
 /// Type-level binding between a marker type, PostgreSQL utility statement
@@ -35,6 +34,11 @@ macro_rules! impl_utility_stmt_node {
 }
 
 impl_utility_stmt_node!(CopyStmtNode, pg_sys::CopyStmt, pg_sys::NodeTag::T_CopyStmt);
+impl_utility_stmt_node!(
+    CreateForeignTableStmtNode,
+    pg_sys::CreateForeignTableStmt,
+    pg_sys::NodeTag::T_CreateForeignTableStmt
+);
 impl_utility_stmt_node!(
     AlterTableStmtNode,
     pg_sys::AlterTableStmt,
@@ -157,11 +161,11 @@ pub(super) struct PreparedUtilityHooks {
     // itself is built, moved into the registration batch, or restored.
     #[allow(clippy::vec_box)]
     contexts: Vec<Box<ExternalHookContext>>,
-    descriptors: Vec<UtilityHookDescriptorV1>,
+    descriptors: Vec<UtilityHookDescriptor>,
 }
 
 impl PreparedUtilityHooks {
-    pub(super) fn descriptors(&self) -> &[UtilityHookDescriptorV1] {
+    pub(super) fn descriptors(&self) -> &[UtilityHookDescriptor] {
         &self.descriptors
     }
 
@@ -271,11 +275,9 @@ pub(super) fn prepare_utility_hooks(
     let mut descriptors = Vec::with_capacity(entries.len());
     for (tag, hook) in entries {
         let mut context = Box::new(ExternalHookContext { tag, hook });
-        descriptors.push(UtilityHookDescriptorV1 {
-            abi_version: HOOK_DESCRIPTOR_VERSION,
-            struct_size:
-                u32::try_from(std::mem::size_of::<UtilityHookDescriptorV1>())
-                    .expect("utility hook descriptor size exceeds u32"),
+        descriptors.push(UtilityHookDescriptor {
+            struct_size: u32::try_from(std::mem::size_of::<UtilityHookDescriptor>())
+                .expect("utility hook descriptor size exceeds u32"),
             tag: tag as u32,
             context: std::ptr::from_mut(context.as_mut()).cast(),
             on_pre: Some(callbacks.on_pre),

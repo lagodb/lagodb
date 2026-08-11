@@ -2,13 +2,13 @@
 
 use std::time::Duration;
 
-use crate::runtime_api::RuntimeMaintenanceConfigV1;
+use crate::runtime_api::RuntimeMaintenanceConfig;
 
 /// Runtime-backed settings shared by physical object cleanup and logical
 /// table maintenance.
 #[derive(Clone, Copy)]
 pub(crate) struct MaintenanceSettings {
-    config: RuntimeMaintenanceConfigV1,
+    config: RuntimeMaintenanceConfig,
 }
 
 /// Validated VACUUM resource bounds exposed to the table-maintenance layer.

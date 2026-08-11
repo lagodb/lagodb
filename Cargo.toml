@@ -9,6 +9,7 @@ members = [
     "pg-backend-tests",
     "iceberg-lite",
     "pg-lakebase-storage",
+    "lagodb-connectors",
     "xtask",
 ]
 resolver = "2"
