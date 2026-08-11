@@ -8,11 +8,11 @@ use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::{PgLogLevel, PgSqlErrorCode};
 
-use super::super::codec::PrivateCodecError;
 use super::contract::FdwModify;
 use crate::diag::{
     PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
 };
+use crate::plan_data::PlanDataError;
 
 /// PostgreSQL modify callback phase attached at the FFI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,8 +181,8 @@ impl SqlStateError for ForeignModifyError {
     }
 }
 
-impl From<PrivateCodecError> for ForeignModifyError {
-    fn from(error: PrivateCodecError) -> Self {
+impl From<PlanDataError> for ForeignModifyError {
+    fn from(error: PlanDataError) -> Self {
         Self::new(ForeignModifyErrorKind::PrivateCodec {
             source: Box::new(error),
         })

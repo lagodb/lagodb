@@ -1,7 +1,4 @@
-//! Plan-stage expression inspection, predicate parsing, classification, and split.
+//! Plan-stage expression inspection and relation metadata.
 
-pub mod classify;
 pub(crate) mod inspect;
-pub mod predicate;
 pub(crate) mod relation;
-pub mod split;

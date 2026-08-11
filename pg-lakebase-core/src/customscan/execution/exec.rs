@@ -27,17 +27,19 @@ mod tests {
     use pgrx::prelude::PgSqlErrorCode;
     use proptest::prelude::*;
 
-    use crate::customscan::plan_data::EnvelopeError;
     use crate::customscan::plan_data::custom_exprs::validate_custom_expr_section_counts;
     use crate::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, CustomScanPrivate, EndContext, LakebaseCustomScanProvider,
-        NextSlotContext, PathContext, PathVariant, PlanTranslateContext,
-        PrivateDataReader, PrivateDataWriter, ReScanContext, RelationContext,
+        NextSlotContext, PathContext, PathVariant, PrivateDataReader,
+        PrivateDataWriter, ReScanContext, RelationContext,
     };
-    use crate::diag::{SqlStateError, error_source_chain_detail};
-    use crate::expr::contract::QualPushdownDecision;
-    use crate::expr::predicate::PlanPredicate;
+    use crate::diag::SqlStateError;
+    use crate::expr::pushdown::{
+        FilterBindResult, FilterFragment, FilterPlan, FilterPlanningContext,
+        FilterPushdown, FilterPushdownPlanner, FilterValueBindings,
+    };
+    use crate::plan_data::{PlanDataReader, PlanDataWriter};
 
     struct NoopPrivate;
 
@@ -65,6 +67,54 @@ mod tests {
 
     struct NoopProvider<S>(PhantomData<S>);
 
+    struct RejectAllPlanner;
+
+    impl FilterPushdownPlanner for RejectAllPlanner {
+        type PlannedPredicate = ();
+        type Error = CustomScanError;
+
+        fn try_plan_filter(
+            &mut self,
+            _fragment: &FilterFragment,
+        ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
+            Ok(FilterPlan::Unsupported)
+        }
+    }
+
+    impl<S: NoopProviderSpec> FilterPushdown for NoopProvider<S> {
+        type Planner = RejectAllPlanner;
+        type PlannedPredicate = ();
+        type BoundPredicate = ();
+        type Error = CustomScanError;
+
+        fn begin_filter_planning(
+            _context: &FilterPlanningContext,
+        ) -> Result<Self::Planner, Self::Error> {
+            Ok(RejectAllPlanner)
+        }
+
+        fn encode_planned(
+            _predicate: &Self::PlannedPredicate,
+            _writer: &mut PlanDataWriter,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn decode_planned(
+            _reader: &mut PlanDataReader<'_>,
+            _binding_count: usize,
+        ) -> Result<Self::PlannedPredicate, Self::Error> {
+            Ok(())
+        }
+
+        fn bind_filter(
+            _predicate: &Self::PlannedPredicate,
+            _values: FilterValueBindings<'_>,
+        ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
+            Ok(FilterBindResult::ValueNotRepresentable)
+        }
+    }
+
     impl<S: NoopProviderSpec> LakebaseCustomScanProvider for NoopProvider<S> {
         const NAME: &'static CStr = S::NAME;
         type PrivateData = NoopPrivate;
@@ -72,13 +122,6 @@ mod tests {
 
         fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
-        }
-
-        fn classify_predicate(
-            _ctx: &PlanTranslateContext,
-            _predicate: &PlanPredicate,
-        ) -> QualPushdownDecision {
-            QualPushdownDecision::Unsupported
         }
 
         fn create_path(
@@ -278,27 +321,13 @@ mod tests {
     fn custom_expr_section_counts_null_branch_returns_err() {
         let err = validate_custom_expr_section_counts(None, 1, 0).unwrap_err();
         assert!(
-            err.to_string().contains("pushed_count=1")
-                && err.to_string().contains("recheck_count=0")
+            err.to_string().contains("binding_count=1")
+                && err.to_string().contains("pushed_count=0")
         );
     }
 
     #[test]
     fn custom_expr_section_counts_zero_counts_returns_zero() {
         assert_eq!(validate_custom_expr_section_counts(None, 0, 0).unwrap(), 0);
-    }
-
-    #[test]
-    fn provider_private_decode_wraps_decode_error_with_provider_name() {
-        let report = CustomScanError::provider_private_decode(
-            DummyProvider::NAME,
-            CustomScanError::private_codec(EnvelopeError::NullPayload),
-        );
-        assert!(report.to_string().contains("exec-test-dummy"));
-        assert!(
-            error_source_chain_detail(&report).is_some_and(
-                |detail| detail.contains("custom_private payload is NULL")
-            )
-        );
     }
 }

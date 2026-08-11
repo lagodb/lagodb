@@ -17,13 +17,13 @@ pub use crate::customscan::plan_data::tuple_layout::{
 };
 pub use contract::LakebaseCustomScanProvider;
 pub use execution::{
-    BeginContext, CreateStateContext, EndContext, NextSlotContext, PushedPredicates,
-    ReScanContext,
+    BeginContext, CreateStateContext, EndContext, NextSlotContext, ReScanContext,
 };
 pub(crate) use methods::method_tables_for;
 pub use planning::*;
 pub use private_data::{
     CustomScanPrivate, NoPrivateData, PrivateDataReader, PrivateDataWriter,
 };
+pub(crate) use registry::ErasedFilterPlanner;
 pub use registry::register_provider;
-pub use registry::{ErasedProvider, find_matching_provider};
+pub(crate) use registry::{ErasedProvider, find_matching_provider};

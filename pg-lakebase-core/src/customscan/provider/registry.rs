@@ -8,25 +8,38 @@ use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
 use crate::customscan::planning::builder::{EmitCustomPathContext, emit_custom_path};
-use crate::expr::contract::QualPushdownDecision;
-use crate::expr::predicate::PlanPredicate;
+use crate::expr::pushdown::{
+    FilterNegotiator, FilterPlanningContext, PathFilterSet, ScanClauseSource,
+};
 
-use super::{LakebaseCustomScanProvider, PlanTranslateContext, RelationContext};
+use super::{LakebaseCustomScanProvider, RelationContext};
+
+pub(crate) trait ErasedFilterPlanner {
+    /// # Safety
+    ///
+    /// `clauses` must be a live planner-owned `List<RestrictInfo>`.
+    unsafe fn negotiate(
+        &mut self,
+        clauses: *mut pg_sys::List,
+        source: ScanClauseSource,
+    ) -> Result<PathFilterSet, CustomScanError>;
+}
 
 /// Type-erased registered provider for the pathlist router.
-pub trait ErasedProvider: Sync {
+pub(crate) trait ErasedProvider: Sync {
     /// Provider name (`P::NAME`).
     fn name(&self) -> &'static CStr;
 
     /// Forwards to `P::supports_relation` (framework path-stage gates already applied).
     fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool;
 
-    /// Forwards to `P::classify_predicate`.
-    fn classify_predicate(
+    /// Create one relation-scoped typed filter planner behind a planning-only
+    /// object-safe bridge.
+    fn begin_filter_planning(
         &self,
-        ctx: &PlanTranslateContext,
-        predicate: &PlanPredicate,
-    ) -> QualPushdownDecision;
+        context: &FilterPlanningContext,
+        baserel: *mut pg_sys::RelOptInfo,
+    ) -> Result<Box<dyn ErasedFilterPlanner>, CustomScanError>;
 
     /// Forwards to [`emit_custom_path`](crate::customscan::planning::builder::emit_custom_path).
     ///
@@ -44,6 +57,27 @@ pub trait ErasedProvider: Sync {
 /// Phantom wrapper for `P: LakebaseCustomScanProvider` in the registry.
 struct ProviderEntry<P: LakebaseCustomScanProvider> {
     _marker: PhantomData<fn() -> P>,
+}
+
+struct ProviderFilterPlanner<P: LakebaseCustomScanProvider> {
+    planner: P::Planner,
+    relation_oid: pg_sys::Oid,
+    baserel: *mut pg_sys::RelOptInfo,
+}
+
+impl<P: LakebaseCustomScanProvider> ErasedFilterPlanner for ProviderFilterPlanner<P> {
+    unsafe fn negotiate(
+        &mut self,
+        clauses: *mut pg_sys::List,
+        source: ScanClauseSource,
+    ) -> Result<PathFilterSet, CustomScanError> {
+        let mut negotiator =
+            FilterNegotiator::new(&mut self.planner, self.relation_oid, self.baserel);
+        match unsafe { negotiator.negotiate(clauses, source) } {
+            Ok(filters) => Ok(filters.into_path_set()),
+            Err(error) => Err(CustomScanError::provider(error)),
+        }
+    }
 }
 
 impl<P: LakebaseCustomScanProvider> ProviderEntry<P> {
@@ -66,12 +100,20 @@ impl<P: LakebaseCustomScanProvider> ErasedProvider for ProviderEntry<P> {
         P::supports_relation(ctx)
     }
 
-    fn classify_predicate(
+    fn begin_filter_planning(
         &self,
-        ctx: &PlanTranslateContext,
-        predicate: &PlanPredicate,
-    ) -> QualPushdownDecision {
-        P::classify_predicate(ctx, predicate)
+        context: &FilterPlanningContext,
+        baserel: *mut pg_sys::RelOptInfo,
+    ) -> Result<Box<dyn ErasedFilterPlanner>, CustomScanError> {
+        let planner = match P::begin_filter_planning(context) {
+            Ok(planner) => planner,
+            Err(error) => return Err(CustomScanError::provider(error)),
+        };
+        Ok(Box::new(ProviderFilterPlanner::<P> {
+            planner,
+            relation_oid: context.relation_oid(),
+            baserel,
+        }))
     }
 
     unsafe fn emit_path(
@@ -113,7 +155,7 @@ pub fn register_provider<P: LakebaseCustomScanProvider>() {
 }
 
 /// Find the unique provider claiming this relation, or `None` / multi-match error.
-pub fn find_matching_provider(
+pub(crate) fn find_matching_provider(
     ctx: &RelationContext<'_>,
 ) -> Result<Option<&'static dyn ErasedProvider>, CustomScanError> {
     REGISTRY.with_borrow(|registry| {

@@ -22,7 +22,7 @@ mod spec;
 mod tasks;
 
 pub use cursor::IcebergBatchCursor;
-pub(crate) use spec::ScanSpec;
+pub(crate) use spec::{LoadedScanMetadata, ScanSpec};
 pub(crate) use tasks::PlannedMutationTasks;
 
 use pg_lakebase_core::access::scan::virtual_slot_callbacks_with_tid;

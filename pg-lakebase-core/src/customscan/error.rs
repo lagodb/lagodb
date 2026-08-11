@@ -2,17 +2,21 @@
 
 use core::ffi::CStr;
 use std::ffi::CString;
+use std::fmt::Display;
 
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
+use crate::customscan::plan_data::EnvelopeError;
 use crate::diag::{
     PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
 };
+use crate::plan_data::PlanDataError;
 
-/// Executor callback phase; only trampolines attach this via [`CustomScanError::with_provider_phase`].
+/// Executor callback phase; only trampolines attach this via
+/// [`CustomScanError::with_callback_phase`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CustomScanPhase {
     Begin,
@@ -24,25 +28,25 @@ impl CustomScanPhase {
     #[inline]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Begin => "begin",
-            Self::ReScan => "rescan",
-            Self::NextSlot => "next_slot",
+            Self::Begin => "BeginCustomScan",
+            Self::ReScan => "ReScanCustomScan",
+            Self::NextSlot => "ExecCustomScan access",
         }
     }
 }
 
 /// Domain error for customscan framework and provider boundaries.
 ///
-/// Variants are not public: AM code must use [`Self::provider`], [`Self::internal`], and
-/// [`Self::predicate_build_at`]. Framework/trampoline code uses `pub(crate)` constructors.
+/// Variants are not public: AM code uses [`Self::provider`] and
+/// [`Self::internal`]. Framework/trampoline code uses `pub(crate)` constructors.
 #[derive(Debug)]
 pub struct CustomScanError(Box<CustomScanErrorKind>);
 
 #[derive(Debug, Error)]
 enum CustomScanErrorKind {
-    /// Trampoline-added context around a provider callback failure.
-    #[error("customscan {:?} provider.{} failed: {source}", provider, phase.as_str())]
-    Runtime {
+    /// Context attached exactly once by the PostgreSQL FFI trampoline.
+    #[error("customscan {:?} {} callback failed: {source}", provider, phase.as_str())]
+    Callback {
         provider: &'static CStr,
         phase: CustomScanPhase,
         #[source]
@@ -55,27 +59,6 @@ enum CustomScanErrorKind {
         sqlerrcode: PgSqlErrorCode,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[error("customscan predicate construction failed")]
-    PredicateBuild {
-        pushed_index: Option<usize>,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[error("customscan runtime parameter resolution failed: {source}")]
-    RuntimeParameter {
-        sqlerrcode: PgSqlErrorCode,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    #[error("{message}: {source}")]
-    Context {
-        message: String,
-        #[source]
-        source: Box<CustomScanError>,
     },
 
     /// Framework/custom_private codec failure (not a provider domain error).
@@ -141,53 +124,12 @@ impl CustomScanError {
         })
     }
 
-    pub fn predicate_build_at(
-        pushed_index: Option<usize>,
-        err: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
-        Self::new(CustomScanErrorKind::PredicateBuild {
-            pushed_index,
-            source: Box::new(err),
-        })
-    }
-
-    pub(crate) fn runtime_parameter<E>(err: E) -> Self
-    where
-        E: SqlStateError + std::error::Error + Send + Sync + 'static,
-    {
-        Self::new(CustomScanErrorKind::RuntimeParameter {
-            sqlerrcode: err.sql_error_code(),
-            source: Box::new(err),
-        })
-    }
-
-    /// Wrap any failure while encoding `custom_private` (provider payload or codec).
-    pub(crate) fn encode_custom_private(source: impl Into<CustomScanError>) -> Self {
-        Self::new(CustomScanErrorKind::Context {
-            message: "customscan: failed to encode custom_private".to_owned(),
-            source: Box::new(source.into()),
-        })
-    }
-
     /// Wrap a custom_private codec error (always `INTERNAL_ERROR`).
     pub(crate) fn private_codec(
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
         Self::new(CustomScanErrorKind::Codec {
             source: Box::new(source),
-        })
-    }
-
-    pub(crate) fn provider_private_decode(
-        provider: &'static CStr,
-        source: impl Into<CustomScanError>,
-    ) -> Self {
-        Self::new(CustomScanErrorKind::Context {
-            message: format!(
-                "customscan {:?} provider failed to decode custom_private payload",
-                provider
-            ),
-            source: Box::new(source.into()),
         })
     }
 
@@ -212,20 +154,20 @@ impl CustomScanError {
         ))
     }
 
-    pub(crate) fn slice_null_with_nonzero_count(
+    pub(crate) fn custom_exprs_missing(
+        binding_count: usize,
         pushed_count: usize,
-        recheck_count: usize,
     ) -> Self {
         Self::framework(format!(
             "customscan BeginCustomScan: custom_exprs is NULL but \
-             pushed_count={pushed_count} recheck_count={recheck_count}"
+             binding_count={binding_count} pushed_count={pushed_count}"
         ))
     }
 
-    pub(crate) fn slice_length_mismatch(got: usize, expected: usize) -> Self {
+    pub(crate) fn custom_exprs_length_mismatch(got: usize, expected: usize) -> Self {
         Self::framework(format!(
             "customscan BeginCustomScan: custom_exprs length mismatch \
-             (got {got}, expected pushed_count + recheck_count = {expected})"
+             (got {got}, expected binding_count + pushed_count = {expected})"
         ))
     }
 
@@ -254,12 +196,12 @@ impl CustomScanError {
     }
 
     /// Attach trampoline context before reporting at the FFI boundary.
-    pub(crate) fn with_provider_phase(
+    pub(crate) fn with_callback_phase(
         self,
         provider: &'static CStr,
         phase: CustomScanPhase,
     ) -> Self {
-        Self::new(CustomScanErrorKind::Runtime {
+        Self::new(CustomScanErrorKind::Callback {
             provider,
             phase,
             source: Box::new(self),
@@ -281,8 +223,10 @@ impl CustomScanError {
         unreachable!()
     }
 
-    fn framework(message: String) -> Self {
-        Self::new(CustomScanErrorKind::Framework { message })
+    pub(crate) fn framework(message: impl Display) -> Self {
+        Self::new(CustomScanErrorKind::Framework {
+            message: message.to_string(),
+        })
     }
 
     #[cfg(test)]
@@ -294,18 +238,27 @@ impl CustomScanError {
 impl SqlStateError for CustomScanError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match &*self.0 {
-            CustomScanErrorKind::Runtime { source, .. } => source.sql_error_code(),
+            CustomScanErrorKind::Callback { source, .. } => source.sql_error_code(),
             CustomScanErrorKind::Provider { sqlerrcode, .. } => *sqlerrcode,
-            CustomScanErrorKind::RuntimeParameter { sqlerrcode, .. } => *sqlerrcode,
-            CustomScanErrorKind::PredicateBuild { .. }
-            | CustomScanErrorKind::Context { .. }
-            | CustomScanErrorKind::Codec { .. }
+            CustomScanErrorKind::Codec { .. }
             | CustomScanErrorKind::Framework { .. }
             | CustomScanErrorKind::Internal { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
             CustomScanErrorKind::PgReport { sqlerrcode, .. } => *sqlerrcode,
         }
+    }
+}
+
+impl From<PlanDataError> for CustomScanError {
+    fn from(error: PlanDataError) -> Self {
+        Self::private_codec(error)
+    }
+}
+
+impl From<EnvelopeError> for CustomScanError {
+    fn from(error: EnvelopeError) -> Self {
+        Self::private_codec(error)
     }
 }
 
@@ -337,9 +290,6 @@ fn custom_scan_error_report(err: CustomScanError) -> ErrorReport {
 fn custom_scan_error_report_parts(err: &CustomScanError) -> CustomScanReportParts {
     let sqlerrcode = err.sql_error_code();
     let mut detail_parts = Vec::new();
-    if let Some(extra) = predicate_build_detail(err) {
-        detail_parts.push(extra);
-    }
     if let Some(chain) = error_source_chain_detail(err) {
         detail_parts.push(chain);
     }
@@ -374,12 +324,8 @@ fn collect_nested_pg_report_extras(
     details: &mut Vec<String>,
     hints: &mut Vec<String>,
 ) {
-    match &*err.0 {
-        CustomScanErrorKind::Runtime { source, .. }
-        | CustomScanErrorKind::Context { source, .. } => {
-            collect_nested_pg_report_extras(source, details, hints);
-        }
-        _ => {}
+    if let CustomScanErrorKind::Callback { source, .. } = &*err.0 {
+        collect_nested_pg_report_extras(source, details, hints);
     }
     if let CustomScanErrorKind::PgReport { detail, hint, .. } = &*err.0 {
         if let Some(detail) = detail.clone() {
@@ -393,45 +339,16 @@ fn collect_nested_pg_report_extras(
 
 fn primary_message(err: &CustomScanError) -> String {
     match &*err.0 {
-        CustomScanErrorKind::Runtime {
+        CustomScanErrorKind::Callback {
             provider,
             phase,
             source,
         } => format!(
-            "customscan {:?} provider.{} failed: {source}",
+            "customscan {:?} {} callback failed: {source}",
             provider,
             phase.as_str()
         ),
-        CustomScanErrorKind::PredicateBuild { .. } => {
-            "customscan predicate construction failed".to_string()
-        }
         _ => format!("{err}"),
-    }
-}
-
-/// Structured predicate-build context only (pushed qual index). Source text lives in
-/// [`error_source_chain_detail`].
-fn predicate_build_detail(err: &CustomScanError) -> Option<String> {
-    match &*err.0 {
-        CustomScanErrorKind::PredicateBuild { pushed_index, .. } => {
-            pushed_index.map(|i| {
-                format!("customscan predicate construction failed at pushed qual {i}")
-            })
-        }
-        CustomScanErrorKind::Runtime { source, .. }
-        | CustomScanErrorKind::Context { source, .. } => {
-            predicate_build_detail(source)
-        }
-        _ => None,
-    }
-}
-
-impl<E> From<crate::expr::translator::BuildPredicateError<E>> for CustomScanError
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn from(err: crate::expr::translator::BuildPredicateError<E>) -> Self {
-        Self::predicate_build_at(None, err)
     }
 }
 
@@ -451,8 +368,6 @@ impl From<PgReportError> for CustomScanError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::customscan::plan_data::EnvelopeError;
-    use crate::expr::execution::params::RuntimeParamError;
     use proptest::prelude::*;
 
     #[derive(Debug, thiserror::Error)]
@@ -504,22 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn predicate_build_at_includes_index_in_detail() {
-        let err =
-            CustomScanError::predicate_build_at(Some(2), InnerError("bad qual"));
-        let report = custom_scan_error_report_parts(&err);
-        let detail = report.detail.expect("detail");
-        assert!(detail.contains("pushed qual 2"));
-        assert!(detail.contains("inner boom"));
-    }
-
-    #[test]
-    fn runtime_delegates_sqlstate_to_source() {
+    fn callback_context_delegates_sqlstate_to_source() {
         let inner = CustomScanError::provider(SqlStateCarrier(
             PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
             "missing",
         ));
-        let err = CustomScanError::new(CustomScanErrorKind::Runtime {
+        let err = CustomScanError::new(CustomScanErrorKind::Callback {
             provider: c"test",
             phase: CustomScanPhase::Begin,
             source: Box::new(inner),
@@ -528,19 +433,6 @@ mod tests {
             err.sql_error_code(),
             PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
         );
-    }
-
-    #[test]
-    fn runtime_parameter_preserves_domain_sqlstate() {
-        let err =
-            CustomScanError::runtime_parameter(RuntimeParamError::NoValueFound {
-                param_id: 3,
-            });
-        assert_eq!(
-            err.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
-        );
-        assert!(err.to_string().contains("no value found for parameter 3"));
     }
 
     #[test]
@@ -562,21 +454,11 @@ mod tests {
 
     #[test]
     fn framework_variants_map_to_internal_sqlstate() {
-        let cases: Vec<(CustomScanError, &str)> = vec![
-            (
-                CustomScanError::slice_null_with_nonzero_count(1, 0),
-                "customscan BeginCustomScan: custom_exprs is NULL but \
-                 pushed_count=1 recheck_count=0",
-            ),
-            (
-                CustomScanError::encode_custom_private(
-                    CustomScanError::private_codec(
-                        EnvelopeError::CountTooLargeToEncode { value: 99 },
-                    ),
-                ),
-                "customscan: failed to encode custom_private",
-            ),
-        ];
+        let cases: Vec<(CustomScanError, &str)> = vec![(
+            CustomScanError::custom_exprs_missing(1, 0),
+            "customscan BeginCustomScan: custom_exprs is NULL but \
+             binding_count=1 pushed_count=0",
+        )];
 
         for (err, expected_prefix) in cases {
             assert_eq!(
@@ -594,7 +476,8 @@ mod tests {
 
     #[test]
     fn envelope_error_maps_to_private_codec_with_internal_sqlstate() {
-        let err = CustomScanError::private_codec(EnvelopeError::NullPayload);
+        let err: CustomScanError =
+            EnvelopeError::MalformedTupleLayout { reason: "test" }.into();
         assert_eq!(err.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
         let report = custom_scan_error_report_parts(&err);
         assert!(
@@ -602,45 +485,23 @@ mod tests {
             "got: {}",
             report.message
         );
-        assert!(report.message.contains("NULL"), "got: {}", report.message);
-    }
-
-    #[test]
-    fn report_uses_custom_scan_error_report_not_domain_error_report() {
-        let inner = CustomScanError::provider(SqlStateCarrier(
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            "feature missing",
-        ));
-        let err = CustomScanError::predicate_build_at(Some(1), InnerError("bad op"));
-        let runtime = CustomScanError::new(CustomScanErrorKind::Runtime {
-            provider: c"pg-test",
-            phase: CustomScanPhase::Begin,
-            source: Box::new(err),
-        });
-        let report = custom_scan_error_report_parts(&runtime);
-        let detail = report.detail.expect("predicate index must be in DETAIL");
-        let qual_pos = detail
-            .find("pushed qual 1")
-            .expect("pushed qual index line");
-        let chain_pos = detail
-            .find("inner boom: bad op")
-            .expect("source chain line");
         assert!(
-            qual_pos < chain_pos,
-            "predicate context should precede source chain in DETAIL; got: {detail}"
+            report.message.contains("malformed"),
+            "got: {}",
+            report.message
         );
-        let _ = inner;
+        assert!(report.message.contains("test"), "got: {}", report.message);
     }
 
     #[test]
-    fn runtime_preserves_nested_pg_report_detail_and_hint() {
+    fn callback_context_preserves_nested_pg_report_detail_and_hint() {
         let inner = CustomScanError::new(CustomScanErrorKind::PgReport {
             sqlerrcode: PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             message: "tuple write failed".to_string(),
             detail: Some("column 3 out of range".to_string()),
             hint: Some("check projection list".to_string()),
         });
-        let err = CustomScanError::new(CustomScanErrorKind::Runtime {
+        let err = CustomScanError::new(CustomScanErrorKind::Callback {
             provider: c"pg-test",
             phase: CustomScanPhase::NextSlot,
             source: Box::new(inner),
@@ -649,23 +510,23 @@ mod tests {
         let report = custom_scan_error_report_parts(&err);
         let detail = report
             .detail
-            .expect("nested PgReport DETAIL must survive Runtime");
+            .expect("nested PgReport DETAIL must survive Callback");
         assert!(detail.contains("column 3 out of range"), "detail: {detail}");
         let hint = report
             .hint
-            .expect("nested PgReport HINT must survive Runtime");
+            .expect("nested PgReport HINT must survive Callback");
         assert!(hint.contains("check projection list"), "hint: {hint}");
     }
 
     #[test]
-    fn runtime_report_includes_nested_provider_in_message() {
+    fn callback_report_includes_nested_provider_in_message() {
         let inner = CustomScanError::provider(InnerError("disk gone"));
-        let runtime = CustomScanError::new(CustomScanErrorKind::Runtime {
+        let callback = CustomScanError::new(CustomScanErrorKind::Callback {
             provider: c"pg-test",
             phase: CustomScanPhase::NextSlot,
             source: Box::new(inner),
         });
-        let report = custom_scan_error_report_parts(&runtime);
+        let report = custom_scan_error_report_parts(&callback);
         assert!(
             report.message.contains("inner boom"),
             "message: {}",
@@ -673,44 +534,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn provider_private_decode_uses_internal_sqlstate_even_for_nested_provider() {
-        let inner = CustomScanError::provider(SqlStateCarrier(
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            "not supported",
-        ));
-        let err = CustomScanError::new(CustomScanErrorKind::Context {
-            message:
-                "customscan \"test\" provider failed to decode custom_private payload"
-                    .to_owned(),
-            source: Box::new(inner),
-        });
-        assert_eq!(err.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
-    }
-
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
         #[test]
         fn framework_carrier_byte_identity(
+            binding_count in any::<usize>(),
             pushed_count in any::<usize>(),
-            recheck_count in any::<usize>(),
             got in any::<usize>(),
             expected_len in any::<usize>(),
             relid in any::<u32>(),
         ) {
-            let e = CustomScanError::slice_null_with_nonzero_count(pushed_count, recheck_count);
+            let e = CustomScanError::custom_exprs_missing(binding_count, pushed_count);
             prop_assert_eq!(e.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
             prop_assert_eq!(
                 format!("{e}"),
                 format!(
                     "customscan BeginCustomScan: custom_exprs is NULL but \
-                     pushed_count={} recheck_count={}",
-                    pushed_count, recheck_count
+                     binding_count={} pushed_count={}",
+                    binding_count, pushed_count
                 )
             );
 
-            let e = CustomScanError::slice_length_mismatch(got, expected_len);
+            let e = CustomScanError::custom_exprs_length_mismatch(got, expected_len);
             prop_assert_eq!(e.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
 
             let e = CustomScanError::multi_provider_match(relid);

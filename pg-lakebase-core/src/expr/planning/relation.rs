@@ -1,13 +1,8 @@
-//! Plan-stage relation metadata used while building pushed expression metadata.
+//! Plan-stage relation identity lookup.
 
 use core::ffi::c_int;
 
 use pgrx::pg_sys;
-
-use crate::expr::column::ColumnNameResolver;
-use crate::expr::contract::ColumnRef;
-use crate::expr::inspect::{RelationExprAnalyzer, RelationScope};
-use crate::expr::predicate::PlanPredicateContext;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PlanRelationResolver {
@@ -39,82 +34,5 @@ impl PlanRelationResolver {
             unsafe { *simple_rte_array.add(relid as usize) }
         };
         unsafe { (*rte).relid }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PlanScanRelation {
-    relid: pg_sys::Index,
-    scan_relid: c_int,
-    rel_oid: pg_sys::Oid,
-}
-
-impl PlanScanRelation {
-    /// # Safety
-    ///
-    /// Valid `PlannerInfo` and `RelOptInfo` in the planner context.
-    pub(crate) unsafe fn new(
-        root: *mut pg_sys::PlannerInfo,
-        baserel: *mut pg_sys::RelOptInfo,
-    ) -> Self {
-        let relid = unsafe { (*baserel).relid };
-        Self {
-            relid,
-            scan_relid: relid as c_int,
-            rel_oid: unsafe { PlanRelationResolver::new(root).rel_oid(relid) },
-        }
-    }
-
-    #[inline]
-    pub(crate) fn predicate_context(self) -> PlanPredicateContext {
-        PlanPredicateContext {
-            rel_oid: self.rel_oid,
-            scan_relid: self.scan_relid,
-        }
-    }
-}
-
-pub(crate) struct ColumnRefCollector {
-    relation: PlanScanRelation,
-    analyzer: RelationExprAnalyzer,
-    names: ColumnNameResolver,
-}
-
-impl ColumnRefCollector {
-    pub(crate) fn new(relation: PlanScanRelation) -> Self {
-        Self {
-            relation,
-            analyzer: RelationExprAnalyzer::new(RelationScope::exact(relation.relid)),
-            names: ColumnNameResolver::new(relation.rel_oid),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// Every pushed expression pointer must be live in the planner context.
-    pub(crate) unsafe fn collect_exprs<I>(&self, pushed_exprs: I) -> Vec<ColumnRef>
-    where
-        I: IntoIterator<Item = *mut pg_sys::Expr>,
-    {
-        let mut column_refs = Vec::new();
-        for (expr_index, expr) in pushed_exprs.into_iter().enumerate() {
-            let usage = unsafe { self.analyzer.collect_expr(expr) };
-            let mut seen_attnos: Vec<pg_sys::AttrNumber> = Vec::new();
-            for var in usage.user_vars() {
-                if seen_attnos.contains(&var.attno) {
-                    continue;
-                }
-                seen_attnos.push(var.attno);
-                column_refs.push(ColumnRef {
-                    expr_index,
-                    rel_oid: self.relation.rel_oid,
-                    attno: var.attno,
-                    atttypid: var.atttypid,
-                    attcollation: var.attcollation,
-                    name: self.names.resolve(var.attno),
-                });
-            }
-        }
-        column_refs
     }
 }

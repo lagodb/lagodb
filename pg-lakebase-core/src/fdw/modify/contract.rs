@@ -4,7 +4,6 @@ use core::ffi::c_int;
 
 use pgrx::pg_sys;
 
-use super::super::codec::{ForeignPrivateReader, ForeignPrivateWriter};
 use super::super::provider::ForeignDataWrapper;
 use super::super::row_identity::{ForeignRowIdentityError, ModifyPlanSlot};
 use super::error::ForeignModifyError;
@@ -16,6 +15,7 @@ use super::planning_context::{
     ForeignUpdateTargetContext,
 };
 use super::slot::ModifySlot;
+use crate::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 
 /// PostgreSQL modify operations exposed to providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

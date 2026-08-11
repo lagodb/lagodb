@@ -17,7 +17,7 @@ behind Rust traits instead of rebuilding those boundaries in every extension.
 | Provider needs to... | `pg-lakebase-core` provides... |
 |---|---|
 | Implement a PostgreSQL table access method | TAM traits and callback adapters for scans, relations, indexes, DML, DDL, and COPY |
-| Push safe predicates into a lake-table scan | A CustomScan planner/executor framework with classification, cost gates, residual quals, and runtime translation |
+| Push safe predicates into a lake-table scan | Complete-expression planning, cost gates, residual/recheck ownership, and runtime value binding for CustomScan and FDW |
 | Move values between PostgreSQL and a storage writer | Typed datum/slot views, owned `Cell`/`Row` values, and columnar batch abstractions |
 | Survive PostgreSQL ERROR, abort, and commit boundaries | Typed handles, `ResourceOwner` cleanup, transaction/subtransaction callbacks, and lifecycle state |
 | Integrate storage-specific PostgreSQL facilities | Catalog/options helpers, hooks, WAL registration, background-worker scaffolding, and diagnostics |
@@ -43,8 +43,8 @@ in safe Rust for their business logic.
                           |
                           v
                   pg-lakebase-core
-   TAM traits + handles  |  CustomScan pushdown framework
-   tuple values + batch  |  Expr translation + classification
+   TAM traits + handles  |  CustomScan / FDW pushdown framework
+   tuple values + batch  |  Planned predicates + value binding
    options / catalog     |  WAL / resource / transaction cleanup
                           |
                           v
@@ -222,29 +222,30 @@ The framework is a planner-and-executor seam:
 ```text
 SQL WHERE
   -> planner (set_rel_pathlist_hook)
-       core classifies each predicate as pushed / residual / recheck
+       core applies PostgreSQL safety gates and normalizes complete expressions
+       provider plans each complete fragment as Exact, Conservative, or Unsupported
+       core owns residual/recheck semantics and OR widening confirmation
        core enumerates plain and parameterized CustomPath variants
   -> planner picks a path on cost
   -> CustomScan plan
-       residual quals stay in plan.qual for PostgreSQL to re-check
-       pushed/recheck predicates travel as copyObject-safe PG Expr nodes
+       residual quals stay in plan.qual for PostgreSQL to evaluate
+       provider-owned planned predicates travel in custom_private
+       value bindings and pushed-expression provenance travel in custom_exprs
   -> executor Begin / ReScan
-       core translates the pushed predicates into the provider's
-       native predicate, which drives file/row-group pruning
+       core decodes planned predicates and binds current values
+       Exact EPQ recheck is derived from provenance and persisted contracts
   -> executor scan
-       provider returns rows; PostgreSQL applies residual quals
+       provider returns rows; PostgreSQL applies residual quals when required
 ```
 
 The design keeps responsibilities split:
 
-- **Core owns the dangerous parts.** Path enumeration, the planner safety gates
-  (movability and security promotion of join clauses), classification,
-  `RestrictInfo` unwrapping, cost modeling, and the runtime predicate
-  translation seam all live in core, in one place, so providers cannot
-  accidentally break query semantics.
-- **The provider owns format knowledge.** It decides whether a given predicate
-  can be pushed and under which contract, shapes the cost estimate, and
-  translates the pushed predicate into its own scan filter at runtime.
+- **Core owns PostgreSQL semantics.** Path enumeration, planner safety gates,
+  complete-fragment normalization, residual/recheck decisions, cost modeling,
+  expression lifecycle, and value-slot binding live in core.
+- **The provider owns format knowledge.** Planning a complete fragment is the
+  provider's only capability decision and produces an owned, encodable native
+  predicate. Begin/ReScan only bind values into that plan.
 
 Pushdown is governed by an explicit contract so correctness never depends on a
 provider getting cost estimates right:
@@ -256,9 +257,10 @@ provider getting cost estimates right:
   still guarantees correctness.
 
 The framework supports both plain and parameterized scans, so a pushdown-aware
-scan can sit on the inner side of a nested-loop join and re-translate its
-predicate as outer-tuple values change. The `pg_lakebase.customscan_mode` GUC
-(`off` / `auto` / `force`) controls path emission: `auto` lets the planner
+scan can sit on the inner side of a nested-loop join and rebind its complete
+planned predicate as outer-tuple values change. The
+`pg_lakebase.customscan_mode` GUC (`off` / `auto` / `force`) controls path
+emission: `auto` lets the planner
 choose on cost, `off` disables the framework entirely, and `force` biases cost
 for regression testing without relaxing any gate or changing SQL semantics.
 
@@ -351,9 +353,9 @@ cargo build -p pg-lakebase-core
 - DML hot paths should not materialize owned `Row` values until the AM has
   chosen a row-oriented strategy. Columnar AMs should consume slot/datum views
   directly and keep target-format type decisions outside core.
-- Predicate pushdown keeps the planner gates, classification, and cost model in
-  core; providers only decide format-specific pushability and translation, so a
-  provider bug cannot silently change query results.
+- Predicate pushdown keeps PostgreSQL gates, residual/recheck semantics, and
+  cost modeling in core. A provider's complete-expression planner is the sole
+  source of format-specific capability and its owned predicate artifact.
 - ResourceOwner cleanup and transaction callbacks are separate mechanisms and
   should stay separate.
 - Unsupported PostgreSQL write paths should fail clearly instead of bypassing

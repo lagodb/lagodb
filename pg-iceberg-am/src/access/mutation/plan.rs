@@ -147,3 +147,73 @@ impl ValidationPlan {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use iceberg_lite::expr::Predicate;
+    use iceberg_lite::spec::TableProperties;
+    use iceberg_lite::transaction::IsolationLevel;
+
+    use super::super::IcebergModifyScanContext;
+    use super::{ModifyCommand, TargetDependency};
+    use crate::access::scan::PlannedMutationTasks;
+
+    #[test]
+    fn commands_read_their_own_isolation_property() {
+        let cases = [
+            (
+                TableProperties::PROPERTY_WRITE_DELETE_ISOLATION_LEVEL,
+                ModifyCommand::Delete,
+            ),
+            (
+                TableProperties::PROPERTY_WRITE_UPDATE_ISOLATION_LEVEL,
+                ModifyCommand::Update,
+            ),
+            (
+                TableProperties::PROPERTY_WRITE_MERGE_ISOLATION_LEVEL,
+                ModifyCommand::Merge,
+            ),
+        ];
+
+        for (snapshot_property, snapshot_command) in cases {
+            let properties = TableProperties::try_from(&HashMap::from([(
+                snapshot_property.to_owned(),
+                "snapshot".to_owned(),
+            )]))
+            .unwrap();
+
+            for command in [
+                ModifyCommand::Delete,
+                ModifyCommand::Update,
+                ModifyCommand::Merge,
+            ] {
+                let expected = if command == snapshot_command {
+                    IsolationLevel::Snapshot
+                } else {
+                    IsolationLevel::Serializable
+                };
+                assert_eq!(
+                    command.table_isolation_level(&properties),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn target_dependency_separates_independent_and_required_reads() {
+        let empty_scan = IcebergModifyScanContext::new(
+            None,
+            Predicate::AlwaysTrue,
+            Rc::new(PlannedMutationTasks::new(Vec::new())),
+        );
+        let empty_table_read = TargetDependency::from_context(Some(&empty_scan));
+        assert_eq!(empty_table_read.required_snapshot().unwrap(), None);
+
+        let independent = TargetDependency::from_context(None);
+        assert_eq!(independent, TargetDependency::Independent);
+    }
+}

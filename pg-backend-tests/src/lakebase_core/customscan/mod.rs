@@ -1,11 +1,6 @@
-mod codec;
-mod custom_private;
 mod exec;
-mod explain_output;
-mod hook;
 mod hook_integration;
 mod method_tables;
-mod provider;
 mod support;
 mod tuple_layout;
 

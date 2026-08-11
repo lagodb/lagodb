@@ -7,19 +7,19 @@ use crate::customscan::error::CustomScanError;
 use crate::customscan::planning::builder::EmitCustomPathContext;
 use crate::customscan::planning::candidate::CustomScanCandidate;
 use crate::customscan::planning::parameterized::{
-    ParameterizedPathGroup, ParameterizedPathPlanner, ParameterizedPathResolver,
+    ParameterizedPathPlanner, ParameterizedPathResolver,
 };
 use crate::customscan::provider::{
-    ErasedProvider, PathVariantKind, PlanTranslateContext,
+    ErasedFilterPlanner, ErasedProvider, PathVariantKind,
 };
-use crate::expr::contract::QualPushdownDecision;
-use crate::expr::split::{PlanPushdownSplit, PlanPushdownSplitter, ScanClauseSource};
+use crate::expr::pushdown::{FilterPlanningContext, PathFilterSet, ScanClauseSource};
 
 /// Plans every CustomPath variant for one validated relation/provider pair.
 pub(super) struct CustomScanPathPlanner {
     candidate: CustomScanCandidate,
     provider: &'static dyn ErasedProvider,
-    base_split: PlanPushdownSplit,
+    filter_planner: Box<dyn ErasedFilterPlanner>,
+    base_filters: PathFilterSet,
 }
 
 impl CustomScanPathPlanner {
@@ -29,27 +29,34 @@ impl CustomScanPathPlanner {
     pub(super) unsafe fn new(
         candidate: CustomScanCandidate,
         provider: &'static dyn ErasedProvider,
-    ) -> Self {
-        let root = candidate.root();
+    ) -> Result<Self, CustomScanError> {
         let rel = candidate.rel();
-        let base_split = unsafe {
-            PredicatePlanner::new(root, rel, provider)
-                .split((*rel).baserestrictinfo, ScanClauseSource::BaseRestriction)
-        };
-        Self {
+        let relation = unsafe { candidate.relation_context() };
+        let context = FilterPlanningContext::new(
+            relation.rel_oid(),
+            unsafe { (*rel).relid },
+            relation.tablespace_oid(),
+        );
+        let mut filter_planner = provider.begin_filter_planning(&context, rel)?;
+        let base_filters = unsafe {
+            filter_planner
+                .negotiate((*rel).baserestrictinfo, ScanClauseSource::BaseRestriction)
+        }?;
+        Ok(Self {
             candidate,
             provider,
-            base_split,
-        }
+            filter_planner,
+            base_filters,
+        })
     }
 
     /// Emit Plain first, followed by useful JoinParameterized variants.
-    pub(super) unsafe fn emit(&self) -> Result<usize, CustomScanError> {
+    pub(super) unsafe fn emit(&mut self) -> Result<usize, CustomScanError> {
         Ok(usize::from(unsafe { self.emit_plain_variant()? })
             + unsafe { self.emit_parameterized_variants()? })
     }
 
-    unsafe fn emit_plain_variant(&self) -> Result<bool, CustomScanError> {
+    unsafe fn emit_plain_variant(&mut self) -> Result<bool, CustomScanError> {
         let root = self.candidate.root();
         let rel = self.candidate.rel();
         let required_outer = unsafe { pg_sys::bms_copy((*rel).lateral_relids) };
@@ -59,44 +66,49 @@ impl CustomScanPathPlanner {
                 self.emit_path(
                     PathVariantKind::Plain,
                     required_outer,
-                    &self.base_split,
+                    &self.base_filters,
                 )
             };
         }
 
-        let lateral_split = unsafe {
-            ParameterizedPathResolver::new(root, rel, self.provider)
-                .resolve_and_split(required_outer)
-        };
-        let split = self
-            .base_split
-            .merged_with_rebased_expr_indexes(&lateral_split);
-        unsafe { self.emit_path(PathVariantKind::Plain, required_outer, &split) }
+        let lateral_filters = unsafe {
+            ParameterizedPathResolver::new(root, rel)
+                .resolve_and_plan(required_outer, self.filter_planner.as_mut())
+        }?;
+        let filters = self.base_filters.merged(&lateral_filters);
+        unsafe { self.emit_path(PathVariantKind::Plain, required_outer, &filters) }
     }
 
-    unsafe fn emit_parameterized_variants(&self) -> Result<usize, CustomScanError> {
+    unsafe fn emit_parameterized_variants(
+        &mut self,
+    ) -> Result<usize, CustomScanError> {
         let root = self.candidate.root();
         let rel = self.candidate.rel();
         let groups = unsafe {
-            ParameterizedPathPlanner::new(root, rel, self.provider)
-                .enumerate((*rel).joininfo)
+            ParameterizedPathPlanner::new(root, rel).enumerate((*rel).joininfo)
         };
 
         let mut emitted = 0;
         for group in groups {
-            let Some(split) = ParameterizedVariant::new(
+            let ppi_filters = unsafe {
+                ParameterizedPathResolver::new(root, rel).resolve_and_plan(
+                    group.outer_relids,
+                    self.filter_planner.as_mut(),
+                )
+            }?;
+            let Some(filters) = ParameterizedVariant::new(
                 self.candidate.purpose(),
-                &self.base_split,
-                &group,
+                &self.base_filters,
+                &ppi_filters,
             )
-            .merged_split() else {
+            .merged_filters() else {
                 continue;
             };
             emitted += usize::from(unsafe {
                 self.emit_path(
                     PathVariantKind::JoinParameterized,
                     group.outer_relids,
-                    &split,
+                    &filters,
                 )?
             });
         }
@@ -107,7 +119,7 @@ impl CustomScanPathPlanner {
         &self,
         kind: PathVariantKind,
         required_outer: *mut pg_sys::Bitmapset,
-        split: &PlanPushdownSplit,
+        filters: &PathFilterSet,
     ) -> Result<bool, CustomScanError> {
         let ctx = EmitCustomPathContext {
             root: self.candidate.root(),
@@ -115,7 +127,7 @@ impl CustomScanPathPlanner {
             purpose: self.candidate.purpose(),
             kind,
             required_outer,
-            split,
+            filters,
         };
         unsafe { self.provider.emit_path(&ctx) }
     }
@@ -123,74 +135,25 @@ impl CustomScanPathPlanner {
 
 struct ParameterizedVariant<'a> {
     purpose: ScanPurpose,
-    base_split: &'a PlanPushdownSplit,
-    group: &'a ParameterizedPathGroup,
+    base_filters: &'a PathFilterSet,
+    ppi_filters: &'a PathFilterSet,
 }
 
 impl<'a> ParameterizedVariant<'a> {
     fn new(
         purpose: ScanPurpose,
-        base_split: &'a PlanPushdownSplit,
-        group: &'a ParameterizedPathGroup,
+        base_filters: &'a PathFilterSet,
+        ppi_filters: &'a PathFilterSet,
     ) -> Self {
         Self {
             purpose,
-            base_split,
-            group,
+            base_filters,
+            ppi_filters,
         }
     }
 
-    fn merged_split(&self) -> Option<PlanPushdownSplit> {
-        (self.purpose.is_modify() || self.group.ppi_split.has_pushed_predicates())
-            .then(|| {
-                self.base_split
-                    .merged_with_rebased_expr_indexes(&self.group.ppi_split)
-            })
-    }
-}
-
-/// Applies core clause gates and asks one provider to classify eligible leaves.
-#[derive(Clone, Copy)]
-pub(super) struct PredicatePlanner {
-    root: *mut pg_sys::PlannerInfo,
-    rel: *mut pg_sys::RelOptInfo,
-    provider: &'static dyn ErasedProvider,
-}
-
-impl PredicatePlanner {
-    pub(super) fn new(
-        root: *mut pg_sys::PlannerInfo,
-        rel: *mut pg_sys::RelOptInfo,
-        provider: &'static dyn ErasedProvider,
-    ) -> Self {
-        Self {
-            root,
-            rel,
-            provider,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// Planner pointers and `clauses` must be live planner-owned nodes.
-    pub(super) unsafe fn split(
-        self,
-        clauses: *mut pg_sys::List,
-        source: ScanClauseSource,
-    ) -> PlanPushdownSplit {
-        let translate_ctx = unsafe { PlanTranslateContext::new(self.rel) };
-        let mut classify_leaf =
-            |predicate: &crate::expr::predicate::PlanPredicate|
-             -> QualPushdownDecision {
-                self.provider.classify_predicate(&translate_ctx, predicate)
-            };
-        let mut splitter = PlanPushdownSplitter::new(
-            self.root,
-            self.rel,
-            clauses,
-            source,
-            &mut classify_leaf,
-        );
-        unsafe { splitter.split() }
+    fn merged_filters(&self) -> Option<PathFilterSet> {
+        (self.purpose.is_modify() || self.ppi_filters.has_planned_filters())
+            .then(|| self.base_filters.merged(self.ppi_filters))
     }
 }

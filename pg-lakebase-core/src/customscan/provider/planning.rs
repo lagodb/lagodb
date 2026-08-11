@@ -107,47 +107,46 @@ pub enum PathVariantKind {
 /// Path-stage pushdown metadata for [`PathVariant`]; no raw PG `Expr` pointers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PathPushdownSummary {
-    /// Number of clauses core classified as pushed for this variant.
-    pub pushed_count: usize,
-    /// Pushed clauses with [`PushdownContract::ExactRowFilter`].
+    /// Number of complete filters planned for this variant.
+    pub planned_count: usize,
+    /// Planned filters with [`PushdownContract::ExactRowFilter`].
     pub exact_row_filter_count: usize,
-    /// Pushed clauses with [`PushdownContract::ConservativePruning`].
+    /// Planned filters with [`PushdownContract::ConservativePruning`].
     pub conservative_pruning_count: usize,
-    /// Pushed clauses with costed pruning.
+    /// Planned filters with costed pruning.
     pub costed_pruning_count: usize,
-    /// Combined selectivity of costed-pruning pushed clauses.
+    /// Combined selectivity of costed-pruning planned filters.
     pub pruning_selectivity: f64,
 }
 
 impl PathPushdownSummary {
-    /// Whether this variant has any pushed predicates.
+    /// Whether this variant has any provider-planned filters.
     #[inline]
-    pub fn has_pushed_predicates(self) -> bool {
-        self.pushed_count > 0
+    pub fn has_planned_filters(self) -> bool {
+        self.planned_count > 0
     }
 
-    /// Summarize an internal plan split plus planner-computed selectivity.
-    pub(crate) fn from_split(
-        split: &crate::expr::split::PlanPushdownSplit,
+    pub(crate) fn from_filter_set(
+        filters: &crate::expr::pushdown::PathFilterSet,
         pruning_selectivity: f64,
     ) -> Self {
-        let pushed_count = split.pushed.len();
+        let planned_count = filters.planned.len();
         let mut exact_row_filter_count = 0;
         let mut conservative_pruning_count = 0;
         let mut costed_pruning_count = 0;
-        for pushed in &split.pushed {
-            match pushed.contract {
+        for filter in &filters.planned {
+            match filter.contract {
                 PushdownContract::ExactRowFilter => exact_row_filter_count += 1,
                 PushdownContract::ConservativePruning => {
                     conservative_pruning_count += 1;
                 }
             }
-            if pushed.costing.is_costed() {
+            if filter.costing.is_costed() {
                 costed_pruning_count += 1;
             }
         }
         Self {
-            pushed_count,
+            planned_count,
             exact_row_filter_count,
             conservative_pruning_count,
             costed_pruning_count,
@@ -168,28 +167,4 @@ pub struct PathVariant<'a> {
     pub required_outer: Relids,
     /// Pre-gated pushdown summary for this variant.
     pub pushdown: PathPushdownSummary,
-}
-
-/// Plan-stage context for provider predicate classification.
-pub struct PlanTranslateContext {
-    baserel: *mut pg_sys::RelOptInfo,
-}
-
-impl PlanTranslateContext {
-    /// Construct from a live planner-owned base relation.
-    ///
-    /// # Safety
-    ///
-    /// `baserel` must be a non-NULL planner-owned `RelOptInfo` that remains
-    /// live for the duration of use.
-    #[inline]
-    pub unsafe fn new(baserel: *mut pg_sys::RelOptInfo) -> Self {
-        Self { baserel }
-    }
-
-    /// The scan relation's range-table index (`baserel->relid`).
-    #[inline]
-    pub fn scan_relid(&self) -> core::ffi::c_int {
-        unsafe { (*self.baserel).relid as core::ffi::c_int }
-    }
 }

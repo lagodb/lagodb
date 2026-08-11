@@ -234,17 +234,6 @@ impl ScanColumns {
         Self::from_field_map(schema, &field_map)
     }
 
-    /// Select-all plan plus the compact bindings retained by CustomScan for
-    /// its predicate index.
-    pub(crate) fn new_with_bindings(
-        schema: Arc<IcebergSchema>,
-        shape: &RelationShape,
-    ) -> IcebergResult<(Self, RelationFieldMap)> {
-        let field_map = RelationFieldMap::from_shape(&schema, shape)?;
-        let columns = Self::from_field_map(schema, &field_map)?;
-        Ok((columns, field_map))
-    }
-
     /// Projected plan.
     ///
     /// The projection carries `(attno, destination)` pairs in scan order
@@ -262,7 +251,7 @@ impl ScanColumns {
         projection: &Projection,
         slot_width: usize,
         attr_types: &[(pg_sys::Oid, i32)],
-    ) -> IcebergResult<(Self, RelationFieldMap)> {
+    ) -> IcebergResult<Self> {
         let full_map = RelationFieldMap::from_shape(&schema, shape)?;
         let field_map = full_map.project(
             projection
@@ -272,8 +261,7 @@ impl ScanColumns {
             slot_width,
             attr_types,
         )?;
-        let columns = Self::from_field_map(schema, &field_map)?;
-        Ok((columns, field_map))
+        Self::from_field_map(schema, &field_map)
     }
 
     fn from_field_map(

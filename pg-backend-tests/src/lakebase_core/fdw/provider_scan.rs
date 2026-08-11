@@ -1,39 +1,25 @@
-use pg_lakebase_core::expr::predicate::{
-    PlanPredicate, PlanPredicateContext, PlanScalar,
-};
-use pg_lakebase_core::expr::{
-    PushdownContract, PushdownCosting, QualPushdownDecision,
-};
 use pg_lakebase_core::fdw::{
     BeginForeignScanContext, FdwScan, ForeignPathBuilder, ForeignPathContext,
     ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanPrivate,
     ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
     ForeignRowIdentityRequirement, ForeignScanError, PathVariantKind,
-    ReScanForeignScanContext, RuntimeExpressionValues, ScanDatumWriter,
-    ScanOutputColumn, ScanProjection, ScanProjectionPolicy, ScanSlotWriter,
+    ReScanForeignScanContext, ScanDatumWriter, ScanOutputColumn, ScanProjection,
+    ScanProjectionPolicy, ScanSlotWriter,
 };
+use pgrx::IntoDatum;
 use pgrx::pg_sys;
-use pgrx::{FromDatum, IntoDatum};
 use std::cmp::Reverse;
 
 use pg_lakebase_core::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 
 use super::fixture::{TestRow, TestStore, TestTrace, TraceEvent};
 use super::provider::FrameworkTestFdw;
-
-const INT4EQ_OPNO: u32 = 96;
+use super::provider_filter::RuntimeFilter;
 
 #[derive(Clone, Debug)]
 pub struct ScanPrivate {
     ordered: bool,
     descending: bool,
-    filters: Vec<FilterSpec>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct FilterSpec {
-    attno: pg_sys::AttrNumber,
-    fdw_expr_index: usize,
 }
 
 impl ForeignPlanPrivate for ScanPrivate {
@@ -43,16 +29,7 @@ impl ForeignPlanPrivate for ScanPrivate {
     ) -> Result<(), ForeignScanError> {
         writer
             .append_bool(self.ordered)
-            .append_bool(self.descending)
-            .append_nested(|writer| {
-                for filter in &self.filters {
-                    writer.append_nested(|entry| {
-                        entry
-                            .append_i32(filter.attno as i32)
-                            .append_count(filter.fdw_expr_index);
-                    });
-                }
-            });
+            .append_bool(self.descending);
         Ok(())
     }
 
@@ -62,7 +39,6 @@ impl ForeignPlanPrivate for ScanPrivate {
         Ok(Self {
             ordered: reader.read_bool()?,
             descending: reader.read_bool()?,
-            filters: read_filter_specs(reader)?,
         })
     }
 }
@@ -76,16 +52,9 @@ pub struct ScanState {
     cursor: usize,
     ordered: bool,
     descending: bool,
-    filter_specs: Vec<FilterSpec>,
     filters: Vec<RuntimeFilter>,
     output_columns: Vec<ScanOutputColumn>,
     item_pointer_identity: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct RuntimeFilter {
-    attno: pg_sys::AttrNumber,
-    value: Option<i32>,
 }
 
 impl ScanState {
@@ -93,7 +62,6 @@ impl ScanState {
         rows: Vec<TestRow>,
         ordered: bool,
         descending: bool,
-        filter_specs: Vec<FilterSpec>,
         filters: Vec<RuntimeFilter>,
         output_columns: Vec<ScanOutputColumn>,
         item_pointer_identity: bool,
@@ -103,7 +71,6 @@ impl ScanState {
             cursor: 0,
             ordered,
             descending,
-            filter_specs,
             filters,
             output_columns,
             item_pointer_identity,
@@ -142,20 +109,6 @@ impl FdwScan for FrameworkTestFdw {
         })
     }
 
-    fn classify_predicate(
-        _ctx: &PlanPredicateContext,
-        predicate: &PlanPredicate,
-    ) -> QualPushdownDecision {
-        if is_int4_eq_comparison(predicate) {
-            QualPushdownDecision::Pushable {
-                contract: PushdownContract::ExactRowFilter,
-                costing: PushdownCosting::CostedPruning,
-            }
-        } else {
-            QualPushdownDecision::Unsupported
-        }
-    }
-
     fn estimate(
         state: &mut Self::PlannerState,
         _ctx: &ForeignRelSizeContext<'_>,
@@ -173,7 +126,6 @@ impl FdwScan for FrameworkTestFdw {
         let private = ScanPrivate {
             ordered: false,
             descending: false,
-            filters: Vec::new(),
         };
 
         let mut baseline = ForeignPathSpec::new(rows, 1.0, 100.0, private);
@@ -192,7 +144,6 @@ impl FdwScan for FrameworkTestFdw {
                     ScanPrivate {
                         ordered: true,
                         descending: first_pathkey_is_descending(query_pathkeys),
-                        filters: Vec::new(),
                     },
                 );
                 // SAFETY: PostgreSQL owns query_pathkeys for the current
@@ -254,67 +205,44 @@ impl FdwScan for FrameworkTestFdw {
 
     fn build_plan(
         _state: &mut Self::PlannerState,
-        ctx: &ForeignPlanContext<'_, Self::PrivateData>,
+        ctx: &ForeignPlanContext<'_, Self>,
     ) -> Result<ForeignPlanSpec<Self::PrivateData>, ForeignScanError> {
-        let mut private = ctx.path_private().clone();
-        private.filters.clear();
-        let mut spec = ForeignPlanSpec::new(private);
+        TestTrace::record(TraceEvent::PlanBuild {
+            filters: ctx
+                .filters()
+                .iter()
+                .map(|filter| {
+                    (
+                        filter.predicate().attno(),
+                        filter.binding_range(),
+                        filter.contract(),
+                        filter.costing(),
+                        filter.qual_location(),
+                    )
+                })
+                .collect(),
+            binding_count: ctx.filters().binding_count(),
+            residual_count: ctx.filters().residual_count(),
+            recheck_count: ctx.filters().recheck_count(),
+        });
+        let mut spec = ForeignPlanSpec::new(ctx.path_private().clone());
         spec.required_columns.require_all_columns();
         spec.projection_policy = if ctx.is_modify_target() {
             ScanProjectionPolicy::RequireRelationShape
         } else {
             ScanProjectionPolicy::AllowColumnPruning
         };
-
-        for (pushed_index, pushed) in ctx.pushdown().pushed.iter().enumerate() {
-            if pushed.contract != PushdownContract::ExactRowFilter {
-                return Err(ForeignScanError::unsupported(
-                    "test FDW only supports exact pushed filters",
-                ));
-            }
-            let column_ref = ctx
-                .pushdown()
-                .column_refs
-                .iter()
-                .find(|column_ref| column_ref.expr_index == pushed_index)
-                .ok_or_else(|| {
-                    ForeignScanError::unsupported(
-                        "test FDW could not find the pushed filter column",
-                    )
-                })?;
-            if !matches!(column_ref.attno, 1 | 2) {
-                return Err(ForeignScanError::unsupported(
-                    "test FDW exact filter uses an unsupported column",
-                ));
-            }
-            let runtime_expression = runtime_filter_expression(
-                pushed.expr,
-                ctx.relation().scan_relid(),
-            )
-            .ok_or_else(|| {
-                ForeignScanError::unsupported(
-                    "test FDW could not find the non-scan side of the pushed equality",
-                )
-            })?;
-            // SAFETY: `runtime_expression` is a planner-owned expression from
-            // the final scan clause and is retained by PostgreSQL's plan tree.
-            unsafe { spec.fdw_exprs.push(runtime_expression)? };
-            spec.private_data.filters.push(FilterSpec {
-                attno: column_ref.attno,
-                fdw_expr_index: spec.private_data.filters.len(),
-            });
-        }
         Ok(spec)
     }
 
     fn begin(
-        ctx: BeginForeignScanContext<'_, Self::PrivateData>,
+        ctx: BeginForeignScanContext<'_, Self>,
     ) -> Result<Self::State, ForeignScanError> {
-        let filters = runtime_filters(&ctx.private_data.filters, ctx.expressions)?;
+        let filters: Vec<RuntimeFilter> = ctx.filters.iter().copied().collect();
         let output_columns = ctx.output_layout.columns().to_vec();
         TestTrace::record(TraceEvent::ScanBegin {
             ordered: ctx.private_data.ordered,
-            pushed_count: ctx.pushdown.pushed_contracts().len(),
+            planned_count: filters.len(),
             filters: trace_filters(&filters),
             projection: projection_name(ctx.projection),
         });
@@ -322,7 +250,6 @@ impl FdwScan for FrameworkTestFdw {
             TestStore::snapshot(ctx.relation.oid()),
             ctx.private_data.ordered,
             ctx.private_data.descending,
-            ctx.private_data.filters.clone(),
             filters,
             output_columns,
             matches!(
@@ -338,7 +265,7 @@ impl FdwScan for FrameworkTestFdw {
     ) -> Result<bool, ForeignScanError> {
         while let Some(row) = state.rows.get(state.cursor).cloned() {
             state.cursor += 1;
-            if !matches_filters(&state.filters, &row) {
+            if !state.filters.iter().all(|filter| filter.matches(&row)) {
                 continue;
             }
             {
@@ -357,14 +284,14 @@ impl FdwScan for FrameworkTestFdw {
 
     fn rescan(
         state: &mut Self::State,
-        ctx: ReScanForeignScanContext<'_>,
+        ctx: ReScanForeignScanContext<'_, Self>,
     ) -> Result<(), ForeignScanError> {
-        let filters = runtime_filters(&state.filter_specs, ctx.expressions)?;
+        let filters: Vec<RuntimeFilter> = ctx.filters.iter().copied().collect();
         state.set_filters(filters);
         state.rows = TestStore::snapshot(ctx.relation.oid());
         state.sort_rows();
         TestTrace::record(TraceEvent::ScanRescan {
-            params_changed: ctx.params_changed,
+            filters_changed: ctx.filters_changed,
             filters: trace_filters(&state.filters),
         });
         Ok(())
@@ -372,27 +299,6 @@ impl FdwScan for FrameworkTestFdw {
 
     fn end(_state: &mut Self::State) -> Result<(), ForeignScanError> {
         Ok(())
-    }
-}
-
-fn is_int4_eq_comparison(predicate: &PlanPredicate) -> bool {
-    match predicate {
-        PlanPredicate::Comparison { op, left, right } => {
-            let accepted_shape = matches!(
-                (left, right),
-                (
-                    PlanScalar::Column(_),
-                    PlanScalar::Literal(_) | PlanScalar::Dynamic(_),
-                ) | (
-                    PlanScalar::Literal(_) | PlanScalar::Dynamic(_),
-                    PlanScalar::Column(_),
-                )
-            );
-            accepted_shape
-                && predicate.scan_column_type() == Some(pg_sys::INT4OID)
-                && op.opno == pg_sys::Oid::from(INT4EQ_OPNO)
-        }
-        _ => false,
     }
 }
 
@@ -414,83 +320,10 @@ fn first_pathkey_is_descending(pathkeys: *mut pg_sys::List) -> bool {
         && unsafe { (*pathkey).pk_strategy == pg_sys::BTGreaterStrategyNumber as i32 }
 }
 
-fn runtime_filter_expression(
-    expression: *mut pg_sys::Expr,
-    scan_relid: pg_sys::Index,
-) -> Option<*mut pg_sys::Expr> {
-    if expression.is_null()
-        || unsafe { (*expression).type_ } != pg_sys::NodeTag::T_OpExpr
-    {
-        return None;
-    }
-    let args = unsafe { (*expression.cast::<pg_sys::OpExpr>()).args };
-    if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
-        return None;
-    }
-    let left = unsafe { pg_sys::list_nth(args, 0) } as *mut pg_sys::Expr;
-    let right = unsafe { pg_sys::list_nth(args, 1) } as *mut pg_sys::Expr;
-    match (
-        is_scan_var(left, scan_relid),
-        is_scan_var(right, scan_relid),
-    ) {
-        (true, false) => Some(right),
-        (false, true) => Some(left),
-        _ => None,
-    }
-}
-
-fn is_scan_var(expression: *mut pg_sys::Expr, scan_relid: pg_sys::Index) -> bool {
-    !expression.is_null()
-        && unsafe { (*expression).type_ } == pg_sys::NodeTag::T_Var
-        && unsafe { (*expression.cast::<pg_sys::Var>()).varno } == scan_relid as i32
-}
-
-fn runtime_filters(
-    filter_specs: &[FilterSpec],
-    expressions: RuntimeExpressionValues<'_>,
-) -> Result<Vec<RuntimeFilter>, ForeignScanError> {
-    filter_specs
-        .iter()
-        .map(|filter| {
-            let value = expressions.get(filter.fdw_expr_index).ok_or_else(|| {
-                ForeignScanError::unsupported(
-                    "test FDW filter descriptor points outside fdw_exprs",
-                )
-            })?;
-            let value = if value.is_null {
-                None
-            } else {
-                Some(unsafe { i32::from_datum(value.datum, false) }.ok_or_else(
-                    || {
-                        ForeignScanError::unsupported(
-                            "test FDW runtime filter was not int4",
-                        )
-                    },
-                )?)
-            };
-            Ok(RuntimeFilter {
-                attno: filter.attno,
-                value,
-            })
-        })
-        .collect()
-}
-
-fn matches_filters(filters: &[RuntimeFilter], row: &TestRow) -> bool {
-    filters.iter().all(|filter| {
-        filter
-            .value
-            .is_some_and(|value| row.int4_value(filter.attno) == Some(value))
-    })
-}
-
 fn trace_filters(
     filters: &[RuntimeFilter],
 ) -> Vec<(pg_sys::AttrNumber, Option<i32>)> {
-    filters
-        .iter()
-        .map(|filter| (filter.attno, filter.value))
-        .collect()
+    filters.iter().map(|filter| filter.trace()).collect()
 }
 
 fn projection_name(projection: &ScanProjection) -> &'static str {
@@ -499,43 +332,6 @@ fn projection_name(projection: &ScanProjection) -> &'static str {
         ScanProjection::Projected { .. } => "projected",
         ScanProjection::SyntheticNull => "synthetic-null",
     }
-}
-
-fn read_filter_specs(
-    reader: &mut ForeignPrivateReader<'_>,
-) -> Result<Vec<FilterSpec>, ForeignScanError> {
-    let mut filters_reader = reader.read_nested()?;
-    let mut filters = Vec::with_capacity(filters_reader.remaining());
-    while filters_reader.remaining() > 0 {
-        let mut entry = filters_reader.read_nested()?;
-        let attno =
-            pg_sys::AttrNumber::try_from(entry.read_i32()?).map_err(|_| {
-                ForeignScanError::unsupported(
-                    "test FDW filter has an invalid attribute",
-                )
-            })?;
-        let fdw_expr_index = entry.read_count()?;
-        entry.finish()?;
-        if !matches!(attno, 1 | 2) {
-            return Err(ForeignScanError::unsupported(
-                "test FDW filter has an unsupported attribute",
-            ));
-        }
-        if filters
-            .iter()
-            .any(|filter: &FilterSpec| filter.fdw_expr_index == fdw_expr_index)
-        {
-            return Err(ForeignScanError::unsupported(
-                "test FDW filter indexes are not unique",
-            ));
-        }
-        filters.push(FilterSpec {
-            attno,
-            fdw_expr_index,
-        });
-    }
-    filters_reader.finish()?;
-    Ok(filters)
 }
 
 fn write_row(

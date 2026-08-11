@@ -41,8 +41,7 @@ pub mod tuple;
 /// Table access implementation modules (scan, index, mutation, ddl, relation)
 pub mod access;
 
-/// Typed PG-`Expr` views, walkers, classification, and the runtime predicate
-/// translator surface used by the CustomScan framework.
+/// Typed PG-expression views, runtime parameters, and planned filter pushdown.
 pub mod expr;
 
 /// Generic CustomScan filter-pushdown framework: planner-and-executor seam
@@ -84,6 +83,9 @@ pub mod table_maintenance;
 
 /// Helper functions and diagnostics
 pub mod diag;
+
+/// Shared `copyObject`-safe plan-data primitives.
+pub mod plan_data;
 
 /// Internal wrapper for PostgreSQL functions
 mod wrapper;

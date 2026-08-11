@@ -299,7 +299,7 @@ DROP TABLE customscan_dml_other;
 --     without the security gate the clause WOULD be pushed as an
 --     ConservativePruning (remote) predicate, appearing on the CustomScan's
 --     `Pushed Filter:` line (and, under VERBOSE, on the
---     `Pushed Filter Conservative Pruning:` labeled line). The gate is the
+--     `Pushed Filter Conservative:` labeled line). The gate is the
 --     active mechanism that keeps it out.
 --   - LANGUAGE plpgsql, NOT LANGUAGE sql. PG's planner inlines
 --     simple `LANGUAGE sql` function bodies via `inline_function`
@@ -373,7 +373,7 @@ INSERT INTO customscan_sm_other VALUES
 -- Either outcome validates
 -- qual NEVER appears as a pushed (remote) predicate — neither on
 -- the default `Pushed Filter:` line nor on VERBOSE's
--- `Pushed Filter Exact:` / `Pushed Filter Conservative Pruning:` labeled lines.
+-- `Pushed Filter Exact:` / `Pushed Filter Conservative:` labeled lines.
 -- The brief explicitly accepts both shapes ("It surfaces as
 -- a residual `Filter:` on the CustomScan or as a SubqueryScan
 -- filter wrapping it"). The expected `.out` file pins whichever

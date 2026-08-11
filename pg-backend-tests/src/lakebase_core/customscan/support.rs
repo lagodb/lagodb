@@ -3,18 +3,74 @@
 use core::marker::PhantomData;
 use core::ptr;
 
-use pg_lakebase_core::customscan::exec_params::RuntimeParamRefs;
 use pg_lakebase_core::customscan::provider::{
-    LakebaseCustomScanProvider, ScanTupleLayout,
+    CustomScanError, LakebaseCustomScanProvider,
 };
 use pg_lakebase_core::customscan::state::{
-    CachedEnvelope, CustomScanStateWrapper, create_custom_scan_state_trampoline,
+    CustomScanStateWrapper, create_custom_scan_state_trampoline,
 };
-use pg_lakebase_core::customscan::{ScanPurpose, custom_exprs};
-use pg_lakebase_core::expr::{
-    ColumnRef, ExecParamRef, ExternParamRef, PushdownContract,
+use pg_lakebase_core::expr::pushdown::{
+    FilterFragment, FilterPlan, FilterPushdownPlanner,
 };
 use pgrx::pg_sys;
+
+pub(crate) struct RejectAllFilterPlanner;
+
+impl FilterPushdownPlanner for RejectAllFilterPlanner {
+    type PlannedPredicate = ();
+    type Error = CustomScanError;
+
+    fn try_plan_filter(
+        &mut self,
+        _fragment: &FilterFragment,
+    ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
+        Ok(FilterPlan::Unsupported)
+    }
+}
+
+macro_rules! impl_reject_all_filters {
+    ($provider:ty) => {
+        impl pg_lakebase_core::expr::pushdown::FilterPushdown for $provider {
+            type Planner =
+                $crate::lakebase_core::customscan::support::RejectAllFilterPlanner;
+            type PlannedPredicate = ();
+            type BoundPredicate = ();
+            type Error = pg_lakebase_core::customscan::provider::CustomScanError;
+
+            fn begin_filter_planning(
+                _context: &pg_lakebase_core::expr::pushdown::FilterPlanningContext,
+            ) -> Result<Self::Planner, Self::Error> {
+                Ok($crate::lakebase_core::customscan::support::RejectAllFilterPlanner)
+            }
+
+            fn encode_planned(
+                _predicate: &Self::PlannedPredicate,
+                _writer: &mut pg_lakebase_core::plan_data::PlanDataWriter,
+            ) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn decode_planned(
+                _reader: &mut pg_lakebase_core::plan_data::PlanDataReader<'_>,
+                _binding_count: usize,
+            ) -> Result<Self::PlannedPredicate, Self::Error> {
+                Ok(())
+            }
+
+            fn bind_filter(
+                _predicate: &Self::PlannedPredicate,
+                _values: pg_lakebase_core::expr::pushdown::FilterValueBindings<'_>,
+            ) -> Result<
+                pg_lakebase_core::expr::pushdown::FilterBindResult<Self::BoundPredicate>,
+                Self::Error,
+            > {
+                Ok(pg_lakebase_core::expr::pushdown::FilterBindResult::ValueNotRepresentable)
+            }
+        }
+    };
+}
+
+pub(crate) use impl_reject_all_filters;
 
 /// Backend test owner for a PostgreSQL-allocated `CustomScanStateWrapper`.
 pub(crate) struct TestScanState<P: LakebaseCustomScanProvider> {
@@ -54,10 +110,6 @@ impl<P: LakebaseCustomScanProvider> TestScanState<P> {
         unsafe { self.wrapper_mut().test_base_mut() }
     }
 
-    pub(crate) unsafe fn base(&self) -> &pg_sys::CustomScanState {
-        unsafe { self.wrapper_ref().test_base() }
-    }
-
     pub(crate) unsafe fn scan_state_ptr(&mut self) -> *mut pg_sys::ScanState {
         unsafe { self.wrapper_mut().test_scan_state_ptr() }
     }
@@ -68,64 +120,5 @@ impl<P: LakebaseCustomScanProvider> TestScanState<P> {
 
     pub(crate) unsafe fn provider_state(&self) -> &P::State {
         unsafe { self.wrapper_ref().test_provider_state() }
-    }
-
-    pub(crate) unsafe fn set_cached_envelope(
-        &mut self,
-        envelope: TestCachedEnvelope,
-    ) {
-        unsafe {
-            self.wrapper_mut().test_set_cached_envelope(CachedEnvelope {
-                purpose: envelope.purpose,
-                pushed_contracts: envelope.pushed_contracts,
-                column_refs: envelope.column_refs,
-                tuple_layout: envelope.tuple_layout,
-            });
-        }
-    }
-
-    pub(crate) unsafe fn set_expr_sections(
-        &mut self,
-        sections: custom_exprs::CustomExprSections,
-    ) {
-        unsafe { self.wrapper_mut().test_set_expr_sections(sections) };
-    }
-
-    pub(crate) unsafe fn set_runtime_params(&mut self, params: RuntimeParamRefs) {
-        unsafe { self.wrapper_mut().test_set_runtime_params(params) };
-    }
-
-    pub(crate) unsafe fn runtime_params(&self) -> Option<&RuntimeParamRefs> {
-        unsafe { self.wrapper_ref().test_runtime_params() }
-    }
-}
-
-/// Cached framework envelope used by the ReScan and execution tests.
-pub(crate) struct TestCachedEnvelope {
-    pub(crate) purpose: ScanPurpose,
-    pub(crate) pushed_contracts: Vec<PushdownContract>,
-    pub(crate) column_refs: Vec<ColumnRef>,
-    pub(crate) tuple_layout: ScanTupleLayout,
-}
-
-/// Read-only view used by tests without exposing the runtime collector's
-/// storage fields.
-pub(crate) struct RuntimeParamRefsView<'a>(&'a RuntimeParamRefs);
-
-impl<'a> RuntimeParamRefsView<'a> {
-    pub(crate) fn new(refs: &'a RuntimeParamRefs) -> Self {
-        Self(refs)
-    }
-
-    pub(crate) fn extern_params(&self) -> &[ExternParamRef] {
-        self.0.extern_params()
-    }
-
-    pub(crate) fn exec_params(&self) -> &[ExecParamRef] {
-        self.0.exec_params()
-    }
-
-    pub(crate) fn exec_param_ids(&self) -> *mut pg_sys::Bitmapset {
-        self.0.exec_param_ids()
     }
 }

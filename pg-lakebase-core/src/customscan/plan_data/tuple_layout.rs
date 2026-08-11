@@ -8,7 +8,6 @@ use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
 use crate::customscan::plan_data::EnvelopeError;
-use crate::expr::execution::builder::ScanVarResolver;
 
 const LAYOUT_RELATION: i32 = 0;
 const LAYOUT_PROJECTED_BASE: i32 = 1;
@@ -28,7 +27,7 @@ pub enum NeededColumns<'a> {
 /// Opaque raw scan-tuple contract.
 ///
 /// The representation stays private so future metadata/computed/join layouts
-/// can be added without spreading enum matches across builders, translators,
+/// can be added without spreading enum matches across builders, planners,
 /// and providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanTupleLayout {
@@ -103,17 +102,6 @@ impl ScanTupleLayout {
             ScanTupleLayoutKind::Relation { .. } => Some(attno as usize - 1),
             ScanTupleLayoutKind::ProjectedBase { attnos_by_resno } => {
                 attnos_by_resno.iter().position(|&source| source == attno)
-            }
-        }
-    }
-
-    pub(crate) fn var_resolver(&self, scan_relid: c_int) -> ScanVarResolver<'_> {
-        match &self.kind {
-            ScanTupleLayoutKind::Relation { .. } => {
-                ScanVarResolver::relation(scan_relid)
-            }
-            ScanTupleLayoutKind::ProjectedBase { attnos_by_resno } => {
-                ScanVarResolver::mapped(pg_sys::INDEX_VAR, attnos_by_resno)
             }
         }
     }
@@ -204,25 +192,25 @@ impl ScanTupleLayout {
         match &self.kind {
             ScanTupleLayoutKind::Relation { .. } => {
                 if !tlist.is_null() {
-                    return Err(CustomScanError::internal(LayoutInvariantError(
-                        "relation layout has a non-NIL custom_scan_tlist",
-                    )));
+                    return Err(CustomScanError::framework(
+                        "customscan tuple-layout invariant violated: relation layout has a non-NIL custom_scan_tlist",
+                    ));
                 }
             }
             ScanTupleLayoutKind::ProjectedBase { attnos_by_resno } => {
                 if tlist.is_null() {
-                    return Err(CustomScanError::internal(LayoutInvariantError(
-                        "projected base layout has a NIL custom_scan_tlist",
-                    )));
+                    return Err(CustomScanError::framework(
+                        "customscan tuple-layout invariant violated: projected base layout has a NIL custom_scan_tlist",
+                    ));
                 }
                 let tlist_len = unsafe { pg_sys::list_length(tlist) } as usize;
                 let slot_width = unsafe { (*tuple_desc).natts } as usize;
                 if tlist_len != attnos_by_resno.len()
                     || slot_width != attnos_by_resno.len()
                 {
-                    return Err(CustomScanError::internal(LayoutInvariantError(
-                        "layout, custom_scan_tlist, and scan slot widths differ",
-                    )));
+                    return Err(CustomScanError::framework(
+                        "customscan tuple-layout invariant violated: layout, custom_scan_tlist, and scan slot widths differ",
+                    ));
                 }
                 let scan_relid = unsafe { (*cscan).scan.scanrelid } as c_int;
                 for (index, &attno) in attnos_by_resno.iter().enumerate() {
@@ -233,26 +221,26 @@ impl ScanTupleLayout {
                             != pg_sys::NodeTag::T_TargetEntry
                         || unsafe { (*tle).resno as usize } != index + 1
                     {
-                        return Err(CustomScanError::internal(LayoutInvariantError(
-                            "custom_scan_tlist entries are not contiguous TargetEntry nodes",
-                        )));
+                        return Err(CustomScanError::framework(
+                            "customscan tuple-layout invariant violated: custom_scan_tlist entries are not contiguous TargetEntry nodes",
+                        ));
                     }
                     let expr = unsafe { (*tle).expr };
                     if expr.is_null()
                         || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var
                     {
-                        return Err(CustomScanError::internal(LayoutInvariantError(
-                            "custom_scan_tlist contains a non-Var expression",
-                        )));
+                        return Err(CustomScanError::framework(
+                            "customscan tuple-layout invariant violated: custom_scan_tlist contains a non-Var expression",
+                        ));
                     }
                     let var = expr.cast::<pg_sys::Var>();
                     if unsafe { (*var).varno } != scan_relid
                         || unsafe { (*var).varattno } != attno
                         || unsafe { (*var).varlevelsup } != 0
                     {
-                        return Err(CustomScanError::internal(LayoutInvariantError(
-                            "custom_scan_tlist Var does not match the encoded base attribute",
-                        )));
+                        return Err(CustomScanError::framework(
+                            "customscan tuple-layout invariant violated: custom_scan_tlist Var does not match the encoded base attribute",
+                        ));
                     }
                 }
             }
@@ -295,10 +283,6 @@ impl Default for ScanTupleLayout {
         Self::relation()
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("customscan tuple-layout invariant violated: {0}")]
-struct LayoutInvariantError(&'static str);
 
 /// Read-only view of the actual executor scan slot descriptor paired with the
 /// decoded plan-time layout contract.

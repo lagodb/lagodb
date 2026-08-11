@@ -5,7 +5,7 @@ use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::expr::split::PlanPushdownSplit;
+use crate::expr::pushdown::PathFilterSet;
 
 use super::context::{
     ForeignPathContext, ForeignPathSpec, ForeignRelContext, PathVariantKind,
@@ -56,7 +56,7 @@ impl<D> ForeignPathBuilder<D> {
 ///
 /// # Safety
 ///
-/// `root`, `baserel`, `relation`, `param_info`, and `split` must all refer to
+/// `root`, `baserel`, `relation`, `param_info`, and `filters` must all refer to
 /// live planner state for one `GetForeignPaths` callback. `required_outer`
 /// must be a PostgreSQL Bitmapset owned by the planner, and `provider_state`
 /// must remain immutably borrowed during path construction.
@@ -68,7 +68,7 @@ pub(crate) unsafe fn build_path_variants<P: FdwScan>(
     kind: PathVariantKind,
     required_outer: pg_sys::Relids,
     param_info: *mut pg_sys::ParamPathInfo,
-    split: &PlanPushdownSplit,
+    filters: &PathFilterSet,
 ) -> Result<usize, ForeignScanError> {
     let relids = unsafe { (*baserel).relids };
     if unsafe { pg_sys::bms_overlap(relids, required_outer) } {
@@ -98,7 +98,7 @@ pub(crate) unsafe fn build_path_variants<P: FdwScan>(
     }
 
     let context =
-        ForeignPathContext::new(*relation, split, kind, required_outer, param_info);
+        ForeignPathContext::new(*relation, filters, kind, required_outer, param_info);
     let mut builder = ForeignPathBuilder::new();
     P::build_paths(provider_state, &context, &mut builder)?;
 
@@ -112,7 +112,7 @@ pub(crate) unsafe fn build_path_variants<P: FdwScan>(
                 provider_state,
                 kind,
                 required_outer,
-                split,
+                filters,
                 &context,
                 spec,
             )
@@ -134,7 +134,7 @@ unsafe fn add_path_spec<P: FdwScan>(
     provider_state: &P::PlannerState,
     kind: PathVariantKind,
     required_outer: pg_sys::Relids,
-    split: &PlanPushdownSplit,
+    filters: &PathFilterSet,
     context: &ForeignPathContext<'_>,
     spec: ForeignPathSpec<P::PrivateData>,
 ) -> Result<bool, ForeignScanError> {
@@ -160,7 +160,8 @@ unsafe fn add_path_spec<P: FdwScan>(
     } else {
         spec.pathkeys_ptr()
     };
-    let (startup_cost, total_cost) = finalize_path_spec(root, baserel, split, &spec)?;
+    let (startup_cost, total_cost) =
+        finalize_path_spec(root, baserel, filters, &spec)?;
     let private = encode_path_private::<P>(P::NAME, kind, &spec.private_data)?;
     let path = unsafe {
         pg::create_foreign_path(
@@ -186,7 +187,7 @@ unsafe fn add_path_spec<P: FdwScan>(
 fn finalize_path_spec<D>(
     root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
-    split: &PlanPushdownSplit,
+    filters: &PathFilterSet,
     spec: &ForeignPathSpec<D>,
 ) -> Result<(f64, f64), ForeignScanError> {
     if !spec.rows.is_finite()
@@ -207,7 +208,7 @@ fn finalize_path_spec<D>(
     // rounded remote estimate. Every estimated output row still requires a
     // materialized scan tuple, so use the output estimate as the lower bound.
     let materialized_rows = spec.retrieved_rows.max(spec.rows);
-    let residual_quals = unsafe { expr_list_from_ptrs(&split.residual) }?;
+    let residual_quals = unsafe { expr_list_from_ptrs(&filters.residual) }?;
     let reltarget = unsafe { (*baserel).reltarget };
     let local_cost = unsafe {
         pg::ForeignScanLocalCost::estimate(

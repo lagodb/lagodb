@@ -127,7 +127,7 @@ mod tests {
             matches!(
                 event,
                 TraceEvent::ScanBegin {
-                    pushed_count: 1,
+                    planned_count: 1,
                     filters,
                     projection: "projected",
                     ..
@@ -153,7 +153,7 @@ mod tests {
                 matches!(
                     event,
                     TraceEvent::ScanBegin {
-                        pushed_count: 0,
+                        planned_count: 0,
                         filters,
                         projection: "projected",
                         ..
@@ -184,7 +184,7 @@ mod tests {
                 matches!(
                     event,
                     TraceEvent::ScanBegin {
-                        pushed_count: 0,
+                        planned_count: 0,
                         filters,
                         projection: "synthetic-null",
                         ..
@@ -202,7 +202,7 @@ mod tests {
             matches!(
                 event,
                 TraceEvent::ScanBegin {
-                    pushed_count: 1,
+                    planned_count: 1,
                     filters,
                     ..
                 } if filters == &vec![(2, Some(10))]
@@ -218,7 +218,7 @@ mod tests {
             matches!(
                 event,
                 TraceEvent::ScanBegin {
-                    pushed_count: 1,
+                    planned_count: 1,
                     filters,
                     ..
                 } if filters == &vec![(1, Some(2))]
@@ -234,7 +234,7 @@ mod tests {
             matches!(
                 event,
                 TraceEvent::ScanBegin {
-                    pushed_count: 2,
+                    planned_count: 2,
                     filters,
                     ..
                 } if filters.len() == 2
@@ -252,7 +252,7 @@ mod tests {
             matches!(
                 event,
                 TraceEvent::ScanBegin {
-                    pushed_count: 0,
+                    planned_count: 0,
                     filters,
                     ..
                 } if filters.is_empty()
@@ -414,7 +414,7 @@ mod tests {
             matches!(
                 event,
                 TraceEvent::ScanRescan {
-                    params_changed: true,
+                    filters_changed: true,
                     filters,
                 }
                 if filters == &vec![(1, None)]
@@ -424,11 +424,115 @@ mod tests {
             matches!(
                 event,
                 TraceEvent::ScanRescan {
-                    params_changed: true,
+                    filters_changed: true,
                     filters,
                 }
                 if filters == &vec![(1, Some(3))]
             )
+        }));
+    }
+
+    #[pg_test]
+    fn lateral_rescan_rebinds_relabelled_exec_param() {
+        let table = "fdw_test_relabelled_param_t";
+        prepare_table(table, "fdw_test_relabelled_param_server");
+        TestTrace::clear();
+
+        let rows =
+            Spi::connect_mut(|client| -> pgrx::spi::Result<Vec<Option<i32>>> {
+                client.update("SET LOCAL enable_hashjoin = off", None, &[])?;
+                client.update("SET LOCAL enable_mergejoin = off", None, &[])?;
+                let rows = client.select(
+                    &format!(
+                        "SELECT inner_scan.id \
+                     FROM (VALUES (1::oid), (3::oid)) AS outer_values(v) \
+                     LEFT JOIN LATERAL ( \
+                         SELECT id FROM {table} \
+                         WHERE {table}.id = outer_values.v::int4 \
+                         ORDER BY {table}.sort_key LIMIT 1 \
+                     ) AS inner_scan ON true \
+                     ORDER BY outer_values.v"
+                    ),
+                    None,
+                    &[],
+                )?;
+                rows.map(|row| row.get::<i32>(1)).collect()
+            })
+            .expect("LATERAL FDW relabelled-param query failed");
+        assert_eq!(rows, vec![Some(1), Some(3)]);
+
+        let trace = TestTrace::take();
+        assert!(trace.iter().any(|event| {
+            matches!(
+                event,
+                TraceEvent::ScanBegin { filters, .. } if filters == &vec![(1, Some(1))]
+            )
+        }));
+        assert!(trace.iter().any(|event| {
+            matches!(
+                event,
+                TraceEvent::ScanRescan {
+                    filters_changed: true,
+                    filters,
+                } if filters == &vec![(1, Some(3))]
+            )
+        }));
+    }
+
+    #[pg_test]
+    fn lateral_rescan_does_not_rebind_filters_for_unrelated_params() {
+        let table = "fdw_test_unrelated_rescan_t";
+        prepare_table(table, "fdw_test_unrelated_rescan_server");
+        TestTrace::clear();
+
+        let rows = Spi::connect_mut(|client| -> pgrx::spi::Result<Vec<(String, Option<i32>)>> {
+            client.update("SET LOCAL enable_hashjoin = off", None, &[])?;
+            client.update("SET LOCAL enable_mergejoin = off", None, &[])?;
+            let rows = client.select(
+                &format!(
+                    "SELECT outer_values.payload, inner_scan.id \
+                     FROM (VALUES ('zulu'::text), ('alpha'::text)) AS outer_values(payload) \
+                     LEFT JOIN LATERAL ( \
+                         SELECT id FROM {table} \
+                         WHERE {table}.id = 1 \
+                           AND {table}.payload = outer_values.payload \
+                         OFFSET 0 LIMIT 1 \
+                     ) AS inner_scan ON true \
+                     ORDER BY outer_values.payload DESC"
+                ),
+                None,
+                &[],
+            )?;
+            rows.map(|row| {
+                Ok((
+                    row.get::<String>(1)?.expect("payload must be non-NULL"),
+                    row.get::<i32>(2)?,
+                ))
+            })
+            .collect()
+        })
+        .expect("LATERAL unrelated-param FDW query failed");
+        assert_eq!(
+            rows,
+            vec![("zulu".to_owned(), Some(1)), ("alpha".to_owned(), None)]
+        );
+
+        let rescans = TestTrace::take()
+            .into_iter()
+            .filter_map(|event| match event {
+                TraceEvent::ScanRescan {
+                    filters_changed,
+                    filters,
+                } => Some((filters_changed, filters)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !rescans.is_empty(),
+            "query must rescan the parameterized FDW"
+        );
+        assert!(rescans.iter().all(|(changed, filters)| {
+            !changed && filters == &vec![(1, Some(1))]
         }));
     }
 }

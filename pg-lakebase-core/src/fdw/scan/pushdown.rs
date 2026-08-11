@@ -1,17 +1,16 @@
 //! Provider-facing scan expression, pushdown, and runtime-value contexts.
 
 use core::ffi::{c_int, c_void};
-use core::marker::PhantomData;
 use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::expr::contract::{ColumnRef, PushdownContract};
 use crate::expr::inspect::{RelationExprAnalyzer, RelationScope};
+use crate::expr::pushdown::BoundFilterSet;
 use crate::handles::{RelationHandle, SnapshotHandle};
 
 use super::super::row_identity::ForeignRowIdentityRequirement;
-use super::context::ForeignPlanPrivate;
+use super::contract::FdwScan;
 use super::error::ForeignScanError;
 use super::projection::{ColumnRequirements, ScanProjection};
 use super::slot::ScanOutputLayout;
@@ -109,115 +108,26 @@ impl ForeignExprs {
         self.raw.is_null()
     }
 
-    #[inline]
-    pub(crate) fn as_raw(&self) -> *mut pg_sys::List {
-        self.raw
-    }
-}
-
-/// PG expression list view used for final pushed and residual quals.
-#[derive(Clone, Copy)]
-pub struct ForeignExprList<'a> {
-    raw: *mut pg_sys::List,
-    len: usize,
-    _marker: PhantomData<&'a pg_sys::List>,
-}
-
-impl<'a> ForeignExprList<'a> {
+    /// Append provider expressions after a framework-owned prefix.
+    ///
     /// # Safety
     ///
-    /// If non-null, `raw` must be a PostgreSQL-owned plan list that remains
-    /// live for the returned borrowed view.
-    pub(crate) unsafe fn from_raw(raw: *mut pg_sys::List) -> Self {
-        let len = if raw.is_null() {
+    /// `prefix` and this object's expressions must be live planner-owned nodes
+    /// in the current memory context.
+    pub(crate) unsafe fn append_to(
+        &self,
+        mut prefix: *mut pg_sys::List,
+    ) -> *mut pg_sys::List {
+        let length = if self.raw.is_null() {
             0
         } else {
-            unsafe { pg_sys::list_length(raw) as usize }
+            unsafe { pg_sys::list_length(self.raw) }
         };
-        Self {
-            raw,
-            len,
-            _marker: PhantomData,
+        for index in 0..length {
+            let expression = unsafe { pg_sys::list_nth(self.raw, index) };
+            prefix = unsafe { pg_sys::lappend(prefix, expression.cast::<c_void>()) };
         }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Return an expression pointer in plan-list order.
-    #[inline]
-    pub fn get(&self, index: usize) -> Option<*mut pg_sys::Expr> {
-        if index >= self.len {
-            return None;
-        }
-        let node = unsafe { pg_sys::list_nth(self.raw, index as i32) };
-        (!node.is_null()).then_some(node as *mut pg_sys::Expr)
-    }
-}
-
-/// Pushdown information made available to a provider at provider start/ReScan.
-///
-/// `recheck_expressions` is the setrefs-processed exact-expression list that
-/// the framework places in `fdw_recheck_quals`.  `pushed_contracts` and
-/// `column_refs` describe the complete pushed-expression section in its
-/// planner order; conservative pruning expressions remain outside the PG
-/// recheck list because they are not exact row filters.
-pub struct ForeignPushdown<'a> {
-    recheck_expressions: ForeignExprList<'a>,
-    pushed_contracts: &'a [PushdownContract],
-    column_refs: &'a [ColumnRef],
-}
-
-impl<'a> ForeignPushdown<'a> {
-    pub(crate) fn new(
-        recheck_expressions: ForeignExprList<'a>,
-        pushed_contracts: &'a [PushdownContract],
-        column_refs: &'a [ColumnRef],
-    ) -> Self {
-        Self {
-            recheck_expressions,
-            pushed_contracts,
-            column_refs,
-        }
-    }
-
-    #[inline]
-    pub fn recheck_expressions(&self) -> ForeignExprList<'_> {
-        self.recheck_expressions
-    }
-
-    #[inline]
-    pub fn pushed_contracts(&self) -> &[PushdownContract] {
-        self.pushed_contracts
-    }
-
-    /// Contracts corresponding to `recheck_expressions`, in the same order.
-    /// The iterator is allocation-free and filters the complete pushed
-    /// contract section down to exact row filters.
-    #[inline]
-    pub fn recheck_contracts(&self) -> impl Iterator<Item = PushdownContract> + '_ {
-        self.pushed_contracts
-            .iter()
-            .copied()
-            .filter(|contract| contract.requires_recheck())
-    }
-
-    #[inline]
-    pub fn column_refs(&self) -> &[ColumnRef] {
-        self.column_refs
-    }
-
-    /// Whether the plan contains no pushed predicate of either contract.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.pushed_contracts.is_empty()
+        prefix
     }
 }
 
@@ -271,15 +181,15 @@ impl<'a> RuntimeExpressionValues<'a> {
 /// `BeginForeignScan` callback, but invokes the provider's `begin` only when
 /// the first valid parameter set is available or when the first row is
 /// requested for an unparameterized scan.
-pub struct BeginForeignScanContext<'a, D: ForeignPlanPrivate> {
-    pub private_data: &'a D,
+pub struct BeginForeignScanContext<'a, P: FdwScan + ?Sized> {
+    pub private_data: &'a P::PrivateData,
     pub relation: RelationHandle<'a>,
     pub snapshot: SnapshotHandle<'a>,
     pub projection: &'a ScanProjection,
     pub required_columns: &'a ColumnRequirements,
     pub output_layout: ScanOutputLayout<'a>,
     pub row_identity_requirement: ForeignRowIdentityRequirement,
-    pub pushdown: ForeignPushdown<'a>,
+    pub filters: BoundFilterSet<'a, P::BoundPredicate>,
     pub expressions: RuntimeExpressionValues<'a>,
     pub estate: *mut pg_sys::EState,
     pub econtext: *mut pg_sys::ExprContext,
@@ -287,7 +197,7 @@ pub struct BeginForeignScanContext<'a, D: ForeignPlanPrivate> {
     pub(crate) effective_user_id: pg_sys::Oid,
 }
 
-impl<'a, D: ForeignPlanPrivate> BeginForeignScanContext<'a, D> {
+impl<'a, P: FdwScan + ?Sized> BeginForeignScanContext<'a, P> {
     /// The role PostgreSQL selected for the foreign scan's user mapping.
     #[inline]
     pub fn effective_user_id(&self) -> pg_sys::Oid {
@@ -297,14 +207,14 @@ impl<'a, D: ForeignPlanPrivate> BeginForeignScanContext<'a, D> {
 
 /// ReScan callback context.  Runtime expressions are reevaluated before the
 /// provider is called, including `PARAM_EXEC` values of a nested-loop path.
-pub struct ReScanForeignScanContext<'a> {
+pub struct ReScanForeignScanContext<'a, P: FdwScan + ?Sized> {
     pub relation: RelationHandle<'a>,
     pub snapshot: SnapshotHandle<'a>,
     pub projection: &'a ScanProjection,
     pub required_columns: &'a ColumnRequirements,
-    pub pushdown: ForeignPushdown<'a>,
+    pub filters: BoundFilterSet<'a, P::BoundPredicate>,
     pub expressions: RuntimeExpressionValues<'a>,
-    pub params_changed: bool,
+    pub filters_changed: bool,
     pub estate: *mut pg_sys::EState,
     pub econtext: *mut pg_sys::ExprContext,
 }

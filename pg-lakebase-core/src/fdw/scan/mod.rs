@@ -5,10 +5,12 @@ mod context;
 mod contract;
 mod error;
 mod executor;
+mod filter;
 mod parameterized;
 mod path_builder;
 mod pathkeys;
 mod pg;
+mod plan_filter;
 mod planning;
 mod private;
 mod projection;
@@ -25,10 +27,13 @@ pub use contract::FdwScan;
 pub use error::{ForeignScanError, ForeignScanPhase};
 pub use path_builder::ForeignPathBuilder;
 pub use pathkeys::{ForeignPathKey, ForeignPathKeys};
+pub use plan_filter::{
+    ForeignPlanFilter, ForeignPlanFilters, ForeignPlanQualLocation,
+};
 pub use projection::{ColumnRequirements, ScanProjection, ScanProjectionPolicy};
 pub use pushdown::{
-    BeginForeignScanContext, ForeignExprList, ForeignExpressionValue, ForeignExprs,
-    ForeignPushdown, ReScanForeignScanContext, RuntimeExpressionValues,
+    BeginForeignScanContext, ForeignExpressionValue, ForeignExprs,
+    ReScanForeignScanContext, RuntimeExpressionValues,
 };
 pub use slot::{ScanDatumWriter, ScanOutputColumn, ScanSlotWriter};
 

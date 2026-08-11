@@ -7,17 +7,15 @@ use core::ptr;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 
-use crate::expr::contract::{ColumnRef, PushdownContract};
-
 use super::super::payload::ProviderPayload;
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::contract::FdwScan;
 use super::error::ForeignScanError;
+use super::filter::ForeignScanFilters;
 use super::private::DecodedScanPrivate;
 use super::projection::{ColumnRequirements, ScanProjection};
 use super::pushdown::{
-    BeginForeignScanContext, ForeignExprList, ForeignExpressionValue,
-    ForeignPushdown, RuntimeExpressionValues,
+    BeginForeignScanContext, ForeignExpressionValue, RuntimeExpressionValues,
 };
 use super::slot::{ScanOutputLayout, ScanSlotWriter, SlotWriteLayout};
 use crate::handles::{RelationHandle, SnapshotHandle};
@@ -30,8 +28,7 @@ pub(crate) struct ForeignScanStateWrapper<P: FdwScan> {
     pub(crate) required_columns: ColumnRequirements,
     pub(crate) write_layout: SlotWriteLayout,
     pub(crate) datum_defaults_initialized: bool,
-    pub(crate) contracts: Vec<PushdownContract>,
-    pub(crate) column_refs: Vec<ColumnRef>,
+    pub(crate) filters: Option<ForeignScanFilters<P>>,
     pub(crate) fdw_expr_states: *mut pg_sys::List,
     pub(crate) eflags: c_int,
     pub(crate) runtime_values: Vec<ForeignExpressionValue>,
@@ -41,6 +38,7 @@ pub(crate) struct ForeignScanStateWrapper<P: FdwScan> {
 impl<P: FdwScan> ForeignScanStateWrapper<P> {
     pub(crate) fn new(
         decoded: DecodedScanPrivate<P::PrivateData>,
+        filters: ForeignScanFilters<P>,
         fdw_expr_states: *mut pg_sys::List,
         write_layout: SlotWriteLayout,
         eflags: c_int,
@@ -58,8 +56,7 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
             required_columns: decoded.requirements,
             datum_defaults_initialized: false,
             write_layout,
-            contracts: decoded.contracts,
-            column_refs: decoded.column_refs,
+            filters: Some(filters),
             fdw_expr_states,
             eflags,
             runtime_values: Vec::with_capacity(expression_count),
@@ -141,11 +138,16 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         // for a parameterized ReScan.  Runtime expression values are then
         // evaluated against the current outer tuple, if this scan is the inner
         // side of a Nested Loop.
+        unsafe {
+            self.filters
+                .as_mut()
+                .expect("FDW filters must remain installed until EndForeignScan")
+                .bind_initial(econtext)
+        }?;
         unsafe { self.refresh_runtime_values(econtext) }?;
 
         let provider_state = {
             let private_data = self.private_data();
-            let pushdown = unsafe { self.pushdown((*plan).fdw_recheck_quals) };
             let begin_context = BeginForeignScanContext {
                 private_data,
                 relation: unsafe { RelationHandle::from_raw(relation) },
@@ -154,7 +156,11 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
                 required_columns: &self.required_columns,
                 output_layout: ScanOutputLayout::new(&self.write_layout),
                 row_identity_requirement: self.row_identity_requirement,
-                pushdown,
+                filters: self
+                    .filters
+                    .as_ref()
+                    .expect("FDW filters must remain installed until EndForeignScan")
+                    .bound(),
                 expressions: self.runtime_values(),
                 estate,
                 econtext,
@@ -230,19 +236,6 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
 
     /// # Safety
     ///
-    /// `raw_recheck_quals` must be a PostgreSQL-owned plan list that remains
-    /// live for the returned borrowed view.
-    pub(crate) unsafe fn pushdown<'a>(
-        &'a self,
-        raw_recheck_quals: *mut pg_sys::List,
-    ) -> ForeignPushdown<'a> {
-        // SAFETY: the list is PostgreSQL-owned plan data borrowed for this scan.
-        let expressions = unsafe { ForeignExprList::from_raw(raw_recheck_quals) };
-        ForeignPushdown::new(expressions, &self.contracts, &self.column_refs)
-    }
-
-    /// # Safety
-    ///
     /// `slot` must be the live HeapTuple scan slot validated during Begin, and
     /// the wrapper's projection, slot output layout, and datum-default state
     /// must still belong to this scan state.
@@ -268,9 +261,8 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
 
     pub(crate) fn cleanup_payloads(&mut self) {
         self.payload.cleanup();
+        self.filters = None;
         self.runtime_values.clear();
-        self.contracts.clear();
-        self.column_refs.clear();
         self.datum_defaults_initialized = false;
         self.fdw_expr_states = ptr::null_mut();
         self.projection = ScanProjection::Relation;

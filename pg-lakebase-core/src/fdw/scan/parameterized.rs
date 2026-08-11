@@ -6,15 +6,12 @@ use core::ptr;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::expr::split::PlannerClauseGate;
-
 use super::error::ForeignScanError;
 
 pub(super) struct ParameterizedCandidates {
     rel: *mut pg_sys::RelOptInfo,
     lateral_relids: pg_sys::Relids,
     relids: pg_sys::Relids,
-    gate: PlannerClauseGate,
     values: Vec<pg_sys::Relids>,
 }
 
@@ -28,7 +25,6 @@ impl ParameterizedCandidates {
             rel,
             lateral_relids: unsafe { (*rel).lateral_relids },
             relids: unsafe { (*rel).relids },
-            gate: PlannerClauseGate::for_relation(rel),
             values: Vec::new(),
         }
     }
@@ -88,13 +84,12 @@ impl ParameterizedCandidates {
 
     /// # Safety
     ///
-    /// `rinfo` must be NULL or a live planner `RestrictInfo` reachable from
+    /// `rinfo` must be a live planner `RestrictInfo` reachable from
     /// `self.rel`'s join information or implied-equality list.
     unsafe fn consider_clause(&mut self, rinfo: *mut pg_sys::RestrictInfo) {
-        if rinfo.is_null()
-            || unsafe { (*rinfo).pseudoconstant }
-            || !unsafe { self.gate.is_securely_promotable(rinfo) }
-            || !unsafe { self.gate.is_movable_to_relation(rinfo) }
+        if unsafe { (*rinfo).pseudoconstant }
+            || !unsafe { pg_sys::restriction_is_securely_promotable(rinfo, self.rel) }
+            || !unsafe { pg_sys::join_clause_is_movable_to(rinfo, self.rel) }
         {
             return;
         }
@@ -122,9 +117,9 @@ struct EcMemberSelection {
 
 /// # Safety
 ///
-/// PostgreSQL invokes this callback with live `rel` and `em` planner objects.
-/// If `em_expr` is a RelabelType or Var, its node layout and referenced
-/// relation bitmap must remain valid for the synchronous callback.
+/// PostgreSQL invokes this callback with live `rel`, `em`, and caller-owned
+/// `EcMemberSelection` objects. If `em_expr` is a RelabelType or Var, its node
+/// layout and referenced relation bitmap remain valid for the callback.
 #[pg_guard]
 unsafe extern "C-unwind" fn ec_member_is_scan_var(
     _root: *mut pg_sys::PlannerInfo,
@@ -133,14 +128,8 @@ unsafe extern "C-unwind" fn ec_member_is_scan_var(
     em: *mut pg_sys::EquivalenceMember,
     arg: *mut c_void,
 ) -> bool {
-    if rel.is_null() || em.is_null() || arg.is_null() {
-        return false;
-    }
     let selection = unsafe { &mut *(arg.cast::<EcMemberSelection>()) };
     let expr = unsafe { (*em).em_expr };
-    if expr.is_null() {
-        return false;
-    }
     if !selection.current.is_null() {
         return unsafe { pg_sys::equal(expr.cast(), selection.current.cast()) };
     }
@@ -150,12 +139,10 @@ unsafe extern "C-unwind" fn ec_member_is_scan_var(
         return false;
     }
     let mut node = expr.cast::<pg_sys::Node>();
-    while !node.is_null()
-        && unsafe { (*node).type_ } == pg_sys::NodeTag::T_RelabelType
-    {
+    while unsafe { (*node).type_ } == pg_sys::NodeTag::T_RelabelType {
         node = unsafe { (*node.cast::<pg_sys::RelabelType>()).arg }.cast();
     }
-    if node.is_null() || unsafe { (*node).type_ } != pg_sys::NodeTag::T_Var {
+    if unsafe { (*node).type_ } != pg_sys::NodeTag::T_Var {
         return false;
     }
     let var = node.cast::<pg_sys::Var>();

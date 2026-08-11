@@ -1,21 +1,20 @@
 //! Public provider API for the FDW planner/executor seam.
 
-use core::ffi::c_int;
 use core::marker::PhantomData;
 use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::expr::predicate::PlanPredicateContext;
+use crate::expr::pushdown::{FilterPlanSummary, NegotiatedFilterSet, PathFilterSet};
 use crate::expr::relation::PlanRelationResolver;
-use crate::expr::split::PlanPushdownSplit;
 
-use super::super::codec::{ForeignPrivateReader, ForeignPrivateWriter};
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::error::ForeignScanError;
 use super::pathkeys::ForeignPathKeys;
+use super::plan_filter::ForeignPlanFilters;
 use super::projection::{ColumnRequirements, ScanProjectionPolicy};
 use super::pushdown::ForeignExprs;
+use crate::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 
 /// Nullable PostgreSQL `Bitmapset *` used for required outer relations.
 pub type Relids = *mut pg_sys::Bitmapset;
@@ -131,15 +130,6 @@ impl<'a> ForeignRelContext<'a> {
         unsafe { (*self.baserel).relids }
     }
 
-    /// Predicate parser context for this base relation.
-    #[inline]
-    pub fn predicate_context(&self) -> PlanPredicateContext {
-        PlanPredicateContext {
-            rel_oid: self.relation_oid,
-            scan_relid: self.scan_relid() as c_int,
-        }
-    }
-
     /// Planner-visible base restriction list.
     #[inline]
     pub fn baserestrictinfo(&self) -> *mut pg_sys::List {
@@ -214,13 +204,13 @@ impl ForeignRelSize {
 /// final plan always re-splits PostgreSQL's final `scan_clauses` list.
 pub struct ForeignRelSizeContext<'a> {
     relation: ForeignRelContext<'a>,
-    pushdown: &'a PlanPushdownSplit,
+    pushdown: &'a PathFilterSet,
 }
 
 impl<'a> ForeignRelSizeContext<'a> {
     pub(crate) fn new(
         relation: ForeignRelContext<'a>,
-        pushdown: &'a PlanPushdownSplit,
+        pushdown: &'a PathFilterSet,
     ) -> Self {
         Self { relation, pushdown }
     }
@@ -231,8 +221,8 @@ impl<'a> ForeignRelSizeContext<'a> {
     }
 
     #[inline]
-    pub fn pushdown(&self) -> &PlanPushdownSplit {
-        self.pushdown
+    pub fn pushdown(&self) -> FilterPlanSummary {
+        FilterPlanSummary::from_path_set(self.pushdown)
     }
 }
 
@@ -240,7 +230,7 @@ impl<'a> ForeignRelSizeContext<'a> {
 /// `GetForeignPlan` recomputes the authoritative final split.
 pub struct ForeignPathContext<'a> {
     relation: ForeignRelContext<'a>,
-    pushdown: &'a PlanPushdownSplit,
+    pushdown: &'a PathFilterSet,
     kind: PathVariantKind,
     required_outer: Relids,
     param_info: *mut pg_sys::ParamPathInfo,
@@ -249,7 +239,7 @@ pub struct ForeignPathContext<'a> {
 impl<'a> ForeignPathContext<'a> {
     pub(crate) fn new(
         relation: ForeignRelContext<'a>,
-        pushdown: &'a PlanPushdownSplit,
+        pushdown: &'a PathFilterSet,
         kind: PathVariantKind,
         required_outer: Relids,
         param_info: *mut pg_sys::ParamPathInfo,
@@ -269,8 +259,8 @@ impl<'a> ForeignPathContext<'a> {
     }
 
     #[inline]
-    pub fn pushdown(&self) -> &PlanPushdownSplit {
-        self.pushdown
+    pub fn pushdown(&self) -> FilterPlanSummary {
+        FilterPlanSummary::from_path_set(self.pushdown)
     }
 
     #[inline]
@@ -356,37 +346,34 @@ impl<D> ForeignPathSpec<D> {
 }
 
 /// Final plan callback context.
-pub struct ForeignPlanContext<'a, D: ForeignPlanPrivate> {
+pub struct ForeignPlanContext<'a, P: super::contract::FdwScan> {
     relation: ForeignRelContext<'a>,
-    pushdown: &'a PlanPushdownSplit,
+    filters: ForeignPlanFilters<'a, P>,
     tlist: *mut pg_sys::List,
-    scan_clauses: *mut pg_sys::List,
     outer_plan: *mut pg_sys::Plan,
     kind: PathVariantKind,
     required_outer: Relids,
-    path_private: &'a D,
+    path_private: &'a P::PrivateData,
     pathkeys: &'a ForeignPathKeys,
     row_identity_requirement: ForeignRowIdentityRequirement,
 }
 
-impl<'a, D: ForeignPlanPrivate> ForeignPlanContext<'a, D> {
+impl<'a, P: super::contract::FdwScan> ForeignPlanContext<'a, P> {
     pub(crate) fn new(
         relation: ForeignRelContext<'a>,
-        pushdown: &'a PlanPushdownSplit,
+        filters: &'a NegotiatedFilterSet<P::PlannedPredicate>,
         tlist: *mut pg_sys::List,
-        scan_clauses: *mut pg_sys::List,
         outer_plan: *mut pg_sys::Plan,
         kind: PathVariantKind,
         required_outer: Relids,
-        path_private: &'a D,
+        path_private: &'a P::PrivateData,
         pathkeys: &'a ForeignPathKeys,
         row_identity_requirement: ForeignRowIdentityRequirement,
     ) -> Self {
         Self {
             relation,
-            pushdown,
+            filters: ForeignPlanFilters::new(filters),
             tlist,
-            scan_clauses,
             outer_plan,
             kind,
             required_outer,
@@ -402,18 +389,20 @@ impl<'a, D: ForeignPlanPrivate> ForeignPlanContext<'a, D> {
     }
 
     #[inline]
-    pub fn pushdown(&self) -> &PlanPushdownSplit {
-        self.pushdown
+    pub fn pushdown(&self) -> FilterPlanSummary {
+        self.filters.summary()
+    }
+
+    /// Finalized typed filter plan. This is the only filter authority at the
+    /// final FDW planning stage.
+    #[inline]
+    pub fn filters(&self) -> &ForeignPlanFilters<'a, P> {
+        &self.filters
     }
 
     #[inline]
     pub fn targetlist(&self) -> *mut pg_sys::List {
         self.tlist
-    }
-
-    #[inline]
-    pub fn scan_clauses(&self) -> *mut pg_sys::List {
-        self.scan_clauses
     }
 
     #[inline]
@@ -432,7 +421,7 @@ impl<'a, D: ForeignPlanPrivate> ForeignPlanContext<'a, D> {
     }
 
     #[inline]
-    pub fn path_private(&self) -> &D {
+    pub fn path_private(&self) -> &P::PrivateData {
         self.path_private
     }
 

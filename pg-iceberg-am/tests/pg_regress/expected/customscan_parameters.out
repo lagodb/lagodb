@@ -747,14 +747,11 @@ FROM customscan_rescan_lake WHERE id IS NULL;
 -- `PlanCustomPath` once (custom-plan path) or once per execution
 -- (generic-plan path; PG decides at runtime). Either way, every
 -- `EXECUTE p(N)` arrives at `BeginCustomScan` with a fresh
--- `paramInfo->params[$1]`, and the framework's
--- `RuntimeParamResolver::resolve` must mirror `ExecEvalParamExtern`
---:
---   - Call `paramInfo->paramFetch(speculative=false)` when set.
---   - Validate `OidIsValid(prm->ptype)` and
---     `prm->ptype == op->d.param.paramtype`.
---   - Raise `ERRCODE_DATATYPE_MISMATCH` / "no value found for
---     parameter %d" mirroring PG's wording on failure.
+-- `paramInfo->params[$1]`. The framework initializes its binding
+-- expressions with `ExecInitExprList` and evaluates them
+-- through `ExecEvalExprSwitchContext`. PostgreSQL therefore owns
+-- `PARAM_EXTERN` fetching and type validation; the framework binds the
+-- evaluated values to the planned filters.
 -- The framework also computes `cached_pushed_param_ids` at
 -- `BeginCustomScan` so that subsequent rescans
 -- (e.g. when this same prepared statement runs inside a larger plan
@@ -896,8 +893,8 @@ EXECUTE customscan_rescan_p1_baseline(75);
 -- statement (`plancache.c` heuristic). Run the same prepared
 -- statement enough times that PG considers using the generic plan,
 -- so both the custom-plan and generic-plan code paths through
--- `BeginCustomScan` / `RuntimeParamResolver::resolve` are exercised. After the
--- switch, EXECUTE one more time on each side and let pg_regress diff
+-- `BeginCustomScan` and PostgreSQL expression evaluation are exercised.
+-- After the switch, run one more `EXECUTE` on each side and let pg_regress diff
 -- the two row blocks: the row set returned by `EXECUTE` against any
 -- bound value must still match the baseline regardless of which plan
 -- flavor PG chose internally.
@@ -1247,11 +1244,10 @@ ORDER BY outer_rel.id, lake.payload;
 -- B.4: nestloop where the pushed inner predicate is a CONSTANT. The
 -- extra outer-dependent residual predicate makes the inner CustomScan
 -- a rescanned parameterized path, but the pushed clause itself has no
--- `Param` references. Therefore `cached_pushed_param_ids` is empty
--- and `bms_overlap(chgParam, cached_pushed_param_ids)` is FALSE on
--- every rescan.3, the framework must NOT
--- re-translate or re-prune — it must only reopen the cursor. We can't
--- observe "didn't re-translate" from SQL, but we CAN assert the
+-- `Param` references. Therefore its binding parameter set is empty and
+-- cannot overlap `chgParam` on any rescan. The framework must not rebind
+-- or rebuild pruning state; it only reopens the cursor. We cannot observe
+-- "didn't rebind" from SQL, but we can assert the
 -- result-set correctness still matches the baseline 
 -- 11.4 — the chgParam gate is correctness-preserving regardless of
 -- which path it picks).
@@ -1260,10 +1256,10 @@ ORDER BY outer_rel.id, lake.payload;
 -- overlapping"), so the test exercises both branches of
 -- the correctness invariant.
 -- B.4 plan guards: the predicate shape here differs from B.1–B.3
--- (constant `lake.id = 25` is classified Exact and pushed; the
+-- (constant `lake.id = 25` is planned Exact and pushed; the
 -- outer-dependent `(lake.id + outer.unrelated) > 0` is the local
 -- residual). So the
--- Block-B plan guard above does NOT certify this classifier outcome — we
+-- Block-B plan guard above does not certify this planned-filter outcome — we
 -- print fresh EXPLAIN blocks for both modes to verify:
 --   - `force`: `Custom Scan` whose default TEXT carries
 --     `Pushed Filter: (id = 25)` (the pushed/remote predicate) with the
@@ -1366,8 +1362,9 @@ ORDER BY outer_rel.unrelated, lake.id, lake.payload;
 
 -- B.5: PARAM_EXEC changes from a representable ConservativePruning value to
 -- a value that cannot be encoded as an Iceberg Datum. The pushed predicate is
--- a ConservativePruning OR, so translation failure must widen by clearing the
--- Iceberg row_filter and relying on the residual qual. Keeping the previous
+-- a ConservativePruning OR, so `ValueNotRepresentable` must omit it from the
+-- current bound set, clearing the Iceberg row_filter and relying on the
+-- residual qual. Keeping the previous
 -- row_filter would reuse stale PARAM_EXEC values and filter out the marker=2
 -- row before PostgreSQL can evaluate the residual OR.
 CREATE TABLE customscan_rescan_date_lake (

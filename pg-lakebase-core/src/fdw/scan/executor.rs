@@ -4,8 +4,6 @@ use core::slice;
 
 use pgrx::pg_sys;
 
-use crate::expr::contract::ColumnRef;
-
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::error::ForeignScanError;
 use super::projection::{ColumnRequirements, ScanProjection, SlotWritePlan};
@@ -25,7 +23,6 @@ pub(crate) unsafe fn validate_executor_layout(
     write_plan: &SlotWritePlan,
     row_identity: ForeignRowIdentityRequirement,
     requirements: &ColumnRequirements,
-    column_refs: &[ColumnRef],
     slot: *mut pg_sys::TupleTableSlot,
 ) -> Result<SlotWriteLayout, ForeignScanError> {
     if plan.is_null() {
@@ -97,20 +94,6 @@ pub(crate) unsafe fn validate_executor_layout(
             ));
         }
     }
-    for column_ref in column_refs {
-        if !valid_user_attno(column_ref.attno)
-            || !requirements.contains_user_column(column_ref.attno)
-            || column_ref.atttypid
-                != relation_attrs[column_ref.attno as usize - 1].atttypid
-            || column_ref.attcollation
-                != relation_attrs[column_ref.attno as usize - 1].attcollation
-        {
-            return Err(ForeignScanError::framework(
-                "FDW private column-reference metadata does not match the relation descriptor",
-            ));
-        }
-    }
-
     // SAFETY: plan is non-null from the function entry check and remains live.
     let tlist = unsafe { (*plan).fdw_scan_tlist };
     match projection {

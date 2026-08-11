@@ -25,7 +25,7 @@ use crate::access::projection::Projection;
 use crate::catalog::bridge::IcebergTableId;
 use crate::catalog::metadata_tracker::TxMetadata;
 use crate::error::{IcebergError, IcebergResult};
-use crate::relation_binding::{RelationFieldIndex, RelationShape};
+use crate::relation_binding::RelationShape;
 use crate::storage::StorageContext;
 
 /// Statement-scoped scan state: snapshot, bound columns, predicates, and
@@ -74,11 +74,56 @@ enum RowLocationProjection {
     Include,
 }
 
-struct LoadedScanMetadata {
+pub(crate) struct LoadedScanMetadata {
     table: Table,
     schema: Arc<IcebergSchema>,
     delta: Option<Arc<SnapshotDelta>>,
     storage_bytes: Option<u64>,
+}
+
+impl LoadedScanMetadata {
+    pub(crate) fn load_query(
+        rel_oid: pg_sys::Oid,
+        spc_oid: pg_sys::Oid,
+    ) -> IcebergResult<Self> {
+        Self::load(rel_oid, spc_oid, ScanMetadataPurpose::Query)
+    }
+
+    pub(crate) fn schema(&self) -> &Arc<IcebergSchema> {
+        &self.schema
+    }
+
+    fn load(
+        rel_oid: pg_sys::Oid,
+        spc_oid: pg_sys::Oid,
+        purpose: ScanMetadataPurpose,
+    ) -> IcebergResult<Self> {
+        PgTransactionIsolation::current()?;
+        let ctx = StorageContext::for_tablespace(spc_oid)?;
+        let loaded =
+            TxMetadata::current().current_table_metadata(rel_oid, ctx.file_io())?;
+        let schema = loaded.metadata.current_schema().clone();
+        let storage_bytes = match purpose {
+            ScanMetadataPurpose::Query => None,
+            ScanMetadataPurpose::Analyze => {
+                Some(loaded.relation_stats(ctx.file_io())?.1)
+            }
+        };
+
+        let table = Table::builder()
+            .file_io(ctx.file_io().clone())
+            .metadata_location(loaded.location)
+            .metadata(loaded.metadata)
+            .identifier(IcebergTableId::for_relation(rel_oid).into_table_ident())
+            .build()?;
+
+        Ok(Self {
+            table,
+            schema,
+            delta: loaded.delta,
+            storage_bytes,
+        })
+    }
 }
 
 impl ScanSpec {
@@ -112,36 +157,31 @@ impl ScanSpec {
         Self::build_full(rel_oid, spc_oid, shape, ScanMetadataPurpose::Analyze)
     }
 
-    /// Build the full-column CustomScan plan together with the direct attno
-    /// index used by its predicate translators.
+    /// Build the full-column CustomScan plan.
     pub(crate) fn build_for_custom_scan(
         rel_oid: pg_sys::Oid,
         spc_oid: pg_sys::Oid,
         planning_filter: Option<Predicate>,
         row_filter: Option<Predicate>,
         shape: &RelationShape,
-    ) -> IcebergResult<(Self, Rc<RelationFieldIndex>)> {
+    ) -> IcebergResult<Self> {
         let LoadedScanMetadata {
             table,
             schema,
             delta,
             storage_bytes,
-        } = Self::load_table(rel_oid, spc_oid, ScanMetadataPurpose::Query)?;
-        let (plan, field_map) = ScanColumns::new_with_bindings(schema, shape)?;
-        let field_index = Rc::new(field_map.into_indexed());
-        Ok((
-            Self {
-                table,
-                plan,
-                planning_filter,
-                row_filter,
-                delta,
-                storage_bytes,
-                query_tasks: None,
-                mutation_tasks: None,
-            },
-            field_index,
-        ))
+        } = LoadedScanMetadata::load_query(rel_oid, spc_oid)?;
+        let plan = ScanColumns::new(schema, shape)?;
+        Ok(Self {
+            table,
+            plan,
+            planning_filter,
+            row_filter,
+            delta,
+            storage_bytes,
+            query_tasks: None,
+            mutation_tasks: None,
+        })
     }
 
     fn build_full(
@@ -155,7 +195,7 @@ impl ScanSpec {
             schema,
             delta,
             storage_bytes,
-        } = Self::load_table(rel_oid, spc_oid, purpose)?;
+        } = LoadedScanMetadata::load(rel_oid, spc_oid, purpose)?;
         let plan = ScanColumns::new(schema, shape)?;
         Ok(Self {
             table,
@@ -185,73 +225,29 @@ impl ScanSpec {
         row_filter: Option<Predicate>,
         shape: &RelationShape,
         scan_attr_types: &[(pg_sys::Oid, i32)],
-    ) -> IcebergResult<(Self, Rc<RelationFieldIndex>)> {
+    ) -> IcebergResult<Self> {
         let LoadedScanMetadata {
             table,
             schema,
             delta,
             storage_bytes,
-        } = Self::load_table(rel_oid, spc_oid, ScanMetadataPurpose::Query)?;
-        let (plan, field_map) = ScanColumns::with_projection(
+        } = LoadedScanMetadata::load_query(rel_oid, spc_oid)?;
+        let plan = ScanColumns::with_projection(
             schema,
             shape,
             &projection,
             scan_attr_types.len(),
             scan_attr_types,
         )?;
-        let field_index = Rc::new(field_map.into_indexed());
-        Ok((
-            Self {
-                table,
-                plan,
-                planning_filter,
-                row_filter,
-                delta,
-                storage_bytes,
-                query_tasks: None,
-                mutation_tasks: None,
-            },
-            field_index,
-        ))
-    }
-
-    /// Shared Iceberg scan core: resolve the relation's metadata through PG's
-    /// transactional cache and build the [`Table`] bound to the current
-    /// snapshot's schema. Used by both PG-side entry points.
-    fn load_table(
-        rel_oid: pg_sys::Oid,
-        spc_oid: pg_sys::Oid,
-        purpose: ScanMetadataPurpose,
-    ) -> IcebergResult<LoadedScanMetadata> {
-        // Validate the transaction mode on every execution-side scan entry.
-        // Serializable currently retains statement-level metadata visibility
-        // and strengthens Iceberg row-level write validation; see
-        // `access::isolation` for the intentionally incomplete PG SSI scope.
-        PgTransactionIsolation::current()?;
-        let ctx = StorageContext::for_tablespace(spc_oid)?;
-
-        let loaded =
-            TxMetadata::current().current_table_metadata(rel_oid, ctx.file_io())?;
-        let schema = loaded.metadata.current_schema().clone();
-        let storage_bytes = match purpose {
-            ScanMetadataPurpose::Query => None,
-            ScanMetadataPurpose::Analyze => {
-                Some(loaded.relation_stats(ctx.file_io())?.1)
-            }
-        };
-
-        let table = Table::builder()
-            .file_io(ctx.file_io().clone())
-            .metadata_location(loaded.location)
-            .metadata(loaded.metadata)
-            .identifier(IcebergTableId::for_relation(rel_oid).into_table_ident())
-            .build()?;
-
-        Ok(LoadedScanMetadata {
+        Ok(Self {
             table,
-            schema,
-            delta: loaded.delta,
+            plan,
+            planning_filter,
+            row_filter,
+            delta,
             storage_bytes,
+            query_tasks: None,
+            mutation_tasks: None,
         })
     }
 
@@ -287,6 +283,11 @@ impl ScanSpec {
     /// safe superset.
     pub(crate) fn set_row_filter(&mut self, predicate: Option<Predicate>) {
         self.row_filter = predicate;
+    }
+
+    #[inline]
+    pub(crate) fn schema_id(&self) -> i32 {
+        self.plan.schema().schema_id()
     }
 
     pub(crate) fn prepared_mutation_tasks(&self) -> Option<Rc<PlannedMutationTasks>> {

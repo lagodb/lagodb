@@ -106,7 +106,7 @@ mod tests {
             );
             assert!(
                 plan.contains("Pushed Filter: (id >= 1)"),
-                "independent pushed predicate must select the CustomPath; got\n{plan}",
+                "independent planned filter must select the CustomPath; got\n{plan}",
             );
 
             let mut rows = Vec::new();
@@ -121,5 +121,50 @@ mod tests {
             Ok(())
         })
         .expect("CustomScan projected SubPlan query failed");
+    }
+
+    #[pg_test]
+    fn customscan_preserves_relabelled_parameter_type_for_filter_binding() {
+        Spi::connect_mut(|client| -> pgrx::spi::Result<()> {
+            for stmt in [
+                "CREATE TABLE cs_relabel_filter (id integer) USING iceberg",
+                "INSERT INTO cs_relabel_filter VALUES (1), (2), (3)",
+                "SET pg_lakebase.customscan_mode = 'force'",
+                "SET plan_cache_mode = force_generic_plan",
+                "PREPARE cs_relabel_filter_query (oid) AS \
+                 SELECT id FROM cs_relabel_filter WHERE id = $1::int4",
+            ] {
+                client.update(stmt, None, &[])?;
+            }
+
+            let plan = client
+                .select(
+                    "EXPLAIN (COSTS OFF) EXECUTE cs_relabel_filter_query('2'::oid)",
+                    None,
+                    &[],
+                )?
+                .filter_map(|row| row.get::<String>(1).ok().flatten())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                plan.contains("Custom Scan (pg-iceberg-am)"),
+                "binary-relabeled parameter must remain pushable; got\n{plan}",
+            );
+            assert!(
+                plan.contains("Pushed Filter:")
+                    && plan.contains("$1")
+                    && plan.contains("integer"),
+                "plan must retain the complete relabeled parameter; got\n{plan}",
+            );
+
+            let id = client
+                .select("EXECUTE cs_relabel_filter_query('2'::oid)", None, &[])?
+                .next()
+                .expect("query must return one row")
+                .get::<i32>(1)?;
+            assert_eq!(id, Some(2));
+            Ok(())
+        })
+        .expect("CustomScan relabeled parameter query failed");
     }
 }

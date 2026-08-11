@@ -6,20 +6,20 @@
 mod tests {
     use core::ffi::c_void;
 
-    use crate::lakebase_core::customscan::support::TestScanState;
+    use crate::lakebase_core::customscan::support::{
+        TestScanState, impl_reject_all_filters,
+    };
     use pg_lakebase_core::api::AmResult;
     use pg_lakebase_core::batch::ScanBatchDriver;
     use pg_lakebase_core::customscan::exec::next_slot_wrapper;
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
-        RelationContext,
+        PathContext, PathVariant, ReScanContext, RelationContext,
     };
     use pg_lakebase_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
-    use pg_lakebase_core::expr::QualPushdownDecision;
     use pg_lakebase_core::handles::{RelationHandle, ScanDirection};
     use pg_lakebase_core::tuple::{Cell, Row, RowDatumCodec, SlotColumns};
     use pgrx::pg_sys;
@@ -90,6 +90,8 @@ mod tests {
 
     struct HandleAccessorProvider;
 
+    impl_reject_all_filters!(HandleAccessorProvider);
+
     struct HandleAccessorState {
         seen_natts: usize,
         seen_oid: pg_sys::Oid,
@@ -121,13 +123,6 @@ mod tests {
 
         fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
-        }
-
-        fn classify_predicate(
-            _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
-        ) -> QualPushdownDecision {
-            QualPushdownDecision::Unsupported
         }
 
         fn create_path(
@@ -395,6 +390,8 @@ mod tests {
     /// covered alongside the row-world `emit_row` test above.
     struct EmitColumnsProvider;
 
+    impl_reject_all_filters!(EmitColumnsProvider);
+
     impl LakebaseCustomScanProvider for EmitColumnsProvider {
         const NAME: &'static core::ffi::CStr = c"emit-columns-test-provider";
         type PrivateData = HandleAccessorPrivate;
@@ -402,13 +399,6 @@ mod tests {
 
         fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
-        }
-
-        fn classify_predicate(
-            _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
-        ) -> QualPushdownDecision {
-            QualPushdownDecision::Unsupported
         }
 
         fn create_path(

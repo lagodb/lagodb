@@ -1,11 +1,5 @@
-//! Planning-side `CustomPath` / `CustomScan` builders: [`CustomPathBuilder`],
-//! [`emit_custom_path`], and the `PlanCustomPath` trampoline.
-//!
-//! Path-stage `custom_private` wraps scan purpose plus provider metadata;
-//! plan-stage [`plan_custom_path_trampoline`] re-splits clauses and wraps it via
-//! [`encode_split`].
+//! Path-stage `CustomPath` construction and child-path reparameterization.
 
-use core::ffi::c_void;
 use core::ptr;
 
 use pgrx::pg_guard;
@@ -14,201 +8,17 @@ use pgrx::pg_sys;
 use crate::customscan::ScanPurpose;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::gucs;
-use crate::customscan::plan_data::custom_private::{
-    decode_path_private, encode_path_private, encode_split_with_layout,
+use crate::customscan::plan_data::path_private::{
+    decode_path_private, encode_path_private,
 };
 use crate::customscan::provider::{
     CustomPathBuilder, CustomScanPrivate, LakebaseCustomScanProvider, PathContext,
-    PathPushdownSummary, PathVariant, PathVariantKind, PlanTranslateContext,
-    PrivateDataWriter, method_tables_for,
+    PathPushdownSummary, PathVariant, PathVariantKind, PrivateDataWriter,
+    method_tables_for,
 };
 
 use crate::diag::ReportableError;
-use crate::expr::contract::{PushdownContract, QualPushdownDecision};
-use crate::expr::predicate::PlanPredicate;
-use crate::expr::relation::PlanRelationResolver;
-use crate::expr::split::{PlanPushdownSplit, PlanPushdownSplitter, ScanClauseSource};
-
-use super::tuple_planner::{BaseScanTuplePlanner, PlannedScanTuple};
-
-/// `PlanCustomPath`: re-split `scan_clauses`, build `custom_exprs` / `plan.qual`,
-/// encode `custom_private`, and assemble the `CustomScan` node.
-///
-/// # Safety
-///
-/// Called from `create_customscan_plan`; all planner pointers are live in the
-/// per-query memory context. `clauses` is `List<RestrictInfo>` (not extracted).
-#[pg_guard]
-pub(crate) unsafe extern "C-unwind" fn plan_custom_path_trampoline<
-    P: LakebaseCustomScanProvider,
->(
-    root: *mut pg_sys::PlannerInfo,
-    rel: *mut pg_sys::RelOptInfo,
-    best_path: *mut pg_sys::CustomPath,
-    tlist: *mut pg_sys::List,
-    clauses: *mut pg_sys::List,
-    custom_plans: *mut pg_sys::List,
-) -> *mut pg_sys::Plan {
-    let path_private =
-        unsafe { decode_path_private((*best_path).custom_private) }.report_unwrap();
-    let provider_metadata = path_private.provider_metadata;
-    let final_clause_sources = unsafe { FinalScanClauseSources::new(rel) };
-
-    let translate_ctx = unsafe { PlanTranslateContext::new(rel) };
-    let mut classify_leaf = |predicate: &PlanPredicate| -> QualPushdownDecision {
-        P::classify_predicate(&translate_ctx, predicate)
-    };
-    let split = unsafe {
-        let mut splitter = PlanPushdownSplitter::new(
-            root,
-            rel,
-            clauses,
-            ScanClauseSource::BaseRestriction,
-            &mut classify_leaf,
-        );
-        splitter.split_with_source(|rinfo| final_clause_sources.source_for(rinfo))
-    };
-
-    let pushed_count = split.pushed.len();
-    let recheck_count = split.recheck.len();
-    let pushed_contracts: Vec<PushdownContract> = split.pushed_contracts().collect();
-    let custom_exprs = unsafe {
-        let mut list: *mut pg_sys::List = ptr::null_mut();
-        for p in split.pushed_exprs() {
-            list = pg_sys::lappend(list, p.cast::<c_void>());
-        }
-        for &p in &split.recheck {
-            list = pg_sys::lappend(list, p.cast::<c_void>());
-        }
-        list
-    };
-
-    let plan_qual = unsafe {
-        let mut list: *mut pg_sys::List = ptr::null_mut();
-        for &p in &split.residual {
-            list = pg_sys::lappend(list, p.cast::<c_void>());
-        }
-        list
-    };
-
-    let relation_oid =
-        unsafe { PlanRelationResolver::new(root).rel_oid((*rel).relid) };
-    let tuple_planner =
-        BaseScanTuplePlanner::new(unsafe { (*rel).relid }, relation_oid);
-    let scan_tuple = if path_private.requires_wholerow {
-        PlannedScanTuple::relation()
-    } else if path_private.purpose.is_modify() {
-        unsafe {
-            tuple_planner.plan_relation_scan(
-                tlist,
-                (*(*best_path).path.pathtarget).exprs,
-                plan_qual,
-                custom_exprs,
-            )
-        }
-    } else {
-        unsafe {
-            tuple_planner.plan(
-                tlist,
-                (*(*best_path).path.pathtarget).exprs,
-                plan_qual,
-                custom_exprs,
-            )
-        }
-    };
-    let custom_private = unsafe {
-        encode_split_with_layout(
-            P::NAME,
-            path_private.purpose,
-            relation_oid,
-            pushed_count,
-            recheck_count,
-            &pushed_contracts,
-            &split.column_refs,
-            provider_metadata,
-            &scan_tuple.layout,
-        )
-    }
-    .map_err(CustomScanError::encode_custom_private)
-    .report_unwrap();
-
-    let cscan = unsafe {
-        pg_sys::palloc0(core::mem::size_of::<pg_sys::CustomScan>())
-            as *mut pg_sys::CustomScan
-    };
-
-    unsafe {
-        let scan = &mut (*cscan).scan;
-        let plan = &mut scan.plan;
-
-        plan.type_ = pg_sys::NodeTag::T_CustomScan;
-        // Mirror `copy_generic_path_info` (not exposed in pg_sys).
-        let path_ptr = best_path as *mut pg_sys::Path;
-        plan.startup_cost = (*path_ptr).startup_cost;
-        plan.total_cost = (*path_ptr).total_cost;
-        plan.plan_rows = (*path_ptr).rows;
-        plan.plan_width = (*(*path_ptr).pathtarget).width;
-        plan.parallel_aware = (*path_ptr).parallel_aware;
-        plan.parallel_safe = (*path_ptr).parallel_safe;
-        plan.async_capable = false;
-        plan.plan_node_id = 0;
-        plan.targetlist = tlist;
-        plan.qual = plan_qual;
-        plan.lefttree = ptr::null_mut();
-        plan.righttree = ptr::null_mut();
-        plan.initPlan = ptr::null_mut();
-        plan.extParam = ptr::null_mut();
-        plan.allParam = ptr::null_mut();
-
-        scan.scanrelid = (*rel).relid;
-
-        (*cscan).flags = (*best_path).flags;
-        (*cscan).custom_plans = custom_plans;
-        (*cscan).custom_exprs = custom_exprs;
-        (*cscan).custom_private = custom_private;
-        (*cscan).custom_scan_tlist = scan_tuple.custom_scan_tlist;
-        (*cscan).custom_relids =
-            pg_sys::bms_make_singleton((*rel).relid as core::ffi::c_int);
-        (*cscan).methods = method_tables_for::<P>().scan();
-    }
-
-    cscan as *mut pg_sys::Plan
-}
-
-/// Source resolver for the final ordered `scan_clauses` passed to
-/// `PlanCustomPath`.
-///
-/// PostgreSQL builds a base scan's final clauses from `baserestrictinfo` plus
-/// parameterized-path `ppi_clauses`. Like `postgres_fdw`, we recover the base
-/// clauses by pointer membership; anything else is a join/PPI clause and must
-/// pass the movability gate before exact pushdown can remove it from
-/// `plan.qual`.
-#[derive(Debug, Clone, Copy)]
-struct FinalScanClauseSources {
-    baserestrictinfo: *mut pg_sys::List,
-}
-
-impl FinalScanClauseSources {
-    /// # Safety
-    ///
-    /// `rel` must be a live planner-owned node from the current
-    /// `PlanCustomPath` call.
-    unsafe fn new(rel: *mut pg_sys::RelOptInfo) -> Self {
-        Self {
-            baserestrictinfo: unsafe { (*rel).baserestrictinfo },
-        }
-    }
-
-    fn source_for(self, rinfo: *mut pg_sys::RestrictInfo) -> ScanClauseSource {
-        if unsafe {
-            pg_sys::list_member_ptr(self.baserestrictinfo, rinfo.cast::<c_void>())
-        } {
-            ScanClauseSource::BaseRestriction
-        } else {
-            ScanClauseSource::Movable
-        }
-    }
-}
+use crate::expr::pushdown::PathFilterSet;
 
 /// Forwards to [`P::reparameterize_private_data`] when a CustomPath is pushed under an appendrel child.
 ///
@@ -223,7 +33,18 @@ pub(crate) unsafe extern "C-unwind" fn reparameterize_custom_path_by_child_tramp
     custom_private: *mut pg_sys::List,
     child_rel: *mut pg_sys::RelOptInfo,
 ) -> *mut pg_sys::List {
-    let path_private = unsafe { decode_path_private(custom_private) }.report_unwrap();
+    unsafe {
+        reparameterize_custom_path_by_child::<P>(root, custom_private, child_rel)
+    }
+    .report_unwrap()
+}
+
+unsafe fn reparameterize_custom_path_by_child<P: LakebaseCustomScanProvider>(
+    root: *mut pg_sys::PlannerInfo,
+    custom_private: *mut pg_sys::List,
+    child_rel: *mut pg_sys::RelOptInfo,
+) -> Result<*mut pg_sys::List, CustomScanError> {
+    let path_private = unsafe { decode_path_private(custom_private) }?;
     let provider_metadata = unsafe {
         P::reparameterize_private_data(
             root,
@@ -241,14 +62,14 @@ pub(crate) unsafe extern "C-unwind" fn reparameterize_custom_path_by_child_tramp
 }
 
 /// Context for [`emit_custom_path`].
-pub struct EmitCustomPathContext<'a> {
-    pub root: *mut pg_sys::PlannerInfo,
-    pub baserel: *mut pg_sys::RelOptInfo,
-    pub purpose: ScanPurpose,
-    pub kind: PathVariantKind,
-    pub required_outer: pg_sys::Relids,
-    /// Path-stage split hint; plan-stage recomputes authoritatively.
-    pub split: &'a PlanPushdownSplit,
+pub(crate) struct EmitCustomPathContext<'a> {
+    pub(crate) root: *mut pg_sys::PlannerInfo,
+    pub(crate) baserel: *mut pg_sys::RelOptInfo,
+    pub(crate) purpose: ScanPurpose,
+    pub(crate) kind: PathVariantKind,
+    pub(crate) required_outer: pg_sys::Relids,
+    /// Path-stage planned-filter hint; plan-stage recomputes authoritatively.
+    pub(crate) filters: &'a PathFilterSet,
 }
 
 /// Build and register a `CustomPath` for one variant via `add_path`.
@@ -258,7 +79,7 @@ pub struct EmitCustomPathContext<'a> {
 /// Planner pointers in `ctx` must be live in the per-query memory context.
 /// `ctx.baserel->relid` must identify a non-NULL `RangeTblEntry` in
 /// `ctx.root->parse->rtable` from the same planning invocation.
-pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
+pub(crate) unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
     ctx: &EmitCustomPathContext<'_>,
 ) -> Result<bool, CustomScanError> {
     // `bms_membership` (not exported `bms_is_empty`) treats NULL as empty.
@@ -287,10 +108,10 @@ pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
             &*ctx.baserel,
         )
     };
-    let costed_pushed: Vec<_> = ctx.split.costed_pruning_exprs().collect();
-    let pushdown = PathPushdownSummary::from_split(
-        ctx.split,
-        path_ctx.clauselist_selectivity_for_exprs(&costed_pushed),
+    let costed_filters: Vec<_> = ctx.filters.costed_pruning_exprs().collect();
+    let pushdown = PathPushdownSummary::from_filter_set(
+        ctx.filters,
+        path_ctx.clauselist_selectivity_for_exprs(&costed_filters),
     );
     let variant = PathVariant {
         purpose: ctx.purpose,
@@ -349,7 +170,7 @@ pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
                 .unwrap_or_else(|| (*ctx.baserel).pages as f64),
             plan.scanned_tuples.unwrap_or_else(|| (*ctx.baserel).tuples),
             plan.extra_startup_cost.unwrap_or(0.0),
-            &ctx.split.residual,
+            &ctx.filters.residual,
         );
         // `customscan_mode = force`: override published costs to (0, 1) after baseline compute.
         let (startup_cost, total_cost) = if gucs::force_mode() {
@@ -365,17 +186,14 @@ pub unsafe fn emit_custom_path<P: LakebaseCustomScanProvider>(
         (*cpath_ptr).custom_paths = ptr::null_mut();
         (*cpath_ptr).custom_restrictinfo = ptr::null_mut();
 
-        let mut writer = PrivateDataWriter::new();
-        let provider_metadata = plan
-            .private_data
-            .encode(&mut writer)
-            .and_then(|()| writer.finish())
-            .map_err(CustomScanError::encode_custom_private)?;
+        let provider_metadata = PrivateDataWriter::encode_list(|writer| {
+            plan.private_data.encode(writer)
+        })?;
         (*cpath_ptr).custom_private = encode_path_private(
             ctx.purpose,
             ctx.purpose.is_modify() && path_ctx.modify_requests_wholerow(),
             provider_metadata,
-        );
+        )?;
 
         (*cpath_ptr).methods = method_tables_for::<P>().path();
 
@@ -466,11 +284,14 @@ mod tests {
 
     use crate::customscan::provider::{
         BeginContext, CreateStateContext, CustomScanError, EndContext,
-        NextSlotContext, PathContext, PlanTranslateContext, ReScanContext,
-        RelationContext,
+        NextSlotContext, PathContext, ReScanContext, RelationContext,
     };
     use crate::customscan::provider::{CustomScanPrivate, PrivateDataReader};
-    use crate::expr::contract::QualPushdownDecision;
+    use crate::expr::pushdown::{
+        FilterBindResult, FilterFragment, FilterPlan, FilterPlanningContext,
+        FilterPushdown, FilterPushdownPlanner, FilterValueBindings,
+    };
+    use crate::plan_data::{PlanDataReader, PlanDataWriter};
 
     struct TestPrivate;
 
@@ -491,8 +312,56 @@ mod tests {
 
     struct TestProviderA;
 
+    struct RejectAllPlanner;
+
+    impl FilterPushdownPlanner for RejectAllPlanner {
+        type PlannedPredicate = ();
+        type Error = CustomScanError;
+
+        fn try_plan_filter(
+            &mut self,
+            _fragment: &FilterFragment,
+        ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
+            Ok(FilterPlan::Unsupported)
+        }
+    }
+
     macro_rules! impl_test_provider {
         ($ty:ty, $name:expr) => {
+            impl FilterPushdown for $ty {
+                type Planner = RejectAllPlanner;
+                type PlannedPredicate = ();
+                type BoundPredicate = ();
+                type Error = CustomScanError;
+
+                fn begin_filter_planning(
+                    _context: &FilterPlanningContext,
+                ) -> Result<Self::Planner, Self::Error> {
+                    Ok(RejectAllPlanner)
+                }
+
+                fn encode_planned(
+                    _predicate: &Self::PlannedPredicate,
+                    _writer: &mut PlanDataWriter,
+                ) -> Result<(), Self::Error> {
+                    Ok(())
+                }
+
+                fn decode_planned(
+                    _reader: &mut PlanDataReader<'_>,
+                    _binding_count: usize,
+                ) -> Result<Self::PlannedPredicate, Self::Error> {
+                    Ok(())
+                }
+
+                fn bind_filter(
+                    _predicate: &Self::PlannedPredicate,
+                    _values: FilterValueBindings<'_>,
+                ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
+                    Ok(FilterBindResult::ValueNotRepresentable)
+                }
+            }
+
             impl LakebaseCustomScanProvider for $ty {
                 const NAME: &'static CStr = $name;
                 type PrivateData = TestPrivate;
@@ -500,13 +369,6 @@ mod tests {
 
                 fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
                     false
-                }
-
-                fn classify_predicate(
-                    _ctx: &PlanTranslateContext,
-                    _predicate: &PlanPredicate,
-                ) -> QualPushdownDecision {
-                    QualPushdownDecision::Unsupported
                 }
 
                 fn create_path(

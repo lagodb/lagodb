@@ -9,11 +9,10 @@ use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use crate::customscan::ScanPurpose;
-use crate::customscan::execution::exec_params::RuntimeParamRefs;
+use crate::customscan::filter::CustomScanFilters;
 use crate::customscan::plan_data::custom_exprs::CustomExprSections;
 use crate::customscan::plan_data::tuple_layout::ScanTupleLayout;
 use crate::customscan::provider::{LakebaseCustomScanProvider, method_tables_for};
-use crate::expr::contract::{ColumnRef, PushdownContract};
 
 /// `#[repr(C)]` wrapper PostgreSQL holds as `*mut CustomScanState`.
 ///
@@ -28,14 +27,14 @@ pub struct CustomScanStateWrapper<P: LakebaseCustomScanProvider> {
     /// share an address.
     pub(crate) base: pg_sys::CustomScanState,
 
-    /// Recheck `ExprState` from `ExecInitQual`; NULL when `recheck_count == 0`.
+    /// Recheck `ExprState` derived from Exact pushed filters; NULL when none.
     pub(crate) recheck_state: *mut pg_sys::ExprState,
 
     /// Immutable expression sections validated once during Begin.
     pub(crate) expr_sections: Option<CustomExprSections>,
 
-    /// Deduplicated parameter references collected once during Begin.
-    pub(crate) runtime_params: Option<RuntimeParamRefs>,
+    /// Decoded planned predicates, ExprStates, and the current bound set.
+    pub(crate) filters: Option<CustomScanFilters<P>>,
 
     /// Decoded provider [`PrivateData`](LakebaseCustomScanProvider::PrivateData).
     pub(crate) decoded_private: Option<P::PrivateData>,
@@ -64,12 +63,7 @@ pub struct CustomScanStateWrapper<P: LakebaseCustomScanProvider> {
 pub struct CachedEnvelope {
     /// Query or modification-target use of the provider scan.
     pub purpose: ScanPurpose,
-    /// Per-pushed-expression pushdown contract (aligned with pushed section).
-    pub pushed_contracts: Vec<PushdownContract>,
-    /// Pre-resolved column metadata for the pushed expressions.
-    pub column_refs: Vec<ColumnRef>,
-    /// Decoded once from `custom_private`; shared by begin/rescan translation
-    /// and provider scan-tuple binding.
+    /// Decoded once from `custom_private`; shared by provider scan-tuple binding.
     pub tuple_layout: ScanTupleLayout,
 }
 
@@ -175,22 +169,6 @@ impl<P: LakebaseCustomScanProvider> CustomScanStateWrapper<P> {
     pub unsafe fn test_set_expr_sections(&mut self, sections: CustomExprSections) {
         self.expr_sections = Some(sections);
     }
-
-    /// # Safety
-    ///
-    /// `params` must have been collected from the wrapper's pushed expressions
-    /// and must remain valid until the corresponding scan teardown.
-    pub unsafe fn test_set_runtime_params(&mut self, params: RuntimeParamRefs) {
-        self.runtime_params = Some(params);
-    }
-
-    /// # Safety
-    ///
-    /// The returned reference is valid only while the wrapper remains live and
-    /// before its runtime parameters are cleared during teardown.
-    pub unsafe fn test_runtime_params(&self) -> Option<&RuntimeParamRefs> {
-        self.runtime_params.as_ref()
-    }
 }
 
 /// `CreateCustomScanState`: allocate wrapper in current memory context,
@@ -215,7 +193,7 @@ pub unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
         },
         recheck_state: core::ptr::null_mut(),
         expr_sections: None,
-        runtime_params: None,
+        filters: None,
         decoded_private: None,
         provider_state: None,
         cached_envelope: None,

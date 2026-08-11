@@ -5,21 +5,19 @@ use core::ffi::CStr;
 use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
-use crate::expr::contract::QualPushdownDecision;
-use crate::expr::predicate::PlanPredicate;
+use crate::expr::pushdown::FilterPushdown;
 
 use super::execution::{
     BeginContext, CreateStateContext, EndContext, NextSlotContext, ReScanContext,
 };
 use super::planning::{
-    CustomPathBuilder, CustomPathPlan, PathContext, PathVariant,
-    PlanTranslateContext, RelationContext,
+    CustomPathBuilder, CustomPathPlan, PathContext, PathVariant, RelationContext,
 };
 use super::private_data::CustomScanPrivate;
 
-/// Lake backend provider trait: path classification, CustomPath emission, and
+/// Lake backend provider trait: relation routing, CustomPath emission, and
 /// scan lifecycle.
-pub trait LakebaseCustomScanProvider: 'static {
+pub trait LakebaseCustomScanProvider: FilterPushdown {
     /// Unique provider name (EXPLAIN + registry).
     const NAME: &'static CStr;
 
@@ -31,13 +29,6 @@ pub trait LakebaseCustomScanProvider: 'static {
 
     /// Whether this provider claims the relation after framework path gates.
     fn supports_relation(ctx: &RelationContext<'_>) -> bool;
-
-    /// Classify one parsed leaf predicate; framework handles composites and
-    /// security gates.
-    fn classify_predicate(
-        ctx: &PlanTranslateContext,
-        predicate: &PlanPredicate,
-    ) -> QualPushdownDecision;
 
     /// Build one CustomPath for a framework-emitted variant; `None` declines.
     fn create_path(
@@ -57,7 +48,7 @@ pub trait LakebaseCustomScanProvider: 'static {
     /// Produce the next row; `Ok(false)` means end of scan.
     fn next_slot(ctx: NextSlotContext<'_, Self>) -> Result<bool, CustomScanError>;
 
-    /// Rescan, rebuilding predicates when `params_changed`.
+    /// Rewind the scan, replacing predicates when `filters_changed`.
     fn rescan(ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError>;
 
     /// Close the cursor and release provider-owned runtime resources.

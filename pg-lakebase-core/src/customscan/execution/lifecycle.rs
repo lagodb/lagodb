@@ -5,19 +5,17 @@ use core::ptr;
 
 use crate::customscan::ScanPurpose;
 use crate::customscan::error::{CustomScanError, CustomScanPhase};
-use crate::customscan::execution::exec_params::RuntimeParamRefs;
 use crate::customscan::execution::state::{CachedEnvelope, CustomScanStateWrapper};
+use crate::customscan::filter::CustomScanFilters;
 use crate::customscan::plan_data::custom_exprs::CustomExprSections;
 use crate::customscan::plan_data::custom_private::{
     EncodedPrivate, assert_provider_name_matches, decode_private,
 };
 use crate::customscan::provider::{
     BeginContext, CreateStateContext, CustomScanPrivate, EndContext,
-    LakebaseCustomScanProvider, PrivateDataReader, PushedPredicates, ReScanContext,
-    method_tables_for,
+    LakebaseCustomScanProvider, PrivateDataReader, ReScanContext, method_tables_for,
 };
-use crate::diag::{ReportableError, report_warning};
-use crate::expr::execution::params::ResolvedParam;
+use crate::diag::report_warning;
 use crate::handles::{RelationHandle, SnapshotHandle};
 use pgrx::{pg_guard, pg_sys};
 
@@ -60,42 +58,47 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
     estate: *mut pg_sys::EState,
     eflags: c_int,
 ) {
-    let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
     let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
+    if let Err(error) = unsafe { begin_custom_scan::<P>(node, estate, eflags) } {
+        error
+            .with_callback_phase(P::NAME, CustomScanPhase::Begin)
+            .report_after_switch(prior_ctx);
+    }
+}
+
+unsafe fn begin_custom_scan<P: LakebaseCustomScanProvider>(
+    node: *mut pg_sys::CustomScanState,
+    estate: *mut pg_sys::EState,
+    eflags: c_int,
+) -> Result<(), CustomScanError> {
+    let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
     let cscan = unsafe { (*node).ss.ps.plan }.cast::<pg_sys::CustomScan>();
     let priv_payload: EncodedPrivate =
-        unsafe { decode_private((*cscan).custom_private) }.report_unwrap();
+        unsafe { decode_private((*cscan).custom_private) }?;
 
     assert_provider_name_matches(
         priv_payload.provider_id_or_name.as_c_str(),
         P::NAME,
-    )
-    .report_unwrap();
+    )?;
 
     let scan_rel: pg_sys::Relation = unsafe { (*node).ss.ss_currentRelation };
-    let scan_relid = unsafe { (*cscan).scan.scanrelid as c_int };
     let opened_relid = unsafe { (*scan_rel).rd_id };
-    check_scan_relation_oid(priv_payload.relation_oid, opened_relid).report_unwrap();
+    check_scan_relation_oid(priv_payload.relation_oid, opened_relid)?;
 
-    let provider_private =
-        unsafe { decode_provider_private::<P>(priv_payload.provider_metadata_raw) }
-            .report_unwrap();
+    let provider_private = unsafe {
+        PrivateDataReader::decode_list(
+            priv_payload.provider_metadata_raw,
+            P::PrivateData::decode,
+        )
+    }?;
 
     let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
     unsafe {
         priv_payload
             .tuple_layout
             .validate_executor(cscan, scan_slot)
-    }
-    .report_unwrap();
+    }?;
     let scan_tuple_desc = unsafe { (*scan_slot).tts_tupleDescriptor };
-
-    wrapper.cached_envelope = Some(CachedEnvelope {
-        purpose: priv_payload.purpose,
-        pushed_contracts: priv_payload.pushed_contracts,
-        column_refs: priv_payload.column_refs,
-        tuple_layout: priv_payload.tuple_layout,
-    });
 
     wrapper.decoded_private = Some(provider_private);
 
@@ -103,45 +106,42 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
     wrapper.provider_state = Some(provider_state);
 
     if (eflags as u32) & pg_sys::EXEC_FLAG_EXPLAIN_ONLY != 0 {
-        return;
+        return Ok(());
     }
 
     let expr_sections = unsafe {
         CustomExprSections::from_custom_exprs(
             (*cscan).custom_exprs,
-            priv_payload.pushed_count,
-            priv_payload.recheck_count,
+            priv_payload.binding_count,
+            priv_payload.planned_filter_count,
         )
-    }
-    .report_unwrap();
+    }?;
     wrapper.expr_sections = Some(expr_sections);
     let expr_sections = wrapper
         .expr_sections
         .as_ref()
         .expect("BeginCustomScan: expression sections were just cached");
 
-    let mut param_refs =
-        unsafe { RuntimeParamRefs::collect_from_exprs(expr_sections.pushed()) };
-    let estate_query_ctx = unsafe { (*estate).es_query_cxt };
-    unsafe { param_refs.relocate_exec_param_ids_to(estate_query_ctx) };
-
     let econtext = unsafe { (*node).ss.ps.ps_ExprContext };
-    let resolved_params: Vec<ResolvedParam> =
-        match unsafe { param_refs.resolve(estate, econtext) } {
-            Ok(params) => params,
-            Err(err) => {
-                CustomScanError::runtime_parameter(err).report_after_switch(prior_ctx)
-            }
-        };
-    wrapper.runtime_params = Some(param_refs);
 
-    if priv_payload.recheck_count > 0 {
-        let recheck_list = unsafe { expr_sections.recheck_list() };
-        let parent = unsafe { &mut (*node).ss.ps };
-        wrapper.recheck_state = unsafe { pg_sys::ExecInitQual(recheck_list, parent) };
+    let parent = unsafe { &mut (*node).ss.ps } as *mut pg_sys::PlanState;
+    let binding_exprs = unsafe { expr_sections.binding_list() };
+    let mut filters = unsafe {
+        CustomScanFilters::<P>::initialize(&priv_payload, binding_exprs, parent)
+    }?;
+    unsafe { filters.bind_initial(econtext) }?;
+    let recheck_list = unsafe { filters.recheck_list(expr_sections.pushed()) };
+    wrapper.recheck_state = if recheck_list.is_null() {
+        ptr::null_mut()
     } else {
-        wrapper.recheck_state = ptr::null_mut();
-    }
+        unsafe { pg_sys::ExecInitQual(recheck_list, parent) }
+    };
+    wrapper.filters = Some(filters);
+
+    wrapper.cached_envelope = Some(CachedEnvelope {
+        purpose: priv_payload.purpose,
+        tuple_layout: priv_payload.tuple_layout,
+    });
 
     // These fields are initialized above and are disjoint, so borrow them
     // directly instead of borrowing the whole wrapper through accessors.
@@ -154,29 +154,25 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
         .cached_envelope
         .as_ref()
         .expect("BeginCustomScan: cached_envelope must be populated above");
-    let pushed_predicates = PushedPredicates::new(
-        expr_sections.pushed(),
-        &envelope.column_refs,
-        &envelope.pushed_contracts,
-        &resolved_params,
-        scan_relid,
-        &envelope.tuple_layout,
-    );
+    let filters = wrapper
+        .filters
+        .as_ref()
+        .expect("BeginCustomScan: filters must be initialized above")
+        .bound();
 
     let begin_ctx = BeginContext::<P>::new(
         provider_state_ref,
         decoded_private_ref,
         envelope.purpose,
-        pushed_predicates,
+        filters,
         scan_tuple_desc,
+        &envelope.tuple_layout,
         unsafe { RelationHandle::from_raw(scan_rel) },
         unsafe { SnapshotHandle::from_raw(snapshot) },
     );
-    if let Err(err) = P::begin(begin_ctx) {
-        err.with_provider_phase(P::NAME, CustomScanPhase::Begin)
-            .report_after_switch(prior_ctx);
-    }
+    P::begin(begin_ctx)?;
     wrapper.provider_began = true;
+    Ok(())
 }
 
 /// ReScanCustomScan: re-resolve params when `chgParam` overlaps cached ids.
@@ -194,67 +190,57 @@ pub unsafe extern "C-unwind" fn rescan_custom_scan_trampoline<
 >(
     node: *mut pg_sys::CustomScanState,
 ) {
-    let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
     let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
+    if let Err(error) = unsafe { rescan_custom_scan::<P>(node) } {
+        error
+            .with_callback_phase(P::NAME, CustomScanPhase::ReScan)
+            .report_after_switch(prior_ctx);
+    }
+}
+
+unsafe fn rescan_custom_scan<P: LakebaseCustomScanProvider>(
+    node: *mut pg_sys::CustomScanState,
+) -> Result<(), CustomScanError> {
+    let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
 
     if !wrapper.provider_began {
         debug_assert!(
             false,
             "ReScanCustomScan invoked before BeginCustomScan completed",
         );
-        return;
+        return Ok(());
     }
 
     let chg_param = unsafe { (*node).ss.ps.chgParam };
-    let runtime_params = wrapper.runtime_params.as_ref().expect(
-        "ReScanCustomScan: runtime params must be collected by BeginCustomScan",
-    );
-    let params_changed = unsafe { runtime_params.changed(chg_param) };
-    let cscan = unsafe { (*node).ss.ps.plan }.cast::<pg_sys::CustomScan>();
     let envelope = wrapper.cached_envelope.as_ref().expect(
         "ReScanCustomScan: cached_envelope must be populated by BeginCustomScan",
     );
-    let expr_sections = wrapper.expr_sections.as_ref().expect(
-        "ReScanCustomScan: expression sections must be cached by BeginCustomScan",
-    );
-    let scan_relid = unsafe { (*cscan).scan.scanrelid as c_int };
     let scan_rel = unsafe { (*node).ss.ss_currentRelation };
     let estate = unsafe { (*node).ss.ps.state };
     let econtext = unsafe { (*node).ss.ps.ps_ExprContext };
     let snapshot = unsafe { (*estate).es_snapshot };
-    let resolved_params = if params_changed {
-        match unsafe { runtime_params.resolve(estate, econtext) } {
-            Ok(params) => params,
-            Err(err) => {
-                CustomScanError::runtime_parameter(err).report_after_switch(prior_ctx)
-            }
-        }
-    } else {
-        Vec::new()
-    };
+
+    let filters = wrapper
+        .filters
+        .as_mut()
+        .expect("ReScanCustomScan: filters must be initialized by BeginCustomScan");
+    let filters_changed = unsafe { filters.filters_changed(chg_param) };
+    if filters_changed {
+        unsafe { filters.rebind_dynamic(econtext) }?;
+    }
 
     let provider_state_ref: &mut P::State =
         unsafe { wrapper.provider_state.as_mut().unwrap_unchecked() };
-    let pushed_predicates = PushedPredicates::new(
-        expr_sections.pushed(),
-        &envelope.column_refs,
-        &envelope.pushed_contracts,
-        &resolved_params,
-        scan_relid,
-        &envelope.tuple_layout,
-    );
     let rescan_ctx = ReScanContext::<P>::new(
         provider_state_ref,
-        params_changed,
+        filters_changed,
         envelope.purpose,
-        pushed_predicates,
+        filters.bound(),
         unsafe { RelationHandle::from_raw(scan_rel) },
         unsafe { SnapshotHandle::from_raw(snapshot) },
     );
-    if let Err(err) = P::rescan(rescan_ctx) {
-        err.with_provider_phase(P::NAME, CustomScanPhase::ReScan)
-            .report_after_switch(prior_ctx);
-    }
+    P::rescan(rescan_ctx)?;
+    Ok(())
 }
 
 /// `EndCustomScan`: close the provider and drop framework-owned state.
@@ -289,7 +275,7 @@ pub unsafe extern "C-unwind" fn end_custom_scan_trampoline<
     wrapper.recheck_state = ptr::null_mut();
     wrapper.cached_envelope = None;
     wrapper.expr_sections = None;
-    wrapper.runtime_params = None;
+    wrapper.filters = None;
 }
 
 /// Compare plan-time vs executor-opened scan relation OID.
@@ -305,16 +291,4 @@ pub fn check_scan_relation_oid(
         ));
     }
     Ok(())
-}
-
-unsafe fn decode_provider_private<P: LakebaseCustomScanProvider>(
-    metadata: *mut pg_sys::List,
-) -> Result<P::PrivateData, CustomScanError> {
-    let mut reader = unsafe { PrivateDataReader::from_list(metadata) };
-    let result = P::PrivateData::decode(&mut reader)
-        .and_then(|private| reader.finish().map(|()| private));
-    match result {
-        Ok(payload) => Ok(payload),
-        Err(error) => Err(CustomScanError::provider_private_decode(P::NAME, error)),
-    }
 }

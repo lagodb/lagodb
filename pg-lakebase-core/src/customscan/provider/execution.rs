@@ -1,8 +1,6 @@
-//! Executor-facing provider contexts and pushed-predicate translation.
+//! Executor-facing provider contexts for bound planned predicates and scan I/O.
 
-use core::ffi::c_void;
 use core::marker::PhantomData;
-use core::ptr;
 
 use pgrx::pg_sys;
 
@@ -11,10 +9,7 @@ use crate::customscan::error::CustomScanError;
 use crate::customscan::plan_data::tuple_layout::{
     NeededColumns, ScanTupleDescriptor, ScanTupleLayout,
 };
-use crate::expr::PredicateBuilder;
-use crate::expr::contract::{ColumnRef, PushdownContract};
-use crate::expr::execution::params::ResolvedParam;
-use crate::expr::translator::PgPredicateTranslator;
+use crate::expr::pushdown::BoundFilterSet;
 use crate::handles::{RelationHandle, ScanDirection, SnapshotHandle};
 use crate::tuple::{Row, RowDatumCodec, SlotColumns, TupleSlotWriter};
 
@@ -35,237 +30,6 @@ impl<P: LakebaseCustomScanProvider + ?Sized> CreateStateContext<P> {
     }
 }
 
-/// All predicate and parameter metadata associated with one executor scan.
-///
-/// The expression slices are borrowed from the framework-owned scan state;
-/// the object does not copy PostgreSQL nodes or resolved parameter values.
-pub struct PushedPredicates<'a> {
-    pushed_exprs: &'a [*mut pg_sys::Expr],
-    column_refs: &'a [ColumnRef],
-    pushed_contracts: &'a [PushdownContract],
-    resolved_params: &'a [ResolvedParam],
-    scan_relid: core::ffi::c_int,
-    tuple_layout: &'a ScanTupleLayout,
-}
-
-impl<'a> PushedPredicates<'a> {
-    pub(crate) fn new(
-        pushed_exprs: &'a [*mut pg_sys::Expr],
-        column_refs: &'a [ColumnRef],
-        pushed_contracts: &'a [PushdownContract],
-        resolved_params: &'a [ResolvedParam],
-        scan_relid: core::ffi::c_int,
-        tuple_layout: &'a ScanTupleLayout,
-    ) -> Self {
-        Self {
-            pushed_exprs,
-            column_refs,
-            pushed_contracts,
-            resolved_params,
-            scan_relid,
-            tuple_layout,
-        }
-    }
-
-    /// Whether any pushed predicates were recorded in `custom_exprs`.
-    #[inline]
-    pub fn has_pushed_predicates(&self) -> bool {
-        !self.pushed_exprs.is_empty()
-    }
-
-    /// Number of pushed predicates in `custom_exprs`.
-    #[inline]
-    pub fn pushed_predicate_count(&self) -> usize {
-        self.pushed_exprs.len()
-    }
-
-    /// Number of resolved executor parameters associated with this scan.
-    #[inline]
-    pub fn resolved_param_count(&self) -> usize {
-        self.resolved_params.len()
-    }
-
-    /// Post-`rtoffset` scan relid used by predicate translation.
-    #[inline]
-    pub fn scan_relid(&self) -> core::ffi::c_int {
-        self.scan_relid
-    }
-
-    /// Plan-time storage-column contract for this scan.
-    #[inline]
-    pub fn required_columns(&self) -> NeededColumns<'_> {
-        self.tuple_layout.required_columns()
-    }
-
-    /// Translate every pushed expression into provider-native predicates.
-    pub fn translate<T, F>(
-        &self,
-        make_translator: F,
-    ) -> Result<Vec<T::Predicate>, CustomScanError>
-    where
-        T: PgPredicateTranslator,
-        T::Error: Send + Sync,
-        F: FnMut(usize) -> T,
-    {
-        // SAFETY: the framework builds these slices from one live executor
-        // scan state and keeps them alive for the provider callback.
-        unsafe { self.translate_selected(make_translator, |_| true) }
-    }
-
-    /// Translate only predicates independent of `PARAM_EXTERN` and
-    /// `PARAM_EXEC` values.
-    pub fn translate_static<T, F>(
-        &self,
-        make_translator: F,
-    ) -> Result<Vec<T::Predicate>, CustomScanError>
-    where
-        T: PgPredicateTranslator,
-        T::Error: Send + Sync,
-        F: FnMut(usize) -> T,
-    {
-        unsafe {
-            self.translate_selected(make_translator, |expr| {
-                !RuntimeParamDetector::contains(expr)
-            })
-        }
-    }
-
-    /// Translate predicates stable across rescans. `PARAM_EXTERN` is stable
-    /// after BeginCustomScan; `PARAM_EXEC` is not stable for parameterized paths.
-    pub fn translate_rescan_stable<T, F>(
-        &self,
-        make_translator: F,
-    ) -> Result<Vec<T::Predicate>, CustomScanError>
-    where
-        T: PgPredicateTranslator,
-        T::Error: Send + Sync,
-        F: FnMut(usize) -> T,
-    {
-        unsafe {
-            self.translate_selected(make_translator, |expr| {
-                !RuntimeParamDetector::contains_exec(expr)
-            })
-        }
-    }
-
-    unsafe fn translate_selected<T, F, I>(
-        &self,
-        mut make_translator: F,
-        mut include: I,
-    ) -> Result<Vec<T::Predicate>, CustomScanError>
-    where
-        T: PgPredicateTranslator,
-        T::Error: Send + Sync,
-        F: FnMut(usize) -> T,
-        I: FnMut(*mut pg_sys::Expr) -> bool,
-    {
-        debug_assert_eq!(
-            self.pushed_exprs.len(),
-            self.pushed_contracts.len(),
-            "pushed expression and contract slices must align by index",
-        );
-
-        let mut out = Vec::with_capacity(self.pushed_exprs.len());
-        for index in 0..self.pushed_exprs.len() {
-            if !include(self.pushed_exprs[index]) {
-                continue;
-            }
-            let mut translator = make_translator(index);
-            let result = unsafe {
-                let mut builder = PredicateBuilder::with_var_resolver(
-                    &mut translator,
-                    self.pushed_exprs,
-                    self.column_refs,
-                    self.resolved_params,
-                    self.tuple_layout.var_resolver(self.scan_relid),
-                );
-                builder.build_one(index)
-            };
-
-            match result {
-                Ok(predicate) => out.push(predicate),
-                Err(error) => {
-                    let contract = self
-                        .pushed_contracts
-                        .get(index)
-                        .copied()
-                        .unwrap_or(PushdownContract::ExactRowFilter);
-                    match contract {
-                        PushdownContract::ConservativePruning => continue,
-                        PushdownContract::ExactRowFilter => {
-                            return Err(CustomScanError::predicate_build_at(
-                                Some(index),
-                                error,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-}
-
-struct RuntimeParamDetector;
-
-impl RuntimeParamDetector {
-    unsafe fn contains(expr: *mut pg_sys::Expr) -> bool {
-        unsafe { Self::walk(expr.cast(), ptr::null_mut()) }
-    }
-
-    unsafe fn contains_exec(expr: *mut pg_sys::Expr) -> bool {
-        unsafe { Self::walk_exec(expr.cast(), ptr::null_mut()) }
-    }
-
-    unsafe extern "C-unwind" fn walk(
-        node: *mut pg_sys::Node,
-        context: *mut c_void,
-    ) -> bool {
-        if node.is_null() {
-            return false;
-        }
-        match unsafe { (*node).type_ } {
-            pg_sys::NodeTag::T_Param => matches!(
-                unsafe { (*node.cast::<pg_sys::Param>()).paramkind },
-                pg_sys::ParamKind::PARAM_EXTERN | pg_sys::ParamKind::PARAM_EXEC
-            ),
-            pg_sys::NodeTag::T_RestrictInfo => unsafe {
-                Self::walk(
-                    (*node.cast::<pg_sys::RestrictInfo>()).clause.cast(),
-                    context,
-                )
-            },
-            _ => unsafe {
-                pg_sys::expression_tree_walker(node, Some(Self::walk), context)
-            },
-        }
-    }
-
-    unsafe extern "C-unwind" fn walk_exec(
-        node: *mut pg_sys::Node,
-        context: *mut c_void,
-    ) -> bool {
-        if node.is_null() {
-            return false;
-        }
-        match unsafe { (*node).type_ } {
-            pg_sys::NodeTag::T_Param => unsafe {
-                (*node.cast::<pg_sys::Param>()).paramkind
-                    == pg_sys::ParamKind::PARAM_EXEC
-            },
-            pg_sys::NodeTag::T_RestrictInfo => unsafe {
-                Self::walk_exec(
-                    (*node.cast::<pg_sys::RestrictInfo>()).clause.cast(),
-                    context,
-                )
-            },
-            _ => unsafe {
-                pg_sys::expression_tree_walker(node, Some(Self::walk_exec), context)
-            },
-        }
-    }
-}
-
 /// Context for [`LakebaseCustomScanProvider::begin`].
 pub struct BeginContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     /// Provider's per-scan runtime state.
@@ -274,9 +38,10 @@ pub struct BeginContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     pub private_data: &'a P::PrivateData,
     /// Query or modification-target purpose selected by the planner.
     pub purpose: ScanPurpose,
-    /// Pushed expressions, contracts, and resolved parameter metadata.
-    pub pushed_predicates: PushedPredicates<'a>,
+    /// Provider predicates bound for the current executor values.
+    pub filters: BoundFilterSet<'a, P::BoundPredicate>,
     scan_tuple_desc: pg_sys::TupleDesc,
+    tuple_layout: &'a ScanTupleLayout,
     /// Scan relation handle.
     pub relation: RelationHandle<'a>,
     /// Executor snapshot handle.
@@ -285,13 +50,13 @@ pub struct BeginContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
 }
 
 impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         state: &'a mut P::State,
         private_data: &'a P::PrivateData,
         purpose: ScanPurpose,
-        pushed_predicates: PushedPredicates<'a>,
+        filters: BoundFilterSet<'a, P::BoundPredicate>,
         scan_tuple_desc: pg_sys::TupleDesc,
+        tuple_layout: &'a ScanTupleLayout,
         relation: RelationHandle<'a>,
         snapshot: SnapshotHandle<'a>,
     ) -> Self {
@@ -299,8 +64,9 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
             state,
             private_data,
             purpose,
-            pushed_predicates,
+            filters,
             scan_tuple_desc,
+            tuple_layout,
             relation,
             snapshot,
             _marker: PhantomData,
@@ -310,12 +76,12 @@ impl<'a, P: LakebaseCustomScanProvider> BeginContext<'a, P> {
     /// Actual executor descriptor for the provider-filled raw scan slot.
     #[inline]
     pub fn scan_tuple(&self) -> ScanTupleDescriptor<'_> {
-        unsafe {
-            ScanTupleDescriptor::new(
-                self.scan_tuple_desc,
-                self.pushed_predicates.tuple_layout,
-            )
-        }
+        unsafe { ScanTupleDescriptor::new(self.scan_tuple_desc, self.tuple_layout) }
+    }
+
+    #[inline]
+    pub fn required_columns(&self) -> NeededColumns<'_> {
+        self.tuple_layout.required_columns()
     }
 
     /// Bind the semantic row conversion plan for this relation.
@@ -427,12 +193,12 @@ where
 pub struct ReScanContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
     /// Provider's per-scan runtime state.
     pub state: &'a mut P::State,
-    /// Whether parameter-dependent predicates must be rebuilt.
-    pub params_changed: bool,
+    /// Whether parameter-dependent filter predicates were rebound.
+    pub filters_changed: bool,
     /// Query or modification-target purpose selected by the planner.
     pub purpose: ScanPurpose,
-    /// Pushed expressions, contracts, and resolved parameter metadata.
-    pub pushed_predicates: PushedPredicates<'a>,
+    /// Complete provider predicate set rebound for the current values.
+    pub filters: BoundFilterSet<'a, P::BoundPredicate>,
     /// Scan relation handle.
     pub relation: RelationHandle<'a>,
     /// Executor snapshot handle.
@@ -441,20 +207,19 @@ pub struct ReScanContext<'a, P: LakebaseCustomScanProvider + ?Sized> {
 }
 
 impl<'a, P: LakebaseCustomScanProvider> ReScanContext<'a, P> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         state: &'a mut P::State,
-        params_changed: bool,
+        filters_changed: bool,
         purpose: ScanPurpose,
-        pushed_predicates: PushedPredicates<'a>,
+        filters: BoundFilterSet<'a, P::BoundPredicate>,
         relation: RelationHandle<'a>,
         snapshot: SnapshotHandle<'a>,
     ) -> Self {
         Self {
             state,
-            params_changed,
+            filters_changed,
             purpose,
-            pushed_predicates,
+            filters,
             relation,
             snapshot,
             _marker: PhantomData,

@@ -2,18 +2,7 @@
 
 use pgrx::pg_sys;
 
-/// Persisted metadata for one scan-relation column in one pushed expression.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ColumnRef {
-    pub expr_index: usize,
-    pub rel_oid: pg_sys::Oid,
-    pub attno: pg_sys::AttrNumber,
-    pub atttypid: pg_sys::Oid,
-    pub attcollation: pg_sys::Oid,
-    pub name: Option<String>,
-}
-
-/// Provider filtering obligation attached to a pushed clause.
+/// Provider filtering obligation attached to a planned filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PushdownContract {
     ExactRowFilter,
@@ -32,7 +21,7 @@ impl PushdownContract {
     }
 }
 
-/// Whether a pushed expression contributes to scan-volume costing.
+/// Whether a planned filter contributes to scan-volume costing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PushdownCosting {
     CostedPruning,
@@ -46,16 +35,6 @@ impl PushdownCosting {
     }
 }
 
-/// Provider decision for one structurally supported predicate leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum QualPushdownDecision {
-    Pushable {
-        contract: PushdownContract,
-        costing: PushdownCosting,
-    },
-    Unsupported,
-}
-
 /// Stable operator identity used by provider capability policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PgComparisonIdentity {
@@ -64,7 +43,7 @@ pub struct PgComparisonIdentity {
     pub inputcollid: pg_sys::Oid,
 }
 
-/// Operator metadata supplied to execution translators.
+/// Operator metadata supplied to provider planning.
 ///
 /// Equality and hashing deliberately live on [`PgComparisonIdentity`]; function
 /// and result OIDs are diagnostic/execution metadata, not capability identity.

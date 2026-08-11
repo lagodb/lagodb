@@ -49,6 +49,24 @@ impl<'a> PgExprRef<'a> {
     }
 
     #[inline]
+    pub fn type_oid(self) -> pg_sys::Oid {
+        // SAFETY: construction established a live expression node for `'a`.
+        unsafe { pg_sys::exprType(self.as_ptr().cast()) }
+    }
+
+    #[inline]
+    pub fn typmod(self) -> i32 {
+        // SAFETY: construction established a live expression node for `'a`.
+        unsafe { pg_sys::exprTypmod(self.as_ptr().cast()) }
+    }
+
+    #[inline]
+    pub fn collation(self) -> pg_sys::Oid {
+        // SAFETY: construction established a live expression node for `'a`.
+        unsafe { pg_sys::exprCollation(self.as_ptr().cast()) }
+    }
+
+    #[inline]
     pub fn without_relabels(mut self) -> Self {
         while let Some(relabel) = PgRelabelType::try_from_expr(self) {
             let Some(inner) = relabel.arg() else {
@@ -111,6 +129,11 @@ impl PgVar<'_> {
     }
 
     #[inline]
+    pub fn vartypmod(self) -> i32 {
+        unsafe { (*self.ptr.as_ptr()).vartypmod }
+    }
+
+    #[inline]
     pub fn varcollid(self) -> pg_sys::Oid {
         unsafe { (*self.ptr.as_ptr()).varcollid }
     }
@@ -126,6 +149,11 @@ impl PgConst<'_> {
             node.constvalue,
             node.constisnull,
         )
+    }
+
+    #[inline]
+    pub fn typmod(self) -> i32 {
+        unsafe { (*self.ptr.as_ptr()).consttypmod }
     }
 }
 
@@ -143,6 +171,11 @@ impl PgParam<'_> {
     #[inline]
     pub fn paramtype(self) -> pg_sys::Oid {
         unsafe { (*self.ptr.as_ptr()).paramtype }
+    }
+
+    #[inline]
+    pub fn paramtypmod(self) -> i32 {
+        unsafe { (*self.ptr.as_ptr()).paramtypmod }
     }
 
     #[inline]
@@ -210,11 +243,6 @@ impl PgBoolExpr<'_> {
     #[inline]
     pub(crate) fn args_list(self) -> *mut pg_sys::List {
         unsafe { (*self.ptr.as_ptr()).args }
-    }
-
-    #[inline]
-    pub(crate) fn location(self) -> pg_sys::ParseLoc {
-        unsafe { (*self.ptr.as_ptr()).location }
     }
 }
 

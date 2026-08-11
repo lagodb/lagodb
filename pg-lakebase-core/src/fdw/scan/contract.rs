@@ -1,7 +1,6 @@
 //! Optional scan capability implemented by an FDW provider.
 
-use crate::expr::contract::QualPushdownDecision;
-use crate::expr::predicate::{PlanPredicate, PlanPredicateContext};
+use crate::expr::pushdown::FilterPushdown;
 
 use super::super::provider::ForeignDataWrapper;
 use super::context::{
@@ -15,7 +14,7 @@ use super::pushdown::{BeginForeignScanContext, ReScanForeignScanContext};
 use super::slot::ScanSlotWriter;
 
 /// Optional scan capability of an FDW provider.
-pub trait FdwScan: ForeignDataWrapper + 'static {
+pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
     type PlannerState: 'static;
     type PrivateData: super::context::ForeignPlanPrivate;
     type State: 'static;
@@ -23,11 +22,6 @@ pub trait FdwScan: ForeignDataWrapper + 'static {
     fn init_planner(
         ctx: &ForeignRelContext<'_>,
     ) -> Result<Self::PlannerState, ForeignScanError>;
-
-    fn classify_predicate(
-        ctx: &PlanPredicateContext,
-        predicate: &PlanPredicate,
-    ) -> QualPushdownDecision;
 
     fn estimate(
         state: &mut Self::PlannerState,
@@ -72,15 +66,21 @@ pub trait FdwScan: ForeignDataWrapper + 'static {
         Ok(false)
     }
 
+    /// Compose provider-specific final plan data from core's finalized filter
+    /// plan and the selected non-filter path state. Filter structure has
+    /// already been accepted or rejected by `try_plan_filter`; implementations
+    /// must not repeat that decision from PostgreSQL expression trees here.
     fn build_plan(
         state: &mut Self::PlannerState,
-        ctx: &ForeignPlanContext<'_, Self::PrivateData>,
-    ) -> Result<ForeignPlanSpec<Self::PrivateData>, ForeignScanError>;
+        ctx: &ForeignPlanContext<'_, Self>,
+    ) -> Result<ForeignPlanSpec<Self::PrivateData>, ForeignScanError>
+    where
+        Self: Sized;
 
     /// Start provider execution and bind reusable output columns through
     /// `ctx.output_layout`.
     fn begin(
-        ctx: BeginForeignScanContext<'_, Self::PrivateData>,
+        ctx: BeginForeignScanContext<'_, Self>,
     ) -> Result<Self::State, ForeignScanError>;
 
     /// Produce the next row.
@@ -99,7 +99,7 @@ pub trait FdwScan: ForeignDataWrapper + 'static {
 
     fn rescan(
         state: &mut Self::State,
-        ctx: ReScanForeignScanContext<'_>,
+        ctx: ReScanForeignScanContext<'_, Self>,
     ) -> Result<(), ForeignScanError>;
 
     fn end(state: &mut Self::State) -> Result<(), ForeignScanError>;

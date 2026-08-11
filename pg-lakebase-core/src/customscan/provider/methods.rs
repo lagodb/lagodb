@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use pgrx::pg_sys;
 
 use crate::customscan::execution::{exec, explain, state};
-use crate::customscan::planning::builder;
+use crate::customscan::planning::{builder, final_plan};
 
 use super::LakebaseCustomScanProvider;
 
@@ -57,7 +57,7 @@ pub fn method_tables_for<P: LakebaseCustomScanProvider>()
     let tables = ProviderMethodTables {
         path: pg_sys::CustomPathMethods {
             CustomName: name,
-            PlanCustomPath: Some(builder::plan_custom_path_trampoline::<P>),
+            PlanCustomPath: Some(final_plan::plan_custom_path_trampoline::<P>),
             ReparameterizeCustomPathByChild: Some(
                 builder::reparameterize_custom_path_by_child_trampoline::<P>,
             ),

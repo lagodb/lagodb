@@ -2,6 +2,8 @@ use core::num::NonZeroU16;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use pg_lakebase_core::expr::{PushdownContract, PushdownCosting};
+use pg_lakebase_core::fdw::ForeignPlanQualLocation;
 use pg_lakebase_core::handles::ValidItemPointer;
 use pgrx::pg_sys;
 
@@ -124,18 +126,24 @@ impl TestStore {
 pub(super) enum TraceEvent {
     ScanBegin {
         ordered: bool,
-        pushed_count: usize,
+        planned_count: usize,
         filters: Vec<(pg_sys::AttrNumber, Option<i32>)>,
         projection: &'static str,
     },
     ScanRescan {
-        params_changed: bool,
+        filters_changed: bool,
         filters: Vec<(pg_sys::AttrNumber, Option<i32>)>,
     },
     Pathkeys {
         candidate_count: usize,
         selected_candidate: usize,
         selected_attno: pg_sys::AttrNumber,
+    },
+    PlanBuild {
+        filters: Vec<FilterPlanTrace>,
+        binding_count: usize,
+        residual_count: usize,
+        recheck_count: usize,
     },
     Modify {
         operation: &'static str,
@@ -144,6 +152,14 @@ pub(super) enum TraceEvent {
         returned_item_pointer: bool,
     },
 }
+
+pub(super) type FilterPlanTrace = (
+    pg_sys::AttrNumber,
+    core::ops::Range<usize>,
+    PushdownContract,
+    PushdownCosting,
+    ForeignPlanQualLocation,
+);
 
 pub(super) struct TestTrace;
 

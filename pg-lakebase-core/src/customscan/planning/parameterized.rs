@@ -3,75 +3,60 @@
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::customscan::planning::paths::PredicatePlanner;
-use crate::customscan::provider::ErasedProvider;
-use crate::expr::split::{PlanPushdownSplit, PlannerClauseGate, ScanClauseSource};
+use crate::customscan::error::CustomScanError;
+use crate::customscan::provider::ErasedFilterPlanner;
+use crate::expr::pushdown::{PathFilterSet, ScanClauseSource};
 
 #[derive(Clone, Copy)]
 pub(super) struct ParameterizedPathResolver {
     root: *mut pg_sys::PlannerInfo,
     rel: *mut pg_sys::RelOptInfo,
-    provider: &'static dyn ErasedProvider,
 }
 
 impl ParameterizedPathResolver {
     pub(super) fn new(
         root: *mut pg_sys::PlannerInfo,
         rel: *mut pg_sys::RelOptInfo,
-        provider: &'static dyn ErasedProvider,
     ) -> Self {
-        Self {
-            root,
-            rel,
-            provider,
-        }
+        Self { root, rel }
     }
 
-    /// Resolve PPI and classify `ppi_clauses`; non-empty `outer_relids`.
+    /// Resolve PPI and plan `ppi_clauses`; non-empty `outer_relids`.
     ///
     /// # Safety
     ///
     /// Captured planner pointers and `outer_relids` must be live.
-    pub(super) unsafe fn resolve_and_split(
+    pub(super) unsafe fn resolve_and_plan(
         self,
         outer_relids: *mut pg_sys::Bitmapset,
-    ) -> PlanPushdownSplit {
+        planner: &mut dyn ErasedFilterPlanner,
+    ) -> Result<PathFilterSet, CustomScanError> {
         let param_info = unsafe {
             pg_sys::get_baserel_parampathinfo(self.root, self.rel, outer_relids)
         };
 
         let ppi_clauses = unsafe { (*param_info).ppi_clauses };
-        unsafe {
-            PredicatePlanner::new(self.root, self.rel, self.provider)
-                .split(ppi_clauses, ScanClauseSource::Movable)
-        }
+        unsafe { planner.negotiate(ppi_clauses, ScanClauseSource::Movable) }
     }
 }
 
 /// Join-parameterized group; PG owns `outer_relids` and `param_info`.
 pub(super) struct ParameterizedPathGroup {
     pub(super) outer_relids: *mut pg_sys::Bitmapset,
-    pub(super) ppi_split: PlanPushdownSplit,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct ParameterizedPathPlanner {
     root: *mut pg_sys::PlannerInfo,
     rel: *mut pg_sys::RelOptInfo,
-    provider: &'static dyn ErasedProvider,
 }
 
 impl ParameterizedPathPlanner {
     pub(super) fn new(
         root: *mut pg_sys::PlannerInfo,
         rel: *mut pg_sys::RelOptInfo,
-        provider: &'static dyn ErasedProvider,
     ) -> Self {
-        Self {
-            root,
-            rel,
-            provider,
-        }
+        Self { root, rel }
     }
 
     /// JoinParameterized variants from `joininfo`; PG owns returned bitmaps/PPI.
@@ -92,14 +77,9 @@ impl ParameterizedPathPlanner {
         let candidates = candidates.into_vec();
         let mut groups: Vec<ParameterizedPathGroup> =
             Vec::with_capacity(candidates.len());
-        let resolver =
-            ParameterizedPathResolver::new(self.root, self.rel, self.provider);
-
         for required_outer in candidates {
-            let ppi_split = unsafe { resolver.resolve_and_split(required_outer) };
             groups.push(ParameterizedPathGroup {
                 outer_relids: required_outer,
-                ppi_split,
             });
         }
 
@@ -111,7 +91,6 @@ struct ParameterizationCandidates {
     rel: *mut pg_sys::RelOptInfo,
     lateral_relids: *mut pg_sys::Bitmapset,
     rel_relids: *mut pg_sys::Bitmapset,
-    clause_gate: PlannerClauseGate,
     candidates: Vec<*mut pg_sys::Bitmapset>,
 }
 
@@ -124,7 +103,6 @@ impl ParameterizationCandidates {
             rel,
             lateral_relids: unsafe { (*rel).lateral_relids },
             rel_relids: unsafe { (*rel).relids },
-            clause_gate: PlannerClauseGate::for_relation(rel),
             candidates: Vec::new(),
         }
     }
@@ -169,10 +147,10 @@ impl ParameterizationCandidates {
             return;
         }
 
-        if !unsafe { self.clause_gate.is_securely_promotable(rinfo) } {
+        if !unsafe { pg_sys::restriction_is_securely_promotable(rinfo, self.rel) } {
             return;
         }
-        if !unsafe { self.clause_gate.is_movable_to_relation(rinfo) } {
+        if !unsafe { pg_sys::join_clause_is_movable_to(rinfo, self.rel) } {
             return;
         }
 

@@ -348,6 +348,20 @@ mod tests {
     }
 
     #[test]
+    fn relation_registry_interns_each_path_once() {
+        let registry = RelationRowRegistry::default();
+        let first_file = registry.register_file("data/a.parquet").unwrap();
+        let second_file = registry.register_file("data/a.parquet").unwrap();
+        let other_file = registry.register_file("data/b.parquet").unwrap();
+        assert_eq!(first_file, second_file);
+        assert_ne!(first_file, other_file);
+        assert_eq!(
+            registry.file_path(other_file).unwrap().as_ref(),
+            "data/b.parquet"
+        );
+    }
+
+    #[test]
     fn file_registry_enforces_the_17_bit_ctid_limit() {
         let registry = RelationRowRegistry::default();
         {

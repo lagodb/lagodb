@@ -3,19 +3,21 @@
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
-    use crate::lakebase_core::customscan::support::TestScanState;
+    use crate::lakebase_core::customscan::support::{
+        TestScanState, impl_reject_all_filters,
+    };
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
-        RelationContext,
+        PathContext, PathVariant, ReScanContext, RelationContext,
     };
     use pg_lakebase_core::customscan::provider::{CustomScanPrivate, NoPrivateData};
-    use pg_lakebase_core::expr::QualPushdownDecision;
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
     struct StateProvider;
+
+    impl_reject_all_filters!(StateProvider);
 
     impl LakebaseCustomScanProvider for StateProvider {
         const NAME: &'static core::ffi::CStr = c"state-wrapper-test-provider";
@@ -24,13 +26,6 @@ mod tests {
 
         fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
             false
-        }
-
-        fn classify_predicate(
-            _ctx: &PlanTranslateContext,
-            _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
-        ) -> QualPushdownDecision {
-            QualPushdownDecision::Unsupported
         }
 
         fn create_path(

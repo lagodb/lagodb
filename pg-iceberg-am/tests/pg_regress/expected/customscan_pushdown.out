@@ -83,7 +83,7 @@ SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
 -- Under `force` and VERBOSE, the output carries `Scan Purpose: Query` and a `Provider:` line
 -- plus the deparsed predicate text on labeled lines `Pushed Filter
 -- Exact:` and `Recheck:` (both non-empty for this plan). The empty
--- classes (`Pushed Filter Conservative Pruning:`, and any local residual) are
+-- classes (`Pushed Filter Conservative:`, and any local residual) are
 -- omitted — only non-empty classes print labeled predicate lines
 --. No numeric count lines appear.
 -- ============================================================================
@@ -984,20 +984,20 @@ WHERE id = 25::bigint;
 -- Block E: Collation / text comparisons are not Exact-promoted
 -- The Exact allowlist is restricted to collation-agnostic integer triples.
 -- These text predicates provide negative coverage for operator identity
---: the classifier must NOT promote text/collation
+--: the provider planner must NOT promote text/collation
 -- triples to `Exact` even though the structural shape (`column op literal`)
 -- matches the Exact template.
 -- We assert this under `pg_lakebase.customscan_mode = 'force'` deliberately:
 -- `force` biases CustomPaths the framework deems legal and selects them
 -- regardless of cost. So the EXPLAIN under `force` directly reveals the
--- classifier's decision for text:
---   - `Seq Scan` ⇒ classifier returned `Unsupported`, no CustomPath emitted
+-- provider planner's decision for text:
+--   - `Seq Scan` ⇒ planning returned `Unsupported`, no CustomPath emitted
 --     for text equality at all (the strongest negative case).
 --   - `Custom Scan` whose text clause was classified
---     `ConservativePruning` ⇒ classifier emitted a CustomPath. This is
+--     `ConservativePruning` ⇒ planning emitted a CustomPath. This is
 --     also acceptable: the ConservativePruning clause is pushed (it appears
 --     on the `Pushed Filter:` line, and under VERBOSE on the
---     `Pushed Filter Conservative Pruning:` labeled line) but the original clause is
+--     `Pushed Filter Conservative:` labeled line) but the original clause is
 --     ALSO retained as a local residual `Filter:` line — importantly it is
 --     NOT classified `Exact` (which would strip it from `plan.qual` and,
 --     under VERBOSE, label it `Pushed Filter Exact:`), which is what
@@ -1156,7 +1156,7 @@ SELECT COUNT(*) AS total_rows FROM customscan_partial_pushdown_t;
 -- Test 1: AND-partial pushdown
 -- ============================================================================
 -- `a = 1 AND length(b) > 0`:
---   - `a = 1` is classified Exact and pushed (and recorded in recheck).
+--   - `a = 1` is planned Exact and pushed; its contract derives EPQ recheck.
 --   - `length(b) > 0` stays in residual.
 --   - Result set must equal the SeqScan baseline (single row: (1, 'one')).
 -- CustomScan path (default TEXT): the CustomScan node carries a
@@ -1211,8 +1211,9 @@ ORDER BY a, b;
 -- VERBOSE: under VERBOSE the deparsed predicate text appears on
 -- labeled lines for each non-empty class.
 -- `Pushed Filter Exact:` and `Recheck:` both print the deparsed
--- `(a = 1)` (v1 stores Exact pushed expressions in recheck verbatim
--- — see design Data Models). The `Pushed Filter Conservative Pruning:` class is
+-- `(a = 1)`: the plan stores one pushed-expression provenance entry and
+-- derives the Exact recheck from its persisted contract. The
+-- `Pushed Filter Conservative:` class is
 -- empty and its label line is omitted (
 -- non-empty classes print labeled predicate lines); no numeric count
 -- lines appear.
@@ -1290,7 +1291,7 @@ ORDER BY a, b;
 -- Test 3: row-valued NullTest residual survives OR widening
 -- ============================================================================
 -- PostgreSQL's row-valued IS NULL and IS NOT NULL tests are not complements.
--- The classifier may widen the OR to `(a = 1) OR (a = 2)` for conservative
+-- The negotiator may widen the OR to `(a = 1) OR (a = 2)` for conservative
 -- pruning, but PostgreSQL must evaluate the original `NOT (t IS NULL)` tree as
 -- the local residual. The additional `(1, NULL)` row distinguishes the correct
 -- three-row result from the incorrect two-row result produced by rewriting the
@@ -1807,10 +1808,10 @@ ORDER BY id;
 -- Test 2: a query whose ONLY predicate is an `Unsupported`-collation `text`
 -- clause shows NO discounted CustomPath.
 -- `WHERE descr < 'mango'` is ordered `text` comparison (`text_lt`, opno 664)
--- under the DEFAULT database collation. The oracle treats the default
+-- under the DEFAULT database collation. The provider planner treats the default
 -- collation as unsafe for ordered text (only the explicit C/POSIX OID is
--- safe), so the clause is `Unsupported`: it never enters
--- `variant.split.pushed`, the set is empty, `create_path` returns `None`, and
+-- safe), so the clause is `Unsupported`: the path summary has no planned
+-- filter, `create_path` returns `None`, and
 -- no CustomPath is emitted. Under `force` the plan therefore falls back to
 -- SeqScan with the `<` clause as the verbatim Filter — there is NO
 -- `Custom Scan (pg-iceberg-am)` node and NO `Pushed Filter:` line.
@@ -1883,9 +1884,10 @@ SET timezone = 'UTC';
 -- provider has applies the predicate as a row-level Arrow filter. Numeric
 -- comparison can only be exact with bound decimal precision/scale and
 -- operator-aware literal conversion; otherwise scale handling can produce false
--- negatives the residual qual cannot recover. The oracle therefore marks
--- numeric comparison `Unsupported`, so `val < 100.5` is NOT pushed. Because it is the only
--- predicate, no clause survives into `variant.split.pushed`, `create_path`
+-- negatives the residual qual cannot recover. The provider planner therefore
+-- marks numeric comparison `Unsupported`, so `val < 100.5` is NOT pushed.
+-- Because it is the only
+-- predicate, the path summary has no planned filter, `create_path`
 -- returns `None`, and no CustomPath is emitted — under `force` the plan falls
 -- back to SeqScan, identical to `off`. The residual qual decides every row, so
 -- force/off results stay in parity. This Part is a regression guard that
@@ -2018,7 +2020,7 @@ SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;
 -- Part 2: date / timestamp / timestamptz — pushable ConservativePruning
 -- ============================================================================
 -- date_ge (1098) / timestamp_ge (2065) / timestamptz_ge (1325) are all marked
--- `ConservativePruning` by the oracle and translated using the shared
+-- `ConservativePruning` by the provider planner and bound using the shared
 -- `PG_EPOCH_DAYS_DIFF` / `PG_EPOCH_USECS_DIFF` constants, so pushed bounds
 -- align with the storage write side. File 1 (2020/2021) is pruned by the
 -- `>= 2024-01-01` predicates; file 2 survives.
@@ -2309,9 +2311,9 @@ SELECT COUNT(*) AS total_rows FROM customscan_unsupported_only_t;
 --.
 -- `WHERE label <> 'bravo'`:
 --   - The sole candidate clause is `text <>`. The oracle returns
---     `Unsupported`, so the classifier returns `Unsupported`, the clause
---     stays in residual, and `variant.split.pushed` is empty.
---   - `create_path` sees `variant.split.pushed.is_empty()` and returns
+--     `Unsupported`, so the clause stays in residual and the path summary has
+--     no planned filter.
+--   - `create_path` sees an empty planned-filter summary and returns
 --     `None`. No CustomPath is emitted, so even under `force` the plan
 --     falls back to SeqScan with the `<>` clause as the Filter.
 -- ============================================================================
@@ -2370,8 +2372,8 @@ ORDER BY id, label;
 -- Test 2: positive control — a translatable clause DOES yield a CustomPath.
 -- This proves the Test 1 SeqScan fallback is genuinely the capability gate
 -- declining the variant, not an artifact of the harness. `WHERE id = 2` is
--- `int4 =` (opno 96), which the oracle marks `Exact`: it is pushed, so
--- `variant.split.pushed` is non-empty, `create_path` emits a CustomPath,
+-- `int4 =` (opno 96), which the provider planner plans as `Exact`: the path
+-- summary is non-empty, so `create_path` emits a CustomPath,
 -- and under `force` the plan is a Custom Scan carrying the pushed predicate.
 -- ============================================================================
 -- Under `force`: the Exact integer clause is pushable, so a CustomPath

@@ -184,7 +184,9 @@ module tree, for example:
 ```text
 src/predicate/
 ├── classifier.rs          # classifier + exhaustive host decision matrix
-├── policy.rs              # pure capability policy + host matrix
+├── policy/
+│   ├── mod.rs              # pure capability policy
+│   └── test.rs             # host policy tests + operator fixture matrix
 ├── translator.rs          # translator semantics + host tests
 ├── translator/
 │   ├── datum.rs           # Datum FFI + pure temporal conversion tests
@@ -197,10 +199,10 @@ src/predicate/
     ├── translator.rs      # representative cross-layer wiring
 ```
 
-`policy.rs` contains a feature-gated `test_opno_table` module. It is shared
-fixture data rather than a test suite, and remains adjacent to the policy that
-owns the operator mapping while both host and backend tests consume the same
-table.
+`policy/mod.rs` contains the pure capability policy and declares its
+host-test-gated `test` child. `policy/test.rs` keeps the ordinary host tests
+and the operator fixture matrix together because the matrix is consumed only
+by that host policy suite.
 
 Test-only construction support for types with private fields stays in a
 feature-gated child module of the owning production module, for example
@@ -224,7 +226,7 @@ cases. Likewise, temporal epoch arithmetic is host logic even though extracting
 the raw value from a PostgreSQL `Datum` is backend-facing.
 
 Each rule has one exhaustive owner. The pure capability matrix belongs to
-`policy.rs`; operand-shape and costing matrices belong to `classifier.rs`;
+`policy/mod.rs`; operand-shape and costing matrices belong to `classifier.rs`;
 epoch and infinity boundaries belong to `translator/datum.rs`. Backend suites
 verify their boundary wiring with representative cases and must not repeat
 those matrices through raw-node fixtures. This keeps backend runtime and test

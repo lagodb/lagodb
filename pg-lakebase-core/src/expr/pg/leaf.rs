@@ -9,24 +9,38 @@ use super::view::{PgConst, PgExprRef, PgNullTest, PgOpExpr, PgParam, PgVar};
 
 #[derive(Clone, Copy, Debug)]
 pub enum PgScalarExprRef<'a> {
-    Var(PgVar<'a>),
-    Const(PgConst<'a>),
-    Param(PgParam<'a>),
+    Var {
+        node: PgVar<'a>,
+        expression: PgExprRef<'a>,
+    },
+    Const {
+        node: PgConst<'a>,
+        expression: PgExprRef<'a>,
+    },
+    Param {
+        node: PgParam<'a>,
+        expression: PgExprRef<'a>,
+    },
 }
 
 impl<'a> PgScalarExprRef<'a> {
     pub fn parse(expr: PgExprRef<'a>) -> Result<Self, PgStructuralError> {
-        let expr = expr.without_relabels();
-        match expr.node_tag() {
-            pg_sys::NodeTag::T_Var => Ok(Self::Var(
-                PgVar::try_from_expr(expr).expect("NodeTag established a Var"),
-            )),
-            pg_sys::NodeTag::T_Const => Ok(Self::Const(
-                PgConst::try_from_expr(expr).expect("NodeTag established a Const"),
-            )),
-            pg_sys::NodeTag::T_Param => Ok(Self::Param(
-                PgParam::try_from_expr(expr).expect("NodeTag established a Param"),
-            )),
+        let node = expr.without_relabels();
+        match node.node_tag() {
+            pg_sys::NodeTag::T_Var => Ok(Self::Var {
+                node: PgVar::try_from_expr(node).expect("NodeTag established a Var"),
+                expression: expr,
+            }),
+            pg_sys::NodeTag::T_Const => Ok(Self::Const {
+                node: PgConst::try_from_expr(node)
+                    .expect("NodeTag established a Const"),
+                expression: expr,
+            }),
+            pg_sys::NodeTag::T_Param => Ok(Self::Param {
+                node: PgParam::try_from_expr(node)
+                    .expect("NodeTag established a Param"),
+                expression: expr,
+            }),
             _ => Err(PgStructuralError::UnsupportedScalar),
         }
     }

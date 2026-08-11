@@ -5,18 +5,17 @@
 mod tests {
     use core::ffi::CStr;
 
+    use crate::lakebase_core::customscan::support::impl_reject_all_filters;
     use pg_lakebase_core::customscan::hook::assert_set_rel_pathlist_callback_signature;
     use pg_lakebase_core::customscan::provider::methods::method_tables_for;
     use pg_lakebase_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-        PathContext, PathVariant, PlanTranslateContext, ReScanContext,
-        RelationContext,
+        PathContext, PathVariant, ReScanContext, RelationContext,
     };
     use pg_lakebase_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
-    use pg_lakebase_core::expr::QualPushdownDecision;
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
@@ -42,6 +41,8 @@ mod tests {
 
     macro_rules! impl_glue_provider {
         ($ty:ty, $name:expr, $state:ty) => {
+            impl_reject_all_filters!($ty);
+
             impl LakebaseCustomScanProvider for $ty {
                 const NAME: &'static CStr = $name;
                 type PrivateData = GluePrivate;
@@ -49,13 +50,6 @@ mod tests {
 
                 fn supports_relation(_ctx: &RelationContext<'_>) -> bool {
                     false
-                }
-
-                fn classify_predicate(
-                    _ctx: &PlanTranslateContext,
-                    _predicate: &pg_lakebase_core::expr::predicate::PlanPredicate,
-                ) -> QualPushdownDecision {
-                    QualPushdownDecision::Unsupported
                 }
 
                 fn create_path(

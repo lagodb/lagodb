@@ -8,14 +8,12 @@ use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::{PgLogLevel, PgSqlErrorCode};
 
+use super::super::provider::ForeignDataWrapper;
+use super::super::row_identity::ForeignRowIdentityError;
 use crate::diag::{
     PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
 };
-use crate::expr::translator::BuildPredicateError;
-
-use super::super::codec::PrivateCodecError;
-use super::super::provider::ForeignDataWrapper;
-use super::super::row_identity::ForeignRowIdentityError;
+use crate::plan_data::PlanDataError;
 
 /// PostgreSQL callback phase attached by the framework at an FFI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +22,6 @@ pub enum ForeignScanPhase {
     Paths,
     Plan,
     Begin,
-    ProviderStart,
     Iterate,
     ReScan,
     End,
@@ -37,7 +34,6 @@ impl ForeignScanPhase {
             Self::Paths => "GetForeignPaths",
             Self::Plan => "GetForeignPlan",
             Self::Begin => "BeginForeignScan",
-            Self::ProviderStart => "provider start",
             Self::Iterate => "IterateForeignScan",
             Self::ReScan => "ReScanForeignScan",
             Self::End => "EndForeignScan",
@@ -54,7 +50,7 @@ pub struct ForeignScanError(Box<ForeignScanErrorKind>);
 
 #[derive(Debug)]
 enum ForeignScanErrorKind {
-    Runtime {
+    Callback {
         provider: &'static CStr,
         phase: ForeignScanPhase,
         source: Box<ForeignScanError>,
@@ -62,14 +58,6 @@ enum ForeignScanErrorKind {
     Provider {
         sqlerrcode: PgSqlErrorCode,
         source: Box<dyn StdError + Send + Sync>,
-    },
-    PredicateBuild {
-        pushed_index: Option<usize>,
-        source: Box<dyn StdError + Send + Sync>,
-    },
-    Context {
-        message: String,
-        source: Box<ForeignScanError>,
     },
     Framework {
         sqlerrcode: PgSqlErrorCode,
@@ -89,23 +77,17 @@ enum ForeignScanErrorKind {
 impl Display for ForeignScanError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &*self.0 {
-            ForeignScanErrorKind::Runtime {
+            ForeignScanErrorKind::Callback {
                 provider,
                 phase,
                 source,
             } => write!(
                 f,
-                "FDW provider {provider:?} callback {} failed: {source}",
+                "FDW {provider:?} {} callback failed: {source}",
                 phase.as_str()
             ),
             ForeignScanErrorKind::Provider { source, .. } => {
                 write!(f, "FDW provider error: {source}")
-            }
-            ForeignScanErrorKind::PredicateBuild { .. } => {
-                f.write_str("FDW predicate construction failed")
-            }
-            ForeignScanErrorKind::Context { message, source } => {
-                write!(f, "{message}: {source}")
             }
             ForeignScanErrorKind::Framework { message, .. } => f.write_str(message),
             ForeignScanErrorKind::PrivateCodec { source } => {
@@ -119,10 +101,8 @@ impl Display for ForeignScanError {
 impl StdError for ForeignScanError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match &*self.0 {
-            ForeignScanErrorKind::Runtime { source, .. }
-            | ForeignScanErrorKind::Context { source, .. } => Some(source),
+            ForeignScanErrorKind::Callback { source, .. } => Some(source),
             ForeignScanErrorKind::Provider { source, .. }
-            | ForeignScanErrorKind::PredicateBuild { source, .. }
             | ForeignScanErrorKind::PrivateCodec { source } => Some(source.as_ref()),
             ForeignScanErrorKind::Framework { .. }
             | ForeignScanErrorKind::PgReport { .. } => None,
@@ -164,33 +144,11 @@ impl ForeignScanError {
         })
     }
 
-    /// Report a pushed-predicate construction failure and retain its pushed
-    /// expression index for PostgreSQL DETAIL output.
-    pub fn predicate_build_at(
-        pushed_index: Option<usize>,
-        error: impl StdError + Send + Sync + 'static,
-    ) -> Self {
-        Self::new(ForeignScanErrorKind::PredicateBuild {
-            pushed_index,
-            source: Box::new(error),
-        })
-    }
-
     pub(crate) fn private_codec(
         error: impl StdError + Send + Sync + 'static,
     ) -> Self {
         Self::new(ForeignScanErrorKind::PrivateCodec {
             source: Box::new(error),
-        })
-    }
-
-    pub(crate) fn context(
-        message: impl Into<String>,
-        source: impl Into<ForeignScanError>,
-    ) -> Self {
-        Self::new(ForeignScanErrorKind::Context {
-            message: message.into(),
-            source: Box::new(source.into()),
         })
     }
 
@@ -200,14 +158,11 @@ impl ForeignScanError {
         ))
     }
 
-    pub(crate) fn with_provider_phase<P: ForeignDataWrapper>(
+    pub(crate) fn with_callback_phase<P: ForeignDataWrapper>(
         self,
         phase: ForeignScanPhase,
     ) -> Self {
-        if matches!(&*self.0, ForeignScanErrorKind::Runtime { .. }) {
-            return self;
-        }
-        Self::new(ForeignScanErrorKind::Runtime {
+        Self::new(ForeignScanErrorKind::Callback {
             provider: P::NAME,
             phase,
             source: Box::new(self),
@@ -239,13 +194,11 @@ impl ForeignScanError {
 impl SqlStateError for ForeignScanError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match &*self.0 {
-            ForeignScanErrorKind::Runtime { source, .. }
-            | ForeignScanErrorKind::Context { source, .. } => source.sql_error_code(),
+            ForeignScanErrorKind::Callback { source, .. } => source.sql_error_code(),
             ForeignScanErrorKind::Provider { sqlerrcode, .. }
             | ForeignScanErrorKind::Framework { sqlerrcode, .. }
             | ForeignScanErrorKind::PgReport { sqlerrcode, .. } => *sqlerrcode,
-            ForeignScanErrorKind::PredicateBuild { .. }
-            | ForeignScanErrorKind::PrivateCodec { .. } => {
+            ForeignScanErrorKind::PrivateCodec { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
         }
@@ -265,8 +218,8 @@ impl From<PgReportError> for ForeignScanError {
     }
 }
 
-impl From<PrivateCodecError> for ForeignScanError {
-    fn from(error: PrivateCodecError) -> Self {
+impl From<PlanDataError> for ForeignScanError {
+    fn from(error: PlanDataError) -> Self {
         Self::private_codec(error)
     }
 }
@@ -277,24 +230,10 @@ impl From<ForeignRowIdentityError> for ForeignScanError {
     }
 }
 
-impl<E> From<BuildPredicateError<E>> for ForeignScanError
-where
-    E: StdError + Send + Sync + 'static,
-{
-    fn from(error: BuildPredicateError<E>) -> Self {
-        Self::predicate_build_at(None, error)
-    }
-}
-
 impl From<ForeignScanError> for ErrorReport {
     fn from(error: ForeignScanError) -> Self {
         let sqlerrcode = error.sql_error_code();
         let mut details = Vec::new();
-        if let Some(index) = predicate_index(&error) {
-            details.push(format!(
-                "FDW predicate construction failed at pushed qual {index}"
-            ));
-        }
         if let Some(chain) = error_source_chain_detail(&error) {
             details.push(chain);
         }
@@ -314,28 +253,16 @@ impl From<ForeignScanError> for ErrorReport {
 
 fn report_message(error: &ForeignScanError) -> String {
     match &*error.0 {
-        ForeignScanErrorKind::Runtime {
+        ForeignScanErrorKind::Callback {
             provider,
             phase,
             source,
         } => format!(
-            "FDW provider {provider:?} callback {} failed: {source}",
+            "FDW {provider:?} {} callback failed: {source}",
             phase.as_str()
         ),
-        ForeignScanErrorKind::PredicateBuild { .. } => {
-            "FDW predicate construction failed".to_owned()
-        }
         ForeignScanErrorKind::PgReport { message, .. } => message.clone(),
         _ => error.to_string(),
-    }
-}
-
-fn predicate_index(error: &ForeignScanError) -> Option<usize> {
-    match &*error.0 {
-        ForeignScanErrorKind::PredicateBuild { pushed_index, .. } => *pushed_index,
-        ForeignScanErrorKind::Runtime { source, .. }
-        | ForeignScanErrorKind::Context { source, .. } => predicate_index(source),
-        _ => None,
     }
 }
 
@@ -345,8 +272,7 @@ fn collect_pg_report_parts(
     hints: &mut Vec<String>,
 ) {
     match &*error.0 {
-        ForeignScanErrorKind::Runtime { source, .. }
-        | ForeignScanErrorKind::Context { source, .. } => {
+        ForeignScanErrorKind::Callback { source, .. } => {
             collect_pg_report_parts(source, details, hints)
         }
         ForeignScanErrorKind::PgReport { detail, hint, .. } => {

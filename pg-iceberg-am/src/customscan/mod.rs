@@ -15,23 +15,63 @@ use pg_lakebase_core::customscan::modify::{
 use pg_lakebase_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
     CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
-    NoPrivateData, PathContext, PathVariant, PlanTranslateContext, ReScanContext,
-    RelationContext, register_provider as register_scan_provider,
+    NoPrivateData, PathContext, PathVariant, ReScanContext, RelationContext,
+    register_provider as register_scan_provider,
 };
-use pg_lakebase_core::expr::QualPushdownDecision;
-use pg_lakebase_core::expr::predicate::PlanPredicate;
+use pg_lakebase_core::expr::pushdown::{
+    FilterBindResult, FilterPlanningContext, FilterPushdown, FilterValueBindings,
+};
+use pg_lakebase_core::plan_data::{PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
 
 use crate::IcebergTableAm;
 use crate::access::mutation::IcebergModifyScanContext;
 use crate::catalog::IcebergAccessMethod;
 use crate::error::IcebergError;
-use crate::predicate::IcebergPredicateClassifier;
+use crate::predicate::{
+    BoundIcebergPredicate, IcebergFilterError, IcebergFilterPlanner,
+    PlannedIcebergPredicate,
+};
 
 use scan_state::IcebergScanState;
 
 /// Zero-sized marker for the Iceberg [`LakebaseCustomScanProvider`].
 struct IcebergCustomScanProvider;
+
+impl FilterPushdown for IcebergCustomScanProvider {
+    type Planner = IcebergFilterPlanner;
+    type PlannedPredicate = PlannedIcebergPredicate;
+    type BoundPredicate = BoundIcebergPredicate;
+    type Error = IcebergFilterError;
+
+    fn begin_filter_planning(
+        context: &FilterPlanningContext,
+    ) -> Result<Self::Planner, Self::Error> {
+        IcebergFilterPlanner::begin(context)
+    }
+
+    fn encode_planned(
+        predicate: &Self::PlannedPredicate,
+        writer: &mut PlanDataWriter,
+    ) -> Result<(), Self::Error> {
+        predicate.encode(writer);
+        Ok(())
+    }
+
+    fn decode_planned(
+        reader: &mut PlanDataReader<'_>,
+        binding_count: usize,
+    ) -> Result<Self::PlannedPredicate, Self::Error> {
+        PlannedIcebergPredicate::decode(reader, binding_count)
+    }
+
+    fn bind_filter(
+        predicate: &Self::PlannedPredicate,
+        values: FilterValueBindings<'_>,
+    ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
+        predicate.bind(values)
+    }
+}
 
 impl From<IcebergError> for CustomScanError {
     fn from(err: IcebergError) -> Self {
@@ -50,22 +90,15 @@ impl LakebaseCustomScanProvider for IcebergCustomScanProvider {
         IcebergAccessMethod::matches_oid(ctx.access_method_oid())
     }
 
-    fn classify_predicate(
-        _ctx: &PlanTranslateContext,
-        predicate: &PlanPredicate,
-    ) -> QualPushdownDecision {
-        IcebergPredicateClassifier.classify(predicate)
-    }
-
-    /// Query paths require pushed predicates. Modify paths remain eligible even
-    /// when the pushdown set is empty so projection pruning can compete with
+    /// Query paths require provider-planned filters. Modify paths remain eligible
+    /// when the planned set is empty so projection pruning can compete with
     /// the standard TableAM path through normal costing.
     fn create_path(
         ctx: &PathContext<'_>,
         variant: &PathVariant<'_>,
         builder: CustomPathBuilder<Self>,
     ) -> Option<CustomPathPlan<Self>> {
-        if !variant.purpose.is_modify() && !variant.pushdown.has_pushed_predicates() {
+        if !variant.purpose.is_modify() && !variant.pushdown.has_planned_filters() {
             return None;
         }
 

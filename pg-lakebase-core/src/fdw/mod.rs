@@ -4,7 +4,6 @@
 //! Their PostgreSQL callback lifecycles remain separate because PostgreSQL
 //! stores their executor state in different node fields.
 
-mod codec;
 mod modify;
 mod payload;
 mod provider;
@@ -14,7 +13,9 @@ mod scan;
 mod system_column;
 mod validation;
 
-pub use codec::{ForeignPrivateReader, ForeignPrivateWriter, PrivateCodecError};
+pub use crate::plan_data::{
+    PlanDataReader as ForeignPrivateReader, PlanDataWriter as ForeignPrivateWriter,
+};
 pub use modify::{
     FdwModify, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyError, ForeignModifyOperation,
@@ -27,14 +28,14 @@ pub use provider::ForeignDataWrapper;
 pub use routine::{FdwRoutine, register_modify, register_scan};
 pub use row_identity::{ForeignRowIdentityError, ForeignRowIdentityRequirement};
 pub use scan::{
-    BeginForeignScanContext, ColumnRequirements, FdwScan, ForeignExprList,
-    ForeignExpressionValue, ForeignExprs, ForeignPathBuilder, ForeignPathContext,
-    ForeignPathKey, ForeignPathKeys, ForeignPathSpec, ForeignPlanContext,
-    ForeignPlanPrivate, ForeignPlanSpec, ForeignPushdown, ForeignRelContext,
-    ForeignRelSize, ForeignRelSizeContext, ForeignScanError, ForeignScanPhase,
-    PathVariantKind, ReScanForeignScanContext, Relids, RuntimeExpressionValues,
-    ScanDatumWriter, ScanOutputColumn, ScanProjection, ScanProjectionPolicy,
-    ScanSlotWriter,
+    BeginForeignScanContext, ColumnRequirements, FdwScan, ForeignExpressionValue,
+    ForeignExprs, ForeignPathBuilder, ForeignPathContext, ForeignPathKey,
+    ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanFilter,
+    ForeignPlanFilters, ForeignPlanPrivate, ForeignPlanQualLocation, ForeignPlanSpec,
+    ForeignRelContext, ForeignRelSize, ForeignRelSizeContext, ForeignScanError,
+    ForeignScanPhase, PathVariantKind, ReScanForeignScanContext, Relids,
+    RuntimeExpressionValues, ScanDatumWriter, ScanOutputColumn, ScanProjection,
+    ScanProjectionPolicy, ScanSlotWriter,
 };
 pub use validation::ForeignValidationError;
 

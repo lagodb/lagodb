@@ -223,11 +223,11 @@ trait LakebaseDataFusionProvider {
         rel_oid: pg_sys::Oid,
         snapshot: SnapshotHandle,
         projection: OffloadProjection,
-        pushed_filters: Vec<PlanPredicate>,
+        planned_filters: &[PlannedOffloadFilter],
     ) -> Result<Arc<dyn datafusion::catalog::TableProvider>>;
 
     fn translate_expr(
-        expr: &PlanPredicate,
+        fragment: &FilterFragment,
         mapper: &ColumnMapper,
     ) -> Result<datafusion::logical_expr::Expr>;
 }

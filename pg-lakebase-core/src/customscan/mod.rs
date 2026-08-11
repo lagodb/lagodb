@@ -7,6 +7,7 @@
 mod error;
 mod execution;
 pub use error::CustomScanError;
+mod filter;
 mod gucs;
 mod plan_data;
 mod planning;
@@ -18,7 +19,7 @@ pub use plan_data::ScanPurpose;
 
 // Backend tests live in `pg-backend-tests`; these are only the production
 // modules they exercise, exposed through the normal public facade.
-pub use execution::{exec, exec_params, explain, state};
+pub use execution::{exec, explain, state};
 pub use plan_data::{custom_exprs, custom_private};
 pub use planning::{candidate, hook, tuple_planner};
 

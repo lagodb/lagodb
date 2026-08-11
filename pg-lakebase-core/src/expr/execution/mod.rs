@@ -1,7 +1,5 @@
-//! Executor-side parameter resolution and provider predicate translation.
+//! Executor-side binding-expression dependency tracking.
 
-pub(crate) mod builder;
-mod error;
-pub mod params;
-pub mod translator;
-pub(crate) mod value;
+mod param_refs;
+
+pub(crate) use param_refs::RuntimeParamRefs;

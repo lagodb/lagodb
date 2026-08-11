@@ -7,9 +7,10 @@ use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::expr::contract::QualPushdownDecision;
-use crate::expr::predicate::PlanPredicate;
-use crate::expr::split::{PlanPushdownSplit, PlanPushdownSplitter, ScanClauseSource};
+use crate::expr::pushdown::{
+    FilterNegotiator, FilterPlanningContext, NegotiatedFilterSet, PathFilterSet,
+    ScanClauseSource,
+};
 
 use super::super::row_identity::{ForeignRowIdentityRequirement, RowIdentityLayout};
 use super::context::{
@@ -18,6 +19,7 @@ use super::context::{
 };
 use super::contract::FdwScan;
 use super::error::{ForeignScanError, ForeignScanPhase};
+use super::filter::ForeignScanFilters;
 use super::path_builder::{build_path_variants, expr_list_from_ptrs};
 use super::pathkeys::ForeignPathKeys;
 use super::private::{DecodedPathPrivate, decode_path_private, encode_scan_private};
@@ -27,7 +29,8 @@ use super::parameterized::ParameterizedCandidates;
 
 struct PlannerState<P: FdwScan> {
     provider_state: P::PlannerState,
-    base_split: PlanPushdownSplit,
+    filter_planner: P::Planner,
+    base_filters: PathFilterSet,
 }
 
 /// # Safety
@@ -57,8 +60,16 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_rel_size<P: FdwScan>(
             ForeignRelContext::from_raw(&*root, &*baserel, foreigntableid)
         }?;
         let mut provider_state = P::init_planner(&relation)?;
-        let base_split = unsafe {
-            split_clauses::<P>(
+        let filter_context = FilterPlanningContext::new(
+            relation.relation_oid(),
+            relation.scan_relid(),
+            unsafe { pg_sys::get_rel_tablespace(relation.relation_oid()) },
+        );
+        let mut filter_planner = P::begin_filter_planning(&filter_context)
+            .map_err(ForeignScanError::provider)?;
+        let base_filters = unsafe {
+            negotiate_clauses::<P>(
+                &mut filter_planner,
                 &relation,
                 relation.baserestrictinfo(),
                 ScanClauseSource::BaseRestriction,
@@ -66,13 +77,14 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_rel_size<P: FdwScan>(
         }?;
         let rel_size = P::estimate(
             &mut provider_state,
-            &ForeignRelSizeContext::new(relation, &base_split),
+            &ForeignRelSizeContext::new(relation, &base_filters),
         )?;
         validate_rel_size(rel_size)?;
 
         let planner_state = PlannerState::<P> {
             provider_state,
-            base_split,
+            filter_planner,
+            base_filters,
         };
         let state_ptr = PgMemoryContexts::CurrentMemoryContext
             .leak_and_drop_on_delete(planner_state);
@@ -88,7 +100,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_rel_size<P: FdwScan>(
 
     if let Err(error) = result {
         error
-            .with_provider_phase::<P>(ForeignScanPhase::RelSize)
+            .with_callback_phase::<P>(ForeignScanPhase::RelSize)
             .report_after_switch(prior_ctx);
     }
 }
@@ -122,35 +134,33 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
         let mut emitted = 0usize;
 
         let lateral_relids = relation.lateral_relids();
-        let (plain_required_outer, plain_param_info, plain_split) = if lateral_relids
-            .is_null()
-        {
-            (ptr::null_mut(), ptr::null_mut(), state.base_split.clone())
-        } else {
-            let required_outer = unsafe { pg_sys::bms_copy(lateral_relids) };
-            let param_info = unsafe {
-                pg_sys::get_baserel_parampathinfo(root, baserel, required_outer)
-            };
-            if param_info.is_null() {
-                return Err(ForeignScanError::framework(
-                    "PostgreSQL returned no ParamPathInfo for a non-empty lateral dependency",
-                ));
-            }
-            let lateral_split = unsafe {
-                split_clauses::<P>(
-                    &relation,
-                    (*param_info).ppi_clauses,
-                    ScanClauseSource::Movable,
+        let (plain_required_outer, plain_param_info, plain_filters) =
+            if lateral_relids.is_null() {
+                (ptr::null_mut(), ptr::null_mut(), state.base_filters.clone())
+            } else {
+                let required_outer = unsafe { pg_sys::bms_copy(lateral_relids) };
+                let param_info = unsafe {
+                    pg_sys::get_baserel_parampathinfo(root, baserel, required_outer)
+                };
+                if param_info.is_null() {
+                    return Err(ForeignScanError::framework(
+                        "PostgreSQL returned no ParamPathInfo for a non-empty lateral dependency",
+                    ));
+                }
+                let lateral_filters = unsafe {
+                    negotiate_clauses::<P>(
+                        &mut state.filter_planner,
+                        &relation,
+                        (*param_info).ppi_clauses,
+                        ScanClauseSource::Movable,
+                    )
+                }?;
+                (
+                    required_outer,
+                    param_info,
+                    state.base_filters.merged(&lateral_filters),
                 )
-            }?;
-            (
-                required_outer,
-                param_info,
-                state
-                    .base_split
-                    .merged_with_rebased_expr_indexes(&lateral_split),
-            )
-        };
+            };
 
         emitted += unsafe {
             build_path_variants::<P>(
@@ -161,7 +171,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
                 PathVariantKind::Plain,
                 plain_required_outer,
                 plain_param_info,
-                &plain_split,
+                &plain_filters,
             )
         }?;
 
@@ -176,19 +186,18 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
                     "PostgreSQL returned no ParamPathInfo for a parameterized FDW path",
                 ));
             }
-            let ppi_split = unsafe {
-                split_clauses::<P>(
+            let ppi_filters = unsafe {
+                negotiate_clauses::<P>(
+                    &mut state.filter_planner,
                     &relation,
                     (*param_info).ppi_clauses,
                     ScanClauseSource::Movable,
                 )
             }?;
-            if !ppi_split.has_pushed_predicates() {
+            if !ppi_filters.has_planned_filters() {
                 continue;
             }
-            let split = state
-                .base_split
-                .merged_with_rebased_expr_indexes(&ppi_split);
+            let filters = state.base_filters.merged(&ppi_filters);
             emitted += unsafe {
                 build_path_variants::<P>(
                     root,
@@ -198,7 +207,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
                     PathVariantKind::JoinParameterized,
                     required_outer,
                     param_info,
-                    &split,
+                    &filters,
                 )
             }?;
         }
@@ -213,7 +222,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
 
     if let Err(error) = result {
         error
-            .with_provider_phase::<P>(ForeignScanPhase::Paths)
+            .with_callback_phase::<P>(ForeignScanPhase::Paths)
             .report_after_switch(prior_ctx);
     }
 }
@@ -254,14 +263,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
         // planner context and no other callback accesses it concurrently.
         let state = unsafe { &mut *state_ptr };
         let path_private: DecodedPathPrivate<P::PrivateData> =
-            unsafe { decode_path_private::<P>((*best_path).fdw_private) }.map_err(
-                |error| {
-                    ForeignScanError::context(
-                        "GetForeignPlan could not decode ForeignPath.fdw_private",
-                        error,
-                    )
-                },
-            )?;
+            unsafe { decode_path_private::<P>((*best_path).fdw_private) }?;
 
         let path_param_info = unsafe { (*best_path).path.param_info };
         if path_private.kind == PathVariantKind::JoinParameterized
@@ -339,12 +341,18 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
                 (*target).exprs
             }
         };
-        let final_split =
-            unsafe { split_final_clauses::<P>(&relation, scan_clauses) }?;
+        let final_filters = unsafe {
+            negotiate_final_clauses::<P>(
+                &mut state.filter_planner,
+                &relation,
+                scan_clauses,
+            )
+        }?;
+        let final_path_filters = final_filters.path_set();
         if !pathkeys.is_empty() {
             let path_context = ForeignPathContext::new(
                 relation,
-                &final_split,
+                &final_path_filters,
                 path_private.kind,
                 required_outer,
                 path_param_info,
@@ -359,11 +367,17 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
                 ));
             }
         }
-        let residual_quals = unsafe { expr_list_from_ptrs(&final_split.residual) }?;
-        let pushed_exprs = unsafe {
-            expr_list_from_ptrs(&final_split.pushed_exprs().collect::<Vec<_>>())
+        let residual_quals = unsafe { expr_list_from_ptrs(&final_filters.residual) }?;
+        let binding_exprs = unsafe {
+            expr_list_from_ptrs(
+                &final_filters
+                    .bindings
+                    .iter()
+                    .map(|binding| binding.expr)
+                    .collect::<Vec<_>>(),
+            )
         }?;
-        let recheck_quals = unsafe { expr_list_from_ptrs(&final_split.recheck) }?;
+        let recheck_quals = unsafe { expr_list_from_ptrs(&final_filters.recheck) }?;
         let row_identity_requirement = if relation.is_modify_target() {
             let processed_tlist = unsafe { (*relation.root()).processed_tlist };
             let has_item_pointer_identity = unsafe {
@@ -381,11 +395,10 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
         } else {
             ForeignRowIdentityRequirement::None
         };
-        let path_context = ForeignPlanContext::new(
+        let plan_context = ForeignPlanContext::new(
             relation,
-            &final_split,
+            &final_filters,
             tlist,
-            scan_clauses,
             outer_plan,
             path_private.kind,
             required_outer,
@@ -393,13 +406,13 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
             &pathkeys,
             row_identity_requirement,
         );
-        let plan_spec = P::build_plan(&mut state.provider_state, &path_context)?;
+        let plan_spec = P::build_plan(&mut state.provider_state, &plan_context)?;
         unsafe {
             plan_spec
                 .fdw_exprs
                 .validate_for_scan(relation.root(), relation.scan_relid())?
         };
-        let fdw_exprs = plan_spec.fdw_exprs.as_raw();
+        let fdw_exprs = unsafe { plan_spec.fdw_exprs.append_to(binding_exprs) };
         let required_columns = plan_spec.required_columns;
         let projection_policy = if pathkeys.is_empty() {
             plan_spec.projection_policy
@@ -419,14 +432,14 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
                 path_target_exprs,
                 &pathkeys,
                 residual_quals,
-                pushed_exprs,
+                fdw_exprs,
                 recheck_quals,
                 projection_policy,
                 row_identity_requirement,
                 required_columns,
             )
         }?;
-        let contracts = final_split.pushed_contracts().collect::<Vec<_>>();
+        let encoded_filters = ForeignScanFilters::<P>::encode(&final_filters)?;
         let private_data = encode_scan_private::<P>(
             P::NAME,
             relation.relation_oid(),
@@ -435,8 +448,10 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
             &planned_projection.write_plan,
             row_identity_requirement,
             &planned_projection.requirements,
-            &contracts,
-            &final_split.column_refs,
+            final_filters.planned.len(),
+            final_filters.bindings.len(),
+            encoded_filters.planned,
+            encoded_filters.bindings,
         )?;
         let scan = unsafe {
             pg_sys::make_foreignscan(
@@ -461,7 +476,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
     match result {
         Ok(scan) => scan,
         Err(error) => error
-            .with_provider_phase::<P>(ForeignScanPhase::Plan)
+            .with_callback_phase::<P>(ForeignScanPhase::Plan)
             .report_after_switch(prior_ctx),
     }
 }
@@ -491,23 +506,17 @@ unsafe fn planner_state<P: FdwScan>(
 /// `relation`, `clauses`, and their planner nodes must remain live for the
 /// synchronous splitter traversal.  `clauses` must be NULL or a PostgreSQL
 /// list of the `RestrictInfo` nodes identified by `source`.
-unsafe fn split_clauses<P: FdwScan>(
+unsafe fn negotiate_clauses<P: FdwScan>(
+    planner: &mut P::Planner,
     relation: &ForeignRelContext<'_>,
     clauses: *mut pg_sys::List,
     source: ScanClauseSource,
-) -> Result<PlanPushdownSplit, ForeignScanError> {
-    let predicate_context = relation.predicate_context();
-    let mut classify = |predicate: &PlanPredicate| -> QualPushdownDecision {
-        P::classify_predicate(&predicate_context, predicate)
-    };
-    let mut splitter = PlanPushdownSplitter::new(
-        relation.root(),
-        relation.baserel(),
-        clauses,
-        source,
-        &mut classify,
-    );
-    Ok(unsafe { splitter.split() })
+) -> Result<PathFilterSet, ForeignScanError> {
+    let mut negotiator =
+        FilterNegotiator::new(planner, relation.relation_oid(), relation.baserel());
+    unsafe { negotiator.negotiate(clauses, source) }
+        .map(NegotiatedFilterSet::into_path_set)
+        .map_err(ForeignScanError::provider)
 }
 
 /// # Safety
@@ -515,31 +524,24 @@ unsafe fn split_clauses<P: FdwScan>(
 /// `relation` and `clauses` must be live planner objects for the current
 /// callback.  The source-classification callback only observes the live
 /// `RestrictInfo` nodes while PostgreSQL performs the split.
-unsafe fn split_final_clauses<P: FdwScan>(
+unsafe fn negotiate_final_clauses<P: FdwScan>(
+    planner: &mut P::Planner,
     relation: &ForeignRelContext<'_>,
     clauses: *mut pg_sys::List,
-) -> Result<PlanPushdownSplit, ForeignScanError> {
-    let predicate_context = relation.predicate_context();
-    let mut classify = |predicate: &PlanPredicate| -> QualPushdownDecision {
-        P::classify_predicate(&predicate_context, predicate)
-    };
-    let mut splitter = PlanPushdownSplitter::new(
-        relation.root(),
-        relation.baserel(),
-        clauses,
-        ScanClauseSource::BaseRestriction,
-        &mut classify,
-    );
+) -> Result<NegotiatedFilterSet<P::PlannedPredicate>, ForeignScanError> {
+    let mut negotiator =
+        FilterNegotiator::new(planner, relation.relation_oid(), relation.baserel());
     let baserestrictinfo = relation.baserestrictinfo();
-    Ok(unsafe {
-        splitter.split_with_source(|rinfo| {
+    unsafe {
+        negotiator.negotiate_with_source(clauses, |rinfo| {
             if pg_sys::list_member_ptr(baserestrictinfo, rinfo.cast::<c_void>()) {
                 ScanClauseSource::BaseRestriction
             } else {
                 ScanClauseSource::Movable
             }
         })
-    })
+    }
+    .map_err(ForeignScanError::provider)
 }
 
 fn validate_rel_size(size: ForeignRelSize) -> Result<(), ForeignScanError> {

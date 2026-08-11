@@ -355,7 +355,7 @@ pub(crate) unsafe fn plan_projection(
     path_target_exprs: *mut pg_sys::List,
     pathkeys: &ForeignPathKeys,
     residual_quals: *mut pg_sys::List,
-    pushed_quals: *mut pg_sys::List,
+    fdw_exprs: *mut pg_sys::List,
     recheck_quals: *mut pg_sys::List,
     projection_policy: ScanProjectionPolicy,
     row_identity_requirement: ForeignRowIdentityRequirement,
@@ -396,7 +396,7 @@ pub(crate) unsafe fn plan_projection(
             DependencyScope::Executor,
         );
         inspect_expr_list(
-            pushed_quals,
+            fdw_exprs,
             &analyzer,
             &mut analysis,
             DependencyScope::Provider,

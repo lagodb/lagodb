@@ -3,12 +3,11 @@
 use crate::customscan::error::{CustomScanError, CustomScanPhase};
 use crate::customscan::execution::state::CustomScanStateWrapper;
 use crate::customscan::provider::{LakebaseCustomScanProvider, NextSlotContext};
-use crate::diag::ReportableError;
 use crate::handles::{RelationHandle, ScanDirection};
 use pgrx::{pg_guard, pg_sys};
 
 /// `ExecCustomScan`: delegate to PostgreSQL's `ExecScan` with framework
-/// access and exact-pushed-qual recheck callbacks.
+/// access and exact planned-filter recheck callbacks.
 #[pg_guard]
 pub unsafe extern "C-unwind" fn exec_custom_scan_trampoline<
     P: LakebaseCustomScanProvider,
@@ -19,7 +18,7 @@ pub unsafe extern "C-unwind" fn exec_custom_scan_trampoline<
         pg_sys::ExecScan(
             &mut (*node).ss,
             Some(next_slot_wrapper::<P>),
-            Some(recheck_exact_pushed_quals::<P>),
+            Some(recheck_exact_filters::<P>),
         )
     }
 }
@@ -38,6 +37,20 @@ pub unsafe extern "C-unwind" fn exec_custom_scan_trampoline<
 pub unsafe extern "C-unwind" fn next_slot_wrapper<P: LakebaseCustomScanProvider>(
     scan_state: *mut pg_sys::ScanState,
 ) -> *mut pg_sys::TupleTableSlot {
+    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
+    match unsafe { next_slot::<P>(scan_state, prior_ctx) } {
+        Ok(slot) => slot,
+        Err(error) => error
+            .with_callback_phase(P::NAME, CustomScanPhase::NextSlot)
+            .report_after_switch(prior_ctx),
+    }
+}
+
+#[inline]
+unsafe fn next_slot<P: LakebaseCustomScanProvider>(
+    scan_state: *mut pg_sys::ScanState,
+    prior_ctx: pg_sys::MemoryContext,
+) -> Result<*mut pg_sys::TupleTableSlot, CustomScanError> {
     let cscan_state = scan_state.cast::<pg_sys::CustomScanState>();
     let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(cscan_state) };
 
@@ -49,9 +62,9 @@ pub unsafe extern "C-unwind" fn next_slot_wrapper<P: LakebaseCustomScanProvider>
     let per_tuple_ctx = unsafe { (*econtext).ecxt_per_tuple_memory };
     let scan_direction =
         ScanDirection::try_from_raw(unsafe { (*estate).es_direction })
-            .report_unwrap();
+            .map_err(CustomScanError::internal)?;
 
-    let prior_ctx = unsafe { pg_sys::MemoryContextSwitchTo(per_tuple_ctx) };
+    let _ = unsafe { pg_sys::MemoryContextSwitchTo(per_tuple_ctx) };
     let provider_state_ref: &mut P::State =
         unsafe { wrapper.provider_state_mut_unchecked() };
     let ctx = NextSlotContext::<P>::new(
@@ -62,14 +75,9 @@ pub unsafe extern "C-unwind" fn next_slot_wrapper<P: LakebaseCustomScanProvider>
         per_tuple_ctx,
     );
 
-    let row_produced = match P::next_slot(ctx) {
-        Ok(produced) => produced,
-        Err(err) => {
-            err.with_provider_phase(P::NAME, CustomScanPhase::NextSlot)
-                .report_after_switch(prior_ctx);
-        }
-    };
+    let row_produced = P::next_slot(ctx);
     let _ = unsafe { pg_sys::MemoryContextSwitchTo(prior_ctx) };
+    let row_produced = row_produced?;
 
     let slot_empty = unsafe { is_slot_empty(slot) };
     match decide(row_produced, slot_empty) {
@@ -77,20 +85,16 @@ pub unsafe extern "C-unwind" fn next_slot_wrapper<P: LakebaseCustomScanProvider>
             (*slot).tts_tableOid = (*scan_rel).rd_id;
         },
         SlotOutcome::RaiseEmptyProduced => {
-            CustomScanError::slot_not_filled(P::NAME)
-                .with_provider_phase(P::NAME, CustomScanPhase::NextSlot)
-                .report_after_switch(prior_ctx);
+            return Err(CustomScanError::slot_not_filled(P::NAME));
         }
         SlotOutcome::RaiseFilledEof => {
             let _ = unsafe { pg_sys::ExecClearTuple(slot) };
-            CustomScanError::slot_filled_at_eof(P::NAME)
-                .with_provider_phase(P::NAME, CustomScanPhase::NextSlot)
-                .report_after_switch(prior_ctx);
+            return Err(CustomScanError::slot_filled_at_eof(P::NAME));
         }
         SlotOutcome::Eof => {}
     }
 
-    slot
+    Ok(slot)
 }
 
 /// Post-`next_slot` outcome from `(produced, slot_empty)`.
@@ -116,11 +120,9 @@ pub(crate) fn decide(produced: bool, slot_empty: bool) -> SlotOutcome {
 }
 
 /// Recheck callback for EPQ: set scantuple, reset per-tuple context, and run
-/// the framework-owned exact pushed qual.
+/// the framework-owned exact filter recheck expression.
 #[pg_guard]
-unsafe extern "C-unwind" fn recheck_exact_pushed_quals<
-    P: LakebaseCustomScanProvider,
->(
+unsafe extern "C-unwind" fn recheck_exact_filters<P: LakebaseCustomScanProvider>(
     node: *mut pg_sys::ScanState,
     slot: *mut pg_sys::TupleTableSlot,
 ) -> bool {
