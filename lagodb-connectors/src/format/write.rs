@@ -10,7 +10,7 @@ use pg_lakebase_core::fdw::{
 use core::ffi::c_int;
 
 use crate::error::ConnectorError;
-use crate::storage::{ObjectLocationKind, ObjectOutput};
+use crate::storage::ObjectOutput;
 
 use super::{FormatKind, FormatObject};
 
@@ -37,7 +37,6 @@ pub(crate) trait FormatWriter: FormatObject {
     fn capabilities(
         &self,
         _context: &ForeignModifyRelationContext<'_>,
-        _output: ObjectLocationKind,
     ) -> Result<ForeignModifyCapabilities, ConnectorError> {
         Ok(ForeignModifyCapabilities::default())
     }

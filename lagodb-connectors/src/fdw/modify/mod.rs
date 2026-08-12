@@ -12,7 +12,8 @@ use pg_lakebase_core::fdw::{
 use super::{Lakebase, ResolvedForeignRelation};
 use crate::error::ConnectorError;
 use crate::format::{FormatKind, FormatWritePrivate};
-use crate::storage::ObjectOutput;
+use crate::gucs::WriteConfig;
+use crate::storage::{ObjectLocationKind, ObjectOutput};
 use pg_lakebase_core::storage::foreign::StorageManager;
 
 pub(crate) use state::LakebaseModifyState;
@@ -46,8 +47,10 @@ impl FdwModify for Lakebase {
         context: &ForeignModifyRelationContext<'_>,
     ) -> Result<ForeignModifyCapabilities, ForeignModifyError> {
         let relation = ResolvedForeignRelation::resolve(context.relation().oid())?;
-        let output = relation.output_kind()?;
-        Ok(relation.into_writer().capabilities(context, output)?)
+        if relation.output_kind()? == ObjectLocationKind::Exact {
+            return Ok(ForeignModifyCapabilities::default());
+        }
+        Ok(relation.into_writer().capabilities(context)?)
     }
 
     fn add_update_targets(
@@ -79,7 +82,9 @@ impl FdwModify for Lakebase {
             selected.into_write_parts(context.effective_user_id())?;
         let manager =
             StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
-        let output = ObjectOutput::resolve(&target, &manager, format)?;
+        let output = ObjectOutput::resolve(&target, &manager, format, || {
+            WriteConfig::from_guc().target_file_bytes()
+        })?;
         let inner = writer.begin_modify(context, output)?;
         Ok(LakebaseModifyState::new(inner))
     }
@@ -94,7 +99,9 @@ impl FdwModify for Lakebase {
         let format = writer.kind();
         let manager =
             StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
-        let output = ObjectOutput::resolve(&target, &manager, format)?;
+        let output = ObjectOutput::resolve(&target, &manager, format, || {
+            WriteConfig::from_guc().target_file_bytes()
+        })?;
         let inner = writer.begin_insert(context, output)?;
         Ok(LakebaseModifyState::new(inner))
     }

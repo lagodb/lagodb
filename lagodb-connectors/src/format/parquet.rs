@@ -68,13 +68,10 @@ impl FormatWriter for ParquetFormat {
     fn capabilities(
         &self,
         _context: &pg_lakebase_core::fdw::ForeignModifyRelationContext<'_>,
-        output: crate::storage::ObjectLocationKind,
     ) -> Result<pg_lakebase_core::fdw::ForeignModifyCapabilities, ConnectorError>
     {
         Ok(pg_lakebase_core::fdw::ForeignModifyCapabilities::new(
-            output == crate::storage::ObjectLocationKind::Prefix,
-            false,
-            false,
+            true, false, false,
         ))
     }
 

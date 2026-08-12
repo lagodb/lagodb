@@ -8,6 +8,7 @@ mod copy;
 mod error;
 mod fdw;
 mod format;
+mod gucs;
 mod storage;
 
 use pg_lakebase_core::hooks::freeze_hooks;
@@ -20,6 +21,7 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
+    gucs::init();
     copy::register();
     fdw::register_ddl_hooks();
     let identity = ProviderIdentity::foreign_data_wrapper(

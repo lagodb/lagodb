@@ -11,6 +11,7 @@ mod csv;
 mod delimited;
 mod filter;
 mod json;
+mod object_writer;
 mod parquet;
 mod resolved;
 mod scan;
@@ -32,6 +33,10 @@ pub(crate) use copy::{
 };
 pub(crate) use filter::{
     FormatBoundFilter, FormatFilterPlanner, FormatPlannedFilter,
+};
+pub(crate) use object_writer::{
+    EmptyOutputPolicy, FileWriteProgress, ObjectFileEncoder,
+    ObjectFileEncoderFactory, ObjectSetWriter,
 };
 pub(crate) use resolved::{FormatOption, ResolvedForeignFormat};
 pub(crate) use scan::{

@@ -12,7 +12,7 @@ use pg_lakebase_core::handles::RelationHandle;
 
 use crate::error::ConnectorError;
 use crate::format::{FormatWriteState, ParquetWriteCompression};
-use crate::storage::{ObjectLocationKind, ObjectOutput};
+use crate::storage::ObjectOutput;
 
 use super::schema::parquet_arrow_type;
 use super::writer::ParquetObjectWriter;
@@ -31,12 +31,6 @@ impl ParquetWriteState {
         output: ObjectOutput,
         compression: ParquetWriteCompression,
     ) -> Result<Self, ConnectorError> {
-        if output.kind() != ObjectLocationKind::Prefix {
-            return Err(ConnectorError::invalid_option(
-                "path",
-                "Parquet foreign-table INSERT requires a prefix path; an exact object is read-only",
-            ));
-        }
         let (schema, plans) = Self::bind_schema(relation)?;
         let buffer = BoundWriteBuffer::new(Arc::clone(&schema), plans)?;
         let writer =

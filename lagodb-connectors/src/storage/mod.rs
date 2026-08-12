@@ -2,13 +2,17 @@
 
 mod config;
 mod invalidation;
-mod object_location;
+mod location;
+mod object_input;
+mod object_output;
 mod upload;
 mod uri;
 
 pub(crate) use config::{ConnectorStoreConfig, validate_storage_options};
-pub(crate) use object_location::{
-    ObjectFiles, ObjectInput, ObjectLocationKind, ObjectOutput, ObjectWriteTarget,
+pub(crate) use location::ObjectLocationKind;
+pub(crate) use object_input::{ObjectFiles, ObjectInput};
+pub(crate) use object_output::{
+    AllocatedObject, ObjectFileSuffix, ObjectOutput,
 };
 pub(crate) use upload::{StagedObjectUpload, StagedObjectWriter};
 pub(crate) use uri::{ObjectUri, StorageScope};

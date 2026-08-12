@@ -15,8 +15,9 @@ use pg_lakebase_core::storage::foreign::StorageManager;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
+use crate::gucs::WriteConfig;
 use crate::storage::{
-    ObjectInput, ObjectOutput, ObjectUri, ObjectWriteTarget, StorageTarget,
+    ObjectInput, ObjectOutput, ObjectUri, StorageTarget,
 };
 
 use super::parquet::{ParquetCopyDestination, ParquetCopySource};
@@ -53,8 +54,8 @@ pub(crate) trait FormatCopyDestination {
 /// explicit or suffix-derived stream codec.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ResolvedCopyFormat {
-    Text(StreamCompression),
-    Csv(StreamCompression),
+    Text(StreamCompression, bool),
+    Csv(StreamCompression, bool),
     Json(StreamCompression),
     AvroRead,
     AvroWrite(AvroWriteCompression),
@@ -83,9 +84,12 @@ impl ResolvedCopyFormat {
                     })?,
                     None => suffix.unwrap_or(StreamCompression::None),
                 };
+                let header = !copy_from
+                    && matches!(kind, FormatKind::Text | FormatKind::Csv)
+                    && Self::copy_to_header_enabled(options)?;
                 Ok(match kind {
-                    FormatKind::Text => Self::Text(compression),
-                    FormatKind::Csv => Self::Csv(compression),
+                    FormatKind::Text => Self::Text(compression, header),
+                    FormatKind::Csv => Self::Csv(compression, header),
                     FormatKind::Json => Self::Json(compression),
                     FormatKind::Avro | FormatKind::Parquet => unreachable!(),
                 })
@@ -131,10 +135,10 @@ impl ResolvedCopyFormat {
         column_layout: impl FnOnce() -> Result<CopyColumnLayout, CopyError>,
     ) -> Result<Box<dyn FormatCopySource>, CopyError> {
         match self {
-            Self::Text(compression) => {
+            Self::Text(compression, _) => {
                 Self::open_stream_source(target, compression, FormatKind::Text)
             }
-            Self::Csv(compression) => {
+            Self::Csv(compression, _) => {
                 Self::open_stream_source(target, compression, FormatKind::Csv)
             }
             Self::ParquetRead => {
@@ -153,15 +157,30 @@ impl ResolvedCopyFormat {
         target: &StorageTarget,
     ) -> Result<Box<dyn FormatCopyDestination>, CopyError> {
         match self {
-            Self::Text(compression) => {
-                Self::open_stream_destination(target, compression, FormatKind::Text)
+            Self::Text(compression, header) => {
+                Self::open_stream_destination(
+                    target,
+                    compression,
+                    FormatKind::Text,
+                    header,
+                )
             }
-            Self::Csv(compression) => {
-                Self::open_stream_destination(target, compression, FormatKind::Csv)
+            Self::Csv(compression, header) => {
+                Self::open_stream_destination(
+                    target,
+                    compression,
+                    FormatKind::Csv,
+                    header,
+                )
             }
             Self::ParquetWrite(compression) => {
                 let manager = StorageManager::from_pg_gucs()?;
-                let output = ObjectOutput::resolve(target, &manager, FormatKind::Parquet)?;
+                let output = ObjectOutput::resolve(
+                    target,
+                    &manager,
+                    FormatKind::Parquet,
+                    || WriteConfig::from_guc().target_file_bytes(),
+                )?;
                 Ok(Box::new(ParquetCopyDestination::new(output, compression)))
             }
             Self::Json(_) | Self::AvroRead | Self::AvroWrite(_) | Self::ParquetRead => {
@@ -190,11 +209,14 @@ impl ResolvedCopyFormat {
         target: &StorageTarget,
         compression: StreamCompression,
         format: FormatKind,
+        header: bool,
     ) -> Result<Box<dyn FormatCopyDestination>, CopyError> {
-        let destination = stream::ObjectCopyDestination::new(
-            ObjectWriteTarget::exact(target.acquire_object_access_from_pg_gucs()?),
-            compression,
-        )?;
+        let manager = StorageManager::from_pg_gucs()?;
+        let output = ObjectOutput::resolve(target, &manager, format, || {
+            WriteConfig::from_guc().target_file_bytes()
+        })?;
+        let destination =
+            stream::ObjectCopyDestination::new(output, compression, format, header);
         Ok(Box::new(StreamCopyDestination {
             destination,
             format,
@@ -224,6 +246,33 @@ impl ResolvedCopyFormat {
         Ok(())
     }
 
+    fn copy_to_header_enabled(
+        options: CopyOptionView<'_>,
+    ) -> Result<bool, ConnectorError> {
+        let Some(header) = options.get("header") else {
+            return Ok(false);
+        };
+        let value = header.value_str().map_err(|_| {
+            ConnectorError::invalid_copy_option("header", "must be valid UTF-8")
+        })?;
+        if value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("on")
+        {
+            return Ok(true);
+        }
+        if value == "0"
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("off")
+        {
+            return Ok(false);
+        }
+        Err(ConnectorError::invalid_copy_option(
+            "header",
+            "must be false, true, on, off, 0, or 1 for COPY TO",
+        ))
+    }
+
     fn validate_options(
         options: CopyOptionView<'_>,
         kind: FormatKind,
@@ -236,8 +285,8 @@ impl ResolvedCopyFormat {
 
     pub(crate) const fn kind(self) -> FormatKind {
         match self {
-            Self::Text(_) => FormatKind::Text,
-            Self::Csv(_) => FormatKind::Csv,
+            Self::Text(_, _) => FormatKind::Text,
+            Self::Csv(_, _) => FormatKind::Csv,
             Self::Json(_) => FormatKind::Json,
             Self::AvroRead | Self::AvroWrite(_) => FormatKind::Avro,
             Self::ParquetRead | Self::ParquetWrite(_) => FormatKind::Parquet,

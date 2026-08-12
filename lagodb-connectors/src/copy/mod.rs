@@ -6,9 +6,9 @@
 //! an object URI must never silently execute PostgreSQL's local-file COPY path
 //! with the wrong format semantics.
 //!
-//! A native format decides whether a selected-format suffix denotes an exact
-//! object or a prefix. PostgreSQL text/CSV retain their existing exact-object
-//! behavior.
+//! Every writable format uses the same exact-object versus rolling-prefix
+//! output contract. Format adapters retain ownership of encoding and safe
+//! split boundaries.
 
 mod options;
 

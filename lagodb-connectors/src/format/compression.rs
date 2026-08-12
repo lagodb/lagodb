@@ -103,6 +103,14 @@ impl<W: Write> StreamEncoder<W> {
             Self::Zstd(writer) => writer.finish(),
         }
     }
+
+    pub(crate) fn writer(&self) -> &W {
+        match self {
+            Self::Plain(writer) => writer,
+            Self::Gzip(writer) => writer.get_ref(),
+            Self::Zstd(writer) => writer.get_ref(),
+        }
+    }
 }
 
 impl<W: Write> Write for StreamEncoder<W> {

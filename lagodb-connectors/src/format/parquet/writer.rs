@@ -1,22 +1,9 @@
 //! Format-domain Parquet object writer shared by FDW and COPY adapters.
 //!
-//! # External-file transaction semantics
-//!
-//! Finalized objects are uploaded immediately, including each prefix object
-//! rolled at [`TARGET_FILE_BYTES`]; visibility is not deferred until PostgreSQL
-//! commit. Prefix scans list matching objects directly, so another backend can
-//! observe a file written by a transaction that later aborts. Abort cleanup of
-//! operation-unique prefix keys is best-effort garbage collection: it neither
-//! provides MVCC nor retracts observations that already occurred.
-//!
-//! This is the intentional contract for a raw file-backed foreign table.
-//! PostgreSQL's `file_fdw` is read-only; the analogous writable core behavior
-//! is server-side `COPY TO` a file, which writes the external file during the
-//! command and does not roll it back with the SQL transaction. PostgreSQL
-//! transaction visibility would require a transactional membership catalog or
-//! manifest. Deferring every upload instead would retain transaction-scale
-//! staged files and move all object-store I/O to pre-commit. Neither behavior
-//! is part of this connector's storage model.
+//! Finalized prefix objects are uploaded immediately and registered for
+//! best-effort transaction-abort deletion. This is raw external-file behavior,
+//! not transactional table publication; providing MVCC membership would
+//! require a manifest or catalog outside this writer.
 
 use std::sync::Arc;
 
@@ -27,23 +14,89 @@ use parquet::basic::Compression;
 use parquet::file::properties::{DEFAULT_MAX_ROW_GROUP_ROW_COUNT, WriterProperties};
 
 use crate::error::ConnectorError;
-use crate::format::ParquetWriteCompression;
-use crate::storage::{
-    ObjectLocationKind, ObjectOutput, StagedObjectUpload, StagedObjectWriter,
+use crate::format::{
+    EmptyOutputPolicy, FileWriteProgress, ObjectFileEncoder,
+    ObjectFileEncoderFactory, ObjectSetWriter, ParquetWriteCompression,
 };
+use crate::storage::{ObjectFileSuffix, ObjectOutput, StagedObjectWriter};
 
-const TARGET_FILE_BYTES: usize = 256 * 1024 * 1024;
-
-/// Rolling Parquet files for one exact object or operation-unique prefix.
-///
-/// This object owns format and upload lifecycle only. Row production remains
-/// in the FDW/COPY adapters, which submit complete Arrow batches.
-pub(crate) struct ParquetObjectWriter {
-    output: ObjectOutput,
+struct ParquetEncoderFactory {
     schema: Arc<Schema>,
     properties: Arc<WriterProperties>,
-    writer: Option<ArrowWriter<StagedObjectWriter>>,
-    upload: Option<StagedObjectUpload>,
+}
+
+impl ParquetEncoderFactory {
+    fn new(schema: Arc<Schema>, compression: ParquetWriteCompression) -> Self {
+        let properties = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Self::compression(compression))
+                .set_max_row_group_row_count(Some(DEFAULT_MAX_ROW_GROUP_ROW_COUNT))
+                .build(),
+        );
+        Self { schema, properties }
+    }
+
+    fn compression(value: ParquetWriteCompression) -> Compression {
+        match value {
+            ParquetWriteCompression::Uncompressed => Compression::UNCOMPRESSED,
+            ParquetWriteCompression::Snappy => Compression::SNAPPY,
+            ParquetWriteCompression::Gzip => Compression::GZIP(Default::default()),
+            ParquetWriteCompression::Zstd => Compression::ZSTD(Default::default()),
+        }
+    }
+}
+
+impl ObjectFileEncoderFactory for ParquetEncoderFactory {
+    type Input = RecordBatch;
+    type Encoder = ParquetFileEncoder;
+
+    fn file_suffix(&self) -> ObjectFileSuffix {
+        ObjectFileSuffix::new("parquet")
+    }
+
+    fn open(
+        &mut self,
+        writer: StagedObjectWriter,
+    ) -> Result<Self::Encoder, ConnectorError> {
+        Ok(ParquetFileEncoder {
+            writer: ArrowWriter::try_new(
+                writer,
+                Arc::clone(&self.schema),
+                Some(self.properties.as_ref().clone()),
+            )?,
+        })
+    }
+}
+
+struct ParquetFileEncoder {
+    writer: ArrowWriter<StagedObjectWriter>,
+}
+
+impl ObjectFileEncoder for ParquetFileEncoder {
+    type Input = RecordBatch;
+
+    fn write(
+        &mut self,
+        batch: &Self::Input,
+    ) -> Result<FileWriteProgress, ConnectorError> {
+        self.writer.write(batch)?;
+        let estimated = self
+            .writer
+            .bytes_written()
+            .saturating_add(self.writer.in_progress_size());
+        let estimated = u64::try_from(estimated)
+            .expect("PostgreSQL is supported only on platforms where usize fits in u64");
+        Ok(FileWriteProgress::new(estimated))
+    }
+
+    fn finish(self) -> Result<StagedObjectWriter, ConnectorError> {
+        Ok(self.writer.into_inner()?)
+    }
+}
+
+/// Incremental Parquet output for one exact object or rolling prefix.
+pub(crate) struct ParquetObjectWriter {
+    writer: Option<ObjectSetWriter<ParquetEncoderFactory>>,
 }
 
 impl ParquetObjectWriter {
@@ -52,18 +105,11 @@ impl ParquetObjectWriter {
         schema: Arc<Schema>,
         compression: ParquetWriteCompression,
     ) -> Self {
-        let properties = Arc::new(
-            WriterProperties::builder()
-                .set_compression(Self::compression(compression))
-                .set_max_row_group_row_count(Some(DEFAULT_MAX_ROW_GROUP_ROW_COUNT))
-                .build(),
-        );
         Self {
-            output,
-            schema,
-            properties,
-            writer: None,
-            upload: None,
+            writer: Some(ObjectSetWriter::new(
+                output,
+                ParquetEncoderFactory::new(schema, compression),
+            )),
         }
     }
 
@@ -74,64 +120,23 @@ impl ParquetObjectWriter {
         if batch.num_rows() == 0 {
             return Ok(());
         }
-        let prefix = self.output.kind() == ObjectLocationKind::Prefix;
-        let writer = self.ensure_writer()?;
-        writer.write(batch)?;
-        if prefix
-            && writer
-                .bytes_written()
-                .saturating_add(writer.in_progress_size())
-                >= TARGET_FILE_BYTES
-        {
-            self.finish_file()?;
-        }
-        Ok(())
+        self.writer
+            .as_mut()
+            .expect("the Parquet writer is not used after finish")
+            .write(batch)
     }
 
-    /// Close the final footer and upload it. COPY TO requests an empty file for
-    /// a zero-row result; FDW INSERT leaves an untouched prefix empty.
+    /// Close the final footer and upload it. COPY TO emits a valid empty
+    /// Parquet container; FDW INSERT leaves an untouched prefix empty.
     pub(crate) fn finish(&mut self, emit_empty: bool) -> Result<(), ConnectorError> {
-        if emit_empty && self.writer.is_none() {
-            self.ensure_writer()?;
-        }
-        self.finish_file()
-    }
-
-    fn ensure_writer(
-        &mut self,
-    ) -> Result<&mut ArrowWriter<StagedObjectWriter>, ConnectorError> {
-        if self.writer.is_none() {
-            let target = self.output.next_object()?;
-            let (staging, upload) = StagedObjectUpload::start(target)?;
-            self.writer = Some(ArrowWriter::try_new(
-                staging,
-                Arc::clone(&self.schema),
-                Some(self.properties.as_ref().clone()),
-            )?);
-            self.upload = Some(upload);
-        }
-        Ok(self.writer.as_mut().expect("writer was initialized"))
-    }
-
-    fn finish_file(&mut self) -> Result<(), ConnectorError> {
         let Some(writer) = self.writer.take() else {
             return Ok(());
         };
-        let staging = writer.into_inner()?;
-        staging.finish_local()?;
-        self.upload
-            .take()
-            .expect("every Parquet writer has one upload capability")
-            .finish()?;
-        Ok(())
-    }
-
-    fn compression(value: ParquetWriteCompression) -> Compression {
-        match value {
-            ParquetWriteCompression::Uncompressed => Compression::UNCOMPRESSED,
-            ParquetWriteCompression::Snappy => Compression::SNAPPY,
-            ParquetWriteCompression::Gzip => Compression::GZIP(Default::default()),
-            ParquetWriteCompression::Zstd => Compression::ZSTD(Default::default()),
-        }
+        let policy = if emit_empty {
+            EmptyOutputPolicy::EmitFile
+        } else {
+            EmptyOutputPolicy::Skip
+        };
+        writer.finish(policy)
     }
 }

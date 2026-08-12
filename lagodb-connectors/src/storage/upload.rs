@@ -13,18 +13,25 @@ use pg_lakebase_storage::{
     StagingFile, StorageError, StorageErrorKind, StorageResult,
 };
 
-use super::ObjectWriteTarget;
+use super::AllocatedObject;
 
 const WRITE_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Buffered writer for one exact object. Successful finalization uploads once;
+/// Buffered writer for one object. Successful finalization uploads once;
 /// Drop closes and removes only the local staging file.
 pub(crate) struct StagedObjectWriter {
     staging: Option<StagingFile>,
     buffer: Vec<u8>,
+    bytes_written: u64,
 }
 
 impl StagedObjectWriter {
+    fn record_write(&mut self, bytes: usize) {
+        let bytes = u64::try_from(bytes)
+            .expect("PostgreSQL is supported only on platforms where usize fits in u64");
+        self.bytes_written += bytes;
+    }
+
     fn flush_buffer(&mut self) -> StorageResult<()> {
         if self.buffer.is_empty() {
             return Ok(());
@@ -46,6 +53,12 @@ impl StagedObjectWriter {
         drop(self.staging.take());
         Ok(())
     }
+
+    /// Encoded bytes accepted by this writer, including bytes still resident
+    /// in its fixed-size buffer.
+    pub(crate) const fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
 }
 
 impl Write for StagedObjectWriter {
@@ -57,12 +70,14 @@ impl Write for StagedObjectWriter {
                 .expect("staging file remains open until local finish")
                 .write(data)
                 .map_err(io::Error::other)?;
+            self.record_write(data.len());
             return Ok(data.len());
         }
 
         let remaining = WRITE_BUFFER_SIZE - self.buffer.len();
         if data.len() < remaining {
             self.buffer.extend_from_slice(data);
+            self.record_write(data.len());
             return Ok(data.len());
         }
 
@@ -70,6 +85,7 @@ impl Write for StagedObjectWriter {
         self.buffer.extend_from_slice(prefix);
         self.flush_buffer().map_err(io::Error::other)?;
         self.buffer.extend_from_slice(suffix);
+        self.record_write(data.len());
         Ok(data.len())
     }
 
@@ -88,15 +104,16 @@ pub(crate) struct StagedObjectUpload {
 
 impl StagedObjectUpload {
     pub(crate) fn start(
-        target: ObjectWriteTarget,
+        allocation: AllocatedObject,
     ) -> StorageResult<(StagedObjectWriter, Self)> {
-        let (object, delete_on_abort) = target.into_parts();
+        let (object, delete_on_abort) = allocation.into_parts();
         let staging = object.create_staging()?;
         let staging_path = staging.path().to_owned();
         Ok((
             StagedObjectWriter {
                 staging: Some(staging),
                 buffer: Vec::with_capacity(WRITE_BUFFER_SIZE),
+                bytes_written: 0,
             },
             Self {
                 object,
