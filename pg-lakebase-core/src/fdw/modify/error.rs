@@ -2,11 +2,12 @@
 
 use core::ffi::CStr;
 use std::error::Error as StdError;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::Display;
 
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::{PgLogLevel, PgSqlErrorCode};
+use thiserror::Error;
 
 use super::contract::FdwModify;
 use crate::diag::{
@@ -52,24 +53,35 @@ impl ForeignModifyPhase {
 #[derive(Debug)]
 pub struct ForeignModifyError(Box<ForeignModifyErrorKind>);
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum ForeignModifyErrorKind {
+    #[error(
+        "FDW provider {provider:?} callback {phase} failed: {source}",
+        phase = phase.as_str()
+    )]
     Runtime {
         provider: &'static CStr,
         phase: ForeignModifyPhase,
+        #[source]
         source: Box<ForeignModifyError>,
     },
+    #[error("FDW provider modify error: {source}")]
     Provider {
         sqlerrcode: PgSqlErrorCode,
+        #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
+    #[error("{message}")]
     Framework {
         sqlerrcode: PgSqlErrorCode,
         message: String,
     },
+    #[error("FDW modify private-data codec error: {source}")]
     PrivateCodec {
+        #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
+    #[error("{message}")]
     PgReport {
         sqlerrcode: PgSqlErrorCode,
         message: String,
@@ -79,40 +91,14 @@ enum ForeignModifyErrorKind {
 }
 
 impl Display for ForeignModifyError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match &*self.0 {
-            ForeignModifyErrorKind::Runtime {
-                provider,
-                phase,
-                source,
-            } => write!(
-                f,
-                "FDW provider {provider:?} callback {} failed: {source}",
-                phase.as_str()
-            ),
-            ForeignModifyErrorKind::Provider { source, .. } => {
-                write!(f, "FDW provider modify error: {source}")
-            }
-            ForeignModifyErrorKind::Framework { message, .. } => f.write_str(message),
-            ForeignModifyErrorKind::PrivateCodec { source } => {
-                write!(f, "FDW modify private-data codec error: {source}")
-            }
-            ForeignModifyErrorKind::PgReport { message, .. } => f.write_str(message),
-        }
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&*self.0, formatter)
     }
 }
 
 impl StdError for ForeignModifyError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match &*self.0 {
-            ForeignModifyErrorKind::Runtime { source, .. } => Some(source),
-            ForeignModifyErrorKind::Provider { source, .. }
-            | ForeignModifyErrorKind::PrivateCodec { source } => {
-                Some(source.as_ref())
-            }
-            ForeignModifyErrorKind::Framework { .. }
-            | ForeignModifyErrorKind::PgReport { .. } => None,
-        }
+        self.0.source()
     }
 }
 

@@ -18,8 +18,10 @@ pub trait ForeignDataWrapper: 'static {
 
     /// Register the PostgreSQL callback groups supported by this provider.
     ///
-    /// Implementations should call [`crate::fdw::register_scan`] and/or
-    /// [`crate::fdw::register_modify`]. The generated `#[pg_fdw]` handler
+    /// Implementations should call the registration function for every
+    /// capability they implement: [`crate::fdw::register_scan`],
+    /// [`crate::fdw::register_modify`], [`crate::fdw::register_analyze`], or
+    /// [`crate::fdw::register_truncate`]. The generated `#[pg_fdw]` handler
     /// invokes this method once while constructing a fresh PostgreSQL-owned
     /// routine; it is not part of any planner or executor hot path.
     fn register(routine: &mut FdwRoutine);

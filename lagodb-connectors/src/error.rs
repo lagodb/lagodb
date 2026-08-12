@@ -5,7 +5,8 @@ use std::error::Error as StdError;
 use pg_lakebase_core::copy::CopyError;
 use pg_lakebase_core::diag::{PgReportError, SqlStateError};
 use pg_lakebase_core::fdw::{
-    ForeignModifyError, ForeignScanError, ForeignValidationError,
+    ForeignModifyError, ForeignScanError, ForeignTableMaintenanceError,
+    ForeignValidationError,
 };
 use pg_lakebase_core::plan_data::PlanDataError;
 use pg_lakebase_core::storage::foreign::StorageAcquireError;
@@ -122,6 +123,12 @@ pub(crate) enum ConnectorError {
 
     #[error("{format} format modify is not implemented")]
     ModifyNotImplemented { format: FormatKind },
+
+    #[error("foreign table ANALYZE is not implemented")]
+    AnalyzeNotImplemented,
+
+    #[error("foreign table TRUNCATE is not implemented")]
+    TruncateNotImplemented,
 
     #[error("{format} format cannot decode its planned filter")]
     InvalidFilterPlan { format: FormatKind },
@@ -365,6 +372,9 @@ impl SqlStateError for ConnectorError {
             Self::ScanNotImplemented { .. } | Self::ModifyNotImplemented { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
+            Self::AnalyzeNotImplemented | Self::TruncateNotImplemented => {
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+            }
             Self::Postgres(error) => error.sql_error_code(),
         }
     }
@@ -375,6 +385,15 @@ impl From<ConnectorError> for ForeignScanError {
         match error {
             ConnectorError::Postgres(error) => error.into(),
             error => ForeignScanError::provider(error),
+        }
+    }
+}
+
+impl From<ConnectorError> for ForeignTableMaintenanceError {
+    fn from(error: ConnectorError) -> Self {
+        match error {
+            ConnectorError::Postgres(error) => error.into(),
+            error => ForeignTableMaintenanceError::provider(error),
         }
     }
 }

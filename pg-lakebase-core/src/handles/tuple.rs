@@ -1,3 +1,4 @@
+use core::mem;
 use core::num::NonZeroU16;
 
 use super::borrowed::PgBorrowed;
@@ -205,6 +206,15 @@ impl HeapTupleGuard {
     #[inline]
     pub fn as_raw(&self) -> pg_sys::HeapTuple {
         self.tuple
+    }
+
+    /// Transfer ownership of the tuple to PostgreSQL or another owner that
+    /// will eventually release it with `heap_freetuple`.
+    #[inline]
+    pub(crate) fn into_raw(self) -> pg_sys::HeapTuple {
+        let tuple = self.tuple;
+        mem::forget(self);
+        tuple
     }
 
     #[inline]

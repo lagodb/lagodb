@@ -1,9 +1,9 @@
 //! Generic PostgreSQL Foreign Data Wrapper framework.
 //!
-//! Scan and modify are optional capability facets of one provider identity.
-//! Their PostgreSQL callback lifecycles remain separate because PostgreSQL
-//! stores their executor state in different node fields.
+//! Scan, modify, analyze, and truncate are optional capability facets of one
+//! provider identity. Their PostgreSQL callback lifecycles remain separate.
 
+mod maintenance;
 mod modify;
 mod payload;
 mod provider;
@@ -16,6 +16,12 @@ mod validation;
 pub use crate::plan_data::{
     PlanDataReader as ForeignPrivateReader, PlanDataWriter as ForeignPrivateWriter,
 };
+pub use maintenance::{
+    FdwAnalyze, FdwTruncate, ForeignAnalyzeContext, ForeignAnalyzeSupport,
+    ForeignSampleContext, ForeignSampleStatistics,
+    ForeignTableMaintenanceError, ForeignTableMaintenancePhase,
+    ForeignTruncateBehavior, ForeignTruncateContext,
+};
 pub use modify::{
     FdwModify, ForeignInsertBatch, ForeignInsertBeginContext,
     ForeignModifyBeginContext, ForeignModifyCapabilities, ForeignModifyError,
@@ -26,7 +32,10 @@ pub use modify::{
     ModifyPlanSlot, ModifySlot,
 };
 pub use provider::ForeignDataWrapper;
-pub use routine::{FdwRoutine, register_modify, register_scan};
+pub use routine::{
+    FdwRoutine, register_analyze, register_modify, register_scan,
+    register_truncate,
+};
 pub use row_identity::{ForeignRowIdentityError, ForeignRowIdentityRequirement};
 pub use scan::{
     BeginForeignScanContext, ColumnRequirements, FdwScan, ForeignExpressionValue,
@@ -49,7 +58,8 @@ pub mod __private {
 /// Common imports for FDW providers.
 pub mod prelude {
     pub use super::{
-        FdwModify, FdwRoutine, FdwScan, ForeignDataWrapper, ForeignInsertBatch,
-        ForeignValidationError, register_modify, register_scan,
+        FdwAnalyze, FdwModify, FdwRoutine, FdwScan, FdwTruncate,
+        ForeignDataWrapper, ForeignInsertBatch, ForeignValidationError,
+        register_analyze, register_modify, register_scan, register_truncate,
     };
 }

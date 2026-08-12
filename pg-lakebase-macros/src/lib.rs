@@ -11,14 +11,15 @@ use syn::{
 /// Generate PostgreSQL handler, validator, and metadata functions for an FDW.
 ///
 /// The provider's `ForeignDataWrapper::register` implementation calls
-/// `register_scan` and/or `register_modify`. Keeping those calls in the trait
-/// implementation avoids declaring the same capability a second time in the
-/// attribute. A procedural macro cannot inspect trait implementations
-/// elsewhere in the crate on stable Rust.
+/// `register_scan`, `register_modify`, `register_analyze`, and/or
+/// `register_truncate`. Keeping those calls in the trait implementation avoids
+/// declaring the same capability a second time in the attribute. A procedural
+/// macro cannot inspect trait implementations elsewhere in the crate on stable
+/// Rust.
 ///
 /// Metadata arguments are optional. The macro accepts only `version`,
-/// `author`, and `website`; scan and modify capabilities are registered by the
-/// provider's `register` implementation.
+/// `author`, and `website`; capabilities are registered by the provider's
+/// `register` implementation.
 /// Use `#[pg_fdw]` when the provider has no metadata values to publish.
 ///
 /// ```rust,ignore

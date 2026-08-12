@@ -2,11 +2,12 @@
 
 use core::ffi::CStr;
 use std::error::Error as StdError;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::Display;
 
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::{PgLogLevel, PgSqlErrorCode};
+use thiserror::Error;
 
 use super::super::provider::ForeignDataWrapper;
 use super::super::row_identity::ForeignRowIdentityError;
@@ -48,24 +49,32 @@ impl ForeignScanPhase {
 #[derive(Debug)]
 pub struct ForeignScanError(Box<ForeignScanErrorKind>);
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum ForeignScanErrorKind {
+    #[error("FDW {provider:?} {phase} callback failed: {source}", phase = phase.as_str())]
     Callback {
         provider: &'static CStr,
         phase: ForeignScanPhase,
+        #[source]
         source: Box<ForeignScanError>,
     },
+    #[error("FDW provider error: {source}")]
     Provider {
         sqlerrcode: PgSqlErrorCode,
+        #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
+    #[error("{message}")]
     Framework {
         sqlerrcode: PgSqlErrorCode,
         message: String,
     },
+    #[error("FDW private-data codec error: {source}")]
     PrivateCodec {
+        #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
+    #[error("{message}")]
     PgReport {
         sqlerrcode: PgSqlErrorCode,
         message: String,
@@ -75,38 +84,14 @@ enum ForeignScanErrorKind {
 }
 
 impl Display for ForeignScanError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match &*self.0 {
-            ForeignScanErrorKind::Callback {
-                provider,
-                phase,
-                source,
-            } => write!(
-                f,
-                "FDW {provider:?} {} callback failed: {source}",
-                phase.as_str()
-            ),
-            ForeignScanErrorKind::Provider { source, .. } => {
-                write!(f, "FDW provider error: {source}")
-            }
-            ForeignScanErrorKind::Framework { message, .. } => f.write_str(message),
-            ForeignScanErrorKind::PrivateCodec { source } => {
-                write!(f, "FDW private-data codec error: {source}")
-            }
-            ForeignScanErrorKind::PgReport { message, .. } => f.write_str(message),
-        }
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&*self.0, formatter)
     }
 }
 
 impl StdError for ForeignScanError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match &*self.0 {
-            ForeignScanErrorKind::Callback { source, .. } => Some(source),
-            ForeignScanErrorKind::Provider { source, .. }
-            | ForeignScanErrorKind::PrivateCodec { source } => Some(source.as_ref()),
-            ForeignScanErrorKind::Framework { .. }
-            | ForeignScanErrorKind::PgReport { .. } => None,
-        }
+        self.0.source()
     }
 }
 

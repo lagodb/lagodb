@@ -3,6 +3,7 @@
 mod ddl;
 mod filter;
 mod format_selection;
+mod maintenance;
 mod modify;
 mod options;
 mod provider;
