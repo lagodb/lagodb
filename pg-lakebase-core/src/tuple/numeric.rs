@@ -2,6 +2,8 @@
 //! `Decimal128 -> AnyNumeric` codec used by columnar read paths.
 
 use pgrx::pg_sys::{self, POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE};
+use pgrx::fcinfo::direct_function_call_as_datum;
+use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
 
 /// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in days.
 pub const PG_EPOCH_DAYS_DIFF: i32 = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i32;
@@ -261,8 +263,8 @@ fn decimal_digit_count(mut value: u128) -> u32 {
     count
 }
 
-/// Schema-bound encoder/decoder between Arrow `Decimal128` (i.e. unscaled
-/// `i128` plus a fixed scale) and PostgreSQL `NUMERIC`.
+/// Schema-bound encoder/decoder between fixed-scale signed `i128` values and
+/// PostgreSQL `NUMERIC`.
 ///
 /// `decode` avoids the Rust-string and `numeric_in` text parser path that
 /// pgrx's `AnyNumeric::try_from(&str)` and `From<i128>` fall back to for
@@ -335,11 +337,138 @@ impl Decimal128NumericCodec {
     pub fn decode(
         &self,
         unscaled: i128,
-    ) -> Result<pgrx::AnyNumeric, DecimalCodecError> {
+    ) -> Result<AnyNumeric, DecimalCodecError> {
         let external = NumericExternal::from_decimal128(unscaled, self.scale);
         // SAFETY: only callable from a PostgreSQL backend thread; see the
         // safety section on `numeric_recv_external`.
         unsafe { numeric_recv_external(&external, self.typmod(), self) }
+    }
+
+    /// Decodes an Avro decimal's signed big-endian two's-complement integer.
+    ///
+    /// Avro decimals permit arbitrary-width byte arrays. This codec admits
+    /// only values representable by this Decimal128 contract, so redundant
+    /// sign-extension is accepted while a wider magnitude is rejected before
+    /// reaching PostgreSQL.
+    pub fn decode_signed_be_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<AnyNumeric, DecimalCodecError> {
+        self.decode(self.signed_be_bytes_to_i128(bytes)?)
+    }
+
+    /// Encodes PostgreSQL `NUMERIC` as the unscaled integer of this fixed-scale
+    /// Decimal128 contract.
+    ///
+    /// This uses PostgreSQL's `numeric_send` representation instead of the
+    /// `AnyNumeric` string conversion path. pgrx exposes an owned numeric but
+    /// no borrowed datum view, so one clone is required solely to supply the
+    /// PostgreSQL function argument; no text allocation or parser round-trip
+    /// occurs on the per-value path.
+    pub fn encode(&self, value: &AnyNumeric) -> Result<i128, DecimalCodecError> {
+        // SAFETY: `into_datum` produces a valid PostgreSQL NUMERIC datum and
+        // `numeric_send` returns a palloc'd bytea in the current backend
+        // memory context. Both allocations are released before returning.
+        unsafe {
+            let input = value
+                .clone()
+                .into_datum()
+                .expect("AnyNumeric always converts to a non-NULL datum");
+            let output = direct_function_call_as_datum(pg_sys::numeric_send, &[Some(input)])
+                .expect("numeric_send must not return SQL NULL");
+            pg_sys::pfree(input.cast_mut_ptr());
+
+            let bytes = varlena_to_byte_slice(output.cast_mut_ptr());
+            let result = self.numeric_send_to_i128(bytes);
+            pg_sys::pfree(output.cast_mut_ptr());
+            result
+        }
+    }
+
+    fn signed_be_bytes_to_i128(&self, bytes: &[u8]) -> Result<i128, DecimalCodecError> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+
+        let sign = bytes[0] & 0x80 != 0;
+        let sign_extension = if sign { 0xFF } else { 0x00 };
+        let retained = bytes.len().saturating_sub(std::mem::size_of::<i128>());
+        if retained > 0
+            && (!bytes[..retained].iter().all(|byte| *byte == sign_extension)
+                || (bytes[retained] & 0x80 != 0) != sign)
+        {
+            return Err(self.value_out_of_range(
+                "Avro decimal value cannot be represented as Decimal128",
+            ));
+        }
+
+        let mut output = [sign_extension; std::mem::size_of::<i128>()];
+        let source = &bytes[retained..];
+        output[output.len() - source.len()..].copy_from_slice(source);
+        Ok(i128::from_be_bytes(output))
+    }
+
+    fn numeric_send_to_i128(&self, bytes: &[u8]) -> Result<i128, DecimalCodecError> {
+        let ndigits = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+        debug_assert_eq!(bytes.len(), 8 + ndigits * 2);
+        let weight = i16::from_be_bytes([bytes[2], bytes[3]]) as i32;
+        let sign = u16::from_be_bytes([bytes[4], bytes[5]]);
+
+        if sign != NUMERIC_POS && sign != NUMERIC_NEG {
+            return Err(self.value_out_of_range(
+                "PostgreSQL numeric value is not finite and cannot be represented as Decimal128",
+            ));
+        }
+
+        let mut coefficient = 0i128;
+        for digit in bytes[8..].chunks_exact(2) {
+            let digit = i128::from(u16::from_be_bytes([digit[0], digit[1]]));
+            coefficient = coefficient
+                .checked_mul(NBASE)
+                .and_then(|value| value.checked_add(digit))
+                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?;
+        }
+
+        let exponent = (weight + 1 - ndigits as i32) * DEC_DIGITS as i32 + self.scale as i32;
+        let unscaled = if exponent >= 0 {
+            let factor = 10_i128
+                .checked_pow(exponent as u32)
+                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?;
+            coefficient
+                .checked_mul(factor)
+                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?
+        } else {
+            let factor = 10_i128
+                .checked_pow((-exponent) as u32)
+                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?;
+            if coefficient % factor != 0 {
+                return Err(self.value_out_of_range(
+                    "numeric value has more fractional digits than the decimal scale",
+                ));
+            }
+            coefficient / factor
+        };
+
+        let unscaled = if sign == NUMERIC_NEG {
+            unscaled
+                .checked_neg()
+                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?
+        } else {
+            unscaled
+        };
+        let limit = 10_i128.pow(self.precision) - 1;
+        if !(-limit..=limit).contains(&unscaled) {
+            return Err(self.value_out_of_range("numeric value exceeds decimal precision"));
+        }
+        Ok(unscaled)
+    }
+
+    fn value_out_of_range(&self, message: impl Into<String>) -> DecimalCodecError {
+        DecimalCodecError::ValueOutOfRange {
+            precision: self.precision,
+            scale: self.scale,
+            message: message.into(),
+        }
     }
 }
 
@@ -386,7 +515,7 @@ unsafe fn numeric_recv_external(
                 cursor: 0,
             };
 
-            let datum = pgrx::fcinfo::direct_function_call_as_datum(
+            let datum = direct_function_call_as_datum(
                 pg_sys::numeric_recv,
                 &[
                     Some(pg_sys::Datum::from(&mut string_info as *mut _)),

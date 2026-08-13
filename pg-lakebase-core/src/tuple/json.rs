@@ -7,16 +7,79 @@
 use std::ffi::{CString, NulError, c_void};
 use std::fmt;
 use std::mem::size_of;
+use std::os::raw::c_uint;
+use std::ptr::NonNull;
 
 use pgrx::pg_sys::{self, Datum};
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{PgTryBuilder, varlena};
+use pgrx::{PgTryBuilder, fcinfo, varlena};
 use thiserror::Error;
 
 use crate::diag::{PgError, SqlStateError};
 use crate::wrapper::{PgOutputCString, PgWrapper};
 
 use super::datum::{ColumnDatumTarget, DatumConversionError};
+
+type PgJsonTypeCategory = c_uint;
+
+const JSONTYPE_NULL: PgJsonTypeCategory = 0;
+const JSONTYPE_BOOL: PgJsonTypeCategory = 1;
+const JSONTYPE_NUMERIC: PgJsonTypeCategory = 2;
+const JSONTYPE_DATE: PgJsonTypeCategory = 3;
+const JSONTYPE_TIMESTAMP: PgJsonTypeCategory = 4;
+const JSONTYPE_TIMESTAMPTZ: PgJsonTypeCategory = 5;
+const JSONTYPE_JSON: PgJsonTypeCategory = 6;
+const JSONTYPE_JSONB: PgJsonTypeCategory = 7;
+const JSONTYPE_ARRAY: PgJsonTypeCategory = 8;
+const JSONTYPE_COMPOSITE: PgJsonTypeCategory = 9;
+const JSONTYPE_CAST: PgJsonTypeCategory = 10;
+const JSONTYPE_OTHER: PgJsonTypeCategory = 11;
+
+unsafe extern "C-unwind" {
+    #[link_name = "json_categorize_type"]
+    fn pg_json_categorize_type(
+        type_oid: pg_sys::Oid,
+        is_jsonb: bool,
+        category: *mut PgJsonTypeCategory,
+        output_function: *mut pg_sys::Oid,
+    );
+
+    #[link_name = "datum_to_json"]
+    fn pg_datum_to_json(
+        datum: Datum,
+        category: PgJsonTypeCategory,
+        output_function: pg_sys::Oid,
+    ) -> Datum;
+}
+
+/// PostgreSQL's JSON representation class for a bound column type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JsonDatumKind {
+    Boolean,
+    Numeric,
+    String,
+    Json,
+    Array,
+    Composite,
+    Cast,
+    Unsupported,
+}
+
+/// Begin-time PostgreSQL Datum-to-JSON conversion plan.
+#[derive(Clone, Copy, Debug)]
+pub struct JsonDatumEncoder {
+    category: PgJsonTypeCategory,
+    output_function: pg_sys::Oid,
+    kind: JsonDatumKind,
+}
+
+/// One PostgreSQL-owned JSON text datum.
+pub struct EncodedJson {
+    text: NonNull<pg_sys::varlena>,
+}
+
+/// Relation-shaped slot encoder backed by PostgreSQL `row_to_json`.
+pub struct JsonRowEncoder;
 
 /// An owned, PostgreSQL-validated `json` value.
 ///
@@ -87,6 +150,122 @@ pub enum JsonValueError {
 
     #[error("JSON value is not valid UTF-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+}
+
+impl JsonDatumEncoder {
+    /// Bind PostgreSQL's JSON category and output function once for a type.
+    pub fn bind(type_oid: pg_sys::Oid) -> Result<Self, JsonValueError> {
+        let mut category = JSONTYPE_NULL;
+        let mut output_function = pg_sys::InvalidOid;
+        unsafe {
+            PgTryBuilder::new(|| {
+                pg_json_categorize_type(
+                    type_oid,
+                    false,
+                    &mut category,
+                    &mut output_function,
+                );
+                Ok(())
+            })
+            .catch_others(|error| Err(PgError::from(error)))
+            .execute()
+        }?;
+        let kind = match category {
+            JSONTYPE_BOOL => JsonDatumKind::Boolean,
+            JSONTYPE_NUMERIC => JsonDatumKind::Numeric,
+            JSONTYPE_DATE
+            | JSONTYPE_TIMESTAMP
+            | JSONTYPE_TIMESTAMPTZ
+            | JSONTYPE_OTHER => JsonDatumKind::String,
+            JSONTYPE_JSON | JSONTYPE_JSONB => JsonDatumKind::Json,
+            JSONTYPE_ARRAY => JsonDatumKind::Array,
+            JSONTYPE_COMPOSITE => JsonDatumKind::Composite,
+            JSONTYPE_CAST => JsonDatumKind::Cast,
+            _ => JsonDatumKind::Unsupported,
+        };
+        Ok(Self {
+            category,
+            output_function,
+            kind,
+        })
+    }
+
+    #[inline]
+    pub const fn kind(self) -> JsonDatumKind {
+        self.kind
+    }
+
+    /// Encode a non-NULL Datum with the cached PostgreSQL JSON plan.
+    ///
+    /// # Safety
+    ///
+    /// `datum` must be valid for the type used to construct this encoder. The
+    /// active PostgreSQL memory context must outlive the returned value.
+    pub unsafe fn encode(self, datum: Datum) -> Result<EncodedJson, JsonValueError> {
+        let encoded = unsafe {
+            PgTryBuilder::new(|| {
+                Ok(pg_datum_to_json(
+                    datum,
+                    self.category,
+                    self.output_function,
+                ))
+            })
+            .catch_others(|error| Err(PgError::from(error)))
+            .execute()
+        }?;
+        Ok(unsafe { EncodedJson::from_datum(encoded) })
+    }
+}
+
+impl JsonRowEncoder {
+    /// Encode one relation-shaped slot with PostgreSQL `row_to_json`.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must contain a live tuple with a valid tuple descriptor for the
+    /// duration of this synchronous call.
+    pub unsafe fn encode(
+        slot: *mut pg_sys::TupleTableSlot,
+    ) -> Result<EncodedJson, JsonValueError> {
+        let encoded = unsafe {
+            PgTryBuilder::new(|| {
+                let composite = pg_sys::ExecFetchSlotHeapTupleDatum(slot);
+                let encoded = fcinfo::direct_function_call_as_datum(
+                    pg_sys::row_to_json,
+                    &[Some(composite)],
+                );
+                pg_sys::pfree(composite.cast_mut_ptr::<c_void>());
+                encoded.ok_or(JsonValueError::NullInput)
+            })
+            .catch_others(|error| Err(JsonValueError::Postgres(PgError::from(error))))
+            .execute()
+        }?;
+        Ok(unsafe { EncodedJson::from_datum(encoded) })
+    }
+}
+
+impl EncodedJson {
+    unsafe fn from_datum(datum: Datum) -> Self {
+        let text = NonNull::new(datum.cast_mut_ptr::<pg_sys::varlena>())
+            .expect("PostgreSQL JSON encoder returned a null text datum");
+        Self { text }
+    }
+
+    pub fn as_str(&self) -> Result<&str, JsonValueError> {
+        unsafe { varlena::text_to_rust_str(self.text.as_ptr()) }
+            .map_err(JsonValueError::from)
+    }
+
+    #[inline]
+    pub fn as_bytes(&self) -> Result<&[u8], JsonValueError> {
+        self.as_str().map(str::as_bytes)
+    }
+}
+
+impl Drop for EncodedJson {
+    fn drop(&mut self) {
+        unsafe { pg_sys::pfree(self.text.as_ptr().cast()) };
+    }
 }
 
 impl SqlStateError for JsonValueError {

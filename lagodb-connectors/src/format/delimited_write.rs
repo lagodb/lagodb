@@ -8,8 +8,10 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 use crate::storage::ObjectOutput;
 
-use super::copy::StreamEncoderFactory;
-use super::{EmptyOutputPolicy, FormatKind, FormatWriteState, ObjectSetWriter, StreamCompression};
+use super::{
+    EmptyOutputPolicy, FormatKind, FormatWriteState, ObjectSetWriter,
+    StreamCompression, StreamEncoderFactory,
+};
 
 /// Prefix-object writer for one Text or CSV foreign-table INSERT statement.
 pub(super) struct DelimitedWriteState {

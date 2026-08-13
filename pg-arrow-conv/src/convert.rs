@@ -32,7 +32,7 @@ impl ColumnRule {
         rows: &[Row],
         col_idx: usize,
     ) -> ArrowConversionResult<ArrayRef> {
-        let mut encoder = ArrowColumnEncoder::new(self, rows.len());
+        let mut encoder = ArrowColumnEncoder::new(self, rows.len())?;
         for cell in rows
             .iter()
             .map(|row| row.get(col_idx).and_then(|c| c.as_ref()))

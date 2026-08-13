@@ -65,7 +65,20 @@ impl Row {
     pub fn set_cell(&mut self, index: usize, cell: Option<Cell>) {
         self.ensure_len(index + 1);
 
-        if let Some(old_cell) = self.cells[index].take() {
+        // SAFETY: ensure_len established this index immediately above.
+        unsafe { self.set_cell_at_bound(index, cell) };
+    }
+
+    /// Replace a cell at an index validated against this row's fixed layout.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be smaller than [`Self::len`].
+    pub unsafe fn set_cell_at_bound(&mut self, index: usize, cell: Option<Cell>) {
+        // SAFETY: required by this method's contract.
+        let slot = unsafe { self.cells.get_unchecked_mut(index) };
+
+        if let Some(old_cell) = slot.take() {
             self.size = self.size.saturating_sub(old_cell.mem_size());
         }
 
@@ -73,7 +86,7 @@ impl Row {
             self.size += new_cell.mem_size();
         }
 
-        self.cells[index] = cell;
+        *slot = cell;
     }
 
     pub fn take_cell(&mut self, index: usize) -> Option<Cell> {

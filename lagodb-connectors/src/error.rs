@@ -4,6 +4,7 @@ use std::error::Error as StdError;
 
 use pg_lakebase_core::copy::CopyError;
 use pg_lakebase_core::diag::{PgReportError, SqlStateError};
+use pg_lakebase_core::tuple::{DecimalCodecError, JsonValueError};
 use pg_lakebase_core::fdw::{
     ForeignModifyError, ForeignScanError, ForeignTableMaintenanceError,
     ForeignValidationError,
@@ -65,6 +66,9 @@ pub(crate) enum ConnectorError {
     #[error("PostgreSQL datum conversion failed: {0}")]
     DatumConversion(#[from] pg_lakebase_core::tuple::DatumConversionError),
 
+    #[error("PostgreSQL numeric conversion failed: {0}")]
+    DecimalCodec(#[from] DecimalCodecError),
+
     #[error("invalid Avro object: {0}")]
     Avro(#[from] apache_avro::Error),
 
@@ -73,6 +77,26 @@ pub(crate) enum ConnectorError {
         line: u64,
         #[source]
         source: serde_json::Error,
+    },
+
+    #[error("NDJSON record {line} exceeds the configured {max_bytes}-byte limit")]
+    JsonRecordTooLarge { line: u64, max_bytes: usize },
+
+    #[error("invalid NDJSON value at logical line {line}, column {column:?}: {reason}")]
+    JsonValue {
+        line: u64,
+        column: Box<str>,
+        reason: &'static str,
+    },
+
+    #[error("PostgreSQL JSON conversion failed: {0}")]
+    JsonDatum(#[from] JsonValueError),
+
+    #[error("NDJSON stream I/O failed: {source}")]
+    JsonIo {
+        sqlerrcode: PgSqlErrorCode,
+        #[source]
+        source: std::io::Error,
     },
 
     #[error("failed to read an object while inferring its schema: {0}")]
@@ -169,6 +193,29 @@ impl ConnectorError {
         Self::InvalidCopyOption {
             option: option.into(),
             reason,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn invalid_json_value(
+        line: u64,
+        column: &str,
+        reason: &'static str,
+    ) -> Self {
+        Self::JsonValue {
+            line,
+            column: column.into(),
+            reason,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn json_datum(error: JsonValueError) -> Self {
+        match error {
+            JsonValueError::Postgres(error) => {
+                Self::Postgres(PgReportError::from_pg_error(error))
+            }
+            error => Self::JsonDatum(error),
         }
     }
 
@@ -271,6 +318,16 @@ impl ConnectorError {
         }
     }
 
+    #[inline]
+    pub(crate) fn json_io(error: std::io::Error) -> Self {
+        let sqlerrcode = Self::source_io_sql_error_code(&error)
+            .unwrap_or(PgSqlErrorCode::ERRCODE_IO_ERROR);
+        Self::JsonIo {
+            sqlerrcode,
+            source: error,
+        }
+    }
+
     fn source_io_sql_error_code(
         error: &(dyn StdError + 'static),
     ) -> Option<PgSqlErrorCode> {
@@ -341,9 +398,13 @@ impl SqlStateError for ConnectorError {
             | Self::UnsupportedForeignTableDefinition { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
-            Self::InvalidObjectSchema { .. } | Self::Json { .. } => {
+            Self::InvalidObjectSchema { .. }
+            | Self::Json { .. }
+            | Self::JsonRecordTooLarge { .. }
+            | Self::JsonValue { .. } => {
                 PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
             }
+            Self::JsonDatum(error) => error.sql_error_code(),
             Self::Parquet(error) => {
                 Self::source_io_sql_error_code(error).unwrap_or(match error {
                     parquet::errors::ParquetError::NYI(_) => {
@@ -358,8 +419,21 @@ impl SqlStateError for ConnectorError {
             Self::Arrow(error) => Self::source_io_sql_error_code(error)
                 .unwrap_or(PgSqlErrorCode::ERRCODE_DATA_EXCEPTION),
             Self::DatumConversion(error) => error.sql_error_code(),
+            Self::DecimalCodec(error) => match error {
+                DecimalCodecError::ValueOutOfRange { .. } => {
+                    PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
+                }
+                DecimalCodecError::InvalidBinaryRepresentation { .. } => {
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+                }
+                DecimalCodecError::PrecisionOutOfRange { .. }
+                | DecimalCodecError::ScaleOutOfRange { .. } => {
+                    PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
+                }
+            },
             Self::SchemaIo(error) => Self::source_io_sql_error_code(error)
                 .unwrap_or(PgSqlErrorCode::ERRCODE_IO_ERROR),
+            Self::JsonIo { sqlerrcode, .. } => *sqlerrcode,
             Self::CopyStreamIo { sqlerrcode, .. } => *sqlerrcode,
             Self::Copy(error) => error.sql_error_code(),
             Self::InvalidObjectUri { .. } | Self::ProviderMismatch { .. } => {

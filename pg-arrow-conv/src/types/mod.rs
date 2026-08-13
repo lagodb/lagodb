@@ -123,7 +123,7 @@ macro_rules! dispatch_encoder {
 impl ArrowColumnEncoder {
     /// Build the encoder for a resolved column rule, pre-sizing builders to
     /// `capacity` rows.
-    pub fn new(rule: &ColumnRule, capacity: usize) -> Self {
+    pub fn new(rule: &ColumnRule, capacity: usize) -> ArrowConversionResult<Self> {
         let encoder = match rule {
             ColumnRule::Bool => Encoder::Bool(BoolEncoder::with_capacity(capacity)),
             ColumnRule::I32 => {
@@ -163,13 +163,13 @@ impl ArrowColumnEncoder {
                 TimestampEncoder::with_capacity(capacity, *nanos, *tz),
             ),
             ColumnRule::Decimal128 { precision, scale } => Encoder::Decimal128(
-                Decimal128Encoder::with_capacity(capacity, *precision, *scale),
+                Decimal128Encoder::with_capacity(capacity, *precision, *scale)?,
             ),
             ColumnRule::List { element, field, .. } => Encoder::List(
                 ListEncoder::with_capacity(capacity, *element, field.clone()),
             ),
         };
-        Self(encoder)
+        Ok(Self(encoder))
     }
 
     /// Row-world write: append one buffered [`Cell`] to the active variant.
@@ -329,7 +329,7 @@ mod tests {
             ),
         ];
         for (rule, expected) in cases {
-            let mut encoder = ArrowColumnEncoder::new(&rule, 4);
+            let mut encoder = ArrowColumnEncoder::new(&rule, 4).expect("valid rule");
             let array = encoder.finish().expect("finish");
             assert_eq!(array.data_type(), &expected, "rule {rule:?}");
         }
@@ -346,8 +346,11 @@ mod tests {
             (true, true, TimeUnit::Nanosecond, Some("+00:00")),
         ];
         for (nanos, tz, expected_unit, expected_tz) in cases {
-            let mut encoder =
-                ArrowColumnEncoder::new(&ColumnRule::Timestamp { nanos, tz }, 4);
+            let mut encoder = ArrowColumnEncoder::new(
+                &ColumnRule::Timestamp { nanos, tz },
+                4,
+            )
+            .expect("valid rule");
             let array = encoder.finish().expect("finish");
             match array.data_type() {
                 DataType::Timestamp(unit, zone) => {

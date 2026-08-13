@@ -208,8 +208,11 @@ impl BoundEncoderPlan {
         Ok(plan)
     }
 
-    pub(crate) fn materialize(self, capacity: usize) -> BoundColumnEncoder {
-        match self {
+    pub(crate) fn materialize(
+        self,
+        capacity: usize,
+    ) -> ArrowConversionResult<BoundColumnEncoder> {
+        Ok(match self {
             Self::Bool => {
                 BoundColumnEncoder::Bool(BoolEncoder::with_capacity(capacity))
             }
@@ -261,7 +264,7 @@ impl BoundEncoderPlan {
                 BoundColumnEncoder::Uuid(UuidEncoder::with_capacity(capacity))
             }
             Self::Numeric { precision, scale } => BoundColumnEncoder::Numeric(
-                Decimal128Encoder::with_capacity(capacity, precision, scale),
+                Decimal128Encoder::with_capacity(capacity, precision, scale)?,
             ),
             Self::Date => {
                 BoundColumnEncoder::Date(PrimitiveEncoder::with_capacity(capacity))
@@ -318,7 +321,7 @@ impl BoundEncoderPlan {
             Self::JsonArray { field } => BoundColumnEncoder::JsonArray(
                 BoundJsonArrayEncoder::with_capacity(capacity, field),
             ),
-        }
+        })
     }
 }
 

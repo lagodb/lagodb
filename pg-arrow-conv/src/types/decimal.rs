@@ -1,12 +1,11 @@
-//! `Decimal128` conversion: the codec that scales a PostgreSQL `NUMERIC` into
-//! the `i128` an Arrow `Decimal128(precision, scale)` column stores, plus the
-//! read and write paths built on it.
+//! `Decimal128` conversion for Arrow builders, backed by the shared
+//! PostgreSQL `NUMERIC` codec.
 
 use std::sync::Arc;
 
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
-use pg_lakebase_core::tuple::Cell;
+use pg_lakebase_core::tuple::{Cell, Decimal128NumericCodec, DecimalCodecError};
 use pgrx::prelude::AnyNumeric;
 use pgrx::{FromDatum, pg_sys};
 
@@ -14,76 +13,28 @@ use super::{ColumnAppend, cell_type_mismatch, read_bound};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 
 // ---------------------------------------------------------------------------
-// Codec
-// ---------------------------------------------------------------------------
-
-pub(crate) struct DecimalCodec {
-    precision: u32,
-    scale: u32,
-}
-
-impl DecimalCodec {
-    pub(crate) fn new(precision: u32, scale: u32) -> Self {
-        Self { precision, scale }
-    }
-
-    pub(crate) fn encode(&self, value: &AnyNumeric) -> ArrowConversionResult<i128> {
-        let scaled = value.clone() * 10_i128.pow(self.scale);
-        let integral = scaled.floor();
-
-        if integral != scaled {
-            return Err(self.error(
-                value,
-                format!("has more than {} fractional digits", self.scale),
-            ));
-        }
-
-        let encoded = i128::try_from(integral)
-            .map_err(|_| self.error(value, "cannot be encoded as Decimal128"))?;
-
-        if !self.fits_precision(encoded) {
-            return Err(self.error(value, "exceeds target precision"));
-        }
-
-        Ok(encoded)
-    }
-
-    fn fits_precision(&self, value: i128) -> bool {
-        let limit = 10_i128.pow(self.precision) - 1;
-        (-limit..=limit).contains(&value)
-    }
-
-    fn error(
-        &self,
-        value: &AnyNumeric,
-        reason: impl Into<String>,
-    ) -> ArrowConversionError {
-        ArrowConversionError::IncompatibleColumnType(
-            format!("decimal({}, {})", self.precision, self.scale),
-            format!("numeric value '{}' {}", value, reason.into()),
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Write encoder
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Decimal128Encoder {
     builder: Decimal128Builder,
-    codec: DecimalCodec,
+    codec: Decimal128NumericCodec,
     precision: u32,
     scale: u32,
 }
 
 impl Decimal128Encoder {
-    pub(crate) fn with_capacity(capacity: usize, precision: u32, scale: u32) -> Self {
-        Self {
+    pub(crate) fn with_capacity(
+        capacity: usize,
+        precision: u32,
+        scale: u32,
+    ) -> Result<Self, DecimalCodecError> {
+        Ok(Self {
             builder: Decimal128Builder::with_capacity(capacity),
-            codec: DecimalCodec::new(precision, scale),
+            codec: Decimal128NumericCodec::new(precision, scale)?,
             precision,
             scale,
-        }
+        })
     }
 
     fn append_scaled(&mut self, value: &AnyNumeric) -> ArrowConversionResult<()> {
@@ -152,7 +103,7 @@ mod tests {
     // scaled values through untouched and tag the array with precision/scale.
     #[test]
     fn finish_preserves_scaled_values_and_tags_precision_scale() {
-        let mut encoder = Decimal128Encoder::with_capacity(4, 10, 2);
+        let mut encoder = Decimal128Encoder::with_capacity(4, 10, 2).expect("valid decimal");
         encoder.builder.append_value(12_345);
         encoder.builder.append_null();
         encoder.builder.append_value(-6_789);

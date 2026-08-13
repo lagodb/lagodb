@@ -34,7 +34,7 @@ pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
 pg-lakebase-storage = { path = "../pg-lakebase-storage" }
 parquet = { version = "58", default-features = false, features = ["arrow"] }
 serde = "1"
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 thiserror = "1.0"
 percent-encoding = "2.3"
 url = "2.5.7"

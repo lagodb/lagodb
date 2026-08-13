@@ -164,6 +164,25 @@ impl ColumnDatumCodec {
     ) -> Result<Datum, DatumConversionError> {
         unsafe { cell.into_datum_for_attribute(self.target) }
     }
+
+    /// Convert one Datum from this already-bound source column into a semantic
+    /// Cell.
+    ///
+    /// `None` is returned only for SQL NULL.
+    ///
+    /// # Safety
+    ///
+    /// PostgreSQL must be running on the current backend thread, and `datum`
+    /// must be valid for this bound column's OID when `is_null` is false.
+    pub unsafe fn datum_to_cell(
+        self,
+        datum: Datum,
+        is_null: bool,
+    ) -> Result<Option<Cell>, DatumConversionError> {
+        unsafe {
+            Cell::from_polymorphic_datum_checked(datum, is_null, self.target.oid())
+        }
+    }
 }
 
 /// A conversion failure that is distinct from SQL NULL.

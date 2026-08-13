@@ -18,6 +18,7 @@ mod parquet;
 mod resolved;
 mod scan;
 mod schema;
+mod stream_writer;
 mod text;
 mod write;
 
@@ -52,6 +53,7 @@ pub(crate) use write::{FormatWritePrivate, FormatWriteState, FormatWriter};
 
 use avro::AvroFormat;
 pub(crate) use compression::{StreamDecoder, StreamEncoder};
+pub(crate) use stream_writer::StreamEncoderFactory;
 use csv::CsvFormat;
 use json::JsonFormat;
 use parquet::ParquetFormat;

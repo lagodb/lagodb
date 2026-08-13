@@ -1,9 +1,9 @@
-//! NDJSON format object and streaming schema reader.
+//! NDJSON schema inference.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
+use std::num::NonZeroUsize;
 
-use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
@@ -11,84 +11,40 @@ use serde_json::Value;
 
 use crate::error::ConnectorError;
 
-use super::{
-    FormatKind, FormatObject, FormatOption, FormatReader, FormatSchemaReader,
-    FormatWriter, InferredColumn, InferredSchema, PostgresType, StorageFileReader,
-    StreamCompression, StreamDecoder,
+use super::stream::JsonLineReader;
+use crate::format::{
+    FormatKind, InferredColumn, InferredSchema, PostgresType,
 };
 
-/// JSON-format processor. Each non-empty logical line is one complete value.
-pub(crate) struct JsonFormat {
-    pub(super) compression: StreamCompression,
-}
-
-impl JsonFormat {
-    pub(crate) fn resolve(
-        compression: StreamCompression,
-        options: &[FormatOption<'_>],
-    ) -> Result<Self, ConnectorError> {
-        if let Some(option) = options.first() {
-            return Err(ConnectorError::invalid_option(
-                option.name(),
-                "is not valid for json",
-            ));
-        }
-        Ok(Self { compression })
-    }
-}
-
-impl FormatObject for JsonFormat {
-    fn kind(&self) -> FormatKind {
-        FormatKind::Json
-    }
-}
-
-impl FormatReader for JsonFormat {}
-
-impl FormatWriter for JsonFormat {}
-
-impl FormatSchemaReader for JsonFormat {
-    fn infer_schema(
-        &self,
-        file: &mut StorageFile,
-    ) -> Result<InferredSchema, ConnectorError> {
-        let source = StorageFileReader::new(file);
-        let input = StreamDecoder::new(source, self.compression)?;
-        JsonSchemaAccumulator::default().read(BufReader::new(input))
-    }
-}
+// JSON carries no embedded relation schema. DDL inference samples the first
+// resolved object only, so cap the number of non-empty records consumed from it.
+// Foreign scans still parse and validate every record they read.
+const SCHEMA_SAMPLE_RECORDS: usize = 100;
 
 #[derive(Default)]
-struct JsonSchemaAccumulator {
+pub(super) struct JsonSchemaAccumulator {
     fields: Vec<JsonField>,
     indexes: HashMap<String, usize>,
 }
 
 impl JsonSchemaAccumulator {
-    fn read(
+    pub(super) fn read(
         mut self,
-        mut input: impl BufRead,
+        input: impl BufRead,
+        max_record_bytes: NonZeroUsize,
     ) -> Result<InferredSchema, ConnectorError> {
-        let mut buffer = Vec::new();
-        let mut logical_line = 0_u64;
-        loop {
-            buffer.clear();
-            if input.read_until(b'\n', &mut buffer)? == 0 {
+        let mut input = JsonLineReader::new(input, max_record_bytes);
+        for _ in 0..SCHEMA_SAMPLE_RECORDS {
+            if !input.read_next()? {
                 break;
             }
-            if buffer.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            logical_line += 1;
-            let object =
-                serde_json::from_slice::<JsonObject>(&buffer).map_err(|source| {
-                    ConnectorError::Json {
-                        line: logical_line,
-                        source,
-                    }
+            let logical_line = input.logical_line();
+            let object = serde_json::from_slice::<JsonObject>(input.record())
+                .map_err(|source| ConnectorError::Json {
+                    line: logical_line,
+                    source,
                 })?;
-            for (name, value) in object.0 {
-                let value_type = JsonFieldType::of(&value);
+            for (name, value_type) in object.into_last_values() {
                 if let Some(index) = self.indexes.get(name.as_str()).copied() {
                     self.fields[index].value_type.merge(value_type);
                 } else {
@@ -109,6 +65,25 @@ impl JsonSchemaAccumulator {
 }
 
 struct JsonObject(Vec<(String, Value)>);
+
+impl JsonObject {
+    fn into_last_values(self) -> Vec<(String, JsonFieldType)> {
+        let mut values: Vec<(String, JsonFieldType)> =
+            Vec::with_capacity(self.0.len());
+        let mut indexes = HashMap::with_capacity(self.0.len());
+        for (name, value) in self.0 {
+            let value_type = JsonFieldType::of(&value);
+            if let Some(index) = indexes.get(name.as_str()).copied() {
+                values[index].1 = value_type;
+            } else {
+                let index = values.len();
+                indexes.insert(name.clone(), index);
+                values.push((name, value_type));
+            }
+        }
+        values
+    }
+}
 
 impl<'de> Deserialize<'de> for JsonObject {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

@@ -5,6 +5,7 @@
 //! this module so adding a format does not grow COPY orchestration.
 
 mod canonical_csv;
+mod json;
 mod stream;
 
 use pg_lakebase_core::copy::{
@@ -20,13 +21,14 @@ use crate::storage::{
     ObjectInput, ObjectLocationKind, ObjectOutput, ObjectUri, ResolvedStorageLocation,
 };
 
+use super::avro::{AvroCopyDestination, AvroCopySource};
 use super::parquet::{ParquetCopyDestination, ParquetCopySource};
 use super::{
     AvroWriteCompression, FormatKind, ParquetWriteCompression, StreamCompression,
 };
 
 pub(super) use canonical_csv::{CanonicalCsv, CanonicalCsvRow};
-pub(super) use stream::StreamEncoderFactory;
+use json::{JsonCopyDestination, JsonCopySource};
 
 /// COPY source constructed by one resolved format.
 pub(crate) trait FormatCopySource {
@@ -147,7 +149,31 @@ impl ResolvedCopyFormat {
                 let files = ObjectInput::resolve(location, &manager, FormatKind::Parquet)?.open();
                 Ok(Box::new(ParquetCopySource::new(files, &column_layout()?)?))
             }
-            Self::Json(_) | Self::AvroRead | Self::AvroWrite(_) | Self::ParquetWrite(_) => {
+            Self::AvroRead => {
+                if ObjectLocationKind::classify(location.object_key(), FormatKind::Avro)?
+                    != ObjectLocationKind::Exact
+                {
+                    return Err(ConnectorError::copy_from_exact_only(FormatKind::Avro).into());
+                }
+                let manager = StorageManager::from_pg_gucs()?;
+                let files = ObjectInput::resolve(location, &manager, FormatKind::Avro)?.open();
+                Ok(Box::new(AvroCopySource::new(files, &column_layout()?)?))
+            }
+            Self::Json(compression) => {
+                if ObjectLocationKind::classify(location.object_key(), FormatKind::Json)?
+                    != ObjectLocationKind::Exact
+                {
+                    return Err(ConnectorError::copy_from_exact_only(FormatKind::Json).into());
+                }
+                let manager = StorageManager::from_pg_gucs()?;
+                let files = ObjectInput::resolve(location, &manager, FormatKind::Json)?.open();
+                Ok(Box::new(JsonCopySource::new(
+                    files,
+                    &column_layout()?,
+                    compression,
+                )?))
+            }
+            Self::AvroWrite(_) | Self::ParquetWrite(_) => {
                 Err(ConnectorError::copy_not_implemented(self.kind()).into())
             }
         }
@@ -184,7 +210,27 @@ impl ResolvedCopyFormat {
                 )?;
                 Ok(Box::new(ParquetCopyDestination::new(output, compression)))
             }
-            Self::Json(_) | Self::AvroRead | Self::AvroWrite(_) | Self::ParquetRead => {
+            Self::AvroWrite(compression) => {
+                let manager = StorageManager::from_pg_gucs()?;
+                let output = ObjectOutput::resolve(
+                    location,
+                    &manager,
+                    FormatKind::Avro,
+                    || WriteConfig::from_guc().target_file_bytes(),
+                )?;
+                Ok(Box::new(AvroCopyDestination::new(output, compression)))
+            }
+            Self::Json(compression) => {
+                let manager = StorageManager::from_pg_gucs()?;
+                let output = ObjectOutput::resolve(
+                    location,
+                    &manager,
+                    FormatKind::Json,
+                    || WriteConfig::from_guc().target_file_bytes(),
+                )?;
+                Ok(Box::new(JsonCopyDestination::new(output, compression)))
+            }
+            Self::AvroRead | Self::ParquetRead => {
                 Err(ConnectorError::copy_not_implemented(self.kind()).into())
             }
         }

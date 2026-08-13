@@ -103,16 +103,16 @@ impl BoundWriteColumnPlan {
         })
     }
 
-    fn into_column(self) -> BoundWriteColumn {
-        match self.input {
+    fn into_column(self) -> ArrowConversionResult<BoundWriteColumn> {
+        Ok(match self.input {
             BoundWriteInput::Null { rule } => BoundWriteColumn::Null(
-                ArrowColumnEncoder::new(&rule, DEFAULT_ROW_CAPACITY),
+                ArrowColumnEncoder::new(&rule, DEFAULT_ROW_CAPACITY)?,
             ),
             BoundWriteInput::Datum { index, plan } => BoundWriteColumn::Datum {
                 index,
-                encoder: plan.materialize(DEFAULT_ROW_CAPACITY),
+                encoder: plan.materialize(DEFAULT_ROW_CAPACITY)?,
             },
-        }
+        })
     }
 }
 
@@ -212,7 +212,7 @@ impl BoundDatumBuffer {
             .into_vec()
             .into_iter()
             .map(|plan| plan.plan.materialize(DEFAULT_ROW_CAPACITY))
-            .collect::<Vec<_>>()
+            .collect::<ArrowConversionResult<Vec<_>>>()?
             .into_boxed_slice();
         Ok(Self {
             schema,
@@ -311,7 +311,7 @@ impl BoundWriteBuffer {
             .into_vec()
             .into_iter()
             .map(BoundWriteColumnPlan::into_column)
-            .collect::<Vec<_>>()
+            .collect::<ArrowConversionResult<Vec<_>>>()?
             .into_boxed_slice();
         Ok(Self {
             schema,

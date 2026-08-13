@@ -44,7 +44,7 @@ impl ObjectInput {
         // Prefix scans intentionally materialize and sort one complete LIST.
         // Object stores do not provide a snapshot across independent LISTs;
         // retaining this set gives FDW ReScan stable membership and a stable
-        // first Parquet file for schema establishment.
+        // first object for format-specific schema inference.
         let mut listing = access.listing(LIST_PAGE_SIZE)?;
         loop {
             pg_sys::check_for_interrupts!();
