@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::error::ConnectorError;
 use crate::format::FormatKind;
 
-use super::{ObjectLocationKind, StorageTarget};
+use super::{ObjectLocationKind, ResolvedStorageLocation};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ObjectFileSuffix(&'static str);
@@ -65,19 +65,19 @@ impl AllocatedObject {
 
 impl ObjectOutput {
     pub(crate) fn resolve(
-        target: &StorageTarget,
+        location: &ResolvedStorageLocation,
         manager: &StorageManager,
         format: FormatKind,
         prefix_target_file_bytes: impl FnOnce() -> NonZeroU64,
     ) -> Result<Self, ConnectorError> {
-        match ObjectLocationKind::classify(target.object_key(), format)? {
+        match ObjectLocationKind::classify(location.object_key(), format)? {
             ObjectLocationKind::Exact => Ok(Self::Exact {
-                object: Some(target.acquire_object_access(manager)?),
+                object: Some(location.acquire_object_access(manager)?),
             }),
             ObjectLocationKind::Prefix => {
-                let prefix = target.normalized_prefix();
+                let prefix = location.normalized_prefix();
                 Ok(Self::Prefix {
-                    access: target.acquire_prefix_access(manager, &prefix)?,
+                    access: location.acquire_prefix_access(manager, &prefix)?,
                     keys: PartitionedKeyGenerator::new(prefix),
                     target_file_bytes: prefix_target_file_bytes(),
                 })

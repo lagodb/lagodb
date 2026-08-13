@@ -45,8 +45,30 @@ CopyFromState lakebase_begin_copy_from(
     List *attnamelist,
     List *options);
 
+bool lakebase_next_copy_from(
+    CopyFromState state,
+    ExprContext *econtext,
+    Datum *values,
+    bool *nulls);
+
 uint64 lakebase_copy_from(CopyFromState state);
 void lakebase_end_copy_from(CopyFromState state);
+
+CopyToState lakebase_begin_copy_row_encoder(
+    Relation rel,
+    List *options);
+
+void lakebase_encode_copy_header(
+    CopyToState state,
+    const char **data,
+    int *len);
+void lakebase_encode_copy_row(
+    CopyToState state,
+    TupleTableSlot *slot,
+    const char **data,
+    int *len);
+void lakebase_end_copy_row_encoder(
+    CopyToState state);
 
 CopyToState lakebase_begin_copy_to(
     ParseState *pstate,

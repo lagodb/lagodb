@@ -101,9 +101,10 @@ fn main() {
     let mut build = cc::Build::new();
     build.include(include);
     let mut has_sources = false;
-    // `lakebase_copy.c` mirrors private COPY state preparation around the
-    // public PG17 COPY functions. The source is selected per PostgreSQL
-    // feature here; the C header applies the shared major-version gate.
+    // `lakebase_copy.c` mirrors COPY preparation and the PG17 Text/CSV
+    // row-encoder state around the public COPY functions. The source is
+    // selected per PostgreSQL feature here; the C header applies the shared
+    // major-version gate and local source branches handle audited minor epochs.
     if pg_feature.copy_bridge_supported {
         build
             .file("csrc/copy/lakebase_copy.c")

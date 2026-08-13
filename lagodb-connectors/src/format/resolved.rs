@@ -142,8 +142,8 @@ impl ResolvedForeignFormat {
     #[cfg(any(test, feature = "pg_test"))]
     pub(crate) const fn stream_compression(&self) -> Option<StreamCompression> {
         match self {
-            Self::Text(format) => Some(format._compression),
-            Self::Csv(format) => Some(format._compression),
+            Self::Text(format) => Some(format.compression),
+            Self::Csv(format) => Some(format.compression),
             Self::Json(format) => Some(format.compression),
             Self::Avro(_) | Self::Parquet(_) => None,
         }

@@ -5,15 +5,15 @@ use pgrx::prelude::*;
 
 use crate::error::ConnectorError;
 
-use super::{ObjectUri, StorageTarget};
+use super::{ObjectUri, ResolvedStorageLocation};
 
 fn invalidate(
     object_uri: &str,
     storage_server: Option<&str>,
 ) -> Result<bool, ConnectorError> {
     let object = ObjectUri::parse(object_uri)?;
-    let target = StorageTarget::resolve(object, storage_server)?;
-    let object = target.acquire_object_access_from_pg_gucs()?;
+    let location = ResolvedStorageLocation::resolve(object, storage_server)?;
+    let object = location.acquire_object_access_from_pg_gucs()?;
     object.invalidate_cache().map_err(ConnectorError::from)
 }
 

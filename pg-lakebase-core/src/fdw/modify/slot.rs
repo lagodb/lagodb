@@ -101,7 +101,11 @@ impl<'slot> ModifySlot<'slot> {
         self.relation_oid
     }
 
-    pub(crate) fn as_raw(&self) -> *mut pg_sys::TupleTableSlot {
+    /// Raw relation-shaped slot for a synchronous provider encoder.
+    ///
+    /// The pointer is valid only for the current modify callback and must not
+    /// be retained after the borrowed [`ModifySlot`] is dropped.
+    pub fn as_raw(&self) -> *mut pg_sys::TupleTableSlot {
         self.columns.as_raw()
     }
 

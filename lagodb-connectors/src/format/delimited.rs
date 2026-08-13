@@ -1,7 +1,9 @@
 //! Shared PostgreSQL COPY text/CSV option values.
 
-use std::ffi::CString;
+use std::ffi::{CString, c_void};
 
+use pg_lakebase_core::fdw::ColumnRequirements;
+use pg_lakebase_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -113,5 +115,130 @@ impl<'a> DelimitedOptionsBuilder<'a> {
             ));
         }
         Ok(())
+    }
+}
+
+impl DelimitedOptions {
+    pub(super) fn append_postgres_output_options(
+        &self,
+        options: *mut pg_sys::List,
+        format: super::FormatKind,
+    ) -> Result<*mut pg_sys::List, ConnectorError> {
+        self.append_base_options(options, format)
+    }
+
+    pub(super) fn append_postgres_options(
+        &self,
+        mut options: *mut pg_sys::List,
+        format: super::FormatKind,
+        relation: &RelationHandle<'_>,
+        requirements: &ColumnRequirements,
+    ) -> Result<*mut pg_sys::List, ConnectorError> {
+        let mut options = self.append_base_options(options, format)?;
+        if !requirements.needs_all_columns() {
+            let names = relation.live_columns();
+            let selected = requirements
+                .user_columns()
+                .filter_map(|attno| {
+                    names
+                        .iter()
+                        .find(|(candidate, _)| *candidate == attno)
+                        .map(|(_, name)| name.as_str())
+                })
+                .collect::<Vec<_>>();
+            options = Self::append_string_list_option(
+                options,
+                "convert_selectively",
+                selected,
+            )?;
+        }
+        Ok(options)
+    }
+
+    fn append_base_options(
+        &self,
+        mut options: *mut pg_sys::List,
+        format: super::FormatKind,
+    ) -> Result<*mut pg_sys::List, ConnectorError> {
+        options = Self::append_string_option(options, "format", format.as_str())?;
+        let delimiter = [self.delimiter];
+        let delimiter = std::str::from_utf8(&delimiter).map_err(|_| {
+            ConnectorError::invalid_option(
+                "delimiter",
+                "must be valid in the PostgreSQL server encoding",
+            )
+        })?;
+        options = Self::append_string_option(options, "delimiter", delimiter)?;
+        options = Self::append_string_option(
+            options,
+            "null",
+            &self.null_marker,
+        )?;
+        if let Some(encoding) = self.encoding.as_deref() {
+            options = Self::append_string_option(options, "encoding", encoding)?;
+        }
+
+        Ok(options)
+    }
+
+    pub(super) fn append_string_option(
+        options: *mut pg_sys::List,
+        name: &str,
+        value: &str,
+    ) -> Result<*mut pg_sys::List, ConnectorError> {
+        let name_c = CString::new(name).map_err(|_| {
+            ConnectorError::invalid_option(name, "must be a valid COPY option name")
+        })?;
+        let value_c = CString::new(value).map_err(|_| {
+            ConnectorError::invalid_option(name, "must not contain NUL")
+        })?;
+        // SAFETY: PostgreSQL copies both strings into its current memory
+        // context and owns the resulting option node.
+        let option = unsafe {
+            pg_sys::makeDefElem(
+                pg_sys::pstrdup(name_c.as_ptr()),
+                pg_sys::makeString(pg_sys::pstrdup(value_c.as_ptr())).cast(),
+                -1,
+            )
+        };
+        // SAFETY: `option` is a freshly allocated PostgreSQL node.
+        Ok(unsafe { pg_sys::lappend(options, option.cast::<c_void>()) })
+    }
+
+    pub(super) fn append_string_list_option<'a>(
+        options: *mut pg_sys::List,
+        name: &str,
+        values: impl IntoIterator<Item = &'a str>,
+    ) -> Result<*mut pg_sys::List, ConnectorError> {
+        let mut value_list = std::ptr::null_mut();
+        for value in values {
+            let value = CString::new(value).map_err(|_| {
+                ConnectorError::invalid_option(
+                    "column option",
+                    "must not contain NUL",
+                )
+            })?;
+            // SAFETY: `value` is copied into PostgreSQL's current memory
+            // context before the temporary CString is dropped.
+            let string = unsafe { pg_sys::makeString(pg_sys::pstrdup(value.as_ptr())) };
+            // SAFETY: both the list and node are PostgreSQL-owned allocations.
+            value_list = unsafe {
+                pg_sys::lappend(value_list, string.cast::<c_void>())
+            };
+        }
+        let name_c = CString::new(name).map_err(|_| {
+            ConnectorError::invalid_option(name, "must be a valid COPY option name")
+        })?;
+        // SAFETY: `value_list` contains valid String nodes and the DefElem is
+        // allocated in the current PostgreSQL memory context.
+        let option = unsafe {
+            pg_sys::makeDefElem(
+                pg_sys::pstrdup(name_c.as_ptr()),
+                value_list.cast(),
+                -1,
+            )
+        };
+        // SAFETY: `option` is a freshly allocated PostgreSQL node.
+        Ok(unsafe { pg_sys::lappend(options, option.cast::<c_void>()) })
     }
 }

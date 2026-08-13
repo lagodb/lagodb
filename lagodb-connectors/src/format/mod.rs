@@ -9,6 +9,8 @@ mod compression;
 mod copy;
 mod csv;
 mod delimited;
+mod delimited_scan;
+mod delimited_write;
 mod filter;
 mod json;
 mod object_writer;

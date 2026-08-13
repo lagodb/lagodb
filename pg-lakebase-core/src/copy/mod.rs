@@ -12,6 +12,8 @@ mod error;
 mod io;
 mod layout;
 mod pg;
+mod row;
+mod scan;
 
 pub use context::{
     CopyCompletion, CopyContext, CopyFromPreparation, CopyOption, CopyOptionIter,
@@ -22,3 +24,5 @@ pub use driver::{CopyFromDriver, CopyFromSpec, CopyToDriver, CopyToSpec};
 pub use error::CopyError;
 pub use io::{CopyDataDestination, CopyDataSource};
 pub use layout::{CopyColumn, CopyColumnLayout};
+pub use row::CopyRowEncoder;
+pub use scan::{CopyDocumentSource, CopyFromScan};

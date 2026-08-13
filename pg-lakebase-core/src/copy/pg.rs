@@ -48,9 +48,38 @@ unsafe extern "C-unwind" {
         options: *mut pg_sys::List,
     ) -> pg_sys::CopyFromState;
 
+    fn lakebase_next_copy_from(
+        state: pg_sys::CopyFromState,
+        econtext: *mut pg_sys::ExprContext,
+        values: *mut pg_sys::Datum,
+        nulls: *mut bool,
+    ) -> bool;
+
     fn lakebase_copy_from(state: pg_sys::CopyFromState) -> u64;
 
     fn lakebase_end_copy_from(state: pg_sys::CopyFromState);
+
+    fn lakebase_begin_copy_row_encoder(
+        rel: pg_sys::Relation,
+        options: *mut pg_sys::List,
+    ) -> pg_sys::CopyToState;
+
+    fn lakebase_encode_copy_header(
+        state: pg_sys::CopyToState,
+        data: *mut *const std::ffi::c_char,
+        len: *mut std::ffi::c_int,
+    );
+
+    fn lakebase_encode_copy_row(
+        state: pg_sys::CopyToState,
+        slot: *mut pg_sys::TupleTableSlot,
+        data: *mut *const std::ffi::c_char,
+        len: *mut std::ffi::c_int,
+    );
+
+    fn lakebase_end_copy_row_encoder(
+        state: pg_sys::CopyToState,
+    );
 
     fn lakebase_begin_copy_to(
         pstate: *mut pg_sys::ParseState,
@@ -174,10 +203,67 @@ impl CopyBridge {
         unsafe { pg_guard_ffi_boundary(|| unsafe { lakebase_copy_from(state) }) }
     }
 
+    pub(crate) unsafe fn next_from(
+        state: pg_sys::CopyFromState,
+        econtext: *mut pg_sys::ExprContext,
+        values: *mut pg_sys::Datum,
+        nulls: *mut bool,
+    ) -> bool {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_next_copy_from(state, econtext, values, nulls)
+            })
+        }
+    }
+
     pub(crate) unsafe fn end_from(state: pg_sys::CopyFromState) {
         unsafe {
             pg_guard_ffi_boundary(|| {
                 unsafe { lakebase_end_copy_from(state) };
+            });
+        }
+    }
+
+    pub(crate) unsafe fn begin_row_encoder(
+        relation: pg_sys::Relation,
+        options: *mut pg_sys::List,
+    ) -> pg_sys::CopyToState {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_begin_copy_row_encoder(relation, options)
+            })
+        }
+    }
+
+    pub(crate) unsafe fn encode_copy_header(
+        state: pg_sys::CopyToState,
+        data: *mut *const std::ffi::c_char,
+        len: *mut std::ffi::c_int,
+    ) {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_encode_copy_header(state, data, len)
+            });
+        }
+    }
+
+    pub(crate) unsafe fn encode_copy_row(
+        state: pg_sys::CopyToState,
+        slot: *mut pg_sys::TupleTableSlot,
+        data: *mut *const std::ffi::c_char,
+        len: *mut std::ffi::c_int,
+    ) {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_encode_copy_row(state, slot, data, len)
+            });
+        }
+    }
+
+    pub(crate) unsafe fn end_row_encoder(state: pg_sys::CopyToState) {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_end_copy_row_encoder(state)
             });
         }
     }

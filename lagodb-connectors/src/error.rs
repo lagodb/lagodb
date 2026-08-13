@@ -85,6 +85,9 @@ pub(crate) enum ConnectorError {
         source: std::io::Error,
     },
 
+    #[error(transparent)]
+    Copy(CopyError),
+
     #[error("unsupported foreign table definition: {definition}")]
     UnsupportedForeignTableDefinition { definition: &'static str },
 
@@ -111,6 +114,9 @@ pub(crate) enum ConnectorError {
 
     #[error("COPY object format {format} is not implemented yet")]
     CopyNotImplemented { format: FormatKind },
+
+    #[error("COPY FROM for {format} supports an exact object URI only")]
+    CopyFromExactOnly { format: FormatKind },
 
     #[error("FDW private data contains unknown format tag {wire}")]
     InvalidPlanFormat { wire: i32 },
@@ -251,6 +257,11 @@ impl ConnectorError {
     }
 
     #[inline]
+    pub(crate) const fn copy_from_exact_only(format: FormatKind) -> Self {
+        Self::CopyFromExactOnly { format }
+    }
+
+    #[inline]
     pub(crate) fn copy_stream_io(error: std::io::Error) -> Self {
         let sqlerrcode = Self::source_io_sql_error_code(&error)
             .unwrap_or(PgSqlErrorCode::ERRCODE_IO_ERROR);
@@ -350,11 +361,14 @@ impl SqlStateError for ConnectorError {
             Self::SchemaIo(error) => Self::source_io_sql_error_code(error)
                 .unwrap_or(PgSqlErrorCode::ERRCODE_IO_ERROR),
             Self::CopyStreamIo { sqlerrcode, .. } => *sqlerrcode,
+            Self::Copy(error) => error.sql_error_code(),
             Self::InvalidObjectUri { .. } | Self::ProviderMismatch { .. } => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
             Self::ServerNotFound { .. } => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
-            Self::ServerWrongFdw { .. } | Self::CopyNotImplemented { .. } => {
+            Self::ServerWrongFdw { .. }
+            | Self::CopyNotImplemented { .. }
+            | Self::CopyFromExactOnly { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::ServerUsageDenied { .. } | Self::ScopeDenied { .. } => {
@@ -384,7 +398,17 @@ impl From<ConnectorError> for ForeignScanError {
     fn from(error: ConnectorError) -> Self {
         match error {
             ConnectorError::Postgres(error) => error.into(),
+            ConnectorError::Copy(CopyError::Postgres(error)) => error.into(),
             error => ForeignScanError::provider(error),
+        }
+    }
+}
+
+impl From<CopyError> for ConnectorError {
+    fn from(error: CopyError) -> Self {
+        match error {
+            CopyError::Postgres(error) => Self::Postgres(error),
+            error => Self::Copy(error),
         }
     }
 }
@@ -402,6 +426,7 @@ impl From<ConnectorError> for CopyError {
     fn from(error: ConnectorError) -> Self {
         match error {
             ConnectorError::Postgres(error) => Self::Postgres(error),
+            ConnectorError::Copy(error) => error,
             error => Self::provider(error),
         }
     }

@@ -26,13 +26,13 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
-pub(crate) struct StorageTarget {
+pub(crate) struct ResolvedStorageLocation {
     server_oid: pg_sys::Oid,
     effective_user: pg_sys::Oid,
     object: ObjectUri,
 }
 
-impl StorageTarget {
+impl ResolvedStorageLocation {
     pub(crate) fn resolve(
         object: ObjectUri,
         explicit_server: Option<&str>,

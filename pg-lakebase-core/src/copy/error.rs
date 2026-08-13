@@ -33,6 +33,9 @@ pub enum CopyError {
     #[error("invalid PostgreSQL COPY column layout: {0}")]
     InvalidColumnLayout(&'static str),
 
+    #[error("COPY row encoder was used after finish")]
+    EncoderFinished,
+
     #[error(transparent)]
     Postgres(#[from] PgReportError),
 }
@@ -59,6 +62,10 @@ impl CopyError {
     pub(crate) const fn invalid_column_layout(reason: &'static str) -> Self {
         Self::InvalidColumnLayout(reason)
     }
+
+    pub(crate) const fn encoder_finished() -> Self {
+        Self::EncoderFinished
+    }
 }
 
 impl From<PgError> for CopyError {
@@ -74,7 +81,8 @@ impl SqlStateError for CopyError {
             Self::Storage(error) => error.sql_error_code(),
             Self::InvalidByteCount { .. }
             | Self::MissingCallbackState
-            | Self::InvalidColumnLayout(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            | Self::InvalidColumnLayout(_)
+            | Self::EncoderFinished => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::Postgres(error) => error.sql_error_code(),
         }
     }

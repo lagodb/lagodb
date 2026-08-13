@@ -6,7 +6,7 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 use crate::format::{FormatKind, FormatReader, FormatWriter};
 use crate::storage::ObjectLocationKind;
-use crate::storage::StorageTarget;
+use crate::storage::ResolvedStorageLocation;
 
 use super::{ResolvedTableOptions, resolve_table_options};
 
@@ -61,24 +61,24 @@ impl ResolvedForeignRelation {
     pub(crate) fn into_scan_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<(Box<dyn FormatReader>, StorageTarget), ConnectorError> {
-        let target = StorageTarget::resolve_foreign_object(
+    ) -> Result<(Box<dyn FormatReader>, ResolvedStorageLocation), ConnectorError> {
+        let location = ResolvedStorageLocation::resolve_foreign_object(
             self.options.object,
             self.server_oid,
             effective_user,
         )?;
-        Ok((self.options.format.into_reader(), target))
+        Ok((self.options.format.into_reader(), location))
     }
 
     pub(crate) fn into_write_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<(Box<dyn FormatWriter>, StorageTarget), ConnectorError> {
-        let target = StorageTarget::resolve_foreign_object(
+    ) -> Result<(Box<dyn FormatWriter>, ResolvedStorageLocation), ConnectorError> {
+        let location = ResolvedStorageLocation::resolve_foreign_object(
             self.options.object,
             self.server_oid,
             effective_user,
         )?;
-        Ok((self.options.format.into_writer(), target))
+        Ok((self.options.format.into_writer(), location))
     }
 }

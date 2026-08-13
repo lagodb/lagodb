@@ -20,7 +20,7 @@ use pg_lakebase_core::hooks::{CopyConsumer, CopyRoute, register_copy_consumer};
 
 use crate::error::ConnectorError;
 use crate::format::{FormatCopyDestination, FormatCopySource};
-use crate::storage::{ObjectUri, StorageTarget};
+use crate::storage::{ObjectUri, ResolvedStorageLocation};
 
 use self::options::ResolvedCopyOptions;
 
@@ -85,8 +85,8 @@ impl ConnectorCopyConsumer {
     ) -> Result<CopyCompletion, CopyError> {
         let parse_state = context.parse_state();
         let preparation = context.prepare_from(&parse_state)?;
-        let target = StorageTarget::resolve(object, options.storage_server.as_deref())?;
-        let mut source = options.format.open_source(&target, || {
+        let location = ResolvedStorageLocation::resolve(object, options.storage_server.as_deref())?;
+        let mut source = options.format.open_source(&location, || {
             preparation.column_layout(context.statement())
         })?;
         let pg_options = source.postgres_options(context);
@@ -112,9 +112,9 @@ impl ConnectorCopyConsumer {
     ) -> Result<CopyCompletion, CopyError> {
         let parse_state = context.parse_state();
         let preparation = context.prepare_to(&parse_state)?;
-        let target = StorageTarget::resolve(object, options.storage_server.as_deref())?;
+        let location = ResolvedStorageLocation::resolve(object, options.storage_server.as_deref())?;
 
-        let mut destination = options.format.open_destination(&target)?;
+        let mut destination = options.format.open_destination(&location)?;
         let pg_options = destination.postgres_options(context);
         let spec = unsafe {
             CopyToSpec::new(

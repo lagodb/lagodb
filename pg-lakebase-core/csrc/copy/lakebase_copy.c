@@ -7,7 +7,9 @@
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_type_d.h"
 #include "executor/executor.h"
+#include "mb/pg_wchar.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/optimizer.h"
@@ -17,6 +19,7 @@
 #include "parser/parse_relation.h"
 #include "utils/acl.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/rls.h"
 #include "miscadmin.h"
@@ -25,6 +28,12 @@
 #if !LAKEBASE_PG17
 #error "COPY bridge has not been ported to this PostgreSQL major version"
 #endif
+
+/*
+ * The row encoder mirrors private copyto.c state from the audited PG17.0-
+ * PG17.10 epoch.  Keep minor-version branches local to this code when a
+ * future audit finds a relevant private-layout or serializer change.
+ */
 
 static void
 lakebase_check_copy_utility(bool is_from)
@@ -324,7 +333,41 @@ lakebase_begin_copy_from(ParseState *pstate,
 						 is_program,
 						 data_source_cb,
 						 attnamelist,
-						 options);
+											 options);
+}
+
+bool
+lakebase_next_copy_from(CopyFromState state,
+						ExprContext *econtext,
+						Datum *values,
+						bool *nulls)
+{
+	ErrorContextCallback errcallback;
+	MemoryContext oldcontext;
+	bool		found = false;
+
+	/* NextCopyFrom reports parser/type errors through this callback. */
+	errcallback.callback = CopyFromErrorCallback;
+	errcallback.arg = state;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
+	/* DEFAULT expressions are evaluated in PostgreSQL's per-tuple context. */
+	oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+	PG_TRY();
+	{
+		found = NextCopyFrom(state, econtext, values, nulls);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcontext);
+		error_context_stack = errcallback.previous;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(oldcontext);
+	error_context_stack = errcallback.previous;
+	return found;
 }
 
 uint64
@@ -337,6 +380,461 @@ void
 lakebase_end_copy_from(CopyFromState state)
 {
 	EndCopyFrom(state);
+}
+
+/*
+ * Exact layout of CopyToStateData in the audited PG17.0-PG17.10 copyto.c
+ * epoch. The public API exposes CopyToState opaquely, but the row encoder must
+ * initialize the same per-row state as DoCopyTo before using its source-derived
+ * serializer.
+ */
+typedef enum LakebaseCopyDest
+{
+	LAKEBASE_COPY_FILE,
+	LAKEBASE_COPY_FRONTEND,
+	LAKEBASE_COPY_CALLBACK
+} LakebaseCopyDest;
+
+typedef struct LakebaseCopyToStateData
+{
+	LakebaseCopyDest copy_dest;
+	FILE	   *copy_file;
+	StringInfo	fe_msgbuf;
+
+	int			file_encoding;
+	bool		need_transcoding;
+	bool		encoding_embeds_ascii;
+
+	Relation	rel;
+	QueryDesc  *queryDesc;
+	List	   *attnumlist;
+	char	   *filename;
+	bool		is_program;
+	copy_data_dest_cb data_dest_cb;
+
+	CopyFormatOptions opts;
+	Node	   *whereClause;
+
+	MemoryContext copycontext;
+
+	FmgrInfo   *out_functions;
+	MemoryContext rowcontext;
+	uint64		bytes_processed;
+} LakebaseCopyToStateData;
+
+static LakebaseCopyToStateData *
+lakebase_copy_to_state(CopyToState state)
+{
+	return (LakebaseCopyToStateData *) state;
+}
+
+static void
+lakebase_copy_send_data(LakebaseCopyToStateData *state,
+						const void *data, int len)
+{
+	appendBinaryStringInfo(state->fe_msgbuf, data, len);
+}
+
+static void
+lakebase_copy_send_string(LakebaseCopyToStateData *state, const char *value)
+{
+	lakebase_copy_send_data(state, value, strlen(value));
+}
+
+static void
+lakebase_copy_send_char(LakebaseCopyToStateData *state, char value)
+{
+	appendStringInfoCharMacro(state->fe_msgbuf, value);
+}
+
+#define LAKEBASE_COPY_DUMP_SO_FAR() \
+	do { \
+		if (ptr > start) \
+			lakebase_copy_send_data(state, start, ptr - start); \
+	} while (0)
+
+/* Source-derived from CopyAttributeOutText in the PG17.0-PG17.10 epoch. */
+static void
+lakebase_copy_attribute_out_text(LakebaseCopyToStateData *state,
+							 const char *string)
+{
+	const char *ptr;
+	const char *start;
+	char		c;
+	char		delimc = state->opts.delim[0];
+
+	if (state->need_transcoding)
+		ptr = pg_server_to_any(string, strlen(string), state->file_encoding);
+	else
+		ptr = string;
+
+	start = ptr;
+	if (state->encoding_embeds_ascii)
+	{
+		while ((c = *ptr) != '\0')
+		{
+			if ((unsigned char) c < (unsigned char) 0x20)
+			{
+				switch (c)
+				{
+					case '\b': c = 'b'; break;
+					case '\f': c = 'f'; break;
+					case '\n': c = 'n'; break;
+					case '\r': c = 'r'; break;
+					case '\t': c = 't'; break;
+					case '\v': c = 'v'; break;
+					default:
+						if (c == delimc)
+							break;
+						ptr++;
+						continue;
+				}
+				LAKEBASE_COPY_DUMP_SO_FAR();
+				lakebase_copy_send_char(state, '\\');
+				lakebase_copy_send_char(state, c);
+				start = ++ptr;
+			}
+			else if (c == '\\' || c == delimc)
+			{
+				LAKEBASE_COPY_DUMP_SO_FAR();
+				lakebase_copy_send_char(state, '\\');
+				start = ptr++;
+			}
+			else if (IS_HIGHBIT_SET(c))
+				ptr += pg_encoding_mblen(state->file_encoding, ptr);
+			else
+				ptr++;
+		}
+	}
+	else
+	{
+		while ((c = *ptr) != '\0')
+		{
+			if ((unsigned char) c < (unsigned char) 0x20)
+			{
+				switch (c)
+				{
+					case '\b': c = 'b'; break;
+					case '\f': c = 'f'; break;
+					case '\n': c = 'n'; break;
+					case '\r': c = 'r'; break;
+					case '\t': c = 't'; break;
+					case '\v': c = 'v'; break;
+					default:
+						if (c == delimc)
+							break;
+						ptr++;
+						continue;
+				}
+				LAKEBASE_COPY_DUMP_SO_FAR();
+				lakebase_copy_send_char(state, '\\');
+				lakebase_copy_send_char(state, c);
+				start = ++ptr;
+			}
+			else if (c == '\\' || c == delimc)
+			{
+				LAKEBASE_COPY_DUMP_SO_FAR();
+				lakebase_copy_send_char(state, '\\');
+				start = ptr++;
+			}
+			else
+				ptr++;
+		}
+	}
+	LAKEBASE_COPY_DUMP_SO_FAR();
+}
+
+/* Source-derived from CopyAttributeOutCSV in the PG17.0-PG17.10 epoch. */
+static void
+lakebase_copy_attribute_out_csv(LakebaseCopyToStateData *state,
+							const char *string, bool use_quote)
+{
+	const char *ptr;
+	const char *start;
+	char		c;
+	char		delimc = state->opts.delim[0];
+	char		quotec = state->opts.quote[0];
+	char		escapec = state->opts.escape[0];
+	bool		single_attr = (list_length(state->attnumlist) == 1);
+
+	if (!use_quote && strcmp(string, state->opts.null_print) == 0)
+		use_quote = true;
+
+	if (state->need_transcoding)
+		ptr = pg_server_to_any(string, strlen(string), state->file_encoding);
+	else
+		ptr = string;
+
+	if (!use_quote)
+	{
+		if (single_attr && strcmp(ptr, "\\.") == 0)
+			use_quote = true;
+		else
+		{
+			const char *tptr = ptr;
+
+			while ((c = *tptr) != '\0')
+			{
+				if (c == delimc || c == quotec || c == '\n' || c == '\r')
+				{
+					use_quote = true;
+					break;
+				}
+				if (IS_HIGHBIT_SET(c) && state->encoding_embeds_ascii)
+					tptr += pg_encoding_mblen(state->file_encoding, tptr);
+				else
+					tptr++;
+			}
+		}
+	}
+
+	if (!use_quote)
+	{
+		lakebase_copy_send_string(state, ptr);
+		return;
+	}
+
+	lakebase_copy_send_char(state, quotec);
+	start = ptr;
+	while ((c = *ptr) != '\0')
+	{
+		if (c == quotec || c == escapec)
+		{
+			LAKEBASE_COPY_DUMP_SO_FAR();
+			lakebase_copy_send_char(state, escapec);
+			start = ptr;
+		}
+		if (IS_HIGHBIT_SET(c) && state->encoding_embeds_ascii)
+			ptr += pg_encoding_mblen(state->file_encoding, ptr);
+		else
+			ptr++;
+	}
+	LAKEBASE_COPY_DUMP_SO_FAR();
+	lakebase_copy_send_char(state, quotec);
+}
+
+#undef LAKEBASE_COPY_DUMP_SO_FAR
+
+static ParseState *
+lakebase_copy_parser_state(void)
+{
+	ParseState *pstate = make_parsestate(NULL);
+
+	/* BeginCopyTo uses this for parser diagnostics and query planning. */
+	pstate->p_sourcetext = "";
+	return pstate;
+}
+
+static List *
+lakebase_copy_shape_attnames(Relation rel)
+{
+	TupleDesc	tupDesc = RelationGetDescr(rel);
+	List	   *attnamelist = NIL;
+	int			i;
+
+	for (i = 0; i < tupDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupDesc, i);
+
+		if (!attr->attisdropped)
+			attnamelist = lappend(
+				attnamelist,
+				makeString(pstrdup(NameStr(attr->attname))));
+	}
+	return attnamelist;
+}
+
+static RawStmt *
+lakebase_copy_shape_query(Relation rel)
+{
+	TupleDesc	tupDesc = RelationGetDescr(rel);
+	SelectStmt *select = makeNode(SelectStmt);
+	RawStmt    *raw_query = makeNode(RawStmt);
+	int			i;
+
+	for (i = 0; i < tupDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupDesc, i);
+		ResTarget  *target = makeNode(ResTarget);
+		char		*name;
+
+		if (attr->attisdropped)
+		{
+			/* Preserve physical attno positions; CopyGetAttnums skips this. */
+			name = psprintf("__lakebase_dropped_%d", i + 1);
+			target->val = (Node *) makeNullConst(INT4OID, -1, InvalidOid);
+		}
+		else
+		{
+			name = pstrdup(NameStr(attr->attname));
+			target->val = (Node *) makeNullConst(attr->atttypid,
+													 attr->atttypmod,
+													 attr->attcollation);
+		}
+		target->name = name;
+		select->targetList = lappend(select->targetList, target);
+	}
+
+	/* Header generation and encoder initialization must not read the table. */
+	select->whereClause = (Node *) makeBoolConst(false, false);
+	raw_query->stmt = (Node *) select;
+	raw_query->stmt_location = -1;
+	raw_query->stmt_len = 0;
+	return raw_query;
+}
+
+static CopyToState
+lakebase_begin_copy_shape(Relation rel,
+							 List *options)
+{
+	ParseState *pstate = lakebase_copy_parser_state();
+	RawStmt    *raw_query = lakebase_copy_shape_query(rel);
+	List	   *attnamelist = lakebase_copy_shape_attnames(rel);
+
+	return BeginCopyTo(pstate,
+						 NULL,
+						 raw_query,
+						 InvalidOid,
+						 NULL,
+						 false,
+						 NULL,
+						 attnamelist,
+						 options);
+}
+
+CopyToState
+lakebase_begin_copy_row_encoder(Relation rel,
+								List *options)
+{
+	CopyToState state = lakebase_begin_copy_shape(rel, options);
+
+	PG_TRY();
+	{
+		LakebaseCopyToStateData *copy_state = lakebase_copy_to_state(state);
+		TupleDesc	tupdesc = copy_state->queryDesc->tupDesc;
+		ListCell   *cur;
+		int			num_phys_attrs = tupdesc->natts;
+
+		if (copy_state->opts.binary)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("binary COPY row encoding is not supported")));
+
+		copy_state->opts.null_print_client = copy_state->opts.null_print;
+		copy_state->fe_msgbuf = makeStringInfo();
+		copy_state->out_functions = (FmgrInfo *) palloc(
+			num_phys_attrs * sizeof(FmgrInfo));
+		foreach(cur, copy_state->attnumlist)
+		{
+			int		attnum = lfirst_int(cur);
+			Oid		out_func_oid;
+			bool	isvarlena;
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+			getTypeOutputInfo(attr->atttypid, &out_func_oid, &isvarlena);
+			fmgr_info(out_func_oid, &copy_state->out_functions[attnum - 1]);
+		}
+		copy_state->rowcontext = AllocSetContextCreate(CurrentMemoryContext,
+			"COPY TO", ALLOCSET_DEFAULT_SIZES);
+		if (copy_state->need_transcoding)
+			copy_state->opts.null_print_client = pg_server_to_any(
+				copy_state->opts.null_print, copy_state->opts.null_print_len,
+				copy_state->file_encoding);
+	}
+	PG_CATCH();
+	{
+		lakebase_end_copy_row_encoder(state);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	return state;
+}
+
+void
+lakebase_encode_copy_header(CopyToState state, const char **data, int *len)
+{
+	LakebaseCopyToStateData *copy_state = lakebase_copy_to_state(state);
+	TupleDesc	tupdesc = copy_state->queryDesc->tupDesc;
+	ListCell   *cur;
+	bool		need_delim = false;
+
+	resetStringInfo(copy_state->fe_msgbuf);
+	foreach(cur, copy_state->attnumlist)
+	{
+		int		attnum = lfirst_int(cur);
+		char	   *name = NameStr(TupleDescAttr(tupdesc, attnum - 1)->attname);
+
+		if (need_delim)
+			lakebase_copy_send_char(copy_state, copy_state->opts.delim[0]);
+		need_delim = true;
+		if (copy_state->opts.csv_mode)
+			lakebase_copy_attribute_out_csv(copy_state, name, false);
+		else
+			lakebase_copy_attribute_out_text(copy_state, name);
+	}
+	*data = copy_state->fe_msgbuf->data;
+	*len = copy_state->fe_msgbuf->len;
+}
+
+void
+lakebase_encode_copy_row(CopyToState state, TupleTableSlot *slot,
+						 const char **data, int *len)
+{
+	LakebaseCopyToStateData *copy_state = lakebase_copy_to_state(state);
+	FmgrInfo   *out_functions = copy_state->out_functions;
+	MemoryContext oldcontext;
+	ListCell   *cur;
+	bool		need_delim = false;
+	char	   *string;
+
+	resetStringInfo(copy_state->fe_msgbuf);
+	MemoryContextReset(copy_state->rowcontext);
+	oldcontext = MemoryContextSwitchTo(copy_state->rowcontext);
+	PG_TRY();
+	{
+		slot_getallattrs(slot);
+		foreach(cur, copy_state->attnumlist)
+		{
+			int		attnum = lfirst_int(cur);
+			Datum	value = slot->tts_values[attnum - 1];
+			bool	isnull = slot->tts_isnull[attnum - 1];
+
+			if (need_delim)
+				lakebase_copy_send_char(copy_state, copy_state->opts.delim[0]);
+			need_delim = true;
+			if (isnull)
+				lakebase_copy_send_string(copy_state,
+					copy_state->opts.null_print_client);
+			else
+			{
+				string = OutputFunctionCall(&out_functions[attnum - 1], value);
+				if (copy_state->opts.csv_mode)
+					lakebase_copy_attribute_out_csv(copy_state, string,
+						copy_state->opts.force_quote_flags[attnum - 1]);
+				else
+					lakebase_copy_attribute_out_text(copy_state, string);
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcontext);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(oldcontext);
+	*data = copy_state->fe_msgbuf->data;
+	*len = copy_state->fe_msgbuf->len;
+}
+
+void
+lakebase_end_copy_row_encoder(CopyToState state)
+{
+	if (state == NULL)
+		return;
+	if (lakebase_copy_to_state(state)->rowcontext != NULL)
+		MemoryContextDelete(lakebase_copy_to_state(state)->rowcontext);
+	EndCopyTo(state);
 }
 
 CopyToState
@@ -379,25 +877,10 @@ lakebase_copy_get_attnums(Relation rel, List *attnamelist)
 	return CopyGetAttnums(RelationGetDescr(rel), rel, attnamelist);
 }
 
-/* PG17-private CopyToStateData prefix, reviewed with this major's copyto.c. */
-typedef struct LakebaseCopyToStatePrefix
-{
-	/* CopyDest is private to copyto.c; PG17 declares it as a C enum. */
-	int			copy_dest;
-	FILE	   *copy_file;
-	StringInfo	fe_msgbuf;
-	int			file_encoding;
-	bool		need_transcoding;
-	bool		encoding_embeds_ascii;
-	Relation	rel;
-	QueryDesc  *queryDesc;
-	List	   *attnumlist;
-} LakebaseCopyToStatePrefix;
-
 TupleDesc
 lakebase_copy_to_tuple_desc(CopyToState state)
 {
-	LakebaseCopyToStatePrefix *copy = (LakebaseCopyToStatePrefix *) state;
+	LakebaseCopyToStateData *copy = lakebase_copy_to_state(state);
 
 	Assert(copy != NULL);
 	if (copy->rel != NULL)
@@ -409,7 +892,7 @@ lakebase_copy_to_tuple_desc(CopyToState state)
 List *
 lakebase_copy_to_attnums(CopyToState state)
 {
-	LakebaseCopyToStatePrefix *copy = (LakebaseCopyToStatePrefix *) state;
+	LakebaseCopyToStateData *copy = lakebase_copy_to_state(state);
 
 	Assert(copy != NULL);
 	return copy->attnumlist;

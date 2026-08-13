@@ -26,20 +26,31 @@ preparation that PostgreSQL performs before calling the internal COPY entry
 points, then exposes the PG17 `BeginCopy*`, `CopyFrom`/`DoCopyTo`, and
 `EndCopy*` calls through a small FFI surface.
 
-The shared `lakebase_pg_compat.h` gate rejects every major except PostgreSQL
-17. PG17 minor releases are accepted by the build. The COPY preparation has
-local semantic epochs: PG17.0-17.6 has no generated-column validation,
-PG17.7-17.9 adds that validation, and PG17.10 adds the system-attribute guard
-that the bridge also applies to the earlier validation epoch. The private COPY
-contract must be re-audited before changing the provenance baseline or adding
-another major.
+The relation-bound Text/CSV Foreign Table row encoder additionally mirrors the
+private `CopyToStateData` layout and the text/CSV part of `CopyOneRowTo` from
+`copyto.c`. It creates the COPY output state with a typed, zero-row query and
+uses the same output functions and escaping as PostgreSQL, while returning the
+completed row buffer to Rust without invoking a callback per row. This private
+layout and serializer contract was compared across `REL_17_0` through
+`REL_17_10`. It is unchanged throughout that epoch, so the row encoder has no
+minor-version branch.
 
-Before adopting a new PostgreSQL baseline:
+The shared `lakebase_pg_compat.h` gate rejects every major except PostgreSQL
+17. The public COPY preparation has local semantic epochs: PG17.0-17.6 has no
+generated-column validation, PG17.7-17.9 adds that validation, and PG17.10
+adds the system-attribute guard that the bridge also applies to the earlier
+validation epoch. The private row-encoder contract restricts the current C
+build to the PG17 major line. A future PG17 minor that changes its mirrored
+layout or serializer must add a local `PG_VERSION_NUM` branch here; a new major
+remains rejected by the shared compatibility gate.
+
+Before adopting a new PostgreSQL baseline or PG17 minor release:
 
 1. Compare the internal declarations in `commands/copy.h`.
 2. Compare `DoCopy` preparation ordering and relation/permission handling in
    `commands/copy.c`, including each supported PG17 minor epoch.
 3. Compare the state lifecycle and callback contracts in `copyfrom.c` and
    `copyto.c`.
-4. Reconcile the Rust FFI declarations and run the complete COPY regression
-   matrix before enabling that PostgreSQL major.
+4. Add a local `PG_VERSION_NUM` branch only when a COPY bridge contract differs.
+5. Reconcile the Rust FFI declarations and run the complete COPY regression
+   matrix before enabling that PostgreSQL version.

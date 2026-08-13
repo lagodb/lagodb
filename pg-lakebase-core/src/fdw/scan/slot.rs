@@ -284,6 +284,33 @@ impl<'a> ScanSlotWriter<'a> {
         self.datum_output_started = true;
     }
 
+    /// Prepare the relation-shaped values/nulls arrays for PostgreSQL's
+    /// `NextCopyFrom` decoder. The decoder fills every parser-visible
+    /// attribute directly, so it does not use the provider output-column map.
+    ///
+    /// # Safety
+    ///
+    /// The caller must use the returned arrays only for the current validated
+    /// scan slot and must call [`Self::store_copy_input`] exactly once when
+    /// PostgreSQL reports a row.
+    pub(crate) unsafe fn prepare_copy_input(
+        &mut self,
+    ) -> (*mut pg_sys::Datum, *mut bool) {
+        unsafe { self.begin_datum_output() };
+        (self.values, self.nulls)
+    }
+
+    /// Publish a row filled by PostgreSQL's `NextCopyFrom` parser.
+    ///
+    /// # Safety
+    ///
+    /// [`Self::prepare_copy_input`] must have been called for this row and the
+    /// arrays must contain a complete relation-shaped COPY result.
+    pub(crate) unsafe fn store_copy_input(&mut self) {
+        unsafe { pg_sys::ExecStoreVirtualTuple(self.slot) };
+        self.stored = true;
+    }
+
     /// Write the item-pointer identity carried by a modify-purpose scan row.
     /// The value is committed to the physical tuple when the row is completed,
     /// after PostgreSQL clears the slot for the new row.

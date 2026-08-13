@@ -17,7 +17,7 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 use crate::gucs::WriteConfig;
 use crate::storage::{
-    ObjectInput, ObjectOutput, ObjectUri, StorageTarget,
+    ObjectInput, ObjectLocationKind, ObjectOutput, ObjectUri, ResolvedStorageLocation,
 };
 
 use super::parquet::{ParquetCopyDestination, ParquetCopySource};
@@ -26,6 +26,7 @@ use super::{
 };
 
 pub(super) use canonical_csv::{CanonicalCsv, CanonicalCsvRow};
+pub(super) use stream::StreamEncoderFactory;
 
 /// COPY source constructed by one resolved format.
 pub(crate) trait FormatCopySource {
@@ -131,19 +132,19 @@ impl ResolvedCopyFormat {
 
     pub(crate) fn open_source(
         self,
-        target: &StorageTarget,
+        location: &ResolvedStorageLocation,
         column_layout: impl FnOnce() -> Result<CopyColumnLayout, CopyError>,
     ) -> Result<Box<dyn FormatCopySource>, CopyError> {
         match self {
             Self::Text(compression, _) => {
-                Self::open_stream_source(target, compression, FormatKind::Text)
+                Self::open_stream_source(location, compression, FormatKind::Text)
             }
             Self::Csv(compression, _) => {
-                Self::open_stream_source(target, compression, FormatKind::Csv)
+                Self::open_stream_source(location, compression, FormatKind::Csv)
             }
             Self::ParquetRead => {
                 let manager = StorageManager::from_pg_gucs()?;
-                let files = ObjectInput::resolve(target, &manager, FormatKind::Parquet)?.open();
+                let files = ObjectInput::resolve(location, &manager, FormatKind::Parquet)?.open();
                 Ok(Box::new(ParquetCopySource::new(files, &column_layout()?)?))
             }
             Self::Json(_) | Self::AvroRead | Self::AvroWrite(_) | Self::ParquetWrite(_) => {
@@ -154,12 +155,12 @@ impl ResolvedCopyFormat {
 
     pub(crate) fn open_destination(
         self,
-        target: &StorageTarget,
+        location: &ResolvedStorageLocation,
     ) -> Result<Box<dyn FormatCopyDestination>, CopyError> {
         match self {
             Self::Text(compression, header) => {
                 Self::open_stream_destination(
-                    target,
+                    location,
                     compression,
                     FormatKind::Text,
                     header,
@@ -167,7 +168,7 @@ impl ResolvedCopyFormat {
             }
             Self::Csv(compression, header) => {
                 Self::open_stream_destination(
-                    target,
+                    location,
                     compression,
                     FormatKind::Csv,
                     header,
@@ -176,7 +177,7 @@ impl ResolvedCopyFormat {
             Self::ParquetWrite(compression) => {
                 let manager = StorageManager::from_pg_gucs()?;
                 let output = ObjectOutput::resolve(
-                    target,
+                    location,
                     &manager,
                     FormatKind::Parquet,
                     || WriteConfig::from_guc().target_file_bytes(),
@@ -190,11 +191,16 @@ impl ResolvedCopyFormat {
     }
 
     fn open_stream_source(
-        target: &StorageTarget,
+        location: &ResolvedStorageLocation,
         compression: StreamCompression,
         format: FormatKind,
     ) -> Result<Box<dyn FormatCopySource>, CopyError> {
-        let object = target.acquire_object_access_from_pg_gucs()?;
+        if ObjectLocationKind::classify(location.object_key(), format)?
+            != ObjectLocationKind::Exact
+        {
+            return Err(ConnectorError::copy_from_exact_only(format).into());
+        }
+        let object = location.acquire_object_access_from_pg_gucs()?;
         let source = stream::ObjectCopySource::new(
             object.open().map_err(CopyError::storage)?,
             compression,
@@ -206,13 +212,13 @@ impl ResolvedCopyFormat {
     }
 
     fn open_stream_destination(
-        target: &StorageTarget,
+        location: &ResolvedStorageLocation,
         compression: StreamCompression,
         format: FormatKind,
         header: bool,
     ) -> Result<Box<dyn FormatCopyDestination>, CopyError> {
         let manager = StorageManager::from_pg_gucs()?;
-        let output = ObjectOutput::resolve(target, &manager, format, || {
+        let output = ObjectOutput::resolve(location, &manager, format, || {
             WriteConfig::from_guc().target_file_bytes()
         })?;
         let destination =

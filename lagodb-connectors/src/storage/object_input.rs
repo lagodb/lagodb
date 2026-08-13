@@ -9,7 +9,7 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 use crate::format::FormatKind;
 
-use super::{ObjectLocationKind, StorageTarget};
+use super::{ObjectLocationKind, ResolvedStorageLocation};
 
 const LIST_PAGE_SIZE: u32 = 1_024;
 
@@ -25,21 +25,21 @@ impl ObjectInput {
     /// Resolve the declared location once and retain stable prefix membership
     /// for rescans.
     pub(crate) fn resolve(
-        target: &StorageTarget,
+        location: &ResolvedStorageLocation,
         manager: &StorageManager,
         format: FormatKind,
     ) -> Result<Self, ConnectorError> {
-        match ObjectLocationKind::classify(target.object_key(), format)? {
+        match ObjectLocationKind::classify(location.object_key(), format)? {
             ObjectLocationKind::Exact => {
-                let exact = target.acquire_object_access(manager)?;
+                let exact = location.acquire_object_access(manager)?;
                 exact.head()?;
                 return Ok(Self::Exact(exact));
             }
             ObjectLocationKind::Prefix => {}
         }
 
-        let prefix = target.normalized_prefix();
-        let access = target.acquire_prefix_access(manager, &prefix)?;
+        let prefix = location.normalized_prefix();
+        let access = location.acquire_prefix_access(manager, &prefix)?;
         let mut keys = Vec::new();
         // Prefix scans intentionally materialize and sort one complete LIST.
         // Object stores do not provide a snapshot across independent LISTs;

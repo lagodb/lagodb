@@ -55,14 +55,14 @@ impl Read for ObjectReader {
     }
 }
 
-struct StreamEncoderFactory {
+pub(crate) struct StreamEncoderFactory {
     compression: StreamCompression,
     suffix: ObjectFileSuffix,
     header: Option<Box<[u8]>>,
 }
 
 impl StreamEncoderFactory {
-    fn new(format: FormatKind, compression: StreamCompression) -> Self {
+    pub(crate) fn new(format: FormatKind, compression: StreamCompression) -> Self {
         let suffix = match (format, compression) {
             (FormatKind::Text, StreamCompression::None) => "text",
             (FormatKind::Text, StreamCompression::Gzip) => "text.gz",
@@ -84,8 +84,8 @@ impl StreamEncoderFactory {
         }
     }
 
-    fn set_header(&mut self, header: &[u8]) {
-        self.header = Some(header.into());
+    pub(crate) fn set_header(&mut self, header: Box<[u8]>) {
+        self.header = Some(header);
     }
 }
 
@@ -193,7 +193,7 @@ impl CopyDataDestination for ObjectCopyDestination {
         ) else {
             unreachable!("the transition state never escapes header handling")
         };
-        factory.set_header(data);
+        factory.set_header(data.into());
         self.state = StreamDestinationState::Writing(ObjectSetWriter::new(
             output, factory,
         ));
