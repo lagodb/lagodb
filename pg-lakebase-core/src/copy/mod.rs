@@ -12,6 +12,7 @@ mod error;
 mod io;
 mod layout;
 mod pg;
+mod raw_fields;
 mod row;
 mod scan;
 
@@ -25,4 +26,7 @@ pub use error::CopyError;
 pub use io::{CopyDataDestination, CopyDataSource};
 pub use layout::{CopyColumn, CopyColumnLayout};
 pub use row::CopyRowEncoder;
+pub use raw_fields::{
+    CopyRawFieldReader, CopyRawFields, CopyRawRecord, CopyTextInputValidator,
+};
 pub use scan::{CopyDocumentSource, CopyFromScan};

@@ -87,4 +87,22 @@ List *lakebase_copy_get_attnums(Relation rel, List *attnamelist);
 TupleDesc lakebase_copy_to_tuple_desc(CopyToState state);
 List *lakebase_copy_to_attnums(CopyToState state);
 
+typedef struct LakebaseRawFieldReader LakebaseRawFieldReader;
+typedef struct LakebaseTextInputValidator LakebaseTextInputValidator;
+
+LakebaseRawFieldReader *lakebase_begin_raw_field_reader(
+    copy_data_source_cb data_source_cb,
+    List *options);
+bool lakebase_next_raw_fields(
+    LakebaseRawFieldReader *reader,
+    char ***fields,
+    size_t *field_count);
+void lakebase_end_raw_field_reader(LakebaseRawFieldReader *reader);
+
+LakebaseTextInputValidator *lakebase_begin_text_input_validator(Oid type_oid);
+bool lakebase_text_input_accepts(
+    LakebaseTextInputValidator *validator,
+    const char *value);
+void lakebase_end_text_input_validator(LakebaseTextInputValidator *validator);
+
 #endif

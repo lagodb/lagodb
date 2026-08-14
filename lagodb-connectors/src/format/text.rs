@@ -6,16 +6,18 @@ use pg_lakebase_core::fdw::{
     ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyRelationContext,
 };
 use pg_lakebase_core::handles::RelationHandle;
+use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::Lakebase;
 
 use super::delimited::{DelimitedOptions, DelimitedOptionsBuilder};
+use super::delimited_schema::DelimitedSchemaReader;
 use super::{
     FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
-    FormatScanState, FormatWritePrivate, FormatWriteState, FormatWriter,
-    StreamCompression,
+    FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
+    FormatWriter, InferredSchema, StreamCompression,
 };
 use crate::storage::ObjectOutput;
 
@@ -91,6 +93,20 @@ impl TextFormat {
 impl FormatObject for TextFormat {
     fn kind(&self) -> FormatKind {
         FormatKind::Text
+    }
+}
+
+impl FormatSchemaReader for TextFormat {
+    fn infer_schema(
+        &self,
+        file: &mut StorageFile,
+    ) -> Result<InferredSchema, ConnectorError> {
+        DelimitedSchemaReader::new(
+            FormatKind::Text,
+            false,
+            self.options.postgres_output_options()?,
+        )
+        .infer(file, self.compression)
     }
 }
 

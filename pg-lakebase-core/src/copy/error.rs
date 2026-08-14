@@ -36,6 +36,12 @@ pub enum CopyError {
     #[error("COPY row encoder was used after finish")]
     EncoderFinished,
 
+    #[error("COPY raw-field reader was used after finish")]
+    RawFieldReaderFinished,
+
+    #[error("COPY text-input validator was used after finish")]
+    TextInputValidatorFinished,
+
     #[error(transparent)]
     Postgres(#[from] PgReportError),
 }
@@ -82,7 +88,9 @@ impl SqlStateError for CopyError {
             Self::InvalidByteCount { .. }
             | Self::MissingCallbackState
             | Self::InvalidColumnLayout(_)
-            | Self::EncoderFinished => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            | Self::EncoderFinished
+            | Self::RawFieldReaderFinished
+            | Self::TextInputValidatorFinished => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::Postgres(error) => error.sql_error_code(),
         }
     }

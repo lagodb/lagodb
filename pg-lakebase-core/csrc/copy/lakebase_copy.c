@@ -4,6 +4,7 @@
 
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/tupdesc.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
@@ -12,6 +13,7 @@
 #include "mb/pg_wchar.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
+#include "nodes/miscnodes.h"
 #include "optimizer/optimizer.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
@@ -380,6 +382,176 @@ void
 lakebase_end_copy_from(CopyFromState state)
 {
 	EndCopyFrom(state);
+}
+
+struct LakebaseRawFieldReader
+{
+	MemoryContext context;
+	CopyFromState state;
+};
+
+struct LakebaseTextInputValidator
+{
+	MemoryContext context;
+	MemoryContext call_context;
+	FmgrInfo input_function;
+	Oid			typioparam;
+};
+
+/*
+ * BeginCopyFrom requires a Relation for parser metadata even when callers use
+ * only NextCopyFromRawFields. This descriptor is intentionally one text
+ * column: the raw-field parser grows its internal field array for wider rows.
+ * It lives below the reader context and is never exposed to executor code.
+ */
+static Relation
+lakebase_raw_fields_relation(void)
+{
+	Relation	relation = palloc0(sizeof(RelationData));
+	TupleDesc	descriptor = CreateTemplateTupleDesc(1);
+
+	TupleDescInitEntry(descriptor, 1, "column1", TEXTOID, -1, 0);
+	relation->rd_att = descriptor;
+	relation->rd_rel = palloc0(sizeof(FormData_pg_class));
+	namestrcpy(&relation->rd_rel->relname, "lakebase_schema_inference");
+	return relation;
+}
+
+LakebaseRawFieldReader *
+lakebase_begin_raw_field_reader(copy_data_source_cb data_source_cb, List *options)
+{
+	LakebaseRawFieldReader *reader;
+	MemoryContext context;
+	MemoryContext oldcontext;
+
+	context = AllocSetContextCreate(CurrentMemoryContext,
+								  "Lakebase raw COPY fields",
+								  ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(context);
+	PG_TRY();
+	{
+		reader = palloc0(sizeof(LakebaseRawFieldReader));
+		reader->context = context;
+		reader->state = BeginCopyFrom(NULL, lakebase_raw_fields_relation(),
+									  NULL, NULL, false, data_source_cb,
+									  NIL, options);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcontext);
+		MemoryContextDelete(context);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(oldcontext);
+	return reader;
+}
+
+bool
+lakebase_next_raw_fields(LakebaseRawFieldReader *reader, char ***fields,
+						size_t *field_count)
+{
+	ErrorContextCallback errcallback;
+	int			nfields;
+	bool		found;
+
+	errcallback.callback = CopyFromErrorCallback;
+	errcallback.arg = reader->state;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+	PG_TRY();
+	{
+		found = NextCopyFromRawFields(reader->state, fields, &nfields);
+	}
+	PG_CATCH();
+	{
+		error_context_stack = errcallback.previous;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	error_context_stack = errcallback.previous;
+	if (!found)
+		return false;
+
+	/* PostgreSQL's public raw-field API reports a nonnegative field count. */
+	Assert(nfields >= 0);
+	*field_count = (size_t) nfields;
+	return true;
+}
+
+void
+lakebase_end_raw_field_reader(LakebaseRawFieldReader *reader)
+{
+	EndCopyFrom(reader->state);
+	MemoryContextDelete(reader->context);
+}
+
+LakebaseTextInputValidator *
+lakebase_begin_text_input_validator(Oid type_oid)
+{
+	LakebaseTextInputValidator *validator;
+	MemoryContext context;
+	MemoryContext oldcontext;
+	Oid			input_function;
+
+	context = AllocSetContextCreate(CurrentMemoryContext,
+								  "Lakebase text input validator",
+								  ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(context);
+	PG_TRY();
+	{
+		validator = palloc0(sizeof(LakebaseTextInputValidator));
+		validator->context = context;
+		getTypeInputInfo(type_oid, &input_function, &validator->typioparam);
+		fmgr_info_cxt(input_function, &validator->input_function, context);
+		validator->call_context = AllocSetContextCreate(context,
+													"Lakebase text input validation",
+													ALLOCSET_DEFAULT_SIZES);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcontext);
+		MemoryContextDelete(context);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(oldcontext);
+	return validator;
+}
+
+bool
+lakebase_text_input_accepts(LakebaseTextInputValidator *validator,
+							const char *value)
+{
+	ErrorSaveContext escontext = {0};
+	Datum		result;
+	MemoryContext oldcontext;
+	bool		accepted;
+
+	MemoryContextReset(validator->call_context);
+	oldcontext = MemoryContextSwitchTo(validator->call_context);
+	escontext.type = T_ErrorSaveContext;
+	PG_TRY();
+	{
+		/* Input functions receive mutable text, so isolate the parser's field buffer. */
+		accepted = InputFunctionCallSafe(&validator->input_function,
+											pstrdup(value), validator->typioparam, -1,
+											(Node *) &escontext, &result);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcontext);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(oldcontext);
+	return accepted;
+}
+
+void
+lakebase_end_text_input_validator(LakebaseTextInputValidator *validator)
+{
+	MemoryContextDelete(validator->context);
 }
 
 /*

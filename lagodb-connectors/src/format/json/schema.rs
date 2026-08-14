@@ -14,12 +14,8 @@ use crate::error::ConnectorError;
 use super::stream::JsonLineReader;
 use crate::format::{
     FormatKind, InferredColumn, InferredSchema, PostgresType,
+    SCHEMA_SAMPLE_RECORDS,
 };
-
-// JSON carries no embedded relation schema. DDL inference samples the first
-// resolved object only, so cap the number of non-empty records consumed from it.
-// Foreign scans still parse and validate every record they read.
-const SCHEMA_SAMPLE_RECORDS: usize = 100;
 
 #[derive(Default)]
 pub(super) struct JsonSchemaAccumulator {

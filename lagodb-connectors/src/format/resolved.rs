@@ -213,15 +213,11 @@ impl ResolvedForeignFormat {
         file: &mut StorageFile,
     ) -> Result<InferredSchema, ConnectorError> {
         match self {
+            Self::Text(format) => format.infer_schema(file),
+            Self::Csv(format) => format.infer_schema(file),
             Self::Json(format) => format.infer_schema(file),
             Self::Avro(format) => format.infer_schema(file),
             Self::Parquet(format) => format.infer_schema(file),
-            Self::Text(_) | Self::Csv(_) => {
-                Err(ConnectorError::schema_inference_unsupported(
-                    self.kind(),
-                    "the format has no embedded schema; specify foreign-table columns explicitly",
-                ))
-            }
         }
     }
 }

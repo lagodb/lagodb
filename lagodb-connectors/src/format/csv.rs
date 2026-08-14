@@ -7,15 +7,17 @@ use pg_lakebase_core::fdw::{
 };
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::storage::foreign::ForeignOptionView;
+use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
 use super::delimited::{DelimitedOptions, DelimitedOptionsBuilder};
+use super::delimited_schema::DelimitedSchemaReader;
 use super::{
     FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
-    FormatScanState, FormatWritePrivate, FormatWriteState, FormatWriter,
-    StreamCompression,
+    FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
+    FormatWriter, InferredSchema, StreamCompression,
 };
 use crate::fdw::Lakebase;
 use crate::storage::ObjectOutput;
@@ -97,6 +99,13 @@ impl CsvOptions {
             FormatKind::Csv,
         )?;
         self.append_postgres_quote_options(options)
+    }
+
+    pub(super) fn postgres_schema_options(
+        &self,
+    ) -> Result<*mut pg_sys::List, ConnectorError> {
+        let options = self.postgres_output_options()?;
+        DelimitedOptions::append_string_option(options, "header", "false")
     }
 
     pub(super) const fn header_enabled(&self) -> bool {
@@ -248,6 +257,20 @@ impl CsvFormat {
 impl FormatObject for CsvFormat {
     fn kind(&self) -> FormatKind {
         FormatKind::Csv
+    }
+}
+
+impl FormatSchemaReader for CsvFormat {
+    fn infer_schema(
+        &self,
+        file: &mut StorageFile,
+    ) -> Result<InferredSchema, ConnectorError> {
+        DelimitedSchemaReader::new(
+            FormatKind::Csv,
+            self.options.header_enabled(),
+            self.options.postgres_schema_options()?,
+        )
+        .infer(file, self.compression)
     }
 }
 

@@ -42,12 +42,6 @@ pub(crate) enum ConnectorError {
     #[error("foreign table format cannot be inferred; specify a format option")]
     FormatRequired,
 
-    #[error("cannot infer a foreign-table schema for {format}: {reason}")]
-    SchemaInferenceUnsupported {
-        format: FormatKind,
-        reason: &'static str,
-    },
-
     #[error("invalid {format} object schema: {reason}")]
     InvalidObjectSchema {
         format: FormatKind,
@@ -232,14 +226,6 @@ impl ConnectorError {
     }
 
     #[inline]
-    pub(crate) const fn schema_inference_unsupported(
-        format: FormatKind,
-        reason: &'static str,
-    ) -> Self {
-        Self::SchemaInferenceUnsupported { format, reason }
-    }
-
-    #[inline]
     pub(crate) fn invalid_object_schema(
         format: FormatKind,
         reason: impl Into<Box<str>>,
@@ -394,8 +380,7 @@ impl SqlStateError for ConnectorError {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
             Self::FormatRequired => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            Self::SchemaInferenceUnsupported { .. }
-            | Self::UnsupportedForeignTableDefinition { .. } => {
+            Self::UnsupportedForeignTableDefinition { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::InvalidObjectSchema { .. }

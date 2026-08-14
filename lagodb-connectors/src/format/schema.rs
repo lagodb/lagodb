@@ -1,15 +1,19 @@
 //! Format-neutral schema description for DDL and COPY cold paths.
 
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::io::{self, Read};
 
 use arrow_schema::{DataType, Schema, TimeUnit};
+use pg_lakebase_core::copy::{CopyDataSource, CopyError};
 use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
-use super::{FormatKind, FormatObject};
+use super::{FormatKind, FormatObject, StreamCompression, StreamDecoder};
+
+pub(crate) const SCHEMA_SAMPLE_RECORDS: usize = 100;
 
 pub(crate) trait FormatSchemaReader: FormatObject {
     fn infer_schema(
@@ -34,6 +38,35 @@ impl Read for StorageFileReader<'_> {
     }
 }
 
+/// A compressed object source for one cold-path PostgreSQL COPY parser.
+pub(crate) struct StorageFileCopySource<'a> {
+    decoder: StreamDecoder<StorageFileReader<'a>>,
+}
+
+impl<'a> StorageFileCopySource<'a> {
+    pub(crate) fn new(
+        file: &'a mut StorageFile,
+        compression: StreamCompression,
+    ) -> Result<Self, ConnectorError> {
+        let decoder = StreamDecoder::new(StorageFileReader::new(file), compression)
+            .map_err(ConnectorError::copy_stream_io)?;
+        Ok(Self { decoder })
+    }
+}
+
+impl CopyDataSource for StorageFileCopySource<'_> {
+    fn read(
+        &mut self,
+        output: &mut [u8],
+        min_read: usize,
+    ) -> Result<usize, CopyError> {
+        self.decoder
+            .read_at_least(output, min_read)
+            .map_err(ConnectorError::copy_stream_io)
+            .map_err(CopyError::from)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct InferredSchema {
     columns: Vec<InferredColumn>,
@@ -50,6 +83,7 @@ impl InferredSchema {
                 "the object does not describe any columns",
             ));
         }
+        Self::validate_column_names(&columns)?;
         Ok(Self { columns })
     }
 
@@ -69,40 +103,15 @@ impl InferredSchema {
                 Ok(InferredColumn::new(field.name(), postgres_type))
             })
             .collect::<Result<Vec<_>, ConnectorError>>()?;
-        if columns.is_empty() {
-            return Err(ConnectorError::invalid_object_schema(
-                format,
-                "the object schema has no fields",
-            ));
-        }
-        Ok(Self { columns })
+        Self::new(format, columns)
     }
 
     pub(crate) fn into_pg_list(self) -> Result<*mut pg_sys::List, ConnectorError> {
         let mut columns = std::ptr::null_mut();
         for column in self.columns {
-            if column.name.is_empty() {
-                return Err(ConnectorError::invalid_object_schema(
-                    column.format,
-                    "a column name is empty",
-                ));
-            }
-            if column.name.len() >= pg_sys::NAMEDATALEN as usize {
-                return Err(ConnectorError::invalid_object_schema(
-                    column.format,
-                    format!(
-                        "column name {:?} exceeds PostgreSQL's {}-byte identifier limit",
-                        column.name,
-                        pg_sys::NAMEDATALEN - 1,
-                    ),
-                ));
-            }
-            let name = CString::new(column.name.as_ref()).map_err(|_| {
-                ConnectorError::invalid_object_schema(
-                    column.format,
-                    "a column name contains a NUL byte",
-                )
-            })?;
+            // SAFETY: InferredSchema validates names before this PostgreSQL
+            // DDL conversion and ownership moves here unchanged.
+            let name = unsafe { CString::from_vec_unchecked(column.name.into_vec()) };
             let definition = unsafe {
                 pg_sys::makeColumnDef(
                     name.as_ptr(),
@@ -115,11 +124,47 @@ impl InferredSchema {
         }
         Ok(columns)
     }
+
+    fn validate_column_names(columns: &[InferredColumn]) -> Result<(), ConnectorError> {
+        let mut names = HashSet::with_capacity(columns.len());
+        for column in columns {
+            let name = column.name.as_ref();
+            if name.is_empty() {
+                return Err(ConnectorError::invalid_object_schema(
+                    column.format,
+                    "a column name is empty",
+                ));
+            }
+            if name.len() >= pg_sys::NAMEDATALEN as usize {
+                return Err(ConnectorError::invalid_object_schema(
+                    column.format,
+                    format!(
+                        "column name {:?} exceeds PostgreSQL's {}-byte identifier limit",
+                        String::from_utf8_lossy(name),
+                        pg_sys::NAMEDATALEN - 1,
+                    ),
+                ));
+            }
+            if name.contains(&0) {
+                return Err(ConnectorError::invalid_object_schema(
+                    column.format,
+                    "a column name contains a NUL byte",
+                ));
+            }
+            if !names.insert(name) {
+                return Err(ConnectorError::invalid_object_schema(
+                    column.format,
+                    "column names must be unique",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct InferredColumn {
-    name: Box<str>,
+    name: Box<[u8]>,
     postgres_type: PostgresType,
     format: FormatKind,
 }
@@ -127,7 +172,18 @@ pub(crate) struct InferredColumn {
 impl InferredColumn {
     pub(crate) fn new(name: &str, postgres_type: PostgresType) -> Self {
         Self {
-            name: name.into(),
+            name: name.as_bytes().into(),
+            postgres_type,
+            format: postgres_type.format,
+        }
+    }
+
+    pub(crate) fn from_bytes(
+        name: Box<[u8]>,
+        postgres_type: PostgresType,
+    ) -> Self {
+        Self {
+            name,
             postgres_type,
             format: postgres_type.format,
         }

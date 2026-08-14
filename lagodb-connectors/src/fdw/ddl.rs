@@ -101,8 +101,10 @@ impl ForeignTableDdlHook {
                 "the resolved input contains no objects",
             )
         })??;
-        let schema = format.infer_schema(&mut file)?;
-        file.close()?;
+        let schema = format.infer_schema(&mut file);
+        let close = file.close();
+        let schema = schema?;
+        close?;
         statement.base.tableElts = schema.into_pg_list()?;
         Ok(())
     }

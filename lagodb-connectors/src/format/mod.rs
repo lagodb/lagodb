@@ -9,6 +9,7 @@ mod compression;
 mod copy;
 mod csv;
 mod delimited;
+mod delimited_schema;
 mod delimited_scan;
 mod delimited_write;
 mod filter;
@@ -47,7 +48,7 @@ pub(crate) use scan::{
 };
 pub(crate) use schema::{
     FormatSchemaReader, InferredColumn, InferredSchema, PostgresType,
-    StorageFileReader,
+    StorageFileCopySource, StorageFileReader, SCHEMA_SAMPLE_RECORDS,
 };
 pub(crate) use write::{FormatWritePrivate, FormatWriteState, FormatWriter};
 

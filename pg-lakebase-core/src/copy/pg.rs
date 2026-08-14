@@ -107,6 +107,30 @@ unsafe extern "C-unwind" {
     ) -> pg_sys::TupleDesc;
 
     fn lakebase_copy_to_attnums(state: pg_sys::CopyToState) -> *mut pg_sys::List;
+
+    fn lakebase_begin_raw_field_reader(
+        data_source_cb: pg_sys::copy_data_source_cb,
+        options: *mut pg_sys::List,
+    ) -> *mut std::ffi::c_void;
+
+    fn lakebase_next_raw_fields(
+        reader: *mut std::ffi::c_void,
+        fields: *mut *mut *mut std::ffi::c_char,
+        field_count: *mut usize,
+    ) -> bool;
+
+    fn lakebase_end_raw_field_reader(reader: *mut std::ffi::c_void);
+
+    fn lakebase_begin_text_input_validator(
+        type_oid: pg_sys::Oid,
+    ) -> *mut std::ffi::c_void;
+
+    fn lakebase_text_input_accepts(
+        validator: *mut std::ffi::c_void,
+        value: *const std::ffi::c_char,
+    ) -> bool;
+
+    fn lakebase_end_text_input_validator(validator: *mut std::ffi::c_void);
 }
 
 /// PostgreSQL ERROR boundary for the local opaque-COPY bridge.
@@ -327,5 +351,65 @@ impl CopyBridge {
 
     pub(crate) unsafe fn to_attnums(state: pg_sys::CopyToState) -> *mut pg_sys::List {
         unsafe { pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to_attnums(state) }) }
+    }
+
+    pub(crate) unsafe fn begin_raw_field_reader(
+        data_source_cb: pg_sys::copy_data_source_cb,
+        options: *mut pg_sys::List,
+    ) -> *mut std::ffi::c_void {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_begin_raw_field_reader(data_source_cb, options)
+            })
+        }
+    }
+
+    pub(crate) unsafe fn next_raw_fields(
+        reader: *mut std::ffi::c_void,
+        fields: *mut *mut *mut std::ffi::c_char,
+        field_count: *mut usize,
+    ) -> bool {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_next_raw_fields(reader, fields, field_count)
+            })
+        }
+    }
+
+    pub(crate) unsafe fn end_raw_field_reader(reader: *mut std::ffi::c_void) {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_end_raw_field_reader(reader);
+            });
+        }
+    }
+
+    pub(crate) unsafe fn begin_text_input_validator(
+        type_oid: pg_sys::Oid,
+    ) -> *mut std::ffi::c_void {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_begin_text_input_validator(type_oid)
+            })
+        }
+    }
+
+    pub(crate) unsafe fn text_input_accepts(
+        validator: *mut std::ffi::c_void,
+        value: *const std::ffi::c_char,
+    ) -> bool {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_text_input_accepts(validator, value)
+            })
+        }
+    }
+
+    pub(crate) unsafe fn end_text_input_validator(validator: *mut std::ffi::c_void) {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_end_text_input_validator(validator);
+            });
+        }
     }
 }
