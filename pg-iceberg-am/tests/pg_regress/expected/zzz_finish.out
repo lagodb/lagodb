@@ -57,5 +57,5 @@ DROP SCHEMA IF EXISTS lakebase_regress;
 DROP SCHEMA
 RESET client_min_messages;
 RESET
-\! bin/object_storage_fixture teardown
+\! ../../../scripts/pg_regress/object_storage_fixture teardown
 object_storage_teardown: true

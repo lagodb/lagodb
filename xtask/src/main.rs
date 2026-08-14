@@ -4,6 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
+mod regress;
+
+use regress::{RegressionRunner, RegressionSuite, RegressionTarget};
+
 const EXTENSION_PACKAGE: &str = "pg-iceberg-am";
 const EXTENSION_NAME: &str = "pg_iceberg_am";
 const RUNTIME_PACKAGE: &str = "pg-lakebase-runtime";
@@ -11,6 +15,7 @@ const RUNTIME_NAME: &str = "pg_lakebase_runtime";
 const DELTA_AM_PACKAGE: &str = "pg-delta-am";
 const DELTA_AM_NAME: &str = "pg_delta_am";
 const CONNECTORS_PACKAGE: &str = "lagodb-connectors";
+const CONNECTORS_NAME: &str = "lagodb_connectors";
 
 fn main() -> ExitCode {
     match run() {
@@ -43,8 +48,12 @@ fn run() -> Result<(), String> {
             let pg_version = args
                 .next()
                 .ok_or_else(|| usage_error("missing PostgreSQL version"))?;
-            let tests: Vec<OsString> = args.collect();
-            run_regress_standalone(&pg_version, &tests)
+            let target = RegressionTarget::parse(args)?;
+            if target.includes_iceberg() {
+                prepare_injection_points(&pg_version)?;
+            }
+            let runner = RegressionRunner::prepare(&pg_version)?;
+            target.run(&runner)
         }
         Some(command) => Err(usage_error(&format!(
             "unknown command '{}'",
@@ -59,12 +68,14 @@ fn usage_error(message: &str) -> String {
         "{message}\n\n\
          usage:\n  \
            cargo xtask test-all <pg-version>\n  \
-           cargo xtask regress <pg-version> [test ...]\n  \
+           cargo xtask regress <pg-version> [all]\n  \
+           cargo xtask regress <pg-version> <iceberg|connectors> [test ...]\n  \
            cargo xtask isolation <pg-version> [spec ...]\n\n\
          examples:\n  \
            cargo xtask test-all pg17\n  \
            cargo xtask regress pg17\n  \
-           cargo xtask regress pg17 worker\n  \
+           cargo xtask regress pg17 iceberg worker\n  \
+           cargo xtask regress pg17 connectors copy_codecs\n  \
            cargo xtask isolation pg17\n  \
            cargo xtask isolation pg17 cas_retry_stress"
     )
@@ -149,26 +160,18 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
             .arg("--package")
             .arg(EXTENSION_PACKAGE),
     )?;
-    // Connectors are also a pgrx extension and their tests exercise error and
-    // option paths that reference backend symbols. Run them in PostgreSQL,
-    // never as a standalone host test executable.
-    install_runtime(pg_version)?;
-    run_command(
-        Command::new("cargo")
-            .arg("pgrx")
-            .arg("test")
-            .arg(pg_version)
-            .arg("--package")
-            .arg(CONNECTORS_PACKAGE),
-    )?;
+    let regression = RegressionRunner::prepare(pg_version)?;
 
     println!("\n=== Phase 4: pg-iceberg-am SQL regression (PostgreSQL) ===\n");
-    run_regress(pg_version, &[])?;
+    regression.run(RegressionSuite::Iceberg, &[])?;
 
-    println!("\n=== Phase 5: Isolation tests (PostgreSQL) ===\n");
+    println!("\n=== Phase 5: LagoDB connectors SQL regression (PostgreSQL) ===\n");
+    regression.run(RegressionSuite::Connectors, &[])?;
+
+    println!("\n=== Phase 6: Isolation tests (PostgreSQL) ===\n");
     run_isolation(pg_version, &[])?;
 
-    println!("\n=== Phase 6: pg-lakebase-storage E2E (Docker/MinIO) ===\n");
+    println!("\n=== Phase 7: pg-lakebase-storage E2E (Docker/MinIO) ===\n");
     run_command(
         Command::new("cargo")
             .arg("test")
@@ -256,55 +259,6 @@ fn prepare_injection_points(pg_version: &OsStr) -> Result<(), String> {
             .arg(format!("PG_CONFIG={}", pg_config.display()))
             .arg("install"),
     )
-}
-
-// ============================================================================
-//  regress: run pg_regress
-// ============================================================================
-
-fn run_regress_standalone(
-    pg_version: &OsStr,
-    tests: &[OsString],
-) -> Result<(), String> {
-    prepare_injection_points(pg_version)?;
-    run_regress(pg_version, tests)
-}
-
-fn run_regress(pg_version: &OsStr, tests: &[OsString]) -> Result<(), String> {
-    install_runtime(pg_version)?;
-
-    let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
-    let bindir = pg_config_value(&pg_config, "--bindir")?;
-    run_command(
-        Command::new("cargo")
-            .arg("pgrx")
-            .arg("install")
-            .arg("--package")
-            .arg(DELTA_AM_PACKAGE)
-            .arg("--features")
-            .arg("pg_test")
-            .arg("--pg-config")
-            .arg(&pg_config),
-    )?;
-
-    let mut command = Command::new("cargo");
-    command
-        .arg("pgrx")
-        .arg("regress")
-        .arg(pg_version)
-        .arg("--package")
-        .arg(EXTENSION_PACKAGE)
-        .arg("--resetdb")
-        .arg("--postgresql-conf")
-        .arg(format!("shared_preload_libraries='{RUNTIME_NAME}'"))
-        .arg("--postgresql-conf")
-        .arg(format!(
-            "pg_lakebase.provider_libraries='{EXTENSION_NAME},{DELTA_AM_NAME}'"
-        ));
-    command.args(tests);
-    prepend_path_env(&mut command, &bindir)?;
-
-    run_command(&mut command)
 }
 
 fn install_runtime(pg_version: &OsStr) -> Result<(), String> {

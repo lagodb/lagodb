@@ -1,0 +1,16 @@
+-- Release the database objects and the shared MinIO fixture.
+
+SET client_min_messages = warning;
+DROP SCHEMA IF EXISTS lagodb_connectors_regress CASCADE;
+DROP SERVER IF EXISTS lagodb_connectors_regress_provider_gcs CASCADE;
+DROP SERVER IF EXISTS lagodb_connectors_regress_scope CASCADE;
+DROP SERVER IF EXISTS lagodb_connectors_regress_missing_mapping CASCADE;
+DROP SERVER IF EXISTS lagodb_connectors_regress_s3 CASCADE;
+DROP EXTENSION IF EXISTS lagodb_connectors CASCADE;
+DROP EXTENSION IF EXISTS pg_lakebase_runtime CASCADE;
+DROP TABLE IF EXISTS lakebase_regress.object_storage_fixture;
+DROP SCHEMA IF EXISTS lakebase_regress;
+RESET client_min_messages;
+
+\setenv PGDATABASE :DBNAME
+\! ../../../scripts/pg_regress/object_storage_fixture teardown

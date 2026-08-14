@@ -17,9 +17,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg17"]
-pg16 = ["pgrx/pg16", "pg-lakebase-core/pg16", "pg-arrow-conv/pg16", "pgrx-tests/pg16"]
-pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17", "pg-arrow-conv/pg17", "pgrx-tests/pg17"]
-pg_test = []
+pg16 = ["pgrx/pg16", "pg-lakebase-core/pg16", "pg-arrow-conv/pg16"]
+pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17", "pg-arrow-conv/pg17"]
 
 [dependencies]
 apache-avro = { version = "0.21", default-features = false, features = ["snappy", "zstandard"] }
@@ -40,6 +39,3 @@ percent-encoding = "2.3"
 url = "2.5.7"
 uuid = { version = "1.16.0", features = ["v7"] }
 zstd = "0.13"
-
-[dev-dependencies]
-pgrx-tests = { workspace = true }

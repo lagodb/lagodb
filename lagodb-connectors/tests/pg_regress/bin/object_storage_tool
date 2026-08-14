@@ -1,0 +1,187 @@
+#!/usr/bin/env sh
+set -eu
+
+: "${OBJECT_STORAGE_ENDPOINT:?OBJECT_STORAGE_ENDPOINT is required}"
+: "${OBJECT_STORAGE_BUCKET:?OBJECT_STORAGE_BUCKET is required}"
+: "${OBJECT_STORAGE_REGION:?OBJECT_STORAGE_REGION is required}"
+: "${OBJECT_STORAGE_ACCESS_KEY_ID:?OBJECT_STORAGE_ACCESS_KEY_ID is required}"
+: "${OBJECT_STORAGE_SECRET_ACCESS_KEY:?OBJECT_STORAGE_SECRET_ACCESS_KEY is required}"
+
+endpoint=${OBJECT_STORAGE_ENDPOINT%/}
+bucket=$OBJECT_STORAGE_BUCKET
+region=$OBJECT_STORAGE_REGION
+access_key=$OBJECT_STORAGE_ACCESS_KEY_ID
+secret_key=$OBJECT_STORAGE_SECRET_ACCESS_KEY
+
+signed_request() {
+    method=$1
+    uri=$2
+    query=$3
+    payload_file=${4:-}
+    url="${endpoint}${uri}"
+    if [ -n "$query" ]; then
+        url="${url}?${query}"
+    fi
+
+    if [ -n "$payload_file" ]; then
+        curl -fsS -X "$method" "$url" \
+            --aws-sigv4 "aws:amz:${region}:s3" \
+            --user "${access_key}:${secret_key}" \
+            --data-binary "@${payload_file}"
+    else
+        curl -fsS -X "$method" "$url" \
+            --aws-sigv4 "aws:amz:${region}:s3" \
+            --user "${access_key}:${secret_key}"
+    fi
+}
+
+object_uri() {
+    printf '/%s/%s' "$bucket" "$1"
+}
+
+truncate_object() {
+    key=${OBJECT_STORAGE_KEY:?OBJECT_STORAGE_KEY is required}
+    bytes=${OBJECT_STORAGE_TRUNCATE_BYTES:-8}
+    work_dir=$(mktemp -d "${TMPDIR:-/tmp}/lagodb-object-storage.XXXXXX")
+    trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+
+    original="${work_dir}/original"
+    truncated="${work_dir}/truncated"
+    signed_request GET "$(object_uri "$key")" '' >"$original"
+    size=$(wc -c <"$original")
+    keep=$((size - bytes))
+    if [ "$keep" -le 0 ]; then
+        echo "cannot truncate ${key}: object has ${size} bytes, requested ${bytes}" >&2
+        exit 1
+    fi
+    dd if="$original" of="$truncated" bs=1 count="$keep" 2>/dev/null
+    signed_request PUT "$(object_uri "$key")" '' "$truncated" >/dev/null
+    printf 'object_storage_truncated: true\n'
+}
+
+corrupt_object_header() {
+    key=${OBJECT_STORAGE_KEY:?OBJECT_STORAGE_KEY is required}
+    work_dir=$(mktemp -d "${TMPDIR:-/tmp}/lagodb-object-storage.XXXXXX")
+    trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+
+    original="${work_dir}/original"
+    tail="${work_dir}/tail"
+    corrupted="${work_dir}/corrupted"
+    signed_request GET "$(object_uri "$key")" '' >"$original"
+    size=$(wc -c <"$original")
+    if [ "$size" -le 1 ]; then
+        echo "cannot corrupt ${key}: object has ${size} bytes" >&2
+        exit 1
+    fi
+    dd if="$original" of="$tail" bs=1 skip=1 2>/dev/null
+    printf '\000' >"$corrupted"
+    cat "$tail" >>"$corrupted"
+    signed_request PUT "$(object_uri "$key")" '' "$corrupted" >/dev/null
+    printf 'object_storage_corrupted: true\n'
+}
+
+prefix_count() {
+    prefix=${OBJECT_STORAGE_PREFIX:?OBJECT_STORAGE_PREFIX is required}
+    # The regression prefixes use only ASCII letters, digits, '/', '-' and
+    # '_'. Encoding '/' is sufficient for the canonical ListObjects query.
+    encoded_prefix=$(printf '%s' "$prefix" | sed 's/%/%25/g; s|/|%2F|g')
+    query="list-type=2&prefix=${encoded_prefix}"
+    listing=$(signed_request GET "/${bucket}" "$query")
+    printf '%s' "$listing" |
+        awk '{total += gsub(/<Key>/, "")} END {print total + 0}'
+}
+
+assert_prefix_rollover() {
+    count=$(prefix_count)
+    if [ "$count" -lt 2 ]; then
+        echo "expected at least 2 objects under ${OBJECT_STORAGE_PREFIX}, found ${count}" >&2
+        exit 1
+    fi
+    printf 'object_storage_prefix_rollover: true\n'
+}
+
+assert_prefix_empty() {
+    count=$(prefix_count)
+    if [ "$count" -ne 0 ]; then
+        echo "expected no objects under ${OBJECT_STORAGE_PREFIX}, found ${count}" >&2
+        exit 1
+    fi
+    printf 'object_storage_prefix_empty: true\n'
+}
+
+put_object() {
+    key=${OBJECT_STORAGE_KEY:?OBJECT_STORAGE_KEY is required}
+    source_file=${OBJECT_STORAGE_FILE:?OBJECT_STORAGE_FILE is required}
+    if [ ! -f "$source_file" ]; then
+        echo "object source file does not exist: ${source_file}" >&2
+        exit 1
+    fi
+    signed_request PUT "$(object_uri "$key")" '' "$source_file" >/dev/null
+    printf 'object_storage_put: true\n'
+}
+
+concatenate_objects() {
+    first_key=${OBJECT_STORAGE_SOURCE_KEY_1:?OBJECT_STORAGE_SOURCE_KEY_1 is required}
+    second_key=${OBJECT_STORAGE_SOURCE_KEY_2:?OBJECT_STORAGE_SOURCE_KEY_2 is required}
+    destination_key=${OBJECT_STORAGE_KEY:?OBJECT_STORAGE_KEY is required}
+    work_dir=$(mktemp -d "${TMPDIR:-/tmp}/lagodb-object-storage.XXXXXX")
+    trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+
+    first="${work_dir}/first"
+    second="${work_dir}/second"
+    combined="${work_dir}/combined"
+    signed_request GET "$(object_uri "$first_key")" '' >"$first"
+    signed_request GET "$(object_uri "$second_key")" '' >"$second"
+    cat "$first" "$second" >"$combined"
+    signed_request PUT "$(object_uri "$destination_key")" '' "$combined" >/dev/null
+    printf 'object_storage_concatenated: true\n'
+}
+
+case "${1:-}" in
+    truncate)
+        [ "$#" -eq 1 ] || {
+            echo 'usage: object_storage_tool COMMAND' >&2
+            exit 2
+        }
+        truncate_object
+        ;;
+    corrupt)
+        [ "$#" -eq 1 ] || {
+            echo 'usage: object_storage_tool COMMAND' >&2
+            exit 2
+        }
+        corrupt_object_header
+        ;;
+    assert-prefix-rollover)
+        [ "$#" -eq 1 ] || {
+            echo 'usage: object_storage_tool COMMAND' >&2
+            exit 2
+        }
+        assert_prefix_rollover
+        ;;
+    assert-prefix-empty)
+        [ "$#" -eq 1 ] || {
+            echo 'usage: object_storage_tool COMMAND' >&2
+            exit 2
+        }
+        assert_prefix_empty
+        ;;
+    put)
+        [ "$#" -eq 1 ] || {
+            echo 'usage: object_storage_tool COMMAND' >&2
+            exit 2
+        }
+        put_object
+        ;;
+    concatenate)
+        [ "$#" -eq 1 ] || {
+            echo 'usage: object_storage_tool COMMAND' >&2
+            exit 2
+        }
+        concatenate_objects
+        ;;
+    *)
+        echo 'usage: object_storage_tool truncate|corrupt|assert-prefix-rollover|assert-prefix-empty|put|concatenate' >&2
+        exit 2
+        ;;
+esac

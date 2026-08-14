@@ -3,7 +3,7 @@
 -- export it for the fixture's own psql calls. `\!` does not interpolate psql
 -- variables (OT_WHOLE_LINE), but `\setenv` arguments (OT_NORMAL) do.
 \setenv PGDATABASE :DBNAME
-\! bin/object_storage_fixture setup
+\! ../../../scripts/pg_regress/object_storage_fixture setup
 
 -- Install the shared Lakebase services once for the regression database.
 -- Individual AM tests may drop/recreate pg_iceberg_am, but the base-owned

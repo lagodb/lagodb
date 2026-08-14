@@ -509,6 +509,3 @@ impl From<ConnectorError> for ForeignValidationError {
         }
     }
 }
-
-#[cfg(any(test, feature = "pg_test"))]
-mod tests;

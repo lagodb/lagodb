@@ -2,7 +2,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
-OBJECT_STORAGE_ENV=${OBJECT_STORAGE_ENV:-${SCRIPT_DIR}/../config/object_storage.defaults.env}
+OBJECT_STORAGE_ENV=${OBJECT_STORAGE_ENV:-${SCRIPT_DIR}/object_storage.defaults.env}
 
 if [ ! -f "$OBJECT_STORAGE_ENV" ]; then
     echo "object-storage fixture config not found: ${OBJECT_STORAGE_ENV}" >&2

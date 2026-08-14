@@ -139,7 +139,7 @@ jobs:
       - name: Verify Docker
         run: |
           set -euo pipefail
-          . pg-iceberg-am/tests/pg_regress/config/object_storage.defaults.env
+          . scripts/pg_regress/object_storage.defaults.env
           MINIO_IMAGE="${MINIO_IMAGE:-${DEFAULT_MINIO_IMAGE}}"
           docker version
           docker info
@@ -160,4 +160,8 @@ jobs:
             pg-iceberg-am/tests/pg_regress/regression.out
             pg-iceberg-am/tests/pg_regress/log/
             pg-iceberg-am/tests/pg_regress/results/
+            lagodb-connectors/tests/pg_regress/regression.diffs
+            lagodb-connectors/tests/pg_regress/regression.out
+            lagodb-connectors/tests/pg_regress/log/
+            lagodb-connectors/tests/pg_regress/results/
             target/isolation/pg${{ matrix.postgres }}/output_iso/
