@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, StringBuilder};
-use pg_lakebase_core::tuple::Cell;
+use pg_lakebase_core::tuple::{Cell, DetoastedVarlena};
 use pgrx::pg_sys;
 
-use super::{ColumnAppend, cell_type_mismatch, detoasted_payload};
+use super::{ColumnAppend, cell_type_mismatch};
 use crate::error::ArrowConversionResult;
 
 pub(crate) struct Utf8Encoder {
@@ -37,7 +37,7 @@ impl Utf8Encoder {
         // The bound buffer validates PG_UTF8 once during construction;
         // PostgreSQL's text-family input boundary guarantees these detoasted
         // bytes are valid UTF-8 for the lifetime of the plan.
-        let guard = unsafe { detoasted_payload(datum) };
+        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
         // SAFETY: the relation-bound writer established the PG_UTF8
         // server-encoding contract before any row was appended.
         let value = unsafe { str::from_utf8_unchecked(guard.bytes()) };

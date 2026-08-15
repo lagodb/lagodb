@@ -23,12 +23,19 @@ impl JsonWriteState {
         output: ObjectOutput,
         compression: StreamCompression,
     ) -> Result<Self, ConnectorError> {
-        let attr_types = relation.attr_types();
-        let names = relation.live_columns();
-        let fields = names.iter().map(|(attno, name)| {
-            let index = (attno - 1) as usize;
-            (name.as_str(), attr_types[index].0, attr_types[index].1)
-        });
+        let columns = relation.live_columns();
+        let fields = columns
+            .iter()
+            .map(|column| {
+                let name = column.name().to_str().map_err(|_| {
+                    ConnectorError::invalid_object_schema(
+                        FormatKind::Json,
+                        "PostgreSQL column names must be valid UTF-8 for JSON",
+                    )
+                })?;
+                Ok((name, column.type_oid(), column.type_mod()))
+            })
+            .collect::<Result<Vec<_>, ConnectorError>>()?;
         // Bind and validate the complete relation once. row_to_json itself
         // writes the object, so the plan has no row-path role after this point.
         let _ = JsonColumnPlan::bind(fields)?;

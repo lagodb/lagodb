@@ -88,18 +88,27 @@ impl JsonScanState {
         files: ObjectFiles,
         compression: StreamCompression,
     ) -> Result<Self, ConnectorError> {
-        let attr_types = context.relation.attr_types();
-        let mut names = vec![None; context.relation.natts()];
-        for (attno, name) in context.relation.live_columns() {
-            names[(attno - 1) as usize] = Some(name);
+        let live = context.relation.live_columns();
+        let mut columns_by_attno = vec![None; context.relation.natts()];
+        for column in live.iter() {
+            column.name().to_str().map_err(|_| {
+                ConnectorError::invalid_object_schema(
+                    FormatKind::Json,
+                    "PostgreSQL column names must be valid UTF-8 for JSON",
+                )
+            })?;
+            columns_by_attno[(column.attno() - 1) as usize] = Some(column);
         }
         let outputs = context.output_layout.columns().to_vec().into_boxed_slice();
         let fields = outputs.iter().map(|output| {
             let index = (output.attno() - 1) as usize;
-            let name = names[index]
-                .as_deref()
+            let column = columns_by_attno[index]
                 .expect("a scan output column always names a live attribute");
-            (name, attr_types[index].0, attr_types[index].1)
+            let name = column
+                .name()
+                .to_str()
+                .expect("all live JSON column names were validated as UTF-8");
+            (name, column.type_oid(), column.type_mod())
         });
         let plan = JsonColumnPlan::bind(fields)?;
         let max_record_bytes = ReadConfig::from_guc().json_max_record_bytes();

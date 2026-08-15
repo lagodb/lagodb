@@ -7,7 +7,6 @@ use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
 use pg_lakebase_core::copy::{CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError};
 use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::tuple::{ColumnDatumTarget, Row, RowDatumCodec};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::{PgTryBuilder, pg_sys};
 
@@ -19,7 +18,7 @@ use crate::format::{AvroWriteCompression, FormatKind};
 use crate::storage::{ObjectFiles, ObjectOutput};
 
 use super::read::{AvroObjectReader, AvroReadColumn};
-use super::write::{AvroObjectWriter, AvroWritePlan};
+use super::write::{AvroDatumRow, AvroObjectWriter, AvroWritePlan};
 
 const BRIDGE_BUFFER_TARGET: usize = 256 * 1024;
 
@@ -195,7 +194,7 @@ struct CopyInputPlan {
 
 struct ReadyAvroCopyDestination {
     columns: Box<[CopyInputPlan]>,
-    codec: RowDatumCodec,
+    row: AvroDatumRow,
     writer: AvroObjectWriter,
 }
 
@@ -241,7 +240,6 @@ impl AvroCopyDestination {
         });
         let plan = AvroWritePlan::from_copy_columns(fields, layout.len()).map_err(CopyError::from)?;
         let mut input_plans = Vec::with_capacity(layout.len());
-        let mut targets = Vec::with_capacity(layout.len());
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 for column in layout.columns() {
@@ -257,7 +255,6 @@ impl AvroCopyDestination {
                         type_io_param,
                         type_mod: column.type_mod(),
                     });
-                    targets.push(ColumnDatumTarget::from_oid(column.type_oid()));
                 }
                 Ok::<(), ConnectorError>(())
             }))
@@ -265,14 +262,13 @@ impl AvroCopyDestination {
             .execute()
         };
         result.map_err(CopyError::from)?;
-        let codec = RowDatumCodec::from_targets(&targets).map_err(ConnectorError::from)?;
         let output = self
             .output
             .take()
             .expect("COPY TO initializes its destination exactly once");
         self.ready = Some(ReadyAvroCopyDestination {
+            row: AvroDatumRow::new(input_plans.len()),
             columns: input_plans.into_boxed_slice(),
-            codec,
             writer: AvroObjectWriter::new(output, plan, self.compression),
         });
         Ok(())
@@ -294,9 +290,8 @@ impl CopyDataDestination for AvroCopyDestination {
         let datum_context = self.datum_context.value();
         unsafe {
             PgMemoryContexts::For(datum_context).switch_to(|_| {
-                let mut row = Row::with_capacity(ready.columns.len());
                 for (index, (field, plan)) in self.row.fields().zip(ready.columns.iter()).enumerate() {
-                    let cell = match field {
+                    let datum = match field {
                         None => None,
                         Some(value) => {
                             let datum = pg_sys::OidInputFunctionCall(
@@ -305,15 +300,15 @@ impl CopyDataDestination for AvroCopyDestination {
                                 plan.type_io_param,
                                 plan.type_mod,
                             );
-                            // SAFETY: `codec` was bound to this COPY output layout
-                            // during initialization and `datum` came from its exact
-                            // PostgreSQL input function.
-                            unsafe { ready.codec.datum_to_cell(index, datum, false) }?
+                            Some(datum)
                         }
                     };
-                    row.push(cell);
+                    // SAFETY: the row and input plans were allocated from the
+                    // same COPY layout. A present Datum is allocated in this
+                    // row's context and is consumed synchronously below.
+                    unsafe { ready.row.set_at_bound(index, datum) };
                 }
-                ready.writer.write_row(&row)?;
+                ready.writer.write_row(&ready.row)?;
                 Ok::<(), ConnectorError>(())
             })
         }

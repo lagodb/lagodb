@@ -15,6 +15,7 @@ use arrow_array::builder::{
     Int64Builder, ListBuilder, StringBuilder,
 };
 use arrow_schema::FieldRef;
+use pg_lakebase_core::tuple::DetoastedVarlena;
 use pgrx::{Array as PgArray, FromDatum, pg_sys};
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};
@@ -27,11 +28,9 @@ use crate::error::{ArrowConversionError, ArrowConversionResult};
 /// `raw` must be a valid non-NULL PostgreSQL array datum.
 unsafe fn linear_array_datum(
     raw: pg_sys::Datum,
-) -> ArrowConversionResult<pg_sys::Datum> {
-    let array = unsafe {
-        pg_sys::pg_detoast_datum(raw.cast_mut_ptr::<pg_sys::varlena>())
-            .cast::<pg_sys::ArrayType>()
-    };
+) -> ArrowConversionResult<DetoastedVarlena> {
+    let detoasted = unsafe { DetoastedVarlena::from_datum(raw) };
+    let array = detoasted.as_datum().cast_mut_ptr::<pg_sys::ArrayType>();
     let dimensions = unsafe { (*array).ndim };
     if dimensions > 1 {
         return Err(ArrowConversionError::IncompatibleColumnType(
@@ -57,7 +56,7 @@ unsafe fn linear_array_datum(
             ));
         }
     }
-    Ok(pg_sys::Datum::from(array))
+    Ok(detoasted)
 }
 
 /// Element-specific part of a relation-bound PostgreSQL array codec.
@@ -98,8 +97,10 @@ macro_rules! primitive_bound_list_element {
                 values: &mut Self::Values,
                 raw: pg_sys::Datum,
             ) -> ArrowConversionResult<usize> {
-                let raw = unsafe { linear_array_datum(raw) }?;
-                let array = unsafe { PgArray::<$pg_type>::from_datum(raw, false) }
+                let detoasted = unsafe { linear_array_datum(raw) }?;
+                let array = unsafe {
+                    PgArray::<$pg_type>::from_datum(detoasted.as_datum(), false)
+                }
                     .ok_or(ArrowConversionError::InvariantViolated(
                         "List encoder: incompatible bound source",
                     ))?;
@@ -170,8 +171,10 @@ macro_rules! string_bound_list_element {
                 values: &mut Self::Values,
                 raw: pg_sys::Datum,
             ) -> ArrowConversionResult<usize> {
-                let raw = unsafe { linear_array_datum(raw) }?;
-                let array = unsafe { PgArray::<$pg_type>::from_datum(raw, false) }
+                let detoasted = unsafe { linear_array_datum(raw) }?;
+                let array = unsafe {
+                    PgArray::<$pg_type>::from_datum(detoasted.as_datum(), false)
+                }
                     .ok_or(ArrowConversionError::InvariantViolated(
                         "List encoder: incompatible bound source",
                     ))?;

@@ -9,11 +9,11 @@ use arrow_array::ArrayRef;
 use arrow_array::builder::{
     ArrayBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
 };
-use pg_lakebase_core::tuple::Cell;
+use pg_lakebase_core::tuple::{Cell, DetoastedVarlena};
 use pgrx::datum::Uuid;
 use pgrx::{FromDatum, PgTryBuilder, fcinfo, pg_sys};
 
-use super::{ColumnAppend, cell_type_mismatch, detoasted_payload, read_bound};
+use super::{ColumnAppend, cell_type_mismatch, read_bound};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 use pg_lakebase_core::diag::PgError;
 
@@ -73,7 +73,7 @@ impl BinaryEncoder {
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
-        let guard = unsafe { detoasted_payload(datum) };
+        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
         let bytes = guard.bytes();
         self.builder.append_value(bytes);
         Ok(bytes.len())
@@ -87,7 +87,7 @@ impl BinaryEncoder {
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
-        let guard = unsafe { detoasted_payload(datum) };
+        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
         let bytes = guard.full_varlena_bytes();
         self.builder.append_value(bytes);
         Ok(bytes.len())
@@ -113,7 +113,7 @@ impl ColumnAppend for BinaryEncoder {
                     // generic JSON tree or serialize it through serde_json.
                     let datum =
                         unsafe { JsonbInputDatum::from_text(value.as_str())? };
-                    let guard = unsafe { detoasted_payload(datum.datum) };
+                    let guard = unsafe { DetoastedVarlena::from_datum(datum.datum) };
                     self.builder.append_value(guard.full_varlena_bytes());
                 }
                 _ => return Err(cell_type_mismatch("jsonb")),
@@ -199,7 +199,7 @@ impl FixedBinaryEncoder {
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
-        let guard = unsafe { detoasted_payload(datum) };
+        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
         let bytes = guard.bytes();
         self.codec.validate(bytes.len())?;
         self.builder.append_value(bytes)?;

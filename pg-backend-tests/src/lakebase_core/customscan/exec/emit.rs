@@ -152,7 +152,7 @@ mod tests {
             ctx.state.seen_natts = ctx.relation.natts();
             ctx.state.seen_oid = ctx.relation.oid();
 
-            let mut row = Row::with_capacity(2);
+            let mut row = Row::with_width(2);
             row.set_cell(0, Some(Cell::I32(7)));
             row.set_cell(1, Some(Cell::String(HANDLE_EMIT_TEXT.to_string())));
             let codec =

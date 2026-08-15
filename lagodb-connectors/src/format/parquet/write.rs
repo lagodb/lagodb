@@ -42,12 +42,18 @@ impl ParquetWriteState {
         relation: &RelationHandle<'_>,
     ) -> Result<(Arc<Schema>, Box<[BoundWriteColumnPlan]>), ConnectorError> {
         let live = relation.live_columns();
-        let attr_types = relation.attr_types();
         let mut fields = Vec::with_capacity(live.len());
         let mut sources = Vec::with_capacity(live.len());
-        for (attno, name) in live {
-            let source = (attno - 1) as usize;
-            let (oid, typmod) = attr_types[source];
+        for column in live.iter() {
+            let name = column.name().to_str().map_err(|_| {
+                ConnectorError::invalid_object_schema(
+                    crate::format::FormatKind::Parquet,
+                    "PostgreSQL column names must be valid UTF-8 for Parquet",
+                )
+            })?;
+            let source = (column.attno() - 1) as usize;
+            let oid = column.type_oid();
+            let typmod = column.type_mod();
             fields.push(Field::new(name, parquet_arrow_type(oid, typmod)?, true));
             sources.push((source, oid));
         }

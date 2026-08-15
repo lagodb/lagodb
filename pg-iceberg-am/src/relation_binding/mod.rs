@@ -38,18 +38,26 @@ pub(crate) struct RelationShape {
 }
 
 impl RelationShape {
-    pub(crate) fn from_relation(rel: &RelationHandle) -> Self {
+    pub(crate) fn from_relation(rel: &RelationHandle) -> IcebergResult<Self> {
         let live_columns = rel
             .live_columns()
-            .into_iter()
-            .map(|(attno, name)| LiveColumn::new(attno, name))
-            .collect();
+            .iter()
+            .map(|column| {
+                let name = column.name().to_str().map_err(|_| {
+                    IcebergError::SchemaBuildError(
+                        "PostgreSQL column names must be valid UTF-8 for Iceberg"
+                            .to_owned(),
+                    )
+                })?;
+                Ok(LiveColumn::new(column.attno(), name.to_owned()))
+            })
+            .collect::<IcebergResult<Vec<_>>>()?;
 
-        Self {
+        Ok(Self {
             live_columns,
             slot_width: rel.natts(),
             attr_types: rel.attr_types(),
-        }
+        })
     }
 
     fn live_columns(&self) -> &[LiveColumn] {

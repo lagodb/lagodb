@@ -14,7 +14,7 @@ use pg_lakebase_core::tuple::{
     numeric_precision_scale, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF,
 };
 use pg_lakebase_storage::StorageFile;
-use pgrx::datum::USECS_PER_DAY;
+use pgrx::datum::{USECS_PER_DAY, Uuid as PgUuid};
 use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
 use pgrx::pg_sys;
 
@@ -181,7 +181,9 @@ impl AvroReadColumn {
                     StringView::from_raw_parts(value.as_ptr(), value.len())
                 })))
             }
-            (AvroValueKind::Uuid, Value::Uuid(value)) => Ok(Some(Cell::Uuid(*value))),
+            (AvroValueKind::Uuid, Value::Uuid(value)) => Ok(Some(Cell::Uuid(
+                PgUuid::from_bytes(*value.as_bytes()),
+            ))),
             (AvroValueKind::Date, Value::Date(value)) => {
                 let days = value
                     .checked_sub(PG_EPOCH_DAYS_DIFF)
@@ -289,6 +291,15 @@ impl AvroScanState {
         context: BeginForeignScanContext<'_, Lakebase>,
         mut files: ObjectFiles,
     ) -> Result<Self, ConnectorError> {
+        let live = context.relation.live_columns();
+        for column in live.iter() {
+            column.name().to_str().map_err(|_| {
+                ConnectorError::invalid_object_schema(
+                    FormatKind::Avro,
+                    "PostgreSQL column names must be valid UTF-8 for Avro",
+                )
+            })?;
+        }
         let Some(first) = files.next() else {
             return Ok(Self {
                 files,
@@ -305,11 +316,9 @@ impl AvroScanState {
                 "the Avro container writer schema must be a record",
             ));
         };
-        let attr_types = context.relation.attr_types();
-        let live = context.relation.live_columns();
-        let mut names = vec![None; attr_types.len()];
-        for (attno, name) in live {
-            names[(attno - 1) as usize] = Some(name);
+        let mut columns_by_attno = vec![None; context.relation.natts()];
+        for column in live.iter() {
+            columns_by_attno[(column.attno() - 1) as usize] = Some(column);
         }
         let columns = context
             .output_layout
@@ -318,12 +327,16 @@ impl AvroScanState {
             .copied()
             .map(|output| {
                 let relation_index = (output.attno() - 1) as usize;
-                let name = names[relation_index].as_deref().ok_or_else(|| {
+                let column = columns_by_attno[relation_index].ok_or_else(|| {
                     ConnectorError::invalid_object_schema(
                         FormatKind::Avro,
                         "a planned output column is not a live relation attribute",
                     )
                 })?;
+                let name = column
+                    .name()
+                    .to_str()
+                    .expect("all live Avro column names were validated as UTF-8");
                 let source = record
                     .fields
                     .iter()
@@ -338,8 +351,8 @@ impl AvroScanState {
                     reader: AvroReadColumn::bind(
                         source,
                         &record.fields[source].schema,
-                        attr_types[relation_index].0,
-                        attr_types[relation_index].1,
+                        column.type_oid(),
+                        column.type_mod(),
                     )?,
                     output,
                 })

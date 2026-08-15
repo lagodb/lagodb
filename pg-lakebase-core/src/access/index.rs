@@ -31,7 +31,7 @@ impl<T> IndexFetchState<T> {
     fn new(am_instance: T, tmp_ctx: pg_sys::MemoryContext, natts: usize) -> Self {
         Self {
             am_instance,
-            row: Row::with_capacity(natts),
+            row: Row::with_width(natts),
             tmp_ctx,
             row_codec: None,
         }

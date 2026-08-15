@@ -24,18 +24,12 @@ impl Row {
         Self::default()
     }
 
-    pub fn with_capacity(capacity: usize) -> Self {
+    /// Create a fixed-width row whose columns are initially SQL NULL.
+    pub fn with_width(width: usize) -> Self {
         Self {
-            cells: vec![None; capacity],
+            cells: vec![None; width],
             size: 0,
         }
-    }
-
-    pub fn push(&mut self, cell: Option<Cell>) {
-        if let Some(ref c) = cell {
-            self.size += c.mem_size();
-        }
-        self.cells.push(cell);
     }
 
     pub fn len(&self) -> usize {
@@ -56,7 +50,7 @@ impl Row {
         self.cells.get(index).and_then(|c| c.as_ref())
     }
 
-    pub fn ensure_len(&mut self, len: usize) {
+    fn ensure_len(&mut self, len: usize) {
         if self.cells.len() < len {
             self.cells.resize_with(len, || None);
         }
@@ -106,11 +100,6 @@ impl Row {
         *self = src;
     }
 
-    pub fn clear(&mut self) {
-        self.cells.clear();
-        self.size = 0;
-    }
-
     ///
     /// # Safety
     ///
@@ -127,7 +116,7 @@ impl Row {
                 target: pg_sys::InvalidOid,
             });
         }
-        let mut row = Self::with_capacity(natts);
+        let mut row = Self::with_width(natts);
         let (values, nulls) = datums.raw_parts();
         unsafe { codec.datums_to_cells(values, nulls, &mut row.cells) }?;
         row.size = row

@@ -1,6 +1,6 @@
 //! Shared PostgreSQL COPY text/CSV option values.
 
-use std::ffi::{CString, c_void};
+use std::ffi::{CStr, CString, c_void};
 
 use pg_lakebase_core::fdw::ColumnRequirements;
 use pg_lakebase_core::handles::RelationHandle;
@@ -136,17 +136,16 @@ impl DelimitedOptions {
     ) -> Result<*mut pg_sys::List, ConnectorError> {
         let mut options = self.append_base_options(options, format)?;
         if !requirements.needs_all_columns() {
-            let names = relation.live_columns();
+            let columns = relation.live_columns();
+            let mut columns_by_attno = vec![None; relation.natts()];
+            for column in columns.iter() {
+                columns_by_attno[(column.attno() - 1) as usize] = Some(column);
+            }
             let selected = requirements
                 .user_columns()
-                .filter_map(|attno| {
-                    names
-                        .iter()
-                        .find(|(candidate, _)| *candidate == attno)
-                        .map(|(_, name)| name.as_str())
-                })
-                .collect::<Vec<_>>();
-            options = Self::append_string_list_option(
+                .filter_map(|attno| columns_by_attno[(attno - 1) as usize])
+                .map(|column| column.name());
+            options = Self::append_identifier_list_option(
                 options,
                 "convert_selectively",
                 selected,
@@ -205,21 +204,16 @@ impl DelimitedOptions {
         Ok(unsafe { pg_sys::lappend(options, option.cast::<c_void>()) })
     }
 
-    pub(super) fn append_string_list_option<'a>(
+    pub(super) fn append_identifier_list_option<'a>(
         options: *mut pg_sys::List,
         name: &str,
-        values: impl IntoIterator<Item = &'a str>,
+        values: impl IntoIterator<Item = &'a CStr>,
     ) -> Result<*mut pg_sys::List, ConnectorError> {
         let mut value_list = std::ptr::null_mut();
         for value in values {
-            let value = CString::new(value).map_err(|_| {
-                ConnectorError::invalid_option(
-                    "column option",
-                    "must not contain NUL",
-                )
-            })?;
-            // SAFETY: `value` is copied into PostgreSQL's current memory
-            // context before the temporary CString is dropped.
+            // SAFETY: CStr guarantees a NUL-terminated value without interior
+            // NUL. COPY expects the original server-encoding identifier bytes
+            // and copies them into its current memory context.
             let string = unsafe { pg_sys::makeString(pg_sys::pstrdup(value.as_ptr())) };
             // SAFETY: both the list and node are PostgreSQL-owned allocations.
             value_list = unsafe {

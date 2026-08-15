@@ -23,6 +23,7 @@ mod row;
 mod row_codec;
 mod slot_columns;
 mod slot_row;
+mod varlena;
 
 pub use cell::{ByteaView, Cell, StringView};
 pub use datum::{ColumnDatumCodec, ColumnDatumTarget, DatumConversionError};
@@ -40,3 +41,4 @@ pub use slot_columns::SlotColumns;
 pub use slot_row::{
     PgDatumRef, SlotDatumIndex, SlotDatums, TupleSlotBatch, TupleSlotRow,
 };
+pub use varlena::DetoastedVarlena;

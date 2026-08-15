@@ -48,7 +48,7 @@ impl IcebergScanState {
         let scan_tuple = ctx.scan_tuple();
         let projection =
             ProjectionResolver.resolve(ctx.required_columns(), scan_tuple)?;
-        let shape = RelationShape::from_relation(&ctx.relation);
+        let shape = RelationShape::from_relation(&ctx.relation)?;
 
         let mut spec = match projection {
             None => {

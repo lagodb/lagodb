@@ -115,7 +115,10 @@ impl SchemaEvolutionUpdate {
         }
 
         let (file_io, table) = Self::table_for_relation(rel, true)?;
-        let columns = self.has_add_column().then(|| RelationColumns::capture(rel));
+        let columns = self
+            .has_add_column()
+            .then(|| RelationColumns::capture(rel))
+            .transpose()?;
         let mut action = Transaction::new(&table).update_schema();
         for op in &self.ops {
             match op {
@@ -215,18 +218,24 @@ struct RelationColumns {
 }
 
 impl RelationColumns {
-    fn capture(rel: &RelationHandle<'_>) -> Self {
-        let attr_types = rel.attr_types();
-        let by_name = rel
-            .live_columns()
-            .into_iter()
-            .filter_map(|(attno, name)| {
-                let index = usize::try_from(attno - 1).ok()?;
-                let (oid, typmod) = *attr_types.get(index)?;
-                Some((name, ColumnType { oid, typmod }))
-            })
-            .collect();
-        Self { by_name }
+    fn capture(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
+        let mut by_name = HashMap::new();
+        for column in rel.live_columns().iter() {
+            let name = column.name().to_str().map_err(|_| {
+                IcebergError::SchemaBuildError(
+                    "PostgreSQL column names must be valid UTF-8 for Iceberg"
+                        .to_owned(),
+                )
+            })?;
+            by_name.insert(
+                name.to_owned(),
+                ColumnType {
+                    oid: column.type_oid(),
+                    typmod: column.type_mod(),
+                },
+            );
+        }
+        Ok(Self { by_name })
     }
 
     fn column_type(&self, name: &str) -> IcebergResult<ColumnType> {

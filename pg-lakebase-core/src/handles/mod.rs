@@ -28,6 +28,7 @@ mod borrowed;
 mod index;
 mod mutation;
 mod relation;
+mod relation_column;
 mod scan;
 mod tuple;
 
@@ -40,6 +41,7 @@ pub use relation::{
     AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationGuard,
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
 };
+pub use relation_column::RelationColumn;
 pub use scan::AnalyzeSamplerState;
 pub use scan::{
     AnalyzeReadStreamHandle, OwnedScanKeys, ParallelTableScanDescHandle,

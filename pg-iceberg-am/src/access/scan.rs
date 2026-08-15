@@ -50,12 +50,12 @@ struct ScanRelation {
 }
 
 impl ScanRelation {
-    fn from_relation(relation: &RelationHandle) -> Self {
-        Self {
+    fn from_relation(relation: &RelationHandle) -> Result<Self, IcebergError> {
+        Ok(Self {
             oid: relation.oid(),
             tablespace_oid: relation.tablespace_oid(),
-            shape: RelationShape::from_relation(relation),
-        }
+            shape: RelationShape::from_relation(relation)?,
+        })
     }
 }
 
@@ -141,7 +141,7 @@ impl AmScanSession for IcebergScan {
     ) -> AmResult<Self> {
         // No metadata IO yet: defer schema-dependent work to `scan_begin`.
         Ok(IcebergScan {
-            relation: ScanRelation::from_relation(rel),
+            relation: ScanRelation::from_relation(rel)?,
             state: IcebergScanState::Pending(if flags.is_analyze() {
                 ScanPurpose::Analyze
             } else {

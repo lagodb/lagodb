@@ -107,6 +107,15 @@ impl ParquetScanState {
         context: BeginForeignScanContext<'_, Lakebase>,
         mut files: ObjectFiles,
     ) -> Result<Self, ConnectorError> {
+        let live = context.relation.live_columns();
+        for column in live.iter() {
+            column.name().to_str().map_err(|_| {
+                ConnectorError::invalid_object_schema(
+                    crate::format::FormatKind::Parquet,
+                    "PostgreSQL column names must be valid UTF-8 for Parquet",
+                )
+            })?;
+        }
         let Some(first) = files.next() else {
             return Ok(Self {
                 files,
@@ -123,10 +132,9 @@ impl ParquetScanState {
             ParquetObjectReader::new(first),
         )?;
         let expected_schema = builder.schema().clone();
-        let attr_types = context.relation.attr_types();
-        let mut column_names = vec![None; attr_types.len()];
-        for (attno, name) in context.relation.live_columns() {
-            column_names[(attno - 1) as usize] = Some(name);
+        let mut columns_by_attno = vec![None; context.relation.natts()];
+        for column in live.iter() {
+            columns_by_attno[(column.attno() - 1) as usize] = Some(column);
         }
         let mut source_roots =
             Vec::with_capacity(context.output_layout.columns().len());
@@ -134,19 +142,23 @@ impl ParquetScanState {
 
         for output in context.output_layout.columns().iter().copied() {
             let relation_index = (output.attno() - 1) as usize;
-            let name = column_names[relation_index].as_deref().ok_or_else(|| {
+            let column = columns_by_attno[relation_index].ok_or_else(|| {
                 ConnectorError::invalid_object_schema(
                     crate::format::FormatKind::Parquet,
                     "a planned output column is not a live relation attribute",
                 )
             })?;
+            let name = column
+                .name()
+                .to_str()
+                .expect("all live Parquet column names were validated as UTF-8");
             let source = expected_schema.index_of(name).map_err(|_| {
                 ConnectorError::invalid_object_schema(
                     crate::format::FormatKind::Parquet,
                     format!("column {name:?} is missing from the Parquet schema"),
                 )
             })?;
-            let target_oid = attr_types[relation_index].0;
+            let target_oid = column.type_oid();
             let pg_type =
                 PgColumnType::from_pg_type(target_oid).ok_or_else(|| {
                     ConnectorError::invalid_object_schema(

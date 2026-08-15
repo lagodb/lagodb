@@ -12,7 +12,7 @@
 //! [`ArrowColumnEncoder`] enum that stores one concrete encoder per column,
 //! and the relation-bound [`BoundColumnEncoder`] whose source codec is selected
 //! once during plan construction. The small set of helpers shared across the
-//! type modules (`read_bound`, `detoasted_payload`, `downcast`,
+//! type modules (`read_bound`, `downcast`,
 //! `cell_type_mismatch`) stays here. The row-world `Cell` **write** dispatch
 //! (`ColumnRule::build`) lives in [`convert`](crate::convert).
 
@@ -20,7 +20,7 @@ use std::borrow::Cow;
 
 use arrow_array::{Array, ArrayRef};
 use pg_lakebase_core::tuple::Cell;
-use pgrx::{pg_sys, varlena};
+use pgrx::pg_sys;
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 use crate::rule::ColumnRule;
@@ -249,62 +249,6 @@ pub(crate) unsafe fn read_bound<T>(
 ) -> ArrowConversionResult<T> {
     unsafe { from(datum, false) }
         .ok_or(ArrowConversionError::InvariantViolated(invariant))
-}
-
-/// RAII view over a detoasted varlena payload, shared by the varlena encoders.
-///
-/// Detoasting must precede any byte read: an in-line `bytea`/`text` datum can be
-/// compressed or stored out-of-line, so reading its raw bytes without
-/// detoasting yields the toast pointer, not the value.
-pub(crate) struct DetoastGuard {
-    detoasted: *mut pg_sys::varlena,
-    data: *const u8,
-    len: usize,
-    // Only a freshly palloc'd result is ours to free; an unchanged in-line datum
-    // is borrowed from the caller and must be left alone.
-    owned: bool,
-}
-
-/// Detoast a varlena datum and expose its header-stripped payload.
-///
-/// # Safety
-///
-/// `datum` must be a non-null varlena datum.
-pub(crate) unsafe fn detoasted_payload(datum: pg_sys::Datum) -> DetoastGuard {
-    unsafe {
-        let input = datum.cast_mut_ptr::<pg_sys::varlena>();
-        let detoasted = pg_sys::pg_detoast_datum(input);
-        DetoastGuard {
-            detoasted,
-            data: varlena::vardata_any(detoasted) as *const u8,
-            len: varlena::varsize_any_exhdr(detoasted),
-            owned: !std::ptr::eq(detoasted, input),
-        }
-    }
-}
-
-impl DetoastGuard {
-    pub(crate) fn bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.data, self.len) }
-    }
-
-    /// The complete detoasted varlena, including its header. The explicit
-    /// JSONB-internal provider codec uses this form; ordinary varlena codecs
-    /// should use [`bytes`](Self::bytes), which strips the header.
-    pub(crate) fn full_varlena_bytes(&self) -> &[u8] {
-        unsafe {
-            let len = varlena::varsize_any(self.detoasted);
-            std::slice::from_raw_parts(self.detoasted as *const u8, len)
-        }
-    }
-}
-
-impl Drop for DetoastGuard {
-    fn drop(&mut self) {
-        if self.owned {
-            unsafe { pg_sys::pfree(self.detoasted.cast()) };
-        }
-    }
 }
 
 #[cfg(test)]

@@ -36,7 +36,7 @@ impl IcebergFilterPlanner {
             pg_sys::NoLock as pg_sys::LOCKMODE,
         )
         .map_err(IcebergError::from)?;
-        let shape = RelationShape::from_relation(&relation.as_handle());
+        let shape = RelationShape::from_relation(&relation.as_handle())?;
         let metadata = LoadedScanMetadata::load_query(
             context.relation_oid(),
             context.tablespace_oid(),

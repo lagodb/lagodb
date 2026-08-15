@@ -7,9 +7,9 @@ use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
 use pg_lakebase_core::tuple::{Cell, Decimal128NumericCodec, DecimalCodecError};
 use pgrx::prelude::AnyNumeric;
-use pgrx::{FromDatum, pg_sys};
+use pgrx::pg_sys;
 
-use super::{ColumnAppend, cell_type_mismatch, read_bound};
+use super::{ColumnAppend, cell_type_mismatch};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 
 // ---------------------------------------------------------------------------
@@ -50,14 +50,10 @@ impl Decimal128Encoder {
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
-        let numeric = unsafe {
-            read_bound(
-                datum,
-                AnyNumeric::from_datum,
-                "Decimal128 encoder: present numeric datum read as null",
-            )
-        }?;
-        self.append_scaled(&numeric)?;
+        // SAFETY: this encoder is bound to a NUMERIC source and the caller
+        // supplies a present datum from that bound relation column.
+        let scaled = unsafe { self.codec.encode_bound_datum(datum) }?;
+        self.builder.append_value(scaled);
         Ok(std::mem::size_of::<i128>())
     }
 }

@@ -2,7 +2,6 @@
 //! `Decimal128 -> AnyNumeric` codec used by columnar read paths.
 
 use pgrx::pg_sys::{self, POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE};
-use pgrx::fcinfo::direct_function_call_as_datum;
 use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
 
 /// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in days.
@@ -357,30 +356,51 @@ impl Decimal128NumericCodec {
         self.decode(self.signed_be_bytes_to_i128(bytes)?)
     }
 
-    /// Encodes PostgreSQL `NUMERIC` as the unscaled integer of this fixed-scale
-    /// Decimal128 contract.
+    /// Encodes a relation-bound PostgreSQL `NUMERIC` datum as the unscaled
+    /// integer of this fixed-scale Decimal128 contract.
     ///
-    /// This uses PostgreSQL's `numeric_send` representation instead of the
-    /// `AnyNumeric` string conversion path. pgrx exposes an owned numeric but
-    /// no borrowed datum view, so one clone is required solely to supply the
-    /// PostgreSQL function argument; no text allocation or parser round-trip
-    /// occurs on the per-value path.
+    /// # Safety
+    ///
+    /// The caller must run on the current PostgreSQL backend thread and pass a
+    /// valid, non-NULL `NUMERIC` datum that remains live for this call.
+    pub unsafe fn encode_bound_datum(
+        &self,
+        datum: pg_sys::Datum,
+    ) -> Result<i128, DecimalCodecError> {
+        // SAFETY: the caller supplies the bound NUMERIC datum required by
+        // `numeric_send`. PostgreSQL builds the FunctionCallInfo on its stack
+        // and returns a palloc'd bytea in the current memory context.
+        let output = unsafe {
+            pg_sys::DirectFunctionCall1Coll(
+                Some(pg_sys::numeric_send),
+                pg_sys::InvalidOid,
+                datum,
+            )
+        };
+        // SAFETY: numeric_send always returns a non-NULL bytea Datum.
+        let bytes = unsafe { varlena_to_byte_slice(output.cast_mut_ptr()) };
+        let result = self.numeric_send_to_i128(bytes);
+        // SAFETY: DirectFunctionCall1Coll returned a fresh palloc'd bytea.
+        unsafe { pg_sys::pfree(output.cast_mut_ptr()) };
+        result
+    }
+
+    /// Encodes an owned pgrx numeric value.
+    ///
+    /// This cold row-world interface copies the owned value into PostgreSQL
+    /// memory. Relation-bound writers should call [`Self::encode_bound_datum`]
+    /// directly to avoid that allocation and copy.
     pub fn encode(&self, value: &AnyNumeric) -> Result<i128, DecimalCodecError> {
-        // SAFETY: `into_datum` produces a valid PostgreSQL NUMERIC datum and
-        // `numeric_send` returns a palloc'd bytea in the current backend
-        // memory context. Both allocations are released before returning.
+        // SAFETY: into_datum produces a valid, non-NULL NUMERIC datum in the
+        // current backend memory context. It remains live through the delegated
+        // call and is freed before returning.
         unsafe {
             let input = value
                 .clone()
                 .into_datum()
                 .expect("AnyNumeric always converts to a non-NULL datum");
-            let output = direct_function_call_as_datum(pg_sys::numeric_send, &[Some(input)])
-                .expect("numeric_send must not return SQL NULL");
+            let result = self.encode_bound_datum(input);
             pg_sys::pfree(input.cast_mut_ptr());
-
-            let bytes = varlena_to_byte_slice(output.cast_mut_ptr());
-            let result = self.numeric_send_to_i128(bytes);
-            pg_sys::pfree(output.cast_mut_ptr());
             result
         }
     }
@@ -494,6 +514,7 @@ unsafe fn numeric_recv_external(
     typmod: i32,
     codec: &Decimal128NumericCodec,
 ) -> Result<pgrx::AnyNumeric, DecimalCodecError> {
+    use pgrx::fcinfo::direct_function_call_as_datum;
     use pgrx::pg_sys::{self, errcodes::PgSqlErrorCode, panic::CaughtError};
     use pgrx::{AnyNumeric, FromDatum, IntoDatum, PgTryBuilder};
 

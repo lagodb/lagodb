@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn row_batch_tracks_size_and_rows() {
-        let mut row = Row::with_capacity(2);
+        let mut row = Row::with_width(2);
         row.set_cell(0, Some(Cell::I32(7)));
         row.set_cell(1, Some(Cell::String("lakebase".to_string())));
         let row_size = row.size;
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn row_batch_accepts_owned_rows() {
         let mut row = Row::new();
-        row.push(Some(Cell::I64(42)));
+        row.set_cell(0, Some(Cell::I64(42)));
 
         let mut buffer = RowBatchBuffer::with_capacity(1);
         buffer.push_row(row);

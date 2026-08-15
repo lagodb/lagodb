@@ -327,7 +327,7 @@ mod tests {
                     })?,
                     None => None,
                 };
-                let mut row = Row::with_capacity(1);
+                let mut row = Row::with_width(1);
                 row.set_cell(0, cell);
                 rows.push(row);
             }

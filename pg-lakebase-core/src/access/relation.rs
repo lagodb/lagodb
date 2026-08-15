@@ -135,7 +135,7 @@ where
             crate::access::mutation::trigger_rows::FetchResult::PhysicalRow => {}
         }
 
-        let mut row = Row::with_capacity(natts);
+        let mut row = Row::with_width(natts);
         if !A::tuple_fetch_row_version(&rel_handle, &tid, &snapshot_handle, &mut row)
             .report_unwrap()
         {

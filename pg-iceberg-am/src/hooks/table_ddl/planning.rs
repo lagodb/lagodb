@@ -282,9 +282,9 @@ impl SchemaEvolutionTarget {
         self.for_each_physical_relation(|rel| {
             let columns = rel.live_columns();
             for name in &names {
-                let (attnum, _) = columns
+                let column = columns
                     .iter()
-                    .find(|(_, column_name)| column_name.as_str() == *name)
+                    .find(|column| column.name().to_bytes() == name.as_bytes())
                     .ok_or_else(|| {
                         HookError::with_code(
                             PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN,
@@ -295,7 +295,7 @@ impl SchemaEvolutionTarget {
                             ),
                         )
                     })?;
-                keys.push((rel.oid(), i32::from(*attnum)));
+                keys.push((rel.oid(), i32::from(column.attno())));
             }
             Ok(())
         })?;

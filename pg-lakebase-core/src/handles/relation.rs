@@ -1,8 +1,12 @@
+use std::slice;
+
 use super::borrowed::{PgBorrowed, PgNullable};
 use crate::catalog::{search_syscache1, search_syscache2};
 use crate::diag::PgError;
 use crate::wrapper::PgWrapper;
 use pgrx::pg_sys;
+
+use super::RelationColumn;
 
 #[derive(Debug)]
 pub struct RelationHandle<'a> {
@@ -126,68 +130,41 @@ impl<'a> RelationHandle<'a> {
 
     /// Live (non-dropped) columns of the relation, in ascending attno order.
     ///
-    /// Each entry pairs the column's 1-based attribute number with its name
-    /// (the same string PostgreSQL stores in `attname`). Dropped columns are
-    /// skipped, so the result may be shorter than [`natts`](Self::natts).
-    ///
-    /// This owns the `TupleDesc` / `attrs` / `attname` unsafe boundary so
-    /// callers stay on safe Rust. Names are copied into owned `String`s, so
-    /// they survive any later memory-context reset.
-    pub fn live_columns(&self) -> Vec<(pg_sys::AttrNumber, String)> {
+    /// Names retain PostgreSQL's server-encoding bytes. Formats that require
+    /// UTF-8 must validate them once while binding their schema.
+    pub fn live_columns(&self) -> Box<[RelationColumn]> {
         let tup_desc = self.tuple_desc();
         debug_assert!(
             !tup_desc.is_null(),
             "RelationHandle::live_columns: rd_att is NULL"
         );
-        // SAFETY: a live RelationHandle yields a valid `TupleDesc`; `attrs` is a
-        // contiguous array of length `natts` for the descriptor's lifetime,
-        // which outlives this borrow.
-        let attrs = unsafe {
-            std::slice::from_raw_parts(
-                (*tup_desc).attrs.as_ptr(),
-                (*tup_desc).natts as usize,
-            )
-        };
-
-        let mut live = Vec::with_capacity(attrs.len());
-        for attr in attrs {
-            if attr.attisdropped {
-                continue;
-            }
-            // SAFETY: `attname.data` is a NUL-terminated `NameData` array owned
-            // by the descriptor and valid for the borrow of `attrs`. Copied
-            // into an owned `String` immediately so it survives later context
-            // resets.
-            let name = unsafe {
-                std::ffi::CStr::from_ptr(attr.attname.data.as_ptr())
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            live.push((attr.attnum, name));
-        }
-        live
+        // SAFETY: the live relation owns this valid descriptor for the handle's
+        // lifetime. The returned metadata copies every borrowed field.
+        unsafe { RelationColumn::live_from_tuple_desc(tup_desc) }
     }
 
-    /// Per-attribute `(type oid, typmod)` for every attribute position, indexed
-    /// by `attno - 1` (so a slot-first decoder can look up a destination's
-    /// target type directly). Dropped-column positions keep their stored type;
-    /// callers that only touch live destinations never read those slots.
+    /// Per-attribute `(type oid, typmod)` indexed by `attno - 1`.
+    ///
+    /// Unlike [`Self::live_columns`], this preserves dropped-column positions
+    /// for consumers whose physical tuple layout includes them.
     pub fn attr_types(&self) -> Vec<(pg_sys::Oid, i32)> {
-        let tup_desc = self.tuple_desc();
+        let tuple_desc = self.tuple_desc();
         debug_assert!(
-            !tup_desc.is_null(),
+            !tuple_desc.is_null(),
             "RelationHandle::attr_types: rd_att is NULL"
         );
-        // SAFETY: a live RelationHandle yields a valid `TupleDesc`; `attrs` is a
-        // contiguous array of length `natts` for the descriptor's lifetime,
-        // which outlives this borrow.
+        // SAFETY: a live relation owns a contiguous `natts` attribute array for
+        // the lifetime of this handle.
         let attrs = unsafe {
-            std::slice::from_raw_parts(
-                (*tup_desc).attrs.as_ptr(),
-                (*tup_desc).natts as usize,
+            slice::from_raw_parts(
+                (*tuple_desc).attrs.as_ptr(),
+                (*tuple_desc).natts as usize,
             )
         };
-        attrs.iter().map(|a| (a.atttypid, a.atttypmod)).collect()
+        attrs
+            .iter()
+            .map(|attribute| (attribute.atttypid, attribute.atttypmod))
+            .collect()
     }
 
     /// Largest effective column or explicitly configured extended-statistics
@@ -209,7 +186,7 @@ impl<'a> RelationHandle<'a> {
         // backend-local GUC value is readable for the duration of this call.
         let (attrs, default_target) = unsafe {
             (
-                std::slice::from_raw_parts(
+                slice::from_raw_parts(
                     (*tup_desc).attrs.as_ptr(),
                     (*tup_desc).natts as usize,
                 ),
@@ -477,7 +454,7 @@ impl<'a> AttrWidthsHandle<'a> {
                 None
             } else {
                 Some(Self {
-                    inner: std::slice::from_raw_parts_mut(ptr, len),
+                    inner: slice::from_raw_parts_mut(ptr, len),
                 })
             }
         }

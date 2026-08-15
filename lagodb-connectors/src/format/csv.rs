@@ -58,34 +58,35 @@ impl CsvOptions {
 
         let mut force_null = Vec::new();
         let mut force_not_null = Vec::new();
-        for (attno, name) in relation.live_columns() {
+        let columns = relation.live_columns();
+        for column in columns.iter() {
             // SAFETY: PostgreSQL owns this foreign-column option list for the
             // live relation and attribute during this begin callback.
             let raw = unsafe {
-                pg_sys::GetForeignColumnOptions(relation.oid(), attno)
+                pg_sys::GetForeignColumnOptions(relation.oid(), column.attno())
             };
             let column_options = unsafe { ForeignOptionView::from_raw(raw) };
             let (is_force_null, is_force_not_null) =
                 ColumnOptions::parse_view(column_options)?.flags();
             if is_force_null {
-                force_null.push(name);
+                force_null.push(column.name());
             }
             if is_force_not_null {
-                force_not_null.push(name);
+                force_not_null.push(column.name());
             }
         }
         if !force_null.is_empty() {
-            options = DelimitedOptions::append_string_list_option(
+            options = DelimitedOptions::append_identifier_list_option(
                 options,
                 "force_null",
-                force_null.iter().map(String::as_str),
+                force_null,
             )?;
         }
         if !force_not_null.is_empty() {
-            options = DelimitedOptions::append_string_list_option(
+            options = DelimitedOptions::append_identifier_list_option(
                 options,
                 "force_not_null",
-                force_not_null.iter().map(String::as_str),
+                force_not_null,
             )?;
         }
         Ok(options)

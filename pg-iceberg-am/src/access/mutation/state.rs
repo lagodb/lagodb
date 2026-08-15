@@ -364,7 +364,7 @@ impl IcebergModifyState {
             // The shared relation shape drives the read and write column
             // mappings, keeping dropped-column and type-position handling
             // consistent. DELETE-only sessions do not allocate it.
-            let relation_shape = RelationShape::from_relation(rel);
+            let relation_shape = RelationShape::from_relation(rel)?;
             Some(DataFileSink::new(
                 &file_io,
                 &iceberg_schema,
