@@ -80,8 +80,7 @@ impl FdwModify for Lakebase {
         }
         let (writer, target) =
             selected.into_write_parts(context.effective_user_id())?;
-        let manager =
-            StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
+        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
         let output = ObjectOutput::resolve(&target, &manager, format, || {
             WriteConfig::from_guc().target_file_bytes()
         })?;
@@ -97,8 +96,7 @@ impl FdwModify for Lakebase {
         let (writer, target) =
             selected.into_write_parts(context.effective_user_id())?;
         let format = writer.kind();
-        let manager =
-            StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
+        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
         let output = ObjectOutput::resolve(&target, &manager, format, || {
             WriteConfig::from_guc().target_file_bytes()
         })?;

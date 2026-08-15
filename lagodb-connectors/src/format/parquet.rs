@@ -19,15 +19,15 @@ use crate::fdw::Lakebase;
 use crate::storage::{ObjectFiles, ObjectOutput};
 
 use super::{
-    FormatKind, FormatObject, FormatOption, FormatReader, FormatSchemaReader,
-    FormatScanPlanner, FormatScanState, FormatWritePrivate, FormatWriteState,
+    FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
+    FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
     FormatWriter, InferredSchema, ParquetWriteCompression,
 };
 
+pub(super) use copy::{ParquetCopyDestination, ParquetCopySource};
 pub(crate) use reader::ParquetObjectReader;
 pub(crate) use schema::parquet_arrow_type;
 pub(crate) use writer::ParquetObjectWriter;
-pub(super) use copy::{ParquetCopyDestination, ParquetCopySource};
 
 /// Parquet-format processor.
 pub(crate) struct ParquetFormat {

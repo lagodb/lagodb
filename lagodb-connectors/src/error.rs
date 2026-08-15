@@ -4,13 +4,13 @@ use std::error::Error as StdError;
 
 use pg_lakebase_core::copy::CopyError;
 use pg_lakebase_core::diag::{PgReportError, SqlStateError};
-use pg_lakebase_core::tuple::{DecimalCodecError, JsonValueError};
 use pg_lakebase_core::fdw::{
     ForeignModifyError, ForeignScanError, ForeignTableMaintenanceError,
     ForeignValidationError,
 };
 use pg_lakebase_core::plan_data::PlanDataError;
 use pg_lakebase_core::storage::foreign::StorageAcquireError;
+use pg_lakebase_core::tuple::{DecimalCodecError, JsonValueError};
 use pg_lakebase_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -76,7 +76,9 @@ pub(crate) enum ConnectorError {
     #[error("NDJSON record {line} exceeds the configured {max_bytes}-byte limit")]
     JsonRecordTooLarge { line: u64, max_bytes: usize },
 
-    #[error("invalid NDJSON value at logical line {line}, column {column:?}: {reason}")]
+    #[error(
+        "invalid NDJSON value at logical line {line}, column {column:?}: {reason}"
+    )]
     JsonValue {
         line: u64,
         column: Box<str>,
@@ -386,9 +388,7 @@ impl SqlStateError for ConnectorError {
             Self::InvalidObjectSchema { .. }
             | Self::Json { .. }
             | Self::JsonRecordTooLarge { .. }
-            | Self::JsonValue { .. } => {
-                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
-            }
+            | Self::JsonValue { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::JsonDatum(error) => error.sql_error_code(),
             Self::Parquet(error) => {
                 Self::source_io_sql_error_code(error).unwrap_or(match error {

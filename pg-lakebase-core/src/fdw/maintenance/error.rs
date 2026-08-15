@@ -99,10 +99,7 @@ impl ForeignTableMaintenanceError {
         self,
         phase: ForeignTableMaintenancePhase,
     ) -> Self {
-        if matches!(
-            &*self.0,
-            ForeignTableMaintenanceErrorKind::Callback { .. }
-        ) {
+        if matches!(&*self.0, ForeignTableMaintenanceErrorKind::Callback { .. }) {
             return self;
         }
         Self::new(ForeignTableMaintenanceErrorKind::Callback {

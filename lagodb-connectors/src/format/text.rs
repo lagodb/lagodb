@@ -47,10 +47,8 @@ impl TextOptions {
     pub(super) fn postgres_output_options(
         &self,
     ) -> Result<*mut pg_sys::List, ConnectorError> {
-        self.0.append_postgres_output_options(
-            std::ptr::null_mut(),
-            FormatKind::Text,
-        )
+        self.0
+            .append_postgres_output_options(std::ptr::null_mut(), FormatKind::Text)
     }
 }
 
@@ -126,10 +124,8 @@ impl FormatReader for TextFormat {
             options: TextOptions(options),
             compression,
         } = *self;
-        let postgres_options = options.postgres_options(
-            &context.relation,
-            context.required_columns,
-        )?;
+        let postgres_options =
+            options.postgres_options(&context.relation, context.required_columns)?;
         Ok(Box::new(super::delimited_scan::DelimitedScanState::begin(
             context,
             files,
@@ -172,14 +168,16 @@ impl FormatWriter for TextFormat {
             compression,
         } = *self;
         let postgres_options = options.postgres_output_options()?;
-        Ok(Box::new(super::delimited_write::DelimitedWriteState::begin(
-            context.relation(),
-            output,
-            FormatKind::Text,
-            compression,
-            postgres_options,
-            false,
-        )?))
+        Ok(Box::new(
+            super::delimited_write::DelimitedWriteState::begin(
+                context.relation(),
+                output,
+                FormatKind::Text,
+                compression,
+                postgres_options,
+                false,
+            )?,
+        ))
     }
 
     fn begin_insert(
@@ -192,13 +190,15 @@ impl FormatWriter for TextFormat {
             compression,
         } = *self;
         let postgres_options = options.postgres_output_options()?;
-        Ok(Box::new(super::delimited_write::DelimitedWriteState::begin(
-            context.relation(),
-            output,
-            FormatKind::Text,
-            compression,
-            postgres_options,
-            false,
-        )?))
+        Ok(Box::new(
+            super::delimited_write::DelimitedWriteState::begin(
+                context.relation(),
+                output,
+                FormatKind::Text,
+                compression,
+                postgres_options,
+                false,
+            )?,
+        ))
     }
 }

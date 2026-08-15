@@ -7,20 +7,23 @@ use apache_avro::{Reader, Schema};
 use pg_lakebase_core::fdw::{
     BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
     ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
-    ForeignRelSizeContext, ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
+    ForeignRelSizeContext, ReScanForeignScanContext, ScanOutputColumn,
+    ScanSlotWriter,
 };
 use pg_lakebase_core::tuple::{
-    ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, StringView,
-    numeric_precision_scale, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF,
+    ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, PG_EPOCH_DAYS_DIFF,
+    PG_EPOCH_USECS_DIFF, StringView, numeric_precision_scale,
 };
 use pg_lakebase_storage::StorageFile;
 use pgrx::datum::{USECS_PER_DAY, Uuid as PgUuid};
-use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
 use pgrx::pg_sys;
+use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
 
 use crate::error::ConnectorError;
 use crate::fdw::Lakebase;
-use crate::format::{FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState};
+use crate::format::{
+    FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState,
+};
 use crate::storage::ObjectFiles;
 
 use super::AvroValueKind;
@@ -122,7 +125,8 @@ impl AvroReadColumn {
         }
         if let AvroValueKind::Decimal(codec) = kind
             && let Some(target) = numeric_precision_scale(target_typmod)
-            && (target.precision != codec.precision() || target.scale != codec.scale() as i32)
+            && (target.precision != codec.precision()
+                || target.scale != codec.scale() as i32)
         {
             return Err(ConnectorError::invalid_object_schema(
                 FormatKind::Avro,
@@ -141,7 +145,10 @@ impl AvroReadColumn {
     }
 
     /// Decodes a field that was already bound against this object's writer schema.
-    pub(super) fn decode(self, value: &Value) -> Result<Option<Cell>, ConnectorError> {
+    pub(super) fn decode(
+        self,
+        value: &Value,
+    ) -> Result<Option<Cell>, ConnectorError> {
         let value = match value {
             Value::Union(_, value) => value.as_ref(),
             value => value,
@@ -150,11 +157,17 @@ impl AvroReadColumn {
             return Ok(None);
         }
         match (self.kind, value) {
-            (AvroValueKind::Boolean, Value::Boolean(value)) => Ok(Some(Cell::Bool(*value))),
+            (AvroValueKind::Boolean, Value::Boolean(value)) => {
+                Ok(Some(Cell::Bool(*value)))
+            }
             (AvroValueKind::Int, Value::Int(value)) => Ok(Some(Cell::I32(*value))),
             (AvroValueKind::Long, Value::Long(value)) => Ok(Some(Cell::I64(*value))),
-            (AvroValueKind::Float, Value::Float(value)) => Ok(Some(Cell::F32(*value))),
-            (AvroValueKind::Double, Value::Double(value)) => Ok(Some(Cell::F64(*value))),
+            (AvroValueKind::Float, Value::Float(value)) => {
+                Ok(Some(Cell::F32(*value)))
+            }
+            (AvroValueKind::Double, Value::Double(value)) => {
+                Ok(Some(Cell::F64(*value)))
+            }
             (AvroValueKind::Bytes, Value::Bytes(value)) => {
                 // SAFETY: the datum conversion immediately copies this view into
                 // PostgreSQL-owned memory before the decoded Avro record drops.
@@ -181,9 +194,9 @@ impl AvroReadColumn {
                     StringView::from_raw_parts(value.as_ptr(), value.len())
                 })))
             }
-            (AvroValueKind::Uuid, Value::Uuid(value)) => Ok(Some(Cell::Uuid(
-                PgUuid::from_bytes(*value.as_bytes()),
-            ))),
+            (AvroValueKind::Uuid, Value::Uuid(value)) => {
+                Ok(Some(Cell::Uuid(PgUuid::from_bytes(*value.as_bytes()))))
+            }
             (AvroValueKind::Date, Value::Date(value)) => {
                 let days = value
                     .checked_sub(PG_EPOCH_DAYS_DIFF)
@@ -203,18 +216,27 @@ impl AvroReadColumn {
             (AvroValueKind::TimeMicros, Value::TimeMicros(value)) => {
                 self.time(*value)
             }
-            (AvroValueKind::TimestampMicros, Value::TimestampMillis(value)) => {
-                self.timestamp(i64::from(*value).checked_mul(1_000).ok_or_else(|| self.out_of_range())?)
-            }
+            (AvroValueKind::TimestampMicros, Value::TimestampMillis(value)) => self
+                .timestamp(
+                    i64::from(*value)
+                        .checked_mul(1_000)
+                        .ok_or_else(|| self.out_of_range())?,
+                ),
             (AvroValueKind::TimestampMicros, Value::TimestampMicros(value)) => {
                 self.timestamp(*value)
             }
-            (AvroValueKind::LocalTimestampMicros, Value::LocalTimestampMillis(value)) => {
-                self.local_timestamp(i64::from(*value).checked_mul(1_000).ok_or_else(|| self.out_of_range())?)
-            }
-            (AvroValueKind::LocalTimestampMicros, Value::LocalTimestampMicros(value)) => {
-                self.local_timestamp(*value)
-            }
+            (
+                AvroValueKind::LocalTimestampMicros,
+                Value::LocalTimestampMillis(value),
+            ) => self.local_timestamp(
+                i64::from(*value)
+                    .checked_mul(1_000)
+                    .ok_or_else(|| self.out_of_range())?,
+            ),
+            (
+                AvroValueKind::LocalTimestampMicros,
+                Value::LocalTimestampMicros(value),
+            ) => self.local_timestamp(*value),
             (AvroValueKind::Decimal(codec), Value::Decimal(value)) => {
                 let bytes = Vec::try_from(value).map_err(ConnectorError::from)?;
                 Ok(Some(Cell::Numeric(codec.decode_signed_be_bytes(&bytes)?)))
@@ -246,14 +268,18 @@ impl AvroReadColumn {
         Ok(Some(Cell::Time(time)))
     }
 
-    fn local_timestamp(self, unix_micros: i64) -> Result<Option<Cell>, ConnectorError> {
+    fn local_timestamp(
+        self,
+        unix_micros: i64,
+    ) -> Result<Option<Cell>, ConnectorError> {
         let pg_micros = unix_micros
             .checked_sub(PG_EPOCH_USECS_DIFF)
             .ok_or_else(|| self.out_of_range())?;
         if pg_micros == i64::MIN || pg_micros == i64::MAX {
             return Err(self.out_of_range());
         }
-        let timestamp = Timestamp::try_from(pg_micros).map_err(|_| self.out_of_range())?;
+        let timestamp =
+            Timestamp::try_from(pg_micros).map_err(|_| self.out_of_range())?;
         Ok(Some(Cell::Timestamp(timestamp)))
     }
 
@@ -264,13 +290,21 @@ impl AvroReadColumn {
         )
     }
 
-    pub(super) unsafe fn datum(self, value: &Value) -> Result<Option<pg_sys::Datum>, ConnectorError> {
+    pub(super) unsafe fn datum(
+        self,
+        value: &Value,
+    ) -> Result<Option<pg_sys::Datum>, ConnectorError> {
         let Some(cell) = self.decode(value)? else {
             return Ok(None);
         };
         // SAFETY: the FDW scan callback owns the current PostgreSQL memory
         // context, and the bound codec targets this output column's OID.
-        unsafe { self.codec.cell_to_datum(cell).map(Some).map_err(ConnectorError::from) }
+        unsafe {
+            self.codec
+                .cell_to_datum(cell)
+                .map(Some)
+                .map_err(ConnectorError::from)
+        }
     }
 }
 
@@ -344,7 +378,9 @@ impl AvroScanState {
                     .ok_or_else(|| {
                         ConnectorError::invalid_object_schema(
                             FormatKind::Avro,
-                            format!("column {name:?} is missing from the Avro schema"),
+                            format!(
+                                "column {name:?} is missing from the Avro schema"
+                            ),
                         )
                     })?;
                 Ok(ScanColumn {
@@ -388,14 +424,19 @@ impl AvroScanState {
 }
 
 impl FormatScanState for AvroScanState {
-    fn next_slot(&mut self, output: &mut ScanSlotWriter<'_>) -> Result<bool, ConnectorError> {
+    fn next_slot(
+        &mut self,
+        output: &mut ScanSlotWriter<'_>,
+    ) -> Result<bool, ConnectorError> {
         loop {
             if let Some(reader) = self.reader.as_mut()
                 && let Some(value) = reader.next()
             {
                 let value = value?;
                 let Value::Record(fields) = value else {
-                    unreachable!("a record writer schema always decodes to a record value");
+                    unreachable!(
+                        "a record writer schema always decodes to a record value"
+                    );
                 };
                 // SAFETY: each ScanColumn was created from this scan's output
                 // layout and all by-reference Datum values are allocated in the
@@ -405,7 +446,8 @@ impl FormatScanState for AvroScanState {
                     // SAFETY: `source` was resolved against this exact writer
                     // schema at Begin; apache-avro decodes a record with one
                     // value per writer-schema field in that order.
-                    let source = unsafe { fields.get_unchecked(column.reader.source()) };
+                    let source =
+                        unsafe { fields.get_unchecked(column.reader.source()) };
                     let value = unsafe { column.reader.datum(source) }?;
                     unsafe {
                         writer.write(

@@ -84,8 +84,9 @@ impl ObjectFileEncoder for ParquetFileEncoder {
             .writer
             .bytes_written()
             .saturating_add(self.writer.in_progress_size());
-        let estimated = u64::try_from(estimated)
-            .expect("PostgreSQL is supported only on platforms where usize fits in u64");
+        let estimated = u64::try_from(estimated).expect(
+            "PostgreSQL is supported only on platforms where usize fits in u64",
+        );
         Ok(FileWriteProgress::new(estimated))
     }
 

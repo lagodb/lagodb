@@ -11,8 +11,8 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 
 use super::{
-    FormatKind, InferredColumn, InferredSchema, PostgresType,
-    SCHEMA_SAMPLE_RECORDS, StorageFileCopySource, StreamCompression,
+    FormatKind, InferredColumn, InferredSchema, PostgresType, SCHEMA_SAMPLE_RECORDS,
+    StorageFileCopySource, StreamCompression,
 };
 
 pub(super) struct DelimitedSchemaReader {
@@ -95,12 +95,10 @@ impl DelimitedSchemaAccumulator {
         let columns = record
             .fields()
             .map(|name| {
-                DelimitedColumn::new(
-                    name.map_or_else(
-                        || Box::<[u8]>::default(),
-                        |value| value.to_bytes().into(),
-                    ),
-                )
+                DelimitedColumn::new(name.map_or_else(
+                    || Box::<[u8]>::default(),
+                    |value| value.to_bytes().into(),
+                ))
             })
             .collect::<Vec<_>>();
         if columns.is_empty() {
@@ -120,7 +118,9 @@ impl DelimitedSchemaAccumulator {
         let mut columns = Vec::with_capacity(record.len());
         for (index, value) in record.fields().enumerate() {
             let mut column = DelimitedColumn::new(
-                format!("column{}", index + 1).into_bytes().into_boxed_slice(),
+                format!("column{}", index + 1)
+                    .into_bytes()
+                    .into_boxed_slice(),
             );
             column.observe(value, validators)?;
             columns.push(column);
@@ -234,9 +234,7 @@ impl TypeCandidates {
     const INT8: u8 = 1 << 1;
     const NUMERIC: u8 = 1 << 2;
     const FLOAT8: u8 = 1 << 3;
-    const ALL: Self = Self(
-        Self::BOOLEAN | Self::INT8 | Self::NUMERIC | Self::FLOAT8,
-    );
+    const ALL: Self = Self(Self::BOOLEAN | Self::INT8 | Self::NUMERIC | Self::FLOAT8);
 
     const fn contains(self, candidate: u8) -> bool {
         self.0 & candidate != 0

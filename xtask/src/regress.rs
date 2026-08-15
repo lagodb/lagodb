@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::{
-    cargo_pgrx_info, install_runtime, pg_config_value, pg_major, prepend_path_env,
-    run_command, usage_error, CONNECTORS_NAME, CONNECTORS_PACKAGE,
-    DELTA_AM_NAME, DELTA_AM_PACKAGE, EXTENSION_NAME, EXTENSION_PACKAGE,
-    RUNTIME_NAME,
+    CONNECTORS_NAME, CONNECTORS_PACKAGE, DELTA_AM_NAME, DELTA_AM_PACKAGE,
+    EXTENSION_NAME, EXTENSION_PACKAGE, RUNTIME_NAME, cargo_pgrx_info,
+    install_runtime, pg_config_value, pg_major, prepend_path_env, run_command,
+    usage_error,
 };
 
 #[derive(Clone, Copy)]

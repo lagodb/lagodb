@@ -6,8 +6,8 @@ use std::sync::Arc;
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
 use pg_lakebase_core::tuple::{Cell, Decimal128NumericCodec, DecimalCodecError};
-use pgrx::prelude::AnyNumeric;
 use pgrx::pg_sys;
+use pgrx::prelude::AnyNumeric;
 
 use super::{ColumnAppend, cell_type_mismatch};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
@@ -99,7 +99,8 @@ mod tests {
     // scaled values through untouched and tag the array with precision/scale.
     #[test]
     fn finish_preserves_scaled_values_and_tags_precision_scale() {
-        let mut encoder = Decimal128Encoder::with_capacity(4, 10, 2).expect("valid decimal");
+        let mut encoder =
+            Decimal128Encoder::with_capacity(4, 10, 2).expect("valid decimal");
         encoder.builder.append_value(12_345);
         encoder.builder.append_null();
         encoder.builder.append_value(-6_789);

@@ -35,8 +35,8 @@ pub use cache::{
 };
 pub use client::{
     DEFAULT_CLIENT_CLEANUP_TIMEOUT, ExternalFdLease, ExternalFdPolicy, ListIter,
-    ListSession, SeekFrom, SocketInterest, SocketWait, SocketWaitContext, StagingFile,
-    StorageClient, StorageClientBuilder, StorageFile, UploadInfo,
+    ListSession, SeekFrom, SocketInterest, SocketWait, SocketWaitContext,
+    StagingFile, StorageClient, StorageClientBuilder, StorageFile, UploadInfo,
 };
 pub use config::{
     CacheCleanupConfig, CacheRuntimeConfig, DEFAULT_CACHE_CLEANUP_BATCH_BYTES,

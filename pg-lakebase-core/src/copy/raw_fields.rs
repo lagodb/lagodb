@@ -124,9 +124,7 @@ impl<'source> CopyRawFieldReader<'source> {
     }
 
     pub fn next(&mut self) -> Result<Option<CopyRawRecord<'_>>, CopyError> {
-        let state = self
-            .state
-            .ok_or(CopyError::RawFieldReaderFinished)?;
+        let state = self.state.ok_or(CopyError::RawFieldReaderFinished)?;
         let mut fields = std::ptr::null_mut();
         let mut field_count = 0;
         let found = unsafe {
@@ -196,9 +194,7 @@ impl CopyTextInputValidator {
     }
 
     pub fn accepts(&mut self, value: &CStr) -> Result<bool, CopyError> {
-        let state = self
-            .state
-            .ok_or(CopyError::TextInputValidatorFinished)?;
+        let state = self.state.ok_or(CopyError::TextInputValidatorFinished)?;
         unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 Ok(pg::CopyBridge::text_input_accepts(

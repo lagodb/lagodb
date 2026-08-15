@@ -95,10 +95,9 @@ impl CsvOptions {
     pub(super) fn postgres_output_options(
         &self,
     ) -> Result<*mut pg_sys::List, ConnectorError> {
-        let options = self.delimited.append_postgres_output_options(
-            std::ptr::null_mut(),
-            FormatKind::Csv,
-        )?;
+        let options = self
+            .delimited
+            .append_postgres_output_options(std::ptr::null_mut(), FormatKind::Csv)?;
         self.append_postgres_quote_options(options)
     }
 
@@ -291,10 +290,8 @@ impl FormatReader for CsvFormat {
             options,
             compression,
         } = *self;
-        let postgres_options = options.postgres_options(
-            &context.relation,
-            context.required_columns,
-        )?;
+        let postgres_options =
+            options.postgres_options(&context.relation, context.required_columns)?;
         Ok(Box::new(super::delimited_scan::DelimitedScanState::begin(
             context,
             files,
@@ -338,14 +335,16 @@ impl FormatWriter for CsvFormat {
         } = *self;
         let postgres_options = options.postgres_output_options()?;
         let write_header = options.header_enabled();
-        Ok(Box::new(super::delimited_write::DelimitedWriteState::begin(
-            context.relation(),
-            output,
-            FormatKind::Csv,
-            compression,
-            postgres_options,
-            write_header,
-        )?))
+        Ok(Box::new(
+            super::delimited_write::DelimitedWriteState::begin(
+                context.relation(),
+                output,
+                FormatKind::Csv,
+                compression,
+                postgres_options,
+                write_header,
+            )?,
+        ))
     }
 
     fn begin_insert(
@@ -359,14 +358,16 @@ impl FormatWriter for CsvFormat {
         } = *self;
         let postgres_options = options.postgres_output_options()?;
         let write_header = options.header_enabled();
-        Ok(Box::new(super::delimited_write::DelimitedWriteState::begin(
-            context.relation(),
-            output,
-            FormatKind::Csv,
-            compression,
-            postgres_options,
-            write_header,
-        )?))
+        Ok(Box::new(
+            super::delimited_write::DelimitedWriteState::begin(
+                context.relation(),
+                output,
+                FormatKind::Csv,
+                compression,
+                postgres_options,
+                write_header,
+            )?,
+        ))
     }
 }
 

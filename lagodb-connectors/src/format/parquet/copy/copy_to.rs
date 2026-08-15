@@ -8,9 +8,7 @@ use pg_arrow_conv::{
     BoundDatumBuffer, BoundDatumColumnPlan, PgColumnType, resolve_column_rule,
 };
 use pg_lakebase_core::batch::BatchBuffer;
-use pg_lakebase_core::copy::{
-    CopyColumnLayout, CopyDataDestination, CopyError,
-};
+use pg_lakebase_core::copy::{CopyColumnLayout, CopyDataDestination, CopyError};
 use pg_lakebase_core::diag::PgReportError;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::{PgTryBuilder, pg_sys};
@@ -21,7 +19,9 @@ use crate::format::{
 };
 use crate::storage::ObjectOutput;
 
-use super::super::super::copy::{CanonicalCsv, CanonicalCsvRow, FormatCopyDestination};
+use super::super::super::copy::{
+    CanonicalCsv, CanonicalCsvRow, FormatCopyDestination,
+};
 
 const COPY_TO_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
@@ -186,18 +186,20 @@ impl CopyDataDestination for ParquetCopyDestination {
         let datum_context = self.datum_context.value();
         unsafe {
             PgMemoryContexts::For(datum_context).switch_to(|_| {
-                let values = self.row.fields().zip(ready.columns.iter()).map(|(field, plan)| {
-                    field.map(|value| {
-                        // Intentional CSV bridge; see canonical_csv's accepted
-                        // native-format performance trade-off.
-                        pg_sys::OidInputFunctionCall(
-                            plan.input_function,
-                            value.as_ptr().cast_mut(),
-                            plan.type_io_param,
-                            plan.type_mod,
-                        )
-                    })
-                });
+                let values = self.row.fields().zip(ready.columns.iter()).map(
+                    |(field, plan)| {
+                        field.map(|value| {
+                            // Intentional CSV bridge; see canonical_csv's accepted
+                            // native-format performance trade-off.
+                            pg_sys::OidInputFunctionCall(
+                                plan.input_function,
+                                value.as_ptr().cast_mut(),
+                                plan.type_io_param,
+                                plan.type_mod,
+                            )
+                        })
+                    },
+                );
                 ready.buffer.append_row_unchecked(values)?;
                 if ready.buffer.should_flush(COPY_TO_BATCH_BYTES) {
                     ready.flush_batch()?;

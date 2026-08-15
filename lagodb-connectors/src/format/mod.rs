@@ -9,8 +9,8 @@ mod compression;
 mod copy;
 mod csv;
 mod delimited;
-mod delimited_schema;
 mod delimited_scan;
+mod delimited_schema;
 mod delimited_write;
 mod filter;
 mod json;
@@ -32,9 +32,7 @@ use crate::error::ConnectorError;
 pub(crate) use codec::{
     AvroWriteCompression, ParquetWriteCompression, StreamCompression,
 };
-pub(crate) use copy::{
-    FormatCopyDestination, FormatCopySource, ResolvedCopyFormat,
-};
+pub(crate) use copy::{FormatCopyDestination, FormatCopySource, ResolvedCopyFormat};
 pub(crate) use filter::{
     FormatBoundFilter, FormatFilterPlanner, FormatPlannedFilter,
 };
@@ -48,19 +46,19 @@ pub(crate) use scan::{
 };
 pub(crate) use schema::{
     FormatSchemaReader, InferredColumn, InferredSchema, PostgresType,
-    StorageFileCopySource, StorageFileReader, SCHEMA_SAMPLE_RECORDS,
+    SCHEMA_SAMPLE_RECORDS, StorageFileCopySource, StorageFileReader,
 };
 pub(crate) use write::{FormatWritePrivate, FormatWriteState, FormatWriter};
 
 use avro::AvroFormat;
 pub(crate) use compression::{StreamDecoder, StreamEncoder};
-pub(crate) use stream_writer::StreamEncoderFactory;
 use csv::CsvFormat;
 use json::JsonFormat;
 use parquet::ParquetFormat;
 pub(crate) use parquet::{
     ParquetObjectReader, ParquetObjectWriter, parquet_arrow_type,
 };
+pub(crate) use stream_writer::StreamEncoderFactory;
 use text::TextFormat;
 
 /// A supported external object format.

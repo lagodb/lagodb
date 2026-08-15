@@ -72,7 +72,8 @@ impl ObjectCleanupExecutor {
         prefix: &str,
         cancelled: &AtomicBool,
     ) -> ObjectCleanupExecutionOutcome {
-        let mut listing = client.list_session(namespace, Some(prefix), self.page_size);
+        let mut listing =
+            client.list_session(namespace, Some(prefix), self.page_size);
         loop {
             if cancelled.load(Ordering::Acquire) {
                 return ObjectCleanupExecutionOutcome::Cancelled;
@@ -89,7 +90,8 @@ impl ObjectCleanupExecutor {
             }
 
             if !entries.is_empty() {
-                let keys: Vec<String> = entries.into_iter().map(|entry| entry.key).collect();
+                let keys: Vec<String> =
+                    entries.into_iter().map(|entry| entry.key).collect();
                 let expected = u32::try_from(keys.len()).unwrap_or(u32::MAX);
                 match client.delete_objects(namespace, keys) {
                     Ok(deleted) if deleted == expected => {}

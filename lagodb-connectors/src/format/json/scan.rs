@@ -5,10 +5,10 @@ use std::panic::AssertUnwindSafe;
 
 use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext,
-    ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec,
-    ForeignRelSize, ForeignRelSizeContext, ReScanForeignScanContext,
-    ScanOutputColumn, ScanProjectionPolicy, ScanSlotWriter,
+    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
+    ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
+    ForeignRelSizeContext, ReScanForeignScanContext, ScanOutputColumn,
+    ScanProjectionPolicy, ScanSlotWriter,
 };
 use pgrx::{PgTryBuilder, pg_sys};
 
@@ -17,9 +17,7 @@ use crate::fdw::Lakebase;
 use crate::gucs::ReadConfig;
 use crate::storage::ObjectFiles;
 
-use super::record::{
-    JsonColumnPlan, JsonInputValue, JsonRecordDecoder,
-};
+use super::record::{JsonColumnPlan, JsonInputValue, JsonRecordDecoder};
 use super::stream::JsonRecordStream;
 use crate::format::{
     FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState,
@@ -143,9 +141,8 @@ impl FormatScanState for JsonScanState {
                     .zip(self.outputs.iter().copied())
                     .enumerate()
                 {
-                    let value = self
-                        .decoder
-                        .value(record, column, index, logical_line)?;
+                    let value =
+                        self.decoder.value(record, column, index, logical_line)?;
                     match value {
                         JsonInputValue::Null => unsafe {
                             writer.write(destination, pg_sys::Datum::from(0), true);
@@ -154,13 +151,19 @@ impl FormatScanState for JsonScanState {
                             self.c_string.clear();
                             self.c_string.extend_from_slice(value);
                             self.c_string.push(0);
-                            // SAFETY: JsonRecordDecoder rejects NUL bytes and
-                            // this state appended one terminator.
+                            // SAFETY: serde_json validation excludes literal
+                            // NUL bytes and this state appended one terminator.
                             let value = unsafe {
                                 CStr::from_bytes_with_nul_unchecked(&self.c_string)
                             };
                             // SAFETY: the input plan was bound to this exact
                             // destination OID and typmod at Begin.
+                            let datum = unsafe { column.input_datum(value) };
+                            unsafe { writer.write(destination, datum, false) };
+                        }
+                        JsonInputValue::CStr(value) => {
+                            // SAFETY: the decoder's reusable buffer is valid
+                            // through this synchronous input-function call.
                             let datum = unsafe { column.input_datum(value) };
                             unsafe { writer.write(destination, datum, false) };
                         }

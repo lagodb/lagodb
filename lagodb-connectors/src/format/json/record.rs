@@ -1,20 +1,18 @@
-//! Shared NDJSON column binding, decoding, and row encoding.
+//! Shared NDJSON column binding and decoding.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ops::Range;
 
 use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::tuple::{
-    ColumnDatumTarget, JsonDatumEncoder, JsonDatumKind,
-};
+use pg_lakebase_core::tuple::{ColumnDatumTarget, JsonDatumEncoder, JsonDatumKind};
 use pgrx::{PgTryBuilder, pg_sys};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
-use crate::error::ConnectorError;
 use super::super::FormatKind;
+use super::scalar::JsonScalarDecoder;
+use crate::error::ConnectorError;
 
 #[derive(Clone, Copy)]
 enum JsonInputKind {
@@ -178,18 +176,19 @@ struct JsonValueRange(Range<usize>);
 pub(in crate::format) enum JsonInputValue<'a> {
     Null,
     Bytes(&'a [u8]),
+    CStr(&'a CStr),
 }
 
 pub(in crate::format) struct JsonRecordDecoder {
     values: Vec<Option<JsonValueRange>>,
-    decoded_string: String,
+    scalar: JsonScalarDecoder,
 }
 
 impl JsonRecordDecoder {
     pub(in crate::format) fn new(column_count: usize) -> Self {
         Self {
             values: vec![None; column_count],
-            decoded_string: String::new(),
+            scalar: JsonScalarDecoder::new(),
         }
     }
 
@@ -221,10 +220,11 @@ impl JsonRecordDecoder {
         index: usize,
         logical_line: u64,
     ) -> Result<JsonInputValue<'a>, ConnectorError> {
-        let Some(range) = self.values[index].as_ref() else {
+        let Some(range) = self.values[index].as_ref().map(|value| value.0.clone())
+        else {
             return Ok(JsonInputValue::Null);
         };
-        let raw = &record[range.0.clone()];
+        let raw = &record[range];
         if raw == b"null" {
             return Ok(JsonInputValue::Null);
         }
@@ -235,13 +235,10 @@ impl JsonRecordDecoder {
                 if !inner.contains(&b'\\') {
                     inner
                 } else {
-                    self.decoded_string = serde_json::from_slice::<Cow<'_, str>>(raw)
-                        .map(Cow::into_owned)
-                        .map_err(|source| ConnectorError::Json {
-                            line: logical_line,
-                            source,
-                        })?;
-                    self.decoded_string.as_bytes()
+                    return self
+                        .scalar
+                        .decode(raw, column.name(), logical_line)
+                        .map(JsonInputValue::CStr);
                 }
             }
             JsonInputKind::Scalar if matches!(raw, b"true" | b"false") => raw,
@@ -260,13 +257,6 @@ impl JsonRecordDecoder {
                 ));
             }
         };
-        if value.contains(&0) {
-            return Err(ConnectorError::invalid_json_value(
-                logical_line,
-                column.name(),
-                "PostgreSQL values cannot contain a NUL byte",
-            ));
-        }
         Ok(JsonInputValue::Bytes(value))
     }
 }
@@ -324,10 +314,11 @@ where
                     let bytes = value.get().as_bytes();
                     // SAFETY: serde_json borrowed RawValue directly from this
                     // record slice, so both pointers belong to one allocation.
-                    let start = unsafe {
-                        bytes.as_ptr().offset_from(self.record.as_ptr())
-                    } as usize;
-                    self.values[index] = Some(JsonValueRange(start..start + bytes.len()));
+                    let start =
+                        unsafe { bytes.as_ptr().offset_from(self.record.as_ptr()) }
+                            as usize;
+                    self.values[index] =
+                        Some(JsonValueRange(start..start + bytes.len()));
                 }
                 None => {
                     map.next_value::<IgnoredAny>()?;
@@ -372,54 +363,5 @@ impl Visitor<'_> for FieldVisitor<'_> {
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
         Ok(self.indexes.get(value).copied())
-    }
-}
-
-pub(in crate::format) struct JsonObjectEncoder {
-    prefixes: Box<[Box<[u8]>]>,
-    bytes: Vec<u8>,
-}
-
-impl JsonObjectEncoder {
-    pub(in crate::format) fn new<'a>(
-        names: impl IntoIterator<Item = &'a str>,
-    ) -> Result<Self, ConnectorError> {
-        let prefixes = names
-            .into_iter()
-            .enumerate()
-            .map(|(index, name)| {
-                let mut prefix = Vec::new();
-                prefix.push(if index == 0 { b'{' } else { b',' });
-                serde_json::to_writer(&mut prefix, name).map_err(|_| {
-                    ConnectorError::invalid_object_schema(
-                        FormatKind::Json,
-                        "a column name could not be encoded as JSON",
-                    )
-                })?;
-                prefix.push(b':');
-                Ok(prefix.into_boxed_slice())
-            })
-            .collect::<Result<Vec<_>, ConnectorError>>()?;
-        Ok(Self {
-            prefixes: prefixes.into_boxed_slice(),
-            bytes: Vec::new(),
-        })
-    }
-
-    pub(in crate::format) fn begin_row(&mut self) {
-        self.bytes.clear();
-        if self.prefixes.is_empty() {
-            self.bytes.push(b'{');
-        }
-    }
-
-    pub(in crate::format) fn write_value(&mut self, index: usize, value: Option<&[u8]>) {
-        self.bytes.extend_from_slice(&self.prefixes[index]);
-        self.bytes.extend_from_slice(value.unwrap_or(b"null"));
-    }
-
-    pub(in crate::format) fn finish_row(&mut self) -> &[u8] {
-        self.bytes.push(b'}');
-        &self.bytes
     }
 }

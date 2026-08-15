@@ -83,11 +83,7 @@ impl StorageClient {
     }
 
     /// Returns an iterator over every object whose key starts with `prefix`.
-    pub fn list(
-        &self,
-        bucket: impl Into<String>,
-        prefix: Option<&str>,
-    ) -> ListIter {
+    pub fn list(&self, bucket: impl Into<String>, prefix: Option<&str>) -> ListIter {
         ListIter::new(self.list_session(bucket, prefix, 0))
     }
 

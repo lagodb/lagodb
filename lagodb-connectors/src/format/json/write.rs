@@ -2,7 +2,7 @@
 
 use pg_lakebase_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
 use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::tuple::JsonRowEncoder;
+use pg_lakebase_core::tuple::{BoundJsonObjectEncoder, SlotDatumIndex};
 
 use crate::error::ConnectorError;
 use crate::storage::ObjectOutput;
@@ -14,6 +14,8 @@ use crate::format::{
 };
 
 pub(super) struct JsonWriteState {
+    sources: Box<[SlotDatumIndex]>,
+    encoder: BoundJsonObjectEncoder,
     writer: Option<ObjectSetWriter<StreamEncoderFactory>>,
 }
 
@@ -36,10 +38,24 @@ impl JsonWriteState {
                 Ok((name, column.type_oid(), column.type_mod()))
             })
             .collect::<Result<Vec<_>, ConnectorError>>()?;
-        // Bind and validate the complete relation once. row_to_json itself
-        // writes the object, so the plan has no row-path role after this point.
-        let _ = JsonColumnPlan::bind(fields)?;
+        let plan = JsonColumnPlan::bind(fields)?;
+        let encoder = BoundJsonObjectEncoder::bind(
+            plan.columns()
+                .iter()
+                .map(|column| (column.name(), column.output_encoder())),
+        )
+        .map_err(ConnectorError::json_datum)?;
+        let sources = columns
+            .iter()
+            .map(|column| {
+                SlotDatumIndex::new((column.attno() - 1) as usize, relation.natts())
+                    .expect("a live relation attribute is within its tuple width")
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Ok(Self {
+            sources,
+            encoder,
             writer: Some(ObjectSetWriter::new(
                 output,
                 StreamEncoderFactory::new(FormatKind::Json, compression),
@@ -53,15 +69,22 @@ impl FormatWriteState for JsonWriteState {
         &mut self,
         slot: &mut ModifySlot<'_>,
     ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        // SAFETY: ModifySlot exposes this live relation-shaped slot only for
-        // the current synchronous callback.
-        let row = unsafe { JsonRowEncoder::encode(slot.as_raw()) }
+        let datums = slot.tuple_row().datums();
+        let values = self.sources.iter().copied().map(|source| {
+            // SAFETY: every source token was validated against this relation's
+            // tuple width during Begin, and the callback supplies that same
+            // relation layout for this synchronous INSERT.
+            let (datum, is_null) = unsafe { datums.datum_at_bound(source) };
+            (!is_null).then_some(datum)
+        });
+        // SAFETY: sources and output columns were built from the same live
+        // relation column sequence, and slot Datums remain live for this call.
+        let row = unsafe { self.encoder.encode_row(values) }
             .map_err(ConnectorError::json_datum)?;
-        let bytes = row.as_bytes().map_err(ConnectorError::json_datum)?;
         self.writer
             .as_mut()
             .expect("JSON writer is not used after finish")
-            .write(bytes)?;
+            .write(row)?;
         Ok(ForeignModifyOutcome::Applied)
     }
 

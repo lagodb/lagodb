@@ -56,8 +56,9 @@ impl ModifySlotBuffer {
     ) -> Self {
         // SAFETY: PostgreSQL supplies the relation-shaped DELETE returning
         // slot, which may be empty before this callback initializes it.
-        let buffer =
-            unsafe { Self::from_raw_parts_unchecked(slot, layout, conversion_context) };
+        let buffer = unsafe {
+            Self::from_raw_parts_unchecked(slot, layout, conversion_context)
+        };
         // SAFETY: `from_raw_parts_unchecked` requires the live relation-shaped
         // slot and its arrays before PostgreSQL clears the row representation.
         unsafe { pg_sys::ExecStoreAllNullTuple(slot) };

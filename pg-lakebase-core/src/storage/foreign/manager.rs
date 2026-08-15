@@ -135,9 +135,7 @@ impl StorageManager {
     {
         let store = self.acquire_server::<P>(server_oid, effective_user)?;
         let staging = StagingPathResolver::new(self.endpoint.cache_dir().to_owned());
-        Ok(ObjectPrefixAccess::new(
-            store, staging, bucket, prefix,
-        ))
+        Ok(ObjectPrefixAccess::new(store, staging, bucket, prefix))
     }
 
     fn acquire_catalog<P>(
@@ -151,9 +149,9 @@ impl StorageManager {
 
         let identity = catalog.identity().clone();
         let umid = identity.umid();
-        if let Some(entry) = StorageCache::with_current(|cache| {
-            cache.find_matching(umid, &identity)
-        }) {
+        if let Some(entry) =
+            StorageCache::with_current(|cache| cache.find_matching(umid, &identity))
+        {
             return Ok(StorageHandle::new(entry));
         }
 

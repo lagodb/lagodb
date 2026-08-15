@@ -5,7 +5,9 @@ use std::panic::AssertUnwindSafe;
 
 use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
-use pg_lakebase_core::copy::{CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError};
+use pg_lakebase_core::copy::{
+    CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError,
+};
 use pg_lakebase_core::diag::PgReportError;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::{PgTryBuilder, pg_sys};
@@ -41,10 +43,11 @@ impl AvroCopySource {
         mut files: ObjectFiles,
         layout: &CopyColumnLayout,
     ) -> Result<Self, CopyError> {
-        let first = files
-            .next()
-            .expect("Avro COPY FROM resolves one exact object before opening its source");
-        let reader = Reader::new(AvroObjectReader::new(first?)).map_err(ConnectorError::from)?;
+        let first = files.next().expect(
+            "Avro COPY FROM resolves one exact object before opening its source",
+        );
+        let reader = Reader::new(AvroObjectReader::new(first?))
+            .map_err(ConnectorError::from)?;
         let schema = reader.writer_schema().clone();
         let Schema::Record(record) = &schema else {
             return Err(ConnectorError::invalid_object_schema(
@@ -116,7 +119,9 @@ impl AvroCopySource {
                         return Ok(false);
                     };
                     let Value::Record(fields) = value? else {
-                        unreachable!("a record writer schema always decodes to a record value");
+                        unreachable!(
+                            "a record writer schema always decodes to a record value"
+                        );
                     };
                     // One COPY row owns temporary PostgreSQL output text only
                     // until it is escaped into the bridge byte buffer.
@@ -128,9 +133,13 @@ impl AvroCopySource {
                             }
                             // SAFETY: this source index was resolved against the
                             // exact Avro writer schema when the source opened.
-                            let source = unsafe { fields.get_unchecked(column.reader.source()) };
+                            let source = unsafe {
+                                fields.get_unchecked(column.reader.source())
+                            };
                             match unsafe { column.reader.datum(source) }? {
-                                None => self.bytes.extend_from_slice(CanonicalCsv::NULL),
+                                None => {
+                                    self.bytes.extend_from_slice(CanonicalCsv::NULL)
+                                }
                                 Some(datum) => {
                                     let value = pg_sys::OidOutputFunctionCall(
                                         column.output_function,
@@ -150,7 +159,9 @@ impl AvroCopySource {
                 }
                 Ok::<bool, ConnectorError>(true)
             }))
-            .catch_others(|error| Err(ConnectorError::Postgres(PgReportError::from_caught(error))))
+            .catch_others(|error| {
+                Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
+            })
             .execute()
         };
         unsafe { self.datum_context.reset() };
@@ -160,7 +171,11 @@ impl AvroCopySource {
 }
 
 impl CopyDataSource for AvroCopySource {
-    fn read(&mut self, output: &mut [u8], min_read: usize) -> Result<usize, CopyError> {
+    fn read(
+        &mut self,
+        output: &mut [u8],
+        min_read: usize,
+    ) -> Result<usize, CopyError> {
         let mut written = 0;
         let target = min_read.max(1).min(output.len());
         while written < target {
@@ -208,7 +223,10 @@ pub(super) struct AvroCopyDestination {
 }
 
 impl AvroCopyDestination {
-    pub(super) fn new(output: ObjectOutput, compression: AvroWriteCompression) -> Self {
+    pub(super) fn new(
+        output: ObjectOutput,
+        compression: AvroWriteCompression,
+    ) -> Self {
         Self {
             output: Some(output),
             compression,
@@ -227,9 +245,13 @@ impl AvroCopyDestination {
             .map_err(CopyError::from)
     }
 
-    fn initialize_inner(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
-        let fields = layout.columns().iter().map(|column| {
-            column.name().to_str().map(|name| {
+    fn initialize_inner(
+        &mut self,
+        layout: &CopyColumnLayout,
+    ) -> Result<(), CopyError> {
+        let fields =
+            layout.columns().iter().map(|column| {
+                column.name().to_str().map(|name| {
                 (name, column.type_oid(), column.type_mod())
             }).map_err(|_| {
                 ConnectorError::invalid_object_schema(
@@ -237,8 +259,9 @@ impl AvroCopyDestination {
                     "COPY TO output column names must be valid UTF-8 for Avro",
                 )
             })
-        });
-        let plan = AvroWritePlan::from_copy_columns(fields, layout.len()).map_err(CopyError::from)?;
+            });
+        let plan = AvroWritePlan::from_copy_columns(fields, layout.len())
+            .map_err(CopyError::from)?;
         let mut input_plans = Vec::with_capacity(layout.len());
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
@@ -258,7 +281,9 @@ impl AvroCopyDestination {
                 }
                 Ok::<(), ConnectorError>(())
             }))
-            .catch_others(|error| Err(ConnectorError::Postgres(PgReportError::from_caught(error))))
+            .catch_others(|error| {
+                Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
+            })
             .execute()
         };
         result.map_err(CopyError::from)?;
@@ -290,7 +315,9 @@ impl CopyDataDestination for AvroCopyDestination {
         let datum_context = self.datum_context.value();
         unsafe {
             PgMemoryContexts::For(datum_context).switch_to(|_| {
-                for (index, (field, plan)) in self.row.fields().zip(ready.columns.iter()).enumerate() {
+                for (index, (field, plan)) in
+                    self.row.fields().zip(ready.columns.iter()).enumerate()
+                {
                     let datum = match field {
                         None => None,
                         Some(value) => {

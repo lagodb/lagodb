@@ -27,8 +27,9 @@ pub(crate) struct StagedObjectWriter {
 
 impl StagedObjectWriter {
     fn record_write(&mut self, bytes: usize) {
-        let bytes = u64::try_from(bytes)
-            .expect("PostgreSQL is supported only on platforms where usize fits in u64");
+        let bytes = u64::try_from(bytes).expect(
+            "PostgreSQL is supported only on platforms where usize fits in u64",
+        );
         self.bytes_written += bytes;
     }
 
@@ -124,20 +125,18 @@ impl StagedObjectUpload {
     }
 
     pub(crate) fn finish(mut self) -> StorageResult<()> {
-        // Exact-key replacement deliberately uses the storage service's external-invalidation
-        // contract. The required order is: upload succeeds, then the caller successfully invokes
-        // `lagodb.invalidate_object_cache`. A Busy result means a reader or fill still owns the
-        // old cache lifecycle, so invalidation must be retried after that activity ends. Once
-        // invalidation succeeds, its per-object lock guarantees that subsequent OPENs miss the
-        // retired residency and fetch the uploaded object.
+        // Object output is immutable: prefix output uses an operation-unique
+        // key, and exact output must name a previously unused key. This write
+        // path deliberately does not invalidate a prior cache residency and
+        // must not be treated as an object-replacement protocol.
         //
-        // This contract does not provide concurrent-read consistency during replacement: readers
-        // opened before invalidation, and reads between upload and successful invalidation, are
-        // outside the freshness guarantee. Providing that stronger guarantee would require an
-        // atomic retire/upload/publish operation or immutable keys; neither is part of the raw-file
-        // connector model. In particular, invalidating before upload is insufficient because a
-        // reader can repopulate the old object before publication. Keep upload and invalidation
-        // separate, with successful post-upload invalidation as the explicit freshness boundary.
+        // Exceptional replacement of an externally managed key requires the
+        // caller to upload first and then successfully invoke
+        // `lagodb.invalidate_object_cache`. A Busy result must be retried after
+        // the current reader or fill ends. That explicit recovery operation
+        // still cannot provide concurrent-read consistency; a stronger
+        // contract requires atomic retire/upload/publish rather than changes to
+        // this immutable-output lifecycle.
         if self.delete_on_abort {
             // Abort deletion is best-effort garbage collection for an
             // operation-unique prefix object, not transactional publication;

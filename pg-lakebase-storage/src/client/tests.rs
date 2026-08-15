@@ -1267,10 +1267,7 @@ async fn client_list_session_owns_connection_and_drives_pages() {
         let mut listing = client.list_session("bucket", Some("k/"), 2);
         drop(client);
 
-        let page1 = listing
-            .next_page()
-            .unwrap()
-            .expect("first page must exist");
+        let page1 = listing.next_page().unwrap().expect("first page must exist");
         assert_eq!(page1.len(), 2);
 
         let page2 = listing
@@ -1279,10 +1276,7 @@ async fn client_list_session_owns_connection_and_drives_pages() {
             .expect("second page must exist");
         assert_eq!(page2.len(), 2);
 
-        let page3 = listing
-            .next_page()
-            .unwrap()
-            .expect("final page must exist");
+        let page3 = listing.next_page().unwrap().expect("final page must exist");
         assert_eq!(page3.len(), 1);
         assert!(listing.next_page().unwrap().is_none());
     })

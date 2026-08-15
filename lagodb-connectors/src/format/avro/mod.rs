@@ -158,10 +158,12 @@ impl AvroFormat {
             Schema::Uuid => plain(pg_sys::UUIDOID),
             Schema::Date => plain(pg_sys::DATEOID),
             Schema::TimeMillis | Schema::TimeMicros => plain(pg_sys::TIMEOID),
-            Schema::TimestampMillis
-            | Schema::TimestampMicros => plain(pg_sys::TIMESTAMPTZOID),
-            Schema::LocalTimestampMillis
-            | Schema::LocalTimestampMicros => plain(pg_sys::TIMESTAMPOID),
+            Schema::TimestampMillis | Schema::TimestampMicros => {
+                plain(pg_sys::TIMESTAMPTZOID)
+            }
+            Schema::LocalTimestampMillis | Schema::LocalTimestampMicros => {
+                plain(pg_sys::TIMESTAMPOID)
+            }
             Schema::Decimal(decimal) => {
                 AvroValueKind::from_schema(schema)?;
                 let precision = i32::try_from(decimal.precision).map_err(|_| {
@@ -199,7 +201,9 @@ impl AvroFormat {
             | Schema::BigDecimal
             | Schema::Duration
             | Schema::TimestampNanos
-            | Schema::LocalTimestampNanos => Err(self.unsupported_type(field_name, schema)),
+            | Schema::LocalTimestampNanos => {
+                Err(self.unsupported_type(field_name, schema))
+            }
         }
     }
 

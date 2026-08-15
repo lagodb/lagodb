@@ -35,7 +35,8 @@ where
             self.record.clear();
             let mut complete = false;
             while !complete {
-                let available = self.input.fill_buf().map_err(ConnectorError::json_io)?;
+                let available =
+                    self.input.fill_buf().map_err(ConnectorError::json_io)?;
                 if available.is_empty() {
                     if self.record.is_empty() {
                         return Ok(false);
@@ -133,8 +134,9 @@ impl JsonRecordStream {
         let Some(file) = self.files.next() else {
             return Ok(false);
         };
-        let input = StreamDecoder::new(ObjectReader { file: file? }, self.compression)
-            .map_err(ConnectorError::json_io)?;
+        let input =
+            StreamDecoder::new(ObjectReader { file: file? }, self.compression)
+                .map_err(ConnectorError::json_io)?;
         self.reader = Some(JsonLineReader::new(
             BufReader::new(input),
             self.max_record_bytes,

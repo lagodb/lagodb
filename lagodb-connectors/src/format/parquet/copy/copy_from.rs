@@ -10,9 +10,7 @@ use parquet::arrow::arrow_reader::{
     ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
 };
 use pg_arrow_conv::{ColumnReader, PgColumnType, resolve_column_rule};
-use pg_lakebase_core::copy::{
-    CopyColumnLayout, CopyDataSource, CopyError,
-};
+use pg_lakebase_core::copy::{CopyColumnLayout, CopyDataSource, CopyError};
 use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
 use pgrx::memcxt::PgMemoryContexts;

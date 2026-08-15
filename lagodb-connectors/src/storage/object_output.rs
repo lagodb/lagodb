@@ -26,6 +26,12 @@ impl ObjectFileSuffix {
     }
 }
 
+/// Output keys follow the object-store immutability contract.
+///
+/// Prefix output always allocates operation-unique keys. Exact output is for
+/// publishing to a previously unused key; overwriting an existing key is not
+/// a supported publication protocol and requires explicit cache coordination
+/// outside this writer.
 pub(crate) enum ObjectOutput {
     Exact {
         object: Option<ObjectAccess>,
@@ -89,8 +95,7 @@ impl ObjectOutput {
         match self {
             Self::Exact { .. } => false,
             Self::Prefix {
-                target_file_bytes,
-                ..
+                target_file_bytes, ..
             } => estimated_file_bytes >= target_file_bytes.get(),
         }
     }

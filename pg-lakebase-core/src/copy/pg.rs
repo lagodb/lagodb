@@ -33,9 +33,7 @@ unsafe extern "C-unwind" {
         preparation: *mut LakebaseCopyPreparation,
     );
 
-    fn lakebase_dispose_copy_preparation(
-        preparation: *mut LakebaseCopyPreparation,
-    );
+    fn lakebase_dispose_copy_preparation(preparation: *mut LakebaseCopyPreparation);
 
     fn lakebase_begin_copy_from(
         pstate: *mut pg_sys::ParseState,
@@ -77,9 +75,7 @@ unsafe extern "C-unwind" {
         len: *mut std::ffi::c_int,
     );
 
-    fn lakebase_end_copy_row_encoder(
-        state: pg_sys::CopyToState,
-    );
+    fn lakebase_end_copy_row_encoder(state: pg_sys::CopyToState);
 
     fn lakebase_begin_copy_to(
         pstate: *mut pg_sys::ParseState,
@@ -102,9 +98,7 @@ unsafe extern "C-unwind" {
         attnamelist: *mut pg_sys::List,
     ) -> *mut pg_sys::List;
 
-    fn lakebase_copy_to_tuple_desc(
-        state: pg_sys::CopyToState,
-    ) -> pg_sys::TupleDesc;
+    fn lakebase_copy_to_tuple_desc(state: pg_sys::CopyToState) -> pg_sys::TupleDesc;
 
     fn lakebase_copy_to_attnums(state: pg_sys::CopyToState) -> *mut pg_sys::List;
 
@@ -151,16 +145,14 @@ impl CopyBridge {
         preparation: *mut LakebaseCopyPreparation,
     ) {
         unsafe {
-            pg_guard_ffi_boundary(|| {
-                unsafe {
-                    lakebase_prepare_copy_from(
-                        pstate,
-                        statement,
-                        stmt_location,
-                        stmt_len,
-                        preparation,
-                    );
-                }
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_prepare_copy_from(
+                    pstate,
+                    statement,
+                    stmt_location,
+                    stmt_len,
+                    preparation,
+                );
             });
         }
     }
@@ -173,21 +165,21 @@ impl CopyBridge {
         preparation: *mut LakebaseCopyPreparation,
     ) {
         unsafe {
-            pg_guard_ffi_boundary(|| {
-                unsafe {
-                    lakebase_prepare_copy_to(
-                        pstate,
-                        statement,
-                        stmt_location,
-                        stmt_len,
-                        preparation,
-                    );
-                }
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_prepare_copy_to(
+                    pstate,
+                    statement,
+                    stmt_location,
+                    stmt_len,
+                    preparation,
+                );
             });
         }
     }
 
-    pub(crate) unsafe fn dispose_preparation(preparation: *mut LakebaseCopyPreparation) {
+    pub(crate) unsafe fn dispose_preparation(
+        preparation: *mut LakebaseCopyPreparation,
+    ) {
         unsafe {
             pg_guard_ffi_boundary(|| {
                 unsafe { lakebase_dispose_copy_preparation(preparation) };
@@ -206,19 +198,17 @@ impl CopyBridge {
         options: *mut pg_sys::List,
     ) -> pg_sys::CopyFromState {
         unsafe {
-            pg_guard_ffi_boundary(|| {
-                unsafe {
-                    lakebase_begin_copy_from(
-                        pstate,
-                        relation,
-                        where_clause,
-                        filename,
-                        is_program,
-                        data_source_cb,
-                        attnamelist,
-                        options,
-                    )
-                }
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_begin_copy_from(
+                    pstate,
+                    relation,
+                    where_clause,
+                    filename,
+                    is_program,
+                    data_source_cb,
+                    attnamelist,
+                    options,
+                )
             })
         }
     }
@@ -286,9 +276,7 @@ impl CopyBridge {
 
     pub(crate) unsafe fn end_row_encoder(state: pg_sys::CopyToState) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
-                lakebase_end_copy_row_encoder(state)
-            });
+            pg_guard_ffi_boundary(|| unsafe { lakebase_end_copy_row_encoder(state) });
         }
     }
 
@@ -304,20 +292,18 @@ impl CopyBridge {
         options: *mut pg_sys::List,
     ) -> pg_sys::CopyToState {
         unsafe {
-            pg_guard_ffi_boundary(|| {
-                unsafe {
-                    lakebase_begin_copy_to(
-                        pstate,
-                        relation,
-                        raw_query,
-                        query_relation,
-                        filename,
-                        is_program,
-                        data_dest_cb,
-                        attnamelist,
-                        options,
-                    )
-                }
+            pg_guard_ffi_boundary(|| unsafe {
+                lakebase_begin_copy_to(
+                    pstate,
+                    relation,
+                    raw_query,
+                    query_relation,
+                    filename,
+                    is_program,
+                    data_dest_cb,
+                    attnamelist,
+                    options,
+                )
             })
         }
     }
@@ -345,12 +331,18 @@ impl CopyBridge {
         }
     }
 
-    pub(crate) unsafe fn to_tuple_desc(state: pg_sys::CopyToState) -> pg_sys::TupleDesc {
-        unsafe { pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to_tuple_desc(state) }) }
+    pub(crate) unsafe fn to_tuple_desc(
+        state: pg_sys::CopyToState,
+    ) -> pg_sys::TupleDesc {
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to_tuple_desc(state) })
+        }
     }
 
     pub(crate) unsafe fn to_attnums(state: pg_sys::CopyToState) -> *mut pg_sys::List {
-        unsafe { pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to_attnums(state) }) }
+        unsafe {
+            pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to_attnums(state) })
+        }
     }
 
     pub(crate) unsafe fn begin_raw_field_reader(

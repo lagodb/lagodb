@@ -95,15 +95,9 @@ where
         }
     }
 
-    pub(crate) fn write(
-        &mut self,
-        input: &F::Input,
-    ) -> Result<(), ConnectorError> {
+    pub(crate) fn write(&mut self, input: &F::Input) -> Result<(), ConnectorError> {
         let progress = self.ensure_open()?.encoder.write(input)?;
-        if self
-            .output
-            .should_roll(progress.estimated_file_bytes())
-        {
+        if self.output.should_roll(progress.estimated_file_bytes()) {
             self.finish_current()?;
         }
         Ok(())

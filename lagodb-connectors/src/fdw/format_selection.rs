@@ -61,7 +61,8 @@ impl ResolvedForeignRelation {
     pub(crate) fn into_scan_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<(Box<dyn FormatReader>, ResolvedStorageLocation), ConnectorError> {
+    ) -> Result<(Box<dyn FormatReader>, ResolvedStorageLocation), ConnectorError>
+    {
         let location = ResolvedStorageLocation::resolve_foreign_object(
             self.options.object,
             self.server_oid,
@@ -73,7 +74,8 @@ impl ResolvedForeignRelation {
     pub(crate) fn into_write_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<(Box<dyn FormatWriter>, ResolvedStorageLocation), ConnectorError> {
+    ) -> Result<(Box<dyn FormatWriter>, ResolvedStorageLocation), ConnectorError>
+    {
         let location = ResolvedStorageLocation::resolve_foreign_object(
             self.options.object,
             self.server_oid,

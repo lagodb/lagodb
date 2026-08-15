@@ -98,8 +98,6 @@ impl StorageHandle {
         prefix: Option<&str>,
         page_size: u32,
     ) -> StorageResult<ListSession> {
-        self.entry
-            .service
-            .list_session(bucket, prefix, page_size)
+        self.entry.service.list_session(bucket, prefix, page_size)
     }
 }

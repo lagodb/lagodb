@@ -9,9 +9,7 @@ use super::contract::{
     FdwAnalyze, FdwTruncate, ForeignAnalyzeContext, ForeignSampleContext,
     ForeignTruncateContext,
 };
-use super::error::{
-    ForeignTableMaintenanceError, ForeignTableMaintenancePhase,
-};
+use super::error::{ForeignTableMaintenanceError, ForeignTableMaintenancePhase};
 
 #[pg_guard]
 /// # Safety
@@ -60,12 +58,7 @@ pub(crate) unsafe extern "C-unwind" fn acquire_sample_rows<P: FdwAnalyze>(
     let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let mut context = unsafe {
-            ForeignSampleContext::from_raw(
-                relation,
-                log_level,
-                rows,
-                target_rows,
-            )
+            ForeignSampleContext::from_raw(relation, log_level, rows, target_rows)
         };
         let statistics = P::acquire_sample_rows(&mut context)?.validate()?;
         unsafe {
@@ -78,9 +71,7 @@ pub(crate) unsafe extern "C-unwind" fn acquire_sample_rows<P: FdwAnalyze>(
     match result {
         Ok(sampled_rows) => sampled_rows,
         Err(error) => error
-            .with_callback_phase::<P>(
-                ForeignTableMaintenancePhase::AcquireSampleRows,
-            )
+            .with_callback_phase::<P>(ForeignTableMaintenancePhase::AcquireSampleRows)
             .report_after_switch(prior_context),
     }
 }
@@ -98,11 +89,7 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_truncate<P: FdwTruncate>(
     let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let context = unsafe {
-            ForeignTruncateContext::from_raw(
-                relations,
-                behavior,
-                restart_sequences,
-            )
+            ForeignTruncateContext::from_raw(relations, behavior, restart_sequences)
         };
         P::truncate(&context)
     })();

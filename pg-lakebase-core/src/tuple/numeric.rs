@@ -333,10 +333,7 @@ impl Decimal128NumericCodec {
     /// `numeric_recv` also runs `apply_typmod`, so a value that does not fit
     /// `NUMERIC(precision, scale)` is reported as
     /// [`DecimalCodecError::ValueOutOfRange`] rather than silently truncated.
-    pub fn decode(
-        &self,
-        unscaled: i128,
-    ) -> Result<AnyNumeric, DecimalCodecError> {
+    pub fn decode(&self, unscaled: i128) -> Result<AnyNumeric, DecimalCodecError> {
         let external = NumericExternal::from_decimal128(unscaled, self.scale);
         // SAFETY: only callable from a PostgreSQL backend thread; see the
         // safety section on `numeric_recv_external`.
@@ -405,7 +402,10 @@ impl Decimal128NumericCodec {
         }
     }
 
-    fn signed_be_bytes_to_i128(&self, bytes: &[u8]) -> Result<i128, DecimalCodecError> {
+    fn signed_be_bytes_to_i128(
+        &self,
+        bytes: &[u8],
+    ) -> Result<i128, DecimalCodecError> {
         if bytes.is_empty() {
             return Ok(0);
         }
@@ -446,21 +446,25 @@ impl Decimal128NumericCodec {
             coefficient = coefficient
                 .checked_mul(NBASE)
                 .and_then(|value| value.checked_add(digit))
-                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?;
+                .ok_or_else(|| {
+                    self.value_out_of_range("numeric value exceeds Decimal128")
+                })?;
         }
 
-        let exponent = (weight + 1 - ndigits as i32) * DEC_DIGITS as i32 + self.scale as i32;
+        let exponent =
+            (weight + 1 - ndigits as i32) * DEC_DIGITS as i32 + self.scale as i32;
         let unscaled = if exponent >= 0 {
-            let factor = 10_i128
-                .checked_pow(exponent as u32)
-                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?;
-            coefficient
-                .checked_mul(factor)
-                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?
+            let factor = 10_i128.checked_pow(exponent as u32).ok_or_else(|| {
+                self.value_out_of_range("numeric value exceeds Decimal128")
+            })?;
+            coefficient.checked_mul(factor).ok_or_else(|| {
+                self.value_out_of_range("numeric value exceeds Decimal128")
+            })?
         } else {
-            let factor = 10_i128
-                .checked_pow((-exponent) as u32)
-                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?;
+            let factor =
+                10_i128.checked_pow((-exponent) as u32).ok_or_else(|| {
+                    self.value_out_of_range("numeric value exceeds Decimal128")
+                })?;
             if coefficient % factor != 0 {
                 return Err(self.value_out_of_range(
                     "numeric value has more fractional digits than the decimal scale",
@@ -470,15 +474,17 @@ impl Decimal128NumericCodec {
         };
 
         let unscaled = if sign == NUMERIC_NEG {
-            unscaled
-                .checked_neg()
-                .ok_or_else(|| self.value_out_of_range("numeric value exceeds Decimal128"))?
+            unscaled.checked_neg().ok_or_else(|| {
+                self.value_out_of_range("numeric value exceeds Decimal128")
+            })?
         } else {
             unscaled
         };
         let limit = 10_i128.pow(self.precision) - 1;
         if !(-limit..=limit).contains(&unscaled) {
-            return Err(self.value_out_of_range("numeric value exceeds decimal precision"));
+            return Err(
+                self.value_out_of_range("numeric value exceeds decimal precision")
+            );
         }
         Ok(unscaled)
     }

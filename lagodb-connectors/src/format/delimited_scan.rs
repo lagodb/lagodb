@@ -6,10 +6,10 @@ use pg_lakebase_core::copy::{
     CopyDataSource, CopyDocumentSource, CopyError, CopyFromScan,
 };
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext,
-    ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec,
-    ForeignRelSize, ForeignRelSizeContext, ReScanForeignScanContext,
-    ScanSlotWriter, ScanProjectionPolicy,
+    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
+    ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
+    ForeignRelSizeContext, ReScanForeignScanContext, ScanProjectionPolicy,
+    ScanSlotWriter,
 };
 use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;

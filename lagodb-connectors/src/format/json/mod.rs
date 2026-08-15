@@ -1,6 +1,7 @@
 //! Newline-delimited JSON object format.
 
 mod record;
+mod scalar;
 mod scan;
 mod schema;
 mod stream;
@@ -23,12 +24,11 @@ use crate::storage::{ObjectFiles, ObjectOutput};
 use super::{
     FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
     FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
-    FormatWriter, InferredSchema, StorageFileReader, StreamCompression, StreamDecoder,
+    FormatWriter, InferredSchema, StorageFileReader, StreamCompression,
+    StreamDecoder,
 };
 
-pub(super) use record::{
-    JsonColumnPlan, JsonInputValue, JsonObjectEncoder, JsonRecordDecoder,
-};
+pub(super) use record::{JsonColumnPlan, JsonInputValue, JsonRecordDecoder};
 pub(super) use stream::JsonRecordStream;
 
 /// JSON-format processor. Every non-empty line is one JSON object.

@@ -1,11 +1,10 @@
 //! Avro OCF write orchestration.
 
 mod encoder;
+mod ocf;
 mod plan;
 
-use pg_lakebase_core::fdw::{
-    ForeignModifyOutcome, ModifyPlanSlot, ModifySlot,
-};
+use pg_lakebase_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::tuple::SlotDatumIndex;
 
@@ -48,10 +47,7 @@ impl AvroObjectWriter {
             .write(row)
     }
 
-    pub(super) fn finish(
-        &mut self,
-        emit_empty: bool,
-    ) -> Result<(), ConnectorError> {
+    pub(super) fn finish(&mut self, emit_empty: bool) -> Result<(), ConnectorError> {
         let Some(writer) = self.writer.take() else {
             return Ok(());
         };
@@ -80,11 +76,8 @@ impl AvroWriteState {
         let sources = columns
             .iter()
             .map(|column| {
-                SlotDatumIndex::new(
-                    (column.attno() - 1) as usize,
-                    relation.natts(),
-                )
-                .expect("a live relation attribute is within its tuple width")
+                SlotDatumIndex::new((column.attno() - 1) as usize, relation.natts())
+                    .expect("a live relation attribute is within its tuple width")
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -109,10 +102,7 @@ impl FormatWriteState for AvroWriteState {
             let (datum, is_null) = unsafe { datums.datum_at_bound(source) };
             // SAFETY: output enumerates the row allocated from sources.len(); a
             // present slot Datum stays live through the immediate writer call.
-            unsafe {
-                self.row
-                    .set_at_bound(output, (!is_null).then_some(datum))
-            };
+            unsafe { self.row.set_at_bound(output, (!is_null).then_some(datum)) };
         }
         self.writer.write_row(&self.row)?;
         Ok(ForeignModifyOutcome::Applied)

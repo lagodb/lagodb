@@ -25,8 +25,8 @@ pub use driver::{CopyFromDriver, CopyFromSpec, CopyToDriver, CopyToSpec};
 pub use error::CopyError;
 pub use io::{CopyDataDestination, CopyDataSource};
 pub use layout::{CopyColumn, CopyColumnLayout};
-pub use row::CopyRowEncoder;
 pub use raw_fields::{
     CopyRawFieldReader, CopyRawFields, CopyRawRecord, CopyTextInputValidator,
 };
+pub use row::CopyRowEncoder;
 pub use scan::{CopyDocumentSource, CopyFromScan};

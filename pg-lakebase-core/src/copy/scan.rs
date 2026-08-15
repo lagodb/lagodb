@@ -165,7 +165,10 @@ impl CopyFromScan {
     }
 
     /// Reset the decoder to the first retained input document.
-    pub fn rescan(&mut self, econtext: *mut pg_sys::ExprContext) -> Result<(), CopyError> {
+    pub fn rescan(
+        &mut self,
+        econtext: *mut pg_sys::ExprContext,
+    ) -> Result<(), CopyError> {
         if let Some(state) = self.state.take() {
             Self::end_state(state)?;
         }

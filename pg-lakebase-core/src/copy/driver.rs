@@ -294,7 +294,9 @@ impl<'statement, 'parse, 'destination>
         }
         .map_err(CopyError::from)
         .and_then(|layout| layout);
-        if let Err(error) = layout.and_then(|layout| destination_guard.initialize(&layout)) {
+        if let Err(error) =
+            layout.and_then(|layout| destination_guard.initialize(&layout))
+        {
             let _ = Self::end_state(state);
             return Err(error);
         }

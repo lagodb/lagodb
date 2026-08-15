@@ -44,11 +44,8 @@ pub(super) struct CanonicalCsvRow {
 impl CanonicalCsv {
     pub(super) const NULL: &'static [u8] = br"\N";
 
-    const CONNECTOR_OPTION_NAMES: [&[u8]; 3] = [
-        b"storage_server",
-        b"format",
-        b"compression",
-    ];
+    const CONNECTOR_OPTION_NAMES: [&[u8]; 3] =
+        [b"storage_server", b"format", b"compression"];
 
     const USER_OVERRIDE_OPTION_NAMES: [&[u8]; 10] = [
         b"delimiter",
@@ -267,7 +264,7 @@ impl CanonicalCsvRow {
         CanonicalCsv::validate_row_width(self.fields.len(), expected_fields)
     }
 
-    pub(super) fn fields(&self) -> impl Iterator<Item = Option<&CStr>> {
+    pub(super) fn fields(&self) -> impl ExactSizeIterator<Item = Option<&CStr>> {
         self.fields.iter().map(|field| {
             (!field.null).then(|| {
                 // SAFETY: parse rejects embedded NUL bytes and appends exactly

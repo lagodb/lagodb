@@ -63,10 +63,7 @@ impl ChunkReader for ParquetObjectReader {
             let request_len = remaining.min(u32::MAX as usize);
             let read = self
                 .file
-                .read_at_into(
-                    position,
-                    &mut data[written..written + request_len],
-                )
+                .read_at_into(position, &mut data[written..written + request_len])
                 .map_err(|error| ParquetError::External(Box::new(error)))?;
             if read == 0 {
                 return Err(ParquetError::EOF(format!(

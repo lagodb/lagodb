@@ -1,18 +1,14 @@
 //! Canonical-CSV bridges for NDJSON COPY FROM and COPY TO.
 
-use std::panic::AssertUnwindSafe;
-
 use pg_lakebase_core::copy::{
     CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError,
 };
-use pg_lakebase_core::diag::PgReportError;
+use pg_lakebase_core::tuple::BoundJsonObjectEncoder;
 use pgrx::memcxt::PgMemoryContexts;
-use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;
 use crate::format::json::{
-    JsonColumnPlan, JsonInputValue, JsonObjectEncoder, JsonRecordDecoder,
-    JsonRecordStream,
+    JsonColumnPlan, JsonInputValue, JsonRecordDecoder, JsonRecordStream,
 };
 use crate::format::{
     EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression,
@@ -21,9 +17,7 @@ use crate::format::{
 use crate::gucs::ReadConfig;
 use crate::storage::{ObjectFiles, ObjectOutput};
 
-use super::{
-    CanonicalCsv, CanonicalCsvRow, FormatCopyDestination, FormatCopySource,
-};
+use super::{CanonicalCsv, CanonicalCsvRow, FormatCopyDestination, FormatCopySource};
 
 const BRIDGE_BUFFER_TARGET: usize = 256 * 1024;
 
@@ -42,15 +36,21 @@ impl JsonCopySource {
         layout: &CopyColumnLayout,
         compression: StreamCompression,
     ) -> Result<Self, CopyError> {
-        let plan = JsonColumnPlan::bind(layout.columns().iter().map(|column| {
-            let name = column.name().to_str().map_err(|_| {
-                ConnectorError::invalid_object_schema(
-                    FormatKind::Json,
-                    "COPY column names must be valid UTF-8 for JSON",
-                )
-            })?;
-            Ok((name, column.type_oid(), column.type_mod()))
-        }).collect::<Result<Vec<_>, ConnectorError>>()?)?;
+        let plan = JsonColumnPlan::bind(
+            layout
+                .columns()
+                .iter()
+                .map(|column| {
+                    let name = column.name().to_str().map_err(|_| {
+                        ConnectorError::invalid_object_schema(
+                            FormatKind::Json,
+                            "COPY column names must be valid UTF-8 for JSON",
+                        )
+                    })?;
+                    Ok((name, column.type_oid(), column.type_mod()))
+                })
+                .collect::<Result<Vec<_>, ConnectorError>>()?,
+        )?;
         let max_record_bytes = ReadConfig::from_guc().json_max_record_bytes();
         Ok(Self {
             stream: JsonRecordStream::new(files, compression, max_record_bytes),
@@ -80,6 +80,9 @@ impl JsonCopySource {
                     JsonInputValue::Bytes(value) => {
                         CanonicalCsv::write_field(&mut self.bytes, value);
                     }
+                    JsonInputValue::CStr(value) => {
+                        CanonicalCsv::write_field(&mut self.bytes, value.to_bytes());
+                    }
                 }
             }
             self.bytes.push(b'\n');
@@ -89,7 +92,11 @@ impl JsonCopySource {
 }
 
 impl CopyDataSource for JsonCopySource {
-    fn read(&mut self, output: &mut [u8], min_read: usize) -> Result<usize, CopyError> {
+    fn read(
+        &mut self,
+        output: &mut [u8],
+        min_read: usize,
+    ) -> Result<usize, CopyError> {
         let mut written = 0;
         let target = min_read.max(1).min(output.len());
         while written < target {
@@ -117,7 +124,7 @@ impl FormatCopySource for JsonCopySource {
 
 struct ReadyJsonCopyDestination {
     plan: JsonColumnPlan,
-    object: JsonObjectEncoder,
+    encoder: BoundJsonObjectEncoder,
     writer: ObjectSetWriter<StreamEncoderFactory>,
 }
 
@@ -137,9 +144,7 @@ impl JsonCopyDestination {
             compression,
             ready: None,
             row: CanonicalCsvRow::new(),
-            datum_context: PgMemoryContexts::new(
-                "lagodb JSON copy to bridge",
-            ),
+            datum_context: PgMemoryContexts::new("lagodb JSON copy to bridge"),
         }
     }
 
@@ -154,7 +159,10 @@ impl JsonCopyDestination {
             .map_err(CopyError::from)
     }
 
-    fn initialize_inner(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
+    fn initialize_inner(
+        &mut self,
+        layout: &CopyColumnLayout,
+    ) -> Result<(), CopyError> {
         let fields = layout
             .columns()
             .iter()
@@ -173,16 +181,19 @@ impl JsonCopyDestination {
                 .iter()
                 .map(|(name, oid, typmod)| (*name, *oid, *typmod)),
         )?;
-        let object = JsonObjectEncoder::new(
-            plan.columns().iter().map(|column| column.name()),
-        )?;
+        let encoder = BoundJsonObjectEncoder::bind(
+            plan.columns()
+                .iter()
+                .map(|column| (column.name(), column.output_encoder())),
+        )
+        .map_err(ConnectorError::json_datum)?;
         let output = self
             .output
             .take()
             .expect("COPY TO initializes its destination exactly once");
         self.ready = Some(ReadyJsonCopyDestination {
             plan,
-            object,
+            encoder,
             writer: ObjectSetWriter::new(
                 output,
                 StreamEncoderFactory::new(FormatKind::Json, self.compression),
@@ -207,40 +218,28 @@ impl CopyDataDestination for JsonCopyDestination {
         let datum_context = self.datum_context.value();
         unsafe {
             PgMemoryContexts::For(datum_context).switch_to(|_| {
-                PgTryBuilder::new(AssertUnwindSafe(|| {
-                    ready.object.begin_row();
-                    for (index, (field, column)) in self
-                        .row
+                let ReadyJsonCopyDestination {
+                    plan,
+                    encoder,
+                    writer,
+                } = ready;
+                let columns = plan.columns();
+                let values =
+                    self.row
                         .fields()
-                        .zip(ready.plan.columns().iter())
-                        .enumerate()
-                    {
-                        match field {
-                            None => ready.object.write_value(index, None),
-                            Some(value) => {
+                        .zip(columns.iter())
+                        .map(|(field, column)| {
+                            field.map(|value| {
                                 // SAFETY: CanonicalCsvRow returns a NUL-terminated
-                                // field and the input plan was bound to this column.
-                                let datum = unsafe { column.input_datum(value) };
-                                // SAFETY: the datum came from the input function
-                                // bound to this exact COPY output column.
-                                let json = unsafe {
-                                    column.output_encoder().encode(datum)
-                                }
-                                .map_err(ConnectorError::json_datum)?;
-                                ready.object.write_value(
-                                    index,
-                                    Some(json.as_bytes().map_err(ConnectorError::json_datum)?),
-                                );
-                            }
-                        }
-                    }
-                    ready.writer.write(ready.object.finish_row())?;
-                    Ok::<(), ConnectorError>(())
-                }))
-                .catch_others(|error| {
-                    Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
-                })
-                .execute()
+                                // field and this input plan is bound to the column.
+                                unsafe { column.input_datum(value) }
+                            })
+                        });
+                // SAFETY: the parsed row and plan have the same width, and
+                // input Datums remain live in datum_context through this call.
+                let row = unsafe { encoder.encode_row(values) }
+                    .map_err(ConnectorError::json_datum)?;
+                writer.write(row)
             })
         }
         .map_err(CopyError::from)

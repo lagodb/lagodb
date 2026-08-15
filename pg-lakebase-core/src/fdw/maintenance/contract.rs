@@ -6,8 +6,8 @@ use core::ptr;
 
 use pgrx::pg_sys;
 
-use super::error::ForeignTableMaintenanceError;
 use super::super::provider::ForeignDataWrapper;
+use super::error::ForeignTableMaintenanceError;
 use crate::handles::{HeapTupleGuard, RelationHandle};
 
 /// Information returned when a provider supports analyzing one foreign table.
@@ -185,9 +185,8 @@ impl<'a> ForeignSampleContext<'a> {
                 "foreign ANALYZE sample replacement index is out of range",
             ));
         }
-        let previous = unsafe {
-            ptr::replace(self.rows.add(index), tuple.into_raw())
-        };
+        let previous =
+            unsafe { ptr::replace(self.rows.add(index), tuple.into_raw()) };
         drop(unsafe { HeapTupleGuard::new(previous) });
         Ok(())
     }

@@ -168,11 +168,7 @@ impl DelimitedOptions {
             )
         })?;
         options = Self::append_string_option(options, "delimiter", delimiter)?;
-        options = Self::append_string_option(
-            options,
-            "null",
-            &self.null_marker,
-        )?;
+        options = Self::append_string_option(options, "null", &self.null_marker)?;
         if let Some(encoding) = self.encoding.as_deref() {
             options = Self::append_string_option(options, "encoding", encoding)?;
         }
@@ -214,11 +210,11 @@ impl DelimitedOptions {
             // SAFETY: CStr guarantees a NUL-terminated value without interior
             // NUL. COPY expects the original server-encoding identifier bytes
             // and copies them into its current memory context.
-            let string = unsafe { pg_sys::makeString(pg_sys::pstrdup(value.as_ptr())) };
+            let string =
+                unsafe { pg_sys::makeString(pg_sys::pstrdup(value.as_ptr())) };
             // SAFETY: both the list and node are PostgreSQL-owned allocations.
-            value_list = unsafe {
-                pg_sys::lappend(value_list, string.cast::<c_void>())
-            };
+            value_list =
+                unsafe { pg_sys::lappend(value_list, string.cast::<c_void>()) };
         }
         let name_c = CString::new(name).map_err(|_| {
             ConnectorError::invalid_option(name, "must be a valid COPY option name")

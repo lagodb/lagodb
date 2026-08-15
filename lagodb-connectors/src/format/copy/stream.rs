@@ -8,12 +8,10 @@ use pg_lakebase_storage::StorageFile;
 
 use crate::error::ConnectorError;
 use crate::format::{
-    EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression,
-    StreamDecoder, StreamEncoderFactory,
+    EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression, StreamDecoder,
+    StreamEncoderFactory,
 };
-use crate::storage::{
-    ObjectOutput,
-};
+use crate::storage::ObjectOutput;
 
 pub(super) struct ObjectCopySource {
     decoder: StreamDecoder<ObjectReader>,
@@ -85,7 +83,9 @@ impl ObjectCopyDestination {
 
     pub(super) fn finish(self) -> Result<(), CopyError> {
         let StreamDestinationState::Writing(writer) = self.state else {
-            unreachable!("PostgreSQL emits the requested COPY header before completion")
+            unreachable!(
+                "PostgreSQL emits the requested COPY header before completion"
+            )
         };
         writer
             .finish(EmptyOutputPolicy::EmitFile)
@@ -101,16 +101,13 @@ impl CopyDataDestination for ObjectCopyDestination {
         let StreamDestinationState::AwaitingHeader {
             output,
             mut factory,
-        } = mem::replace(
-            &mut self.state,
-            StreamDestinationState::Transitioning,
-        ) else {
+        } = mem::replace(&mut self.state, StreamDestinationState::Transitioning)
+        else {
             unreachable!("the transition state never escapes header handling")
         };
         factory.set_header(data.into());
-        self.state = StreamDestinationState::Writing(ObjectSetWriter::new(
-            output, factory,
-        ));
+        self.state =
+            StreamDestinationState::Writing(ObjectSetWriter::new(output, factory));
         Ok(())
     }
 }

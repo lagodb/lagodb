@@ -267,7 +267,8 @@ impl FormatScanState for ParquetScanState {
                 let row = self.row;
                 let mut writer = unsafe { output.datum_writer() };
                 for (plan, column) in self.columns.iter().zip(batch.columns.iter()) {
-                    let value = unsafe { column.read_datum_unchecked(row, plan.codec) }?;
+                    let value =
+                        unsafe { column.read_datum_unchecked(row, plan.codec) }?;
                     unsafe {
                         writer.write(
                             plan.output,

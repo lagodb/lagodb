@@ -16,6 +16,4 @@ pub use contract::{
     ForeignSampleContext, ForeignSampleStatistics, ForeignTruncateBehavior,
     ForeignTruncateContext,
 };
-pub use error::{
-    ForeignTableMaintenanceError, ForeignTableMaintenancePhase,
-};
+pub use error::{ForeignTableMaintenanceError, ForeignTableMaintenancePhase};

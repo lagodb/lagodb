@@ -13,8 +13,7 @@ use crate::error::ConnectorError;
 
 use super::stream::JsonLineReader;
 use crate::format::{
-    FormatKind, InferredColumn, InferredSchema, PostgresType,
-    SCHEMA_SAMPLE_RECORDS,
+    FormatKind, InferredColumn, InferredSchema, PostgresType, SCHEMA_SAMPLE_RECORDS,
 };
 
 #[derive(Default)]

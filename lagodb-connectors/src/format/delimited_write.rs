@@ -32,9 +32,8 @@ impl DelimitedWriteState {
         // SAFETY: the FDW begin context keeps the relation live until its
         // matching end callback. The selected format supplies a text/CSV
         // option list allocated in this PostgreSQL execution context.
-        let mut encoder = unsafe {
-            CopyRowEncoder::begin(relation.as_raw(), postgres_options)
-        }?;
+        let mut encoder =
+            unsafe { CopyRowEncoder::begin(relation.as_raw(), postgres_options) }?;
         let mut factory = StreamEncoderFactory::new(format, compression);
         if write_header {
             factory.set_header(encoder.header()?.into());

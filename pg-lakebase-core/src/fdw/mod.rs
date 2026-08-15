@@ -18,9 +18,8 @@ pub use crate::plan_data::{
 };
 pub use maintenance::{
     FdwAnalyze, FdwTruncate, ForeignAnalyzeContext, ForeignAnalyzeSupport,
-    ForeignSampleContext, ForeignSampleStatistics,
-    ForeignTableMaintenanceError, ForeignTableMaintenancePhase,
-    ForeignTruncateBehavior, ForeignTruncateContext,
+    ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
+    ForeignTableMaintenancePhase, ForeignTruncateBehavior, ForeignTruncateContext,
 };
 pub use modify::{
     FdwModify, ForeignInsertBatch, ForeignInsertBeginContext,
@@ -33,8 +32,7 @@ pub use modify::{
 };
 pub use provider::ForeignDataWrapper;
 pub use routine::{
-    FdwRoutine, register_analyze, register_modify, register_scan,
-    register_truncate,
+    FdwRoutine, register_analyze, register_modify, register_scan, register_truncate,
 };
 pub use row_identity::{ForeignRowIdentityError, ForeignRowIdentityRequirement};
 pub use scan::{
@@ -58,8 +56,8 @@ pub mod __private {
 /// Common imports for FDW providers.
 pub mod prelude {
     pub use super::{
-        FdwAnalyze, FdwModify, FdwRoutine, FdwScan, FdwTruncate,
-        ForeignDataWrapper, ForeignInsertBatch, ForeignValidationError,
-        register_analyze, register_modify, register_scan, register_truncate,
+        FdwAnalyze, FdwModify, FdwRoutine, FdwScan, FdwTruncate, ForeignDataWrapper,
+        ForeignInsertBatch, ForeignValidationError, register_analyze,
+        register_modify, register_scan, register_truncate,
     };
 }

@@ -18,6 +18,7 @@
 mod cell;
 mod datum;
 mod json;
+mod json_encode;
 mod numeric;
 mod row;
 mod row_codec;
@@ -27,10 +28,8 @@ mod varlena;
 
 pub use cell::{ByteaView, Cell, StringView};
 pub use datum::{ColumnDatumCodec, ColumnDatumTarget, DatumConversionError};
-pub use json::{
-    EncodedJson, JsonDatumEncoder, JsonDatumKind, JsonRowEncoder, JsonText,
-    JsonValueError, JsonbValue,
-};
+pub use json::{JsonText, JsonValueError, JsonbValue};
+pub use json_encode::{BoundJsonObjectEncoder, JsonDatumEncoder, JsonDatumKind};
 pub use numeric::{
     Decimal128NumericCodec, DecimalCodecError, NumericTypmod, PG_EPOCH_DAYS_DIFF,
     PG_EPOCH_USECS_DIFF, numeric_precision_scale, numeric_typmod,

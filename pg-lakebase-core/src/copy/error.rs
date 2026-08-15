@@ -90,7 +90,9 @@ impl SqlStateError for CopyError {
             | Self::InvalidColumnLayout(_)
             | Self::EncoderFinished
             | Self::RawFieldReaderFinished
-            | Self::TextInputValidatorFinished => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            | Self::TextInputValidatorFinished => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
             Self::Postgres(error) => error.sql_error_code(),
         }
     }

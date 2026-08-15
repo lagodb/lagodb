@@ -29,8 +29,7 @@ impl LakebaseScanState {
         }
         let (reader, target) =
             selected.into_scan_parts(context.effective_user_id())?;
-        let manager =
-            StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
+        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
         let files = ObjectInput::resolve(&target, &manager, format)?.open();
         let inner = reader.begin(context, files)?;
         Ok(Self { inner })

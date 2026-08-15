@@ -2,8 +2,8 @@
 
 use pg_lakebase_core::fdw::{
     FdwAnalyze, FdwTruncate, ForeignAnalyzeContext, ForeignAnalyzeSupport,
-    ForeignSampleContext, ForeignSampleStatistics,
-    ForeignTableMaintenanceError, ForeignTruncateContext,
+    ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
+    ForeignTruncateContext,
 };
 
 use crate::error::ConnectorError;

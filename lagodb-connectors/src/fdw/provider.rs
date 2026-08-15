@@ -3,8 +3,8 @@
 use core::ffi::CStr;
 
 use pg_lakebase_core::fdw::{
-    FdwRoutine, ForeignDataWrapper, ForeignValidationError, register_modify,
-    register_analyze, register_scan, register_truncate,
+    FdwRoutine, ForeignDataWrapper, ForeignValidationError, register_analyze,
+    register_modify, register_scan, register_truncate,
 };
 use pg_lakebase_core::pg_fdw;
 use pgrx::pg_sys;

@@ -125,7 +125,9 @@ impl InferredSchema {
         Ok(columns)
     }
 
-    fn validate_column_names(columns: &[InferredColumn]) -> Result<(), ConnectorError> {
+    fn validate_column_names(
+        columns: &[InferredColumn],
+    ) -> Result<(), ConnectorError> {
         let mut names = HashSet::with_capacity(columns.len());
         for column in columns {
             let name = column.name.as_ref();
@@ -178,10 +180,7 @@ impl InferredColumn {
         }
     }
 
-    pub(crate) fn from_bytes(
-        name: Box<[u8]>,
-        postgres_type: PostgresType,
-    ) -> Self {
+    pub(crate) fn from_bytes(name: Box<[u8]>, postgres_type: PostgresType) -> Self {
         Self {
             name,
             postgres_type,

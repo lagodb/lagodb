@@ -101,9 +101,9 @@ macro_rules! primitive_bound_list_element {
                 let array = unsafe {
                     PgArray::<$pg_type>::from_datum(detoasted.as_datum(), false)
                 }
-                    .ok_or(ArrowConversionError::InvariantViolated(
-                        "List encoder: incompatible bound source",
-                    ))?;
+                .ok_or(ArrowConversionError::InvariantViolated(
+                    "List encoder: incompatible bound source",
+                ))?;
                 for value in array.iter() {
                     values.append_option(value.map($map));
                 }
@@ -175,9 +175,9 @@ macro_rules! string_bound_list_element {
                 let array = unsafe {
                     PgArray::<$pg_type>::from_datum(detoasted.as_datum(), false)
                 }
-                    .ok_or(ArrowConversionError::InvariantViolated(
-                        "List encoder: incompatible bound source",
-                    ))?;
+                .ok_or(ArrowConversionError::InvariantViolated(
+                    "List encoder: incompatible bound source",
+                ))?;
                 let mut payload = 0usize;
                 for value in array.iter() {
                     match value {

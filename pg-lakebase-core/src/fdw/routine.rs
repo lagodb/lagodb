@@ -56,12 +56,10 @@ pub fn register_modify<P: FdwModify>(routine: &mut FdwRoutine) {
 /// Install the foreign-table ANALYZE negotiation and sampling callbacks for
 /// `P`.
 pub fn register_analyze<P: FdwAnalyze>(routine: &mut FdwRoutine) {
-    routine.AnalyzeForeignTable =
-        Some(maintenance::analyze_foreign_table::<P>);
+    routine.AnalyzeForeignTable = Some(maintenance::analyze_foreign_table::<P>);
 }
 
 /// Install the batched foreign-table TRUNCATE callback for `P`.
 pub fn register_truncate<P: FdwTruncate>(routine: &mut FdwRoutine) {
-    routine.ExecForeignTruncate =
-        Some(maintenance::exec_foreign_truncate::<P>);
+    routine.ExecForeignTruncate = Some(maintenance::exec_foreign_truncate::<P>);
 }

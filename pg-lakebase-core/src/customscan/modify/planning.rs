@@ -163,8 +163,8 @@ impl WholeRowPlanner {
         // for DELETE and can introduce an avoidable upgrade deadlock.
         let lockmode = unsafe { (*self.rte).rellockmode };
         let relations = unsafe {
-            pg_sys::ffi::pg_guard_ffi_boundary(|| {
-                unsafe { find_all_inheritors((*self.rte).relid, lockmode, ptr::null_mut()) }
+            pg_sys::ffi::pg_guard_ffi_boundary(|| unsafe {
+                find_all_inheritors((*self.rte).relid, lockmode, ptr::null_mut())
             })
         };
         let count = unsafe { pg_sys::list_length(relations) };

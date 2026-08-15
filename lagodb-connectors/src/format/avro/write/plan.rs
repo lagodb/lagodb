@@ -91,7 +91,9 @@ impl AvroValueKind {
 
     fn schema_json(self) -> serde_json::Value {
         match self {
-            Self::Uuid => serde_json::json!({ "type": "string", "logicalType": "uuid" }),
+            Self::Uuid => {
+                serde_json::json!({ "type": "string", "logicalType": "uuid" })
+            }
             Self::Date => serde_json::json!({ "type": "int", "logicalType": "date" }),
             Self::TimeMicros => {
                 serde_json::json!({ "type": "long", "logicalType": "time-micros" })
@@ -109,7 +111,9 @@ impl AvroValueKind {
                 "precision": codec.precision(),
                 "scale": codec.scale(),
             }),
-            primitive => serde_json::Value::String(primitive.schema_name().to_owned()),
+            primitive => {
+                serde_json::Value::String(primitive.schema_name().to_owned())
+            }
         }
     }
 
@@ -164,7 +168,9 @@ impl AvroValueKind {
         match self {
             Self::Boolean => oid == pg_sys::BOOLOID,
             Self::Int | Self::Long => {
-                oid == pg_sys::INT2OID || oid == pg_sys::INT4OID || oid == pg_sys::INT8OID
+                oid == pg_sys::INT2OID
+                    || oid == pg_sys::INT4OID
+                    || oid == pg_sys::INT8OID
             }
             Self::Float => oid == pg_sys::FLOAT4OID,
             Self::Double => oid == pg_sys::FLOAT8OID,
@@ -188,7 +194,10 @@ impl AvroValueKind {
     pub(super) fn value_out_of_range(self) -> ConnectorError {
         ConnectorError::invalid_object_schema(
             FormatKind::Avro,
-            format!("a {} value is outside the Avro epoch range", self.schema_name()),
+            format!(
+                "a {} value is outside the Avro epoch range",
+                self.schema_name()
+            ),
         )
     }
 
@@ -244,9 +253,7 @@ impl AvroWritePlan {
     }
 
     pub(super) fn from_copy_columns(
-        columns: impl Iterator<
-            Item = Result<(&str, pg_sys::Oid, i32), ConnectorError>,
-        >,
+        columns: impl Iterator<Item = Result<(&str, pg_sys::Oid, i32), ConnectorError>>,
         count: usize,
     ) -> Result<Self, ConnectorError> {
         let mut fields = Vec::with_capacity(count);
@@ -260,10 +267,9 @@ impl AvroWritePlan {
     fn from_fields(
         fields: Vec<(String, AvroValueKind)>,
     ) -> Result<Self, ConnectorError> {
-        if fields
-            .iter()
-            .any(|(_, kind)| matches!(kind, AvroValueKind::String | AvroValueKind::Name))
-        {
+        if fields.iter().any(|(_, kind)| {
+            matches!(kind, AvroValueKind::String | AvroValueKind::Name)
+        }) {
             ColumnDatumTarget::validate_utf8_server_encoding()?;
         }
         let kinds = fields

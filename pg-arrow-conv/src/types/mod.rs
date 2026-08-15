@@ -290,11 +290,9 @@ mod tests {
             (true, true, TimeUnit::Nanosecond, Some("+00:00")),
         ];
         for (nanos, tz, expected_unit, expected_tz) in cases {
-            let mut encoder = ArrowColumnEncoder::new(
-                &ColumnRule::Timestamp { nanos, tz },
-                4,
-            )
-            .expect("valid rule");
+            let mut encoder =
+                ArrowColumnEncoder::new(&ColumnRule::Timestamp { nanos, tz }, 4)
+                    .expect("valid rule");
             let array = encoder.finish().expect("finish");
             match array.data_type() {
                 DataType::Timestamp(unit, zone) => {

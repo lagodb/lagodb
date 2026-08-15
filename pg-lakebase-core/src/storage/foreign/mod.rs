@@ -49,6 +49,4 @@ pub use catalog::{
 };
 pub use handle::StorageHandle;
 pub use identity::StorageIdentity;
-pub use manager::{
-    StorageAcquireError, StorageConfigProvider, StorageManager,
-};
+pub use manager::{StorageAcquireError, StorageConfigProvider, StorageManager};
