@@ -1,5 +1,6 @@
 //! Public provider API for the FDW planner/executor seam.
 
+use core::ffi::c_int;
 use core::marker::PhantomData;
 use core::ptr;
 
@@ -165,6 +166,57 @@ impl<'a> ForeignRelContext<'a> {
         unsafe { (*self.root).query_pathkeys }
     }
 
+    /// Unfiltered tuple population from `pg_class`, or PostgreSQL's provider
+    /// fallback established during `GetForeignRelSize`.
+    #[inline]
+    pub fn base_tuples(&self) -> f64 {
+        unsafe { (*self.baserel).tuples }
+    }
+
+    /// Unfiltered relation size in PostgreSQL blocks.
+    #[inline]
+    pub fn base_pages(&self) -> f64 {
+        unsafe { (*self.baserel).pages as f64 }
+    }
+
+    /// Rows after all base restrictions, as established by relation sizing.
+    #[inline]
+    pub fn rows(&self) -> f64 {
+        unsafe { (*self.baserel).rows }
+    }
+
+    fn filter_estimate_for_exprs(
+        &self,
+        exprs: impl IntoIterator<Item = *mut pg_sys::Expr>,
+    ) -> ForeignFilterEstimate {
+        let mut clauses = ptr::null_mut();
+        for expr in exprs {
+            clauses = unsafe { pg_sys::lappend(clauses, expr.cast()) };
+        }
+        if clauses.is_null() {
+            return ForeignFilterEstimate::NONE;
+        }
+        let selectivity = unsafe {
+            pg_sys::clauselist_selectivity(
+                self.root,
+                clauses,
+                (*self.baserel).relid as c_int,
+                pg_sys::JoinType::JOIN_INNER,
+                ptr::null_mut(),
+            )
+        };
+        let mut cost = pg_sys::QualCost {
+            startup: 0.0,
+            per_tuple: 0.0,
+        };
+        unsafe { pg_sys::cost_qual_eval(&mut cost, clauses, self.root) };
+        ForeignFilterEstimate {
+            selectivity: selectivity.clamp(0.0, 1.0),
+            startup_cost: cost.startup,
+            per_tuple_cost: cost.per_tuple,
+        }
+    }
+
     /// Whether PostgreSQL is planning this base relation as the target of an
     /// UPDATE or DELETE statement.
     ///
@@ -224,6 +276,49 @@ impl<'a> ForeignRelSizeContext<'a> {
     pub fn pushdown(&self) -> FilterPlanSummary {
         FilterPlanSummary::from_path_set(self.pushdown)
     }
+
+    /// Estimate a foreign relation from locally persisted PostgreSQL
+    /// statistics. This is the same fallback used by `postgres_fdw` when it
+    /// does not request a remote estimate: an unANALYZEd relation is assigned
+    /// a small page population, then PostgreSQL applies type widths, column
+    /// statistics, and base-qual selectivity itself.
+    pub fn local_statistics_estimate(
+        &self,
+        fallback_pages: pg_sys::BlockNumber,
+    ) -> ForeignRelSize {
+        let baserel = self.relation.baserel;
+        unsafe {
+            if (*baserel).tuples < 0.0 {
+                (*baserel).pages = fallback_pages;
+                let width = if (*baserel).reltarget.is_null() {
+                    0
+                } else {
+                    (*(*baserel).reltarget).width.max(0)
+                };
+                let header_bytes = core::mem::offset_of!(
+                    pg_sys::HeapTupleHeaderData,
+                    t_bits
+                );
+                let alignment = pg_sys::MAXIMUM_ALIGNOF as usize;
+                let aligned_header = header_bytes
+                    .saturating_add(alignment - 1)
+                    & !(alignment - 1);
+                let tuple_bytes = (width as usize)
+                    .saturating_add(aligned_header)
+                    .max(1);
+                let relation_bytes = (fallback_pages as usize)
+                    .saturating_mul(pg_sys::BLCKSZ as usize);
+                (*baserel).tuples = relation_bytes as f64 / tuple_bytes as f64;
+            }
+            pg_sys::set_baserel_size_estimates(self.relation.root, baserel);
+            let width = if (*baserel).reltarget.is_null() {
+                0
+            } else {
+                (*(*baserel).reltarget).width
+            };
+            ForeignRelSize::new((*baserel).rows, width)
+        }
+    }
 }
 
 /// Path callback context.  The split is used for path costing and selection;
@@ -234,6 +329,25 @@ pub struct ForeignPathContext<'a> {
     kind: PathVariantKind,
     required_outer: Relids,
     param_info: *mut pg_sys::ParamPathInfo,
+}
+
+/// PostgreSQL's selectivity and evaluation cost for provider-side filters.
+#[derive(Debug, Clone, Copy)]
+pub struct ForeignFilterEstimate {
+    /// Fraction of input rows expected to survive the provider filter.
+    pub selectivity: f64,
+    /// One-time expression evaluation cost.
+    pub startup_cost: f64,
+    /// Expression evaluation cost charged for each provider input row.
+    pub per_tuple_cost: f64,
+}
+
+impl ForeignFilterEstimate {
+    const NONE: Self = Self {
+        selectivity: 1.0,
+        startup_cost: 0.0,
+        per_tuple_cost: 0.0,
+    };
 }
 
 impl<'a> ForeignPathContext<'a> {
@@ -261,6 +375,21 @@ impl<'a> ForeignPathContext<'a> {
     #[inline]
     pub fn pushdown(&self) -> FilterPlanSummary {
         FilterPlanSummary::from_path_set(self.pushdown)
+    }
+
+    /// Selectivity and execution cost of provider filters that are allowed to
+    /// reduce scan-volume costing. Unsupported/local quals are excluded.
+    pub fn pruning_estimate(&self) -> ForeignFilterEstimate {
+        self.relation.filter_estimate_for_exprs(
+            self.pushdown.costed_pruning_exprs(),
+        )
+    }
+
+    /// Rows emitted by this path after all base and parameterized local quals.
+    #[inline]
+    pub fn rows(&self) -> f64 {
+        self.param_info()
+            .map_or_else(|| self.relation.rows(), |info| info.ppi_rows)
     }
 
     #[inline]

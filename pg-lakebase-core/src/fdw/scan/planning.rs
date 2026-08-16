@@ -19,6 +19,7 @@ use super::context::{
 };
 use super::contract::FdwScan;
 use super::error::{ForeignScanError, ForeignScanPhase};
+use super::explain::ForeignScanExplain;
 use super::filter::ForeignScanFilters;
 use super::path_builder::{build_path_variants, expr_list_from_ptrs};
 use super::pathkeys::ForeignPathKeys;
@@ -440,6 +441,10 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
             )
         }?;
         let encoded_filters = ForeignScanFilters::<P>::encode(&final_filters)?;
+        let encoded_explain = unsafe {
+            ForeignScanExplain::build::<P>(&final_filters)
+        }?
+        .encode()?;
         let private_data = encode_scan_private::<P>(
             P::NAME,
             relation.relation_oid(),
@@ -452,6 +457,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
             final_filters.bindings.len(),
             encoded_filters.planned,
             encoded_filters.bindings,
+            encoded_explain,
         )?;
         let scan = unsafe {
             pg_sys::make_foreignscan(

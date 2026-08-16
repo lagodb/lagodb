@@ -150,14 +150,14 @@ pub(crate) enum ConnectorError {
     #[error("{format} format modify is not implemented")]
     ModifyNotImplemented { format: FormatKind },
 
-    #[error("foreign table ANALYZE is not implemented")]
-    AnalyzeNotImplemented,
-
     #[error("foreign table TRUNCATE is not implemented")]
     TruncateNotImplemented,
 
     #[error("{format} format cannot decode its planned filter")]
     InvalidFilterPlan { format: FormatKind },
+
+    #[error("cannot decode PostgreSQL filter datum of type OID {type_oid}")]
+    InvalidFilterDatum { type_oid: pgrx::pg_sys::Oid },
 
     #[error("connector plan-data error: {0}")]
     PlanData(#[from] PlanDataError),
@@ -367,6 +367,13 @@ impl ConnectorError {
     pub(crate) const fn invalid_filter_plan(format: FormatKind) -> Self {
         Self::InvalidFilterPlan { format }
     }
+
+    #[inline]
+    pub(crate) const fn invalid_filter_datum(
+        type_oid: pgrx::pg_sys::Oid,
+    ) -> Self {
+        Self::InvalidFilterDatum { type_oid }
+    }
 }
 
 impl SqlStateError for ConnectorError {
@@ -436,6 +443,9 @@ impl SqlStateError for ConnectorError {
             Self::InvalidPlanFormat { .. }
             | Self::InvalidFilterPlan { .. }
             | Self::PlanData(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            Self::InvalidFilterDatum { .. } => {
+                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
+            }
             Self::PlanFormatChanged => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
@@ -445,7 +455,7 @@ impl SqlStateError for ConnectorError {
             Self::ScanNotImplemented { .. } | Self::ModifyNotImplemented { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
-            Self::AnalyzeNotImplemented | Self::TruncateNotImplemented => {
+            Self::TruncateNotImplemented => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::Postgres(error) => error.sql_error_code(),

@@ -3,11 +3,13 @@
 use pg_lakebase_core::expr::pushdown::{
     FilterBindResult, FilterFragment, FilterPlan, FilterValueBindings,
 };
+use pg_lakebase_core::fdw::ForeignFilterExplainValues;
 use pg_lakebase_core::plan_data::PlanDataWriter;
 
 use crate::error::ConnectorError;
 
 use super::FormatKind;
+use super::parquet::ParquetBoundPredicate;
 
 /// A format predicate accepted during scan planning.
 ///
@@ -19,17 +21,29 @@ pub(crate) trait FormatFilterPlan: 'static {
 
     fn encode(&self, writer: &mut PlanDataWriter) -> Result<(), ConnectorError>;
 
+    fn explain(&self, values: ForeignFilterExplainValues<'_>) -> String;
+
     fn bind(
         &self,
         values: FilterValueBindings<'_>,
     ) -> Result<FilterBindResult<FormatBoundFilter>, ConnectorError>;
 }
 
-/// Format-owned bound predicate consumed by a scan implementation.
-pub(crate) trait FormatBoundPredicate: 'static {}
-
 pub(crate) type FormatPlannedFilter = Box<dyn FormatFilterPlan>;
-pub(crate) type FormatBoundFilter = Box<dyn FormatBoundPredicate>;
+
+/// Closed set of runtime predicates produced by the configured format. This
+/// mirrors `FormatKind` and avoids untyped downcasts in scan hot paths.
+pub(crate) enum FormatBoundFilter {
+    Parquet(ParquetBoundPredicate),
+}
+
+impl FormatBoundFilter {
+    pub(crate) fn parquet(&self) -> &ParquetBoundPredicate {
+        match self {
+            Self::Parquet(predicate) => predicate,
+        }
+    }
+}
 
 /// Relation-scoped filter planner owned by the selected reader.
 pub(crate) trait FormatFilterPlanner: 'static {

@@ -24,6 +24,8 @@ pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17", "pg-arrow-conv/pg17"]
 apache-avro = { version = "0.21", default-features = false, features = ["snappy", "zstandard"] }
 arrow-schema = "58"
 arrow-array = "58"
+arrow-arith = "58"
+arrow-ord = "58"
 bytes = "1"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 flate2 = "1"

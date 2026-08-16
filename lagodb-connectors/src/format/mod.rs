@@ -34,7 +34,8 @@ pub(crate) use codec::{
 };
 pub(crate) use copy::ResolvedCopyFormat;
 pub(crate) use filter::{
-    FormatBoundFilter, FormatFilterPlanner, FormatPlannedFilter,
+    FormatBoundFilter, FormatFilterPlan, FormatFilterPlanner,
+    FormatPlannedFilter,
 };
 pub(crate) use object_writer::{
     EmptyOutputPolicy, FileWriteProgress, ObjectFileEncoder,
@@ -42,7 +43,8 @@ pub(crate) use object_writer::{
 };
 pub(crate) use resolved::{FormatOption, ResolvedForeignFormat};
 pub(crate) use scan::{
-    FormatReader, FormatScanPlanner, FormatScanPrivate, FormatScanState,
+    FormatAnalyzer, FormatReader, FormatScanPlanner, FormatScanPrivate,
+    FormatScanState,
 };
 pub(crate) use schema::{
     FormatSchemaReader, InferredColumn, InferredSchema, PostgresType,

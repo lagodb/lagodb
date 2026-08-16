@@ -14,10 +14,14 @@ use super::{ObjectLocationKind, ResolvedStorageLocation};
 const LIST_PAGE_SIZE: u32 = 1_024;
 
 pub(crate) enum ObjectInput {
-    Exact(ObjectAccess),
+    Exact {
+        access: ObjectAccess,
+        size: u64,
+    },
     Prefix {
         access: ObjectPrefixAccess,
         keys: Box<[String]>,
+        total_bytes: u64,
     },
 }
 
@@ -32,8 +36,11 @@ impl ObjectInput {
         match ObjectLocationKind::classify(location.object_key(), format)? {
             ObjectLocationKind::Exact => {
                 let exact = location.acquire_object_access(manager)?;
-                exact.head()?;
-                return Ok(Self::Exact(exact));
+                let size = exact.head()?.size;
+                return Ok(Self::Exact {
+                    access: exact,
+                    size,
+                });
             }
             ObjectLocationKind::Prefix => {}
         }
@@ -41,6 +48,7 @@ impl ObjectInput {
         let prefix = location.normalized_prefix();
         let access = location.acquire_prefix_access(manager, &prefix)?;
         let mut keys = Vec::new();
+        let mut total_bytes = 0_u64;
         // Prefix scans intentionally materialize and sort one complete LIST.
         // Object stores do not provide a snapshot across independent LISTs;
         // retaining this set gives FDW ReScan stable membership and a stable
@@ -51,9 +59,12 @@ impl ObjectInput {
             let Some(entries) = listing.next_page()? else {
                 break;
             };
-            keys.extend(entries.into_iter().filter_map(|entry| {
-                format.matches_object_key(&entry.key).then_some(entry.key)
-            }));
+            for entry in entries {
+                if format.matches_object_key(&entry.key) {
+                    total_bytes = total_bytes.saturating_add(entry.size);
+                    keys.push(entry.key);
+                }
+            }
             if listing.is_exhausted() {
                 break;
             }
@@ -64,16 +75,24 @@ impl ObjectInput {
         Ok(Self::Prefix {
             access,
             keys: keys.into_boxed_slice(),
+            total_bytes,
         })
+    }
+
+    pub(crate) const fn total_bytes(&self) -> u64 {
+        match self {
+            Self::Exact { size, .. } => *size,
+            Self::Prefix { total_bytes, .. } => *total_bytes,
+        }
     }
 
     pub(crate) fn open(self) -> ObjectFiles {
         match self {
-            Self::Exact(access) => ObjectFiles::Exact {
+            Self::Exact { access, .. } => ObjectFiles::Exact {
                 access,
                 emitted: false,
             },
-            Self::Prefix { access, keys } => ObjectFiles::Prefix {
+            Self::Prefix { access, keys, .. } => ObjectFiles::Prefix {
                 access,
                 keys,
                 index: 0,

@@ -87,6 +87,12 @@ impl<'a> RelationHandle<'a> {
         unsafe { (*self.rd_rel()).relkind }
     }
 
+    /// Role whose user mapping PostgreSQL uses for foreign-table maintenance.
+    #[inline]
+    pub fn owner_oid(&self) -> pg_sys::Oid {
+        unsafe { (*self.rd_rel()).relowner }
+    }
+
     /// Row estimate last persisted by PostgreSQL ANALYZE, or a negative value
     /// when the relation has never been analyzed.
     #[inline]

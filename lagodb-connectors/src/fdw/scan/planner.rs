@@ -2,9 +2,9 @@
 
 use pg_lakebase_core::fdw::{
     BeginForeignScanContext, FdwScan, ForeignPathBuilder, ForeignPathContext,
-    ForeignPathKeys, ForeignPlanContext, ForeignPlanSpec, ForeignRelContext,
-    ForeignRelSize, ForeignRelSizeContext, ForeignScanError,
-    ReScanForeignScanContext, ScanSlotWriter,
+    ForeignFilterExplainValues, ForeignPathKeys, ForeignPlanContext,
+    ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
+    ForeignScanError, ReScanForeignScanContext, ScanSlotWriter,
 };
 
 use crate::format::FormatScanPlanner;
@@ -62,6 +62,13 @@ impl FdwScan for Lakebase {
         context: &ForeignPlanContext<'_, Self>,
     ) -> Result<ForeignPlanSpec<Self::PrivateData>, ForeignScanError> {
         Ok(state.scan.build_plan(context)?)
+    }
+
+    fn explain_filter(
+        predicate: &Self::PlannedPredicate,
+        values: ForeignFilterExplainValues<'_>,
+    ) -> Result<Option<String>, ForeignScanError> {
+        Ok(Some(predicate.explain(values)))
     }
 
     fn begin(

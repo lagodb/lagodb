@@ -5,22 +5,40 @@ use pg_lakebase_core::fdw::{
     ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
     ForeignTruncateContext,
 };
+use pg_lakebase_core::storage::foreign::StorageManager;
 
 use crate::error::ConnectorError;
+use crate::storage::ObjectInput;
 
-use super::Lakebase;
+use super::{Lakebase, ResolvedForeignRelation};
 
 impl FdwAnalyze for Lakebase {
     fn analyze(
-        _ctx: &ForeignAnalyzeContext<'_>,
+        ctx: &ForeignAnalyzeContext<'_>,
     ) -> Result<Option<ForeignAnalyzeSupport>, ForeignTableMaintenanceError> {
-        Ok(None)
+        let selected = ResolvedForeignRelation::resolve(ctx.relation().oid())?;
+        let kind = selected.kind();
+        let Some((analyzer, target)) =
+            selected.into_analyze_parts(ctx.relation().owner_oid())?
+        else {
+            return Ok(None);
+        };
+        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
+        let input = ObjectInput::resolve(&target, &manager, kind)?;
+        Ok(Some(analyzer.support(input.total_bytes())))
     }
 
     fn acquire_sample_rows(
-        _ctx: &mut ForeignSampleContext<'_>,
+        ctx: &mut ForeignSampleContext<'_>,
     ) -> Result<ForeignSampleStatistics, ForeignTableMaintenanceError> {
-        Err(ConnectorError::AnalyzeNotImplemented.into())
+        let selected = ResolvedForeignRelation::resolve(ctx.relation().oid())?;
+        let kind = selected.kind();
+        let (analyzer, target) = selected
+            .into_analyze_parts(ctx.relation().owner_oid())?
+            .expect("PostgreSQL installed sampling only for an analyzable format");
+        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
+        let files = ObjectInput::resolve(&target, &manager, kind)?.open();
+        analyzer.acquire_sample_rows(ctx, files)
     }
 }
 

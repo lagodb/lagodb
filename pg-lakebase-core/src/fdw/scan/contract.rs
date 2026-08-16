@@ -10,6 +10,7 @@ use super::context::{
 use super::error::ForeignScanError;
 use super::path_builder::ForeignPathBuilder;
 use super::pathkeys::ForeignPathKeys;
+use super::plan_filter::ForeignFilterExplainValues;
 use super::pushdown::{BeginForeignScanContext, ReScanForeignScanContext};
 use super::slot::ScanSlotWriter;
 
@@ -76,6 +77,16 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
     ) -> Result<ForeignPlanSpec<Self::PrivateData>, ForeignScanError>
     where
         Self: Sized;
+
+    /// Build an EXPLAIN-ready description from the provider predicate accepted
+    /// during planning. The framework persists the returned text separately
+    /// from executor expressions and never calls this method at execution time.
+    fn explain_filter(
+        _predicate: &Self::PlannedPredicate,
+        _values: ForeignFilterExplainValues<'_>,
+    ) -> Result<Option<String>, ForeignScanError> {
+        Ok(None)
+    }
 
     /// Start provider execution and bind reusable output columns through
     /// `ctx.output_layout`.

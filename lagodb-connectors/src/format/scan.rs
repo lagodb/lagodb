@@ -2,9 +2,11 @@
 
 use pg_lakebase_core::expr::pushdown::FilterPlanningContext;
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
-    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
-    ReScanForeignScanContext, ScanSlotWriter,
+    BeginForeignScanContext, ForeignAnalyzeSupport, ForeignPathBuilder,
+    ForeignPathContext, ForeignPathKeys, ForeignPlanContext, ForeignPlanSpec,
+    ForeignRelSize, ForeignRelSizeContext, ForeignSampleContext,
+    ForeignSampleStatistics, ForeignTableMaintenanceError, ReScanForeignScanContext,
+    ScanSlotWriter,
 };
 use pg_lakebase_core::plan_data::PlanDataReader;
 
@@ -77,6 +79,26 @@ pub(crate) trait FormatReader: FormatObject {
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         Err(ConnectorError::scan_not_implemented(self.kind()))
     }
+
+    /// Select the explicit ANALYZE capability before resolving storage.
+    fn analyzer(self: Box<Self>) -> Option<Box<dyn FormatAnalyzer>> {
+        None
+    }
+}
+
+/// Explicit ANALYZE operations supported by one concrete format.
+///
+/// Capability selection precedes object discovery, so unsupported formats do
+/// not enumerate remote storage. PostgreSQL installs the sampling callback
+/// only after [`Self::support`] is returned.
+pub(crate) trait FormatAnalyzer: 'static {
+    fn support(&self, total_bytes: u64) -> ForeignAnalyzeSupport;
+
+    fn acquire_sample_rows(
+        self: Box<Self>,
+        context: &mut ForeignSampleContext<'_>,
+        files: ObjectFiles,
+    ) -> Result<ForeignSampleStatistics, ForeignTableMaintenanceError>;
 }
 
 /// Planner-side scan behavior for one selected format.

@@ -71,6 +71,7 @@ pub(crate) fn encode_scan_private<P>(
     binding_count: usize,
     planned_filters: *mut pg_sys::List,
     binding_slots: *mut pg_sys::List,
+    explain_filters: *mut pg_sys::List,
 ) -> Result<*mut pg_sys::List, ForeignScanError>
 where
     P: FdwScan,
@@ -109,6 +110,7 @@ where
         unsafe {
             envelope.append_list(planned_filters);
             envelope.append_list(binding_slots);
+            envelope.append_list(explain_filters);
         }
         Ok(())
     })
@@ -159,6 +161,29 @@ pub(crate) unsafe fn decode_scan_private<P>(
 where
     P: FdwScan,
 {
+    unsafe { decode_scan_envelope::<P>(raw) }.map(|(decoded, _)| decoded)
+}
+
+/// Decode only the dedicated EXPLAIN section from a live scan envelope.
+///
+/// # Safety
+///
+/// `raw` must satisfy [`decode_scan_private`].
+pub(crate) unsafe fn decode_scan_explain_private<P>(
+    raw: *mut pg_sys::List,
+) -> Result<*mut pg_sys::List, ForeignScanError>
+where
+    P: FdwScan,
+{
+    unsafe { decode_scan_envelope::<P>(raw) }.map(|(_, explain)| explain)
+}
+
+unsafe fn decode_scan_envelope<P>(
+    raw: *mut pg_sys::List,
+) -> Result<(DecodedScanPrivate<P::PrivateData>, *mut pg_sys::List), ForeignScanError>
+where
+    P: FdwScan,
+{
     unsafe {
         ForeignPrivateReader::decode_checked_list(raw, 0, |reader| {
             let kind = reader.read_i32()?;
@@ -195,7 +220,9 @@ where
                 reader.read_optional_list(pg_sys::NodeTag::T_List)?;
             let binding_slots_raw =
                 reader.read_optional_list(pg_sys::NodeTag::T_List)?;
-            Ok(DecodedScanPrivate {
+            let explain_filters_raw =
+                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
+            let decoded = DecodedScanPrivate {
                 private_data,
                 relation_oid,
                 projection,
@@ -206,7 +233,8 @@ where
                 binding_count,
                 planned_filters_raw,
                 binding_slots_raw,
-            })
+            };
+            Ok((decoded, explain_filters_raw))
         })
     }
 }

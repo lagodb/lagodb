@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
+use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
-    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
+    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder, RowFilter,
 };
-use pg_arrow_conv::{ColumnReader, PgColumnType, resolve_column_rule};
+use pg_arrow_conv::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
 use pg_lakebase_core::fdw::{
     BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
     ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
@@ -19,23 +20,28 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::Lakebase;
-use crate::format::{FormatScanPlanner, FormatScanPrivate, FormatScanState};
+use crate::format::{
+    FormatBoundFilter, FormatKind, FormatScanPlanner, FormatScanPrivate,
+    FormatScanState,
+};
 use crate::storage::ObjectFiles;
 
-use super::reader::ParquetObjectReader;
+use super::{ParquetBoundPredicate, reader::ParquetObjectReader};
 
-const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
-const DEFAULT_ESTIMATED_WIDTH: i32 = 32;
+const UNANALYZED_FALLBACK_PAGES: pg_sys::BlockNumber = 10;
+const PARQUET_STARTUP_COST: f64 = 100.0;
 const PARQUET_BATCH_SIZE: usize = 8_192;
 
 pub(super) struct ParquetScanPlanner {
-    rows: f64,
+    base_tuples: f64,
+    pages: f64,
 }
 
 impl ParquetScanPlanner {
     pub(super) const fn new() -> Self {
         Self {
-            rows: DEFAULT_ESTIMATED_ROWS,
+            base_tuples: 0.0,
+            pages: 0.0,
         }
     }
 }
@@ -43,23 +49,37 @@ impl ParquetScanPlanner {
 impl FormatScanPlanner for ParquetScanPlanner {
     fn estimate(
         &mut self,
-        _context: &ForeignRelSizeContext<'_>,
+        context: &ForeignRelSizeContext<'_>,
     ) -> Result<ForeignRelSize, ConnectorError> {
-        Ok(ForeignRelSize::new(self.rows, DEFAULT_ESTIMATED_WIDTH))
+        let estimate =
+            context.local_statistics_estimate(UNANALYZED_FALLBACK_PAGES);
+        self.base_tuples = context.relation().base_tuples().max(estimate.rows);
+        self.pages = context.relation().base_pages().max(0.0);
+        Ok(estimate)
     }
 
     fn build_paths(
         &self,
-        _context: &ForeignPathContext<'_>,
+        context: &ForeignPathContext<'_>,
         paths: &mut ForeignPathBuilder<FormatScanPrivate>,
     ) -> Result<(), ConnectorError> {
+        let rows = context.rows();
+        let pruning = context.pruning_estimate();
+        let retrieved_rows =
+            (self.base_tuples * pruning.selectivity).max(rows);
+        let provider_startup_cost = PARQUET_STARTUP_COST + pruning.startup_cost;
+        // PostgreSQL initializes planner cost GUCs before invoking FDW callbacks.
+        let seq_page_cost = unsafe { pg_sys::seq_page_cost };
+        let provider_total_cost = provider_startup_cost
+            + self.pages * seq_page_cost
+            + self.base_tuples * pruning.per_tuple_cost;
         let mut path = ForeignPathSpec::new(
-            self.rows,
-            0.0,
-            self.rows,
-            FormatScanPrivate::new(crate::format::FormatKind::Parquet),
+            rows,
+            provider_startup_cost,
+            provider_total_cost,
+            FormatScanPrivate::new(FormatKind::Parquet),
         );
-        path.retrieved_rows = self.rows;
+        path.retrieved_rows = retrieved_rows;
         paths.push(path);
         Ok(())
     }
@@ -82,7 +102,7 @@ impl FormatScanPlanner for ParquetScanPlanner {
 
 struct ColumnPlan {
     source: usize,
-    rule: pg_arrow_conv::ColumnRule,
+    rule: ColumnRule,
     output: ScanOutputColumn,
     codec: ColumnDatumCodec,
 }
@@ -98,6 +118,7 @@ pub(super) struct ParquetScanState {
     expected_schema: Option<Arc<Schema>>,
     projection_roots: Box<[usize]>,
     columns: Box<[ColumnPlan]>,
+    filters: Box<[ParquetBoundPredicate]>,
     current: Option<BoundBatch>,
     row: usize,
 }
@@ -108,6 +129,7 @@ impl ParquetScanState {
         mut files: ObjectFiles,
     ) -> Result<Self, ConnectorError> {
         let live = context.relation.live_columns();
+        let filters = Self::bound_filters(context.filters.iter());
         for column in live.iter() {
             column.name().to_str().map_err(|_| {
                 ConnectorError::invalid_object_schema(
@@ -123,6 +145,7 @@ impl ParquetScanState {
                 expected_schema: None,
                 projection_roots: Box::new([]),
                 columns: Box::new([]),
+                filters,
                 current: None,
                 row: 0,
             });
@@ -192,13 +215,14 @@ impl ParquetScanState {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let reader = Self::build_reader(builder, &source_roots)?;
+        let reader = Self::build_reader(builder, &source_roots, &filters)?;
         Ok(Self {
             files,
             reader: Some(reader),
             expected_schema: Some(expected_schema),
             projection_roots: source_roots.into_boxed_slice(),
             columns,
+            filters,
             current: None,
             row: 0,
         })
@@ -207,13 +231,32 @@ impl ParquetScanState {
     fn build_reader(
         builder: ParquetRecordBatchReaderBuilder<ParquetObjectReader>,
         roots: &[usize],
+        filters: &[ParquetBoundPredicate],
     ) -> Result<ParquetRecordBatchReader, ConnectorError> {
         let projection =
             ProjectionMask::roots(builder.parquet_schema(), roots.iter().copied());
+        let mut builder = builder.with_projection(projection);
+        if !filters.is_empty() {
+            let predicate = ParquetBoundPredicate::arrow_predicate(
+                filters,
+                builder.parquet_schema(),
+                builder.schema(),
+            )?;
+            builder = builder.with_row_filter(RowFilter::new(vec![predicate]));
+        }
         Ok(builder
-            .with_projection(projection)
             .with_batch_size(PARQUET_BATCH_SIZE)
             .build()?)
+    }
+
+    fn bound_filters<'a>(
+        filters: impl IntoIterator<Item = &'a FormatBoundFilter>,
+    ) -> Box<[ParquetBoundPredicate]> {
+        filters
+            .into_iter()
+            .map(|filter| filter.parquet().clone())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 
     fn open_next_reader(&mut self) -> Result<bool, ConnectorError> {
@@ -233,13 +276,17 @@ impl ParquetScanState {
                 "objects under one prefix do not share the same Arrow schema",
             ));
         }
-        self.reader = Some(Self::build_reader(builder, &self.projection_roots)?);
+        self.reader = Some(Self::build_reader(
+            builder,
+            &self.projection_roots,
+            &self.filters,
+        )?);
         Ok(true)
     }
 
     fn bind_batch(
         &self,
-        batch: arrow_array::RecordBatch,
+        batch: RecordBatch,
     ) -> Result<BoundBatch, ConnectorError> {
         let columns = self
             .columns
@@ -298,8 +345,11 @@ impl FormatScanState for ParquetScanState {
 
     fn rescan(
         &mut self,
-        _context: ReScanForeignScanContext<'_, Lakebase>,
+        context: ReScanForeignScanContext<'_, Lakebase>,
     ) -> Result<(), ConnectorError> {
+        if context.filters_changed {
+            self.filters = Self::bound_filters(context.filters.iter());
+        }
         self.files.reset();
         self.reader = None;
         self.current = None;

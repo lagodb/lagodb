@@ -34,6 +34,7 @@ pub fn register_scan<P: FdwScan>(routine: &mut FdwRoutine) {
     routine.IterateForeignScan = Some(scan::iterate_foreign_scan::<P>);
     routine.ReScanForeignScan = Some(scan::rescan_foreign_scan::<P>);
     routine.EndForeignScan = Some(scan::end_foreign_scan::<P>);
+    routine.ExplainForeignScan = Some(scan::explain_foreign_scan::<P>);
 }
 
 /// Install the complete INSERT/UPDATE/DELETE callback group for `P`.

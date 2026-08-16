@@ -1,17 +1,21 @@
 //! Parquet format configuration and capability composition.
 
+mod analyze;
 mod copy;
+mod filter;
 mod reader;
 mod scan;
 mod schema;
 mod write;
 mod writer;
 
+use pg_lakebase_core::expr::pushdown::FilterPlanningContext;
 use pg_lakebase_core::fdw::{
     BeginForeignScanContext, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
     ForeignModifyPlanSpec, ForeignModifyRelationContext,
 };
+use pg_lakebase_core::plan_data::PlanDataReader;
 use pg_lakebase_storage::StorageFile;
 
 use crate::error::ConnectorError;
@@ -19,12 +23,14 @@ use crate::fdw::Lakebase;
 use crate::storage::{ObjectFiles, ObjectOutput};
 
 use super::{
-    FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
-    FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
-    FormatWriter, InferredSchema, ParquetWriteCompression,
+    FormatAnalyzer, FormatFilterPlanner, FormatKind, FormatObject, FormatOption,
+    FormatPlannedFilter, FormatReader, FormatScanPlanner, FormatScanState,
+    FormatSchemaReader, FormatWritePrivate, FormatWriteState, FormatWriter,
+    InferredSchema, ParquetWriteCompression,
 };
 
 pub(super) use copy::{ParquetCopyDestination, ParquetCopySource};
+pub(crate) use filter::ParquetBoundPredicate;
 pub(crate) use reader::ParquetObjectReader;
 pub(crate) use schema::parquet_arrow_type;
 pub(crate) use writer::ParquetObjectWriter;
@@ -60,12 +66,32 @@ impl FormatReader for ParquetFormat {
         Box::new(scan::ParquetScanPlanner::new())
     }
 
+    fn begin_filter_planning(
+        self: Box<Self>,
+        context: &FilterPlanningContext,
+    ) -> Result<Box<dyn FormatFilterPlanner>, ConnectorError> {
+        Ok(Box::new(filter::ParquetFilterPlanner::begin(context)?))
+    }
+
+    fn decode_filter(
+        kind: FormatKind,
+        reader: &mut PlanDataReader<'_>,
+        binding_count: usize,
+    ) -> Result<FormatPlannedFilter, ConnectorError> {
+        filter::ParquetPlannedPredicate::decode(kind, reader, binding_count)
+            .map(|predicate| Box::new(predicate) as FormatPlannedFilter)
+    }
+
     fn begin(
         self: Box<Self>,
         context: BeginForeignScanContext<'_, Lakebase>,
         files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         Ok(Box::new(scan::ParquetScanState::begin(context, files)?))
+    }
+
+    fn analyzer(self: Box<Self>) -> Option<Box<dyn FormatAnalyzer>> {
+        Some(Box::new(analyze::ParquetAnalyze))
     }
 }
 

@@ -26,6 +26,7 @@ pub enum ForeignScanPhase {
     Iterate,
     ReScan,
     End,
+    Explain,
 }
 
 impl ForeignScanPhase {
@@ -38,6 +39,7 @@ impl ForeignScanPhase {
             Self::Iterate => "IterateForeignScan",
             Self::ReScan => "ReScanForeignScan",
             Self::End => "EndForeignScan",
+            Self::Explain => "ExplainForeignScan",
         }
     }
 }

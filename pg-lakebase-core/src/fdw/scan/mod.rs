@@ -4,6 +4,7 @@ mod callbacks;
 mod context;
 mod contract;
 mod error;
+mod explain;
 mod executor;
 mod filter;
 mod parameterized;
@@ -19,16 +20,17 @@ mod slot;
 mod state;
 
 pub use context::{
-    ForeignPathContext, ForeignPathSpec, ForeignPlanContext, ForeignPlanPrivate,
-    ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
-    PathVariantKind, Relids,
+    ForeignFilterEstimate, ForeignPathContext, ForeignPathSpec, ForeignPlanContext,
+    ForeignPlanPrivate, ForeignPlanSpec, ForeignRelContext, ForeignRelSize,
+    ForeignRelSizeContext, PathVariantKind, Relids,
 };
 pub use contract::FdwScan;
 pub use error::{ForeignScanError, ForeignScanPhase};
 pub use path_builder::ForeignPathBuilder;
 pub use pathkeys::{ForeignPathKey, ForeignPathKeys};
 pub use plan_filter::{
-    ForeignPlanFilter, ForeignPlanFilters, ForeignPlanQualLocation,
+    ForeignFilterExplainValues, ForeignPlanFilter, ForeignPlanFilters,
+    ForeignPlanQualLocation,
 };
 pub use projection::{ColumnRequirements, ScanProjection, ScanProjectionPolicy};
 pub use pushdown::{
@@ -40,6 +42,7 @@ pub use slot::{ScanDatumWriter, ScanOutputColumn, ScanSlotWriter};
 pub(crate) use callbacks::{
     begin_foreign_scan, end_foreign_scan, iterate_foreign_scan, rescan_foreign_scan,
 };
+pub(crate) use explain::explain_foreign_scan;
 pub(crate) use planning::{
     get_foreign_paths, get_foreign_plan, get_foreign_rel_size,
 };

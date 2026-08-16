@@ -3173,7 +3173,9 @@ name = "lagodb-connectors"
 version = "0.1.0"
 dependencies = [
  "apache-avro",
+ "arrow-arith",
  "arrow-array",
+ "arrow-ord",
  "arrow-schema",
  "bytes",
  "chrono",

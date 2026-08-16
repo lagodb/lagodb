@@ -2,7 +2,7 @@
 
 use crate::expr::pushdown::{
     FilterPlanSummary, FilterPushdown, FilterQualLocation, NegotiatedFilter,
-    NegotiatedFilterSet,
+    NegotiatedFilterSet, FilterValueSlotId,
 };
 use crate::expr::{PushdownContract, PushdownCosting};
 
@@ -13,6 +13,35 @@ pub enum ForeignPlanQualLocation {
     Local { index: usize },
     /// PostgreSQL evaluates the original clause as an FDW recheck qual.
     Recheck { index: usize },
+}
+
+/// Planning-time text for the PostgreSQL values referenced by one provider
+/// predicate. Indices are the predicate-local [`FilterValueSlotId`] values
+/// supplied to the provider during filter negotiation.
+#[derive(Clone, Copy)]
+pub struct ForeignFilterExplainValues<'a> {
+    values: &'a [String],
+}
+
+impl<'a> ForeignFilterExplainValues<'a> {
+    pub(crate) const fn new(values: &'a [String]) -> Self {
+        Self { values }
+    }
+
+    #[inline]
+    pub fn value(self, id: FilterValueSlotId) -> &'a str {
+        &self.values[id.index()]
+    }
+
+    #[inline]
+    pub const fn len(self) -> usize {
+        self.values.len()
+    }
+
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.values.is_empty()
+    }
 }
 
 /// One finalized provider predicate visible while building an FDW plan.

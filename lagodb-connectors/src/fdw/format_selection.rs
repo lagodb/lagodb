@@ -4,7 +4,7 @@ use pg_lakebase_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::format::{FormatKind, FormatReader, FormatWriter};
+use crate::format::{FormatAnalyzer, FormatKind, FormatReader, FormatWriter};
 use crate::storage::ObjectLocationKind;
 use crate::storage::ResolvedStorageLocation;
 
@@ -69,6 +69,25 @@ impl ResolvedForeignRelation {
             effective_user,
         )?;
         Ok((self.options.format.into_reader(), location))
+    }
+
+    pub(crate) fn into_analyze_parts(
+        self,
+        effective_user: pg_sys::Oid,
+    ) -> Result<
+        Option<(Box<dyn FormatAnalyzer>, ResolvedStorageLocation)>,
+        ConnectorError,
+    > {
+        let ResolvedTableOptions { object, format } = self.options;
+        let Some(analyzer) = format.into_reader().analyzer() else {
+            return Ok(None);
+        };
+        let location = ResolvedStorageLocation::resolve_foreign_object(
+            object,
+            self.server_oid,
+            effective_user,
+        )?;
+        Ok(Some((analyzer, location)))
     }
 
     pub(crate) fn into_write_parts(
