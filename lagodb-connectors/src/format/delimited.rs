@@ -129,7 +129,7 @@ impl DelimitedOptions {
 
     pub(super) fn append_postgres_options(
         &self,
-        mut options: *mut pg_sys::List,
+        options: *mut pg_sys::List,
         format: super::FormatKind,
         relation: &RelationHandle<'_>,
         requirements: &ColumnRequirements,

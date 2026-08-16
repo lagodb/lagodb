@@ -3,7 +3,6 @@ use std::panic::AssertUnwindSafe;
 
 use pgrx::{PgTryBuilder, pg_sys};
 
-use crate::access::mutation::{CopyFromLifecycleGuard, begin_copy_from_lifecycle};
 use crate::diag::PgError;
 
 use super::context::{
@@ -53,7 +52,6 @@ impl<'statement, 'parse, 'source> CopyFromSpec<'statement, 'parse, 'source> {
 pub struct CopyFromDriver<'statement, 'parse, 'source> {
     state: pg_sys::CopyFromState,
     finished: bool,
-    lifecycle: Option<CopyFromLifecycleGuard>,
     _source_guard: SourceGuard<'source>,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     _statement_lifetime: PhantomData<&'statement pg_sys::CopyStmt>,
@@ -95,10 +93,6 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
         let attlist = statement.attlist();
         let options = spec.options;
 
-        // The table-AM COPY frame must exist before BeginCopyFrom invokes
-        // BeginForeignInsert. This is the same boundary used by the runtime
-        // pass-through route.
-        let lifecycle = begin_copy_from_lifecycle();
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
                 Ok(pg::CopyBridge::begin_from(
@@ -122,7 +116,6 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
         Ok(Self {
             state,
             finished: false,
-            lifecycle: Some(lifecycle),
             _source_guard: source_guard,
             _preparation: preparation,
             _statement_lifetime: PhantomData,
@@ -141,19 +134,8 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
         };
         match result {
             Ok(processed) => {
-                // PostgreSQL's public COPY contract calls EndCopyFrom after
-                // CopyFrom returns. Finish the relation-local frame even if
-                // EndCopyFrom itself reports an error, so a caught ERROR
-                // cannot leave the frame on the backend-local stack.
-                let end_result = Self::end_state(state);
                 self.finished = true;
-                let lifecycle_result = self
-                    .lifecycle
-                    .take()
-                    .expect("COPY FROM lifecycle is present before execution")
-                    .finish();
-                end_result?;
-                lifecycle_result?;
+                Self::end_state(state)?;
                 Ok(processed)
             }
             Err(error) => {

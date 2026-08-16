@@ -1,0 +1,128 @@
+\i include/column_definitions.sql
+-- PostgreSQL rejects CREATE FOREIGN TABLE ... LIKE before an FDW callback can
+-- run. Keep the repeated regression-table shapes in psql variables so tests
+-- exercise valid core syntax without duplicating long column lists.
+\set common_columns 'id integer, bool_col boolean, smallint_col smallint, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
+\set json_columns :common_columns ', json_col json, jsonb_col jsonb'
+\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[]'
+\set stream_extra_columns 'id integer, json_col json, jsonb_col jsonb, bool_array boolean[], int_array integer[], text_array text[]'
+\set id_payload_columns 'id integer, payload text'
+-- FDW ReScan coverage for each independent reader-state implementation.
+-- Text and CSV share DelimitedScanState, so Text represents that class.
+SET client_min_messages = warning;
+SELECT bucket AS lakebase_regress_bucket
+FROM lakebase_regress.object_storage_fixture
+\gset
+SELECT format('s3://%s/lagodb-connectors/seed/common-prefix/',
+              :'lakebase_regress_bucket') AS text_path,
+       format('s3://%s/lagodb-connectors/seed/json-prefix/',
+              :'lakebase_regress_bucket') AS json_path,
+       format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
+              :'lakebase_regress_bucket') AS avro_path,
+       format('s3://%s/lagodb-connectors/seed/parquet-prefix/',
+              :'lakebase_regress_bucket') AS parquet_path
+\gset rescan_
+CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_text
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rescan_text_path', format 'text');
+CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_json
+    (:json_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rescan_json_path', format 'json');
+CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_avro
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rescan_avro_path', format 'avro');
+CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_parquet
+    (:parquet_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rescan_parquet_path', format 'parquet');
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+SET enable_nestloop = on;
+-- OFFSET 0 prevents pull-up. The correlated inner foreign scan is rescanned
+-- for each outer id, including one id with no match after prior successful
+-- rescans.
+SELECT outer_rel.id AS outer_id,
+       inner_rel.id AS inner_id,
+       inner_rel.text_col
+FROM (VALUES (1), (2), (999)) AS outer_rel(id)
+LEFT JOIN LATERAL (
+    SELECT id, text_col
+    FROM lagodb_connectors_regress.rescan_text AS inner_rel
+    WHERE inner_rel.id = outer_rel.id
+    OFFSET 0
+) AS inner_rel ON true
+ORDER BY outer_rel.id;
+ outer_id | inner_id |       text_col       
+----------+----------+----------------------
+        1 |        1 | comma,value "quoted"+
+          |          | line
+        2 |        2 | 
+      999 |          | 
+(3 rows)
+
+SELECT outer_rel.id AS outer_id,
+       inner_rel.id AS inner_id,
+       inner_rel.text_col
+FROM (VALUES (1), (2), (999)) AS outer_rel(id)
+LEFT JOIN LATERAL (
+    SELECT id, text_col
+    FROM lagodb_connectors_regress.rescan_json AS inner_rel
+    WHERE inner_rel.id = outer_rel.id
+    OFFSET 0
+) AS inner_rel ON true
+ORDER BY outer_rel.id;
+ outer_id | inner_id |       text_col       
+----------+----------+----------------------
+        1 |        1 | comma,value "quoted"+
+          |          | line
+        2 |        2 | 
+      999 |          | 
+(3 rows)
+
+SELECT outer_rel.id AS outer_id,
+       inner_rel.id AS inner_id,
+       inner_rel.text_col
+FROM (VALUES (1), (2), (999)) AS outer_rel(id)
+LEFT JOIN LATERAL (
+    SELECT id, text_col
+    FROM lagodb_connectors_regress.rescan_avro AS inner_rel
+    WHERE inner_rel.id = outer_rel.id
+    OFFSET 0
+) AS inner_rel ON true
+ORDER BY outer_rel.id;
+ outer_id | inner_id |       text_col       
+----------+----------+----------------------
+        1 |        1 | comma,value "quoted"+
+          |          | line
+        2 |        2 | 
+      999 |          | 
+(3 rows)
+
+SELECT outer_rel.id AS outer_id,
+       inner_rel.id AS inner_id,
+       inner_rel.text_col
+FROM (VALUES (1), (2), (999)) AS outer_rel(id)
+LEFT JOIN LATERAL (
+    SELECT id, text_col
+    FROM lagodb_connectors_regress.rescan_parquet AS inner_rel
+    WHERE inner_rel.id = outer_rel.id
+    OFFSET 0
+) AS inner_rel ON true
+ORDER BY outer_rel.id;
+ outer_id | inner_id |       text_col       
+----------+----------+----------------------
+        1 |        1 | comma,value "quoted"+
+          |          | line
+        2 |        2 | 
+      999 |          | 
+(3 rows)
+
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+RESET enable_nestloop;
+RESET client_min_messages;

@@ -22,7 +22,11 @@ pub(super) struct DelimitedSchemaReader {
 }
 
 impl DelimitedSchemaReader {
-    pub(super) const fn new(
+    /// # Safety
+    ///
+    /// `options` must be PostgreSQL `NIL` or a valid COPY option list that
+    /// remains live through [`Self::infer`].
+    pub(super) const unsafe fn new(
         format: FormatKind,
         has_header: bool,
         options: *mut pg_sys::List,
@@ -40,8 +44,11 @@ impl DelimitedSchemaReader {
         compression: StreamCompression,
     ) -> Result<InferredSchema, ConnectorError> {
         let mut source = StorageFileCopySource::new(file, compression)?;
-        let mut reader = CopyRawFieldReader::begin(self.options, &mut source)
-            .map_err(ConnectorError::from)?;
+        // SAFETY: required by `new`; `self` retains the same options pointer
+        // and the reader is finished before this method returns.
+        let mut reader =
+            unsafe { CopyRawFieldReader::begin(self.options, &mut source) }
+                .map_err(ConnectorError::from)?;
         let result = self.read_records(&mut reader);
         let finish = reader.finish().map_err(ConnectorError::from);
         match (result, finish) {
@@ -55,7 +62,7 @@ impl DelimitedSchemaReader {
         reader: &mut CopyRawFieldReader<'_>,
     ) -> Result<InferredSchema, ConnectorError> {
         let mut validators = TypeValidators::new()?;
-        let first = reader.next().map_err(ConnectorError::from)?;
+        let first = reader.next_record().map_err(ConnectorError::from)?;
         let Some(first) = first else {
             return InferredSchema::new(self.format, Vec::new());
         };
@@ -72,7 +79,8 @@ impl DelimitedSchemaReader {
 
         let mut sampled = usize::from(!self.has_header);
         while sampled < SCHEMA_SAMPLE_RECORDS {
-            let Some(record) = reader.next().map_err(ConnectorError::from)? else {
+            let Some(record) = reader.next_record().map_err(ConnectorError::from)?
+            else {
                 break;
             };
             accumulator.observe(&record, &mut validators)?;
@@ -95,10 +103,11 @@ impl DelimitedSchemaAccumulator {
         let columns = record
             .fields()
             .map(|name| {
-                DelimitedColumn::new(name.map_or_else(
-                    || Box::<[u8]>::default(),
-                    |value| value.to_bytes().into(),
-                ))
+                DelimitedColumn::new(
+                    name.map_or_else(Box::<[u8]>::default, |value| {
+                        value.to_bytes().into()
+                    }),
+                )
             })
             .collect::<Vec<_>>();
         if columns.is_empty() {

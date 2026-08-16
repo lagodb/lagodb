@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Foreign-table exact/prefix scan coverage.
 --
 -- Exact and prefix scans consume the seed objects created by setup.sql.
@@ -40,72 +42,72 @@ SELECT format('s3://%s/lagodb-connectors/seed/common-exact.txt',
 \gset
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_text_exact
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_text_exact');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_text_prefix
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_text_prefix', format 'text');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_csv_exact
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_csv_exact');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_csv_prefix
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_csv_prefix', format 'csv');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_csv_header
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_csv_header', format 'csv', header 'match');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_avro_exact
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_avro_exact');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_avro_prefix
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_avro_prefix', format 'avro');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_json_exact
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_json_exact');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_json_prefix
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_json_prefix', format 'json');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_json_compressed
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_json_compressed');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_parquet_exact
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_parquet_exact');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_parquet_prefix
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_parquet_prefix', format 'parquet');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_extra_text
-    (LIKE lagodb_connectors_regress.stream_extra_source)
+    (:stream_extra_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_extra_text_exact');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_extra_csv
-    (LIKE lagodb_connectors_regress.stream_extra_source)
+    (:stream_extra_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_extra_csv_exact');
 

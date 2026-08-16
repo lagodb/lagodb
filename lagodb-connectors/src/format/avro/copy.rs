@@ -30,7 +30,7 @@ struct CopyReadColumn {
 }
 
 /// Avro-to-canonical-CSV source for PostgreSQL COPY FROM.
-pub(super) struct AvroCopySource {
+pub(in crate::format) struct AvroCopySource {
     reader: Reader<'static, AvroObjectReader>,
     columns: Box<[CopyReadColumn]>,
     bytes: Vec<u8>,
@@ -39,7 +39,7 @@ pub(super) struct AvroCopySource {
 }
 
 impl AvroCopySource {
-    pub(super) fn new(
+    pub(in crate::format) fn new(
         mut files: ObjectFiles,
         layout: &CopyColumnLayout,
     ) -> Result<Self, CopyError> {
@@ -133,10 +133,8 @@ impl AvroCopySource {
                             }
                             // SAFETY: this source index was resolved against the
                             // exact Avro writer schema when the source opened.
-                            let source = unsafe {
-                                fields.get_unchecked(column.reader.source())
-                            };
-                            match unsafe { column.reader.datum(source) }? {
+                            let source = fields.get_unchecked(column.reader.source());
+                            match column.reader.datum(&source.1)? {
                                 None => {
                                     self.bytes.extend_from_slice(CanonicalCsv::NULL)
                                 }
@@ -214,7 +212,7 @@ struct ReadyAvroCopyDestination {
 }
 
 /// Canonical-CSV-to-Avro destination for PostgreSQL COPY TO.
-pub(super) struct AvroCopyDestination {
+pub(in crate::format) struct AvroCopyDestination {
     output: Option<ObjectOutput>,
     compression: AvroWriteCompression,
     ready: Option<ReadyAvroCopyDestination>,
@@ -223,7 +221,7 @@ pub(super) struct AvroCopyDestination {
 }
 
 impl AvroCopyDestination {
-    pub(super) fn new(
+    pub(in crate::format) fn new(
         output: ObjectOutput,
         compression: AvroWriteCompression,
     ) -> Self {
@@ -236,7 +234,7 @@ impl AvroCopyDestination {
         }
     }
 
-    pub(super) fn finish(mut self) -> Result<(), CopyError> {
+    pub(in crate::format) fn finish(mut self) -> Result<(), CopyError> {
         self.ready
             .as_mut()
             .expect("COPY TO initializes its destination before producing rows")
@@ -333,7 +331,7 @@ impl CopyDataDestination for AvroCopyDestination {
                     // SAFETY: the row and input plans were allocated from the
                     // same COPY layout. A present Datum is allocated in this
                     // row's context and is consumed synchronously below.
-                    unsafe { ready.row.set_at_bound(index, datum) };
+                    ready.row.set_at_bound(index, datum);
                 }
                 ready.writer.write_row(&ready.row)?;
                 Ok::<(), ConnectorError>(())

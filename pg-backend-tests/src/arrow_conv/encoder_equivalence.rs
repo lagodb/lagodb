@@ -289,7 +289,12 @@ mod tests {
             let slot = make_slot(oid);
             let row_codec = RowDatumCodec::from_slot(slot)
                 .expect("test slot must produce a row datum codec");
-            let mut type_encoder = ArrowColumnEncoder::new(&rule, 0);
+            let mut type_encoder =
+                ArrowColumnEncoder::new(&rule, 0).map_err(|e| {
+                    TestCaseError::fail(format!(
+                        "type encoder construction failed: {e:?}"
+                    ))
+                })?;
             let data_type = type_encoder
                 .finish()
                 .map_err(|e| {

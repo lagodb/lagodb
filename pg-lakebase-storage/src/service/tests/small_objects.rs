@@ -45,6 +45,34 @@ async fn open_small_object_populates_small_kv() {
 }
 
 #[tokio::test]
+async fn open_empty_object_does_not_request_an_empty_backend_range() {
+    let key = default_location(SMALL_KEY);
+    let backend = MemoryObjectBackend::new();
+    backend.insert(key.clone(), Vec::new());
+    let cache = memory_cache();
+    let service = StorageService::with_registry(
+        StoreRegistry::new()
+            .with_shared_backend(DEFAULT_STORE, std::sync::Arc::new(backend.clone()))
+            .unwrap(),
+        cache.clone(),
+    );
+    let handles = service.test_context();
+
+    let open = open_file(&service, &handles, BUCKET, SMALL_KEY).await;
+
+    assert_eq!(backend.range_get_count(), 0);
+    assert_eq!(
+        cache.index().get_small(&key).await.unwrap(),
+        Some(Vec::new())
+    );
+    let reply = read(&service, &handles, open.handle, 0, 1).await;
+    assert!(reply.data.is_empty());
+    assert!(reply.eof);
+
+    close(&service, &handles, open.handle).await;
+}
+
+#[tokio::test]
 async fn small_cache_hit_open_does_not_head_backend() {
     let key = default_location(SMALL_KEY);
     let backend = MemoryObjectBackend::new();

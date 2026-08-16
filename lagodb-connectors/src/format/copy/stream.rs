@@ -57,7 +57,7 @@ enum StreamDestinationState {
         output: ObjectOutput,
         factory: StreamEncoderFactory,
     },
-    Writing(ObjectSetWriter<StreamEncoderFactory>),
+    Writing(Box<ObjectSetWriter<StreamEncoderFactory>>),
     Transitioning,
 }
 
@@ -76,7 +76,9 @@ impl ObjectCopyDestination {
         let state = if header {
             StreamDestinationState::AwaitingHeader { output, factory }
         } else {
-            StreamDestinationState::Writing(ObjectSetWriter::new(output, factory))
+            StreamDestinationState::Writing(Box::new(ObjectSetWriter::new(
+                output, factory,
+            )))
         };
         Self { state }
     }
@@ -87,7 +89,7 @@ impl ObjectCopyDestination {
                 "PostgreSQL emits the requested COPY header before completion"
             )
         };
-        writer
+        (*writer)
             .finish(EmptyOutputPolicy::EmitFile)
             .map_err(CopyError::from)
     }
@@ -106,8 +108,9 @@ impl CopyDataDestination for ObjectCopyDestination {
             unreachable!("the transition state never escapes header handling")
         };
         factory.set_header(data.into());
-        self.state =
-            StreamDestinationState::Writing(ObjectSetWriter::new(output, factory));
+        self.state = StreamDestinationState::Writing(Box::new(ObjectSetWriter::new(
+            output, factory,
+        )));
         Ok(())
     }
 }

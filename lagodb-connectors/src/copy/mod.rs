@@ -19,7 +19,6 @@ use pg_lakebase_core::copy::{
 use pg_lakebase_core::hooks::{CopyConsumer, CopyRoute, register_copy_consumer};
 
 use crate::error::ConnectorError;
-use crate::format::{FormatCopyDestination, FormatCopySource};
 use crate::storage::{ObjectUri, ResolvedStorageLocation};
 
 use self::options::ResolvedCopyOptions;

@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Parquet array element and shape boundaries.
 
 SET client_min_messages = warning;
@@ -28,7 +30,7 @@ SELECT format('s3://%s/lagodb-connectors/parquet-arrays/null-elements.parquet',
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.parquet_null_array_source;
 CREATE TABLE lagodb_connectors_regress.parquet_null_array_source
-    (LIKE lagodb_connectors_regress.parquet_source);
+    (:parquet_columns);
 INSERT INTO lagodb_connectors_regress.parquet_null_array_source
 SELECT id,
        bool_col,
@@ -69,7 +71,7 @@ WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.parquet_null_array_sink;
 CREATE TABLE lagodb_connectors_regress.parquet_null_array_sink
-    (LIKE lagodb_connectors_regress.parquet_source);
+    (:parquet_columns);
 COPY lagodb_connectors_regress.parquet_null_array_sink
 FROM :'array_null_elements_path'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');

@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- LagoDB connector regression fixture.
 --
 -- The fixture is intentionally provisioned here rather than by every test:
@@ -133,7 +135,7 @@ VALUES
     );
 
 CREATE TABLE lagodb_connectors_regress.json_source
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 ALTER TABLE lagodb_connectors_regress.json_source
     ADD COLUMN json_col json,
     ADD COLUMN jsonb_col jsonb;
@@ -152,7 +154,7 @@ FROM lagodb_connectors_regress.common_source AS source
 ORDER BY source.id;
 
 CREATE TABLE lagodb_connectors_regress.parquet_source
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 ALTER TABLE lagodb_connectors_regress.parquet_source
     ADD COLUMN json_col json,
     ADD COLUMN bool_array boolean[],

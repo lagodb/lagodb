@@ -22,6 +22,7 @@ use crate::object::{ListEntry, ObjectInfo, ObjectPath};
 pub struct MemoryObjectBackend {
     objects: Arc<Mutex<HashMap<ObjectPath, Vec<u8>>>>,
     head_calls: Arc<AtomicU64>,
+    range_gets: Arc<AtomicU64>,
 }
 
 impl MemoryObjectBackend {
@@ -45,6 +46,10 @@ impl MemoryObjectBackend {
     pub fn head_call_count(&self) -> u64 {
         self.head_calls.load(Ordering::Relaxed)
     }
+
+    pub fn range_get_count(&self) -> u64 {
+        self.range_gets.load(Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
@@ -66,6 +71,7 @@ impl ObjectBackend for MemoryObjectBackend {
         key: &ObjectPath,
         range: Range<u64>,
     ) -> StorageResult<bytes::Bytes> {
+        self.range_gets.fetch_add(1, Ordering::Relaxed);
         let objects = self.lock_objects();
         let data = objects
             .get(key)

@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Direct COPY paths for Avro and Parquet container formats.
 
 SET TIME ZONE 'UTC';
@@ -43,13 +45,13 @@ WITH (
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_avro_exact;
 CREATE TABLE lagodb_connectors_regress.copy_avro_exact
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_avro_exact
 FROM :'native_avro_exact'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_avro_snappy;
 CREATE TABLE lagodb_connectors_regress.copy_avro_snappy
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_avro_snappy
 FROM :'native_avro_snappy'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -82,19 +84,19 @@ WITH (
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_parquet_exact;
 CREATE TABLE lagodb_connectors_regress.copy_parquet_exact
-    (LIKE lagodb_connectors_regress.parquet_source);
+    (:parquet_columns);
 COPY lagodb_connectors_regress.copy_parquet_exact
 FROM :'native_parquet_exact'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_parquet_zstd;
 CREATE TABLE lagodb_connectors_regress.copy_parquet_zstd
-    (LIKE lagodb_connectors_regress.parquet_source);
+    (:parquet_columns);
 COPY lagodb_connectors_regress.copy_parquet_zstd
 FROM :'native_parquet_zstd'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_parquet_prefix;
 CREATE TABLE lagodb_connectors_regress.copy_parquet_prefix
-    (LIKE lagodb_connectors_regress.parquet_source);
+    (:parquet_columns);
 COPY lagodb_connectors_regress.copy_parquet_prefix
 FROM :'native_parquet_prefix'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
@@ -143,17 +145,17 @@ TO :'native_bridge_parquet'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
 
 CREATE TABLE lagodb_connectors_regress.native_bridge_json
-    (LIKE lagodb_connectors_regress.native_bridge_source);
+    (:id_payload_columns);
 COPY lagodb_connectors_regress.native_bridge_json
 FROM :'native_bridge_json'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
 CREATE TABLE lagodb_connectors_regress.native_bridge_avro
-    (LIKE lagodb_connectors_regress.native_bridge_source);
+    (:id_payload_columns);
 COPY lagodb_connectors_regress.native_bridge_avro
 FROM :'native_bridge_avro'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
 CREATE TABLE lagodb_connectors_regress.native_bridge_parquet
-    (LIKE lagodb_connectors_regress.native_bridge_source);
+    (:id_payload_columns);
 COPY lagodb_connectors_regress.native_bridge_parquet
 FROM :'native_bridge_parquet'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');

@@ -424,7 +424,8 @@ impl Decimal128NumericCodec {
 
         let mut output = [sign_extension; std::mem::size_of::<i128>()];
         let source = &bytes[retained..];
-        output[output.len() - source.len()..].copy_from_slice(source);
+        let output_start = output.len() - source.len();
+        output[output_start..].copy_from_slice(source);
         Ok(i128::from_be_bytes(output))
     }
 
@@ -440,20 +441,10 @@ impl Decimal128NumericCodec {
             ));
         }
 
-        let mut coefficient = 0i128;
-        for digit in bytes[8..].chunks_exact(2) {
-            let digit = i128::from(u16::from_be_bytes([digit[0], digit[1]]));
-            coefficient = coefficient
-                .checked_mul(NBASE)
-                .and_then(|value| value.checked_add(digit))
-                .ok_or_else(|| {
-                    self.value_out_of_range("numeric value exceeds Decimal128")
-                })?;
-        }
-
         let exponent =
             (weight + 1 - ndigits as i32) * DEC_DIGITS as i32 + self.scale as i32;
         let unscaled = if exponent >= 0 {
+            let coefficient = self.accumulate_numeric_digits(&bytes[8..])?;
             let factor = 10_i128.checked_pow(exponent as u32).ok_or_else(|| {
                 self.value_out_of_range("numeric value exceeds Decimal128")
             })?;
@@ -461,16 +452,7 @@ impl Decimal128NumericCodec {
                 self.value_out_of_range("numeric value exceeds Decimal128")
             })?
         } else {
-            let factor =
-                10_i128.checked_pow((-exponent) as u32).ok_or_else(|| {
-                    self.value_out_of_range("numeric value exceeds Decimal128")
-                })?;
-            if coefficient % factor != 0 {
-                return Err(self.value_out_of_range(
-                    "numeric value has more fractional digits than the decimal scale",
-                ));
-            }
-            coefficient / factor
+            self.accumulate_scaled_numeric_digits(&bytes[8..], -exponent as u32)?
         };
 
         let unscaled = if sign == NUMERIC_NEG {
@@ -487,6 +469,76 @@ impl Decimal128NumericCodec {
             );
         }
         Ok(unscaled)
+    }
+
+    fn accumulate_numeric_digits(
+        &self,
+        bytes: &[u8],
+    ) -> Result<i128, DecimalCodecError> {
+        bytes.chunks_exact(2).try_fold(0i128, |coefficient, digit| {
+            let digit = i128::from(u16::from_be_bytes([digit[0], digit[1]]));
+            coefficient
+                .checked_mul(NBASE)
+                .and_then(|value| value.checked_add(digit))
+                .ok_or_else(|| {
+                    self.value_out_of_range("numeric value exceeds Decimal128")
+                })
+        })
+    }
+
+    /// Accumulates `digits / 10^decimal_places` without first materializing
+    /// the wider base-10000 coefficient. PostgreSQL preserves trailing
+    /// fractional groups according to dscale, so that intermediate
+    /// coefficient can exceed i128 even when the schema-scaled result fits.
+    fn accumulate_scaled_numeric_digits(
+        &self,
+        bytes: &[u8],
+        decimal_places: u32,
+    ) -> Result<i128, DecimalCodecError> {
+        let digits = bytes.chunks_exact(2);
+        let group_places = decimal_places / DEC_DIGITS;
+        let digit_places = decimal_places % DEC_DIGITS;
+        let retained = digits
+            .len()
+            .checked_sub(group_places as usize)
+            .filter(|retained| *retained != 0)
+            .ok_or_else(|| {
+                self.value_out_of_range(
+                    "numeric value has more fractional digits than the decimal scale",
+                )
+            })?;
+
+        let mut coefficient = 0i128;
+        for (index, digit) in digits.enumerate() {
+            let digit = i128::from(u16::from_be_bytes([digit[0], digit[1]]));
+            if index >= retained {
+                if digit != 0 {
+                    return Err(self.value_out_of_range(
+                        "numeric value has more fractional digits than the decimal scale",
+                    ));
+                }
+                continue;
+            }
+
+            let (radix, digit) = if index + 1 == retained && digit_places != 0 {
+                let divisor = 10_i128.pow(digit_places);
+                if digit % divisor != 0 {
+                    return Err(self.value_out_of_range(
+                        "numeric value has more fractional digits than the decimal scale",
+                    ));
+                }
+                (NBASE / divisor, digit / divisor)
+            } else {
+                (NBASE, digit)
+            };
+            coefficient = coefficient
+                .checked_mul(radix)
+                .and_then(|value| value.checked_add(digit))
+                .ok_or_else(|| {
+                    self.value_out_of_range("numeric value exceeds Decimal128")
+                })?;
+        }
+        Ok(coefficient)
     }
 
     fn value_out_of_range(&self, message: impl Into<String>) -> DecimalCodecError {
@@ -720,5 +772,26 @@ mod tests {
         assert_eq!(&buf[2..4], &(ext.weight as u16).to_be_bytes());
         assert_eq!(&buf[4..6], &ext.sign.to_be_bytes());
         assert_eq!(&buf[6..8], &ext.dscale.to_be_bytes());
+    }
+
+    #[test]
+    fn numeric_send_scaling_avoids_wider_intermediate_coefficient() {
+        let codec = Decimal128NumericCodec::new(38, 18).unwrap();
+        let digits = [
+            1234u16, 5678, 9012, 3456, 7890, 1234, 5678, 9012, 3456, 7800,
+        ];
+        let mut wire = Vec::with_capacity(8 + digits.len() * 2);
+        wire.extend_from_slice(&(digits.len() as u16).to_be_bytes());
+        wire.extend_from_slice(&4i16.to_be_bytes());
+        wire.extend_from_slice(&NUMERIC_POS.to_be_bytes());
+        wire.extend_from_slice(&18u16.to_be_bytes());
+        for digit in digits {
+            wire.extend_from_slice(&digit.to_be_bytes());
+        }
+
+        assert_eq!(
+            codec.numeric_send_to_i128(&wire).unwrap(),
+            12_345_678_901_234_567_890_123_456_789_012_345_678i128
+        );
     }
 }

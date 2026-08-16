@@ -68,7 +68,7 @@ impl ObjectFileEncoderFactory for StreamEncoderFactory {
     }
 }
 
-struct StreamFileEncoder {
+pub(crate) struct StreamFileEncoder {
     encoder: StreamEncoder<StagedObjectWriter>,
 }
 

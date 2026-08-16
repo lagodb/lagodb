@@ -218,7 +218,7 @@ impl AvroReadColumn {
             }
             (AvroValueKind::TimestampMicros, Value::TimestampMillis(value)) => self
                 .timestamp(
-                    i64::from(*value)
+                    (*value)
                         .checked_mul(1_000)
                         .ok_or_else(|| self.out_of_range())?,
                 ),
@@ -229,7 +229,7 @@ impl AvroReadColumn {
                 AvroValueKind::LocalTimestampMicros,
                 Value::LocalTimestampMillis(value),
             ) => self.local_timestamp(
-                i64::from(*value)
+                (*value)
                     .checked_mul(1_000)
                     .ok_or_else(|| self.out_of_range())?,
             ),
@@ -448,7 +448,7 @@ impl FormatScanState for AvroScanState {
                     // value per writer-schema field in that order.
                     let source =
                         unsafe { fields.get_unchecked(column.reader.source()) };
-                    let value = unsafe { column.reader.datum(source) }?;
+                    let value = unsafe { column.reader.datum(&source.1) }?;
                     unsafe {
                         writer.write(
                             column.output,

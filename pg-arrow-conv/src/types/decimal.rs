@@ -10,7 +10,7 @@ use pgrx::pg_sys;
 use pgrx::prelude::AnyNumeric;
 
 use super::{ColumnAppend, cell_type_mismatch};
-use crate::error::{ArrowConversionError, ArrowConversionResult};
+use crate::error::ArrowConversionResult;
 
 // ---------------------------------------------------------------------------
 // Write encoder

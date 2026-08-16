@@ -46,6 +46,7 @@ pub struct CopyFromScan {
     relation: pg_sys::Relation,
     options: *mut pg_sys::List,
     econtext: *mut pg_sys::ExprContext,
+    parser_context: pg_sys::MemoryContext,
     _not_send_sync: PhantomData<*mut ()>,
 }
 
@@ -79,6 +80,11 @@ impl CopyFromScan {
             relation,
             options,
             econtext,
+            // CopyFromScan::begin is invoked while the FDW framework has
+            // switched to the executor query context. Parser replacements at
+            // prefix object boundaries happen later from the per-tuple
+            // context, so retain this parent for every BeginCopyFrom call.
+            parser_context: unsafe { pg_sys::CurrentMemoryContext },
             _not_send_sync: PhantomData,
         };
         if has_document {
@@ -108,7 +114,16 @@ impl CopyFromScan {
     }
 
     fn start_parser(&mut self) -> Result<(), CopyError> {
-        self.state = Some(self.begin_state()?);
+        // BeginCopyFrom allocates the CopyFromState itself in the current
+        // context and its workspace in a child context. A prefix scan can
+        // replace this parser while IterateForeignScan is running in the
+        // executor's resettable per-tuple context, so create every parser in
+        // the query-lifetime context captured by begin().
+        let prior_context =
+            unsafe { pg_sys::MemoryContextSwitchTo(self.parser_context) };
+        let result = self.begin_state();
+        unsafe { pg_sys::MemoryContextSwitchTo(prior_context) };
+        self.state = Some(result?);
         Ok(())
     }
 

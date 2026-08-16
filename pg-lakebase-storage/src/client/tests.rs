@@ -1151,9 +1151,11 @@ async fn client_bulk_delete_and_explicit_cursor_close_are_end_to_end() {
         let first_page = client.list_page("bucket", Some("scope/"), None, 1).unwrap();
         let cursor = first_page.next_cursor.expect("more objects must remain");
         client.close_list_cursor(cursor.clone()).unwrap();
-        let closed = client
-            .list_page("bucket", Some("scope/"), Some(cursor), 1)
-            .unwrap_err();
+        let closed = match client.list_page("bucket", Some("scope/"), Some(cursor), 1)
+        {
+            Ok(_) => panic!("closed cursor must be rejected"),
+            Err(error) => error,
+        };
         assert_eq!(closed.kind(), StorageErrorKind::ExpiredCursor);
 
         let deleted = client

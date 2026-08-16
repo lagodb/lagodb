@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Foreign-table INSERT paths and write-capability boundaries.
 
 SET TIME ZONE 'UTC';
@@ -44,27 +46,27 @@ SELECT format('s3://%s/lagodb-connectors/foreign-write/text/',
 \gset write_
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_text
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_text_path', format 'text');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_csv
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_csv_path', format 'csv');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_json
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_json_path', format 'json');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_avro
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_avro_path', format 'avro');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_parquet
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_parquet_path', format 'parquet');
 
@@ -105,23 +107,23 @@ ORDER BY relation;
 
 -- Exact locations are read-only foreign-table targets for every format.
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_exact_text
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_exact_text_path', format 'text');
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_exact_csv
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_exact_csv_path', format 'csv');
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_exact_json
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_exact_json_path', format 'json');
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_exact_avro
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_exact_avro_path', format 'avro');
 CREATE FOREIGN TABLE lagodb_connectors_regress.write_exact_parquet
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'write_exact_parquet_path', format 'parquet');
 

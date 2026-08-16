@@ -19,9 +19,7 @@ use crate::format::{
 };
 use crate::storage::ObjectOutput;
 
-use super::super::super::copy::{
-    CanonicalCsv, CanonicalCsvRow, FormatCopyDestination,
-};
+use super::super::super::copy::{CanonicalCsvRow, FormatCopyDestination};
 
 const COPY_TO_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
@@ -53,7 +51,7 @@ impl ReadyParquetCopyDestination {
 }
 
 /// COPY TO destination initialized from PostgreSQL's actual output TupleDesc.
-pub(super) struct ParquetCopyDestination {
+pub(in crate::format) struct ParquetCopyDestination {
     output: Option<ObjectOutput>,
     compression: ParquetWriteCompression,
     ready: Option<ReadyParquetCopyDestination>,
@@ -62,7 +60,7 @@ pub(super) struct ParquetCopyDestination {
 }
 
 impl ParquetCopyDestination {
-    pub(super) fn new(
+    pub(in crate::format) fn new(
         output: ObjectOutput,
         compression: ParquetWriteCompression,
     ) -> Self {
@@ -75,7 +73,7 @@ impl ParquetCopyDestination {
         }
     }
 
-    pub(super) fn finish(mut self) -> Result<(), CopyError> {
+    pub(in crate::format) fn finish(mut self) -> Result<(), CopyError> {
         self.ready
             .as_mut()
             .expect("COPY TO initializes its destination before producing rows")

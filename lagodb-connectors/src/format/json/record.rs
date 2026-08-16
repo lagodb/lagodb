@@ -28,21 +28,21 @@ struct PgInputPlan {
 
 impl PgInputPlan {
     fn bind(type_oid: pg_sys::Oid, type_mod: i32) -> Result<Self, ConnectorError> {
-        let mut input_function = pg_sys::InvalidOid;
-        let mut type_io_param = pg_sys::InvalidOid;
         let result = unsafe {
             PgTryBuilder::new(|| {
+                let mut input_function = pg_sys::InvalidOid;
+                let mut type_io_param = pg_sys::InvalidOid;
                 pg_sys::getTypeInputInfo(
                     type_oid,
                     &mut input_function,
                     &mut type_io_param,
                 );
-                Ok(())
+                Ok((input_function, type_io_param))
             })
             .catch_others(|error| Err(PgReportError::from_caught(error)))
             .execute()
         };
-        result.map_err(ConnectorError::from)?;
+        let (input_function, type_io_param) = result.map_err(ConnectorError::from)?;
         Ok(Self {
             input_function,
             type_io_param,

@@ -20,6 +20,7 @@
 #include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "utils/acl.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -792,106 +793,74 @@ lakebase_copy_parser_state(void)
 {
 	ParseState *pstate = make_parsestate(NULL);
 
-	/* BeginCopyTo uses this for parser diagnostics and query planning. */
+	/* ProcessCopyOptions uses this for parser diagnostics. */
 	pstate->p_sourcetext = "";
 	return pstate;
-}
-
-static List *
-lakebase_copy_shape_attnames(Relation rel)
-{
-	TupleDesc	tupDesc = RelationGetDescr(rel);
-	List	   *attnamelist = NIL;
-	int			i;
-
-	for (i = 0; i < tupDesc->natts; i++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupDesc, i);
-
-		if (!attr->attisdropped)
-			attnamelist = lappend(
-				attnamelist,
-				makeString(pstrdup(NameStr(attr->attname))));
-	}
-	return attnamelist;
-}
-
-static RawStmt *
-lakebase_copy_shape_query(Relation rel)
-{
-	TupleDesc	tupDesc = RelationGetDescr(rel);
-	SelectStmt *select = makeNode(SelectStmt);
-	RawStmt    *raw_query = makeNode(RawStmt);
-	int			i;
-
-	for (i = 0; i < tupDesc->natts; i++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupDesc, i);
-		ResTarget  *target = makeNode(ResTarget);
-		char		*name;
-
-		if (attr->attisdropped)
-		{
-			/* Preserve physical attno positions; CopyGetAttnums skips this. */
-			name = psprintf("__lakebase_dropped_%d", i + 1);
-			target->val = (Node *) makeNullConst(INT4OID, -1, InvalidOid);
-		}
-		else
-		{
-			name = pstrdup(NameStr(attr->attname));
-			target->val = (Node *) makeNullConst(attr->atttypid,
-													 attr->atttypmod,
-													 attr->attcollation);
-		}
-		target->name = name;
-		select->targetList = lappend(select->targetList, target);
-	}
-
-	/* Header generation and encoder initialization must not read the table. */
-	select->whereClause = (Node *) makeBoolConst(false, false);
-	raw_query->stmt = (Node *) select;
-	raw_query->stmt_location = -1;
-	raw_query->stmt_len = 0;
-	return raw_query;
-}
-
-static CopyToState
-lakebase_begin_copy_shape(Relation rel,
-							 List *options)
-{
-	ParseState *pstate = lakebase_copy_parser_state();
-	RawStmt    *raw_query = lakebase_copy_shape_query(rel);
-	List	   *attnamelist = lakebase_copy_shape_attnames(rel);
-
-	return BeginCopyTo(pstate,
-						 NULL,
-						 raw_query,
-						 InvalidOid,
-						 NULL,
-						 false,
-						 NULL,
-						 attnamelist,
-						 options);
 }
 
 CopyToState
 lakebase_begin_copy_row_encoder(Relation rel,
 								List *options)
 {
-	CopyToState state = lakebase_begin_copy_shape(rel, options);
+	LakebaseCopyToStateData *copy_state;
+	MemoryContext copycontext;
+	MemoryContext oldcontext;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			num_phys_attrs = tupdesc->natts;
+
+	/*
+	 * The Rust owner can be dropped by a reset callback on its executor query
+	 * context. PostgreSQL deletes child contexts before invoking that callback,
+	 * so this explicitly-owned context must not be a child of the owner context.
+	 * It is deleted by lakebase_end_copy_row_encoder on every normal and ERROR
+	 * cleanup path.
+	 */
+	copycontext = AllocSetContextCreate(TopMemoryContext,
+		"lakebase COPY row encoder", ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(copycontext);
+	copy_state = (LakebaseCopyToStateData *) palloc0(
+		sizeof(LakebaseCopyToStateData));
+	copy_state->copycontext = copycontext;
 
 	PG_TRY();
 	{
-		LakebaseCopyToStateData *copy_state = lakebase_copy_to_state(state);
-		TupleDesc	tupdesc = copy_state->queryDesc->tupDesc;
+		ParseState *pstate = lakebase_copy_parser_state();
 		ListCell   *cur;
-		int			num_phys_attrs = tupdesc->natts;
+
+		ProcessCopyOptions(pstate, &copy_state->opts, false, options);
 
 		if (copy_state->opts.binary)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("binary COPY row encoding is not supported")));
 
+		copy_state->rel = rel;
+		copy_state->attnumlist = CopyGetAttnums(tupdesc, rel, NIL);
+		copy_state->opts.force_quote_flags = (bool *) palloc0(
+			num_phys_attrs * sizeof(bool));
+		if (copy_state->opts.force_quote_all)
+			MemSet(copy_state->opts.force_quote_flags, true,
+				num_phys_attrs * sizeof(bool));
+		else if (copy_state->opts.force_quote != NIL)
+		{
+			List *force_quote_attnums = CopyGetAttnums(
+				tupdesc, rel, copy_state->opts.force_quote);
+
+			foreach(cur, force_quote_attnums)
+			{
+				int attnum = lfirst_int(cur);
+
+				copy_state->opts.force_quote_flags[attnum - 1] = true;
+			}
+		}
+
+		copy_state->file_encoding = copy_state->opts.file_encoding < 0 ?
+			pg_get_client_encoding() : copy_state->opts.file_encoding;
+		copy_state->need_transcoding =
+			copy_state->file_encoding != GetDatabaseEncoding() &&
+			copy_state->file_encoding != PG_SQL_ASCII;
+		copy_state->encoding_embeds_ascii =
+			PG_ENCODING_IS_CLIENT_ONLY(copy_state->file_encoding);
 		copy_state->opts.null_print_client = copy_state->opts.null_print;
 		copy_state->fe_msgbuf = makeStringInfo();
 		copy_state->out_functions = (FmgrInfo *) palloc(
@@ -915,18 +884,20 @@ lakebase_begin_copy_row_encoder(Relation rel,
 	}
 	PG_CATCH();
 	{
-		lakebase_end_copy_row_encoder(state);
+		MemoryContextSwitchTo(oldcontext);
+		MemoryContextDelete(copycontext);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	return state;
+	MemoryContextSwitchTo(oldcontext);
+	return (CopyToState) copy_state;
 }
 
 void
 lakebase_encode_copy_header(CopyToState state, const char **data, int *len)
 {
 	LakebaseCopyToStateData *copy_state = lakebase_copy_to_state(state);
-	TupleDesc	tupdesc = copy_state->queryDesc->tupDesc;
+	TupleDesc	tupdesc = RelationGetDescr(copy_state->rel);
 	ListCell   *cur;
 	bool		need_delim = false;
 
@@ -1002,11 +973,14 @@ lakebase_encode_copy_row(CopyToState state, TupleTableSlot *slot,
 void
 lakebase_end_copy_row_encoder(CopyToState state)
 {
+	LakebaseCopyToStateData *copy_state;
+	MemoryContext copycontext;
+
 	if (state == NULL)
 		return;
-	if (lakebase_copy_to_state(state)->rowcontext != NULL)
-		MemoryContextDelete(lakebase_copy_to_state(state)->rowcontext);
-	EndCopyTo(state);
+	copy_state = lakebase_copy_to_state(state);
+	copycontext = copy_state->copycontext;
+	MemoryContextDelete(copycontext);
 }
 
 CopyToState

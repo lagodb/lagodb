@@ -129,53 +129,51 @@ impl FormatScanState for JsonScanState {
             return Ok(false);
         };
         self.decoder.decode(&self.plan, record, logical_line)?;
-        let result = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                // SAFETY: outputs were copied from this scan's Begin-time
-                // layout and every destination is written exactly once.
-                let mut writer = unsafe { output.datum_writer() };
-                for (index, (column, destination)) in self
-                    .plan
-                    .columns()
-                    .iter()
-                    .zip(self.outputs.iter().copied())
-                    .enumerate()
-                {
-                    let value =
-                        self.decoder.value(record, column, index, logical_line)?;
-                    match value {
-                        JsonInputValue::Null => unsafe {
-                            writer.write(destination, pg_sys::Datum::from(0), true);
-                        },
-                        JsonInputValue::Bytes(value) => {
-                            self.c_string.clear();
-                            self.c_string.extend_from_slice(value);
-                            self.c_string.push(0);
-                            // SAFETY: serde_json validation excludes literal
-                            // NUL bytes and this state appended one terminator.
-                            let value = unsafe {
-                                CStr::from_bytes_with_nul_unchecked(&self.c_string)
-                            };
-                            // SAFETY: the input plan was bound to this exact
-                            // destination OID and typmod at Begin.
-                            let datum = unsafe { column.input_datum(value) };
-                            unsafe { writer.write(destination, datum, false) };
-                        }
-                        JsonInputValue::CStr(value) => {
-                            // SAFETY: the decoder's reusable buffer is valid
-                            // through this synchronous input-function call.
-                            let datum = unsafe { column.input_datum(value) };
-                            unsafe { writer.write(destination, datum, false) };
-                        }
+        let result = PgTryBuilder::new(AssertUnwindSafe(|| {
+            // SAFETY: outputs were copied from this scan's Begin-time
+            // layout and every destination is written exactly once.
+            let mut writer = unsafe { output.datum_writer() };
+            for (index, (column, destination)) in self
+                .plan
+                .columns()
+                .iter()
+                .zip(self.outputs.iter().copied())
+                .enumerate()
+            {
+                let value =
+                    self.decoder.value(record, column, index, logical_line)?;
+                match value {
+                    JsonInputValue::Null => unsafe {
+                        writer.write(destination, pg_sys::Datum::from(0), true);
+                    },
+                    JsonInputValue::Bytes(value) => {
+                        self.c_string.clear();
+                        self.c_string.extend_from_slice(value);
+                        self.c_string.push(0);
+                        // SAFETY: serde_json validation excludes literal
+                        // NUL bytes and this state appended one terminator.
+                        let value = unsafe {
+                            CStr::from_bytes_with_nul_unchecked(&self.c_string)
+                        };
+                        // SAFETY: the input plan was bound to this exact
+                        // destination OID and typmod at Begin.
+                        let datum = unsafe { column.input_datum(value) };
+                        unsafe { writer.write(destination, datum, false) };
+                    }
+                    JsonInputValue::CStr(value) => {
+                        // SAFETY: the decoder's reusable buffer is valid
+                        // through this synchronous input-function call.
+                        let datum = unsafe { column.input_datum(value) };
+                        unsafe { writer.write(destination, datum, false) };
                     }
                 }
-                Ok::<(), ConnectorError>(())
-            }))
-            .catch_others(|error| {
-                Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
-            })
-            .execute()
-        };
+            }
+            Ok::<(), ConnectorError>(())
+        }))
+        .catch_others(|error| {
+            Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
+        })
+        .execute();
         result?;
         Ok(true)
     }

@@ -65,7 +65,8 @@ impl JsonObject {
     fn into_last_values(self) -> Vec<(String, JsonFieldType)> {
         let mut values: Vec<(String, JsonFieldType)> =
             Vec::with_capacity(self.0.len());
-        let mut indexes = HashMap::with_capacity(self.0.len());
+        let mut indexes: HashMap<String, usize> =
+            HashMap::with_capacity(self.0.len());
         for (name, value) in self.0 {
             let value_type = JsonFieldType::of(&value);
             if let Some(index) = indexes.get(name.as_str()).copied() {

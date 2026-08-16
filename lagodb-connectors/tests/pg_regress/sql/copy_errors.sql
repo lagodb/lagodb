@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Direct COPY capability errors and their SQLSTATE contracts.
 
 SET client_min_messages = warning;
@@ -20,10 +22,10 @@ SELECT format('s3://%s/lagodb-connectors/seed/common-prefix/',
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_error_common;
 CREATE TABLE lagodb_connectors_regress.copy_error_common
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_error_json;
 CREATE TABLE lagodb_connectors_regress.copy_error_json
-    (LIKE lagodb_connectors_regress.json_source);
+    (:json_columns);
 
 \set VERBOSITY sqlstate
 

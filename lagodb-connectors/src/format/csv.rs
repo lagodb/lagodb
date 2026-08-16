@@ -116,14 +116,16 @@ impl CsvOptions {
         &self,
         mut options: *mut pg_sys::List,
     ) -> Result<*mut pg_sys::List, ConnectorError> {
-        let quote = std::str::from_utf8(&[self.quote]).map_err(|_| {
+        let quote = [self.quote];
+        let quote = std::str::from_utf8(&quote).map_err(|_| {
             ConnectorError::invalid_option(
                 "quote",
                 "must be valid in the server encoding",
             )
         })?;
         options = DelimitedOptions::append_string_option(options, "quote", quote)?;
-        let escape = std::str::from_utf8(&[self.escape]).map_err(|_| {
+        let escape = [self.escape];
+        let escape = std::str::from_utf8(&escape).map_err(|_| {
             ConnectorError::invalid_option(
                 "escape",
                 "must be valid in the server encoding",
@@ -265,11 +267,15 @@ impl FormatSchemaReader for CsvFormat {
         &self,
         file: &mut StorageFile,
     ) -> Result<InferredSchema, ConnectorError> {
-        DelimitedSchemaReader::new(
-            FormatKind::Csv,
-            self.options.header_enabled(),
-            self.options.postgres_schema_options()?,
-        )
+        // SAFETY: postgres_schema_options returns a PostgreSQL-owned COPY
+        // option list in the current context, which outlives inference.
+        unsafe {
+            DelimitedSchemaReader::new(
+                FormatKind::Csv,
+                self.options.header_enabled(),
+                self.options.postgres_schema_options()?,
+            )
+        }
         .infer(file, self.compression)
     }
 }

@@ -150,7 +150,7 @@ impl CopyDocumentSource for DelimitedObjectSource {
         let Some(file) = self.files.next() else {
             return Ok(false);
         };
-        let file = file.map_err(ConnectorError::from)?;
+        let file = file?;
         let decoder = StreamDecoder::new(ObjectReader { file }, self.compression)
             .map_err(ConnectorError::copy_stream_io)?;
         self.decoder = Some(decoder);

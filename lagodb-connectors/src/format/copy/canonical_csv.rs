@@ -27,7 +27,7 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
-pub(super) struct CanonicalCsv;
+pub(in crate::format) struct CanonicalCsv;
 
 #[derive(Clone, Copy)]
 struct FieldRange {
@@ -36,13 +36,13 @@ struct FieldRange {
     null: bool,
 }
 
-pub(super) struct CanonicalCsvRow {
+pub(in crate::format) struct CanonicalCsvRow {
     bytes: Vec<u8>,
     fields: Vec<FieldRange>,
 }
 
 impl CanonicalCsv {
-    pub(super) const NULL: &'static [u8] = br"\N";
+    pub(in crate::format) const NULL: &'static [u8] = br"\N";
 
     const CONNECTOR_OPTION_NAMES: [&[u8]; 3] =
         [b"storage_server", b"format", b"compression"];
@@ -60,7 +60,7 @@ impl CanonicalCsv {
         b"force_null",
     ];
 
-    pub(super) fn reject_user_overrides(
+    pub(in crate::format) fn reject_user_overrides(
         options: CopyOptionView<'_>,
     ) -> Result<(), ConnectorError> {
         for option in options.iter() {
@@ -83,7 +83,9 @@ impl CanonicalCsv {
         Ok(())
     }
 
-    pub(super) fn postgres_options(context: &CopyContext<'_>) -> *mut pg_sys::List {
+    pub(in crate::format) fn postgres_options(
+        context: &CopyContext<'_>,
+    ) -> *mut pg_sys::List {
         let mut ignored_names = Vec::with_capacity(
             Self::CONNECTOR_OPTION_NAMES.len()
                 + Self::USER_OVERRIDE_OPTION_NAMES.len(),
@@ -123,7 +125,7 @@ impl CanonicalCsv {
         unsafe { pg_sys::lappend(options, option.cast()) }
     }
 
-    pub(super) fn write_field(output: &mut Vec<u8>, value: &[u8]) {
+    pub(in crate::format) fn write_field(output: &mut Vec<u8>, value: &[u8]) {
         let quote = value.is_empty()
             || value == Self::NULL
             || value == br"\."
@@ -144,7 +146,7 @@ impl CanonicalCsv {
         output.push(b'"');
     }
 
-    pub(super) fn validate_row_width(
+    pub(in crate::format) fn validate_row_width(
         actual: usize,
         expected: usize,
     ) -> Result<(), crate::error::ConnectorError> {
@@ -159,14 +161,14 @@ impl CanonicalCsv {
 }
 
 impl CanonicalCsvRow {
-    pub(super) fn new() -> Self {
+    pub(in crate::format) fn new() -> Self {
         Self {
             bytes: Vec::new(),
             fields: Vec::new(),
         }
     }
 
-    pub(super) fn parse(
+    pub(in crate::format) fn parse(
         &mut self,
         input: &[u8],
         expected_fields: usize,
@@ -264,7 +266,9 @@ impl CanonicalCsvRow {
         CanonicalCsv::validate_row_width(self.fields.len(), expected_fields)
     }
 
-    pub(super) fn fields(&self) -> impl ExactSizeIterator<Item = Option<&CStr>> {
+    pub(in crate::format) fn fields(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Option<&CStr>> {
         self.fields.iter().map(|field| {
             (!field.null).then(|| {
                 // SAFETY: parse rejects embedded NUL bytes and appends exactly

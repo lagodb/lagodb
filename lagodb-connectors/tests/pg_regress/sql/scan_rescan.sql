@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- FDW ReScan coverage for each independent reader-state implementation.
 -- Text and CSV share DelimitedScanState, so Text represents that class.
 
@@ -18,19 +20,19 @@ SELECT format('s3://%s/lagodb-connectors/seed/common-prefix/',
 \gset rescan_
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_text
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rescan_text_path', format 'text');
 CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_json
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rescan_json_path', format 'json');
 CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_avro
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rescan_avro_path', format 'avro');
 CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_parquet
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rescan_parquet_path', format 'parquet');
 

@@ -45,11 +45,7 @@ where
                 }
                 let newline = available.iter().position(|byte| *byte == b'\n');
                 let payload_len = newline.unwrap_or(available.len());
-                let next_len = self
-                    .record
-                    .len()
-                    .checked_add(payload_len)
-                    .unwrap_or(usize::MAX);
+                let next_len = self.record.len().saturating_add(payload_len);
                 if next_len > self.max_record_bytes.get() {
                     return Err(ConnectorError::JsonRecordTooLarge {
                         line: self.logical_line + 1,
@@ -110,11 +106,16 @@ impl JsonRecordStream {
             if self.reader.is_none() && !self.open_next()? {
                 return Ok(None);
             }
-            let reader = self
+            let has_record = self
                 .reader
                 .as_mut()
-                .expect("an opened JSON object owns a line reader");
-            if reader.read_next()? {
+                .expect("an opened JSON object owns a line reader")
+                .read_next()?;
+            if has_record {
+                let reader = self
+                    .reader
+                    .as_ref()
+                    .expect("the JSON line reader still owns the current record");
                 return Ok(Some((reader.logical_line(), reader.record())));
             }
             self.reader = None;

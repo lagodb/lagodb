@@ -387,9 +387,7 @@ pub(super) unsafe extern "C-unwind" fn exec<P: LakebaseCustomModifyProvider>(
         .as_mut()
         .expect("BeginCustomScan initialized bridge");
     let result = unsafe {
-        pg_guard_ffi_boundary(|| unsafe {
-            lakebase_exec_modify_table(state.inner, bridge)
-        })
+        pg_guard_ffi_boundary(|| lakebase_exec_modify_table(state.inner, bridge))
     };
     if !instrument.is_null() {
         unsafe {

@@ -86,7 +86,11 @@ pub(crate) fn parquet_arrow_type(
             | PgBuiltInOids::NAMEOID
             | PgBuiltInOids::JSONOID,
         ) => DataType::Utf8,
-        PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => DataType::Binary,
+        // Keep the write-side physical type aligned with pg-arrow-conv's
+        // canonical bytea builder and Iceberg's binary mapping. The read path
+        // accepts both offset widths, but newly produced columns use i64
+        // offsets so a batch cannot overflow Arrow Binary's i32 byte limit.
+        PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => DataType::LargeBinary,
         PgOid::BuiltIn(PgBuiltInOids::UUIDOID) => DataType::FixedSizeBinary(16),
         PgOid::BuiltIn(PgBuiltInOids::DATEOID) => DataType::Date32,
         PgOid::BuiltIn(PgBuiltInOids::TIMEOID) => {
@@ -96,7 +100,8 @@ pub(crate) fn parquet_arrow_type(
             DataType::Timestamp(TimeUnit::Microsecond, None)
         }
         PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
-            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+            // Match pg-arrow-conv and pg-iceberg-am's canonical UTC metadata.
+            DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
         }
         PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
             let numeric = numeric_precision_scale(typmod).ok_or_else(|| {

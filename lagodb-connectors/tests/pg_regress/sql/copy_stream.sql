@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Direct COPY paths for Text, CSV, and JSON stream formats.
 --
 -- Exact outputs exercise suffix inference. Prefix outputs require an explicit
@@ -52,7 +54,7 @@ WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_text_from;
 CREATE TABLE lagodb_connectors_regress.copy_text_from
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_text_from
 FROM :'copy_text_exact'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -73,7 +75,7 @@ TO :'copy_text_alias'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_text_alias_from;
 CREATE TABLE lagodb_connectors_regress.copy_text_alias_from
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_text_alias_from
 FROM :'copy_text_alias'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -112,21 +114,21 @@ WITH (
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_csv_from;
 CREATE TABLE lagodb_connectors_regress.copy_csv_from
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_csv_from
 FROM :'copy_csv_exact'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_csv_header_from;
 CREATE TABLE lagodb_connectors_regress.copy_csv_header_from
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_csv_header_from
 FROM :'copy_csv_header'
 WITH (storage_server 'lagodb_connectors_regress_s3', header true);
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_csv_custom_from;
 CREATE TABLE lagodb_connectors_regress.copy_csv_custom_from
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_csv_custom_from
 FROM :'copy_csv_custom'
 WITH (
@@ -139,7 +141,7 @@ WITH (
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_csv_compressed_from;
 CREATE TABLE lagodb_connectors_regress.copy_csv_compressed_from
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_csv_compressed_from
 FROM :'copy_csv_compressed'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -175,7 +177,7 @@ WITH (
 );
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_text_compressed_from;
 CREATE TABLE lagodb_connectors_regress.copy_text_compressed_from
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.copy_text_compressed_from
 FROM :'copy_text_compressed'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -201,14 +203,14 @@ WITH (
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_json_from;
 CREATE TABLE lagodb_connectors_regress.copy_json_from
-    (LIKE lagodb_connectors_regress.json_source);
+    (:json_columns);
 COPY lagodb_connectors_regress.copy_json_from
 FROM :'copy_json_exact'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_json_compressed_from;
 CREATE TABLE lagodb_connectors_regress.copy_json_compressed_from
-    (LIKE lagodb_connectors_regress.json_source);
+    (:json_columns);
 COPY lagodb_connectors_regress.copy_json_compressed_from
 FROM :'copy_json_compressed'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -231,7 +233,7 @@ TO :'copy_json_alias'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_json_alias_from;
 CREATE TABLE lagodb_connectors_regress.copy_json_alias_from
-    (LIKE lagodb_connectors_regress.json_source);
+    (:json_columns);
 COPY lagodb_connectors_regress.copy_json_alias_from
 FROM :'copy_json_alias'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -250,14 +252,14 @@ WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_extra_text_from;
 CREATE TABLE lagodb_connectors_regress.copy_extra_text_from
-    (LIKE lagodb_connectors_regress.stream_extra_source);
+    (:stream_extra_columns);
 COPY lagodb_connectors_regress.copy_extra_text_from
 FROM :'copy_extra_text'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_extra_csv_from;
 CREATE TABLE lagodb_connectors_regress.copy_extra_csv_from
-    (LIKE lagodb_connectors_regress.stream_extra_source);
+    (:stream_extra_columns);
 COPY lagodb_connectors_regress.copy_extra_csv_from
 FROM :'copy_extra_csv'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');

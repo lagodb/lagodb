@@ -3,55 +3,52 @@
 //! ModifyTable execution owns its mutation state inside the outer CustomScan. COPY
 //! FROM bypasses ModifyTable, so it alone needs utility-hook boundaries.
 
-use crate::diag::PgReportError;
+use std::sync::Once;
+
+use pgrx::pg_sys;
+
+use crate::hooks::{
+    CopyStmtNode, PostUtilityContext, UtilityHook, UtilityHookError, UtilityNode,
+    register_utility_hook,
+};
 
 use super::session;
 
-/// Utility-scoped relation COPY FROM lifecycle.
-///
-/// The guard is created only after a COPY consumer has been selected. This is
-/// important because an external COPY consumer may own a format writer without
-/// invoking PostgreSQL's relation COPY executor and therefore must not create
-/// a Table-AM session frame accidentally.
-pub struct CopyFromLifecycleGuard {
-    id: u64,
-    finished: bool,
-}
+static MUTATION_LIFECYCLE_INIT: Once = Once::new();
 
-impl CopyFromLifecycleGuard {
-    pub(crate) fn begin() -> Self {
-        let id = session::begin_copy_from_frame();
-        Self {
-            id,
-            finished: false,
-        }
+struct CopyFromLifecycle;
+
+impl UtilityHook for CopyFromLifecycle {
+    fn name(&self) -> &'static str {
+        "mutation_copy_from_lifecycle"
     }
 
-    /// Finish every relation-local Table-AM COPY session in this utility
-    /// frame. Dropping an unfinished guard aborts the frame immediately;
-    /// ResourceOwner cleanup remains as a backend-error safety net.
-    pub fn finish(mut self) -> Result<(), PgReportError> {
-        let result = session::finish_copy_frame(self.id);
-        if result.is_err() {
-            // A frame can only be finished while it is the stack top. If that
-            // invariant is violated, remove the frame explicitly so its
-            // sessions still run their abort cleanup when the frame drops.
-            session::abort_copy_frame(self.id);
+    fn on_pre(&self, context: &mut UtilityNode) -> Result<(), UtilityHookError> {
+        let Some(copy) = context.cast::<CopyStmtNode>() else {
+            return Ok(());
+        };
+        if copy.is_from {
+            session::begin_copy_from_frame();
         }
-        self.finished = true;
-        result
+        Ok(())
+    }
+
+    fn on_post(&self, context: &PostUtilityContext) -> Result<(), UtilityHookError> {
+        let Some(copy) = context.original_stmt().cast::<CopyStmtNode>() else {
+            return Ok(());
+        };
+        if copy.is_from {
+            session::finish_current_copy_frame().map_err(UtilityHookError::from)?;
+        }
+        Ok(())
     }
 }
 
-impl Drop for CopyFromLifecycleGuard {
-    fn drop(&mut self) {
-        if !self.finished {
-            session::abort_copy_frame(self.id);
-            self.finished = true;
-        }
-    }
-}
-
-pub fn begin_copy_from_lifecycle() -> CopyFromLifecycleGuard {
-    CopyFromLifecycleGuard::begin()
+pub fn init_lifecycle_hooks() {
+    MUTATION_LIFECYCLE_INIT.call_once(|| {
+        register_utility_hook(
+            pg_sys::NodeTag::T_CopyStmt,
+            Box::new(CopyFromLifecycle),
+        );
+    });
 }

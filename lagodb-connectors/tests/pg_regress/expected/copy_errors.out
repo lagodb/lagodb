@@ -1,0 +1,84 @@
+\i include/column_definitions.sql
+-- PostgreSQL rejects CREATE FOREIGN TABLE ... LIKE before an FDW callback can
+-- run. Keep the repeated regression-table shapes in psql variables so tests
+-- exercise valid core syntax without duplicating long column lists.
+\set common_columns 'id integer, bool_col boolean, smallint_col smallint, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
+\set json_columns :common_columns ', json_col json, jsonb_col jsonb'
+\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[]'
+\set stream_extra_columns 'id integer, json_col json, jsonb_col jsonb, bool_array boolean[], int_array integer[], text_array text[]'
+\set id_payload_columns 'id integer, payload text'
+-- Direct COPY capability errors and their SQLSTATE contracts.
+SET client_min_messages = warning;
+SELECT bucket AS lakebase_regress_bucket
+FROM lakebase_regress.object_storage_fixture
+\gset
+SELECT format('s3://%s/lagodb-connectors/seed/common-prefix/',
+              :'lakebase_regress_bucket') AS text_prefix,
+       format('s3://%s/lagodb-connectors/seed/common-prefix-csv/',
+              :'lakebase_regress_bucket') AS csv_prefix,
+       format('s3://%s/lagodb-connectors/seed/json-prefix/',
+              :'lakebase_regress_bucket') AS json_prefix,
+       format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
+              :'lakebase_regress_bucket') AS avro_prefix,
+       format('s3://%s/lagodb-connectors/copy-errors/missing.txt',
+              :'lakebase_regress_bucket') AS missing_text
+\gset copy_error_
+DROP TABLE IF EXISTS lagodb_connectors_regress.copy_error_common;
+CREATE TABLE lagodb_connectors_regress.copy_error_common
+    (:common_columns);
+DROP TABLE IF EXISTS lagodb_connectors_regress.copy_error_json;
+CREATE TABLE lagodb_connectors_regress.copy_error_json
+    (:json_columns);
+\set VERBOSITY sqlstate
+-- Stream, JSON, and Avro COPY FROM require an exact object. Parquet prefix
+-- input is covered as a successful path by copy_native.sql.
+COPY lagodb_connectors_regress.copy_error_common
+FROM :'copy_error_text_prefix'
+WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+ERROR:  0A000
+COPY lagodb_connectors_regress.copy_error_common
+FROM :'copy_error_csv_prefix'
+WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+ERROR:  0A000
+COPY lagodb_connectors_regress.copy_error_json
+FROM :'copy_error_json_prefix'
+WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+ERROR:  0A000
+COPY lagodb_connectors_regress.copy_error_common
+FROM :'copy_error_avro_prefix'
+WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+ERROR:  0A000
+-- A missing exact object locks direct StorageError mapping at the COPY FFI
+-- boundary.
+COPY lagodb_connectors_regress.copy_error_common
+FROM :'copy_error_missing_text'
+WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+ERROR:  58030
+-- Native formats reject PostgreSQL text/CSV overrides before storage access.
+COPY lagodb_connectors_regress.json_source
+TO 's3://invalid-bucket/lagodb-connectors/copy-errors/negative.json'
+WITH (
+    storage_server 'lagodb_connectors_regress_s3',
+    format 'json',
+    delimiter ';'
+);
+ERROR:  22023
+COPY lagodb_connectors_regress.parquet_source
+TO 's3://invalid-bucket/lagodb-connectors/copy-errors/negative.parquet'
+WITH (
+    storage_server 'lagodb_connectors_regress_s3',
+    format 'parquet',
+    header true
+);
+ERROR:  22023
+-- Avro has no JSON datum type, and Parquet has JSON but not JSONB.
+COPY lagodb_connectors_regress.json_source
+TO 's3://invalid-bucket/lagodb-connectors/copy-errors/unsupported.avro'
+WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+ERROR:  22000
+COPY lagodb_connectors_regress.json_source
+TO 's3://invalid-bucket/lagodb-connectors/copy-errors/unsupported.parquet'
+WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+ERROR:  22000
+\set VERBOSITY default
+RESET client_min_messages;

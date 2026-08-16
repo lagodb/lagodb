@@ -87,12 +87,12 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_truncate<P: FdwTruncate>(
     restart_sequences: bool,
 ) {
     let prior_context = unsafe { pg_sys::CurrentMemoryContext };
-    let result = (|| {
+    let result = {
         let context = unsafe {
             ForeignTruncateContext::from_raw(relations, behavior, restart_sequences)
         };
         P::truncate(&context)
-    })();
+    };
 
     if let Err(error) = result {
         error

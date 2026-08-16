@@ -82,17 +82,17 @@ struct JsonEncodeBuffer {
 impl JsonDatumEncoder {
     /// Bind PostgreSQL's JSON category and output function once for a type.
     pub fn bind(type_oid: pg_sys::Oid) -> Result<Self, JsonValueError> {
-        let mut category = JSONTYPE_NULL;
-        let mut output_function = pg_sys::InvalidOid;
-        unsafe {
+        let (category, output_function) = unsafe {
             PgTryBuilder::new(|| {
+                let mut category = JSONTYPE_NULL;
+                let mut output_function = pg_sys::InvalidOid;
                 pg_json_categorize_type(
                     type_oid,
                     false,
                     &mut category,
                     &mut output_function,
                 );
-                Ok(())
+                Ok((category, output_function))
             })
             .catch_others(|error| Err(PgError::from(error)))
             .execute()
@@ -172,27 +172,23 @@ impl BoundJsonObjectEncoder {
         if self.columns.is_empty() {
             self.buffer.append_byte(b'{');
         }
-        let result = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                for (column, value) in self.columns.iter().zip(values) {
-                    self.buffer.append_prefix(column);
-                    match value {
-                        None => self.buffer.append_bytes(b"null"),
-                        Some(datum) => {
-                            // SAFETY: required by this method's bound-row
-                            // contract and established for this column above.
-                            unsafe {
-                                self.buffer.append_datum(column.encoder, datum)
-                            };
-                        }
+        let result = PgTryBuilder::new(AssertUnwindSafe(|| {
+            for (column, value) in self.columns.iter().zip(values) {
+                self.buffer.append_prefix(column);
+                match value {
+                    None => self.buffer.append_bytes(b"null"),
+                    Some(datum) => {
+                        // SAFETY: required by this method's bound-row
+                        // contract and established for this column above.
+                        unsafe { self.buffer.append_datum(column.encoder, datum) };
                     }
                 }
-                self.buffer.append_byte(b'}');
-                Ok::<(), JsonValueError>(())
-            }))
-            .catch_others(|error| Err(JsonValueError::Postgres(PgError::from(error))))
-            .execute()
-        };
+            }
+            self.buffer.append_byte(b'}');
+            Ok::<(), JsonValueError>(())
+        }))
+        .catch_others(|error| Err(JsonValueError::Postgres(PgError::from(error))))
+        .execute();
         result?;
         Ok(self.buffer.as_bytes())
     }

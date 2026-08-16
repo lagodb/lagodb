@@ -142,7 +142,14 @@ impl<I: CacheIndex> StorageService<I> {
         let key = leader.key();
         let info = backend.head(key.path()).await?;
         if info.size <= self.cache.small_object_limit() {
-            let data = backend.get_range(key.path(), 0..info.size).await?;
+            // An empty object has no valid byte range. Some object-store
+            // implementations reject 0..0 instead of returning an empty body,
+            // so admit the metadata directly without issuing a backend GET.
+            let data = if info.size == 0 {
+                bytes::Bytes::new()
+            } else {
+                backend.get_range(key.path(), 0..info.size).await?
+            };
             self.cache.admit_small(leader, data.to_vec(), info).await
         } else {
             self.cache.admit_large(leader, info).await

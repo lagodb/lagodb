@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Malformed native objects, prefix schema drift, and catalog boundaries.
 
 SET client_min_messages = warning;
@@ -64,10 +66,10 @@ SELECT lagodb.invalidate_object_cache(
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.object_error_json_sink;
 CREATE TABLE lagodb_connectors_regress.object_error_json_sink
-    (LIKE lagodb_connectors_regress.json_source);
+    (:json_columns);
 DROP TABLE IF EXISTS lagodb_connectors_regress.object_error_parquet_sink;
 CREATE TABLE lagodb_connectors_regress.object_error_parquet_sink
-    (LIKE lagodb_connectors_regress.parquet_source);
+    (:parquet_columns);
 
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.object_error_json_sink

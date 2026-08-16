@@ -232,12 +232,13 @@ impl CopyDataDestination for JsonCopyDestination {
                             field.map(|value| {
                                 // SAFETY: CanonicalCsvRow returns a NUL-terminated
                                 // field and this input plan is bound to the column.
-                                unsafe { column.input_datum(value) }
+                                column.input_datum(value)
                             })
                         });
                 // SAFETY: the parsed row and plan have the same width, and
                 // input Datums remain live in datum_context through this call.
-                let row = unsafe { encoder.encode_row(values) }
+                let row = encoder
+                    .encode_row(values)
                     .map_err(ConnectorError::json_datum)?;
                 writer.write(row)
             })

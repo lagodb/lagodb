@@ -145,7 +145,7 @@ impl CopyBridge {
         preparation: *mut LakebaseCopyPreparation,
     ) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_prepare_copy_from(
                     pstate,
                     statement,
@@ -165,7 +165,7 @@ impl CopyBridge {
         preparation: *mut LakebaseCopyPreparation,
     ) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_prepare_copy_to(
                     pstate,
                     statement,
@@ -182,7 +182,7 @@ impl CopyBridge {
     ) {
         unsafe {
             pg_guard_ffi_boundary(|| {
-                unsafe { lakebase_dispose_copy_preparation(preparation) };
+                lakebase_dispose_copy_preparation(preparation);
             });
         }
     }
@@ -198,7 +198,7 @@ impl CopyBridge {
         options: *mut pg_sys::List,
     ) -> pg_sys::CopyFromState {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_begin_copy_from(
                     pstate,
                     relation,
@@ -214,7 +214,7 @@ impl CopyBridge {
     }
 
     pub(crate) unsafe fn execute_from(state: pg_sys::CopyFromState) -> u64 {
-        unsafe { pg_guard_ffi_boundary(|| unsafe { lakebase_copy_from(state) }) }
+        unsafe { pg_guard_ffi_boundary(|| lakebase_copy_from(state)) }
     }
 
     pub(crate) unsafe fn next_from(
@@ -224,7 +224,7 @@ impl CopyBridge {
         nulls: *mut bool,
     ) -> bool {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_next_copy_from(state, econtext, values, nulls)
             })
         }
@@ -233,7 +233,7 @@ impl CopyBridge {
     pub(crate) unsafe fn end_from(state: pg_sys::CopyFromState) {
         unsafe {
             pg_guard_ffi_boundary(|| {
-                unsafe { lakebase_end_copy_from(state) };
+                lakebase_end_copy_from(state);
             });
         }
     }
@@ -243,7 +243,7 @@ impl CopyBridge {
         options: *mut pg_sys::List,
     ) -> pg_sys::CopyToState {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_begin_copy_row_encoder(relation, options)
             })
         }
@@ -255,9 +255,7 @@ impl CopyBridge {
         len: *mut std::ffi::c_int,
     ) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
-                lakebase_encode_copy_header(state, data, len)
-            });
+            pg_guard_ffi_boundary(|| lakebase_encode_copy_header(state, data, len));
         }
     }
 
@@ -268,7 +266,7 @@ impl CopyBridge {
         len: *mut std::ffi::c_int,
     ) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_encode_copy_row(state, slot, data, len)
             });
         }
@@ -276,7 +274,7 @@ impl CopyBridge {
 
     pub(crate) unsafe fn end_row_encoder(state: pg_sys::CopyToState) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe { lakebase_end_copy_row_encoder(state) });
+            pg_guard_ffi_boundary(|| lakebase_end_copy_row_encoder(state));
         }
     }
 
@@ -292,7 +290,7 @@ impl CopyBridge {
         options: *mut pg_sys::List,
     ) -> pg_sys::CopyToState {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_begin_copy_to(
                     pstate,
                     relation,
@@ -309,13 +307,13 @@ impl CopyBridge {
     }
 
     pub(crate) unsafe fn execute_to(state: pg_sys::CopyToState) -> u64 {
-        unsafe { pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to(state) }) }
+        unsafe { pg_guard_ffi_boundary(|| lakebase_copy_to(state)) }
     }
 
     pub(crate) unsafe fn end_to(state: pg_sys::CopyToState) {
         unsafe {
             pg_guard_ffi_boundary(|| {
-                unsafe { lakebase_end_copy_to(state) };
+                lakebase_end_copy_to(state);
             });
         }
     }
@@ -325,24 +323,18 @@ impl CopyBridge {
         attnamelist: *mut pg_sys::List,
     ) -> *mut pg_sys::List {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
-                lakebase_copy_get_attnums(relation, attnamelist)
-            })
+            pg_guard_ffi_boundary(|| lakebase_copy_get_attnums(relation, attnamelist))
         }
     }
 
     pub(crate) unsafe fn to_tuple_desc(
         state: pg_sys::CopyToState,
     ) -> pg_sys::TupleDesc {
-        unsafe {
-            pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to_tuple_desc(state) })
-        }
+        unsafe { pg_guard_ffi_boundary(|| lakebase_copy_to_tuple_desc(state)) }
     }
 
     pub(crate) unsafe fn to_attnums(state: pg_sys::CopyToState) -> *mut pg_sys::List {
-        unsafe {
-            pg_guard_ffi_boundary(|| unsafe { lakebase_copy_to_attnums(state) })
-        }
+        unsafe { pg_guard_ffi_boundary(|| lakebase_copy_to_attnums(state)) }
     }
 
     pub(crate) unsafe fn begin_raw_field_reader(
@@ -350,7 +342,7 @@ impl CopyBridge {
         options: *mut pg_sys::List,
     ) -> *mut std::ffi::c_void {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_begin_raw_field_reader(data_source_cb, options)
             })
         }
@@ -362,7 +354,7 @@ impl CopyBridge {
         field_count: *mut usize,
     ) -> bool {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_next_raw_fields(reader, fields, field_count)
             })
         }
@@ -370,7 +362,7 @@ impl CopyBridge {
 
     pub(crate) unsafe fn end_raw_field_reader(reader: *mut std::ffi::c_void) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_end_raw_field_reader(reader);
             });
         }
@@ -380,9 +372,7 @@ impl CopyBridge {
         type_oid: pg_sys::Oid,
     ) -> *mut std::ffi::c_void {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
-                lakebase_begin_text_input_validator(type_oid)
-            })
+            pg_guard_ffi_boundary(|| lakebase_begin_text_input_validator(type_oid))
         }
     }
 
@@ -391,15 +381,13 @@ impl CopyBridge {
         value: *const std::ffi::c_char,
     ) -> bool {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
-                lakebase_text_input_accepts(validator, value)
-            })
+            pg_guard_ffi_boundary(|| lakebase_text_input_accepts(validator, value))
         }
     }
 
     pub(crate) unsafe fn end_text_input_validator(validator: *mut std::ffi::c_void) {
         unsafe {
-            pg_guard_ffi_boundary(|| unsafe {
+            pg_guard_ffi_boundary(|| {
                 lakebase_end_text_input_validator(validator);
             });
         }

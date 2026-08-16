@@ -69,7 +69,7 @@ impl PgWrapper {
     ) -> Result<Vec<pg_sys::Oid>, PgError> {
         unsafe {
             PgTryBuilder::new(move || {
-                let relations = pg_sys::ffi::pg_guard_ffi_boundary(|| unsafe {
+                let relations = pg_sys::ffi::pg_guard_ffi_boundary(|| {
                     find_all_inheritors(parent_rel_id, lockmode, std::ptr::null_mut())
                 });
                 let len = pg_sys::list_length(relations);

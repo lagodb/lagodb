@@ -99,11 +99,15 @@ impl FormatSchemaReader for TextFormat {
         &self,
         file: &mut StorageFile,
     ) -> Result<InferredSchema, ConnectorError> {
-        DelimitedSchemaReader::new(
-            FormatKind::Text,
-            false,
-            self.options.postgres_output_options()?,
-        )
+        // SAFETY: postgres_output_options returns a PostgreSQL-owned COPY
+        // option list in the current context, which outlives inference.
+        unsafe {
+            DelimitedSchemaReader::new(
+                FormatKind::Text,
+                false,
+                self.options.postgres_output_options()?,
+            )
+        }
         .infer(file, self.compression)
     }
 }
@@ -121,7 +125,7 @@ impl FormatReader for TextFormat {
         files: crate::storage::ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         let Self {
-            options: TextOptions(options),
+            options,
             compression,
         } = *self;
         let postgres_options =

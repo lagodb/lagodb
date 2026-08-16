@@ -42,7 +42,7 @@ struct CopyColumnBindings {
     columns: Box<[CopyColumnPlan]>,
 }
 
-pub(super) struct ParquetCopySource {
+pub(in crate::format) struct ParquetCopySource {
     files: ObjectFiles,
     expected_schema: Option<Arc<Schema>>,
     projection_roots: Box<[usize]>,
@@ -56,7 +56,7 @@ pub(super) struct ParquetCopySource {
 }
 
 impl ParquetCopySource {
-    pub(super) fn new(
+    pub(in crate::format) fn new(
         mut files: ObjectFiles,
         layout: &CopyColumnLayout,
     ) -> Result<Self, CopyError> {

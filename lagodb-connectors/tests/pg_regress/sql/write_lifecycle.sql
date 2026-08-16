@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Transaction, statement-abort, and repeated-write lifecycle coverage.
 
 SET client_min_messages = warning;
@@ -62,23 +64,23 @@ SELECT format('s3://%s/lagodb-connectors/lifecycle/rollback/text/',
 \gset lifecycle_
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_text
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_text_path', format 'text');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_csv
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_csv_path', format 'csv');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_json
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_json_path', format 'json');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_avro
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_avro_path', format 'avro');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_parquet
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_parquet_path', format 'parquet');
 
@@ -136,7 +138,7 @@ ORDER BY relation;
 
 -- A committed prefix object remains visible after the transaction callback.
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_commit
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_commit_path', format 'json');
 BEGIN;
@@ -150,7 +152,7 @@ FROM lagodb_connectors_regress.lifecycle_commit;
 
 -- A savepoint abort deletes only objects registered by the subtransaction.
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_savepoint
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_savepoint_path', format 'text');
 BEGIN;
@@ -170,7 +172,7 @@ FROM lagodb_connectors_regress.lifecycle_savepoint;
 
 -- Each INSERT statement allocates a new object under the same prefix.
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_append
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_append_path', format 'avro');
 INSERT INTO lagodb_connectors_regress.lifecycle_append
@@ -184,23 +186,23 @@ FROM lagodb_connectors_regress.lifecycle_append;
 -- Foreign INSERT uses Skip for empty output, unlike direct COPY TO's explicit
 -- empty-object contract. No writer may leave a remote object for zero rows.
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_text
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_empty_text_path', format 'text');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_csv
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_empty_csv_path', format 'csv');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_json
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_empty_json_path', format 'json');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_avro
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_empty_avro_path', format 'avro');
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_parquet
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_empty_parquet_path', format 'parquet');
 

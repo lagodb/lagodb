@@ -25,12 +25,12 @@ use super::plan::{AvroValueKind, AvroWritePlan};
 const AVRO_SUFFIX: ObjectFileSuffix = ObjectFileSuffix::new("avro");
 
 /// A fixed-width, statement-reused row of callback-scoped PostgreSQL Datums.
-pub(super) struct AvroDatumRow {
+pub(in crate::format::avro) struct AvroDatumRow {
     values: Box<[Option<pg_sys::Datum>]>,
 }
 
 impl AvroDatumRow {
-    pub(super) fn new(width: usize) -> Self {
+    pub(in crate::format::avro) fn new(width: usize) -> Self {
         Self {
             values: vec![None; width].into_boxed_slice(),
         }
@@ -42,7 +42,7 @@ impl AvroDatumRow {
     ///
     /// `index` must be smaller than the row width. A present Datum must remain
     /// valid until the row has been synchronously written.
-    pub(super) unsafe fn set_at_bound(
+    pub(in crate::format::avro) unsafe fn set_at_bound(
         &mut self,
         index: usize,
         value: Option<pg_sys::Datum>,

@@ -3,5 +3,5 @@
 mod copy_from;
 mod copy_to;
 
-pub(super) use copy_from::ParquetCopySource;
-pub(super) use copy_to::ParquetCopyDestination;
+pub(in crate::format) use copy_from::ParquetCopySource;
+pub(in crate::format) use copy_to::ParquetCopyDestination;

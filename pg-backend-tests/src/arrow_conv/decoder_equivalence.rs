@@ -439,7 +439,8 @@ mod tests {
     fn null_append_adds_one_slot_per_call() {
         use arrow_array::Array;
         use pg_arrow_conv::ArrowColumnEncoder;
-        let mut encoder = ArrowColumnEncoder::new(&ColumnRule::I32, 4);
+        let mut encoder = ArrowColumnEncoder::new(&ColumnRule::I32, 4)
+            .expect("I32 encoder construction is infallible");
         encoder.append_null();
         encoder.append_null();
         assert_eq!(encoder.len(), 2);

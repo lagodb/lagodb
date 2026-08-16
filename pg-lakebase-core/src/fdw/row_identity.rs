@@ -304,8 +304,14 @@ impl RowIdentityLayout {
         targetlist: *mut pg_sys::List,
         rtindex: pg_sys::Index,
     ) -> Result<bool, ForeignRowIdentityError> {
-        if targetlist.is_null() || rtindex == 0 {
+        if rtindex == 0 {
             return Err(ForeignRowIdentityError::MissingTargetList);
+        }
+        // A DELETE has no user target entries. Its processed targetlist stays
+        // NIL when the FDW does not register a row identity, which is a valid
+        // planner state (and is later rejected by modify capability checks).
+        if targetlist.is_null() {
+            return Ok(false);
         }
         let length = unsafe { pg_sys::list_length(targetlist) };
         if length < 0 {

@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Stream compression inference, explicit overrides, and malformed input.
 
 SET client_min_messages = warning;
@@ -70,7 +72,7 @@ WITH (
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_plain_gz;
 CREATE TABLE lagodb_connectors_regress.codec_plain_gz
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.codec_plain_gz
 FROM :'codec_plain_gz_path'
 WITH (
@@ -79,7 +81,7 @@ WITH (
 );
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.codec_plain_zst
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'codec_plain_zst_path', compression 'none');
 
@@ -103,12 +105,12 @@ WITH (storage_server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_gzip_alias;
 CREATE TABLE lagodb_connectors_regress.codec_gzip_alias
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.codec_gzip_alias
 FROM :'codec_gzip_alias_path'
 WITH (storage_server 'lagodb_connectors_regress_s3');
 CREATE FOREIGN TABLE lagodb_connectors_regress.codec_zstd_alias
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'codec_zstd_alias_path');
 
@@ -140,7 +142,7 @@ WITH (storage_server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_concatenated_gzip;
 CREATE TABLE lagodb_connectors_regress.codec_concatenated_gzip
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.codec_concatenated_gzip
 FROM :'codec_gzip_concatenated_path'
 WITH (storage_server 'lagodb_connectors_regress_s3');
@@ -193,7 +195,7 @@ SELECT lagodb.invalidate_object_cache(
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_error_sink;
 CREATE TABLE lagodb_connectors_regress.codec_error_sink
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.codec_error_sink

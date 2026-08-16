@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Prefix rollover for every writer implementation.
 
 SET client_min_messages = warning;
@@ -79,29 +81,29 @@ WITH (
 \! sh bin/object_storage_tool assert-prefix-rollover
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_text
-    (LIKE lagodb_connectors_regress.rollover_source)
+    (:id_payload_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rollover_text_path', format 'text');
 CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_csv
-    (LIKE lagodb_connectors_regress.rollover_source)
+    (:id_payload_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rollover_csv_path', format 'csv');
 CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_json
-    (LIKE lagodb_connectors_regress.rollover_source)
+    (:id_payload_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rollover_json_path', format 'json');
 CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_avro
-    (LIKE lagodb_connectors_regress.rollover_source)
+    (:id_payload_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rollover_avro_path', format 'avro');
 CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_parquet
-    (LIKE lagodb_connectors_regress.rollover_source)
+    (:id_payload_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'rollover_parquet_path', format 'parquet');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.rollover_parquet_copy;
 CREATE TABLE lagodb_connectors_regress.rollover_parquet_copy
-    (LIKE lagodb_connectors_regress.rollover_source);
+    (:id_payload_columns);
 COPY lagodb_connectors_regress.rollover_parquet_copy
 FROM :'rollover_parquet_path'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');

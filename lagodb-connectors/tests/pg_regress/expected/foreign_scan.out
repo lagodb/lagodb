@@ -1,0 +1,181 @@
+\i include/column_definitions.sql
+-- PostgreSQL rejects CREATE FOREIGN TABLE ... LIKE before an FDW callback can
+-- run. Keep the repeated regression-table shapes in psql variables so tests
+-- exercise valid core syntax without duplicating long column lists.
+\set common_columns 'id integer, bool_col boolean, smallint_col smallint, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
+\set json_columns :common_columns ', json_col json, jsonb_col jsonb'
+\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[]'
+\set stream_extra_columns 'id integer, json_col json, jsonb_col jsonb, bool_array boolean[], int_array integer[], text_array text[]'
+\set id_payload_columns 'id integer, payload text'
+-- Foreign-table exact/prefix scan coverage.
+--
+-- Exact and prefix scans consume the seed objects created by setup.sql.
+SET TIME ZONE 'UTC';
+SET client_min_messages = warning;
+SELECT bucket AS lakebase_regress_bucket
+FROM lakebase_regress.object_storage_fixture
+\gset
+SELECT format('s3://%s/lagodb-connectors/seed/common-exact.txt',
+              :'lakebase_regress_bucket') AS seed_text_exact,
+       format('s3://%s/lagodb-connectors/seed/common-prefix/',
+              :'lakebase_regress_bucket') AS seed_text_prefix,
+       format('s3://%s/lagodb-connectors/seed/common-exact.csv',
+              :'lakebase_regress_bucket') AS seed_csv_exact,
+       format('s3://%s/lagodb-connectors/seed/common-prefix-csv/',
+              :'lakebase_regress_bucket') AS seed_csv_prefix,
+       format('s3://%s/lagodb-connectors/seed/common-header.csv',
+              :'lakebase_regress_bucket') AS seed_csv_header,
+       format('s3://%s/lagodb-connectors/seed/common-exact.avro',
+              :'lakebase_regress_bucket') AS seed_avro_exact,
+       format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
+              :'lakebase_regress_bucket') AS seed_avro_prefix,
+       format('s3://%s/lagodb-connectors/seed/json-exact.json',
+              :'lakebase_regress_bucket') AS seed_json_exact,
+       format('s3://%s/lagodb-connectors/seed/json-prefix/',
+              :'lakebase_regress_bucket') AS seed_json_prefix,
+       format('s3://%s/lagodb-connectors/seed/json-compressed.json.gz',
+              :'lakebase_regress_bucket') AS seed_json_compressed,
+       format('s3://%s/lagodb-connectors/seed/parquet-exact.parquet',
+              :'lakebase_regress_bucket') AS seed_parquet_exact,
+       format('s3://%s/lagodb-connectors/seed/parquet-prefix/',
+              :'lakebase_regress_bucket') AS seed_parquet_prefix,
+       format('s3://%s/lagodb-connectors/seed/extra-exact.txt',
+              :'lakebase_regress_bucket') AS seed_extra_text_exact,
+       format('s3://%s/lagodb-connectors/seed/extra-exact.csv',
+              :'lakebase_regress_bucket') AS seed_extra_csv_exact
+\gset
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_text_exact
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_text_exact');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_text_prefix
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_text_prefix', format 'text');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_csv_exact
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_csv_exact');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_csv_prefix
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_csv_prefix', format 'csv');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_csv_header
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_csv_header', format 'csv', header 'match');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_avro_exact
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_avro_exact');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_avro_prefix
+    (:common_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_avro_prefix', format 'avro');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_json_exact
+    (:json_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_json_exact');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_json_prefix
+    (:json_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_json_prefix', format 'json');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_json_compressed
+    (:json_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_json_compressed');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_parquet_exact
+    (:parquet_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_parquet_exact');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_parquet_prefix
+    (:parquet_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_parquet_prefix', format 'parquet');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_extra_text
+    (:stream_extra_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_extra_text_exact');
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_extra_csv
+    (:stream_extra_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'seed_extra_csv_exact');
+-- SELECT exact/prefix for every format, with stable row digests.
+SELECT relation, rows, digest
+FROM (
+    SELECT 'text-exact' AS relation, count(*) AS rows,
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id)) AS digest
+    FROM lagodb_connectors_regress.foreign_text_exact AS value
+    UNION ALL
+    SELECT 'text-prefix', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_text_prefix AS value
+    UNION ALL
+    SELECT 'csv-exact', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_csv_exact AS value
+    UNION ALL
+    SELECT 'csv-prefix', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_csv_prefix AS value
+    UNION ALL
+    SELECT 'csv-header', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_csv_header AS value
+    UNION ALL
+    SELECT 'avro-exact', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_avro_exact AS value
+    UNION ALL
+    SELECT 'avro-prefix', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_avro_prefix AS value
+    UNION ALL
+    SELECT 'json-exact', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_json_exact AS value
+    UNION ALL
+    SELECT 'json-prefix', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_json_prefix AS value
+    UNION ALL
+    SELECT 'json-compressed', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_json_compressed AS value
+    UNION ALL
+    SELECT 'parquet-exact', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_parquet_exact AS value
+    UNION ALL
+    SELECT 'parquet-prefix', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_parquet_prefix AS value
+    UNION ALL
+    SELECT 'extra-text', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_extra_text AS value
+    UNION ALL
+    SELECT 'extra-csv', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.foreign_extra_csv AS value
+) AS results
+ORDER BY relation;
+    relation     | rows |              digest              
+-----------------+------+----------------------------------
+ avro-exact      |    2 | 5c0315b77bb566515e52e8af217bbfc1
+ avro-prefix     |    2 | 5c0315b77bb566515e52e8af217bbfc1
+ csv-exact       |    2 | 5c0315b77bb566515e52e8af217bbfc1
+ csv-header      |    2 | 5c0315b77bb566515e52e8af217bbfc1
+ csv-prefix      |    2 | 5c0315b77bb566515e52e8af217bbfc1
+ extra-csv       |    2 | f35208f050f03c1f95ae5e7a2c1f3d71
+ extra-text      |    2 | f35208f050f03c1f95ae5e7a2c1f3d71
+ json-compressed |    2 | 2357214c88602bf2cbe7effe2e69bcea
+ json-exact      |    2 | 2357214c88602bf2cbe7effe2e69bcea
+ json-prefix     |    2 | 2357214c88602bf2cbe7effe2e69bcea
+ parquet-exact   |    2 | dcab6b6d6d76dcf6195ea8bc507c9ecc
+ parquet-prefix  |    2 | dcab6b6d6d76dcf6195ea8bc507c9ecc
+ text-exact      |    2 | 5c0315b77bb566515e52e8af217bbfc1
+ text-prefix     |    2 | 5c0315b77bb566515e52e8af217bbfc1
+(14 rows)
+
+RESET client_min_messages;

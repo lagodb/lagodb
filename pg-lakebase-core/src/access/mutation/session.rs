@@ -110,19 +110,10 @@ pub(crate) fn begin_copy_from_frame() -> u64 {
     id
 }
 
-pub(crate) fn finish_copy_frame(id: u64) -> Result<(), PgReportError> {
+pub(crate) fn finish_current_copy_frame() -> Result<(), PgReportError> {
     let mut frame = COPY_FRAMES
-        .with(|frames| {
-            let mut frames = frames.borrow_mut();
-            if frames.last().is_some_and(|frame| frame.id == id) {
-                frames.pop()
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            internal_error("COPY FROM lifecycle stack is not at the expected frame")
-        })?;
+        .with(|frames| frames.borrow_mut().pop())
+        .ok_or_else(|| internal_error("COPY FROM lifecycle stack is empty"))?;
     resource::forget_resource(frame.resource);
     for (_, session) in &mut frame.sessions {
         session.finish()?;

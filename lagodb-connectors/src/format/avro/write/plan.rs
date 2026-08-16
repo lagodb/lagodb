@@ -11,7 +11,7 @@ use crate::error::ConnectorError;
 use crate::format::FormatKind;
 
 #[derive(Clone, Copy)]
-pub(super) enum AvroValueKind {
+pub(in crate::format::avro) enum AvroValueKind {
     Boolean,
     Int,
     Long,
@@ -117,7 +117,9 @@ impl AvroValueKind {
         }
     }
 
-    pub(super) fn from_schema(schema: &Schema) -> Result<Self, ConnectorError> {
+    pub(in crate::format::avro) fn from_schema(
+        schema: &Schema,
+    ) -> Result<Self, ConnectorError> {
         match schema {
             Schema::Boolean => Ok(Self::Boolean),
             Schema::Int => Ok(Self::Int),
@@ -164,7 +166,7 @@ impl AvroValueKind {
         }
     }
 
-    pub(super) const fn supports_target(self, oid: pg_sys::Oid) -> bool {
+    pub(in crate::format::avro) fn supports_target(self, oid: pg_sys::Oid) -> bool {
         match self {
             Self::Boolean => oid == pg_sys::BOOLOID,
             Self::Int | Self::Long => {
@@ -227,7 +229,7 @@ impl AvroValueKind {
     }
 }
 
-pub(super) struct AvroWritePlan {
+pub(in crate::format::avro) struct AvroWritePlan {
     schema: Schema,
     fields: Box<[AvroValueKind]>,
 }
@@ -252,8 +254,8 @@ impl AvroWritePlan {
         Self::from_fields(fields)
     }
 
-    pub(super) fn from_copy_columns(
-        columns: impl Iterator<Item = Result<(&str, pg_sys::Oid, i32), ConnectorError>>,
+    pub(in crate::format::avro) fn from_copy_columns<'a>(
+        columns: impl Iterator<Item = Result<(&'a str, pg_sys::Oid, i32), ConnectorError>>,
         count: usize,
     ) -> Result<Self, ConnectorError> {
         let mut fields = Vec::with_capacity(count);

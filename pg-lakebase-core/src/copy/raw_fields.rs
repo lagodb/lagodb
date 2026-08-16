@@ -15,7 +15,7 @@ use super::{CopyError, pg};
 /// A raw text/CSV record returned by PostgreSQL's COPY parser.
 ///
 /// Field pointers remain valid only until the next call to
-/// [`CopyRawFieldReader::next`]. The record's borrow prevents that call while
+/// [`CopyRawFieldReader::next_record`]. The record's borrow prevents that call while
 /// field values are still borrowed.
 pub struct CopyRawRecord<'reader> {
     fields: *mut *mut c_char,
@@ -97,7 +97,11 @@ pub struct CopyRawFieldReader<'source> {
 }
 
 impl<'source> CopyRawFieldReader<'source> {
-    pub fn begin(
+    /// # Safety
+    ///
+    /// `options` must be either PostgreSQL `NIL` or a valid COPY option list
+    /// that remains live until the returned reader is finished or dropped.
+    pub unsafe fn begin(
         options: *mut pg_sys::List,
         source: &'source mut dyn CopyDataSource,
     ) -> Result<Self, CopyError> {
@@ -123,7 +127,7 @@ impl<'source> CopyRawFieldReader<'source> {
         })
     }
 
-    pub fn next(&mut self) -> Result<Option<CopyRawRecord<'_>>, CopyError> {
+    pub fn next_record(&mut self) -> Result<Option<CopyRawRecord<'_>>, CopyError> {
         let state = self.state.ok_or(CopyError::RawFieldReaderFinished)?;
         let mut fields = std::ptr::null_mut();
         let mut field_count = 0;

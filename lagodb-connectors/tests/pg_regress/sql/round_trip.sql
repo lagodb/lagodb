@@ -1,3 +1,5 @@
+\i include/column_definitions.sql
+
 -- Cross-path round trips: foreign scan -> direct COPY TO -> direct COPY FROM.
 -- The foreign input is a prefix for every format, while the final COPY FROM
 -- uses exact objects for formats whose direct input contract is exact-only.
@@ -34,27 +36,27 @@ SELECT format('s3://%s/lagodb-connectors/round-trip/text.txt',
 \gset
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.round_text_input
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_text_prefix', format 'text');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.round_csv_input
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_csv_prefix', format 'csv');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.round_json_input
-    (LIKE lagodb_connectors_regress.json_source)
+    (:json_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_json_prefix', format 'json');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.round_avro_input
-    (LIKE lagodb_connectors_regress.common_source)
+    (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_avro_prefix', format 'avro');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.round_parquet_input
-    (LIKE lagodb_connectors_regress.parquet_source)
+    (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'seed_parquet_prefix', format 'parquet');
 
@@ -94,31 +96,31 @@ COPY (
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
 
 CREATE TABLE lagodb_connectors_regress.round_text_sink
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.round_text_sink
 FROM :'round_text'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
 
 CREATE TABLE lagodb_connectors_regress.round_csv_sink
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.round_csv_sink
 FROM :'round_csv'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
 
 CREATE TABLE lagodb_connectors_regress.round_json_sink
-    (LIKE lagodb_connectors_regress.json_source);
+    (:json_columns);
 COPY lagodb_connectors_regress.round_json_sink
 FROM :'round_json'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
 
 CREATE TABLE lagodb_connectors_regress.round_avro_sink
-    (LIKE lagodb_connectors_regress.common_source);
+    (:common_columns);
 COPY lagodb_connectors_regress.round_avro_sink
 FROM :'round_avro'
 WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
 
 CREATE TABLE lagodb_connectors_regress.round_parquet_sink
-    (LIKE lagodb_connectors_regress.parquet_source);
+    (:parquet_columns);
 COPY lagodb_connectors_regress.round_parquet_sink
 FROM :'round_parquet'
 WITH (

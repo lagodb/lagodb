@@ -7,7 +7,6 @@ use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
-use pg_lakebase_core::access::mutation::begin_copy_from_lifecycle;
 use pg_lakebase_core::diag::ReportableError;
 use pg_lakebase_core::runtime_api::UtilityHookDescriptor;
 use pgrx::{pg_guard, pg_sys};
@@ -463,8 +462,6 @@ unsafe extern "C-unwind" fn process_utility_router(
         // utility tag and COPY direction, not the pre-hook input.
         let target_node = args.target_node();
         let final_tag = (*target_node).type_;
-        let copy_from = final_tag == pg_sys::NodeTag::T_CopyStmt
-            && (*target_node.cast::<pg_sys::CopyStmt>()).is_from;
         let may_consume_vacuum = final_tag == pg_sys::NodeTag::T_VacuumStmt;
         let selected_consumer =
             crate::utility_consumer::select(final_tag, args).report_unwrap();
@@ -491,15 +488,7 @@ unsafe extern "C-unwind" fn process_utility_router(
                         == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
                 ));
         if !consumed {
-            // A pass-through COPY FROM must still create the relation-local
-            // Table-AM frame used by Iceberg and other custom table AMs. A
-            // consuming utility handler owns this guard itself only when it
-            // deliberately invokes the standard CopyFrom driver.
-            let lifecycle = copy_from.then(begin_copy_from_lifecycle);
             args.call_parent();
-            if let Some(lifecycle) = lifecycle {
-                lifecycle.finish().report_unwrap();
-            }
         }
 
         if let Some(original_node) = original_node {
