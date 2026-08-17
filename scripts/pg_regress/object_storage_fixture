@@ -137,6 +137,14 @@ setup() {
     trap cleanup_failed_setup EXIT HUP INT TERM
 
     docker=$(docker_program)
+    case "$docker" in
+        */*)
+            # Docker finds credential helpers through PATH even when its CLI
+            # was selected by an absolute path.
+            PATH="${docker%/*}:${PATH}"
+            export PATH
+            ;;
+    esac
     name=$(container_name)
     cleanup_stale_containers "$docker"
 
