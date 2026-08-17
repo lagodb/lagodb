@@ -369,9 +369,7 @@ impl ConnectorError {
     }
 
     #[inline]
-    pub(crate) const fn invalid_filter_datum(
-        type_oid: pgrx::pg_sys::Oid,
-    ) -> Self {
+    pub(crate) const fn invalid_filter_datum(type_oid: pgrx::pg_sys::Oid) -> Self {
         Self::InvalidFilterDatum { type_oid }
     }
 }
@@ -443,9 +441,7 @@ impl SqlStateError for ConnectorError {
             Self::InvalidPlanFormat { .. }
             | Self::InvalidFilterPlan { .. }
             | Self::PlanData(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            Self::InvalidFilterDatum { .. } => {
-                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
-            }
+            Self::InvalidFilterDatum { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::PlanFormatChanged => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }

@@ -1,6 +1,6 @@
 //! Bound predicate execution against projected Arrow record batches.
 
-use arrow_arith::boolean::{and_kleene, is_not_null, is_null, not, or_kleene};
+use arrow_arith::boolean::{and_kleene, is_not_null, is_null, or_kleene};
 use arrow_array::{ArrayRef, BooleanArray, RecordBatch, Scalar};
 use arrow_schema::{ArrowError, Schema};
 use parquet::arrow::ProjectionMask;
@@ -24,13 +24,12 @@ pub(super) enum BoundNode {
     IsNotNull(PlannedColumn),
     And(Box<[Self]>),
     Or(Box<[Self]>),
-    Not(Box<Self>),
-    Unknown,
+    NeverTrue,
 }
 
 #[derive(Clone)]
 pub(crate) struct ParquetBoundPredicate {
-    root: BoundNode,
+    pub(super) root: BoundNode,
 }
 
 impl ParquetBoundPredicate {
@@ -59,10 +58,9 @@ impl ParquetBoundPredicate {
             ExecutableNode::And(executable.into_boxed_slice())
         };
         let projection = ProjectionMask::roots(parquet_schema, roots);
-        Ok(Box::new(ArrowPredicateFn::new(
-            projection,
-            move |batch| executable.evaluate(&batch),
-        )))
+        Ok(Box::new(ArrowPredicateFn::new(projection, move |batch| {
+            executable.evaluate(&batch)
+        })))
     }
 }
 
@@ -75,8 +73,8 @@ impl BoundNode {
         match self {
             Self::Comparison { column, .. }
             | Self::IsNull(column)
-            | Self::IsNotNull(column) => roots.push(schema.index_of(&column.name).map_err(
-                |_| {
+            | Self::IsNotNull(column) => {
+                roots.push(schema.index_of(&column.name).map_err(|_| {
                     ConnectorError::invalid_object_schema(
                         FormatKind::Parquet,
                         format!(
@@ -84,15 +82,14 @@ impl BoundNode {
                             column.name
                         ),
                     )
-                },
-            )?),
+                })?)
+            }
             Self::And(children) | Self::Or(children) => {
                 for child in children {
                     child.collect_roots(schema, roots)?;
                 }
             }
-            Self::Not(child) => child.collect_roots(schema, roots)?,
-            Self::Unknown => {}
+            Self::NeverTrue => {}
         }
         Ok(())
     }
@@ -149,10 +146,7 @@ impl BoundNode {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
             ),
-            Self::Not(child) => {
-                ExecutableNode::Not(Box::new(child.bind_schema(schema, roots)?))
-            }
-            Self::Unknown => ExecutableNode::Unknown,
+            Self::NeverTrue => ExecutableNode::NeverTrue,
         })
     }
 }
@@ -167,15 +161,11 @@ enum ExecutableNode {
     IsNotNull(usize),
     And(Box<[Self]>),
     Or(Box<[Self]>),
-    Not(Box<Self>),
-    Unknown,
+    NeverTrue,
 }
 
 impl ExecutableNode {
-    fn evaluate(
-        &self,
-        batch: &RecordBatch,
-    ) -> Result<BooleanArray, ArrowError> {
+    fn evaluate(&self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError> {
         match self {
             Self::Comparison {
                 operator,
@@ -187,21 +177,15 @@ impl ExecutableNode {
             Self::And(children) => {
                 Self::evaluate_children(children, batch, and_kleene)
             }
-            Self::Or(children) => {
-                Self::evaluate_children(children, batch, or_kleene)
-            }
-            Self::Not(child) => not(&child.evaluate(batch)?),
-            Self::Unknown => Ok(BooleanArray::new_null(batch.num_rows())),
+            Self::Or(children) => Self::evaluate_children(children, batch, or_kleene),
+            Self::NeverTrue => Ok(BooleanArray::new_null(batch.num_rows())),
         }
     }
 
     fn evaluate_children(
         children: &[Self],
         batch: &RecordBatch,
-        combine: fn(
-            &BooleanArray,
-            &BooleanArray,
-        ) -> Result<BooleanArray, ArrowError>,
+        combine: fn(&BooleanArray, &BooleanArray) -> Result<BooleanArray, ArrowError>,
     ) -> Result<BooleanArray, ArrowError> {
         let mut children = children.iter();
         let mut result = children

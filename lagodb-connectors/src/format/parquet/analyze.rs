@@ -134,15 +134,17 @@ impl ParquetAnalyzer {
                 )
             })?;
             let target_oid = column.type_oid();
-            let pg_type = PgColumnType::from_pg_type(target_oid).ok_or_else(|| {
-                ConnectorError::invalid_object_schema(
-                    FormatKind::Parquet,
-                    format!(
-                        "PostgreSQL type OID {target_oid} has no Arrow conversion"
-                    ),
-                )
-            })?;
-            let rule = resolve_column_rule(schema.field(source).data_type(), pg_type)?;
+            let pg_type =
+                PgColumnType::from_pg_type(target_oid).ok_or_else(|| {
+                    ConnectorError::invalid_object_schema(
+                        FormatKind::Parquet,
+                        format!(
+                            "PostgreSQL type OID {target_oid} has no Arrow conversion"
+                        ),
+                    )
+                })?;
+            let rule =
+                resolve_column_rule(schema.field(source).data_type(), pg_type)?;
             let codec =
                 ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(target_oid))?;
             roots.push(source);
@@ -201,18 +203,12 @@ impl ParquetAnalyzer {
         Ok(true)
     }
 
-    fn bind_batch(
-        &self,
-        batch: RecordBatch,
-    ) -> Result<BoundBatch, ConnectorError> {
+    fn bind_batch(&self, batch: RecordBatch) -> Result<BoundBatch, ConnectorError> {
         let columns = self
             .columns
             .iter()
             .map(|column| {
-                ColumnReader::bind(
-                    &column.rule,
-                    batch.column(column.source).as_ref(),
-                )
+                ColumnReader::bind(&column.rule, batch.column(column.source).as_ref())
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(BoundBatch {
@@ -281,8 +277,7 @@ impl ParquetAnalyzer {
                                 pg_sys::sampler_random_fract(
                                     &mut selection_state.randstate,
                                 )
-                            })
-                            as usize;
+                            }) as usize;
                         Some(selected.min(target_rows - 1))
                     } else {
                         None

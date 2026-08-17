@@ -66,6 +66,20 @@ CROSS JOIN LATERAL (
     OFFSET 0
 ) AS inner_rel;
 
+-- Metadata pruning normalizes NOT to leaf operators. NOT UNKNOWN must remain
+-- UNKNOWN rather than becoming TRUE when the runtime parameter is NULL.
+SELECT coalesce(
+           string_agg(inner_rel.id::text, ',' ORDER BY inner_rel.id),
+           '<none>'
+       ) AS ids
+FROM (VALUES (NULL::integer)) AS outer_rel(id)
+CROSS JOIN LATERAL (
+    SELECT id
+    FROM lagodb_connectors_regress.parquet_filter
+    WHERE NOT (id = outer_rel.id)
+    OFFSET 0
+) AS inner_rel;
+
 ANALYZE lagodb_connectors_regress.parquet_filter;
 
 -- ANALYZE scans the complete object set for the population and persists its

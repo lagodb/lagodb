@@ -34,8 +34,7 @@ pub(crate) use codec::{
 };
 pub(crate) use copy::ResolvedCopyFormat;
 pub(crate) use filter::{
-    FormatBoundFilter, FormatFilterPlan, FormatFilterPlanner,
-    FormatPlannedFilter,
+    FormatBoundFilter, FormatFilterPlan, FormatFilterPlanner, FormatPlannedFilter,
 };
 pub(crate) use object_writer::{
     EmptyOutputPolicy, FileWriteProgress, ObjectFileEncoder,

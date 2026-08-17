@@ -1,10 +1,10 @@
 //! Planner-side scan delegation.
 
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, FdwScan, ForeignPathBuilder, ForeignPathContext,
-    ForeignFilterExplainValues, ForeignPathKeys, ForeignPlanContext,
-    ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
-    ForeignScanError, ReScanForeignScanContext, ScanSlotWriter,
+    BeginForeignScanContext, FdwScan, ForeignFilterExplainValues, ForeignPathBuilder,
+    ForeignPathContext, ForeignPathKeys, ForeignPlanContext, ForeignPlanSpec,
+    ForeignRelContext, ForeignRelSize, ForeignRelSizeContext, ForeignScanError,
+    ReScanForeignScanContext, ScanSlotWriter,
 };
 
 use crate::format::FormatScanPlanner;

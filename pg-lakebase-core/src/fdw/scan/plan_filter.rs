@@ -1,8 +1,8 @@
 //! Read-only finalized filter-plan view for FDW providers.
 
 use crate::expr::pushdown::{
-    FilterPlanSummary, FilterPushdown, FilterQualLocation, NegotiatedFilter,
-    NegotiatedFilterSet, FilterValueSlotId,
+    FilterPlanSummary, FilterPushdown, FilterQualLocation, FilterValueSlotId,
+    NegotiatedFilter, NegotiatedFilterSet,
 };
 use crate::expr::{PushdownContract, PushdownCosting};
 

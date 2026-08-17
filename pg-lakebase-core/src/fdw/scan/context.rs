@@ -295,19 +295,15 @@ impl<'a> ForeignRelSizeContext<'a> {
                 } else {
                     (*(*baserel).reltarget).width.max(0)
                 };
-                let header_bytes = core::mem::offset_of!(
-                    pg_sys::HeapTupleHeaderData,
-                    t_bits
-                );
+                let header_bytes =
+                    core::mem::offset_of!(pg_sys::HeapTupleHeaderData, t_bits);
                 let alignment = pg_sys::MAXIMUM_ALIGNOF as usize;
-                let aligned_header = header_bytes
-                    .saturating_add(alignment - 1)
-                    & !(alignment - 1);
-                let tuple_bytes = (width as usize)
-                    .saturating_add(aligned_header)
-                    .max(1);
-                let relation_bytes = (fallback_pages as usize)
-                    .saturating_mul(pg_sys::BLCKSZ as usize);
+                let aligned_header =
+                    header_bytes.saturating_add(alignment - 1) & !(alignment - 1);
+                let tuple_bytes =
+                    (width as usize).saturating_add(aligned_header).max(1);
+                let relation_bytes =
+                    (fallback_pages as usize).saturating_mul(pg_sys::BLCKSZ as usize);
                 (*baserel).tuples = relation_bytes as f64 / tuple_bytes as f64;
             }
             pg_sys::set_baserel_size_estimates(self.relation.root, baserel);
@@ -380,9 +376,8 @@ impl<'a> ForeignPathContext<'a> {
     /// Selectivity and execution cost of provider filters that are allowed to
     /// reduce scan-volume costing. Unsupported/local quals are excluded.
     pub fn pruning_estimate(&self) -> ForeignFilterEstimate {
-        self.relation.filter_estimate_for_exprs(
-            self.pushdown.costed_pruning_exprs(),
-        )
+        self.relation
+            .filter_estimate_for_exprs(self.pushdown.costed_pruning_exprs())
     }
 
     /// Rows emitted by this path after all base and parameterized local quals.

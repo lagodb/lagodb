@@ -51,9 +51,8 @@ impl ForeignScanExplain {
             let bindings = &filters.bindings[start..end];
             let mut values = Vec::with_capacity(bindings.len());
             for (local_index, binding) in bindings.iter().enumerate() {
-                values.push(unsafe {
-                    explain_binding(binding, start + local_index)
-                }?);
+                values
+                    .push(unsafe { explain_binding(binding, start + local_index) }?);
             }
             let values = ForeignFilterExplainValues::new(&values);
             let Some(text) = P::explain_filter(&filter.planned, values)? else {
@@ -72,9 +71,7 @@ impl ForeignScanExplain {
         Ok(Self { entries })
     }
 
-    pub(crate) fn encode(
-        &self,
-    ) -> Result<*mut pg_sys::List, ForeignScanError> {
+    pub(crate) fn encode(&self) -> Result<*mut pg_sys::List, ForeignScanError> {
         ForeignPrivateWriter::encode_list(|writer| {
             for entry in &self.entries {
                 writer.append_nested(|record| {
@@ -217,9 +214,7 @@ unsafe fn explain_binding(
                 .to_str()
                 .map(str::to_owned)
                 .map_err(|_| {
-                    ForeignScanError::framework(
-                        "FDW filter value is not valid UTF-8",
-                    )
+                    ForeignScanError::framework("FDW filter value is not valid UTF-8")
                 })
         }
         FilterValueSourceKind::ExecParam | FilterValueSourceKind::OuterValue => {
@@ -291,9 +286,7 @@ pub(crate) unsafe extern "C-unwind" fn explain_foreign_scan<P: FdwScan>(
             ));
         }
 
-        let raw = unsafe {
-            decode_scan_explain_private::<P>((*plan).fdw_private)
-        }?;
+        let raw = unsafe { decode_scan_explain_private::<P>((*plan).fdw_private) }?;
         let explain = unsafe { ForeignScanExplain::decode(raw) }?;
         unsafe { explain.emit::<P>(es) };
         Ok::<(), ForeignScanError>(())

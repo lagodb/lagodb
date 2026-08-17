@@ -37,14 +37,14 @@ pub use routine::{
 pub use row_identity::{ForeignRowIdentityError, ForeignRowIdentityRequirement};
 pub use scan::{
     BeginForeignScanContext, ColumnRequirements, FdwScan, ForeignExpressionValue,
-    ForeignExprs, ForeignPathBuilder, ForeignPathContext, ForeignPathKey,
-    ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanFilter,
-    ForeignPlanFilters, ForeignPlanPrivate, ForeignPlanQualLocation,
-    ForeignPlanSpec, ForeignFilterEstimate, ForeignFilterExplainValues,
-    ForeignRelContext, ForeignRelSize, ForeignRelSizeContext, ForeignScanError,
-    ForeignScanPhase, PathVariantKind, ReScanForeignScanContext, Relids,
-    RuntimeExpressionValues, ScanDatumWriter, ScanOutputColumn, ScanProjection,
-    ScanProjectionPolicy, ScanSlotWriter,
+    ForeignExprs, ForeignFilterEstimate, ForeignFilterExplainValues,
+    ForeignPathBuilder, ForeignPathContext, ForeignPathKey, ForeignPathKeys,
+    ForeignPathSpec, ForeignPlanContext, ForeignPlanFilter, ForeignPlanFilters,
+    ForeignPlanPrivate, ForeignPlanQualLocation, ForeignPlanSpec, ForeignRelContext,
+    ForeignRelSize, ForeignRelSizeContext, ForeignScanError, ForeignScanPhase,
+    PathVariantKind, ReScanForeignScanContext, Relids, RuntimeExpressionValues,
+    ScanDatumWriter, ScanOutputColumn, ScanProjection, ScanProjectionPolicy,
+    ScanSlotWriter,
 };
 pub use validation::ForeignValidationError;
 

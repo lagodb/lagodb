@@ -1,6 +1,7 @@
 //! PostgreSQL predicate planning and Parquet `RowFilter` construction.
 
 mod explain;
+mod pruning;
 mod runtime;
 mod value;
 
@@ -24,6 +25,7 @@ use crate::format::{
 use self::runtime::BoundNode;
 use self::value::{ComparisonOperator, ValueType};
 
+pub(crate) use self::pruning::ParquetFilePredicate;
 pub(crate) use self::runtime::ParquetBoundPredicate;
 
 const NODE_COMPARISON: i32 = 0;
@@ -111,12 +113,12 @@ impl ParquetFilterPlanner {
             FilterNode::IsNotNull(FilterScalar::Column(column)) => {
                 Some(PlannedNode::IsNotNull(self.column(column)?))
             }
-            FilterNode::And(children) => self
-                .plan_children(fragment, children)
-                .map(PlannedNode::And),
-            FilterNode::Or(children) => self
-                .plan_children(fragment, children)
-                .map(PlannedNode::Or),
+            FilterNode::And(children) => {
+                self.plan_children(fragment, children).map(PlannedNode::And)
+            }
+            FilterNode::Or(children) => {
+                self.plan_children(fragment, children).map(PlannedNode::Or)
+            }
             FilterNode::Not(child) => self
                 .plan_node(fragment, child)
                 .map(|child| PlannedNode::Not(Box::new(child))),
@@ -170,9 +172,8 @@ impl ParquetPlannedPredicate {
         if kind != FormatKind::Parquet {
             return Err(ConnectorError::invalid_filter_plan(kind));
         }
-        let root = reader.read_nested(|nested| {
-            PlannedNode::decode(nested, binding_count)
-        })?;
+        let root = reader
+            .read_nested(|nested| PlannedNode::decode(nested, binding_count))?;
         Ok(Self { root })
     }
 }
@@ -225,7 +226,6 @@ impl PlannedColumn {
             name: reader.read_str()?.into(),
         })
     }
-
 }
 
 enum PlannedNode {
@@ -251,9 +251,13 @@ impl PlannedNode {
                 value,
                 value_type,
             } => {
-                writer.append_i32(NODE_COMPARISON).append_i32(operator.tag());
+                writer
+                    .append_i32(NODE_COMPARISON)
+                    .append_i32(operator.tag());
                 column.encode(writer);
-                writer.append_count(value.index()).append_i32(value_type.tag());
+                writer
+                    .append_count(value.index())
+                    .append_i32(value_type.tag());
             }
             Self::IsNull(column) => {
                 writer.append_i32(NODE_IS_NULL);
@@ -291,8 +295,8 @@ impl PlannedNode {
                 let index = reader.read_count()?;
                 let value = FilterValueSlotId::from_plan_data(index, binding_count)
                     .ok_or_else(|| {
-                        ConnectorError::invalid_filter_plan(FormatKind::Parquet)
-                    })?;
+                    ConnectorError::invalid_filter_plan(FormatKind::Parquet)
+                })?;
                 let value_type = ValueType::from_tag(reader.read_i32()?)?;
                 if !value_type.accepts_operator(operator) {
                     return Err(ConnectorError::invalid_filter_plan(
@@ -310,9 +314,11 @@ impl PlannedNode {
             NODE_IS_NOT_NULL => Ok(Self::IsNotNull(PlannedColumn::decode(reader)?)),
             NODE_AND => Ok(Self::And(Self::decode_children(reader, binding_count)?)),
             NODE_OR => Ok(Self::Or(Self::decode_children(reader, binding_count)?)),
-            NODE_NOT => Ok(Self::Not(Box::new(reader.read_nested(|nested| {
-                Self::decode(nested, binding_count)
-            })?))),
+            NODE_NOT => {
+                Ok(Self::Not(Box::new(reader.read_nested(|nested| {
+                    Self::decode(nested, binding_count)
+                })?)))
+            }
             _ => Err(ConnectorError::invalid_filter_plan(FormatKind::Parquet)),
         }
     }
@@ -327,9 +333,9 @@ impl PlannedNode {
         }
         let mut children = Vec::with_capacity(count);
         for _ in 0..count {
-            children.push(reader.read_nested(|nested| {
-                Self::decode(nested, binding_count)
-            })?);
+            children.push(
+                reader.read_nested(|nested| Self::decode(nested, binding_count))?,
+            );
         }
         Ok(children.into_boxed_slice())
     }
@@ -337,6 +343,14 @@ impl PlannedNode {
     fn bind(
         &self,
         values: FilterValueBindings<'_>,
+    ) -> Result<BoundNode, ConnectorError> {
+        self.bind_negated(values, false)
+    }
+
+    fn bind_negated(
+        &self,
+        values: FilterValueBindings<'_>,
+        negated: bool,
     ) -> Result<BoundNode, ConnectorError> {
         Ok(match self {
             Self::Comparison {
@@ -347,32 +361,51 @@ impl PlannedNode {
             } => {
                 let value = values.value(*value);
                 if value.is_null() {
-                    BoundNode::Unknown
+                    // A strict comparison with NULL is never TRUE, including
+                    // below NOT. The pushed predicate represents the SQL WHERE
+                    // truth set, so UNKNOWN can be folded to NeverTrue here.
+                    BoundNode::NeverTrue
                 } else {
                     BoundNode::Comparison {
-                        operator: *operator,
+                        operator: if negated {
+                            operator.negated()
+                        } else {
+                            *operator
+                        },
                         column: column.clone(),
                         value: unsafe { value_type.decode(value)? },
                     }
                 }
             }
+            Self::IsNull(column) if negated => BoundNode::IsNotNull(column.clone()),
             Self::IsNull(column) => BoundNode::IsNull(column.clone()),
+            Self::IsNotNull(column) if negated => BoundNode::IsNull(column.clone()),
             Self::IsNotNull(column) => BoundNode::IsNotNull(column.clone()),
-            Self::And(children) => BoundNode::And(
-                children
+            Self::And(children) => {
+                let bound = children
                     .iter()
-                    .map(|child| child.bind(values))
+                    .map(|child| child.bind_negated(values, negated))
                     .collect::<Result<Vec<_>, _>>()?
-                    .into_boxed_slice(),
-            ),
-            Self::Or(children) => BoundNode::Or(
-                children
+                    .into_boxed_slice();
+                if negated {
+                    BoundNode::Or(bound)
+                } else {
+                    BoundNode::And(bound)
+                }
+            }
+            Self::Or(children) => {
+                let bound = children
                     .iter()
-                    .map(|child| child.bind(values))
+                    .map(|child| child.bind_negated(values, negated))
                     .collect::<Result<Vec<_>, _>>()?
-                    .into_boxed_slice(),
-            ),
-            Self::Not(child) => BoundNode::Not(Box::new(child.bind(values)?)),
+                    .into_boxed_slice();
+                if negated {
+                    BoundNode::And(bound)
+                } else {
+                    BoundNode::Or(bound)
+                }
+            }
+            Self::Not(child) => child.bind_negated(values, !negated)?,
         })
     }
 }

@@ -15,9 +15,7 @@ use arrow_array::{
 };
 use arrow_ord::cmp;
 use arrow_schema::{ArrowError, DataType};
-use pg_lakebase_core::expr::pushdown::{
-    FilterColumn, FilterValue, FilterValueSlot,
-};
+use pg_lakebase_core::expr::pushdown::{FilterColumn, FilterValue, FilterValueSlot};
 use pg_lakebase_core::tuple::ColumnDatumTarget;
 use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
 
@@ -116,6 +114,17 @@ impl ComparisonOperator {
         }
     }
 
+    pub(super) const fn negated(self) -> Self {
+        match self {
+            Self::Eq => Self::NotEq,
+            Self::NotEq => Self::Eq,
+            Self::Lt => Self::Ge,
+            Self::Le => Self::Gt,
+            Self::Gt => Self::Le,
+            Self::Ge => Self::Lt,
+        }
+    }
+
     pub(super) const fn tag(self) -> i32 {
         match self {
             Self::Eq => OP_EQ,
@@ -164,10 +173,7 @@ pub(super) enum ValueType {
 }
 
 impl ValueType {
-    pub(super) const fn accepts_operator(
-        self,
-        operator: ComparisonOperator,
-    ) -> bool {
+    pub(super) const fn accepts_operator(self, operator: ComparisonOperator) -> bool {
         !matches!(self, Self::Bool)
             || matches!(operator, ComparisonOperator::Eq | ComparisonOperator::NotEq)
     }
@@ -188,7 +194,11 @@ impl ValueType {
                 PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
                 PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
                 PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
-            ) if matches!(operator, ComparisonOperator::Eq | ComparisonOperator::NotEq) => {
+            ) if matches!(
+                operator,
+                ComparisonOperator::Eq | ComparisonOperator::NotEq
+            ) =>
+            {
                 Self::Bool
             }
             (
@@ -236,12 +246,18 @@ impl ValueType {
                         });
                 match operator {
                     ComparisonOperator::Eq | ComparisonOperator::NotEq
-                        if deterministic => Some(value_type),
+                        if deterministic =>
+                    {
+                        Some(value_type)
+                    }
                     ComparisonOperator::Lt
                     | ComparisonOperator::Le
                     | ComparisonOperator::Gt
                     | ComparisonOperator::Ge
-                        if c_order => Some(value_type),
+                        if c_order =>
+                    {
+                        Some(value_type)
+                    }
                     _ => None,
                 }
             }
@@ -297,15 +313,17 @@ impl ValueType {
                 unsafe { i64::from_datum(datum, false) }
                     .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
             ),
-            (Self::String, pg_sys::TEXTOID | pg_sys::VARCHAROID) => BoundValue::String(
-                unsafe { String::from_datum(datum, false) }
-                    .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?
-                    .into_boxed_str(),
-            ),
+            (Self::String, pg_sys::TEXTOID | pg_sys::VARCHAROID) => {
+                BoundValue::String(
+                    unsafe { String::from_datum(datum, false) }
+                        .ok_or_else(|| {
+                            ConnectorError::invalid_filter_datum(type_oid)
+                        })?
+                        .into_boxed_str(),
+                )
+            }
             _ => {
-                return Err(ConnectorError::invalid_filter_plan(
-                    FormatKind::Parquet,
-                ));
+                return Err(ConnectorError::invalid_filter_plan(FormatKind::Parquet));
             }
         };
         Ok(decoded)

@@ -441,10 +441,8 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
             )
         }?;
         let encoded_filters = ForeignScanFilters::<P>::encode(&final_filters)?;
-        let encoded_explain = unsafe {
-            ForeignScanExplain::build::<P>(&final_filters)
-        }?
-        .encode()?;
+        let encoded_explain =
+            unsafe { ForeignScanExplain::build::<P>(&final_filters) }?.encode()?;
         let private_data = encode_scan_private::<P>(
             P::NAME,
             relation.relation_oid(),
