@@ -154,12 +154,12 @@ impl ComparisonOperator {
         scalar: &Scalar<ArrayRef>,
     ) -> Result<BooleanArray, ArrowError> {
         match self {
-            Self::Eq => cmp::eq(column, scalar),
-            Self::NotEq => cmp::neq(column, scalar),
-            Self::Lt => cmp::lt(column, scalar),
-            Self::Le => cmp::lt_eq(column, scalar),
-            Self::Gt => cmp::gt(column, scalar),
-            Self::Ge => cmp::gt_eq(column, scalar),
+            Self::Eq => cmp::eq(&column, scalar),
+            Self::NotEq => cmp::neq(&column, scalar),
+            Self::Lt => cmp::lt(&column, scalar),
+            Self::Le => cmp::lt_eq(&column, scalar),
+            Self::Gt => cmp::gt(&column, scalar),
+            Self::Ge => cmp::gt_eq(&column, scalar),
         }
     }
 }

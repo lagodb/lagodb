@@ -19,7 +19,7 @@ fn row_group_file() -> ParquetRecordBatchReaderBuilder<Bytes> {
     )
     .expect("test batch is valid");
     let properties = WriterProperties::builder()
-        .set_max_row_group_size(4)
+        .set_max_row_group_row_count(Some(4))
         .build();
     let mut output = Vec::new();
     let mut writer = ArrowWriter::try_new(&mut output, schema, Some(properties))

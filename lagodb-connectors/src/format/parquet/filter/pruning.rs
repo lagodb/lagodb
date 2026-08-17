@@ -208,10 +208,7 @@ impl PruningColumn {
         Ok(Some(Self { leaf }))
     }
 
-    fn statistics<'a>(
-        self,
-        row_group: &'a RowGroupMetaData,
-    ) -> Option<&'a Statistics> {
+    fn statistics(self, row_group: &RowGroupMetaData) -> Option<&Statistics> {
         row_group.column(self.leaf).statistics()
     }
 

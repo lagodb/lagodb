@@ -30,7 +30,7 @@ use super::{
 };
 
 pub(super) use copy::{ParquetCopyDestination, ParquetCopySource};
-pub(crate) use filter::ParquetBoundPredicate;
+pub(crate) use filter::{ParquetBoundPredicate, ParquetFilePredicate};
 pub(crate) use reader::ParquetObjectReader;
 pub(crate) use schema::parquet_arrow_type;
 pub(crate) use writer::ParquetObjectWriter;

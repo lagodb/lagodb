@@ -4,6 +4,11 @@
 use pgrx::pg_sys::{self, POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE};
 use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
 
+unsafe extern "C-unwind" {
+    #[link_name = "numeric_send"]
+    fn pg_numeric_send(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum;
+}
+
 /// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in days.
 pub const PG_EPOCH_DAYS_DIFF: i32 = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i32;
 
@@ -369,7 +374,7 @@ impl Decimal128NumericCodec {
         // and returns a palloc'd bytea in the current memory context.
         let output = unsafe {
             pg_sys::DirectFunctionCall1Coll(
-                Some(pg_sys::numeric_send),
+                Some(pg_numeric_send),
                 pg_sys::InvalidOid,
                 datum,
             )

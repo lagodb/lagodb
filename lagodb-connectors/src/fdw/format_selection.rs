@@ -10,6 +10,8 @@ use crate::storage::ResolvedStorageLocation;
 
 use super::{ResolvedTableOptions, resolve_table_options};
 
+type ResolvedFormatParts<T> = (T, ResolvedStorageLocation);
+
 /// Catalog identity, object location, and configured format resolved together
 /// for one planner or executor callback.
 pub(crate) struct ResolvedForeignRelation {
@@ -61,8 +63,7 @@ impl ResolvedForeignRelation {
     pub(crate) fn into_scan_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<(Box<dyn FormatReader>, ResolvedStorageLocation), ConnectorError>
-    {
+    ) -> Result<ResolvedFormatParts<Box<dyn FormatReader>>, ConnectorError> {
         let location = ResolvedStorageLocation::resolve_foreign_object(
             self.options.object,
             self.server_oid,
@@ -74,10 +75,8 @@ impl ResolvedForeignRelation {
     pub(crate) fn into_analyze_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<
-        Option<(Box<dyn FormatAnalyzer>, ResolvedStorageLocation)>,
-        ConnectorError,
-    > {
+    ) -> Result<Option<ResolvedFormatParts<Box<dyn FormatAnalyzer>>>, ConnectorError>
+    {
         let ResolvedTableOptions { object, format } = self.options;
         let Some(analyzer) = format.into_reader().analyzer() else {
             return Ok(None);
@@ -93,8 +92,7 @@ impl ResolvedForeignRelation {
     pub(crate) fn into_write_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<(Box<dyn FormatWriter>, ResolvedStorageLocation), ConnectorError>
-    {
+    ) -> Result<ResolvedFormatParts<Box<dyn FormatWriter>>, ConnectorError> {
         let location = ResolvedStorageLocation::resolve_foreign_object(
             self.options.object,
             self.server_oid,
