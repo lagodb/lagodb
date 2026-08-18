@@ -400,7 +400,7 @@ mod tests {
             length: 0,
             record_count: Some(10),
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: file_path.to_string_lossy().into_owned(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -410,8 +410,10 @@ mod tests {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: true,
+            key_metadata: None,
         };
         let file_io = FileIO::from_path(temp_dir.path().to_str().unwrap()).unwrap();
         let batches = ArrowReaderBuilder::new(file_io)
@@ -579,7 +581,7 @@ mod tests {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -589,8 +591,10 @@ mod tests {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -773,7 +777,7 @@ mod tests {
             length: row_group_0.compressed_size() as u64,
             record_count: Some(100),
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -783,8 +787,10 @@ mod tests {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         };
 
         // Task 2: read the second and third row groups
@@ -794,7 +800,7 @@ mod tests {
             length: file_end - rg1_start,
             record_count: Some(200),
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -804,8 +810,10 @@ mod tests {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         };
 
         let tasks1 = vec![task1];

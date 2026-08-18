@@ -394,6 +394,7 @@ pub(crate) mod tests {
             content_offset: None,
             content_size_in_bytes: None,
             record_count: 0,
+            key_metadata: None,
         };
 
         let pos_del_2 = FileScanTaskDeleteFile {
@@ -410,6 +411,7 @@ pub(crate) mod tests {
             content_offset: None,
             content_size_in_bytes: None,
             record_count: 0,
+            key_metadata: None,
         };
 
         let pos_del_3 = FileScanTaskDeleteFile {
@@ -426,6 +428,7 @@ pub(crate) mod tests {
             content_offset: None,
             content_size_in_bytes: None,
             record_count: 0,
+            key_metadata: None,
         };
 
         let file_scan_tasks = vec![
@@ -435,7 +438,7 @@ pub(crate) mod tests {
                 length: 0,
                 record_count: None,
                 first_row_id: None,
-                last_updated_sequence_number: None,
+                data_sequence_number: None,
                 data_file_path: format!(
                     "{}/1.parquet",
                     table_location.to_str().unwrap()
@@ -448,8 +451,10 @@ pub(crate) mod tests {
                 deletes: vec![pos_del_1, pos_del_2.clone()],
                 partition: None,
                 partition_spec: None,
+                unified_partition_type: None,
                 name_mapping: None,
                 case_sensitive: false,
+                key_metadata: None,
             },
             FileScanTask {
                 file_size_in_bytes: 0,
@@ -457,7 +462,7 @@ pub(crate) mod tests {
                 length: 0,
                 record_count: None,
                 first_row_id: None,
-                last_updated_sequence_number: None,
+                data_sequence_number: None,
                 data_file_path: format!(
                     "{}/2.parquet",
                     table_location.to_str().unwrap()
@@ -470,8 +475,10 @@ pub(crate) mod tests {
                 deletes: vec![pos_del_3],
                 partition: None,
                 partition_spec: None,
+                unified_partition_type: None,
                 name_mapping: None,
                 case_sensitive: false,
+                key_metadata: None,
             },
         ];
 
@@ -522,7 +529,7 @@ pub(crate) mod tests {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: "data.parquet".to_string(),
             data_file_format: crate::spec::DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -540,11 +547,14 @@ pub(crate) mod tests {
                 content_offset: None,
                 content_size_in_bytes: None,
                 record_count: 0,
+                key_metadata: None,
             }],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: true,
+            key_metadata: None,
         };
 
         let filter = DeleteFilter::default();

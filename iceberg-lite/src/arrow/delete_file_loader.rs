@@ -25,6 +25,7 @@ use crate::arrow::reader::ParquetReadOptions;
 use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
 use crate::arrow::scan_metrics::ScanMetrics;
 use crate::delete_vector::DeleteVector;
+use crate::encryption::{EncryptedInputFile, StandardKeyMetadata};
 use crate::io::FileIO;
 use crate::scan::{ArrowRecordBatchIterator, FileScanTaskDeleteFile};
 use crate::spec::{DataContentType, DataFileFormat, Schema, SchemaRef};
@@ -68,6 +69,7 @@ impl BasicDeleteFileLoader {
         &self,
         data_file_path: &str,
         file_size_in_bytes: u64,
+        key_metadata: Option<&[u8]>,
     ) -> Result<ArrowRecordBatchIterator> {
         /*
            Essentially a super-cut-down ArrowReader. We can't use ArrowReader directly
@@ -79,6 +81,7 @@ impl BasicDeleteFileLoader {
             file_size_in_bytes,
             ParquetReadOptions::default(),
             self.scan_metrics.clone(),
+            key_metadata,
         )?;
 
         let record_batch_reader = ParquetRecordBatchReaderBuilder::new_with_metadata(
@@ -133,8 +136,16 @@ impl BasicDeleteFileLoader {
             Error::new(ErrorKind::DataInvalid, "deletion vector range overflow")
         })?;
 
-        let reader = self.file_io.new_input(&task.file_path)?.reader()?;
-        let bytes = reader.read_range(offset..end)?;
+        let input = self.file_io.new_input(&task.file_path)?;
+        let bytes = match task.key_metadata.as_deref() {
+            Some(encoded_key_metadata) => {
+                let key_metadata = StandardKeyMetadata::decode(encoded_key_metadata)?;
+                EncryptedInputFile::new(input, key_metadata)
+                    .reader()?
+                    .read_range(offset..end)?
+            }
+            None => input.reader()?.read_range(offset..end)?,
+        };
         DeleteVector::from_puffin_v1_bytes(&bytes, task.record_count)
     }
 
@@ -167,8 +178,11 @@ impl DeleteFileLoader for BasicDeleteFileLoader {
         task: &FileScanTaskDeleteFile,
         schema: SchemaRef,
     ) -> Result<ArrowRecordBatchIterator> {
-        let raw_batch_iterator =
-            self.parquet_to_batch_iterator(&task.file_path, task.file_size_in_bytes)?;
+        let raw_batch_iterator = self.parquet_to_batch_iterator(
+            &task.file_path,
+            task.file_size_in_bytes,
+            task.key_metadata.as_deref(),
+        )?;
 
         // For equality deletes, only evolve the equality_ids columns.
         // For positional deletes (equality_ids is None), use all field IDs.

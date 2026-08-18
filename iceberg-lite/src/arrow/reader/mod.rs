@@ -19,20 +19,21 @@
 
 mod file_reader;
 mod options;
-mod physical_row;
 pub(crate) mod pipeline;
 mod positional_deletes;
 mod predicate_plan;
 pub(super) mod predicate_visitor;
 mod projection;
 mod row_filter;
-mod row_position;
+mod row_lineage;
 mod row_positions;
 mod selected_rows;
 
+#[cfg(test)]
+mod encryption_tests;
+
 pub use file_reader::ArrowFileReader;
 pub(crate) use options::ParquetReadOptions;
-pub use physical_row::{PhysicalRowReadContext, PhysicalRowReadRequest};
 pub use pipeline::SyncFileScanPipeline;
 use predicate_visitor::{CollectFieldIdVisitor, PredicateConverter};
 use projection::{

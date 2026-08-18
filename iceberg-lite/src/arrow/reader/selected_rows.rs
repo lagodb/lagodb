@@ -24,10 +24,9 @@ use crate::{Error, ErrorKind, Result};
 /// Read selected original Parquet positions through the normal Iceberg scan
 /// pipeline.
 ///
-/// Unlike [`super::PhysicalRowReadRequest`], this request applies position
-/// deletes, deletion vectors, equality deletes, schema transforms, partition
-/// constants, and scan predicates. It is therefore suitable for statistical
-/// sampling of the current logical snapshot, not `SnapshotAny` tuple fetches.
+/// This request applies position deletes, deletion vectors, equality deletes,
+/// schema transforms, partition constants, and scan predicates. It is therefore
+/// suitable for statistical sampling of the current logical snapshot.
 #[derive(Debug)]
 pub struct SelectedRowsReadRequest {
     pub(super) task: FileScanTask,

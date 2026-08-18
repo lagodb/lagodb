@@ -464,7 +464,7 @@ mod tests {
             length: 0,
             record_count: Some(200),
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -482,11 +482,14 @@ mod tests {
                 content_offset: None,
                 content_size_in_bytes: None,
                 record_count: 0,
+                key_metadata: None,
             }],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -705,7 +708,7 @@ mod tests {
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -723,11 +726,14 @@ mod tests {
                 content_offset: None,
                 content_size_in_bytes: None,
                 record_count: 0,
+                key_metadata: None,
             }],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         };
 
         let tasks = vec![task];
@@ -943,7 +949,7 @@ mod tests {
             length: rg1_length,
             record_count: Some(100), // Row group 1 has 100 rows
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: data_file_path.clone(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -961,11 +967,14 @@ mod tests {
                 content_offset: None,
                 content_size_in_bytes: None,
                 record_count: 0,
+                key_metadata: None,
             }],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         };
 
         let tasks = vec![task];

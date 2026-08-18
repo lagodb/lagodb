@@ -23,43 +23,46 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, FieldRef};
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
-use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, RowNumber};
+use parquet::arrow::{PARQUET_FIELD_ID_META_KEY, ProjectionMask, RowNumber};
+use parquet::encryption::decrypt::FileDecryptionProperties;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 
 use super::predicate_plan::FilePredicatePlan;
 use super::row_filter::TransformedRecordBatchFilter;
-use super::row_position::RowPositionSelection;
+use super::row_lineage::RowLineageResolution;
 use super::row_positions::RowPositionsSelection;
 use super::{
-    ArrowFileReader, ArrowReader, ParquetReadOptions, PhysicalRowReadRequest,
-    SelectedRowsReadRequest, add_fallback_field_ids_to_arrow_schema,
-    apply_name_mapping_to_arrow_schema,
+    ArrowFileReader, ArrowReader, ParquetReadOptions, SelectedRowsReadRequest,
+    add_fallback_field_ids_to_arrow_schema, apply_name_mapping_to_arrow_schema,
 };
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::delete_filter::is_equality_delete;
 use crate::arrow::int96::coerce_int96_timestamps;
-use crate::arrow::record_batch_transformer::RecordBatchTransformerBuilder;
+use crate::arrow::record_batch_transformer::{
+    RecordBatchTransformerBuilder, StructConstant,
+};
 use crate::arrow::scan_metrics::{CountingFileRead, ScanMetrics, ScanResult};
+use crate::encryption::StandardKeyMetadata;
 use crate::error::Result;
 use crate::expr::BoundPredicate;
 use crate::io::{FileIO, FileMetadata, FileRead};
 use crate::metadata_columns::{
     RESERVED_COL_NAME_POS, RESERVED_FIELD_ID_FILE,
-    RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER, RESERVED_FIELD_ID_POS,
-    RESERVED_FIELD_ID_ROW_ID, is_metadata_field,
+    RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER, RESERVED_FIELD_ID_PARTITION,
+    RESERVED_FIELD_ID_POS, RESERVED_FIELD_ID_ROW_ID, RESERVED_FIELD_ID_SPEC_ID,
+    is_metadata_field,
 };
 use crate::scan::{ArrowRecordBatchIterator, FileScanTask};
-use crate::spec::{Datum, NameMapping, PartitionSpec, SchemaRef, Struct};
+use crate::spec::{Datum, NameMapping, PartitionSpec, SchemaRef, Struct, StructType};
 use crate::{Error, ErrorKind};
 
 /// Preserve the upstream scan task as a domain object until scan-only delete
-/// handling is complete; physical reads have different visibility semantics.
-/// Keeping the scan variant inline avoids one heap allocation per data file.
+/// handling is complete. Keeping the scan variant inline avoids one heap
+/// allocation per data file.
 #[allow(clippy::large_enum_variant)]
 enum FileReadRequest {
     Scan {
@@ -71,7 +74,6 @@ enum FileReadRequest {
         task_index: usize,
         predicate: Option<Arc<BoundPredicate>>,
     },
-    Physical(PhysicalRowReadRequest),
     SelectedRows(Box<SelectedRowsReadRequest>),
 }
 
@@ -82,35 +84,36 @@ struct FileReadPlan<'a> {
     start: u64,
     length: u64,
     first_row_id: Option<u64>,
-    last_updated_sequence_number: Option<i64>,
+    data_sequence_number: Option<i64>,
+    partition_spec_id: i32,
     data_file_path: &'a str,
+    key_metadata: Option<&'a [u8]>,
     schema: &'a SchemaRef,
     project_field_ids: &'a [i32],
     predicate: Option<&'a BoundPredicate>,
     partition: Option<&'a Struct>,
     partition_spec: Option<&'a Arc<PartitionSpec>>,
+    unified_partition_type: Option<&'a Arc<StructType>>,
     name_mapping: Option<&'a Arc<NameMapping>>,
     has_deletes: bool,
     has_equality_deletes: bool,
-    row_position: Option<i64>,
     row_positions: Option<&'a [i64]>,
     expected_record_count: Option<u64>,
 }
 
 impl FileReadRequest {
-    fn scan_task(&self) -> Result<Option<&FileScanTask>> {
+    fn scan_task(&self) -> Result<&FileScanTask> {
         match self {
-            Self::Scan { task, .. } => Ok(Some(task)),
+            Self::Scan { task, .. } => Ok(task),
             Self::SharedScan {
                 tasks, task_index, ..
-            } => tasks.get(*task_index).map(Some).ok_or_else(|| {
+            } => tasks.get(*task_index).ok_or_else(|| {
                 Error::new(
                     ErrorKind::Unexpected,
                     "shared file scan task index is out of bounds",
                 )
             }),
-            Self::Physical(_) => Ok(None),
-            Self::SelectedRows(request) => Ok(Some(&request.task)),
+            Self::SelectedRows(request) => Ok(&request.task),
         }
     }
 
@@ -135,17 +138,19 @@ impl FileReadRequest {
                     start: task.start,
                     length: task.length,
                     first_row_id: task.first_row_id,
-                    last_updated_sequence_number: task.last_updated_sequence_number,
+                    data_sequence_number: task.data_sequence_number,
+                    partition_spec_id: task.partition_spec_id,
                     data_file_path: &task.data_file_path,
+                    key_metadata: task.key_metadata.as_deref(),
                     schema: &task.schema,
                     project_field_ids: &task.project_field_ids,
                     predicate: task.predicate.as_ref(),
                     partition: task.partition.as_ref(),
                     partition_spec: task.partition_spec.as_ref(),
+                    unified_partition_type: task.unified_partition_type.as_ref(),
                     name_mapping: task.name_mapping.as_ref(),
                     has_deletes: !task.deletes.is_empty(),
                     has_equality_deletes: task.deletes.iter().any(is_equality_delete),
-                    row_position: None,
                     row_positions: None,
                     expected_record_count,
                 })
@@ -166,54 +171,38 @@ impl FileReadRequest {
                     start: task.start,
                     length: task.length,
                     first_row_id: task.first_row_id,
-                    last_updated_sequence_number: task.last_updated_sequence_number,
+                    data_sequence_number: task.data_sequence_number,
+                    partition_spec_id: task.partition_spec_id,
                     data_file_path: &task.data_file_path,
+                    key_metadata: task.key_metadata.as_deref(),
                     schema: &task.schema,
                     project_field_ids: &task.project_field_ids,
                     predicate: predicate.as_deref(),
                     partition: task.partition.as_ref(),
                     partition_spec: task.partition_spec.as_ref(),
+                    unified_partition_type: task.unified_partition_type.as_ref(),
                     name_mapping: task.name_mapping.as_ref(),
                     has_deletes: !task.deletes.is_empty(),
                     has_equality_deletes: task.deletes.iter().any(is_equality_delete),
-                    row_position: None,
                     row_positions: None,
                     expected_record_count: None,
                 })
             }
-            Self::Physical(request) => Ok(FileReadPlan {
-                file_size_in_bytes: 0,
-                start: 0,
-                length: 0,
-                first_row_id: None,
-                last_updated_sequence_number: None,
-                data_file_path: &request.data_file_path,
-                schema: &request.schema,
-                project_field_ids: &request.projected_field_ids,
-                predicate: None,
-                partition: None,
-                partition_spec: None,
-                name_mapping: request.name_mapping.as_ref(),
-                has_deletes: false,
-                has_equality_deletes: false,
-                row_position: Some(request.position),
-                row_positions: None,
-                expected_record_count: None,
-            }),
             Self::SelectedRows(request) => Ok(FileReadPlan {
                 file_size_in_bytes: request.task.file_size_in_bytes,
                 start: request.task.start,
                 length: request.task.length,
                 first_row_id: request.task.first_row_id,
-                last_updated_sequence_number: request
-                    .task
-                    .last_updated_sequence_number,
+                data_sequence_number: request.task.data_sequence_number,
+                partition_spec_id: request.task.partition_spec_id,
                 data_file_path: &request.task.data_file_path,
+                key_metadata: request.task.key_metadata.as_deref(),
                 schema: &request.task.schema,
                 project_field_ids: &request.task.project_field_ids,
                 predicate: request.task.predicate.as_ref(),
                 partition: request.task.partition.as_ref(),
                 partition_spec: request.task.partition_spec.as_ref(),
+                unified_partition_type: request.task.unified_partition_type.as_ref(),
                 name_mapping: request.task.name_mapping.as_ref(),
                 has_deletes: !request.task.deletes.is_empty(),
                 has_equality_deletes: request
@@ -221,7 +210,6 @@ impl FileReadRequest {
                     .deletes
                     .iter()
                     .any(is_equality_delete),
-                row_position: None,
                 row_positions: Some(&request.positions),
                 expected_record_count: request.task.record_count,
             }),
@@ -312,39 +300,6 @@ impl ArrowReader {
         Ok(self.read_requests_with_metrics(requests)?.stream())
     }
 
-    /// Reads the exact stored row at one original, zero-based file position.
-    ///
-    /// This physical read does not apply Iceberg predicates or delete files.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be read or transformed according to
-    /// the request schema.
-    pub fn read_physical_row(
-        self,
-        request: PhysicalRowReadRequest,
-    ) -> Result<Option<RecordBatch>> {
-        let batches = self
-            .read_requests_with_metrics(std::iter::once(FileReadRequest::Physical(
-                request,
-            )))?
-            .stream();
-        for batch in batches {
-            let batch = batch?;
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            if batch.num_rows() != 1 {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "position-constrained reader returned more than one row",
-                ));
-            }
-            return Ok(Some(batch));
-        }
-        Ok(None)
-    }
-
     /// Read batches for validated physical-position requests while retaining
     /// normal Iceberg visibility and transformation semantics.
     pub fn read_selected_rows(
@@ -423,8 +378,7 @@ impl ArrowReader {
         } else {
             PageIndexPolicy::Skip
         };
-        let offset_index_policy = if plan.row_position.is_some()
-            || plan.row_positions.is_some()
+        let offset_index_policy = if plan.row_positions.is_some()
             || predicate_page_pruning
             || plan.has_deletes
         {
@@ -435,22 +389,13 @@ impl ArrowReader {
         let parquet_read_options = parquet_read_options
             .with_index_policies(column_index_policy, offset_index_policy);
 
-        let (delete_predicate, positional_delete_indexes) =
-            if let Some(file_scan_task) = request.scan_task()? {
-                let delete_filter = delete_file_loader.load_deletes(
-                    &file_scan_task.deletes,
-                    file_scan_task.schema_ref(),
-                )?;
-                let delete_predicate =
-                    delete_filter.build_equality_delete_predicate(file_scan_task)?;
-                let positional_delete_indexes =
-                    delete_filter.get_delete_vector(file_scan_task);
-                (delete_predicate, positional_delete_indexes)
-            } else {
-                // SnapshotAny physical fetches return the exact stored row and
-                // must not apply the table's logical delete files.
-                (None, None)
-            };
+        let file_scan_task = request.scan_task()?;
+        let delete_filter = delete_file_loader
+            .load_deletes(&file_scan_task.deletes, file_scan_task.schema_ref())?;
+        let delete_predicate =
+            delete_filter.build_equality_delete_predicate(file_scan_task)?;
+        let positional_delete_indexes =
+            delete_filter.get_delete_vector(file_scan_task);
 
         let (parquet_file_reader, arrow_metadata) = Self::open_parquet_file(
             plan.data_file_path,
@@ -458,7 +403,9 @@ impl ArrowReader {
             plan.file_size_in_bytes,
             parquet_read_options,
             Some(scan_metrics),
+            plan.key_metadata,
         )?;
+        let original_arrow_schema = Arc::clone(arrow_metadata.schema());
 
         // Check if Parquet file has embedded field IDs
         // Corresponds to Java's ParquetSchemaUtil.hasIds()
@@ -565,25 +512,25 @@ impl ArrowReader {
             .contains(&RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER)
             || post_transform_field_ids
                 .contains(&RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER);
-        let file_has_field_id = |field_id: i32| {
-            arrow_metadata.schema().fields().iter().any(|field| {
-                field
-                    .metadata()
-                    .get(PARQUET_FIELD_ID_META_KEY)
-                    .and_then(|value| value.parse::<i32>().ok())
-                    == Some(field_id)
-            })
-        };
-        let stored_row_id =
-            needs_row_id_column && file_has_field_id(RESERVED_FIELD_ID_ROW_ID);
-        let stored_last_updated = needs_last_updated_column
-            && file_has_field_id(RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER);
         // A pre-v3 file carried into a v3 table can still have no effective
         // row-id range. Preserve that state as NULL; the snapshot/manifest
         // writer that first commits it in v3 assigns the inherited range.
         let inherit_row_id = needs_row_id_column && plan.first_row_id.is_some();
         let inherit_last_updated =
             needs_last_updated_column && plan.first_row_id.is_some();
+        let fallback_data_sequence_number = if inherit_last_updated {
+            Some(plan.data_sequence_number.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!(
+                        "Data file {} has a first_row_id but no data sequence number",
+                        plan.data_file_path
+                    ),
+                )
+            })?)
+        } else {
+            None
+        };
         let needs_row_number_column = needs_position_column || inherit_row_id;
         let mut effective_project_field_ids = requested_project_field_ids.clone();
         let mut ordered_post_transform_field_ids =
@@ -599,7 +546,7 @@ impl ArrowReader {
         {
             effective_project_field_ids.push(RESERVED_FIELD_ID_POS);
         }
-        let first_row_id = inherit_row_id.then_some(plan.first_row_id).flatten();
+        let first_row_id = plan.first_row_id;
 
         let arrow_metadata = if needs_row_number_column {
             Self::with_row_number_column(arrow_metadata)?
@@ -613,19 +560,13 @@ impl ArrowReader {
                 arrow_metadata,
             );
 
-        // Filter out generated metadata fields for Parquet projection. `_pos`
-        // is the exception: arrow-rs exposes it as a native virtual RowNumber
-        // column, so it can be projected and row-filtered like a file column.
+        // Filter out all metadata fields for ordinary Parquet projection. The
+        // virtual `_pos` column and physically stored lineage leaves are added
+        // separately below because they are not in the table schema.
         let project_field_ids_without_metadata: Vec<i32> =
             effective_project_field_ids
                 .iter()
-                .filter(|&&id| {
-                    !is_metadata_field(id)
-                        || (id == RESERVED_FIELD_ID_POS && needs_row_number_column)
-                        || (id == RESERVED_FIELD_ID_ROW_ID && stored_row_id)
-                        || (id == RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER
-                            && stored_last_updated)
-                })
+                .filter(|&&id| !is_metadata_field(id))
                 .copied()
                 .collect();
 
@@ -633,13 +574,48 @@ impl ArrowReader {
         // - If file has embedded IDs: field-ID-based projection.
         // - If name mapping applied: field-ID-based projection using mapped IDs.
         // - Otherwise: position-based fallback projection.
-        let projection_mask = Self::get_arrow_projection_mask(
+        let mut projection_mask = Self::get_arrow_projection_mask(
             &project_field_ids_without_metadata,
             plan.schema,
             record_batch_reader_builder.parquet_schema(),
             record_batch_reader_builder.schema(),
             use_position_fallback,
         )?;
+
+        let physical_lineage_projection_mask =
+            if inherit_row_id || inherit_last_updated {
+                RowLineageResolution::try_new(
+                    record_batch_reader_builder.parquet_schema(),
+                    &original_arrow_schema,
+                    plan.data_file_path,
+                )?
+                .projection_mask(
+                    record_batch_reader_builder.parquet_schema(),
+                    inherit_row_id,
+                    inherit_last_updated,
+                    plan.data_file_path,
+                )?
+            } else {
+                None
+            };
+
+        // A metadata-only projection normally maps to "read all" so a bare
+        // COUNT(*) still has a row source. `_pos` and a physically stored
+        // lineage column provide that row source independently, so avoid
+        // reading the data columns in those projections.
+        if project_field_ids_without_metadata.is_empty()
+            && (needs_row_number_column || physical_lineage_projection_mask.is_some())
+        {
+            projection_mask = ProjectionMask::none(
+                record_batch_reader_builder.parquet_schema().num_columns(),
+            );
+        }
+
+        if let Some(physical_lineage_projection_mask) =
+            physical_lineage_projection_mask
+        {
+            projection_mask.union(&physical_lineage_projection_mask);
+        }
 
         record_batch_reader_builder =
             record_batch_reader_builder.with_projection(projection_mask.clone());
@@ -659,25 +635,65 @@ impl ArrowReader {
                 .with_constant(RESERVED_FIELD_ID_FILE, file_datum);
         }
 
+        if effective_project_field_ids.contains(&RESERVED_FIELD_ID_SPEC_ID) {
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_constant(
+                    RESERVED_FIELD_ID_SPEC_ID,
+                    Datum::int(plan.partition_spec_id),
+                );
+        }
+
+        if effective_project_field_ids.contains(&RESERVED_FIELD_ID_PARTITION) {
+            let unified_type = plan.unified_partition_type.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "_partition was projected without a unified partition type",
+                )
+            })?;
+            let (partition_spec, partition_data) =
+                match (plan.partition_spec.cloned(), plan.partition.cloned()) {
+                    (Some(spec), Some(data)) => (spec, data),
+                    _ if unified_type.fields().is_empty() => {
+                        (Arc::new(PartitionSpec::unpartition_spec()), Struct::empty())
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::Unexpected,
+                            "_partition scan task is missing partition spec or data",
+                        ));
+                    }
+                };
+            let partition_constant = StructConstant::from_partition(
+                unified_type,
+                &partition_spec,
+                &partition_data,
+            )?;
+            record_batch_transformer_builder = record_batch_transformer_builder
+                .with_partition_constant(partition_constant);
+        }
+
         if needs_row_number_column {
             record_batch_transformer_builder =
                 record_batch_transformer_builder.with_position_column();
         }
 
-        if let Some(first_row_id) = first_row_id {
-            record_batch_transformer_builder =
-                record_batch_transformer_builder.with_row_id_column(first_row_id);
+        if needs_row_id_column {
+            record_batch_transformer_builder = match first_row_id {
+                Some(first_row_id) => record_batch_transformer_builder
+                    .with_row_id_column(first_row_id)?,
+                None => record_batch_transformer_builder
+                    .with_null_metadata_column(RESERVED_FIELD_ID_ROW_ID)?,
+            };
         }
 
-        if inherit_last_updated {
-            let sequence_number = plan.last_updated_sequence_number.ok_or_else(|| {
-                Error::new(
-                    ErrorKind::FeatureUnsupported,
-                    "_last_updated_sequence_number requires Iceberg format v3 row lineage",
-                )
-            })?;
-            record_batch_transformer_builder = record_batch_transformer_builder
-                .with_last_updated_sequence_number_column(sequence_number);
+        if needs_last_updated_column {
+            record_batch_transformer_builder = match fallback_data_sequence_number {
+                Some(sequence_number) => record_batch_transformer_builder
+                    .with_last_updated_sequence_number_column(sequence_number),
+                None => record_batch_transformer_builder.with_null_metadata_column(
+                    RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER,
+                )?,
+            };
         }
 
         if let (Some(partition_spec), Some(partition_data)) =
@@ -749,19 +765,6 @@ impl ArrowReader {
             }
         }
 
-        let single_position_selection = plan
-            .row_position
-            .map(|position| {
-                RowPositionSelection::try_new(
-                    record_batch_reader_builder.metadata(),
-                    position,
-                )
-            })
-            .transpose()?;
-        if let Some(position_selection) = &single_position_selection {
-            position_selection.restrict_row_groups(&mut selected_row_group_indices);
-        }
-
         let positions_selection = plan
             .row_positions
             .map(|positions| {
@@ -830,9 +833,6 @@ impl ArrowReader {
             }
         }
 
-        if let Some(position_selection) = single_position_selection {
-            position_selection.merge_row_selection(&mut row_selection);
-        }
         if let Some(position_selection) = positions_selection {
             position_selection
                 .merge_row_selection(&selected_row_group_indices, &mut row_selection);
@@ -944,6 +944,7 @@ impl ArrowReader {
         file_size_in_bytes: u64,
         parquet_read_options: ParquetReadOptions,
         scan_metrics: Option<ScanMetrics>,
+        key_metadata: Option<&[u8]>,
     ) -> Result<(ArrowFileReader<Box<dyn FileRead>>, ArrowReaderMetadata)> {
         let parquet_file = file_io.new_input(data_file_path)?;
         let opened_file = parquet_file.open_reader()?;
@@ -963,8 +964,8 @@ impl ArrowReader {
         };
         let parquet_file_reader = ArrowFileReader::new(metadata, reader);
 
-        let options =
-            parquet_read_options.apply_to_options(ArrowReaderOptions::default());
+        let options = parquet_read_options
+            .apply_to_options(Self::build_arrow_reader_options(key_metadata)?);
         let metadata_options = options.metadata_options().clone();
         let decryption_properties = options.file_decryption_properties().cloned();
         let parquet_metadata = parquet_read_options
@@ -988,5 +989,33 @@ impl ArrowReader {
                 })?;
 
         Ok((parquet_file_reader, arrow_metadata))
+    }
+
+    /// Builds `ArrowReaderOptions`, adding `FileDecryptionProperties` when
+    /// key metadata is present for Parquet Modular Encryption.
+    fn build_arrow_reader_options(
+        key_metadata: Option<&[u8]>,
+    ) -> Result<ArrowReaderOptions> {
+        match key_metadata {
+            Some(km) => {
+                let standard_key_metadata = StandardKeyMetadata::decode(km)?;
+                let mut builder = FileDecryptionProperties::builder(
+                    standard_key_metadata.encryption_key().as_bytes().to_vec(),
+                );
+                if let Some(aad) = standard_key_metadata.aad_prefix() {
+                    builder = builder.with_aad_prefix(aad.to_vec());
+                }
+                let decryption_properties = builder.build().map_err(|e| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "Failed to build Parquet file decryption properties",
+                    )
+                    .with_source(e)
+                })?;
+                Ok(ArrowReaderOptions::new()
+                    .with_file_decryption_properties(decryption_properties))
+            }
+            None => Ok(ArrowReaderOptions::default()),
+        }
     }
 }

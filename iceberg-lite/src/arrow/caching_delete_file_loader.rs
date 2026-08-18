@@ -16,7 +16,6 @@
 // under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::ops::Not;
 use std::sync::Arc;
 
 use arrow_array::downcast_dictionary_array;
@@ -38,7 +37,8 @@ use crate::scan::{ArrowRecordBatchIterator, FileScanTaskDeleteFile};
 use crate::spec::{
     DataContentType, DataFileFormat, Datum, ListType, MapType, NestedField,
     NestedFieldRef, PartnerAccessor, PrimitiveType, Schema, SchemaRef,
-    SchemaWithPartnerVisitor, StructType, Type, visit_schema_with_partner,
+    SchemaWithPartnerVisitor, StructType, Type, VariantType,
+    visit_schema_with_partner,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -124,12 +124,16 @@ impl CachingDeleteFileLoader {
     fn load_positional_delete(&self, task: &FileScanTaskDeleteFile) -> Result<()> {
         let file_path = task.file_path.clone();
         let file_size_in_bytes = task.file_size_in_bytes;
+        let key_metadata = task.key_metadata.as_deref();
         let loader = self.basic_delete_file_loader.clone();
         let key = DeleteFileLoadKey::from_position_delete(task);
 
         self.delete_filter.load_pos_del_file(key, || {
-            let iterator =
-                loader.parquet_to_batch_iterator(&file_path, file_size_in_bytes)?;
+            let iterator = loader.parquet_to_batch_iterator(
+                &file_path,
+                file_size_in_bytes,
+                key_metadata,
+            )?;
             Self::parse_positional_deletes_record_batch_iterator(iterator)
         })
     }
@@ -165,11 +169,15 @@ impl CachingDeleteFileLoader {
         let equality_ids_vec = task.equality_ids.clone().unwrap_or_default();
         let equality_ids: HashSet<i32> = HashSet::from_iter(equality_ids_vec.clone());
         let file_size_in_bytes = task.file_size_in_bytes;
+        let key_metadata = task.key_metadata.as_deref();
         let loader = self.basic_delete_file_loader.clone();
 
         self.delete_filter.load_eq_del_file(&file_path, || {
-            let raw_iterator =
-                loader.parquet_to_batch_iterator(&file_path, file_size_in_bytes)?;
+            let raw_iterator = loader.parquet_to_batch_iterator(
+                &file_path,
+                file_size_in_bytes,
+                key_metadata,
+            )?;
             let evolved_iterator = BasicDeleteFileLoader::evolve_schema(
                 raw_iterator,
                 schema,
@@ -321,6 +329,15 @@ impl CachingDeleteFileLoader {
         iterator: ArrowRecordBatchIterator,
         equality_ids: HashSet<i32>,
     ) -> Result<Predicate> {
+        // Performance limitation: equality deletes are represented as one predicate subtree
+        // per delete row. For D delete rows and K equality fields, constructing and retaining
+        // this expression requires O(D * K) predicate nodes. Applying it to R data rows then
+        // evaluates those D subtrees for every row, making scan work O(D * K * R), or O(D * R)
+        // when K is treated as fixed. The balanced combination below limits expression depth
+        // and avoids stack overflow, but does not reduce the number of comparisons. Scaling this
+        // path requires replacing the predicate tree with a schema-aware membership index keyed
+        // by the equality-field tuple; micro-optimizing or rebalancing the tree cannot change the
+        // asymptotic cost.
         let mut row_predicates = Vec::new();
         let mut batch_schema_iceberg: Option<Schema> = None;
         let accessor = EqDelRecordBatchPartnerAccessor;
@@ -357,23 +374,30 @@ impl CachingDeleteFileLoader {
                 continue;
             }
 
-            // Process the collected columns in lockstep
+            // Build the predicate that keeps rows not matched by this delete row:
+            // nullable non-null values use `col IS NULL OR col != value`, while
+            // a null delete value uses `col IS NOT NULL`.
             #[allow(clippy::len_zero)]
             while datum_columns_with_names[0].0.len() > 0 {
-                let mut row_predicate = AlwaysTrue;
+                let mut row_keep_predicate = Predicate::AlwaysFalse;
                 for &mut (ref mut column, ref field_name) in
                     &mut datum_columns_with_names
                 {
                     if let Some(item) = column.next() {
-                        let cell_predicate = if let Some(datum) = item? {
-                            Reference::new(field_name.clone()).equal_to(datum.clone())
+                        let reference = Reference::new(field_name.clone());
+                        let cell_keep_predicate = if let Some(datum) = item? {
+                            reference
+                                .clone()
+                                .is_null()
+                                .or(reference.not_equal_to(datum.clone()))
                         } else {
-                            Reference::new(field_name.clone()).is_null()
+                            reference.is_not_null()
                         };
-                        row_predicate = row_predicate.and(cell_predicate)
+                        row_keep_predicate =
+                            row_keep_predicate.or(cell_keep_predicate);
                     }
                 }
-                row_predicates.push(row_predicate.not().rewrite_not());
+                row_predicates.push(row_keep_predicate);
             }
         }
 
@@ -521,6 +545,10 @@ impl SchemaWithPartnerVisitor<ArrayRef> for EqDelColumnProcessor<'_> {
         _primitive: &PrimitiveType,
         _partner: &ArrayRef,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    fn variant(&mut self, _variant: &VariantType, _partner: &ArrayRef) -> Result<()> {
         Ok(())
     }
 }
@@ -706,7 +734,7 @@ mod tests {
 
         let basic_delete_file_loader = BasicDeleteFileLoader::new(file_io.clone());
         let record_batch_iterator = basic_delete_file_loader
-            .parquet_to_batch_iterator(&eq_delete_file_path, 0)
+            .parquet_to_batch_iterator(&eq_delete_file_path, 0, None)
             .expect("could not get batch iterator");
 
         let eq_ids = HashSet::from_iter(vec![2, 3, 4, 6, 8]);
@@ -719,7 +747,7 @@ mod tests {
             .expect("error parsing batch iterator");
         println!("{parsed_eq_delete}");
 
-        let expected = "(((((y != 1) OR (z != 100)) OR (a != \"HELP\")) OR (sa != 4)) OR (b != 62696E6172795F64617461)) AND (((((y != 2) OR (z IS NOT NULL)) OR (a IS NOT NULL)) OR (sa != 5)) OR (b IS NOT NULL))".to_string();
+        let expected = "((((((y IS NULL) OR (y != 1)) OR ((z IS NULL) OR (z != 100))) OR ((a IS NULL) OR (a != \"HELP\"))) OR ((sa IS NULL) OR (sa != 4))) OR ((b IS NULL) OR (b != 62696E6172795F64617461))) AND ((((((y IS NULL) OR (y != 2)) OR (z IS NOT NULL)) OR (a IS NOT NULL)) OR ((sa IS NULL) OR (sa != 5))) OR (b IS NOT NULL))".to_string();
 
         assert_eq!(parsed_eq_delete.to_string(), expected);
     }
@@ -914,7 +942,7 @@ mod tests {
         let basic_delete_file_loader = BasicDeleteFileLoader::new(file_io.clone());
 
         let batch_iterator = basic_delete_file_loader
-            .parquet_to_batch_iterator(&delete_file_path, 0)
+            .parquet_to_batch_iterator(&delete_file_path, 0, None)
             .unwrap();
 
         // Only evolve the equality_ids columns (field 2), not all table columns
@@ -1031,6 +1059,7 @@ mod tests {
             content_offset: None,
             content_size_in_bytes: None,
             record_count: 0,
+            key_metadata: None,
         };
 
         let eq_del = FileScanTaskDeleteFile {
@@ -1044,6 +1073,7 @@ mod tests {
             content_offset: None,
             content_size_in_bytes: None,
             record_count: 0,
+            key_metadata: None,
         };
 
         let file_scan_task = FileScanTask {
@@ -1052,7 +1082,7 @@ mod tests {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!(
                 "{}/data-1.parquet",
                 table_location.to_str().unwrap()
@@ -1065,8 +1095,10 @@ mod tests {
             deletes: vec![pos_del, eq_del],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         };
 
         // Load the deletes - should handle both types without error
@@ -1130,6 +1162,7 @@ mod tests {
                 content_offset: file.content_offset(),
                 content_size_in_bytes: file.content_size_in_bytes(),
                 record_count: file.record_count(),
+                key_metadata: file.key_metadata().map(Box::from),
             })
             .collect();
         let task = FileScanTask {
@@ -1138,7 +1171,7 @@ mod tests {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: "data-a.parquet".to_owned(),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1148,8 +1181,10 @@ mod tests {
             deletes,
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: true,
+            key_metadata: None,
         };
 
         let delete_filter = CachingDeleteFileLoader::new(file_io, 10)
@@ -1200,7 +1235,7 @@ mod tests {
 
         let basic_delete_file_loader = BasicDeleteFileLoader::new(file_io.clone());
         let record_batch_iterator = basic_delete_file_loader
-            .parquet_to_batch_iterator(&path, 0)
+            .parquet_to_batch_iterator(&path, 0, None)
             .expect("could not get batch iterator");
 
         let eq_ids = HashSet::from_iter(vec![2]);

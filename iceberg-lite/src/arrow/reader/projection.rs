@@ -80,6 +80,11 @@ impl ArrowReader {
                 Self::include_leaf_field_id(&map_type.key_field, field_ids);
                 Self::include_leaf_field_id(&map_type.value_field, field_ids);
             }
+            // Variant projection is rejected earlier (in `get_arrow_projection_mask`); this
+            // arm only keeps the match exhaustive. Treat it as a leaf, like a primitive.
+            Type::Variant(_) => {
+                field_ids.push(field.id);
+            }
         }
     }
 
@@ -122,6 +127,19 @@ impl ArrowReader {
             return Ok(ProjectionMask::all());
         }
 
+        // Reading variant columns is not supported yet (see #2188 follow-ups): reject any
+        // projection that touches a variant, rather than returning a partial/incorrect batch.
+        for field_id in field_ids {
+            if let Some(field) = iceberg_schema_of_task.field_by_id(*field_id)
+                && Self::type_contains_variant(&field.field_type)
+            {
+                return Err(Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    "Reading variant columns is not supported yet",
+                ));
+            }
+        }
+
         if use_fallback {
             // Position-based projection necessary because file lacks embedded field IDs
             Self::get_arrow_projection_mask_fallback(field_ids, parquet_schema)
@@ -147,6 +165,25 @@ impl ArrowReader {
         }
     }
 
+    /// Whether `field_type` is, or transitively contains, a variant type.
+    fn type_contains_variant(field_type: &Type) -> bool {
+        match field_type {
+            Type::Variant(_) => true,
+            Type::Struct(s) => s
+                .fields()
+                .iter()
+                .any(|field| Self::type_contains_variant(&field.field_type)),
+            Type::List(list) => {
+                Self::type_contains_variant(&list.element_field.field_type)
+            }
+            Type::Map(map) => {
+                Self::type_contains_variant(&map.key_field.field_type)
+                    || Self::type_contains_variant(&map.value_field.field_type)
+            }
+            Type::Primitive(_) => false,
+        }
+    }
+
     /// Standard projection using embedded field IDs from Parquet metadata.
     /// For iceberg-java compatibility with ParquetSchemaUtil.pruneColumns().
     fn get_arrow_projection_mask_with_field_ids(
@@ -161,6 +198,9 @@ impl ArrowReader {
     ) -> Result<ProjectionMask> {
         let mut column_map = HashMap::new();
         let fields = arrow_schema.fields();
+        // HashSet for O(1) membership checks instead of O(n) slice scans.
+        let leaf_field_id_set: HashSet<i32> =
+            leaf_field_ids.iter().copied().collect();
 
         // Pre-project only the fields that have been selected, possibly avoiding converting
         // some Arrow types that are not yet supported.
@@ -172,7 +212,7 @@ impl ArrowReader {
                     .and_then(|field_id| i32::from_str(field_id).ok())
                     .is_some_and(|field_id| {
                         projected_fields.insert((*f).clone(), field_id);
-                        leaf_field_ids.contains(&field_id)
+                        leaf_field_id_set.contains(&field_id)
                     })
             }),
             arrow_schema.metadata().clone(),
@@ -252,8 +292,8 @@ impl ArrowReader {
 }
 
 /// Build the map of parquet field id to Parquet column index in the schema.
-/// Returns None if the Parquet file doesn't have field IDs embedded (e.g., migrated tables).
-fn build_field_id_map(
+/// Returns `None` unless every Parquet leaf has an embedded field ID.
+pub(super) fn build_field_id_map(
     parquet_schema: &SchemaDescriptor,
 ) -> Result<Option<HashMap<i32, usize>>> {
     let mut column_map = HashMap::new();
@@ -655,7 +695,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: file_path,
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -665,8 +705,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: Some(name_mapping),
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -759,7 +801,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/old_file.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -769,8 +811,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -871,7 +915,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -881,8 +925,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -991,7 +1037,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1001,8 +1047,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -1095,7 +1143,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1105,8 +1153,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -1211,7 +1261,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1221,8 +1271,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -1352,7 +1404,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1362,8 +1414,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -1468,7 +1522,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1478,8 +1532,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
@@ -1596,7 +1652,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/1.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1606,8 +1662,10 @@ message schema {
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         // Should no longer panic
@@ -1749,7 +1807,7 @@ message schema {
             length: 0,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_path: format!("{table_location}/data.parquet"),
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
@@ -1759,8 +1817,10 @@ message schema {
             deletes: vec![],
             partition: Some(partition_data),
             partition_spec: Some(partition_spec),
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         }];
 
         let result = reader
