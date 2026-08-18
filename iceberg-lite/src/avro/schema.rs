@@ -28,7 +28,7 @@ use serde_json::{Number, Value};
 
 use crate::spec::{
     ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, Schema,
-    SchemaVisitor, StructType, Type, visit_schema,
+    SchemaVisitor, StructType, Type, VariantType, visit_schema,
 };
 use crate::{Error, ErrorKind, Result, ensure_data_valid};
 
@@ -250,6 +250,13 @@ impl SchemaVisitor for SchemaToAvroSchema {
             }
         };
         Ok(Either::Left(avro_schema))
+    }
+
+    fn variant(&mut self, _v: &VariantType) -> Result<AvroSchemaOrField> {
+        Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            "Converting a variant type to an Avro schema is not supported yet",
+        ))
     }
 }
 
@@ -1312,5 +1319,19 @@ mod tests {
             iceberg_type,
             converter.primitive(&avro_schema).unwrap().unwrap()
         );
+    }
+
+    #[test]
+    fn test_variant_to_avro_schema_is_unsupported() {
+        // Converting a variant to an Avro schema is not supported yet; it must error rather
+        // than emit an incorrect schema.
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "v", Type::Variant(VariantType)).into(),
+            ])
+            .build()
+            .unwrap();
+        let err = schema_to_avro_schema("t", &schema).unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::FeatureUnsupported, "{err}");
     }
 }

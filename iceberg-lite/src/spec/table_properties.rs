@@ -20,6 +20,7 @@ use std::fmt::Display;
 use std::str::FromStr;
 
 use crate::compression::CompressionCodec;
+use crate::util::location::strip_trailing_slash;
 use crate::{Error, ErrorKind, Result};
 
 /// Isolation level governing Iceberg row-delta conflict validation.
@@ -86,6 +87,28 @@ where
     })
 }
 
+/// Parse an optional property, returning `None` when the key is absent and an
+/// error when the value is present but fails to parse.
+fn parse_optional_property<T: FromStr>(
+    properties: &HashMap<String, String>,
+    key: &str,
+) -> Result<Option<T>>
+where
+    <T as FromStr>::Err: Display,
+{
+    properties
+        .get(key)
+        .map(|value| {
+            value.parse::<T>().map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Invalid value for {key}: {e}"),
+                )
+            })
+        })
+        .transpose()
+}
+
 /// Parse compression codec for metadata files from table properties.
 pub(crate) fn parse_metadata_file_compression(
     properties: &HashMap<String, String>,
@@ -126,6 +149,79 @@ pub(crate) fn parse_metadata_file_compression(
     }
 }
 
+/// Parse the Parquet data-file compression codec (`write.parquet.compression-codec`)
+/// and fold in the compression level (`write.parquet.compression-level`) for the
+/// codecs that accept one (`zstd`, `gzip`, `brotli`).
+fn parse_parquet_compression(
+    properties: &HashMap<String, String>,
+) -> Result<CompressionCodec> {
+    let value = properties
+        .get(TableProperties::PROPERTY_PARQUET_COMPRESSION_CODEC)
+        .map(|s| s.as_str())
+        .unwrap_or(TableProperties::PROPERTY_PARQUET_COMPRESSION_CODEC_DEFAULT);
+
+    let codec: CompressionCodec = serde_json::from_value(serde_json::Value::String(
+        value.to_lowercase(),
+    ))
+    .map_err(|_| {
+        Error::new(
+            ErrorKind::DataInvalid,
+            format!(
+                "Invalid Parquet compression codec: {value}. Supported codecs: \
+                     uncompressed, snappy, gzip, lzo, brotli, lz4, lz4_raw, zstd"
+            ),
+        )
+    })?;
+
+    let level: Option<u8> = parse_optional_property(
+        properties,
+        TableProperties::PROPERTY_PARQUET_COMPRESSION_LEVEL,
+    )?;
+
+    Ok(match (codec, level) {
+        (CompressionCodec::Zstd(_), Some(level)) => CompressionCodec::Zstd(level),
+        (CompressionCodec::Gzip(_), Some(level)) => CompressionCodec::Gzip(level),
+        (CompressionCodec::Brotli(_), Some(level)) => CompressionCodec::Brotli(level),
+        (codec, _) => codec,
+    })
+}
+
+/// Parse boolean property case insensitively
+/// Rust standard library only accepts "true" and "false", see https://doc.rust-lang.org/std/primitive.bool.html#method.from_str
+/// Users might accidentally trigger fallback with valid configuration values such as "False" or "True"
+fn parse_property_bool(
+    properties: &HashMap<String, String>,
+    key: &str,
+    default: bool,
+) -> Result<bool> {
+    properties.get(key).map_or(Ok(default), |value| {
+        value.to_lowercase().parse::<bool>().map_err(|e| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Invalid value for {key}: {e}"),
+            )
+        })
+    })
+}
+
+fn parse_location_property(
+    properties: &HashMap<String, String>,
+    key: &str,
+) -> Result<Option<String>> {
+    properties
+        .get(key)
+        .map(|path| {
+            if path.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Invalid value for {key}: path must not be empty"),
+                ));
+            }
+            Ok(strip_trailing_slash(path).to_string())
+        })
+        .transpose()
+}
+
 /// TableProperties that contains the properties of a table.
 #[derive(Debug)]
 pub struct TableProperties {
@@ -141,6 +237,8 @@ pub struct TableProperties {
     pub write_format_default: String,
     /// The target file size for files.
     pub write_target_file_size_bytes: usize,
+    /// Base directory for metadata files.
+    pub write_metadata_path: Option<String>,
     pub metadata_previous_versions_max: usize,
     /// Minimum live manifest count before automatic merging.
     pub manifest_min_count_to_merge: usize,
@@ -160,6 +258,24 @@ pub struct TableProperties {
     pub cdc_max_chunk_size: usize,
     /// Content-defined chunking normalization level.
     pub cdc_norm_level: i32,
+    /// Compression codec and resolved level for Parquet data files.
+    pub parquet_compression_codec: CompressionCodec,
+    /// Approximate maximum Parquet row group size in bytes.
+    pub parquet_row_group_size_bytes: usize,
+    /// Approximate maximum Parquet data page size in bytes.
+    pub parquet_page_size_bytes: usize,
+    /// Maximum number of rows per Parquet data page.
+    pub parquet_page_row_limit: usize,
+    /// Approximate maximum Parquet dictionary page size in bytes.
+    pub parquet_dict_size_bytes: usize,
+    /// Base directory for data files.
+    pub write_data_location: Option<String>,
+    /// Deprecated fallback base directory for data files.
+    pub write_folder_storage_location: Option<String>,
+    /// Deprecated fallback base directory for object-storage layout.
+    pub write_object_storage_location: Option<String>,
+    /// Whether object-storage paths include partition values.
+    pub write_object_storage_partitioned_paths: bool,
     /// Whether garbage collection is enabled.
     /// When `false`, maintenance actions must not remove metadata references.
     pub gc_enabled: bool,
@@ -289,6 +405,7 @@ impl TableProperties {
     /// Default target file size
     pub const PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT: usize =
         512 * 1024 * 1024; // 512 MB
+    pub const PROPERTY_WRITE_METADATA_PATH: &str = "write.metadata.path";
     /// Minimum live manifest count before automatic merging is considered.
     pub const PROPERTY_MANIFEST_MIN_COUNT_TO_MERGE: &str =
         "commit.manifest.min-count-to-merge";
@@ -330,6 +447,33 @@ impl TableProperties {
         "write.parquet.content-defined-chunking.norm-level";
     /// Default matches `parquet::file::properties::DEFAULT_CDC_NORM_LEVEL`.
     pub const PROPERTY_PARQUET_CDC_NORM_LEVEL_DEFAULT: i32 = 0;
+
+    pub const PROPERTY_PARQUET_COMPRESSION_CODEC: &str =
+        "write.parquet.compression-codec";
+    pub const PROPERTY_PARQUET_COMPRESSION_CODEC_DEFAULT: &str = "zstd";
+    pub const PROPERTY_PARQUET_COMPRESSION_LEVEL: &str =
+        "write.parquet.compression-level";
+    pub const PROPERTY_PARQUET_ROW_GROUP_SIZE_BYTES: &str =
+        "write.parquet.row-group-size-bytes";
+    pub const PROPERTY_PARQUET_ROW_GROUP_SIZE_BYTES_DEFAULT: usize =
+        128 * 1024 * 1024;
+    pub const PROPERTY_PARQUET_PAGE_SIZE_BYTES: &str =
+        "write.parquet.page-size-bytes";
+    pub const PROPERTY_PARQUET_PAGE_SIZE_BYTES_DEFAULT: usize = 1024 * 1024;
+    pub const PROPERTY_PARQUET_PAGE_ROW_LIMIT: &str = "write.parquet.page-row-limit";
+    pub const PROPERTY_PARQUET_PAGE_ROW_LIMIT_DEFAULT: usize = 20_000;
+    pub const PROPERTY_PARQUET_DICT_SIZE_BYTES: &str =
+        "write.parquet.dict-size-bytes";
+    pub const PROPERTY_PARQUET_DICT_SIZE_BYTES_DEFAULT: usize = 2 * 1024 * 1024;
+
+    pub const PROPERTY_WRITE_DATA_LOCATION: &str = "write.data.path";
+    pub const PROPERTY_WRITE_FOLDER_STORAGE_LOCATION: &str =
+        "write.folder-storage.path";
+    pub const PROPERTY_WRITE_OBJECT_STORAGE_LOCATION: &str =
+        "write.object-storage.path";
+    pub const PROPERTY_WRITE_OBJECT_STORAGE_PARTITIONED_PATHS: &str =
+        "write.object-storage.partitioned-paths";
+    pub const PROPERTY_WRITE_OBJECT_STORAGE_PARTITIONED_PATHS_DEFAULT: bool = true;
 
     /// Property key for enabling garbage collection.
     /// Defaults to `true`.
@@ -397,6 +541,10 @@ impl TryFrom<&HashMap<String, String>> for TableProperties {
                 TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES,
                 TableProperties::PROPERTY_WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT,
             )?,
+            write_metadata_path: parse_location_property(
+                props,
+                TableProperties::PROPERTY_WRITE_METADATA_PATH,
+            )?,
             metadata_previous_versions_max: parse_property(
                 props,
                 TableProperties::PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX,
@@ -442,6 +590,44 @@ impl TryFrom<&HashMap<String, String>> for TableProperties {
                 props,
                 TableProperties::PROPERTY_PARQUET_CDC_NORM_LEVEL,
                 TableProperties::PROPERTY_PARQUET_CDC_NORM_LEVEL_DEFAULT,
+            )?,
+            parquet_compression_codec: parse_parquet_compression(props)?,
+            parquet_row_group_size_bytes: parse_property(
+                props,
+                TableProperties::PROPERTY_PARQUET_ROW_GROUP_SIZE_BYTES,
+                TableProperties::PROPERTY_PARQUET_ROW_GROUP_SIZE_BYTES_DEFAULT,
+            )?,
+            parquet_page_size_bytes: parse_property(
+                props,
+                TableProperties::PROPERTY_PARQUET_PAGE_SIZE_BYTES,
+                TableProperties::PROPERTY_PARQUET_PAGE_SIZE_BYTES_DEFAULT,
+            )?,
+            parquet_page_row_limit: parse_property(
+                props,
+                TableProperties::PROPERTY_PARQUET_PAGE_ROW_LIMIT,
+                TableProperties::PROPERTY_PARQUET_PAGE_ROW_LIMIT_DEFAULT,
+            )?,
+            parquet_dict_size_bytes: parse_property(
+                props,
+                TableProperties::PROPERTY_PARQUET_DICT_SIZE_BYTES,
+                TableProperties::PROPERTY_PARQUET_DICT_SIZE_BYTES_DEFAULT,
+            )?,
+            write_data_location: parse_location_property(
+                props,
+                TableProperties::PROPERTY_WRITE_DATA_LOCATION,
+            )?,
+            write_folder_storage_location: parse_location_property(
+                props,
+                TableProperties::PROPERTY_WRITE_FOLDER_STORAGE_LOCATION,
+            )?,
+            write_object_storage_location: parse_location_property(
+                props,
+                TableProperties::PROPERTY_WRITE_OBJECT_STORAGE_LOCATION,
+            )?,
+            write_object_storage_partitioned_paths: parse_property_bool(
+                props,
+                TableProperties::PROPERTY_WRITE_OBJECT_STORAGE_PARTITIONED_PATHS,
+                TableProperties::PROPERTY_WRITE_OBJECT_STORAGE_PARTITIONED_PATHS_DEFAULT,
             )?,
             gc_enabled: parse_property(
                 props,

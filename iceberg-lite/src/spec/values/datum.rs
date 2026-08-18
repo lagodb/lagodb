@@ -1124,6 +1124,16 @@ impl Datum {
         }
     }
 
+    fn f64_to_f32(val: f64) -> Datum {
+        if val > f64::from(f32::MAX) {
+            Datum::new(PrimitiveType::Float, PrimitiveLiteral::AboveMax)
+        } else if val < f64::from(f32::MIN) {
+            Datum::new(PrimitiveType::Float, PrimitiveLiteral::BelowMin)
+        } else {
+            Datum::float(val as f32)
+        }
+    }
+
     fn decimal_from_mantissa(
         mantissa: i128,
         precision: u32,
@@ -1173,6 +1183,12 @@ impl Datum {
                     }
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Int) => {
                         Ok(Datum::i64_to_i32(*val))
+                    }
+                    (PrimitiveLiteral::Double(val), _, PrimitiveType::Float) => {
+                        Ok(Datum::f64_to_f32(val.0))
+                    }
+                    (PrimitiveLiteral::Float(val), _, PrimitiveType::Double) => {
+                        Ok(Datum::double(f64::from(val.0)))
                     }
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Timestamp) => {
                         Ok(Datum::timestamp_micros(*val))

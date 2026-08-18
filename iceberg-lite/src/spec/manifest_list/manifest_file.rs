@@ -20,9 +20,10 @@ use std::str::FromStr;
 use serde_derive::{Deserialize, Serialize};
 
 use super::ByteBuf;
+use crate::encryption::{EncryptedInputFile, StandardKeyMetadata};
 use crate::error::Result;
 use crate::io::FileIO;
-use crate::spec::Manifest;
+use crate::spec::{Manifest, ManifestEntry};
 use crate::{Error, ErrorKind};
 
 /// Entry in a manifest list.
@@ -180,7 +181,14 @@ impl ManifestFile {
     ///
     /// This method will also initialize inherited values of [`ManifestEntry`], such as `sequence_number`.
     pub fn load_manifest(&self, file_io: &FileIO) -> Result<Manifest> {
-        let avro = file_io.new_input(&self.manifest_path)?.read()?;
+        let input = file_io.new_input(&self.manifest_path)?;
+        let avro = match &self.key_metadata {
+            Some(encoded_key_metadata) => {
+                let key_metadata = StandardKeyMetadata::decode(encoded_key_metadata)?;
+                EncryptedInputFile::new(input, key_metadata).read()?
+            }
+            None => input.read()?,
+        };
 
         let (metadata, mut entries) = Manifest::try_from_avro_bytes(&avro)?;
 
@@ -189,7 +197,58 @@ impl ManifestFile {
             entry.inherit_data(self);
         }
 
+        self.assign_first_row_ids(&mut entries)?;
+
         Ok(Manifest::new(metadata, entries))
+    }
+
+    fn assign_first_row_ids(&self, entries: &mut [ManifestEntry]) -> Result<()> {
+        if self.content != ManifestContentType::Data {
+            if let Some(manifest_first_row_id) = self.first_row_id {
+                tracing::warn!(
+                    "Ignoring first_row_id {manifest_first_row_id} on delete manifest {}",
+                    self.manifest_path
+                );
+            }
+            return Ok(());
+        }
+
+        let Some(manifest_first_row_id) = self.first_row_id else {
+            for entry in entries {
+                entry.data_file.first_row_id = None;
+            }
+            return Ok(());
+        };
+
+        let mut next_row_id = i64::try_from(manifest_first_row_id).map_err(|_| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "Invalid first_row_id: {manifest_first_row_id} (exceeds i64::MAX)"
+                ),
+            )
+        })?;
+
+        for entry in entries {
+            if !entry.is_alive() || entry.data_file.first_row_id.is_some() {
+                continue;
+            }
+
+            entry.data_file.first_row_id = Some(next_row_id);
+            next_row_id = next_row_id
+                .checked_add_unsigned(entry.data_file.record_count)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "Row ID overflow assigning first_row_id in {}",
+                            self.manifest_path
+                        ),
+                    )
+                })?;
+        }
+
+        Ok(())
     }
 }
 

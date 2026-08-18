@@ -73,18 +73,17 @@ pub struct ManifestWriterBuilder {
 }
 
 impl ManifestWriterBuilder {
-    /// Create a new builder.
+    /// Create a new builder for an unencrypted manifest.
     pub fn new(
         output: OutputFile,
         snapshot_id: Option<i64>,
-        key_metadata: Option<Vec<u8>>,
         schema: SchemaRef,
         partition_spec: PartitionSpec,
     ) -> Self {
         Self {
             output: ManifestWriterOutput::Plain(output),
             snapshot_id,
-            key_metadata,
+            key_metadata: None,
             schema,
             partition_spec,
         }
@@ -94,17 +93,17 @@ impl ManifestWriterBuilder {
     pub fn new_from_encrypted(
         encrypted_output: EncryptedOutputFile,
         snapshot_id: Option<i64>,
-        key_metadata: Option<Vec<u8>>,
         schema: SchemaRef,
         partition_spec: PartitionSpec,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let key_metadata = Some(encrypted_output.key_metadata().encode()?.into_vec());
+        Ok(Self {
             output: ManifestWriterOutput::Encrypted(encrypted_output),
             snapshot_id,
             key_metadata,
             schema,
             partition_spec,
-        }
+        })
     }
 
     /// Build a [`ManifestWriter`] for format version 1.
@@ -777,7 +776,6 @@ mod tests {
         let mut writer = ManifestWriterBuilder::new(
             output_file,
             Some(3),
-            None,
             metadata.schema.clone(),
             metadata.partition_spec.clone(),
         )

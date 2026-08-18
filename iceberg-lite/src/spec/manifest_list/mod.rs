@@ -117,7 +117,8 @@ mod test {
     };
 
     fn test_key_metadata() -> StandardKeyMetadata {
-        StandardKeyMetadata::new(b"0123456789abcdef")
+        StandardKeyMetadata::try_new(b"0123456789abcdef")
+            .unwrap()
             .with_aad_prefix(b"manifest-list!!")
     }
 

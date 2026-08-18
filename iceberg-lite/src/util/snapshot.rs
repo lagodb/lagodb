@@ -15,11 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashSet;
+
 use crate::spec::{SnapshotRef, TableMetadataRef};
 
 struct Ancestors {
     next: Option<SnapshotRef>,
     get_snapshot: Box<dyn Fn(i64) -> Option<SnapshotRef> + Send>,
+    visited: HashSet<i64>,
 }
 
 impl Iterator for Ancestors {
@@ -27,6 +30,10 @@ impl Iterator for Ancestors {
 
     fn next(&mut self) -> Option<Self::Item> {
         let snapshot = self.next.take()?;
+        // corrupt metadata with a parent cycle must not hang the traversal
+        if !self.visited.insert(snapshot.snapshot_id()) {
+            return None;
+        }
         self.next = snapshot
             .parent_snapshot_id()
             .and_then(|id| (self.get_snapshot)(id));
@@ -44,10 +51,14 @@ pub fn ancestors_of(
     Ancestors {
         next: initial,
         get_snapshot: Box::new(move |id| table_metadata.snapshot_by_id(id).cloned()),
+        visited: HashSet::new(),
     }
 }
 
 /// Iterate from `latest_snapshot_id` inclusive to `oldest_snapshot_id` exclusive.
+///
+/// If `oldest_snapshot_id` is not an ancestor of `latest_snapshot_id`, the
+/// iterator yields the full chain from the latest snapshot to the root.
 pub fn ancestors_between(
     table_metadata: &TableMetadataRef,
     latest_snapshot_id: i64,

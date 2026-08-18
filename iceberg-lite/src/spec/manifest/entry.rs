@@ -148,6 +148,23 @@ impl ManifestEntry {
     pub fn data_file(&self) -> &DataFile {
         &self.data_file
     }
+
+    pub(crate) fn first_row_id(&self) -> Result<Option<u64>> {
+        self.data_file
+            .first_row_id()
+            .map(|first_row_id| {
+                u64::try_from(first_row_id).map_err(|_| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        format!(
+                            "data file {} has negative first_row_id {first_row_id}",
+                            self.file_path()
+                        ),
+                    )
+                })
+            })
+            .transpose()
+    }
 }
 
 /// Resolves file-level `first_row_id` inheritance while walking one manifest.
@@ -171,21 +188,7 @@ impl FirstRowIdInheritance {
             return Ok(None);
         }
 
-        let explicit_first_row_id = entry
-            .data_file()
-            .first_row_id()
-            .map(|first_row_id| {
-                u64::try_from(first_row_id).map_err(|_| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!(
-                            "data file {} has negative first_row_id {first_row_id}",
-                            entry.file_path()
-                        ),
-                    )
-                })
-            })
-            .transpose()?;
+        let explicit_first_row_id = entry.first_row_id()?;
         let effective_first_row_id = explicit_first_row_id.or(self.next_row_id);
 
         if entry.is_alive()

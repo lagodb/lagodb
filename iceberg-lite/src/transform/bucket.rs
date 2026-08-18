@@ -23,6 +23,8 @@ use arrow_schema::{DataType, TimeUnit};
 use super::TransformFunction;
 use crate::spec::{Datum, PrimitiveLiteral, PrimitiveType};
 
+const NANOSECONDS_PER_MICROSECOND: i64 = 1_000;
+
 #[derive(Debug)]
 pub struct Bucket {
     mod_n: u32,
@@ -146,6 +148,11 @@ impl Bucket {
     fn bucket_bytes(&self, v: &[u8]) -> i32 {
         self.bucket_n(Self::hash_bytes(v))
     }
+
+    #[inline]
+    fn nanos_to_micros(v: i64) -> i64 {
+        v.div_euclid(NANOSECONDS_PER_MICROSECOND)
+    }
 }
 
 impl TransformFunction for Bucket {
@@ -185,12 +192,12 @@ impl TransformFunction for Bucket {
                 .as_any()
                 .downcast_ref::<arrow_array::Time64NanosecondArray>()
                 .unwrap()
-                .unary(|v| self.bucket_time(v / 1000)),
+                .unary(|v| self.bucket_time(Self::nanos_to_micros(v))),
             DataType::Timestamp(TimeUnit::Nanosecond, _) => input
                 .as_any()
                 .downcast_ref::<arrow_array::TimestampNanosecondArray>()
                 .unwrap()
-                .unary(|v| self.bucket_timestamp(v / 1000)),
+                .unary(|v| self.bucket_timestamp(Self::nanos_to_micros(v))),
             DataType::Utf8 => arrow_array::Int32Array::from_iter(
                 input
                     .as_any()
@@ -260,10 +267,10 @@ impl TransformFunction for Bucket {
                 self.bucket_timestamp(*v)
             }
             (PrimitiveType::TimestampNs, PrimitiveLiteral::Long(v)) => {
-                self.bucket_timestamp(*v / 1000)
+                self.bucket_timestamp(Self::nanos_to_micros(*v))
             }
             (PrimitiveType::TimestamptzNs, PrimitiveLiteral::Long(v)) => {
-                self.bucket_timestamp(*v / 1000)
+                self.bucket_timestamp(Self::nanos_to_micros(*v))
             }
             (PrimitiveType::String, PrimitiveLiteral::String(v)) => {
                 self.bucket_str(v.as_str())

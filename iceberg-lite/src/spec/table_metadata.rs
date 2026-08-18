@@ -40,7 +40,7 @@ use super::{
     SchemaRef, SnapshotRef, SnapshotRetention, SortOrder, SortOrderRef,
     StatisticsFile, StructType, TableProperties, parse_metadata_file_compression,
 };
-use crate::catalog::MetadataLocation;
+use crate::catalog::{METADATA_FOLDER_NAME, MetadataLocation};
 use crate::compression::CompressionCodec;
 use crate::error::{Result, timestamp_ms_to_utc};
 use crate::io::FileIO;
@@ -389,6 +389,19 @@ impl TableMetadata {
         &self.properties
     }
 
+    /// Returns the configured base directory for metadata files.
+    ///
+    /// Honors `write.metadata.path`, falling back to the table's `metadata`
+    /// subdirectory when the property is absent.
+    pub fn metadata_location(&self) -> Result<String> {
+        Ok(self
+            .table_properties()?
+            .write_metadata_path
+            .unwrap_or_else(|| {
+                format!("{}/{}", self.location(), METADATA_FOLDER_NAME)
+            }))
+    }
+
     /// Returns the metadata compression codec from table properties.
     pub fn metadata_compression_codec(&self) -> Result<CompressionCodec> {
         parse_metadata_file_compression(&self.properties)
@@ -558,6 +571,7 @@ impl TableMetadata {
         // Normalize location (remove trailing slash)
         self.location = self.location.trim_end_matches('/').to_string();
         self.validate_snapshot_sequence_number()?;
+        self.validate_schema_format_compatibility()?;
         self.try_normalize_partition_spec()?;
         self.try_normalize_sort_order()?;
         Ok(self)
@@ -771,6 +785,13 @@ impl TableMetadata {
         }
 
         Ok(())
+    }
+
+    /// Validates that every type used in the current schema is supported by the
+    /// table's format version.  Delegates to [`Schema::check_format_compatibility`].
+    fn validate_schema_format_compatibility(&self) -> Result<()> {
+        self.current_schema()
+            .check_format_compatibility(self.format_version)
     }
 }
 

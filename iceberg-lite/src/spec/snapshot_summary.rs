@@ -517,24 +517,27 @@ fn update_totals(
         }
     };
 
-    let added =
-        summary
-            .additional_properties
-            .get(added_property)
-            .map_or(0, |value| {
-                value
-                    .parse::<u64>()
-                    .expect("must be parsable as it was just serialized")
-            });
-    let removed =
-        summary
-            .additional_properties
-            .get(removed_property)
-            .map_or(0, |value| {
-                value
-                    .parse::<u64>()
-                    .expect("must be parsable as it was just serialized")
-            });
+    let parse_delta = |property: &str| -> Option<u64> {
+        match summary.additional_properties.get(property) {
+            None => Some(0),
+            Some(value) => match value.parse::<u64>() {
+                Ok(value) => Some(value),
+                Err(parse_err) => {
+                    tracing::warn!(
+                        "Property '{property}' could not be parsed when computing '{total_property}': {parse_err}. \
+                         Skipping total computation.",
+                    );
+                    None
+                }
+            },
+        }
+    };
+
+    let (Some(added), Some(removed)) =
+        (parse_delta(added_property), parse_delta(removed_property))
+    else {
+        return;
+    };
 
     let Some(new_total) = previous_total
         .checked_add(added)

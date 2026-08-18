@@ -50,6 +50,11 @@ impl Struct {
     pub fn fields(&self) -> &[Option<Literal>] {
         &self.fields
     }
+
+    /// Returns the field at `index`, or `None` when the struct is shorter.
+    pub fn get(&self, index: usize) -> Option<&Option<Literal>> {
+        self.fields.get(index)
+    }
 }
 
 impl Index<usize> for Struct {

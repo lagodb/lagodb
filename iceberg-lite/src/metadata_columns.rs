@@ -225,7 +225,7 @@ static COMMIT_SNAPSHOT_ID_FIELD: Lazy<NestedFieldRef> = Lazy::new(|| {
 /// This field represents a unique long assigned for row lineage.
 static ROW_ID_FIELD: Lazy<NestedFieldRef> = Lazy::new(|| {
     Arc::new(
-        NestedField::required(
+        NestedField::optional(
             RESERVED_FIELD_ID_ROW_ID,
             RESERVED_COL_NAME_ROW_ID,
             Type::Primitive(PrimitiveType::Long),
@@ -238,7 +238,7 @@ static ROW_ID_FIELD: Lazy<NestedFieldRef> = Lazy::new(|| {
 /// This field represents the sequence number which last updated this row.
 static LAST_UPDATED_SEQUENCE_NUMBER_FIELD: Lazy<NestedFieldRef> = Lazy::new(|| {
     Arc::new(
-        NestedField::required(
+        NestedField::optional(
             RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER,
             RESERVED_COL_NAME_LAST_UPDATED_SEQUENCE_NUMBER,
             Type::Primitive(PrimitiveType::Long),
@@ -458,13 +458,13 @@ pub fn get_metadata_field_id(column_name: &str) -> Result<i32> {
     }
 }
 
-/// Checks if a field ID is a metadata field.
+/// Checks if a field ID is a projectable data-table metadata field.
 ///
 /// # Arguments
 /// * `field_id` - The field ID to check
 ///
 /// # Returns
-/// `true` if the field ID is a (currently supported) metadata field, `false` otherwise
+/// `true` if the field ID is a data-table metadata field, `false` otherwise
 pub fn is_metadata_field(field_id: i32) -> bool {
     matches!(
         field_id,
@@ -473,17 +473,12 @@ pub fn is_metadata_field(field_id: i32) -> bool {
             | RESERVED_FIELD_ID_DELETED
             | RESERVED_FIELD_ID_SPEC_ID
             | RESERVED_FIELD_ID_PARTITION
-            | RESERVED_FIELD_ID_DELETE_FILE_PATH
-            | RESERVED_FIELD_ID_DELETE_FILE_POS
-            | RESERVED_FIELD_ID_CHANGE_TYPE
-            | RESERVED_FIELD_ID_CHANGE_ORDINAL
-            | RESERVED_FIELD_ID_COMMIT_SNAPSHOT_ID
             | RESERVED_FIELD_ID_ROW_ID
             | RESERVED_FIELD_ID_LAST_UPDATED_SEQUENCE_NUMBER
     )
 }
 
-/// Checks if a column name is a metadata column.
+/// Checks if a column name is a projectable data-table metadata column.
 ///
 /// # Arguments
 /// * `column_name` - The column name to check
@@ -491,7 +486,16 @@ pub fn is_metadata_field(field_id: i32) -> bool {
 /// # Returns
 /// `true` if the column name is a metadata column, `false` otherwise
 pub fn is_metadata_column_name(column_name: &str) -> bool {
-    get_metadata_field_id(column_name).is_ok()
+    matches!(
+        column_name,
+        RESERVED_COL_NAME_FILE
+            | RESERVED_COL_NAME_POS
+            | RESERVED_COL_NAME_DELETED
+            | RESERVED_COL_NAME_SPEC_ID
+            | RESERVED_COL_NAME_PARTITION
+            | RESERVED_COL_NAME_ROW_ID
+            | RESERVED_COL_NAME_LAST_UPDATED_SEQUENCE_NUMBER
+    )
 }
 
 #[cfg(test)]
