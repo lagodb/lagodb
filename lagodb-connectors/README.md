@@ -56,21 +56,28 @@ Use `provider 's3'` for AWS S3, `provider 'gcs'` for `gs://` URIs, or
 the user mapping. When another role uses the server, grant it `USAGE` and
 create an appropriate user mapping for that role.
 
-This example deliberately names the server `pg_lakebase_s3`. When
-`storage_server` is omitted from an object-URI `COPY`, the connector selects a
-default foreign server name from the URI scheme:
+Configure the default server for each URI scheme that the database uses:
 
-| Object URI | Foreign server used |
-| --- | --- |
-| `s3://...` | `pg_lakebase_s3` |
-| `gs://...` | `pg_lakebase_gcs` |
-| `az://...` | `pg_lakebase_azure` |
+```sql
+ALTER DATABASE appdb
+SET lagodb_connectors.default_s3_server = 'pg_lakebase_s3';
+```
 
-For example, a `COPY` using an `s3://` URI without `storage_server` uses the
-foreign server named `pg_lakebase_s3`. That server must exist. If the database
-only has an S3 server named `object_store`, the `COPY` fails instead of
-selecting it automatically, even when `object_store` has `provider 's3'` or
-`provider 's3_compatible'`.
+The available settings are `lagodb_connectors.default_s3_server` for `s3://`,
+`lagodb_connectors.default_gcs_server` for `gs://`, and
+`lagodb_connectors.default_azure_server` for `az://`. They have no built-in
+server names. A database setting applies to new sessions; normal PostgreSQL
+setting precedence allows a role or the current session to override it:
+
+```sql
+ALTER ROLE analytics
+SET lagodb_connectors.default_s3_server = 'analytics_store';
+
+SET lagodb_connectors.default_s3_server = 'development_store';
+```
+
+If neither the applicable setting nor the COPY `server` option is present,
+the operation fails instead of selecting an arbitrary matching server.
 
 After selecting the server, the connector verifies that it uses
 `lakebase_fdw`, its provider matches the URI, and the URI is within its
@@ -84,9 +91,8 @@ with `s3://`, `gs://`, or `az://`. PostgreSQL continues to handle `COPY`
 through `STDIN`, `STDOUT`, a local file, or `PROGRAM`. An object-URI `COPY`
 does not create or require a foreign table.
 
-With the default `pg_lakebase_s3` server configured above, an exact object
-with a supported suffix needs no `WITH` clause. The connector infers its
-format from the suffix:
+With the S3 default configured above, an exact object with a supported suffix
+needs no `WITH` clause. The connector infers its format from the suffix:
 
 ```sql
 CREATE TABLE events (
@@ -140,8 +146,7 @@ TO 's3://analytics/exports/events-with-header.csv'
 WITH (header true);
 ```
 
-`storage_server` is the exact COPY option name for selecting a differently
-named foreign server. Use it when the server has a custom name:
+`server` overrides the scheme-specific default for one object-URI `COPY`:
 
 ```sql
 CREATE SERVER object_store
@@ -161,11 +166,11 @@ OPTIONS (
 
 COPY events
 TO 's3://analytics/exports/events.parquet'
-WITH (storage_server 'object_store');
+WITH (server 'object_store');
 ```
 
-`storage_server` applies only to object-URI `COPY`. A foreign table selects
-its server with the `SERVER` clause instead.
+`server` applies only to object-URI `COPY`. A foreign table selects its server
+with the `SERVER` clause instead.
 
 ## Foreign tables
 
@@ -237,7 +242,7 @@ COPY external_events FROM STDIN WITH (format 'csv', header true);
 
 Object-URI `COPY` depends on a foreign server and user mapping even when no
 foreign table appears in the statement. The server comes from
-`storage_server`, or from the URI scheme's default server name when that
+the COPY `server` option, or from the URI scheme's configured default when the
 option is absent.
 
 When a foreign table participates, its storage configuration is resolved

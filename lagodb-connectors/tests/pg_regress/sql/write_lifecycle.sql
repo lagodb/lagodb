@@ -255,7 +255,7 @@ COPY (
            repeat(md5(id::text), 40000 + 0 / (4 - id)) AS payload
     FROM generate_series(1, 4) AS rows(id)
 ) TO :'lifecycle_failure_copy_exact_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 \set VERBOSITY default
 \setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_copy_exact_key
 \! sh bin/object_storage_tool assert-prefix-empty
@@ -268,7 +268,7 @@ COPY (
            repeat(md5(id::text), 40000 + 0 / (4 - id)) AS payload
     FROM generate_series(1, 4) AS rows(id)
 ) TO :'lifecycle_failure_copy_prefix_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 \set VERBOSITY default
 \setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_copy_prefix_key
 \! sh bin/object_storage_tool assert-prefix-empty
@@ -284,7 +284,7 @@ OPTIONS (path :'lifecycle_abort_copy_prefix_path', format 'text');
 BEGIN;
 COPY (SELECT 1 AS id, 'abort'::text AS payload)
 TO :'lifecycle_abort_copy_prefix_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 SELECT count(*) AS copy_prefix_rows_before_rollback
 FROM lagodb_connectors_regress.lifecycle_abort_copy_prefix;
 ROLLBACK;

@@ -1,5 +1,6 @@
 //! Connector read/write configuration captured once per operation.
 
+use std::ffi::CString;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
@@ -20,6 +21,12 @@ static TARGET_FILE_SIZE_MB: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_TARGET_FILE_SIZE_MB);
 static JSON_MAX_RECORD_SIZE_MB: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_JSON_MAX_RECORD_SIZE_MB);
+static DEFAULT_S3_SERVER: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+static DEFAULT_GCS_SERVER: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+static DEFAULT_AZURE_SERVER: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
 
 pub(crate) fn init() {
     GucRegistry::define_int_guc(
@@ -42,6 +49,70 @@ pub(crate) fn init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_string_guc(
+        c"lagodb_connectors.default_s3_server",
+        c"Default foreign server for s3:// object URIs",
+        c"Used when COPY or cache invalidation does not specify a server.",
+        &DEFAULT_S3_SERVER,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"lagodb_connectors.default_gcs_server",
+        c"Default foreign server for gs:// object URIs",
+        c"Used when COPY or cache invalidation does not specify a server.",
+        &DEFAULT_GCS_SERVER,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"lagodb_connectors.default_azure_server",
+        c"Default foreign server for az:// object URIs",
+        c"Used when COPY or cache invalidation does not specify a server.",
+        &DEFAULT_AZURE_SERVER,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+}
+
+/// Scheme-specific default-server setting used by object URI operations.
+#[derive(Clone, Copy)]
+pub(crate) struct DefaultServerConfig {
+    guc_name: &'static str,
+    setting: &'static GucSetting<Option<CString>>,
+}
+
+impl DefaultServerConfig {
+    pub(crate) const fn s3() -> Self {
+        Self {
+            guc_name: "lagodb_connectors.default_s3_server",
+            setting: &DEFAULT_S3_SERVER,
+        }
+    }
+
+    pub(crate) const fn gcs() -> Self {
+        Self {
+            guc_name: "lagodb_connectors.default_gcs_server",
+            setting: &DEFAULT_GCS_SERVER,
+        }
+    }
+
+    pub(crate) const fn azure() -> Self {
+        Self {
+            guc_name: "lagodb_connectors.default_azure_server",
+            setting: &DEFAULT_AZURE_SERVER,
+        }
+    }
+
+    pub(crate) const fn guc_name(self) -> &'static str {
+        self.guc_name
+    }
+
+    pub(crate) fn server_name(self) -> Option<CString> {
+        self.setting
+            .get()
+            .filter(|server| !server.as_bytes().is_empty())
+    }
 }
 
 /// Immutable read settings captured at the start of one operation.

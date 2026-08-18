@@ -46,64 +46,64 @@ CREATE TABLE lagodb_connectors_regress.edge_empty_source (id integer);
 
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_text_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_text_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_csv_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_csv_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_json_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_json_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_avro_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_avro_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_parquet_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.edge_empty_source
 TO :'edge_empty_parquet_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.edge_empty_text_from;
 CREATE TABLE lagodb_connectors_regress.edge_empty_text_from (id integer);
 COPY lagodb_connectors_regress.edge_empty_text_from
 FROM :'edge_empty_text_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.edge_empty_csv_from;
 CREATE TABLE lagodb_connectors_regress.edge_empty_csv_from (id integer);
 COPY lagodb_connectors_regress.edge_empty_csv_from
 FROM :'edge_empty_csv_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.edge_empty_json_from;
 CREATE TABLE lagodb_connectors_regress.edge_empty_json_from (id integer);
 COPY lagodb_connectors_regress.edge_empty_json_from
 FROM :'edge_empty_json_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.edge_empty_avro_from;
 CREATE TABLE lagodb_connectors_regress.edge_empty_avro_from (id integer);
 COPY lagodb_connectors_regress.edge_empty_avro_from
 FROM :'edge_empty_avro_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.edge_empty_parquet_from;
 CREATE TABLE lagodb_connectors_regress.edge_empty_parquet_from (id integer);
 COPY lagodb_connectors_regress.edge_empty_parquet_from
 FROM :'edge_empty_parquet_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 SELECT relation, rows
 FROM (

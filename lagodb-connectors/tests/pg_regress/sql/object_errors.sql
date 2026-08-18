@@ -44,7 +44,7 @@ SELECT format('s3://%s/lagodb-connectors/corrupt/truncated.json',
 
 COPY lagodb_connectors_regress.common_source
 TO :'object_error_corrupt_json_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 \setenv OBJECT_STORAGE_KEY :object_error_corrupt_json_key
 \setenv OBJECT_STORAGE_TRUNCATE_BYTES 2
 \! sh bin/object_storage_tool truncate
@@ -55,7 +55,7 @@ SELECT lagodb.invalidate_object_cache(
 
 COPY lagodb_connectors_regress.parquet_source
 TO :'object_error_corrupt_parquet_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \setenv OBJECT_STORAGE_KEY :object_error_corrupt_parquet_key
 \setenv OBJECT_STORAGE_TRUNCATE_BYTES 8
 \! sh bin/object_storage_tool truncate
@@ -74,10 +74,10 @@ CREATE TABLE lagodb_connectors_regress.object_error_parquet_sink
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.object_error_json_sink
 FROM :'object_error_corrupt_json_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.object_error_parquet_sink
 FROM :'object_error_corrupt_parquet_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 \set VERBOSITY default
 
 -- Avro and Parquet prefix readers reject a later object with a different
@@ -87,25 +87,25 @@ COPY (
     FROM lagodb_connectors_regress.common_source
     WHERE id = 1
 ) TO :'object_error_drift_parquet_part_a'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 COPY (
     SELECT id, integer_col
     FROM lagodb_connectors_regress.common_source
     WHERE id = 2
 ) TO :'object_error_drift_parquet_part_b'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 COPY (
     SELECT id, text_col
     FROM lagodb_connectors_regress.common_source
     WHERE id = 1
 ) TO :'object_error_drift_avro_part_a'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY (
     SELECT id, integer_col
     FROM lagodb_connectors_regress.common_source
     WHERE id = 2
 ) TO :'object_error_drift_avro_part_b'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.object_error_drift_parquet (
     id integer,
@@ -130,7 +130,7 @@ SELECT count(*) FROM lagodb_connectors_regress.object_error_drift_parquet;
 SELECT count(*) FROM lagodb_connectors_regress.object_error_drift_avro;
 COPY lagodb_connectors_regress.object_error_drift_parquet_sink
 FROM :'object_error_drift_parquet_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 
 -- Provider mismatch and scope denial fail at DDL validation. Missing user

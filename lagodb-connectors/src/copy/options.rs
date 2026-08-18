@@ -13,12 +13,12 @@ use crate::format::{FormatKind, ResolvedCopyFormat};
 use crate::storage::ObjectUri;
 
 pub(crate) struct CopyCommandOptions {
-    storage_server: Option<Box<str>>,
+    server: Option<Box<str>>,
     format: ResolvedCopyFormat,
 }
 
 pub(crate) struct ResolvedCopyOptions {
-    pub(crate) storage_server: Option<Box<str>>,
+    pub(crate) server: Option<Box<str>>,
     pub(crate) format: ResolvedCopyFormat,
 }
 
@@ -40,14 +40,14 @@ impl CopyCommandOptions {
             provider.compression.as_deref(),
         )?;
         Ok(Self {
-            storage_server: provider.storage_server,
+            server: provider.server,
             format,
         })
     }
 
     pub(crate) fn into_resolved(self) -> ResolvedCopyOptions {
         ResolvedCopyOptions {
-            storage_server: self.storage_server,
+            server: self.server,
             format: self.format,
         }
     }
@@ -55,7 +55,7 @@ impl CopyCommandOptions {
 
 #[derive(Default)]
 struct ProviderOptions {
-    storage_server: Option<Box<str>>,
+    server: Option<Box<str>>,
     format: Option<FormatKind>,
     compression: Option<Box<str>>,
 }
@@ -66,26 +66,26 @@ impl ProviderOptions {
         for option in view.iter() {
             let name = option.name().to_bytes();
             match name {
-                b"storage_server" => {
-                    if options.storage_server.is_some() {
+                b"server" => {
+                    if options.server.is_some() {
                         return Err(ConnectorError::invalid_copy_option(
-                            "storage_server",
+                            "server",
                             "must not be specified more than once",
                         ));
                     }
                     let value = option.value_str().map_err(|_| {
                         ConnectorError::invalid_copy_option(
-                            "storage_server",
+                            "server",
                             "must be valid UTF-8",
                         )
                     })?;
                     if value.is_empty() {
                         return Err(ConnectorError::invalid_copy_option(
-                            "storage_server",
+                            "server",
                             "must not be empty",
                         ));
                     }
-                    options.storage_server = Some(value.into());
+                    options.server = Some(value.into());
                 }
                 b"format" => {
                     if options.format.is_some() {

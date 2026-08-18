@@ -18,7 +18,7 @@ COPY (
     FROM lagodb_connectors_regress.common_source
     ORDER BY id
 ) TO :'projection_reorder_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.scan_projection_sink;
 CREATE TABLE lagodb_connectors_regress.scan_projection_sink (
@@ -27,7 +27,7 @@ CREATE TABLE lagodb_connectors_regress.scan_projection_sink (
 );
 COPY lagodb_connectors_regress.scan_projection_sink (id, text_col)
 FROM :'projection_reorder_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.scan_reordered_sink;
 CREATE TABLE lagodb_connectors_regress.scan_reordered_sink (
@@ -41,7 +41,7 @@ COPY lagodb_connectors_regress.scan_reordered_sink (
     bool_col
 )
 FROM :'projection_reorder_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 SELECT relation, rows, digest
 FROM (

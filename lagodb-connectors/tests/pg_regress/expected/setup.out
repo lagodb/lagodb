@@ -271,75 +271,75 @@ SELECT format('s3://%s/lagodb-connectors/seed/common-exact.txt',
 \gset
 COPY lagodb_connectors_regress.common_source
 TO :'seed_text_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1
 ) TO :'seed_text_part_a'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 2
 ) TO :'seed_text_part_b'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.common_source
 TO :'seed_csv_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1
 ) TO :'seed_csv_part_a'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 2
 ) TO :'seed_csv_part_b'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.common_source
 TO :'seed_csv_header'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv', header true);
+WITH (server 'lagodb_connectors_regress_s3', format 'csv', header true);
 COPY lagodb_connectors_regress.common_source
 TO :'seed_avro_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1
 ) TO :'seed_avro_part_a'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 2
 ) TO :'seed_avro_part_b'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY lagodb_connectors_regress.json_source
 TO :'seed_json_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY (
     SELECT * FROM lagodb_connectors_regress.json_source WHERE id = 1
 ) TO :'seed_json_part_a'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY (
     SELECT * FROM lagodb_connectors_regress.json_source WHERE id = 2
 ) TO :'seed_json_part_b'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY lagodb_connectors_regress.json_source
 TO :'seed_json_compressed'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json', compression 'gzip');
+WITH (server 'lagodb_connectors_regress_s3', format 'json', compression 'gzip');
 COPY lagodb_connectors_regress.parquet_source
 TO :'seed_parquet_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 COPY (
     SELECT * FROM lagodb_connectors_regress.parquet_source WHERE id = 1
 ) TO :'seed_parquet_part_a'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 COPY (
     SELECT * FROM lagodb_connectors_regress.parquet_source WHERE id = 2
 ) TO :'seed_parquet_part_b'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 COPY lagodb_connectors_regress.stream_extra_source
 TO :'seed_extra_text_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.stream_extra_source
 TO :'seed_extra_text_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.stream_extra_source
 TO :'seed_extra_csv_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.stream_extra_source
 TO :'seed_extra_csv_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 RESET client_min_messages;

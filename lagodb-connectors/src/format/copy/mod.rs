@@ -421,7 +421,7 @@ fn postgres_options(
     format: FormatKind,
 ) -> *mut pg_sys::List {
     let options = context.statement().option_view().without_names(&[
-        b"storage_server".as_slice(),
+        b"server".as_slice(),
         b"format".as_slice(),
         b"compression".as_slice(),
     ]);

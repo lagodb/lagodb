@@ -117,6 +117,14 @@ pub(crate) enum ConnectorError {
     #[error("foreign server {server:?} does not exist")]
     ServerNotFound { server: Box<str> },
 
+    #[error(
+        "no foreign server is configured for {scheme} object URIs; set {guc} or specify server"
+    )]
+    DefaultServerNotConfigured {
+        scheme: &'static str,
+        guc: &'static str,
+    },
+
     #[error("foreign server {server:?} does not use lakebase_fdw")]
     ServerWrongFdw { server: Box<str> },
 
@@ -255,6 +263,14 @@ impl ConnectorError {
         Self::ServerNotFound {
             server: server.into(),
         }
+    }
+
+    #[inline]
+    pub(crate) const fn default_server_not_configured(
+        scheme: &'static str,
+        guc: &'static str,
+    ) -> Self {
+        Self::DefaultServerNotConfigured { scheme, guc }
     }
 
     #[inline]
@@ -426,7 +442,9 @@ impl SqlStateError for ConnectorError {
             Self::JsonIo { sqlerrcode, .. } => *sqlerrcode,
             Self::CopyStreamIo { sqlerrcode, .. } => *sqlerrcode,
             Self::Copy(error) => error.sql_error_code(),
-            Self::InvalidObjectUri { .. } | Self::ProviderMismatch { .. } => {
+            Self::InvalidObjectUri { .. }
+            | Self::ProviderMismatch { .. }
+            | Self::DefaultServerNotConfigured { .. } => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
             Self::ServerNotFound { .. } => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,

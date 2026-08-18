@@ -142,14 +142,6 @@ impl ObjectUri {
     pub(crate) fn key(&self) -> &str {
         &self.key
     }
-
-    pub(crate) fn default_server_name(&self) -> &'static str {
-        match self.scheme {
-            ObjectScheme::S3 => "pg_lakebase_s3",
-            ObjectScheme::Gcs => "pg_lakebase_gcs",
-            ObjectScheme::Azure => "pg_lakebase_azure",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

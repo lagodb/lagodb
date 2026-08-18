@@ -67,14 +67,14 @@ WHERE id = 1;
 
 COPY lagodb_connectors_regress.parquet_null_array_source
 TO :'array_null_elements_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.parquet_null_array_sink;
 CREATE TABLE lagodb_connectors_regress.parquet_null_array_sink
     (:parquet_columns);
 COPY lagodb_connectors_regress.parquet_null_array_sink
 FROM :'array_null_elements_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 SELECT bool_array[2] IS NULL AS bool_null,
        smallint_array[2] IS NULL AS smallint_null,
@@ -96,7 +96,7 @@ COPY (
     SELECT 1 AS id,
            '[0:1]={10,20}'::integer[] AS integer_array
 ) TO :'array_lower_bound_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 \setenv OBJECT_STORAGE_PREFIX :array_lower_bound_key
 \! sh bin/object_storage_tool assert-prefix-empty

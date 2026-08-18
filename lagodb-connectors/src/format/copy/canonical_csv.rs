@@ -44,8 +44,7 @@ pub(in crate::format) struct CanonicalCsvRow {
 impl CanonicalCsv {
     pub(in crate::format) const NULL: &'static [u8] = br"\N";
 
-    const CONNECTOR_OPTION_NAMES: [&[u8]; 3] =
-        [b"storage_server", b"format", b"compression"];
+    const CONNECTOR_OPTION_NAMES: [&[u8]; 3] = [b"server", b"format", b"compression"];
 
     const USER_OVERRIDE_OPTION_NAMES: [&[u8]; 10] = [
         b"delimiter",

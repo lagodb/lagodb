@@ -60,13 +60,13 @@ SELECT format('s3://%s/lagodb-connectors/codecs/plain-suffix.txt.gz',
 COPY lagodb_connectors_regress.common_source
 TO :'codec_plain_gz_path'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     compression 'none'
 );
 COPY lagodb_connectors_regress.common_source
 TO :'codec_plain_zst_path'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     compression 'none'
 );
 
@@ -76,7 +76,7 @@ CREATE TABLE lagodb_connectors_regress.codec_plain_gz
 COPY lagodb_connectors_regress.codec_plain_gz
 FROM :'codec_plain_gz_path'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     compression 'none'
 );
 
@@ -98,17 +98,17 @@ ORDER BY relation;
 -- Long compression suffix aliases participate in format/compression inference.
 COPY lagodb_connectors_regress.common_source
 TO :'codec_gzip_alias_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.common_source
 TO :'codec_zstd_alias_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_gzip_alias;
 CREATE TABLE lagodb_connectors_regress.codec_gzip_alias
     (:common_columns);
 COPY lagodb_connectors_regress.codec_gzip_alias
 FROM :'codec_gzip_alias_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 CREATE FOREIGN TABLE lagodb_connectors_regress.codec_zstd_alias
     (:common_columns)
 SERVER lagodb_connectors_regress_s3
@@ -129,11 +129,11 @@ ORDER BY relation;
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1
 ) TO :'codec_gzip_member_1_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 2
 ) TO :'codec_gzip_member_2_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 \setenv OBJECT_STORAGE_SOURCE_KEY_1 :codec_gzip_member_1_key
 \setenv OBJECT_STORAGE_SOURCE_KEY_2 :codec_gzip_member_2_key
@@ -145,7 +145,7 @@ CREATE TABLE lagodb_connectors_regress.codec_concatenated_gzip
     (:common_columns);
 COPY lagodb_connectors_regress.codec_concatenated_gzip
 FROM :'codec_gzip_concatenated_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 SELECT count(*) AS concatenated_gzip_rows,
        string_agg(id::text, ',' ORDER BY id) AS concatenated_gzip_ids
 FROM lagodb_connectors_regress.codec_concatenated_gzip;
@@ -155,16 +155,16 @@ FROM lagodb_connectors_regress.codec_concatenated_gzip;
 -- magic; truncation exercises final frame/trailer validation.
 COPY lagodb_connectors_regress.common_source
 TO :'codec_corrupt_gzip_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.common_source
 TO :'codec_corrupt_zstd_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.common_source
 TO :'codec_truncated_gzip_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.common_source
 TO :'codec_truncated_zstd_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 \setenv OBJECT_STORAGE_KEY :codec_corrupt_gzip_key
 \! sh bin/object_storage_tool corrupt
@@ -200,16 +200,16 @@ CREATE TABLE lagodb_connectors_regress.codec_error_sink
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.codec_error_sink
 FROM :'codec_corrupt_gzip_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.codec_error_sink
 FROM :'codec_corrupt_zstd_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.codec_error_sink
 FROM :'codec_truncated_gzip_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.codec_error_sink
 FROM :'codec_truncated_zstd_path'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 \set VERBOSITY default
 
 -- Raw fixtures reach PostgreSQL's CSV framing and field-count validation
@@ -242,10 +242,10 @@ OPTIONS (path :'codec_malformed_width_path', format 'csv');
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.codec_csv_sink
 FROM :'codec_malformed_framing_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.codec_csv_sink
 FROM :'codec_malformed_width_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 SELECT count(*) FROM lagodb_connectors_regress.codec_csv_framing;
 SELECT count(*) FROM lagodb_connectors_regress.codec_csv_width;
 \set VERBOSITY default

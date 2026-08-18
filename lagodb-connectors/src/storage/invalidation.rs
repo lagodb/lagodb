@@ -9,10 +9,10 @@ use super::{ObjectUri, ResolvedStorageLocation};
 
 fn invalidate(
     object_uri: &str,
-    storage_server: Option<&str>,
+    server: Option<&str>,
 ) -> Result<bool, ConnectorError> {
     let object = ObjectUri::parse(object_uri)?;
-    let location = ResolvedStorageLocation::resolve(object, storage_server)?;
+    let location = ResolvedStorageLocation::resolve(object, server)?;
     let object = location.acquire_object_access_from_pg_gucs()?;
     object.invalidate_cache().map_err(ConnectorError::from)
 }
@@ -31,9 +31,9 @@ mod lagodb {
     #[pg_extern]
     fn invalidate_object_cache(
         object_uri: &str,
-        storage_server: default!(Option<String>, "NULL"),
+        server: default!(Option<String>, "NULL"),
     ) -> bool {
-        super::invalidate(object_uri, storage_server.as_deref())
+        super::invalidate(object_uri, server.as_deref())
             .unwrap_or_else(|error| PgReportError::from_domain_error(error).report())
     }
 }

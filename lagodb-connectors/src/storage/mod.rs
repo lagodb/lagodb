@@ -13,7 +13,7 @@ pub(crate) use location::ObjectLocationKind;
 pub(crate) use object_input::{ObjectFiles, ObjectInput};
 pub(crate) use object_output::{AllocatedObject, ObjectFileSuffix, ObjectOutput};
 pub(crate) use upload::{StagedObjectUpload, StagedObjectWriter};
-pub(crate) use uri::{ObjectUri, StorageScope};
+pub(crate) use uri::{ObjectScheme, ObjectUri, StorageScope};
 
 use std::ffi::{CStr, CString};
 
@@ -23,6 +23,7 @@ use pg_lakebase_core::storage::foreign::{
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
+use crate::gucs::DefaultServerConfig;
 
 pub(crate) struct ResolvedStorageLocation {
     server_oid: pg_sys::Oid,
@@ -35,19 +36,33 @@ impl ResolvedStorageLocation {
         object: ObjectUri,
         explicit_server: Option<&str>,
     ) -> Result<Self, ConnectorError> {
-        let server_name = explicit_server
-            .map(str::to_owned)
-            .unwrap_or_else(|| object.default_server_name().to_owned());
-        let server_name_c = CString::new(server_name.as_bytes()).map_err(|_| {
-            ConnectorError::invalid_option(
-                "storage_server",
-                "must not contain a NUL byte",
-            )
-        })?;
+        let server_name = match explicit_server {
+            Some(server) => CString::new(server.as_bytes()).map_err(|_| {
+                ConnectorError::invalid_copy_option(
+                    "server",
+                    "must not contain a NUL byte",
+                )
+            })?,
+            None => {
+                let config = match object.scheme() {
+                    ObjectScheme::S3 => DefaultServerConfig::s3(),
+                    ObjectScheme::Gcs => DefaultServerConfig::gcs(),
+                    ObjectScheme::Azure => DefaultServerConfig::azure(),
+                };
+                config.server_name().ok_or_else(|| {
+                    ConnectorError::default_server_not_configured(
+                        object.scheme().as_str(),
+                        config.guc_name(),
+                    )
+                })?
+            }
+        };
         let server_oid =
-            unsafe { pg_sys::get_foreign_server_oid(server_name_c.as_ptr(), true) };
+            unsafe { pg_sys::get_foreign_server_oid(server_name.as_ptr(), true) };
         if server_oid == pg_sys::InvalidOid {
-            return Err(ConnectorError::server_not_found(&server_name));
+            return Err(ConnectorError::server_not_found(
+                &server_name.to_string_lossy(),
+            ));
         }
 
         Self::resolve_on_server(object, server_oid, unsafe { pg_sys::GetUserId() })

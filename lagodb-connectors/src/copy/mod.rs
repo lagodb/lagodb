@@ -84,10 +84,8 @@ impl ConnectorCopyConsumer {
     ) -> Result<CopyCompletion, CopyError> {
         let parse_state = context.parse_state();
         let preparation = context.prepare_from(&parse_state)?;
-        let location = ResolvedStorageLocation::resolve(
-            object,
-            options.storage_server.as_deref(),
-        )?;
+        let location =
+            ResolvedStorageLocation::resolve(object, options.server.as_deref())?;
         let mut source = options.format.open_source(&location, || {
             preparation.column_layout(context.statement())
         })?;
@@ -114,10 +112,8 @@ impl ConnectorCopyConsumer {
     ) -> Result<CopyCompletion, CopyError> {
         let parse_state = context.parse_state();
         let preparation = context.prepare_to(&parse_state)?;
-        let location = ResolvedStorageLocation::resolve(
-            object,
-            options.storage_server.as_deref(),
-        )?;
+        let location =
+            ResolvedStorageLocation::resolve(object, options.server.as_deref())?;
 
         let mut destination = options.format.open_destination(&location)?;
         let pg_options = destination.postgres_options(context);

@@ -47,17 +47,17 @@ SELECT format('s3://%s/lagodb-connectors/copy/text/exact.txt',
 -- Text: scalar types, NULLs, escaping, exact COPY TO/FROM, and prefix COPY TO.
 COPY lagodb_connectors_regress.common_source
 TO :'copy_text_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.common_source
 TO :'copy_text_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_text_from;
 CREATE TABLE lagodb_connectors_regress.copy_text_from
     (:common_columns);
 COPY lagodb_connectors_regress.copy_text_from
 FROM :'copy_text_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 SELECT 'common_source' AS relation,
        count(*) AS rows,
@@ -72,13 +72,13 @@ ORDER BY relation;
 
 COPY lagodb_connectors_regress.common_source
 TO :'copy_text_alias'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_text_alias_from;
 CREATE TABLE lagodb_connectors_regress.copy_text_alias_from
     (:common_columns);
 COPY lagodb_connectors_regress.copy_text_alias_from
 FROM :'copy_text_alias'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 SELECT count(*) AS text_alias_rows,
        md5(string_agg(row_to_json(source)::text, E'\n' ORDER BY source.id))
        AS text_alias_digest
@@ -87,17 +87,17 @@ FROM lagodb_connectors_regress.copy_text_alias_from AS source;
 -- CSV: exact/prefix paths, header handling, and PostgreSQL CSV options.
 COPY lagodb_connectors_regress.common_source
 TO :'copy_csv_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.common_source
 TO :'copy_csv_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.common_source
 TO :'copy_csv_header'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv', header true);
+WITH (server 'lagodb_connectors_regress_s3', format 'csv', header true);
 COPY lagodb_connectors_regress.common_source
 TO :'copy_csv_custom'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'csv',
     delimiter ';',
     null '<NULL>',
@@ -107,7 +107,7 @@ WITH (
 COPY lagodb_connectors_regress.common_source
 TO :'copy_csv_compressed'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'csv',
     compression 'gzip'
 );
@@ -117,14 +117,14 @@ CREATE TABLE lagodb_connectors_regress.copy_csv_from
     (:common_columns);
 COPY lagodb_connectors_regress.copy_csv_from
 FROM :'copy_csv_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_csv_header_from;
 CREATE TABLE lagodb_connectors_regress.copy_csv_header_from
     (:common_columns);
 COPY lagodb_connectors_regress.copy_csv_header_from
 FROM :'copy_csv_header'
-WITH (storage_server 'lagodb_connectors_regress_s3', header true);
+WITH (server 'lagodb_connectors_regress_s3', header true);
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_csv_custom_from;
 CREATE TABLE lagodb_connectors_regress.copy_csv_custom_from
@@ -132,7 +132,7 @@ CREATE TABLE lagodb_connectors_regress.copy_csv_custom_from
 COPY lagodb_connectors_regress.copy_csv_custom_from
 FROM :'copy_csv_custom'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     delimiter ';',
     null '<NULL>',
     quote '"',
@@ -144,7 +144,7 @@ CREATE TABLE lagodb_connectors_regress.copy_csv_compressed_from
     (:common_columns);
 COPY lagodb_connectors_regress.copy_csv_compressed_from
 FROM :'copy_csv_compressed'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 SELECT relation, rows, digest
 FROM (
@@ -171,7 +171,7 @@ ORDER BY relation;
 COPY lagodb_connectors_regress.common_source
 TO :'copy_text_compressed'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'text',
     compression 'zstd'
 );
@@ -180,7 +180,7 @@ CREATE TABLE lagodb_connectors_regress.copy_text_compressed_from
     (:common_columns);
 COPY lagodb_connectors_regress.copy_text_compressed_from
 FROM :'copy_text_compressed'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 SELECT count(*) AS text_zstd_rows,
        md5(string_agg(row_to_json(source)::text, E'\n' ORDER BY source.id))
        AS text_zstd_digest
@@ -189,14 +189,14 @@ FROM lagodb_connectors_regress.copy_text_compressed_from AS source;
 -- JSON: json/jsonb values are exercised in addition to the common scalar set.
 COPY lagodb_connectors_regress.json_source
 TO :'copy_json_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.json_source
 TO :'copy_json_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY lagodb_connectors_regress.json_source
 TO :'copy_json_compressed'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'json',
     compression 'gzip'
 );
@@ -206,14 +206,14 @@ CREATE TABLE lagodb_connectors_regress.copy_json_from
     (:json_columns);
 COPY lagodb_connectors_regress.copy_json_from
 FROM :'copy_json_exact'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_json_compressed_from;
 CREATE TABLE lagodb_connectors_regress.copy_json_compressed_from
     (:json_columns);
 COPY lagodb_connectors_regress.copy_json_compressed_from
 FROM :'copy_json_compressed'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 
 SELECT relation, rows, digest
 FROM (
@@ -230,13 +230,13 @@ ORDER BY relation;
 
 COPY lagodb_connectors_regress.json_source
 TO :'copy_json_alias'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_json_alias_from;
 CREATE TABLE lagodb_connectors_regress.copy_json_alias_from
     (:json_columns);
 COPY lagodb_connectors_regress.copy_json_alias_from
 FROM :'copy_json_alias'
-WITH (storage_server 'lagodb_connectors_regress_s3');
+WITH (server 'lagodb_connectors_regress_s3');
 SELECT count(*) AS json_alias_rows,
        md5(string_agg(row_to_json(source)::text, E'\n' ORDER BY source.id))
        AS json_alias_digest
@@ -245,24 +245,24 @@ FROM lagodb_connectors_regress.copy_json_alias_from AS source;
 -- Stream formats retain PostgreSQL COPY's array and JSON datum semantics.
 COPY lagodb_connectors_regress.stream_extra_source
 TO :'copy_extra_text'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.stream_extra_source
 TO :'copy_extra_csv'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_extra_text_from;
 CREATE TABLE lagodb_connectors_regress.copy_extra_text_from
     (:stream_extra_columns);
 COPY lagodb_connectors_regress.copy_extra_text_from
 FROM :'copy_extra_text'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_extra_csv_from;
 CREATE TABLE lagodb_connectors_regress.copy_extra_csv_from
     (:stream_extra_columns);
 COPY lagodb_connectors_regress.copy_extra_csv_from
 FROM :'copy_extra_csv'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 
 SELECT relation, rows, digest
 FROM (

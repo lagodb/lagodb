@@ -62,57 +62,57 @@ COPY (
     FROM lagodb_connectors_regress.round_text_input
     ORDER BY id
 ) TO :'round_text'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY (
     SELECT *
     FROM lagodb_connectors_regress.round_csv_input
     ORDER BY id
 ) TO :'round_csv'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY (
     SELECT *
     FROM lagodb_connectors_regress.round_json_input
     ORDER BY id
 ) TO :'round_json'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY (
     SELECT *
     FROM lagodb_connectors_regress.round_avro_input
     ORDER BY id
 ) TO :'round_avro'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY (
     SELECT *
     FROM lagodb_connectors_regress.round_parquet_input
     ORDER BY id
 ) TO :'round_parquet'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 CREATE TABLE lagodb_connectors_regress.round_text_sink
     (:common_columns);
 COPY lagodb_connectors_regress.round_text_sink
 FROM :'round_text'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 CREATE TABLE lagodb_connectors_regress.round_csv_sink
     (:common_columns);
 COPY lagodb_connectors_regress.round_csv_sink
 FROM :'round_csv'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 CREATE TABLE lagodb_connectors_regress.round_json_sink
     (:json_columns);
 COPY lagodb_connectors_regress.round_json_sink
 FROM :'round_json'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 CREATE TABLE lagodb_connectors_regress.round_avro_sink
     (:common_columns);
 COPY lagodb_connectors_regress.round_avro_sink
 FROM :'round_avro'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 CREATE TABLE lagodb_connectors_regress.round_parquet_sink
     (:parquet_columns);
 COPY lagodb_connectors_regress.round_parquet_sink
 FROM :'round_parquet'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'parquet'
 );
 SELECT relation, source_rows, sink_rows, source_digest = sink_digest AS ok

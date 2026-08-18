@@ -51,20 +51,20 @@ ORDER BY row_id;
 
 COPY lagodb_connectors_regress.rollover_source
 TO :'rollover_text_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.rollover_source
 TO :'rollover_csv_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.rollover_source
 TO :'rollover_json_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY lagodb_connectors_regress.rollover_source
 TO :'rollover_avro_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY lagodb_connectors_regress.rollover_source
 TO :'rollover_parquet_path'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'parquet',
     compression 'none'
 );
@@ -106,7 +106,7 @@ CREATE TABLE lagodb_connectors_regress.rollover_parquet_copy
     (:id_payload_columns);
 COPY lagodb_connectors_regress.rollover_parquet_copy
 FROM :'rollover_parquet_path'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 SELECT relation, rows, digest
 FROM (

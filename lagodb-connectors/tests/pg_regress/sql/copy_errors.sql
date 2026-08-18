@@ -29,39 +29,44 @@ CREATE TABLE lagodb_connectors_regress.copy_error_json
 
 \set VERBOSITY sqlstate
 
+-- Object COPY has no implicit catalog-wide server selection.
+RESET lagodb_connectors.default_s3_server;
+COPY lagodb_connectors_regress.common_source
+TO 's3://invalid-bucket/lagodb-connectors/copy-errors/no-default.txt';
+
 -- Stream, JSON, and Avro COPY FROM require an exact object. Parquet prefix
 -- input is covered as a successful path by copy_native.sql.
 COPY lagodb_connectors_regress.copy_error_common
 FROM :'copy_error_text_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.copy_error_common
 FROM :'copy_error_csv_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'csv');
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.copy_error_json
 FROM :'copy_error_json_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'json');
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
 COPY lagodb_connectors_regress.copy_error_common
 FROM :'copy_error_avro_prefix'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 
 -- A missing exact object locks direct StorageError mapping at the COPY FFI
 -- boundary.
 COPY lagodb_connectors_regress.copy_error_common
 FROM :'copy_error_missing_text'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'text');
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
 
 -- Native formats reject PostgreSQL text/CSV overrides before storage access.
 COPY lagodb_connectors_regress.json_source
 TO 's3://invalid-bucket/lagodb-connectors/copy-errors/negative.json'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'json',
     delimiter ';'
 );
 COPY lagodb_connectors_regress.parquet_source
 TO 's3://invalid-bucket/lagodb-connectors/copy-errors/negative.parquet'
 WITH (
-    storage_server 'lagodb_connectors_regress_s3',
+    server 'lagodb_connectors_regress_s3',
     format 'parquet',
     header true
 );
@@ -69,10 +74,10 @@ WITH (
 -- Avro has no JSON datum type, and Parquet has JSON but not JSONB.
 COPY lagodb_connectors_regress.json_source
 TO 's3://invalid-bucket/lagodb-connectors/copy-errors/unsupported.avro'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'avro');
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY lagodb_connectors_regress.json_source
 TO 's3://invalid-bucket/lagodb-connectors/copy-errors/unsupported.parquet'
-WITH (storage_server 'lagodb_connectors_regress_s3', format 'parquet');
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
 \set VERBOSITY default
 RESET client_min_messages;
