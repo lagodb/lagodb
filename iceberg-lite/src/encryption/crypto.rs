@@ -17,51 +17,16 @@
 
 //! Core cryptographic operations for Iceberg encryption.
 
-use std::fmt;
 use std::str::FromStr;
 
+use crate::sensitive::SensitiveBytes;
+use crate::{Error, ErrorKind, Result};
 use aes_gcm::aead::generic_array::typenum::U12;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, AesGcm, Nonce};
-use zeroize::Zeroizing;
-
-use crate::{Error, ErrorKind, Result};
 
 type Aes192Gcm = AesGcm<aes_gcm::aes::Aes192, U12>;
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct SensitiveBytes(Zeroizing<Box<[u8]>>);
-
-impl SensitiveBytes {
-    pub fn new(bytes: impl Into<Box<[u8]>>) -> Self {
-        Self(Zeroizing::new(bytes.into()))
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl fmt::Debug for SensitiveBytes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{} bytes REDACTED]", self.0.len())
-    }
-}
-
-impl fmt::Display for SensitiveBytes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{} bytes REDACTED]", self.0.len())
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AesKeySize {
@@ -109,6 +74,7 @@ impl FromStr for AesKeySize {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecureKey {
     key: SensitiveBytes,
     key_size: AesKeySize,

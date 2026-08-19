@@ -18,6 +18,7 @@
 use once_cell::sync::OnceCell;
 
 use crate::Result;
+use crate::encryption::EncryptedInputFile;
 use crate::io::{FileRead, InputFile};
 use crate::puffin::blob::Blob;
 use crate::puffin::metadata::{BlobMetadata, FileMetadata};
@@ -25,33 +26,52 @@ use crate::puffin::validate_puffin_compression;
 
 /// Puffin reader
 pub struct PuffinReader {
-    input_file: InputFile,
+    file_read: Box<dyn FileRead>,
+    file_length: u64,
     file_metadata: OnceCell<FileMetadata>,
 }
 
 impl PuffinReader {
-    /// Returns a new Puffin reader
-    pub fn new(input_file: InputFile) -> Self {
+    /// Returns a new Puffin reader for an unencrypted file.
+    pub fn new(input_file: InputFile) -> Result<Self> {
+        let opened_file = input_file.open_reader()?;
+        Ok(Self::from_parts(
+            opened_file.reader,
+            opened_file.metadata.size,
+        ))
+    }
+
+    /// Returns a reader that transparently decrypts an encrypted Puffin file.
+    pub fn new_from_encrypted(input_file: EncryptedInputFile) -> Result<Self> {
+        let opened_file = input_file.open_reader()?;
+        Ok(Self::from_parts(
+            opened_file.reader,
+            opened_file.metadata.size,
+        ))
+    }
+
+    fn from_parts(file_read: Box<dyn FileRead>, file_length: u64) -> Self {
         Self {
-            input_file,
+            file_read,
+            file_length,
             file_metadata: OnceCell::new(),
         }
     }
 
     /// Returns file metadata
     pub fn file_metadata(&self) -> Result<&FileMetadata> {
-        self.file_metadata
-            .get_or_try_init(|| FileMetadata::read(&self.input_file))
+        self.file_metadata.get_or_try_init(|| {
+            FileMetadata::read_from(self.file_read.as_ref(), self.file_length)
+        })
     }
 
     /// Returns blob
     pub fn blob(&self, blob_metadata: &BlobMetadata) -> Result<Blob> {
         validate_puffin_compression(blob_metadata.compression_codec)?;
 
-        let file_read = self.input_file.reader()?;
         let start = blob_metadata.offset;
         let end = start + blob_metadata.length;
-        let bytes = file_read.read_range(start..end)?.to_vec();
+        let bytes = self.file_read.read_range(start..end)?.to_vec();
         let data = blob_metadata.compression_codec.decompress(bytes)?;
 
         Ok(Blob {
@@ -78,7 +98,7 @@ mod tests {
     #[test]
     fn test_puffin_reader_uncompressed_metric_data() {
         let input_file = java_uncompressed_metric_input_file();
-        let puffin_reader = PuffinReader::new(input_file);
+        let puffin_reader = PuffinReader::new(input_file).unwrap();
 
         let file_metadata = puffin_reader.file_metadata().unwrap().clone();
         assert_eq!(file_metadata, uncompressed_metric_file_metadata());
@@ -101,7 +121,7 @@ mod tests {
     #[test]
     fn test_puffin_reader_zstd_compressed_metric_data() {
         let input_file = java_zstd_compressed_metric_input_file();
-        let puffin_reader = PuffinReader::new(input_file);
+        let puffin_reader = PuffinReader::new(input_file).unwrap();
 
         let file_metadata = puffin_reader.file_metadata().unwrap().clone();
         assert_eq!(file_metadata, zstd_compressed_metric_file_metadata());

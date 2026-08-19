@@ -30,6 +30,7 @@ use crate::{Error, ErrorKind, Result};
 const ZSTD_DEFAULT_LEVEL: u8 = 3;
 const GZIP_DEFAULT_LEVEL: u8 = 6;
 const GZIP_MAX_LEVEL: u8 = 9;
+const BROTLI_DEFAULT_LEVEL: u8 = 1;
 
 /// Data compression formats.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
@@ -39,11 +40,17 @@ pub enum CompressionCodec {
     None,
     /// LZ4 single compression frame with content size present.
     Lz4,
+    /// LZ4 raw block compression, as used by Parquet.
+    Lz4Raw,
     /// Zstandard single compression frame with content size present.
     /// Level range is 0-22, where 0 means default compression level.
     Zstd(u8),
     /// Gzip compression. Level range is 0-9, where 0 means no compression.
     Gzip(u8),
+    /// Brotli compression. Level range is 0-11.
+    Brotli(u8),
+    /// LZO compression.
+    Lzo,
     /// Snappy compression.
     Snappy,
 }
@@ -59,13 +66,21 @@ impl CompressionCodec {
         CompressionCodec::Gzip(GZIP_DEFAULT_LEVEL)
     }
 
+    /// Returns a Brotli codec with the default compression level.
+    pub const fn brotli_default() -> Self {
+        CompressionCodec::Brotli(BROTLI_DEFAULT_LEVEL)
+    }
+
     /// Returns the codec name as used in serialization and error messages.
     pub fn name(&self) -> &'static str {
         match self {
             CompressionCodec::None => "none",
             CompressionCodec::Lz4 => "lz4",
+            CompressionCodec::Lz4Raw => "lz4_raw",
             CompressionCodec::Zstd(_) => "zstd",
             CompressionCodec::Gzip(_) => "gzip",
+            CompressionCodec::Brotli(_) => "brotli",
+            CompressionCodec::Lzo => "lzo",
             CompressionCodec::Snappy => "snappy",
         }
     }
@@ -84,6 +99,18 @@ impl CompressionCodec {
                 decoder.read_to_end(&mut decompressed)?;
                 Ok(decompressed)
             }
+            CompressionCodec::Lz4Raw => Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "LZ4_RAW decompression is not supported currently",
+            )),
+            CompressionCodec::Brotli(_) => Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Brotli decompression is not supported currently",
+            )),
+            CompressionCodec::Lzo => Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "LZO decompression is not supported currently",
+            )),
             CompressionCodec::Snappy => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 "Snappy decompression is not supported currently",
@@ -113,6 +140,18 @@ impl CompressionCodec {
                 encoder.write_all(&bytes)?;
                 Ok(encoder.finish()?)
             }
+            CompressionCodec::Lz4Raw => Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "LZ4_RAW compression is not supported currently",
+            )),
+            CompressionCodec::Brotli(_) => Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "Brotli compression is not supported currently",
+            )),
+            CompressionCodec::Lzo => Err(Error::new(
+                ErrorKind::FeatureUnsupported,
+                "LZO compression is not supported currently",
+            )),
             CompressionCodec::Snappy => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 "Snappy compression is not supported currently",
@@ -130,7 +169,10 @@ impl CompressionCodec {
             CompressionCodec::None => Ok(""),
             CompressionCodec::Gzip(_) => Ok(".gz"),
             codec @ (CompressionCodec::Lz4
+            | CompressionCodec::Lz4Raw
             | CompressionCodec::Zstd(_)
+            | CompressionCodec::Brotli(_)
+            | CompressionCodec::Lzo
             | CompressionCodec::Snappy) => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 format!("suffix not defined for {codec:?}"),
@@ -154,14 +196,27 @@ impl<'de> Deserialize<'de> for CompressionCodec {
     ) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         match s.to_lowercase().as_str() {
-            "none" => Ok(CompressionCodec::None),
+            "none" | "uncompressed" => Ok(CompressionCodec::None),
             "lz4" => Ok(CompressionCodec::Lz4),
+            "lz4_raw" => Ok(CompressionCodec::Lz4Raw),
             "zstd" => Ok(CompressionCodec::zstd_default()),
             "gzip" => Ok(CompressionCodec::gzip_default()),
+            "brotli" => Ok(CompressionCodec::brotli_default()),
+            "lzo" => Ok(CompressionCodec::Lzo),
             "snappy" => Ok(CompressionCodec::Snappy),
             other => Err(serde::de::Error::unknown_variant(
                 other,
-                &["none", "lz4", "zstd", "gzip", "snappy"],
+                &[
+                    "none",
+                    "uncompressed",
+                    "lz4",
+                    "lz4_raw",
+                    "zstd",
+                    "gzip",
+                    "brotli",
+                    "lzo",
+                    "snappy",
+                ],
             )),
         }
     }
@@ -172,8 +227,11 @@ impl fmt::Display for CompressionCodec {
         match self {
             CompressionCodec::None => write!(f, "None"),
             CompressionCodec::Lz4 => write!(f, "Lz4"),
+            CompressionCodec::Lz4Raw => write!(f, "Lz4Raw"),
             CompressionCodec::Zstd(level) => write!(f, "Zstd(level={level})"),
             CompressionCodec::Gzip(level) => write!(f, "Gzip(level={level})"),
+            CompressionCodec::Brotli(level) => write!(f, "Brotli(level={level})"),
+            CompressionCodec::Lzo => write!(f, "Lzo"),
             CompressionCodec::Snappy => write!(f, "Snappy"),
         }
     }

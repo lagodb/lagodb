@@ -23,8 +23,10 @@ use std::sync::Arc;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use itertools::Itertools;
 use parquet::arrow::ArrowWriter;
+use parquet::basic::{BrotliLevel, Compression, GzipLevel, ZstdLevel};
+use parquet::encryption::encrypt::FileEncryptionProperties;
 use parquet::file::metadata::ParquetMetaData;
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{CdcOptions, WriterProperties};
 use parquet::file::statistics::Statistics;
 
 use super::{FileWriter, FileWriterBuilder};
@@ -32,11 +34,14 @@ use crate::arrow::{
     ArrowFileReader, DEFAULT_MAP_FIELD_NAME, FieldMatchMode, NanValueCountVisitor,
     get_parquet_stat_max_as_datum, get_parquet_stat_min_as_datum,
 };
+use crate::compression::CompressionCodec;
+use crate::encryption::{EncryptionManager, StandardKeyMetadata};
 use crate::io::{FileIO, OutputFile, OutputFileWriter};
 use crate::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, Datum, ListType, Literal,
     MapType, NestedFieldRef, PartitionSpec, PrimitiveType, Schema, SchemaRef,
-    SchemaVisitor, Struct, StructType, TableMetadata, Type, visit_schema,
+    SchemaVisitor, Struct, StructType, TableMetadata, TableProperties, Type,
+    VariantType, visit_schema,
 };
 use crate::transform::create_transform_function;
 use crate::writer::{CurrentFileStatus, DataFile};
@@ -48,11 +53,16 @@ pub struct ParquetWriterBuilder {
     props: WriterProperties,
     schema: SchemaRef,
     match_mode: FieldMatchMode,
+    encryption_manager: Option<Arc<EncryptionManager>>,
 }
 
 impl ParquetWriterBuilder {
     /// Create a new `ParquetWriterBuilder`
     /// To construct the write result, the schema should contain the `PARQUET_FIELD_ID_META_KEY` metadata for each field.
+    ///
+    /// When writing into an existing Iceberg table, prefer
+    /// [`Self::from_table_properties`], which derives `WriterProperties` from
+    /// the table's `write.parquet.*` properties.
     pub fn new(props: WriterProperties, schema: SchemaRef) -> Self {
         Self::new_with_match_mode(props, schema, FieldMatchMode::Id)
     }
@@ -67,23 +77,108 @@ impl ParquetWriterBuilder {
             props,
             schema,
             match_mode,
+            encryption_manager: None,
         }
     }
+
+    /// Build a `ParquetWriterBuilder` from Iceberg table properties and a
+    /// schema, translating `write.parquet.*` settings into `WriterProperties`
+    /// instead of using parquet-rs defaults.
+    pub fn from_table_properties(
+        table_props: &TableProperties,
+        schema: SchemaRef,
+    ) -> Result<Self> {
+        let cdc = table_props.cdc_enabled.then_some(CdcOptions {
+            min_chunk_size: table_props.cdc_min_chunk_size,
+            max_chunk_size: table_props.cdc_max_chunk_size,
+            norm_level: table_props.cdc_norm_level,
+        });
+        let compression = parquet_compression(table_props.parquet_compression_codec)?;
+        let props = WriterProperties::builder()
+            .set_content_defined_chunking(cdc)
+            .set_compression(compression)
+            .set_max_row_group_bytes(Some(table_props.parquet_row_group_size_bytes))
+            .set_data_page_size_limit(table_props.parquet_page_size_bytes)
+            .set_data_page_row_count_limit(table_props.parquet_page_row_limit)
+            .set_dictionary_page_size_limit(table_props.parquet_dict_size_bytes)
+            .build();
+        Ok(Self::new_with_match_mode(props, schema, FieldMatchMode::Id))
+    }
+
+    /// Set the field match mode used to map Arrow fields to Iceberg fields.
+    ///
+    /// Defaults to [`FieldMatchMode::Id`]. Use [`FieldMatchMode::Name`] when the
+    /// incoming Arrow schema does not carry Iceberg field-id metadata.
+    pub fn with_match_mode(mut self, match_mode: FieldMatchMode) -> Self {
+        self.match_mode = match_mode;
+        self
+    }
+
+    /// Sets the manager used to generate independent Parquet file keys.
+    pub fn with_encryption_manager(
+        mut self,
+        encryption_manager: Arc<EncryptionManager>,
+    ) -> Self {
+        self.encryption_manager = Some(encryption_manager);
+        self
+    }
+}
+
+fn parquet_compression(codec: CompressionCodec) -> Result<Compression> {
+    let compression = match codec {
+        CompressionCodec::None => Compression::UNCOMPRESSED,
+        CompressionCodec::Snappy => Compression::SNAPPY,
+        CompressionCodec::Lzo => Compression::LZO,
+        CompressionCodec::Lz4 => Compression::LZ4,
+        CompressionCodec::Lz4Raw => Compression::LZ4_RAW,
+        CompressionCodec::Zstd(level) => {
+            let level = ZstdLevel::try_new(level as i32)
+                .map_err(|e| invalid_level_error("zstd", e))?;
+            Compression::ZSTD(level)
+        }
+        CompressionCodec::Gzip(level) => {
+            let level = GzipLevel::try_new(level as u32)
+                .map_err(|e| invalid_level_error("gzip", e))?;
+            Compression::GZIP(level)
+        }
+        CompressionCodec::Brotli(level) => {
+            let level = BrotliLevel::try_new(level as u32)
+                .map_err(|e| invalid_level_error("brotli", e))?;
+            Compression::BROTLI(level)
+        }
+    };
+    Ok(compression)
+}
+
+fn invalid_level_error(codec: &str, source: impl Into<anyhow::Error>) -> Error {
+    Error::new(
+        ErrorKind::DataInvalid,
+        format!("Invalid {codec} compression level"),
+    )
+    .with_source(source)
 }
 
 impl FileWriterBuilder for ParquetWriterBuilder {
     type R = ParquetWriter;
 
     fn build(&self, output_file: OutputFile) -> Result<Self::R> {
+        let key_metadata = self
+            .encryption_manager
+            .as_ref()
+            .map(|manager| manager.generate_key_metadata());
         Ok(ParquetWriter {
             schema: self.schema.clone(),
             inner_writer: None,
-            writer_properties: self.props.clone(),
+            writer_properties: resolve_writer_properties(
+                self.props.clone(),
+                key_metadata.as_ref(),
+            )?,
             current_row_num: 0,
             output_file,
             nan_value_count_visitor: NanValueCountVisitor::new_with_match_mode(
                 self.match_mode,
             ),
+            key_metadata,
         })
     }
 }
@@ -213,6 +308,13 @@ impl SchemaVisitor for IndexByParquetPathName {
 
         Ok(())
     }
+
+    fn variant(&mut self, _v: &VariantType) -> Result<Self::T> {
+        Err(Error::new(
+            ErrorKind::FeatureUnsupported,
+            "Writing variant columns to Parquet is not supported yet",
+        ))
+    }
 }
 
 /// `ParquetWriter`` is used to write arrow data into parquet file on storage.
@@ -223,6 +325,7 @@ pub struct ParquetWriter {
     writer_properties: WriterProperties,
     current_row_num: usize,
     nan_value_count_visitor: NanValueCountVisitor,
+    key_metadata: Option<StandardKeyMetadata>,
 }
 
 /// Used to aggregate min and max value of each column.
@@ -352,6 +455,7 @@ impl ParquetWriter {
                 file_path,
                 // TODO: Implement nan_value_counts here
                 HashMap::new(),
+                None,
             )?;
             builder.partition_spec_id(table_metadata.default_partition_spec_id());
             let data_file = builder.build().unwrap();
@@ -368,6 +472,7 @@ impl ParquetWriter {
         written_size: usize,
         file_path: String,
         nan_value_counts: HashMap<i32, u64>,
+        key_metadata: Option<StandardKeyMetadata>,
     ) -> Result<DataFileBuilder> {
         let index_by_parquet_path = {
             let mut visitor = IndexByParquetPathName::new();
@@ -419,6 +524,9 @@ impl ParquetWriter {
             )
         };
 
+        let key_metadata = key_metadata
+            .map(|metadata| metadata.encode().map(|encoded| encoded.into_vec()))
+            .transpose()?;
         let mut builder = DataFileBuilder::default();
         builder
             .content(DataContentType::Data)
@@ -431,6 +539,7 @@ impl ParquetWriter {
             .value_counts(value_counts)
             .null_value_counts(null_value_counts)
             .nan_value_counts(nan_value_counts)
+            .key_metadata(key_metadata)
             // # NOTE:
             // - We can ignore implementing distinct_counts due to this: https://lists.apache.org/thread/j52tsojv0x4bopxyzsp7m7bqt23n5fnd
             .lower_bounds(lower_bounds)
@@ -493,6 +602,41 @@ impl ParquetWriter {
 
         Ok(partition_struct)
     }
+}
+
+fn resolve_writer_properties(
+    writer_properties: WriterProperties,
+    key_metadata: Option<&StandardKeyMetadata>,
+) -> Result<WriterProperties> {
+    let Some(key_metadata) = key_metadata else {
+        return Ok(writer_properties);
+    };
+
+    if writer_properties.file_encryption_properties().is_some() {
+        return Err(Error::new(
+            ErrorKind::Unexpected,
+            "Parquet writer properties already contain encryption properties",
+        ));
+    }
+
+    let mut builder = FileEncryptionProperties::builder(
+        key_metadata.encryption_key().as_bytes().to_vec(),
+    );
+    if let Some(aad_prefix) = key_metadata.aad_prefix() {
+        builder = builder.with_aad_prefix(aad_prefix.to_vec());
+    }
+    let encryption = builder.build().map_err(|error| {
+        Error::new(
+            ErrorKind::Unexpected,
+            "Failed to build Parquet encryption properties",
+        )
+        .with_source(error)
+    })?;
+
+    Ok(writer_properties
+        .into_builder()
+        .with_file_encryption_properties(encryption)
+        .build())
 }
 
 impl FileWriter for ParquetWriter {
@@ -574,6 +718,7 @@ impl FileWriter for ParquetWriter {
                 written_size,
                 self.output_file.location().to_string(),
                 self.nan_value_count_visitor.nan_value_counts,
+                self.key_metadata,
             )?])
         }
     }
@@ -615,7 +760,9 @@ mod tests {
     use arrow_schema::{DataType, Field, Fields, SchemaRef as ArrowSchemaRef};
     use arrow_select::concat::concat_batches;
     use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+    use parquet::basic::{BrotliLevel, Compression, GzipLevel, ZstdLevel};
     use parquet::file::statistics::ValueStatistics;
+    use parquet::schema::types::ColumnPath;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -2499,5 +2646,230 @@ mod tests {
 
         assert_eq!(lower_bounds, HashMap::from([(0, Datum::int(i32::MIN))]));
         assert_eq!(upper_bounds, HashMap::from([(0, Datum::int(i32::MAX))]));
+    }
+
+    fn cdc_test_schema() -> SchemaRef {
+        Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::required(
+                        1,
+                        "id",
+                        Type::Primitive(PrimitiveType::Long),
+                    )
+                    .into(),
+                    NestedField::required(
+                        2,
+                        "payload",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                ])
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn table_props(entries: HashMap<String, String>) -> TableProperties {
+        TableProperties::try_from(&entries).unwrap()
+    }
+
+    #[test]
+    fn test_from_table_properties_no_cdc_by_default() {
+        let tp = table_props(HashMap::new());
+        let builder =
+            ParquetWriterBuilder::from_table_properties(&tp, cdc_test_schema())
+                .unwrap();
+        assert!(builder.props.content_defined_chunking().is_none());
+    }
+
+    #[test]
+    fn test_from_table_properties_propagate_to_writer() {
+        // `build()` must carry the translated `WriterProperties` through to the
+        // `ParquetWriter` unchanged — otherwise the `write.parquet.*` settings
+        // derived in `from_table_properties` would never reach parquet-rs.
+        //
+        // Asserting on the writer's `WriterProperties` (rather than re-reading a
+        // written file) keeps this a direct propagation check: every future
+        // `write.parquet.*` option just adds an assertion on its corresponding
+        // `WriterProperties` getter here.
+        let tp = table_props(HashMap::from([
+            (
+                TableProperties::PROPERTY_PARQUET_CDC_ENABLED.to_string(),
+                "true".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_CDC_MIN_CHUNK_SIZE.to_string(),
+                "4096".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_CDC_MAX_CHUNK_SIZE.to_string(),
+                "8192".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_CDC_NORM_LEVEL.to_string(),
+                "2".to_string(),
+            ),
+        ]));
+
+        let tmp = TempDir::new().unwrap();
+        let output = FileIO::local()
+            .new_output(format!("{}/cdc.parquet", tmp.path().to_str().unwrap()))
+            .unwrap();
+        let writer =
+            ParquetWriterBuilder::from_table_properties(&tp, cdc_test_schema())
+                .unwrap()
+                .build(output)
+                .unwrap();
+
+        let cdc = writer
+            .writer_properties
+            .content_defined_chunking()
+            .copied()
+            .expect("CDC should be enabled on the built writer");
+        assert_eq!(cdc.min_chunk_size, 4096);
+        assert_eq!(cdc.max_chunk_size, 8192);
+        assert_eq!(cdc.norm_level, 2);
+    }
+
+    #[test]
+    fn test_from_table_properties_sizing_defaults() {
+        // With no properties set, the writer must use Iceberg's defaults (which
+        // differ from parquet-rs's own defaults), not parquet-rs's.
+        let tp = table_props(HashMap::new());
+        let props =
+            ParquetWriterBuilder::from_table_properties(&tp, cdc_test_schema())
+                .unwrap()
+                .props;
+
+        assert_eq!(
+            props.max_row_group_bytes(),
+            Some(TableProperties::PROPERTY_PARQUET_ROW_GROUP_SIZE_BYTES_DEFAULT)
+        );
+        assert_eq!(
+            props.data_page_size_limit(),
+            TableProperties::PROPERTY_PARQUET_PAGE_SIZE_BYTES_DEFAULT
+        );
+        assert_eq!(
+            props.data_page_row_count_limit(),
+            TableProperties::PROPERTY_PARQUET_PAGE_ROW_LIMIT_DEFAULT
+        );
+        assert_eq!(
+            props.dictionary_page_size_limit(),
+            TableProperties::PROPERTY_PARQUET_DICT_SIZE_BYTES_DEFAULT
+        );
+        // Default codec is zstd at the Java-aligned default level (3).
+        assert_eq!(
+            props.compression(&ColumnPath::from("id")),
+            Compression::ZSTD(ZstdLevel::try_new(3).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_from_table_properties_sizing_and_compression_overrides() {
+        let tp = table_props(HashMap::from([
+            (
+                TableProperties::PROPERTY_PARQUET_ROW_GROUP_SIZE_BYTES.to_string(),
+                "1048576".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_PAGE_SIZE_BYTES.to_string(),
+                "65536".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_PAGE_ROW_LIMIT.to_string(),
+                "5000".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_DICT_SIZE_BYTES.to_string(),
+                "131072".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_COMPRESSION_CODEC.to_string(),
+                "gzip".to_string(),
+            ),
+            (
+                TableProperties::PROPERTY_PARQUET_COMPRESSION_LEVEL.to_string(),
+                "9".to_string(),
+            ),
+        ]));
+        let props =
+            ParquetWriterBuilder::from_table_properties(&tp, cdc_test_schema())
+                .unwrap()
+                .props;
+
+        assert_eq!(props.max_row_group_bytes(), Some(1048576));
+        assert_eq!(props.data_page_size_limit(), 65536);
+        assert_eq!(props.data_page_row_count_limit(), 5000);
+        assert_eq!(props.dictionary_page_size_limit(), 131072);
+        assert_eq!(
+            props.compression(&ColumnPath::from("id")),
+            Compression::GZIP(GzipLevel::try_new(9).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_from_table_properties_invalid_codec_errors() {
+        let entries = HashMap::from([(
+            TableProperties::PROPERTY_PARQUET_COMPRESSION_CODEC.to_string(),
+            "bogus".to_string(),
+        )]);
+        let err = TableProperties::try_from(&entries).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
+        assert!(err.to_string().contains("bogus"));
+    }
+
+    #[test]
+    fn test_parquet_compression_mapping() {
+        // Codecs without a level.
+        assert_eq!(
+            parquet_compression(CompressionCodec::None).unwrap(),
+            Compression::UNCOMPRESSED
+        );
+        assert_eq!(
+            parquet_compression(CompressionCodec::Snappy).unwrap(),
+            Compression::SNAPPY
+        );
+        assert_eq!(
+            parquet_compression(CompressionCodec::Lz4).unwrap(),
+            Compression::LZ4
+        );
+        assert_eq!(
+            parquet_compression(CompressionCodec::Lz4Raw).unwrap(),
+            Compression::LZ4_RAW
+        );
+        assert_eq!(
+            parquet_compression(CompressionCodec::Lzo).unwrap(),
+            Compression::LZO
+        );
+
+        // Level-carrying codecs at their defaults.
+        assert_eq!(
+            parquet_compression(CompressionCodec::zstd_default()).unwrap(),
+            Compression::ZSTD(ZstdLevel::try_new(3).unwrap())
+        );
+        assert_eq!(
+            parquet_compression(CompressionCodec::gzip_default()).unwrap(),
+            Compression::GZIP(GzipLevel::try_new(6).unwrap())
+        );
+        assert_eq!(
+            parquet_compression(CompressionCodec::brotli_default()).unwrap(),
+            Compression::BROTLI(BrotliLevel::try_new(1).unwrap())
+        );
+
+        // Explicit levels are honored.
+        assert_eq!(
+            parquet_compression(CompressionCodec::Zstd(10)).unwrap(),
+            Compression::ZSTD(ZstdLevel::try_new(10).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_parquet_compression_invalid_level() {
+        // zstd valid range is 1..=22; 99 is out of range.
+        let err = parquet_compression(CompressionCodec::Zstd(99)).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
+        assert!(err.to_string().contains("zstd"));
     }
 }

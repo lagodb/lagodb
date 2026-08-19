@@ -19,14 +19,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Result;
 use crate::compression::CompressionCodec;
-use crate::io::{OutputFile, OutputFileWriter};
+use crate::encryption::EncryptedOutputFile;
+use crate::io::{FileWrite, OutputFile};
 use crate::puffin::blob::Blob;
 use crate::puffin::metadata::{BlobMetadata, FileMetadata, Flag};
 use crate::puffin::validate_puffin_compression;
 
 /// Puffin writer
 pub struct PuffinWriter {
-    writer: OutputFileWriter,
+    writer: Box<dyn FileWrite>,
     is_header_written: bool,
     num_bytes_written: u64,
     written_blobs_metadata: Vec<BlobMetadata>,
@@ -42,6 +43,27 @@ impl PuffinWriter {
         properties: HashMap<String, String>,
         compress_footer: bool,
     ) -> Result<Self> {
+        Self::from_writer(
+            output_file.create_file_writer()?,
+            properties,
+            compress_footer,
+        )
+    }
+
+    /// Returns a writer that transparently encrypts a Puffin file.
+    pub fn new_from_encrypted(
+        output_file: &EncryptedOutputFile,
+        properties: HashMap<String, String>,
+        compress_footer: bool,
+    ) -> Result<Self> {
+        Self::from_writer(output_file.writer()?, properties, compress_footer)
+    }
+
+    fn from_writer(
+        writer: Box<dyn FileWrite>,
+        properties: HashMap<String, String>,
+        compress_footer: bool,
+    ) -> Result<Self> {
         let mut flags = HashSet::<Flag>::new();
         let footer_compression_codec = if compress_footer {
             flags.insert(Flag::FooterPayloadCompressed);
@@ -49,8 +71,6 @@ impl PuffinWriter {
         } else {
             CompressionCodec::None
         };
-
-        let writer = output_file.create_writer()?;
         Ok(Self {
             writer,
             is_header_written: false,
@@ -104,7 +124,7 @@ impl PuffinWriter {
     pub fn close(mut self) -> Result<()> {
         self.write_header_once()?;
         self.write_footer()?;
-        self.writer.finish()
+        self.writer.close()
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
@@ -199,7 +219,7 @@ mod tests {
     }
 
     fn read_all_blobs_from_puffin_file(input_file: InputFile) -> Vec<Blob> {
-        let puffin_reader = PuffinReader::new(input_file);
+        let puffin_reader = PuffinReader::new(input_file).unwrap();
         let mut blobs = Vec::new();
         let blobs_metadata = puffin_reader.file_metadata().unwrap().clone().blobs;
         for blob_metadata in blobs_metadata {

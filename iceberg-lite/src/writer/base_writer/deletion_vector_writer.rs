@@ -18,11 +18,15 @@
 //! Writer for Iceberg v3 deletion vectors.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use crate::arrow::caching_delete_file_loader::CachingDeleteFileLoader;
 use crate::arrow::delete_file_loader::BasicDeleteFileLoader;
 use crate::compression::CompressionCodec;
 use crate::delete_vector::DeleteVector;
+use crate::encryption::{
+    EncryptedInputFile, EncryptedOutputFile, EncryptionManager, StandardKeyMetadata,
+};
 use crate::io::FileIO;
 use crate::metadata_columns::RESERVED_FIELD_ID_DELETE_FILE_POS;
 use crate::puffin::{Blob, DELETION_VECTOR_V1, PuffinWriter};
@@ -87,6 +91,7 @@ pub struct ExistingPositionDeleteFile<'a> {
     content_offset: Option<i64>,
     content_size_in_bytes: Option<i64>,
     record_count: u64,
+    key_metadata: Option<&'a [u8]>,
 }
 
 impl<'a> ExistingPositionDeleteFile<'a> {
@@ -109,6 +114,7 @@ impl<'a> ExistingPositionDeleteFile<'a> {
             content_offset,
             content_size_in_bytes,
             record_count,
+            key_metadata: None,
         }
     }
 
@@ -133,7 +139,15 @@ impl<'a> ExistingPositionDeleteFile<'a> {
             data_file.content_offset(),
             data_file.content_size_in_bytes(),
             data_file.record_count(),
-        ))
+        )
+        .with_key_metadata(data_file.key_metadata()))
+    }
+
+    /// Associates the manifest's Parquet key metadata with this descriptor.
+    #[must_use]
+    pub fn with_key_metadata(mut self, key_metadata: Option<&'a [u8]>) -> Self {
+        self.key_metadata = key_metadata;
+        self
     }
 }
 
@@ -224,6 +238,7 @@ impl DeletionVectorWriteResult {
 pub struct DeletionVectorFileWriter {
     file_io: FileIO,
     output_file_path: String,
+    encryption_manager: Option<Arc<EncryptionManager>>,
     pending: BTreeMap<String, PendingDeletionVector>,
     parsed_parquet_position_deletes:
         HashMap<ExistingPositionDeleteCacheKey, HashMap<String, DeleteVector>>,
@@ -235,9 +250,20 @@ impl DeletionVectorFileWriter {
         Self {
             file_io,
             output_file_path: output_file_path.into(),
+            encryption_manager: None,
             pending: BTreeMap::new(),
             parsed_parquet_position_deletes: HashMap::new(),
         }
+    }
+
+    /// Uses the table encryption manager for the output Puffin file.
+    #[must_use]
+    pub fn with_encryption_manager(
+        mut self,
+        encryption_manager: Arc<EncryptionManager>,
+    ) -> Self {
+        self.encryption_manager = Some(encryption_manager);
+        self
     }
 
     /// Marks one row position as deleted for `target`.
@@ -355,6 +381,7 @@ impl DeletionVectorFileWriter {
         let Self {
             file_io,
             output_file_path,
+            encryption_manager,
             pending,
             parsed_parquet_position_deletes: _,
         } = self;
@@ -367,7 +394,25 @@ impl DeletionVectorFileWriter {
         }
 
         let output_file = file_io.new_output(&output_file_path)?;
-        let mut writer = PuffinWriter::new(output_file, HashMap::new(), false)?;
+        let output_key_metadata = encryption_manager
+            .as_ref()
+            .map(|manager| manager.generate_key_metadata());
+        let encoded_output_key_metadata = output_key_metadata
+            .as_ref()
+            .map(StandardKeyMetadata::encode)
+            .transpose()?;
+        let mut writer = match output_key_metadata.as_ref() {
+            Some(key_metadata) => {
+                let encrypted_output =
+                    EncryptedOutputFile::new(output_file, key_metadata.clone());
+                PuffinWriter::new_from_encrypted(
+                    &encrypted_output,
+                    HashMap::new(),
+                    false,
+                )?
+            }
+            None => PuffinWriter::new(output_file, HashMap::new(), false)?,
+        };
         let mut pending_outputs = Vec::with_capacity(pending.len());
 
         for pending in pending.into_values() {
@@ -398,6 +443,7 @@ impl DeletionVectorFileWriter {
                 cardinality,
                 blob_metadata.offset(),
                 blob_metadata.length(),
+                encoded_output_key_metadata.as_deref(),
             )?);
         }
 
@@ -454,8 +500,16 @@ impl DeletionVectorFileWriter {
             Error::new(ErrorKind::DataInvalid, "deletion vector range overflow")
         })?;
 
-        let reader = file_io.new_input(delete_file.file_path)?.reader()?;
-        let bytes = reader.read_range(offset..end)?;
+        let input = file_io.new_input(delete_file.file_path)?;
+        let bytes = match delete_file.key_metadata {
+            Some(encoded_key_metadata) => {
+                let key_metadata = StandardKeyMetadata::decode(encoded_key_metadata)?;
+                EncryptedInputFile::new(input, key_metadata)
+                    .reader()?
+                    .read_range(offset..end)?
+            }
+            None => input.reader()?.read_range(offset..end)?,
+        };
         DeleteVector::from_puffin_v1_bytes(&bytes, delete_file.record_count)
     }
 
@@ -472,6 +526,7 @@ impl DeletionVectorFileWriter {
             let iterator = loader.parquet_to_batch_iterator(
                 delete_file.file_path,
                 delete_file.file_size_in_bytes,
+                delete_file.key_metadata,
             )?;
             let deletes_by_file =
                 CachingDeleteFileLoader::parse_positional_deletes_record_batch_iterator(
@@ -584,6 +639,7 @@ impl DeletionVectorFileWriter {
         cardinality: u64,
         content_offset: u64,
         content_size_in_bytes: u64,
+        key_metadata: Option<&[u8]>,
     ) -> Result<DataFile> {
         let content_offset = i64::try_from(content_offset).map_err(|_| {
             Error::new(
@@ -608,6 +664,7 @@ impl DeletionVectorFileWriter {
             .partition_spec_id(target.partition_spec_id)
             .record_count(cardinality)
             .file_size_in_bytes(file_size_in_bytes)
+            .key_metadata(key_metadata.map(ToOwned::to_owned))
             .equality_ids(None)
             .referenced_data_file(Some(target.file_path))
             .content_offset(Some(content_offset))

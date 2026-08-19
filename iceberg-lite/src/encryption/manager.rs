@@ -28,11 +28,12 @@ use chrono::Utc;
 use moka::sync::Cache;
 use uuid::Uuid;
 
-use super::crypto::{AesGcmCipher, AesKeySize, SecureKey, SensitiveBytes};
+use super::crypto::{AesGcmCipher, AesKeySize, SecureKey};
 use super::io::EncryptedOutputFile;
 use super::key_metadata::StandardKeyMetadata;
 use super::kms::KeyManagementClient;
 use crate::io::OutputFile;
+use crate::sensitive::SensitiveBytes;
 use crate::spec::{EncryptedKey, FormatVersion, TableMetadataRef};
 use crate::{Error, ErrorKind, Result};
 
@@ -117,12 +118,15 @@ impl EncryptionManager {
         Ok(Some(Arc::new(em)))
     }
 
-    pub fn encrypt(&self, raw_output: OutputFile) -> EncryptedOutputFile {
+    /// Generates fresh key metadata for one encrypted file.
+    pub fn generate_key_metadata(&self) -> StandardKeyMetadata {
         let dek = SecureKey::generate(self.key_size);
         let aad_prefix = Self::generate_aad_prefix();
-        let metadata =
-            StandardKeyMetadata::new(dek.as_bytes()).with_aad_prefix(&aad_prefix);
-        EncryptedOutputFile::new(raw_output, metadata)
+        StandardKeyMetadata::from(dek).with_aad_prefix(&aad_prefix)
+    }
+
+    pub fn encrypt(&self, raw_output: OutputFile) -> EncryptedOutputFile {
+        EncryptedOutputFile::new(raw_output, self.generate_key_metadata())
     }
 
     pub fn encrypt_manifest_list_key_metadata(
@@ -392,7 +396,8 @@ mod tests {
     }
 
     fn sample_key_metadata() -> StandardKeyMetadata {
-        StandardKeyMetadata::new(b"0123456789abcdef")
+        StandardKeyMetadata::try_new(b"0123456789abcdef")
+            .unwrap()
             .with_aad_prefix(b"test-aad-prefix!")
     }
 

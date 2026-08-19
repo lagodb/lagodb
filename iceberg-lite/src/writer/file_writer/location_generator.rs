@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::Result;
-use crate::spec::{DataFileFormat, PartitionKey, TableMetadata};
+use crate::spec::{DataFileFormat, PartitionKey, TableMetadata, TableProperties};
+use crate::util::location::strip_trailing_slash;
 
 /// `LocationGenerator` used to generate the location of data file.
 pub trait LocationGenerator: Clone + Send + Sync + 'static {
@@ -45,9 +46,10 @@ pub trait LocationGenerator: Clone + Send + Sync + 'static {
     ) -> String;
 }
 
-const WRITE_DATA_LOCATION: &str = "write.data.path";
-const WRITE_FOLDER_STORAGE_LOCATION: &str = "write.folder-storage.path";
 const DEFAULT_DATA_DIR: &str = "/data";
+const HASH_BINARY_STRING_BITS: usize = 20;
+const ENTROPY_DIR_LENGTH: usize = 4;
+const ENTROPY_DIR_DEPTH: usize = 3;
 
 #[derive(Clone, Debug)]
 /// `DefaultLocationGenerator` used to generate the data dir location of data file.
@@ -58,17 +60,22 @@ pub struct DefaultLocationGenerator {
 
 impl DefaultLocationGenerator {
     /// Create a new `DefaultLocationGenerator`.
+    /// Resolve the base data location from table properties, falling back to `{table_location}/data`.
+    ///
+    /// Precedence follows Java Iceberg: `write.data.path` first, then the deprecated
+    /// `write.folder-storage.path` properties, and finally the default
+    /// `{table_location}/data`.
     pub fn new(table_metadata: &TableMetadata) -> Result<Self> {
-        let table_location = table_metadata.location();
-        let prop = table_metadata.properties();
-        let configured_data_location = prop
-            .get(WRITE_DATA_LOCATION)
-            .or(prop.get(WRITE_FOLDER_STORAGE_LOCATION));
-        let data_location = if let Some(data_location) = configured_data_location {
-            data_location.clone()
-        } else {
-            format!("{table_location}{DEFAULT_DATA_DIR}")
-        };
+        let table_location = strip_trailing_slash(table_metadata.location());
+        let prop = TableProperties::try_from(table_metadata.properties())?;
+        let data_location = strip_trailing_slash(
+            prop.write_data_location
+                .or(prop.write_folder_storage_location)
+                .unwrap_or(format!("{table_location}{DEFAULT_DATA_DIR}"))
+                .as_ref(),
+        )
+        .to_string();
+
         Ok(Self { data_location })
     }
 
@@ -99,6 +106,141 @@ impl LocationGenerator for DefaultLocationGenerator {
             )
         }
     }
+}
+
+/// `ObjectStorageLocationGenerator` injects hash entropy into generated file locations so that
+/// files are spread across many object-store prefixes.
+///
+/// Object stores such as S3 shard request throughput by key prefix, so writing every file under a
+/// common `.../data/` prefix creates a throughput hotspot. This generator prepends a
+/// deterministic, hashed directory tree (derived from the file name) to each location, mirroring
+/// Java Iceberg's `ObjectStoreLocationProvider`.
+///
+/// The behavior is controlled by these table properties:
+/// * `write.data.path` / `write.object-storage.path` / `write.folder-storage.path` - the base data
+///   location (checked in that order), defaulting to `{table_location}/data`.
+/// * `write.object-storage.partitioned-paths` - whether partition values are included in the path
+///   (defaults to `true`).
+#[derive(Clone, Debug)]
+pub struct ObjectStorageLocationGenerator {
+    storage_location: String,
+    /// Database/table context, only set when the storage location is outside the table location.
+    context: Option<String>,
+    include_partition_paths: bool,
+}
+
+impl ObjectStorageLocationGenerator {
+    /// Create a new `ObjectStorageLocationGenerator` from table metadata.
+    /// Resolve the base data location from table properties, falling back to `{table_location}/data`.
+    ///
+    /// Precedence follows Java Iceberg: `write.data.path` first, then the deprecated
+    /// `write.object-storage.path` and `write.folder-storage.path` properties, and finally the default
+    /// `{table_location}/data`.
+    pub fn new(table_metadata: &TableMetadata) -> Result<Self> {
+        let table_location = strip_trailing_slash(table_metadata.location());
+        let prop = TableProperties::try_from(table_metadata.properties())?;
+        let storage_location = strip_trailing_slash(
+            prop.write_data_location
+                .or(prop.write_object_storage_location)
+                .or(prop.write_folder_storage_location)
+                .unwrap_or(format!("{table_location}{DEFAULT_DATA_DIR}"))
+                .as_ref(),
+        )
+        .to_string();
+
+        // If the storage location is within the table prefix, files are already scoped to this
+        // table so there is no need to add database/table context to avoid collisions.
+        let context = if storage_location.starts_with(table_location) {
+            None
+        } else {
+            Some(path_context(table_location))
+        };
+
+        let include_partition_paths = prop.write_object_storage_partitioned_paths;
+
+        Ok(Self {
+            storage_location,
+            context,
+            include_partition_paths,
+        })
+    }
+
+    /// Build the final location for a fully-formed data file name (which may already include a
+    /// partition path).
+    fn new_data_location(&self, name: &str) -> String {
+        let hash = self.compute_hash(name);
+        if let Some(context) = &self.context {
+            format!("{}/{}/{}/{}", self.storage_location, hash, context, name)
+        } else if self.include_partition_paths {
+            format!("{}/{}/{}", self.storage_location, hash, name)
+        } else {
+            // When partition paths are excluded, join the entropy to the file name with `-` so the
+            // file still lives directly under the storage location.
+            format!("{}/{}-{}", self.storage_location, hash, name)
+        }
+    }
+
+    /// Compute the entropy directory tree for the given name, e.g. `0101/0110/1001/10110010`.
+    fn compute_hash(&self, name: &str) -> String {
+        let mut bytes = name.as_bytes();
+        let hash_code = murmur3::murmur3_32(&mut bytes, 0).unwrap();
+        let binary = format!("{:032b}", hash_code);
+        let hash = &binary[binary.len() - HASH_BINARY_STRING_BITS..];
+        dirs_from_hash(hash)
+    }
+}
+
+impl LocationGenerator for ObjectStorageLocationGenerator {
+    fn generate_location(
+        &self,
+        partition_key: Option<&PartitionKey>,
+        file_name: &str,
+    ) -> String {
+        let name = if self.include_partition_paths
+            && !PartitionKey::is_effectively_none(partition_key)
+        {
+            format!("{}/{}", partition_key.unwrap().to_path(), file_name)
+        } else {
+            file_name.to_string()
+        };
+        self.new_data_location(&name)
+    }
+}
+
+/// Derive the `{parent}/{name}` context from a table location, mirroring Hadoop's
+/// `Path.getParent().getName()` / `Path.getName()`.
+fn path_context(table_location: &str) -> String {
+    let mut segments = table_location.rsplit('/').filter(|s| !s.is_empty());
+    let name = segments.next().unwrap_or("");
+    match segments.next() {
+        Some(parent) => format!("{parent}/{name}"),
+        None => name.to_string(),
+    }
+}
+
+/// Divide a binary hash string into directories for optimized listing/orphan removal.
+///
+/// With `ENTROPY_DIR_DEPTH = 3` and `ENTROPY_DIR_LENGTH = 4`, the 20-bit hash
+/// `10011001100110011001` becomes `1001/1001/1001/10011001`.
+fn dirs_from_hash(hash: &str) -> String {
+    let mut result = String::new();
+
+    let mut i = 0;
+    while i < ENTROPY_DIR_DEPTH * ENTROPY_DIR_LENGTH {
+        if i > 0 {
+            result.push('/');
+        }
+        let end = (i + ENTROPY_DIR_LENGTH).min(hash.len());
+        result.push_str(&hash[i..end]);
+        i += ENTROPY_DIR_LENGTH;
+    }
+
+    if hash.len() > ENTROPY_DIR_DEPTH * ENTROPY_DIR_LENGTH {
+        result.push('/');
+        result.push_str(&hash[ENTROPY_DIR_DEPTH * ENTROPY_DIR_LENGTH..]);
+    }
+
+    result
 }
 
 /// `FileNameGeneratorTrait` used to generate file name for data file. The file name can be passed to `LocationGenerator` to generate the location of the file.
@@ -162,11 +304,11 @@ pub(crate) mod test {
     use super::LocationGenerator;
     use crate::spec::{
         FormatVersion, Literal, NestedField, PartitionKey, PartitionSpec,
-        PrimitiveType, Schema, Struct, StructType, TableMetadata, Transform, Type,
+        PrimitiveType, Schema, Struct, StructType, TableMetadata, TableProperties,
+        Transform, Type,
     };
     use crate::writer::file_writer::location_generator::{
-        DefaultLocationGenerator, FileNameGenerator, WRITE_DATA_LOCATION,
-        WRITE_FOLDER_STORAGE_LOCATION,
+        DefaultLocationGenerator, FileNameGenerator,
     };
 
     #[test]
@@ -214,7 +356,7 @@ pub(crate) mod test {
 
         // test custom data location
         table_metadata.properties.insert(
-            WRITE_FOLDER_STORAGE_LOCATION.to_string(),
+            TableProperties::PROPERTY_WRITE_FOLDER_STORAGE_LOCATION.to_string(),
             "s3://data.db/table/data_1".to_string(),
         );
         let location_generator =
@@ -227,7 +369,7 @@ pub(crate) mod test {
         );
 
         table_metadata.properties.insert(
-            WRITE_DATA_LOCATION.to_string(),
+            TableProperties::PROPERTY_WRITE_DATA_LOCATION.to_string(),
             "s3://data.db/table/data_2".to_string(),
         );
         let location_generator =
@@ -240,7 +382,7 @@ pub(crate) mod test {
         );
 
         table_metadata.properties.insert(
-            WRITE_DATA_LOCATION.to_string(),
+            TableProperties::PROPERTY_WRITE_DATA_LOCATION.to_string(),
             // invalid table location
             "s3://data.db/data_3".to_string(),
         );

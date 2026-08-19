@@ -176,6 +176,9 @@ impl FileMetadata {
     pub(crate) const FOOTER_STRUCT_LENGTH: u8 =
         FileMetadata::FOOTER_STRUCT_MAGIC_OFFSET + FileMetadata::MAGIC_LENGTH;
 
+    const MIN_FILE_LENGTH: u64 = (FileMetadata::MAGIC_LENGTH as u64) * 2
+        + FileMetadata::FOOTER_STRUCT_LENGTH as u64;
+
     /// Constructs new puffin `FileMetadata`
     pub fn new(
         blobs: Vec<BlobMetadata>,
@@ -220,7 +223,14 @@ impl FileMetadata {
         let footer_length = footer_payload_length as u64
             + FileMetadata::FOOTER_STRUCT_LENGTH as u64
             + FileMetadata::MAGIC_LENGTH as u64;
-        let start = input_file_length - footer_length;
+        let start = input_file_length.checked_sub(footer_length).ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "Footer length {footer_length} exceeds file length {input_file_length}"
+                ),
+            )
+        })?;
         let end = input_file_length;
         file_read.read_range(start..end)
     }
@@ -287,22 +297,32 @@ impl FileMetadata {
     /// Returns the file metadata about a Puffin file
     pub(crate) fn read(input_file: &InputFile) -> Result<FileMetadata> {
         let opened_file = input_file.open_reader()?;
-        Self::read_from(opened_file.reader, opened_file.metadata.size)
+        Self::read_from(opened_file.reader.as_ref(), opened_file.metadata.size)
     }
 
     /// Core reader: parses puffin footer from an already-opened file.
-    fn read_from(
-        file_read: Box<dyn FileRead>,
+    pub(super) fn read_from(
+        file_read: &dyn FileRead,
         input_file_length: u64,
     ) -> Result<FileMetadata> {
+        if input_file_length < FileMetadata::MIN_FILE_LENGTH {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "File length {input_file_length} is too short to be a Puffin file, expected at least {} bytes",
+                    FileMetadata::MIN_FILE_LENGTH
+                ),
+            ));
+        }
+
         let first_four_bytes =
             file_read.read_range(0..FileMetadata::MAGIC_LENGTH.into())?;
         FileMetadata::check_magic(&first_four_bytes)?;
 
         let footer_payload_length =
-            FileMetadata::read_footer_payload_length(&*file_read, input_file_length)?;
+            FileMetadata::read_footer_payload_length(file_read, input_file_length)?;
         let footer_bytes = FileMetadata::read_footer_bytes(
-            &*file_read,
+            file_read,
             input_file_length,
             footer_payload_length,
         )?;
@@ -340,7 +360,7 @@ impl FileMetadata {
 
             // Hint cannot be larger than input file — fall back to full read
             if prefetch_hint as u64 > input_file_length {
-                return Self::read_from(file_read, input_file_length);
+                return Self::read_from(file_read.as_ref(), input_file_length);
             }
 
             // Validate file header magic.
@@ -373,7 +393,7 @@ impl FileMetadata {
                 + FileMetadata::FOOTER_STRUCT_LENGTH as usize
                 + FileMetadata::MAGIC_LENGTH as usize;
             if footer_length > prefetch_hint as usize {
-                return Self::read_from(file_read, input_file_length);
+                return Self::read_from(file_read.as_ref(), input_file_length);
             }
 
             // Read footer bytes

@@ -20,12 +20,12 @@
 
 use std::fmt;
 
-use super::SensitiveBytes;
+use super::SecureKey;
 use crate::{Error, ErrorKind, Result};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct StandardKeyMetadata {
-    encryption_key: SensitiveBytes,
+    encryption_key: SecureKey,
     aad_prefix: Option<Box<[u8]>>,
     file_length: Option<u64>,
 }
@@ -47,12 +47,9 @@ impl fmt::Debug for StandardKeyMetadata {
 }
 
 impl StandardKeyMetadata {
-    pub fn new(encryption_key: &[u8]) -> Self {
-        Self {
-            encryption_key: SensitiveBytes::new(encryption_key),
-            aad_prefix: None,
-            file_length: None,
-        }
+    /// Creates a new `StandardKeyMetadata` from raw key bytes.
+    pub fn try_new(encryption_key: &[u8]) -> Result<Self> {
+        Ok(Self::from(SecureKey::new(encryption_key)?))
     }
 
     pub fn with_aad_prefix(mut self, aad_prefix: &[u8]) -> Self {
@@ -65,7 +62,8 @@ impl StandardKeyMetadata {
         self
     }
 
-    pub fn encryption_key(&self) -> &SensitiveBytes {
+    /// Returns the plaintext Data Encryption Key.
+    pub fn encryption_key(&self) -> &SecureKey {
         &self.encryption_key
     }
 
@@ -82,7 +80,17 @@ impl StandardKeyMetadata {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        _serde::StandardKeyMetadataV1::decode(bytes).map(Self::from)
+        _serde::StandardKeyMetadataV1::decode(bytes).and_then(Self::try_from)
+    }
+}
+
+impl From<SecureKey> for StandardKeyMetadata {
+    fn from(encryption_key: SecureKey) -> Self {
+        Self {
+            encryption_key,
+            aad_prefix: None,
+            file_length: None,
+        }
     }
 }
 
@@ -205,13 +213,22 @@ mod _serde {
         }
     }
 
-    impl From<StandardKeyMetadataV1> for StandardKeyMetadata {
-        fn from(v1: StandardKeyMetadataV1) -> Self {
-            Self {
-                encryption_key: SensitiveBytes::new(v1.encryption_key.into_vec()),
+    impl TryFrom<StandardKeyMetadataV1> for StandardKeyMetadata {
+        type Error = Error;
+
+        fn try_from(v1: StandardKeyMetadataV1) -> Result<Self> {
+            let encryption_key = SecureKey::new(&v1.encryption_key).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    "Invalid encryption key in key metadata",
+                )
+                .with_source(e)
+            })?;
+            Ok(Self {
+                encryption_key,
                 aad_prefix: v1.aad_prefix.map(|b| b.into_vec().into_boxed_slice()),
                 file_length: v1.file_length,
-            }
+            })
         }
     }
 }
@@ -225,7 +242,9 @@ mod tests {
         let key = b"0123456789012345";
         let aad = b"1234567890123456";
 
-        let metadata = StandardKeyMetadata::new(key).with_aad_prefix(aad);
+        let metadata = StandardKeyMetadata::try_new(key)
+            .unwrap()
+            .with_aad_prefix(aad);
         let serialized = metadata.encode().unwrap();
         let parsed = StandardKeyMetadata::decode(&serialized).unwrap();
 
@@ -239,5 +258,32 @@ mod tests {
         let result = StandardKeyMetadata::decode(&[0x02]);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::FeatureUnsupported);
+    }
+
+    #[test]
+    fn test_new_rejects_invalid_key_length() {
+        for len in [16usize, 24, 32] {
+            assert!(StandardKeyMetadata::try_new(&vec![0u8; len]).is_ok());
+        }
+
+        for len in [0usize, 4, 15, 20, 33] {
+            assert!(StandardKeyMetadata::try_new(&vec![0u8; len]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_decode_rejects_invalid_key_length() {
+        for len in [0usize, 4, 15, 20, 33] {
+            let serialized = _serde::StandardKeyMetadataV1 {
+                encryption_key: serde_bytes::ByteBuf::from(vec![0u8; len]),
+                aad_prefix: None,
+                file_length: None,
+            }
+            .encode()
+            .unwrap();
+
+            let err = StandardKeyMetadata::decode(&serialized).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::DataInvalid);
+        }
     }
 }

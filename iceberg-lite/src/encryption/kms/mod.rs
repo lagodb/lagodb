@@ -16,7 +16,9 @@
 // under the License.
 
 mod client;
+mod factory;
 mod memory;
 
 pub use client::{GeneratedKey, KeyManagementClient};
-pub use memory::MemoryKeyManagementClient;
+pub use factory::KmsClientFactory;
+pub use memory::{MemoryKeyManagementClient, MemoryKmsClientFactory};

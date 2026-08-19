@@ -22,11 +22,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use super::crypto::{AesGcmCipher, SecureKey};
+use super::crypto::AesGcmCipher;
 use super::key_metadata::StandardKeyMetadata;
 use super::stream::{AesGcmFileRead, AesGcmFileWrite};
 use crate::Result;
-use crate::io::{FileMetadata, FileRead, FileWrite, InputFile, OutputFile};
+use crate::io::{
+    FileMetadata, FileRead, FileWrite, InputFile, OpenedFile, OutputFile,
+};
 
 pub struct EncryptedInputFile {
     inner: InputFile,
@@ -62,8 +64,11 @@ impl EncryptedInputFile {
         self.reader()?.read_all()
     }
 
-    pub fn reader(&self) -> Result<Box<dyn FileRead>> {
+    /// Opens one decrypting reader and returns its plaintext length.
+    pub fn open_reader(&self) -> Result<OpenedFile> {
         let opened = self.inner.open_reader()?;
+        let plaintext_size =
+            AesGcmFileRead::calculate_plaintext_length(opened.metadata.size)?;
         let cipher = build_cipher(&self.key_metadata)?;
         let aad_prefix: Box<[u8]> =
             self.key_metadata.aad_prefix().unwrap_or_default().into();
@@ -73,7 +78,16 @@ impl EncryptedInputFile {
             aad_prefix,
             opened.metadata.size,
         )?;
-        Ok(Box::new(decrypting))
+        Ok(OpenedFile {
+            metadata: FileMetadata {
+                size: plaintext_size,
+            },
+            reader: Box::new(decrypting),
+        })
+    }
+
+    pub fn reader(&self) -> Result<Box<dyn FileRead>> {
+        Ok(self.open_reader()?.reader)
     }
 
     pub fn key_metadata(&self) -> &StandardKeyMetadata {
@@ -148,8 +162,9 @@ impl std::fmt::Debug for EncryptedOutputFile {
 }
 
 fn build_cipher(metadata: &StandardKeyMetadata) -> Result<Arc<AesGcmCipher>> {
-    let key = SecureKey::new(metadata.encryption_key().as_bytes())?;
-    Ok(Arc::new(AesGcmCipher::new(key)))
+    Ok(Arc::new(AesGcmCipher::new(
+        metadata.encryption_key().clone(),
+    )))
 }
 
 #[cfg(test)]
@@ -158,7 +173,8 @@ mod tests {
     use crate::io::FileIO;
 
     fn key_metadata() -> StandardKeyMetadata {
-        StandardKeyMetadata::new(b"0123456789abcdef")
+        StandardKeyMetadata::try_new(b"0123456789abcdef")
+            .unwrap()
             .with_aad_prefix(b"test-aad-prefix!")
     }
 
