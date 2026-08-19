@@ -23,7 +23,7 @@ use typed_builder::TypedBuilder;
 use crate::expr::BoundPredicate;
 use crate::spec::{
     DataContentType, DataFile, DataFileFormat, ManifestEntryRef, NameMapping,
-    PartitionSpec, Schema, SchemaRef, Struct,
+    PartitionSpec, Schema, SchemaRef, Struct, StructType,
 };
 
 /// One maintenance planning result that retains the source manifest data file.
@@ -94,12 +94,11 @@ pub struct FileScanTask {
     #[builder(default)]
     pub first_row_id: Option<u64>,
 
-    /// Data sequence inherited by rows when the v3 last-updated lineage field
-    /// is not physically present in the source file.
+    /// Data sequence number inherited from the manifest entry.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
-    pub last_updated_sequence_number: Option<i64>,
+    pub data_sequence_number: Option<i64>,
 
     /// The data file path corresponding to the task.
     pub data_file_path: String,
@@ -145,6 +144,14 @@ pub struct FileScanTask {
     #[builder(default)]
     pub partition_spec: Option<Arc<PartitionSpec>>,
 
+    /// Union of partition fields across all table partition specs.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "serialize_not_implemented")]
+    #[serde(deserialize_with = "deserialize_not_implemented")]
+    #[builder(default)]
+    pub unified_partition_type: Option<Arc<StructType>>,
+
     /// Name mapping from table metadata (property: schema.name-mapping.default),
     /// used to resolve field IDs from column names when Parquet files lack field IDs
     /// or have field ID conflicts.
@@ -157,6 +164,19 @@ pub struct FileScanTask {
 
     /// Whether this scan task should treat column names as case-sensitive when binding predicates.
     pub case_sensitive: bool,
+
+    /// Key metadata for encrypted data files (Parquet Modular Encryption).
+    /// When present, the reader uses this to build `FileDecryptionProperties`.
+    ///
+    /// Note on the trust boundary: for the standard encryption scheme this
+    /// carries `StandardKeyMetadata`, whose payload is the *plaintext* DEK.
+    /// Because `FileScanTask` derives `Serialize`, that plaintext DEK is part
+    /// of the serialized scan plan should these tasks ever be serialized and sent
+    /// over the network.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub key_metadata: Option<Box<[u8]>>,
 }
 
 impl FileScanTask {
@@ -222,6 +242,7 @@ impl From<&DeleteFileContext> for FileScanTaskDeleteFile {
             file_format: ctx.manifest_entry.file_format(),
             partition_spec_id: ctx.partition_spec_id,
             equality_ids: ctx.manifest_entry.data_file.equality_ids.clone(),
+            key_metadata: data_file.key_metadata().map(Box::from),
             referenced_data_file: referenced_data_file.map(str::to_owned),
             content_offset: data_file.content_offset(),
             content_size_in_bytes: data_file.content_size_in_bytes(),
@@ -255,6 +276,16 @@ pub struct FileScanTaskDeleteFile {
     #[serde(default)]
     #[builder(default)]
     pub equality_ids: Option<Vec<i32>>,
+
+    /// Key metadata for encrypted delete files (Parquet Modular Encryption).
+    /// When present, the reader uses this to build `FileDecryptionProperties`.
+    ///
+    /// Same plaintext-DEK trust boundary as [`FileScanTask::key_metadata`]:
+    /// this is part of the serialized scan plan should these tasks be serialized.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub key_metadata: Option<Box<[u8]>>,
 
     /// Effective data file path referenced by file-scoped position deletes or
     /// deletion vectors.

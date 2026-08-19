@@ -41,7 +41,6 @@ impl TransactionAction for RewriteManifestsAction {
         let mut producer = DeltaSnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
-            None,
             HashMap::new(),
         );
         producer

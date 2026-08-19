@@ -32,8 +32,6 @@ use crate::table::Table;
 use crate::transaction::ActionCommit;
 use crate::{Error, ErrorKind, TableRequirement, TableUpdate};
 
-const META_ROOT_PATH: &str = "metadata";
-
 /// A trait that defines how different table operations produce new snapshots.
 ///
 /// `SnapshotProduceOperation` is used by [`SnapshotProducer`] to customize snapshot creation
@@ -111,7 +109,6 @@ pub(crate) struct SnapshotProducer<'a> {
     pub(crate) table: &'a Table,
     snapshot_id: i64,
     commit_uuid: Uuid,
-    key_metadata: Option<Vec<u8>>,
     snapshot_properties: HashMap<String, String>,
     added_data_files: Vec<DataFile>,
     // A counter used to generate unique manifest file names.
@@ -124,7 +121,6 @@ impl<'a> SnapshotProducer<'a> {
     pub(crate) fn new(
         table: &'a Table,
         commit_uuid: Uuid,
-        key_metadata: Option<Vec<u8>>,
         snapshot_properties: HashMap<String, String>,
         added_data_files: Vec<DataFile>,
     ) -> Self {
@@ -132,7 +128,6 @@ impl<'a> SnapshotProducer<'a> {
             table,
             snapshot_id: Self::generate_unique_snapshot_id(table),
             commit_uuid,
-            key_metadata,
             snapshot_properties,
             added_data_files,
             manifest_counter: (0..),
@@ -247,25 +242,35 @@ impl<'a> SnapshotProducer<'a> {
         content: ManifestContentType,
     ) -> Result<ManifestWriter> {
         let new_manifest_path = format!(
-            "{}/{}/{}-m{}.{}",
-            self.table.metadata().location(),
-            META_ROOT_PATH,
+            "{}/{}-m{}.{}",
+            self.table.metadata().metadata_location()?,
             self.commit_uuid,
             self.manifest_counter.next().unwrap(),
             DataFileFormat::Avro
         );
         let output_file = self.table.file_io().new_output(new_manifest_path)?;
-        let builder = ManifestWriterBuilder::new(
-            output_file,
-            Some(self.snapshot_id),
-            self.key_metadata.clone(),
-            self.table.metadata().current_schema().clone(),
-            self.table
-                .metadata()
-                .default_partition_spec()
-                .as_ref()
-                .clone(),
-        );
+        let schema = self.table.metadata().current_schema().clone();
+        let partition_spec = self
+            .table
+            .metadata()
+            .default_partition_spec()
+            .as_ref()
+            .clone();
+        let builder = if let Some(manager) = self.table.encryption_manager() {
+            ManifestWriterBuilder::new_from_encrypted(
+                manager.encrypt(output_file),
+                Some(self.snapshot_id),
+                schema,
+                partition_spec,
+            )?
+        } else {
+            ManifestWriterBuilder::new(
+                output_file,
+                Some(self.snapshot_id),
+                schema,
+                partition_spec,
+            )
+        };
         match self.table.metadata().format_version() {
             FormatVersion::V1 => Ok(builder.build_v1()),
             FormatVersion::V2 => match content {
@@ -410,8 +415,10 @@ impl<'a> SnapshotProducer<'a> {
 
         let previous_snapshot = table_metadata.current_snapshot();
 
-        let mut additional_properties = summary_collector.build();
-        additional_properties.extend(self.snapshot_properties.clone());
+        // Computed metrics must win over user properties, matching Iceberg Java's
+        // SnapshotSummary.Builder ordering.
+        let mut additional_properties = self.snapshot_properties.clone();
+        additional_properties.extend(summary_collector.build());
 
         let summary = Summary {
             operation: snapshot_produce_operation.operation(),
@@ -425,16 +432,15 @@ impl<'a> SnapshotProducer<'a> {
         )
     }
 
-    fn generate_manifest_list_file_path(&self, attempt: i64) -> String {
-        format!(
-            "{}/{}/snap-{}-{}-{}.{}",
-            self.table.metadata().location(),
-            META_ROOT_PATH,
+    fn generate_manifest_list_file_path(&self, attempt: i64) -> Result<String> {
+        Ok(format!(
+            "{}/snap-{}-{}-{}.{}",
+            self.table.metadata().metadata_location()?,
             self.snapshot_id,
             attempt,
             self.commit_uuid,
             DataFileFormat::Avro
-        )
+        ))
     }
 
     /// Finished building the action and return the [`ActionCommit`] to the transaction.
@@ -443,34 +449,40 @@ impl<'a> SnapshotProducer<'a> {
         snapshot_produce_operation: OP,
         process: MP,
     ) -> Result<ActionCommit> {
-        let manifest_list_path = self.generate_manifest_list_file_path(0);
+        let manifest_list_path = self.generate_manifest_list_file_path(0)?;
         let next_seq_num = self.table.metadata().next_sequence_number();
         let first_row_id = self.table.metadata().next_row_id();
+        let raw_output = self
+            .table
+            .file_io()
+            .new_output(manifest_list_path.clone())?;
+        let (manifest_list_output, encryption_key_id) =
+            if let Some(manager) = self.table.encryption_manager() {
+                let encrypted_output = manager.encrypt(raw_output);
+                let encryption_key_id = manager.encrypt_manifest_list_key_metadata(
+                    encrypted_output.key_metadata(),
+                )?;
+                (encrypted_output.writer()?, Some(encryption_key_id))
+            } else {
+                (raw_output.create_file_writer()?, None)
+            };
+        let parent_snapshot_id = self.table.metadata().current_snapshot_id();
         let mut manifest_list_writer = match self.table.metadata().format_version() {
             FormatVersion::V1 => ManifestListWriter::v1(
-                self.table
-                    .file_io()
-                    .new_output(manifest_list_path.clone())?
-                    .create_file_writer()?,
+                manifest_list_output,
                 self.snapshot_id,
-                self.table.metadata().current_snapshot_id(),
+                parent_snapshot_id,
             ),
             FormatVersion::V2 => ManifestListWriter::v2(
-                self.table
-                    .file_io()
-                    .new_output(manifest_list_path.clone())?
-                    .create_file_writer()?,
+                manifest_list_output,
                 self.snapshot_id,
-                self.table.metadata().current_snapshot_id(),
+                parent_snapshot_id,
                 next_seq_num,
             ),
             FormatVersion::V3 => ManifestListWriter::v3(
-                self.table
-                    .file_io()
-                    .new_output(manifest_list_path.clone())?
-                    .create_file_writer()?,
+                manifest_list_output,
                 self.snapshot_id,
-                self.table.metadata().current_snapshot_id(),
+                parent_snapshot_id,
                 next_seq_num,
                 Some(first_row_id),
             ),
@@ -499,11 +511,18 @@ impl<'a> SnapshotProducer<'a> {
             .with_sequence_number(next_seq_num)
             .with_summary(summary)
             .with_schema_id(self.table.metadata().current_schema_id())
+            .with_encryption_key_id(encryption_key_id)
             .with_timestamp_ms(commit_ts);
 
         let new_snapshot = if let Some(writer_next_row_id) = writer_next_row_id {
-            let assigned_rows =
-                writer_next_row_id - self.table.metadata().next_row_id();
+            let assigned_rows = writer_next_row_id
+                .checked_sub(self.table.metadata().next_row_id())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::DataInvalid,
+                        "snapshot row-id assignment moved backwards",
+                    )
+                })?;
             new_snapshot
                 .with_row_range(first_row_id, assigned_rows)
                 .build()
@@ -511,18 +530,25 @@ impl<'a> SnapshotProducer<'a> {
             new_snapshot.build()
         };
 
-        let updates = vec![
-            TableUpdate::AddSnapshot {
-                snapshot: new_snapshot,
-            },
-            TableUpdate::SetSnapshotRef {
-                ref_name: MAIN_BRANCH.to_string(),
-                reference: SnapshotReference::new(
-                    self.snapshot_id,
-                    SnapshotRetention::branch(None, None, None),
-                ),
-            },
-        ];
+        let encryption_key_updates = self
+            .table
+            .pending_encryption_keys()
+            .into_iter()
+            .map(|encryption_key| TableUpdate::AddEncryptionKey { encryption_key });
+        let updates = encryption_key_updates
+            .chain([
+                TableUpdate::AddSnapshot {
+                    snapshot: new_snapshot,
+                },
+                TableUpdate::SetSnapshotRef {
+                    ref_name: MAIN_BRANCH.to_string(),
+                    reference: SnapshotReference::new(
+                        self.snapshot_id,
+                        SnapshotRetention::branch(None, None, None),
+                    ),
+                },
+            ])
+            .collect();
 
         let requirements = vec![
             TableRequirement::UuidMatch {

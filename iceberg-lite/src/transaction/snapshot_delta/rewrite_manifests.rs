@@ -245,10 +245,8 @@ impl<'a> DeltaSnapshotProducer<'a> {
             Some(current_snapshot.summary()),
             false,
         )?;
-        let (manifest_list_path, writer_next_row_id) =
-            self.write_manifest_list(output)?;
-        let snapshot =
-            self.new_snapshot(manifest_list_path, summary, writer_next_row_id)?;
+        let manifest_list = self.write_manifest_list(output)?;
+        let snapshot = self.new_snapshot(&manifest_list, summary)?;
         Ok(ActionCommit::new(
             vec![
                 TableUpdate::AddSnapshot { snapshot },

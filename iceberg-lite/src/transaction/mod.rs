@@ -55,6 +55,7 @@ pub use action::*;
 mod append;
 mod expire_snapshots;
 mod manifest_rewrite;
+mod prepared;
 mod rewrite_files;
 mod rewrite_manifests;
 mod row_delta;
@@ -71,6 +72,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
+pub use prepared::{PreparedTableCommit, PreparedTransaction};
 pub use update_schema::{AddColumn, PreparedSchemaUpdate};
 
 use crate::error::Result;
@@ -93,7 +95,7 @@ use crate::transaction::update_properties::UpdatePropertiesAction;
 use crate::transaction::update_schema::UpdateSchemaAction;
 use crate::transaction::update_statistics::UpdateStatisticsAction;
 use crate::transaction::upgrade_format_version::UpgradeFormatVersionAction;
-use crate::{Catalog, Error, ErrorKind, TableCommit, TableRequirement, TableUpdate};
+use crate::{Catalog, TableCommit, TableRequirement, TableUpdate};
 
 /// Table transaction.
 #[derive(Clone)]
@@ -226,17 +228,17 @@ impl Transaction {
 
         let table_props = self.table.metadata().table_properties()?;
 
-        // TODO(https://github.com/apache/iceberg-rust/issues/2034): remove once encrypted writes are supported.
-        if table_props.encryption_key_id.is_some() {
-            return Err(Error::new(
-                ErrorKind::FeatureUnsupported,
-                "Cannot commit to an encrypted table: encrypted writes are not yet supported",
-            ));
-        }
-
         let mut backoff = Self::build_backoff(table_props)?;
         loop {
-            match self.do_commit(catalog) {
+            match self
+                .prepare_once(catalog)
+                .and_then(|prepared| match prepared {
+                    PreparedTransaction::Noop(table) => Ok(table),
+                    PreparedTransaction::Commit(commit) => {
+                        let (_, table_commit) = commit.into_parts();
+                        catalog.update_table(table_commit)
+                    }
+                }) {
                 Ok(table) => return Ok(table),
                 Err(e) if e.retryable() => {
                     // After failure, consume backoff to get next delay
@@ -267,15 +269,25 @@ impl Transaction {
             .build())
     }
 
-    fn do_commit(&mut self, catalog: &dyn Catalog) -> Result<Table> {
+    /// Materializes every action against a freshly loaded table without
+    /// publishing the resulting catalog update.
+    ///
+    /// Unlike [`Self::commit`], this method deliberately performs no retry:
+    /// once publication is separated from preparation, a caller cannot safely
+    /// rebase the same prepared artifacts after a later catalog conflict.
+    pub fn prepare(mut self, catalog: &dyn Catalog) -> Result<PreparedTransaction> {
+        if self.actions.is_empty() {
+            return Ok(PreparedTransaction::Noop(self.table));
+        }
+        self.prepare_once(catalog)
+    }
+
+    fn prepare_once(&mut self, catalog: &dyn Catalog) -> Result<PreparedTransaction> {
         let refreshed = catalog.load_table(self.table.identifier())?;
 
-        if self.table.metadata() != refreshed.metadata()
-            || self.table.metadata_location() != refreshed.metadata_location()
-        {
-            // current base is stale, use refreshed as base and re-apply transaction actions
-            self.table = refreshed.clone();
-        }
+        // Always retain the refreshed table, even when metadata is unchanged:
+        // catalog responses may refresh response-scoped storage credentials.
+        self.table = refreshed;
 
         let mut current_table = self.table.clone();
         let mut existing_updates: Vec<TableUpdate> = vec![];
@@ -297,16 +309,20 @@ impl Transaction {
         }
 
         if existing_updates.is_empty() && existing_requirements.is_empty() {
-            return Ok(current_table);
+            return Ok(PreparedTransaction::Noop(current_table));
         }
 
         let table_commit = TableCommit::builder()
             .ident(self.table.identifier().to_owned())
+            .file_io(self.table.file_io().clone())
             .updates(existing_updates)
             .requirements(existing_requirements)
             .build();
 
-        catalog.update_table(table_commit)
+        Ok(PreparedTransaction::Commit(PreparedTableCommit::new(
+            current_table,
+            table_commit,
+        )))
     }
 }
 
@@ -322,7 +338,9 @@ mod tests {
     use crate::io::FileIO;
     use crate::spec::TableMetadata;
     use crate::table::Table;
-    use crate::transaction::{ApplyTransactionAction, Transaction};
+    use crate::transaction::{
+        ApplyTransactionAction, PreparedTransaction, Transaction,
+    };
     use crate::{Catalog, Error, ErrorKind, TableCreation, TableIdent};
 
     pub fn make_v1_table() -> Table {
@@ -560,6 +578,34 @@ mod tests {
             assert_eq!(err.message(), "Non-retryable error");
             assert!(!err.retryable(), "Error should not be retryable");
         }
+    }
+
+    #[test]
+    fn prepare_materializes_without_publishing() {
+        let table = make_v2_table();
+        let transaction = create_test_transaction(&table);
+        let mut catalog = MockCatalog::new();
+        catalog
+            .expect_load_table()
+            .times(1)
+            .returning_st(|_| Ok(make_v2_table()));
+        catalog.expect_update_table().times(0);
+
+        let prepared = transaction.prepare(&catalog).unwrap();
+
+        let PreparedTransaction::Commit(commit) = prepared else {
+            panic!("property update must produce a catalog commit");
+        };
+        assert_eq!(commit.identifier(), table.identifier());
+        assert_eq!(
+            commit
+                .table()
+                .metadata()
+                .properties()
+                .get("test.key")
+                .map(String::as_str),
+            Some("test.value")
+        );
     }
 
     #[test]

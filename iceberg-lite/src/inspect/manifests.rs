@@ -26,13 +26,13 @@ use arrow_array::builder::{
 use arrow_array::types::{Int32Type, Int64Type};
 use arrow_schema::{DataType, Field, Fields};
 
-use crate::Result;
 use crate::arrow::schema_to_arrow_schema;
 use crate::scan::ArrowRecordBatchIterator;
 use crate::spec::{
     Datum, FieldSummary, ListType, NestedField, PrimitiveType, StructType, Type,
 };
 use crate::table::Table;
+use crate::{Error, ErrorKind, Result};
 
 /// Manifests table.
 pub struct ManifestsTable<'a> {
@@ -195,13 +195,20 @@ impl<'a> ManifestsTable<'a> {
                     .table
                     .metadata()
                     .partition_spec_by_id(manifest.partition_spec_id)
-                    .unwrap();
-                let spec_struct = spec
-                    .partition_type(self.table.metadata().current_schema())
-                    .unwrap();
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            format!(
+                                "Partition spec {} for manifest {} is not in table metadata",
+                                manifest.partition_spec_id, manifest.manifest_path
+                            ),
+                        )
+                    })?;
+                let spec_struct =
+                    spec.partition_type(self.table.metadata().current_schema())?;
                 self.append_partition_summaries(
                     &mut partition_summaries,
-                    &manifest.partitions.clone().unwrap_or_else(Vec::new),
+                    manifest.partitions.as_deref().unwrap_or(&[]),
                     spec_struct,
                 );
             }

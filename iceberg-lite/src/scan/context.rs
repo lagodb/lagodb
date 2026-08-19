@@ -25,9 +25,8 @@ use crate::scan::{
     PartitionFilterCache,
 };
 use crate::spec::{
-    FirstRowIdInheritance, ManifestContentType, ManifestEntryRef, ManifestFile,
-    ManifestList, NameMapping, PartitionSpecRef, SchemaRef, SnapshotRef,
-    TableMetadataRef,
+    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, NameMapping,
+    PartitionSpecRef, SchemaRef, SnapshotRef, StructType, TableMetadataRef,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -46,6 +45,7 @@ pub(crate) struct ManifestFileContext {
     pub name_mapping: Option<Arc<NameMapping>>,
     pub case_sensitive: bool,
     pub partition_spec: PartitionSpecRef,
+    pub unified_partition_type: Option<Arc<StructType>>,
 }
 
 /// Wraps a [`ManifestEntryRef`] alongside the objects that are needed
@@ -59,6 +59,7 @@ pub(crate) struct ManifestEntryContext {
     pub snapshot_bound_predicate: Option<Arc<BoundPredicate>>,
     pub partition_spec_id: i32,
     pub partition_spec: PartitionSpecRef,
+    pub unified_partition_type: Option<Arc<StructType>>,
     pub snapshot_schema: SchemaRef,
     pub delete_file_index: Option<DeleteFileIndex>,
     pub name_mapping: Option<Arc<NameMapping>>,
@@ -73,10 +74,8 @@ impl ManifestFileContext {
         let manifest = self.object_cache.get_manifest(&self.manifest_file)?;
 
         let mut entries = Vec::with_capacity(manifest.entries().len());
-        let mut row_id_inheritance =
-            FirstRowIdInheritance::new(self.manifest_file.first_row_id);
         for manifest_entry in manifest.entries() {
-            let entry_first_row_id = row_id_inheritance.resolve(manifest_entry)?;
+            let entry_first_row_id = manifest_entry.first_row_id()?;
 
             entries.push(ManifestEntryContext {
                 manifest_entry: manifest_entry.clone(),
@@ -84,6 +83,7 @@ impl ManifestFileContext {
                 field_ids: self.field_ids.clone(),
                 partition_spec_id: self.manifest_file.partition_spec_id,
                 partition_spec: self.partition_spec.clone(),
+                unified_partition_type: self.unified_partition_type.clone(),
                 bound_predicates: self.bound_predicates.clone(),
                 snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
                 snapshot_schema: self.snapshot_schema.clone(),
@@ -131,7 +131,7 @@ impl ManifestEntryContext {
             length: 0,
             record_count: Some(self.manifest_entry.record_count()),
             first_row_id: self.first_row_id,
-            last_updated_sequence_number: self.manifest_entry.sequence_number(),
+            data_sequence_number: self.manifest_entry.sequence_number(),
 
             data_file_path: self.manifest_entry.file_path().to_string(),
             data_file_format: self.manifest_entry.file_format(),
@@ -149,8 +149,14 @@ impl ManifestEntryContext {
             // Include partition data and spec from manifest entry
             partition: Some(self.manifest_entry.data_file.partition.clone()),
             partition_spec: Some(self.partition_spec),
+            unified_partition_type: self.unified_partition_type,
             name_mapping: self.name_mapping,
             case_sensitive: self.case_sensitive,
+            key_metadata: self
+                .manifest_entry
+                .data_file()
+                .key_metadata()
+                .map(Box::from),
         })
     }
 }
@@ -173,6 +179,7 @@ pub(crate) struct PlanContext {
     pub partition_filter_cache: Arc<PartitionFilterCache>,
     pub manifest_evaluator_cache: Arc<ManifestEvaluatorCache>,
     pub expression_evaluator_cache: Arc<ExpressionEvaluatorCache>,
+    pub unified_partition_type: Option<Arc<StructType>>,
 }
 
 impl PlanContext {
@@ -208,6 +215,7 @@ impl PlanContext {
             field_ids: self.field_ids.clone(),
             partition_spec_id,
             partition_spec,
+            unified_partition_type: self.unified_partition_type.clone(),
             bound_predicates,
             snapshot_bound_predicate: self.snapshot_bound_predicate.clone(),
             snapshot_schema: self.snapshot_schema.clone(),
@@ -345,6 +353,7 @@ impl PlanContext {
             name_mapping: self.name_mapping.clone(),
             case_sensitive: self.case_sensitive,
             partition_spec,
+            unified_partition_type: self.unified_partition_type.clone(),
         })
     }
 

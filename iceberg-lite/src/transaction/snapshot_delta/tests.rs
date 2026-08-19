@@ -19,6 +19,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::catalog::MockCatalog;
 use crate::io::{FileIO, FileMetadata, FileWrite, OpenedFile, Storage};
 use crate::memory::tests::new_memory_catalog;
 use crate::overlay::SnapshotDelta;
@@ -112,6 +113,16 @@ fn open_count(opens: &Arc<Mutex<HashMap<String, usize>>>, path: &str) -> usize {
         .get(path)
         .copied()
         .unwrap_or_default()
+}
+
+fn prepare_with_refreshed_table(transaction: Transaction, table: &Table) -> Table {
+    let refreshed = table.clone();
+    let mut catalog = MockCatalog::new();
+    catalog
+        .expect_load_table()
+        .times(1)
+        .return_once(move |_| Ok(refreshed));
+    transaction.prepare(&catalog).unwrap().table().clone()
 }
 
 #[test]
@@ -442,7 +453,9 @@ fn snapshot_delta_v3_suppresses_preassigned_id_on_added_file() {
         .iter()
         .find(|entry| entry.is_alive())
         .unwrap();
-    assert_eq!(added.data_file().first_row_id(), None);
+    // The manifest writer strips the preassigned value (99) from an added file;
+    // loading the v3 manifest then applies the manifest-list range (0).
+    assert_eq!(added.data_file().first_row_id(), Some(0));
     assert_eq!(
         updated.scan().build().unwrap().plan_files().unwrap()[0].first_row_id,
         Some(0)
@@ -516,7 +529,7 @@ fn rewrite_files_preserves_sequence_and_manifest_status() {
         .rewrite_data_files([input_a], [replacement])
         .apply(tx)
         .unwrap();
-    let updated = tx.commit(&catalog).unwrap();
+    let updated = prepare_with_refreshed_table(tx, &table);
     for path in source_manifest_paths {
         assert_eq!(
             open_count(&opens, &path),
@@ -580,7 +593,7 @@ fn rewrite_manifests_streams_entries_into_fewer_manifests() {
 
     let tx = Transaction::new(&table);
     let tx = tx.rewrite_manifests(2, u64::MAX).apply(tx).unwrap();
-    let updated = tx.commit(&catalog).unwrap();
+    let updated = prepare_with_refreshed_table(tx, &table);
     for path in source_manifest_paths {
         assert_eq!(
             open_count(&opens, &path),

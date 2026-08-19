@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -33,7 +33,6 @@ pub struct FastAppendAction {
     check_duplicate: bool,
     // below are properties used to create SnapshotProducer when commit
     commit_uuid: Option<Uuid>,
-    key_metadata: Option<Vec<u8>>,
     snapshot_properties: HashMap<String, String>,
     added_data_files: Vec<DataFile>,
 }
@@ -43,7 +42,6 @@ impl FastAppendAction {
         Self {
             check_duplicate: true,
             commit_uuid: None,
-            key_metadata: None,
             snapshot_properties: HashMap::default(),
             added_data_files: vec![],
         }
@@ -84,12 +82,6 @@ impl FastAppendAction {
         self
     }
 
-    /// Set key metadata for manifest files.
-    pub fn set_key_metadata(mut self, key_metadata: Vec<u8>) -> Self {
-        self.key_metadata = Some(key_metadata);
-        self
-    }
-
     /// Set snapshot summary properties.
     pub fn set_snapshot_properties(
         mut self,
@@ -98,6 +90,15 @@ impl FastAppendAction {
         self.snapshot_properties = snapshot_properties;
         self
     }
+
+    fn dedupe_added_files(&self) -> Vec<DataFile> {
+        let mut seen = HashSet::with_capacity(self.added_data_files.len());
+        self.added_data_files
+            .iter()
+            .filter(|data_file| seen.insert(data_file.file_path()))
+            .cloned()
+            .collect()
+    }
 }
 
 impl TransactionAction for FastAppendAction {
@@ -105,9 +106,8 @@ impl TransactionAction for FastAppendAction {
         let snapshot_producer = SnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
-            self.key_metadata.clone(),
             self.snapshot_properties.clone(),
-            self.added_data_files.clone(),
+            self.dedupe_added_files(),
         );
 
         // validate added files

@@ -34,9 +34,11 @@ use crate::expr::visitors::inclusive_metrics_evaluator::InclusiveMetricsEvaluato
 use crate::expr::{Bind, BoundPredicate, Predicate};
 use crate::io::FileIO;
 use crate::metadata_columns::{
-    get_metadata_field_id, is_metadata_column_name, is_metadata_field,
+    RESERVED_FIELD_ID_PARTITION, get_metadata_field_id, is_metadata_column_name,
+    is_metadata_field,
 };
 use crate::overlay::{SnapshotDelta, SnapshotDeltaRemovalLookup};
+use crate::partitioning::compute_unified_partition_type;
 
 use crate::spec::{
     DEFAULT_SCHEMA_NAME_MAPPING, DataContentType, ManifestContentType, NameMapping,
@@ -279,6 +281,18 @@ impl<'a> TableScanBuilder<'a> {
         };
 
         let field_ids = self.projection.field_ids(&schema)?;
+        let unified_partition_type =
+            if field_ids.contains(&RESERVED_FIELD_ID_PARTITION) {
+                Some(Arc::new(compute_unified_partition_type(
+                    self.table
+                        .metadata()
+                        .partition_specs_iter()
+                        .map(AsRef::as_ref),
+                    &schema,
+                )?))
+            } else {
+                None
+            };
 
         // TODO(metadata-column predicate binding): `Predicate::bind` below is
         // intentionally a table-schema binder, so `_pos`, `_file`, and
@@ -345,6 +359,7 @@ impl<'a> TableScanBuilder<'a> {
             partition_filter_cache: Arc::new(PartitionFilterCache::new()),
             manifest_evaluator_cache: Arc::new(ManifestEvaluatorCache::new()),
             expression_evaluator_cache: Arc::new(ExpressionEvaluatorCache::new()),
+            unified_partition_type,
         };
 
         Ok(TableScan {
@@ -874,9 +889,7 @@ pub mod tests {
 
     use crate::Result;
     use crate::TableIdent;
-    use crate::arrow::{
-        ArrowReaderBuilder, PhysicalRowReadContext, SelectedRowsReadRequest,
-    };
+    use crate::arrow::{ArrowReaderBuilder, SelectedRowsReadRequest};
     use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
     use crate::metadata_columns::{
@@ -1071,7 +1084,6 @@ pub mod tests {
             let mut writer = ManifestWriterBuilder::new(
                 self.next_manifest_file(),
                 Some(current_snapshot.snapshot_id()),
-                None,
                 current_schema.clone(),
                 current_partition_spec.as_ref().clone(),
             )
@@ -1341,7 +1353,6 @@ pub mod tests {
             let mut writer = ManifestWriterBuilder::new(
                 self.next_manifest_file(),
                 Some(current_snapshot.snapshot_id()),
-                None,
                 current_schema.clone(),
                 current_partition_spec.as_ref().clone(),
             )
@@ -1605,7 +1616,6 @@ pub mod tests {
             let mut writer = ManifestWriterBuilder::new(
                 self.next_manifest_file(),
                 Some(current_snapshot.snapshot_id()),
-                None,
                 current_schema.clone(),
                 current_partition_spec.as_ref().clone(),
             )
@@ -1645,7 +1655,6 @@ pub mod tests {
             let mut writer = ManifestWriterBuilder::new(
                 self.next_manifest_file(),
                 Some(current_snapshot.snapshot_id()),
-                None,
                 current_schema.clone(),
                 current_partition_spec.as_ref().clone(),
             )
@@ -1952,48 +1961,6 @@ pub mod tests {
                 "parquet footer row count differs from the Iceberg manifest"
             ),
             "unexpected validation error: {error}"
-        );
-    }
-
-    #[test]
-    fn test_physical_row_read_returns_requested_row() {
-        let mut fixture = TableTestFixture::new();
-        fixture.setup_manifest_files();
-        let data_file_path = format!("{}/1.parquet", fixture.table_location);
-        let read_context =
-            PhysicalRowReadContext::try_new(fixture.table.metadata()).unwrap();
-        let request = read_context
-            .read_row(&data_file_path, 700, vec![2])
-            .unwrap();
-
-        let batch = fixture
-            .table
-            .reader_builder()
-            .build()
-            .read_physical_row(request)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 1);
-        let values = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(values.value(0), 3);
-
-        let out_of_bounds = read_context
-            .read_row(&data_file_path, 1024, vec![2])
-            .unwrap();
-        assert!(
-            fixture
-                .table
-                .reader_builder()
-                .build()
-                .read_physical_row(out_of_bounds)
-                .unwrap()
-                .is_none()
         );
     }
 
@@ -2524,6 +2491,8 @@ pub mod tests {
             assert_eq!(task.project_field_ids, deserialized.project_field_ids);
             assert_eq!(task.predicate, deserialized.predicate);
             assert_eq!(task.schema, deserialized.schema);
+            assert_eq!(task.first_row_id, deserialized.first_row_id);
+            assert_eq!(task.data_sequence_number, deserialized.data_sequence_number);
         };
 
         // without predicate
@@ -2547,14 +2516,16 @@ pub mod tests {
             schema: schema.clone(),
             record_count: Some(100),
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_format: DataFileFormat::Parquet,
             partition_spec_id: 0,
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         };
         test_fn(task);
 
@@ -2569,14 +2540,16 @@ pub mod tests {
             schema,
             record_count: None,
             first_row_id: None,
-            last_updated_sequence_number: None,
+            data_sequence_number: None,
             data_file_format: DataFileFormat::Avro,
             partition_spec_id: 0,
             deletes: vec![],
             partition: None,
             partition_spec: None,
+            unified_partition_type: None,
             name_mapping: None,
             case_sensitive: false,
+            key_metadata: None,
         };
         test_fn(task);
     }

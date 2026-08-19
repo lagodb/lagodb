@@ -411,7 +411,7 @@ impl SchemaUpdatePlanner {
 
     fn assign_fresh_ids_to_type(&mut self, field_type: &Type) -> Type {
         match field_type {
-            Type::Primitive(_) => field_type.clone(),
+            Type::Primitive(_) | Type::Variant(_) => field_type.clone(),
             Type::Struct(struct_type) => {
                 let new_fields: Vec<NestedFieldRef> = struct_type
                     .fields()
@@ -514,7 +514,7 @@ impl SchemaUpdatePlanner {
 
     fn collect_type_field_ids(field_type: &Type, output: &mut Vec<i32>) {
         match field_type {
-            Type::Primitive(_) => {}
+            Type::Primitive(_) | Type::Variant(_) => {}
             Type::Struct(struct_type) => {
                 for field in struct_type.fields() {
                     Self::collect_field_ids(field, output);
@@ -687,7 +687,7 @@ impl<'a> SchemaRewriter<'a> {
         op: &PreparedSchemaOp,
     ) -> Result<(Type, bool)> {
         match field_type {
-            Type::Primitive(_) => Ok((field_type.clone(), false)),
+            Type::Primitive(_) | Type::Variant(_) => Ok((field_type.clone(), false)),
             Type::Struct(struct_type) => {
                 let rewritten =
                     self.apply_op_to_fields(struct_type.fields(), parent_id, op);

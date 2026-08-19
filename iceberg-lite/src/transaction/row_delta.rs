@@ -118,7 +118,6 @@ pub struct RowDeltaAction {
     validations: Vec<RowDeltaValidation>,
     check_duplicate: bool,
     commit_uuid: Option<Uuid>,
-    key_metadata: Option<Vec<u8>>,
     snapshot_properties: HashMap<String, String>,
 }
 
@@ -130,7 +129,6 @@ impl RowDeltaAction {
             validations: Vec::new(),
             check_duplicate: true,
             commit_uuid: None,
-            key_metadata: None,
             snapshot_properties: HashMap::new(),
         }
     }
@@ -173,13 +171,6 @@ impl RowDeltaAction {
         self
     }
 
-    /// Set key metadata for manifest files.
-    #[must_use]
-    pub fn set_key_metadata(mut self, key_metadata: Vec<u8>) -> Self {
-        self.key_metadata = Some(key_metadata);
-        self
-    }
-
     /// Set snapshot summary properties.
     #[must_use]
     pub fn set_snapshot_properties(
@@ -202,7 +193,6 @@ impl TransactionAction for RowDeltaAction {
         let producer = DeltaSnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
-            self.key_metadata.clone(),
             self.snapshot_properties.clone(),
         );
         producer.validate_plan(&plan)?;

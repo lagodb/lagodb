@@ -43,8 +43,6 @@ pub(super) use inventory::CurrentSnapshotInventory;
 use inventory::CurrentSnapshotManifest;
 pub(super) use plan::DeltaPlan;
 
-const META_ROOT_PATH: &str = "metadata";
-
 /// Transaction action that materializes a [`SnapshotDelta`] as standard
 /// Iceberg manifests, manifest list, and snapshot metadata.
 ///
@@ -58,7 +56,6 @@ pub struct SnapshotDeltaAction {
     truncate_base: bool,
     check_duplicate: bool,
     commit_uuid: Option<Uuid>,
-    key_metadata: Option<Vec<u8>>,
     snapshot_properties: HashMap<String, String>,
 }
 
@@ -69,7 +66,6 @@ impl SnapshotDeltaAction {
             truncate_base: false,
             check_duplicate: true,
             commit_uuid: None,
-            key_metadata: None,
             snapshot_properties: HashMap::new(),
         }
     }
@@ -90,12 +86,6 @@ impl SnapshotDeltaAction {
     /// Set commit UUID for generated metadata file names.
     pub fn set_commit_uuid(mut self, commit_uuid: Uuid) -> Self {
         self.commit_uuid = Some(commit_uuid);
-        self
-    }
-
-    /// Set key metadata for manifest files.
-    pub fn set_key_metadata(mut self, key_metadata: Vec<u8>) -> Self {
-        self.key_metadata = Some(key_metadata);
         self
     }
 
@@ -120,7 +110,6 @@ impl TransactionAction for SnapshotDeltaAction {
         let producer = DeltaSnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
-            self.key_metadata.clone(),
             self.snapshot_properties.clone(),
         );
         producer.validate_plan(&plan)?;
@@ -142,24 +131,27 @@ pub(super) struct DeltaSnapshotProducer<'a> {
     table: &'a Table,
     snapshot_id: i64,
     commit_uuid: Uuid,
-    key_metadata: Option<Vec<u8>>,
     snapshot_properties: HashMap<String, String>,
     manifest_counter: u64,
     current_inventory: Option<CurrentSnapshotInventory>,
+}
+
+struct ManifestListOutput {
+    path: String,
+    next_row_id: Option<u64>,
+    encryption_key_id: Option<String>,
 }
 
 impl<'a> DeltaSnapshotProducer<'a> {
     pub(super) fn new(
         table: &'a Table,
         commit_uuid: Uuid,
-        key_metadata: Option<Vec<u8>>,
         snapshot_properties: HashMap<String, String>,
     ) -> Self {
         Self {
             table,
             snapshot_id: Self::generate_unique_snapshot_id(table),
             commit_uuid,
-            key_metadata,
             snapshot_properties,
             manifest_counter: 0,
             current_inventory: None,
@@ -356,23 +348,28 @@ impl<'a> DeltaSnapshotProducer<'a> {
             summary_collector,
             truncate_full_table,
         )?;
-        let (manifest_list_path, writer_next_row_id) =
-            self.write_manifest_list(manifests)?;
-        let new_snapshot =
-            self.new_snapshot(manifest_list_path, summary, writer_next_row_id)?;
+        let manifest_list = self.write_manifest_list(manifests)?;
+        let new_snapshot = self.new_snapshot(&manifest_list, summary)?;
 
-        let updates = vec![
-            TableUpdate::AddSnapshot {
-                snapshot: new_snapshot,
-            },
-            TableUpdate::SetSnapshotRef {
-                ref_name: MAIN_BRANCH.to_owned(),
-                reference: SnapshotReference::new(
-                    self.snapshot_id,
-                    SnapshotRetention::branch(None, None, None),
-                ),
-            },
-        ];
+        let encryption_key_updates = self
+            .table
+            .pending_encryption_keys()
+            .into_iter()
+            .map(|encryption_key| TableUpdate::AddEncryptionKey { encryption_key });
+        let updates = encryption_key_updates
+            .chain([
+                TableUpdate::AddSnapshot {
+                    snapshot: new_snapshot,
+                },
+                TableUpdate::SetSnapshotRef {
+                    ref_name: MAIN_BRANCH.to_owned(),
+                    reference: SnapshotReference::new(
+                        self.snapshot_id,
+                        SnapshotRetention::branch(None, None, None),
+                    ),
+                },
+            ])
+            .collect();
 
         let requirements = vec![
             TableRequirement::UuidMatch {
@@ -650,35 +647,41 @@ impl<'a> DeltaSnapshotProducer<'a> {
     fn write_manifest_list(
         &self,
         manifests: Vec<ManifestFile>,
-    ) -> Result<(String, Option<u64>)> {
-        let manifest_list_path = self.generate_manifest_list_file_path(0);
+    ) -> Result<ManifestListOutput> {
+        let manifest_list_path = self.generate_manifest_list_file_path(0)?;
         let next_sequence_number = self.table.metadata().next_sequence_number();
         let first_row_id = self.table.metadata().next_row_id();
+        let raw_output = self
+            .table
+            .file_io()
+            .new_output(manifest_list_path.clone())?;
+        let (manifest_list_output, encryption_key_id) =
+            if let Some(manager) = self.table.encryption_manager() {
+                let encrypted_output = manager.encrypt(raw_output);
+                let encryption_key_id = manager.encrypt_manifest_list_key_metadata(
+                    encrypted_output.key_metadata(),
+                )?;
+                (encrypted_output.writer()?, Some(encryption_key_id))
+            } else {
+                (raw_output.create_file_writer()?, None)
+            };
+        let parent_snapshot_id = self.table.metadata().current_snapshot_id();
         let mut writer = match self.table.metadata().format_version() {
             FormatVersion::V1 => ManifestListWriter::v1(
-                self.table
-                    .file_io()
-                    .new_output(manifest_list_path.clone())?
-                    .create_file_writer()?,
+                manifest_list_output,
                 self.snapshot_id,
-                self.table.metadata().current_snapshot_id(),
+                parent_snapshot_id,
             ),
             FormatVersion::V2 => ManifestListWriter::v2(
-                self.table
-                    .file_io()
-                    .new_output(manifest_list_path.clone())?
-                    .create_file_writer()?,
+                manifest_list_output,
                 self.snapshot_id,
-                self.table.metadata().current_snapshot_id(),
+                parent_snapshot_id,
                 next_sequence_number,
             ),
             FormatVersion::V3 => ManifestListWriter::v3(
-                self.table
-                    .file_io()
-                    .new_output(manifest_list_path.clone())?
-                    .create_file_writer()?,
+                manifest_list_output,
                 self.snapshot_id,
-                self.table.metadata().current_snapshot_id(),
+                parent_snapshot_id,
                 next_sequence_number,
                 // V3 snapshots require first-row-id/added-rows even when no
                 // new ID space is consumed. The writer advances this cursor
@@ -690,26 +693,30 @@ impl<'a> DeltaSnapshotProducer<'a> {
         writer.add_manifests(manifests.into_iter())?;
         let writer_next_row_id = writer.next_row_id();
         writer.close()?;
-        Ok((manifest_list_path, writer_next_row_id))
+        Ok(ManifestListOutput {
+            path: manifest_list_path,
+            next_row_id: writer_next_row_id,
+            encryption_key_id,
+        })
     }
 
     fn new_snapshot(
         &self,
-        manifest_list_path: String,
+        manifest_list: &ManifestListOutput,
         summary: Summary,
-        writer_next_row_id: Option<u64>,
     ) -> Result<Snapshot> {
         let timestamp_ms = chrono::Utc::now().timestamp_millis();
         let snapshot = Snapshot::builder()
-            .with_manifest_list(manifest_list_path)
+            .with_manifest_list(manifest_list.path.clone())
             .with_snapshot_id(self.snapshot_id)
             .with_parent_snapshot_id(self.table.metadata().current_snapshot_id())
             .with_sequence_number(self.table.metadata().next_sequence_number())
             .with_summary(summary)
             .with_schema_id(self.table.metadata().current_schema_id())
+            .with_encryption_key_id(manifest_list.encryption_key_id.clone())
             .with_timestamp_ms(timestamp_ms);
 
-        if let Some(writer_next_row_id) = writer_next_row_id {
+        if let Some(writer_next_row_id) = manifest_list.next_row_id {
             let first_row_id = self.table.metadata().next_row_id();
             let assigned_rows = writer_next_row_id
                 .checked_sub(first_row_id)
@@ -731,8 +738,8 @@ impl<'a> DeltaSnapshotProducer<'a> {
         summary_collector: SnapshotSummaryCollector,
         truncate_full_table: bool,
     ) -> Result<Summary> {
-        let mut additional_properties = summary_collector.build();
-        additional_properties.extend(self.snapshot_properties.clone());
+        let mut additional_properties = self.snapshot_properties.clone();
+        additional_properties.extend(summary_collector.build());
 
         let summary = Summary {
             operation,
@@ -803,22 +810,31 @@ impl<'a> DeltaSnapshotProducer<'a> {
             .checked_add(1)
             .expect("snapshot delta manifest counter should not overflow");
         let new_manifest_path = format!(
-            "{}/{}/{}-m{}.{}",
-            self.table.metadata().location(),
-            META_ROOT_PATH,
+            "{}/{}-m{}.{}",
+            self.table.metadata().metadata_location()?,
             self.commit_uuid,
             manifest_counter,
             DataFileFormat::Avro
         );
         let output_file = self.table.file_io().new_output(new_manifest_path)?;
         let partition_spec = self.partition_spec(partition_spec_id)?;
-        let builder = ManifestWriterBuilder::new(
-            output_file,
-            Some(self.snapshot_id),
-            self.key_metadata.clone(),
-            self.table.metadata().current_schema().clone(),
-            partition_spec.as_ref().clone(),
-        );
+        let schema = self.table.metadata().current_schema().clone();
+        let partition_spec = partition_spec.as_ref().clone();
+        let builder = if let Some(manager) = self.table.encryption_manager() {
+            ManifestWriterBuilder::new_from_encrypted(
+                manager.encrypt(output_file),
+                Some(self.snapshot_id),
+                schema,
+                partition_spec,
+            )?
+        } else {
+            ManifestWriterBuilder::new(
+                output_file,
+                Some(self.snapshot_id),
+                schema,
+                partition_spec,
+            )
+        };
 
         match self.table.metadata().format_version() {
             FormatVersion::V1 => {
@@ -894,16 +910,15 @@ impl<'a> DeltaSnapshotProducer<'a> {
         Ok(())
     }
 
-    fn generate_manifest_list_file_path(&self, attempt: i64) -> String {
-        format!(
-            "{}/{}/snap-{}-{}-{}.{}",
-            self.table.metadata().location(),
-            META_ROOT_PATH,
+    fn generate_manifest_list_file_path(&self, attempt: i64) -> Result<String> {
+        Ok(format!(
+            "{}/snap-{}-{}-{}.{}",
+            self.table.metadata().metadata_location()?,
             self.snapshot_id,
             attempt,
             self.commit_uuid,
             DataFileFormat::Avro
-        )
+        ))
     }
 
     fn generate_unique_snapshot_id(table: &Table) -> i64 {

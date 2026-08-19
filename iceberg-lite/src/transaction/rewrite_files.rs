@@ -342,7 +342,6 @@ impl TransactionAction for RewriteFilesAction {
         let producer = DeltaSnapshotProducer::new(
             table,
             self.commit_uuid.unwrap_or_else(Uuid::now_v7),
-            None,
             HashMap::new(),
         )
         .with_current_inventory(inventory);
