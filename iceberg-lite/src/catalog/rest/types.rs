@@ -1,0 +1,469 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+//! Request and response types for the Iceberg REST API.
+
+use std::collections::HashMap;
+
+use http::StatusCode;
+use serde_derive::{Deserialize, Serialize};
+
+use crate::spec::{Schema, SortOrder, TableMetadata, UnboundPartitionSpec};
+use crate::{
+    Error, ErrorKind, Namespace, NamespaceIdent, TableIdent, TableRequirement,
+    TableUpdate,
+};
+
+pub use crate::io::StorageCredential;
+
+use super::endpoint::Endpoint;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct CatalogConfig {
+    pub(super) overrides: HashMap<String, String>,
+    pub(super) defaults: HashMap<String, String>,
+    /// Endpoints the server advertises support for; `None` when the field is
+    /// absent.
+    pub(super) endpoints: Option<Vec<Endpoint>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+/// Wrapper for all non-2xx error responses from the REST API
+pub struct ErrorResponse {
+    error: ErrorModel,
+}
+
+impl ErrorResponse {
+    pub(super) fn into_error(self, status: StatusCode) -> Error {
+        self.error.into_error(status)
+    }
+
+    pub(super) fn into_commit_error(self, status: StatusCode) -> Error {
+        self.error.into_commit_error(status)
+    }
+}
+
+/// Stable classification of a non-success REST catalog response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestErrorKind {
+    /// The endpoint requires valid authentication credentials.
+    Unauthenticated,
+    /// The authenticated principal is not authorized for the operation.
+    Forbidden,
+    /// A commit requirement failed and the transaction may be rebuilt.
+    CommitConflict,
+    /// A commit request was sent but its durable outcome cannot be determined.
+    CommitStateUnknown,
+    /// A non-commit request conflicted with current server state.
+    Conflict,
+    /// The endpoint rejected the request because of rate limiting.
+    RateLimited,
+    /// An otherwise unclassified 5xx response.
+    Server,
+    /// An otherwise unclassified 4xx response.
+    Client,
+    /// A response outside the standard 4xx and 5xx error ranges.
+    Unexpected,
+}
+
+/// Structured REST response metadata retained as the source of an Iceberg
+/// error. PostgreSQL adapters can classify the failure without parsing its
+/// human-readable message.
+#[derive(Debug, thiserror::Error)]
+#[error("REST catalog returned HTTP status {status}")]
+pub struct RestError {
+    status: StatusCode,
+    error_type: Option<String>,
+    response_code: Option<u16>,
+    kind: RestErrorKind,
+}
+
+impl RestError {
+    pub(super) fn new(
+        status: StatusCode,
+        error_type: Option<String>,
+        response_code: Option<u16>,
+    ) -> Self {
+        let kind = Self::kind_from_status(status);
+        Self {
+            status,
+            error_type,
+            response_code,
+            kind,
+        }
+    }
+
+    pub(super) fn for_commit(
+        status: StatusCode,
+        error_type: Option<String>,
+        response_code: Option<u16>,
+    ) -> Self {
+        let kind = match status {
+            StatusCode::CONFLICT => RestErrorKind::CommitConflict,
+            StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::GATEWAY_TIMEOUT => RestErrorKind::CommitStateUnknown,
+            status
+                if status.is_server_error()
+                    && matches!(
+                        error_type.as_deref(),
+                        Some("CommitStateUnknown")
+                            | Some("CommitStateUnknownException")
+                    ) =>
+            {
+                RestErrorKind::CommitStateUnknown
+            }
+            _ => Self::kind_from_status(status),
+        };
+        Self {
+            status,
+            error_type,
+            response_code,
+            kind,
+        }
+    }
+
+    fn kind_from_status(status: StatusCode) -> RestErrorKind {
+        match status {
+            StatusCode::UNAUTHORIZED => RestErrorKind::Unauthenticated,
+            StatusCode::FORBIDDEN => RestErrorKind::Forbidden,
+            StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => {
+                RestErrorKind::Conflict
+            }
+            StatusCode::TOO_MANY_REQUESTS => RestErrorKind::RateLimited,
+            status if status.is_server_error() => RestErrorKind::Server,
+            status if status.is_client_error() => RestErrorKind::Client,
+            _ => RestErrorKind::Unexpected,
+        }
+    }
+
+    /// Actual HTTP status returned by the REST endpoint.
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// Stable classification derived from the actual status and, for commit
+    /// responses, the REST operation semantics.
+    pub fn kind(&self) -> RestErrorKind {
+        self.kind
+    }
+
+    /// Server-defined REST error type, when the body followed the Iceberg
+    /// error-response schema.
+    pub fn error_type(&self) -> Option<&str> {
+        self.error_type.as_deref()
+    }
+
+    /// Status-like code carried in the REST error body. This remains separate
+    /// from [`Self::status`] so a malformed server response cannot replace the
+    /// actual HTTP status used for classification.
+    pub fn response_code(&self) -> Option<u16> {
+        self.response_code
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+/// Error payload returned in a response with further details on the error
+pub struct ErrorModel {
+    /// Human-readable error message
+    pub message: String,
+    /// Internal type definition of the error
+    pub r#type: String,
+    /// HTTP response code
+    pub code: u16,
+    /// Optional error stack / context
+    pub stack: Option<Vec<String>>,
+}
+
+impl ErrorModel {
+    fn into_error(self, status: StatusCode) -> Error {
+        let source =
+            RestError::new(status, Some(self.r#type.clone()), Some(self.code));
+        self.into_error_with_source(status, ErrorKind::Unexpected, source)
+    }
+
+    fn into_commit_error(self, status: StatusCode) -> Error {
+        let source =
+            RestError::for_commit(status, Some(self.r#type.clone()), Some(self.code));
+        let retryable = source.kind() == RestErrorKind::CommitConflict;
+        let kind = if retryable {
+            ErrorKind::CatalogCommitConflicts
+        } else {
+            ErrorKind::Unexpected
+        };
+        self.into_error_with_source(status, kind, source)
+            .with_retryable(retryable)
+    }
+
+    fn into_error_with_source(
+        self,
+        status: StatusCode,
+        kind: ErrorKind,
+        source: RestError,
+    ) -> Error {
+        let mut error = Error::new(kind, self.message)
+            .with_context("status", status.to_string())
+            .with_context("type", self.r#type)
+            .with_context("code", self.code.to_string());
+
+        if let Some(stack) = self.stack {
+            error = error.with_context("stack", stack.join("\n"));
+        }
+
+        error.with_source(source)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct OAuthError {
+    pub(super) error: String,
+    pub(super) error_description: Option<String>,
+    pub(super) error_uri: Option<String>,
+}
+
+impl OAuthError {
+    pub(super) fn into_error(self, status: StatusCode) -> Error {
+        let source = RestError::new(status, Some(self.error.clone()), None);
+        let mut error =
+            Error::new(ErrorKind::Unexpected, format!("OAuthError: {}", self.error))
+                .with_context("status", status.to_string());
+
+        if let Some(desc) = self.error_description {
+            error = error.with_context("description", desc);
+        }
+
+        if let Some(uri) = self.error_uri {
+            error = error.with_context("uri", uri);
+        }
+
+        error.with_source(source)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct TokenResponse {
+    pub(super) access_token: String,
+    pub(super) token_type: String,
+    pub(super) expires_in: Option<u64>,
+    pub(super) issued_token_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Namespace response
+pub struct NamespaceResponse {
+    /// Namespace identifier
+    pub namespace: NamespaceIdent,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    /// Properties stored on the namespace, if supported by the server.
+    pub properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Create namespace request
+pub struct CreateNamespaceRequest {
+    /// Name of the namespace to create
+    pub namespace: NamespaceIdent,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    /// Properties to set on the namespace
+    pub properties: HashMap<String, String>,
+}
+
+impl From<&Namespace> for NamespaceResponse {
+    fn from(value: &Namespace) -> Self {
+        Self {
+            namespace: value.name().clone(),
+            properties: value.properties().clone(),
+        }
+    }
+}
+
+impl From<NamespaceResponse> for Namespace {
+    fn from(value: NamespaceResponse) -> Self {
+        Namespace::with_properties(value.namespace, value.properties)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+/// Response containing a list of namespace identifiers, with optional pagination support.
+pub struct ListNamespaceResponse {
+    /// List of namespace identifiers returned by the server
+    pub namespaces: Vec<NamespaceIdent>,
+    /// Opaque token for pagination. If present, indicates there are more results available.
+    /// Use this value in subsequent requests to retrieve the next page.
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Request to update properties on a namespace.
+///
+/// Properties that are not in the request are not modified or removed by this call.
+/// Server implementations are not required to support namespace properties.
+pub struct UpdateNamespacePropertiesRequest {
+    /// List of property keys to remove from the namespace
+    pub removals: Option<Vec<String>>,
+    /// Map of property keys to values to set or update on the namespace
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub updates: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Response from updating namespace properties, indicating which properties were changed.
+pub struct UpdateNamespacePropertiesResponse {
+    /// List of property keys that were added or updated
+    pub updated: Vec<String>,
+    /// List of properties that were removed
+    pub removed: Vec<String>,
+    /// List of properties requested for removal that were not found in the namespace's properties.
+    /// Represents a partial success response. Servers do not need to implement this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+/// Response containing a list of table identifiers, with optional pagination support.
+pub struct ListTablesResponse {
+    /// List of table identifiers under the requested namespace
+    pub identifiers: Vec<TableIdent>,
+    /// Opaque token for pagination. If present, indicates there are more results available.
+    /// Use this value in subsequent requests to retrieve the next page.
+    #[serde(default)]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Request to rename a table from one identifier to another.
+///
+/// It's valid to move a table across namespaces, but the server implementation
+/// is not required to support it.
+pub struct RenameTableRequest {
+    /// Current table identifier to rename
+    pub source: TableIdent,
+    /// New table identifier to rename to
+    pub destination: TableIdent,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+/// Result returned when a table is successfully loaded or created.
+///
+/// The table metadata JSON is returned in the `metadata` field. The corresponding file location
+/// of table metadata should be returned in the `metadata_location` field, unless the metadata
+/// is not yet committed. For example, a create transaction may return metadata that is staged
+/// but not committed.
+///
+/// The `config` map returns table-specific configuration for the table's resources, including
+/// its HTTP client and FileIO. For example, config may contain a specific FileIO implementation
+/// class for the table depending on its underlying storage.
+pub struct LoadTableResult {
+    /// May be null if the table is staged as part of a transaction
+    pub metadata_location: Option<String>,
+    /// The table's full metadata
+    pub metadata: TableMetadata,
+    /// Table-specific configuration overriding catalog configuration
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub config: HashMap<String, String>,
+    /// Storage credentials for accessing table data. Clients should check this field
+    /// before falling back to credentials in the `config` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_credentials: Option<Vec<StorageCredential>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+/// Request to create a new table in a namespace.
+///
+/// If `stage_create` is false, the table is created immediately.
+/// If `stage_create` is true, the table is not created, but table metadata is initialized
+/// and returned. The service should prepare as needed for a commit to the table commit
+/// endpoint to complete the create transaction.
+pub struct CreateTableRequest {
+    /// Name of the table to create
+    pub name: String,
+    /// Optional table location. If not provided, the server will choose a location.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// Table schema
+    pub schema: Schema,
+    /// Optional partition specification. If not provided, the table will be unpartitioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_spec: Option<UnboundPartitionSpec>,
+    /// Optional sort order for the table
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_order: Option<SortOrder>,
+    /// Whether to stage the create for a transaction (true) or create immediately (false)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_create: Option<bool>,
+    /// Optional properties to set on the table
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Request to commit updates to a table.
+///
+/// Commits have two parts: requirements and updates. Requirements are assertions that will
+/// be validated before attempting to make and commit changes. Updates are changes to make
+/// to table metadata.
+///
+/// Create table transactions that are started by createTable with `stage-create` set to true
+/// are committed using this request. Transactions should include all changes to the table,
+/// including table initialization, like AddSchemaUpdate and SetCurrentSchemaUpdate.
+pub struct CommitTableRequest {
+    /// Table identifier to update; must be present for CommitTransactionRequest
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<TableIdent>,
+    /// List of requirements that must be satisfied before committing changes
+    pub requirements: Vec<TableRequirement>,
+    /// List of updates to apply to the table metadata
+    pub updates: Vec<TableUpdate>,
+}
+
+/// Request to atomically commit changes to multiple tables in one REST catalog.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct CommitTransactionRequest {
+    /// Per-table changes, including each table's optimistic requirements.
+    pub table_changes: Vec<CommitTableRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+/// Response returned when a table is successfully updated.
+///
+/// The table metadata JSON is returned in the metadata field. The corresponding file location
+/// of table metadata must be returned in the metadata-location field. Clients can check whether
+/// metadata has changed by comparing metadata locations.
+pub struct CommitTableResponse {
+    /// Location of the updated table metadata file
+    pub metadata_location: String,
+    /// The table's updated metadata
+    pub metadata: TableMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+/// Request to register a table using an existing metadata file location.
+pub struct RegisterTableRequest {
+    /// Name of the table to register
+    pub name: String,
+    /// Location of the metadata file for the table
+    pub metadata_location: String,
+    /// Whether to overwrite table metadata if the table already exists
+    pub overwrite: Option<bool>,
+}
