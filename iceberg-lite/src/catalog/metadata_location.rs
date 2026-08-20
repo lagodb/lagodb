@@ -24,11 +24,14 @@ use crate::compression::CompressionCodec;
 use crate::spec::{TableMetadata, parse_metadata_file_compression};
 use crate::{Error, ErrorKind, Result};
 
-/// Helper for parsing a location of the format: `<location>/metadata/<version>-<uuid>.metadata.json`
-/// or with compression: `<location>/metadata/<version>-<uuid>.gz.metadata.json`
+/// Default folder name for metadata files under the table location.
+pub(crate) const METADATA_FOLDER_NAME: &str = "metadata";
+
+/// Helper for parsing a location of the format: `<metadata-dir>/<version>-<uuid>.metadata.json`
+/// or with compression: `<metadata-dir>/<version>-<uuid>.gz.metadata.json`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetadataLocation {
-    table_location: String,
+    location: String,
     version: i32,
     id: Uuid,
     compression_codec: CompressionCodec,
@@ -41,67 +44,46 @@ impl MetadataLocation {
         parse_metadata_file_compression(properties).unwrap_or(CompressionCodec::None)
     }
 
-    /// Creates a completely new metadata location starting at version 0.
-    /// Only used for creating a new table. For updates, see `with_next_version`.
-    pub fn new_with_table_location(table_location: impl ToString) -> Self {
-        Self {
-            table_location: table_location.to_string(),
-            version: 0,
-            id: Uuid::new_v4(),
-            compression_codec: CompressionCodec::None,
-        }
-    }
-
-    /// Creates a completely new metadata location starting at version 0
-    /// with compression settings from table metadata.
-    pub fn new_with_metadata(
-        table_location: impl ToString,
-        metadata: &TableMetadata,
-    ) -> Self {
-        Self {
-            table_location: table_location.to_string(),
+    /// Creates a new metadata location starting at version 0 from table metadata.
+    pub fn try_new_with_metadata(metadata: &TableMetadata) -> Result<Self> {
+        Ok(Self {
+            location: metadata.metadata_location()?,
             version: 0,
             id: Uuid::new_v4(),
             compression_codec: Self::compression_from_properties(
                 metadata.properties(),
             ),
-        }
+        })
     }
 
     /// Creates a new metadata location for an updated metadata file.
     pub fn with_next_version(&self) -> Self {
         Self {
-            table_location: self.table_location.clone(),
+            location: self.location.clone(),
             version: self.version + 1,
             id: Uuid::new_v4(),
             compression_codec: self.compression_codec,
         }
     }
 
-    /// Updates the metadata location with compression settings from new metadata.
-    pub fn with_new_metadata(&self, new_metadata: &TableMetadata) -> Self {
-        Self {
-            table_location: self.table_location.clone(),
+    /// Updates the metadata location from the metadata being committed.
+    pub fn try_with_new_metadata(
+        &self,
+        new_metadata: &TableMetadata,
+    ) -> Result<Self> {
+        Ok(Self {
+            location: new_metadata.metadata_location()?,
             version: self.version,
             id: self.id,
             compression_codec: Self::compression_from_properties(
                 new_metadata.properties(),
             ),
-        }
+        })
     }
 
     /// Returns the compression codec used for this metadata location.
     pub fn compression_codec(&self) -> CompressionCodec {
         self.compression_codec
-    }
-
-    fn parse_metadata_path_prefix(path: &str) -> Result<String> {
-        let prefix = path.strip_suffix("/metadata").ok_or(Error::new(
-            ErrorKind::Unexpected,
-            format!("Metadata location not under \"/metadata\" subdirectory: {path}"),
-        ))?;
-
-        Ok(prefix.to_string())
     }
 
     /// Parses a file name of the format `<version>-<uuid>.metadata.json`
@@ -138,8 +120,8 @@ impl Display for MetadataLocation {
         let suffix = self.compression_codec.suffix().unwrap_or("");
         write!(
             f,
-            "{}/metadata/{:0>5}-{}{}.metadata.json",
-            self.table_location, self.version, self.id, suffix
+            "{}/{:0>5}-{}{}.metadata.json",
+            self.location, self.version, self.id, suffix
         )
     }
 }
@@ -148,16 +130,15 @@ impl FromStr for MetadataLocation {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let (path, file_name) = s.rsplit_once('/').ok_or(Error::new(
+        let (location, file_name) = s.rsplit_once('/').ok_or(Error::new(
             ErrorKind::Unexpected,
             format!("Invalid metadata location: {s}"),
         ))?;
 
-        let prefix = Self::parse_metadata_path_prefix(path)?;
         let (version, id, compression_codec) = Self::parse_file_name(file_name)?;
 
         Ok(MetadataLocation {
-            table_location: prefix,
+            location: location.to_string(),
             version,
             id,
             compression_codec,
@@ -175,13 +156,13 @@ mod test {
     use crate::compression::CompressionCodec;
 
     fn expected_location(
-        table_location: &str,
+        location: &str,
         version: i32,
         id: &str,
         compression_codec: CompressionCodec,
     ) -> MetadataLocation {
         MetadataLocation {
-            table_location: table_location.to_string(),
+            location: location.to_string(),
             version,
             id: Uuid::from_str(id).unwrap(),
             compression_codec,
@@ -195,7 +176,7 @@ mod test {
             (
                 "/metadata/1234567-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
                 Ok(expected_location(
-                    "",
+                    "/metadata",
                     1234567,
                     "2cd22b57-5127-4198-92ba-e4e67c79821b",
                     CompressionCodec::None,
@@ -205,7 +186,7 @@ mod test {
             (
                 "/abc/metadata/1234567-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
                 Ok(expected_location(
-                    "/abc",
+                    "/abc/metadata",
                     1234567,
                     "2cd22b57-5127-4198-92ba-e4e67c79821b",
                     CompressionCodec::None,
@@ -215,7 +196,7 @@ mod test {
             (
                 "/abc/def/metadata/1234567-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
                 Ok(expected_location(
-                    "/abc/def",
+                    "/abc/def/metadata",
                     1234567,
                     "2cd22b57-5127-4198-92ba-e4e67c79821b",
                     CompressionCodec::None,
@@ -225,7 +206,7 @@ mod test {
             (
                 "https://127.0.0.1/metadata/1234567-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
                 Ok(expected_location(
-                    "https://127.0.0.1",
+                    "https://127.0.0.1/metadata",
                     1234567,
                     "2cd22b57-5127-4198-92ba-e4e67c79821b",
                     CompressionCodec::None,
@@ -235,7 +216,7 @@ mod test {
             (
                 "/abc/metadata/1234567-81056704-ce5b-41c4-bb83-eb6408081af6.metadata.json",
                 Ok(expected_location(
-                    "/abc",
+                    "/abc/metadata",
                     1234567,
                     "81056704-ce5b-41c4-bb83-eb6408081af6",
                     CompressionCodec::None,
@@ -245,7 +226,7 @@ mod test {
             (
                 "/abc/metadata/00000-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
                 Ok(expected_location(
-                    "/abc",
+                    "/abc/metadata",
                     0,
                     "2cd22b57-5127-4198-92ba-e4e67c79821b",
                     CompressionCodec::None,
@@ -255,7 +236,7 @@ mod test {
             (
                 "/abc/metadata/00000-2cd22b57-5127-4198-92ba-e4e67c79821b.gz.metadata.json",
                 Ok(expected_location(
-                    "/abc",
+                    "/abc/metadata",
                     0,
                     "2cd22b57-5127-4198-92ba-e4e67c79821b",
                     CompressionCodec::gzip_default(),
@@ -276,10 +257,15 @@ mod test {
                 "/metadata/noversion-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
                 Err("".to_string()),
             ),
-            // No /metadata subdirectory
+            // Custom metadata directories are valid.
             (
                 "/wrongsubdir/1234567-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
-                Err("".to_string()),
+                Ok(expected_location(
+                    "/wrongsubdir",
+                    1234567,
+                    "2cd22b57-5127-4198-92ba-e4e67c79821b",
+                    CompressionCodec::None,
+                )),
             ),
             // No .metadata.json suffix
             (
@@ -306,7 +292,6 @@ mod test {
     #[test]
     fn test_metadata_location_with_next_version() {
         let test_cases = vec![
-            MetadataLocation::new_with_table_location("/abc"),
             MetadataLocation::from_str(
                 "/abc/def/metadata/1234567-2cd22b57-5127-4198-92ba-e4e67c79821b.metadata.json",
             )
@@ -317,7 +302,7 @@ mod test {
             let next = MetadataLocation::from_str(&input.to_string())
                 .unwrap()
                 .with_next_version();
-            assert_eq!(next.table_location, input.table_location);
+            assert_eq!(next.location, input.location);
             assert_eq!(next.version, input.version + 1);
             assert_ne!(next.id, input.id);
         }

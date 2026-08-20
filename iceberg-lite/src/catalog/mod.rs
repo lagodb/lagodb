@@ -19,6 +19,8 @@
 
 pub mod memory;
 mod metadata_location;
+pub mod rest;
+mod session;
 pub(crate) mod utils;
 
 use std::collections::HashMap;
@@ -34,9 +36,12 @@ pub use metadata_location::*;
 #[cfg(test)]
 use mockall::automock;
 use serde_derive::{Deserialize, Serialize};
+pub use session::*;
 use typed_builder::TypedBuilder;
 use uuid::Uuid;
 
+use crate::encryption::kms::KmsClientFactory;
+use crate::io::FileIO;
 use crate::spec::{
     EncryptedKey, FormatVersion, PartitionStatisticsFile, Schema, SchemaId, Snapshot,
     SnapshotReference, SortOrder, StatisticsFile, TableMetadata,
@@ -128,6 +133,31 @@ pub trait Catalog: Debug + Sync + Send {
 pub trait CatalogBuilder: Default + Debug + Send + Sync {
     /// The catalog type that this builder creates.
     type C: Catalog;
+
+    /// Set a [`KmsClientFactory`] to enable table encryption.
+    ///
+    /// When provided, the catalog calls the factory once during
+    /// [`load`](Self::load) with the catalog properties to create a shared
+    /// [`KeyManagementClient`](crate::encryption::KeyManagementClient).
+    /// That client is then passed to each table's `TableBuilder` so tables
+    /// with `encryption.key-id` set can construct an `EncryptionManager`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use iceberg::CatalogBuilder;
+    /// use iceberg::encryption::kms::KmsClientFactory;
+    /// use std::sync::Arc;
+    ///
+    /// let catalog = MyCatalogBuilder::default()
+    ///     .with_kms_client_factory(Arc::new(MyKmsClientFactory))
+    ///     .load("my_catalog", props)?;
+    /// ```
+    fn with_kms_client_factory(
+        self,
+        kms_client_factory: Arc<dyn KmsClientFactory>,
+    ) -> Self;
+
     /// Create a new catalog instance.
     fn load(
         self,
@@ -327,6 +357,12 @@ pub struct TableCreation {
 pub struct TableCommit {
     /// The table ident.
     ident: TableIdent,
+    /// Storage bound to the table version used to prepare this commit.
+    ///
+    /// Some catalogs return only metadata in their commit response, so the
+    /// resulting [`Table`] must retain the response-scoped storage context from
+    /// the most recent table refresh.
+    file_io: FileIO,
     /// The requirements of the table.
     ///
     /// Commit will fail if the requirements are not met.
@@ -339,6 +375,11 @@ impl TableCommit {
     /// Return the table identifier.
     pub fn identifier(&self) -> &TableIdent {
         &self.ident
+    }
+
+    /// Return the storage context associated with this commit's base table.
+    pub(crate) fn file_io(&self) -> &FileIO {
+        &self.file_io
     }
 
     /// Take all requirements.
@@ -380,7 +421,7 @@ impl TableCommit {
         let new_metadata_location =
             MetadataLocation::from_str(current_metadata_location)?
                 .with_next_version()
-                .with_new_metadata(&new_metadata)
+                .try_with_new_metadata(&new_metadata)?
                 .to_string();
 
         Ok(table
@@ -2468,6 +2509,7 @@ mod tests {
 
         let table_commit = TableCommit::builder()
             .ident(table.identifier().to_owned())
+            .file_io(table.file_io().clone())
             .updates(updates)
             .requirements(requirements)
             .build();
@@ -2483,12 +2525,13 @@ mod tests {
             "v2"
         );
 
-        // metadata version should be bumped
+        // Metadata version should be bumped, and the metadata directory should be
+        // re-derived from the updated table location.
         assert!(
             updated_table
                 .metadata_location()
                 .unwrap()
-                .starts_with("s3://bucket/test/location/metadata/00001-")
+                .starts_with("s3://bucket/test/new_location/data/metadata/00001-")
         );
 
         assert_eq!(

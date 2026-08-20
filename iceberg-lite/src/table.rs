@@ -27,7 +27,8 @@ use crate::io::FileIO;
 use crate::io::object_cache::ObjectCache;
 use crate::scan::TableScanBuilder;
 use crate::spec::{
-    ManifestListReader, SchemaRef, SnapshotRef, TableMetadata, TableMetadataRef,
+    EncryptedKey, ManifestListReader, SchemaRef, SnapshotRef, TableMetadata,
+    TableMetadataRef,
 };
 use crate::{Error, ErrorKind, Result, TableIdent};
 
@@ -268,6 +269,27 @@ impl Table {
     /// Returns the [`EncryptionManager`] for this table, if encryption is configured.
     pub fn encryption_manager(&self) -> Option<&EncryptionManager> {
         self.encryption_manager.as_deref()
+    }
+
+    pub(crate) fn pending_encryption_keys(&self) -> Vec<EncryptedKey> {
+        self.encryption_manager
+            .as_ref()
+            .map(|manager| {
+                manager.with_encryption_keys(|keys| {
+                    let mut pending_keys = keys
+                        .values()
+                        .filter(|key| {
+                            self.metadata.encryption_key(key.key_id()).is_none()
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    pending_keys.sort_unstable_by(|left, right| {
+                        left.key_id().cmp(right.key_id())
+                    });
+                    pending_keys
+                })
+            })
+            .unwrap_or_default()
     }
 
     /// Creates a synchronous manifest-list reader for a snapshot.

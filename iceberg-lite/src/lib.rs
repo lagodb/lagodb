@@ -9,7 +9,9 @@ pub mod expr;
 pub mod inspect;
 pub mod io;
 pub mod overlay;
+pub mod partitioning;
 pub mod scan;
+pub mod sensitive;
 pub mod spec;
 pub mod table;
 

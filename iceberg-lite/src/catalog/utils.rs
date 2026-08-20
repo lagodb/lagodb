@@ -17,11 +17,11 @@
 
 //! Utility functions for catalog operations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::Result;
 use crate::io::FileIO;
-use crate::spec::Manifest;
+use crate::spec::ManifestFile;
 use crate::table::Table;
 
 /// Deletes all data and metadata files referenced by the table metadata.
@@ -31,19 +31,24 @@ use crate::table::Table;
 /// corrupted by catalog cleanup.
 pub(crate) fn drop_table_data(table_info: &Table) -> Result<()> {
     let mut manifest_lists_to_delete: HashSet<String> = HashSet::new();
-    let mut manifests_to_delete: HashSet<String> = HashSet::new();
+    let mut manifests_to_delete: HashMap<String, ManifestFile> = HashMap::new();
 
     let metadata = table_info.metadata_ref();
     let file_io = table_info.file_io();
 
     for snapshot in metadata.snapshots() {
-        let manifest_list = snapshot.load_manifest_list(file_io, &metadata)?;
+        let manifest_list = snapshot.load_manifest_list_with_encryption(
+            file_io,
+            &metadata,
+            table_info.encryption_manager(),
+        )?;
         let manifest_list_location = snapshot.manifest_list();
         if !manifest_list_location.is_empty() {
             manifest_lists_to_delete.insert(manifest_list_location.to_string());
         }
         for manifest_file in manifest_list.entries() {
-            manifests_to_delete.insert(manifest_file.manifest_path.clone());
+            manifests_to_delete
+                .insert(manifest_file.manifest_path.clone(), manifest_file.clone());
         }
     }
 
@@ -51,7 +56,7 @@ pub(crate) fn drop_table_data(table_info: &Table) -> Result<()> {
         delete_data_files(file_io, &manifests_to_delete)?;
     }
 
-    delete_paths(file_io, manifests_to_delete)?;
+    delete_paths(file_io, manifests_to_delete.into_keys().collect())?;
     delete_paths(file_io, manifest_lists_to_delete)?;
 
     delete_paths(
@@ -88,11 +93,10 @@ pub(crate) fn drop_table_data(table_info: &Table) -> Result<()> {
 
 fn delete_data_files(
     file_io: &FileIO,
-    manifest_paths: &HashSet<String>,
+    manifest_files: &HashMap<String, ManifestFile>,
 ) -> Result<()> {
-    for manifest_path in manifest_paths {
-        let manifest_content = file_io.new_input(manifest_path)?.read()?;
-        let manifest = Manifest::parse_avro(&manifest_content)?;
+    for manifest_file in manifest_files.values() {
+        let manifest = manifest_file.load_manifest(file_io)?;
         let data_file_paths = manifest
             .entries()
             .iter()

@@ -18,11 +18,12 @@
 //! This module contains memory catalog implementation.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use itertools::Itertools;
-use std::sync::{Mutex, MutexGuard};
 
 use super::namespace_state::NamespaceState;
+use crate::encryption::kms::{KeyManagementClient, KmsClientFactory};
 use crate::io::FileIO;
 use crate::spec::{TableMetadata, TableMetadataBuilder};
 use crate::table::Table;
@@ -39,53 +40,71 @@ const LOCATION: &str = "location";
 
 /// Builder for [`MemoryCatalog`].
 #[derive(Debug)]
-pub struct MemoryCatalogBuilder(MemoryCatalogConfig);
+pub struct MemoryCatalogBuilder {
+    config: MemoryCatalogConfig,
+    kms_client_factory: Option<Arc<dyn KmsClientFactory>>,
+}
 
 impl Default for MemoryCatalogBuilder {
     fn default() -> Self {
-        Self(MemoryCatalogConfig {
-            name: None,
-            warehouse: "".to_string(),
-            props: HashMap::new(),
-        })
+        Self {
+            config: MemoryCatalogConfig {
+                name: None,
+                warehouse: "".to_string(),
+                props: HashMap::new(),
+            },
+            kms_client_factory: None,
+        }
     }
 }
 
 impl CatalogBuilder for MemoryCatalogBuilder {
     type C = MemoryCatalog;
 
+    fn with_kms_client_factory(
+        mut self,
+        kms_client_factory: Arc<dyn KmsClientFactory>,
+    ) -> Self {
+        self.kms_client_factory = Some(kms_client_factory);
+        self
+    }
+
     fn load(
         mut self,
         name: impl Into<String>,
         props: HashMap<String, String>,
     ) -> Result<Self::C> {
-        self.0.name = Some(name.into());
+        self.config.name = Some(name.into());
 
         if props.contains_key(MEMORY_CATALOG_WAREHOUSE) {
-            self.0.warehouse = props
+            self.config.warehouse = props
                 .get(MEMORY_CATALOG_WAREHOUSE)
                 .cloned()
                 .unwrap_or_default()
         }
 
         // Collect other remaining properties
-        self.0.props = props
+        self.config.props = props
             .into_iter()
             .filter(|(k, _)| k != MEMORY_CATALOG_WAREHOUSE)
             .collect();
 
-        if self.0.name.is_none() {
+        if self.config.name.is_none() {
             Err(Error::new(
                 ErrorKind::DataInvalid,
                 "Catalog name is required",
             ))
-        } else if self.0.warehouse.is_empty() {
+        } else if self.config.warehouse.is_empty() {
             Err(Error::new(
                 ErrorKind::DataInvalid,
                 "Catalog warehouse is required",
             ))
         } else {
-            MemoryCatalog::new(self.0)
+            let kms_client = match self.kms_client_factory {
+                Some(factory) => Some(factory.create_kms_client(&self.config.props)?),
+                None => None,
+            };
+            MemoryCatalog::new(self.config, kms_client)
         }
     }
 }
@@ -103,15 +122,20 @@ pub struct MemoryCatalog {
     root_namespace_state: Mutex<NamespaceState>,
     file_io: FileIO,
     warehouse_location: String,
+    kms_client: Option<Arc<dyn KeyManagementClient>>,
 }
 
 impl MemoryCatalog {
     /// Creates a memory catalog.
-    fn new(config: MemoryCatalogConfig) -> Result<Self> {
+    fn new(
+        config: MemoryCatalogConfig,
+        kms_client: Option<Arc<dyn KeyManagementClient>>,
+    ) -> Result<Self> {
         Ok(Self {
             root_namespace_state: Mutex::new(NamespaceState::default()),
             file_io: FileIO::from_path_with_props(&config.warehouse, config.props)?,
             warehouse_location: config.warehouse,
+            kms_client,
         })
     }
 
@@ -125,12 +149,15 @@ impl MemoryCatalog {
             root_namespace_state.get_existing_table_location(table_ident)?;
         let metadata = TableMetadata::read_from(&self.file_io, metadata_location)?;
 
-        Table::builder()
+        let mut builder = Table::builder()
             .identifier(table_ident.clone())
             .metadata(metadata)
             .metadata_location(metadata_location.to_string())
-            .file_io(self.file_io.clone())
-            .build()
+            .file_io(self.file_io.clone());
+        if let Some(kms_client) = self.kms_client.clone() {
+            builder = builder.kms_client(kms_client);
+        }
+        builder.build()
     }
 }
 
@@ -259,8 +286,8 @@ impl Catalog for MemoryCatalog {
         let table_name = table_creation.name.clone();
         let table_ident = TableIdent::new(namespace_ident.clone(), table_name);
 
-        let (table_creation, location) = match table_creation.location.clone() {
-            Some(location) => (table_creation, location),
+        let table_creation = match table_creation.location.clone() {
+            Some(_) => table_creation,
             None => {
                 let namespace_properties =
                     root_namespace_state.get_properties(namespace_ident)?;
@@ -275,12 +302,10 @@ impl Catalog for MemoryCatalog {
 
                 let location = format!("{}/{}", location_prefix, table_ident.name());
 
-                let new_table_creation = TableCreation {
-                    location: Some(location.clone()),
+                TableCreation {
+                    location: Some(location),
                     ..table_creation
-                };
-
-                (new_table_creation, location)
+                }
             }
         };
 
@@ -288,19 +313,22 @@ impl Catalog for MemoryCatalog {
             .build()?
             .metadata;
         let metadata_location =
-            MetadataLocation::new_with_metadata(location, &metadata).to_string();
+            MetadataLocation::try_new_with_metadata(&metadata)?.to_string();
 
         metadata.write_to(&self.file_io, &metadata_location)?;
 
         root_namespace_state
             .insert_new_table(&table_ident, metadata_location.clone())?;
 
-        Table::builder()
+        let mut builder = Table::builder()
             .file_io(self.file_io.clone())
             .metadata_location(metadata_location)
             .metadata(metadata)
-            .identifier(table_ident)
-            .build()
+            .identifier(table_ident);
+        if let Some(kms_client) = self.kms_client.clone() {
+            builder = builder.kms_client(kms_client);
+        }
+        builder.build()
     }
 
     /// Load table from the catalog.
@@ -362,12 +390,15 @@ impl Catalog for MemoryCatalog {
 
         let metadata = TableMetadata::read_from(&self.file_io, &metadata_location)?;
 
-        Table::builder()
+        let mut builder = Table::builder()
             .file_io(self.file_io.clone())
             .metadata_location(metadata_location)
             .metadata(metadata)
-            .identifier(table_ident.clone())
-            .build()
+            .identifier(table_ident.clone());
+        if let Some(kms_client) = self.kms_client.clone() {
+            builder = builder.kms_client(kms_client);
+        }
+        builder.build()
     }
 
     /// Update a table in the catalog.
@@ -406,9 +437,11 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::encryption::kms::MemoryKmsClientFactory;
     use crate::io::FileIO;
     use crate::spec::{
-        NestedField, PartitionSpec, PrimitiveType, Schema, SortOrder, Type,
+        FormatVersion, NestedField, PartitionSpec, PrimitiveType, Schema, SortOrder,
+        TableProperties, Type,
     };
     use crate::transaction::{ApplyTransactionAction, Transaction};
 
@@ -1915,6 +1948,53 @@ pub(crate) mod tests {
             .commit(&catalog)
             .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::TableNotFound);
+    }
+
+    #[test]
+    fn catalog_kms_factory_client_reaches_table_encryption_manager() {
+        let factory = MemoryKmsClientFactory::new();
+        factory.add_master_key("master-1").unwrap();
+
+        let catalog = MemoryCatalogBuilder::default()
+            .with_kms_client_factory(Arc::new(factory))
+            .load(
+                "memory",
+                HashMap::from([(MEMORY_CATALOG_WAREHOUSE.to_string(), temp_path())]),
+            )
+            .unwrap();
+
+        let namespace_ident = NamespaceIdent::new("enc_ns".into());
+        create_namespace(&catalog, &namespace_ident);
+
+        let table_ident = TableIdent::new(namespace_ident.clone(), "enc".into());
+        let table = catalog
+            .create_table(
+                &namespace_ident,
+                TableCreation::builder()
+                    .name(table_ident.name().to_string())
+                    .schema(simple_table_schema())
+                    .format_version(FormatVersion::V3)
+                    .properties(HashMap::from([(
+                        TableProperties::PROPERTY_ENCRYPTION_KEY_ID.to_string(),
+                        "master-1".to_string(),
+                    )]))
+                    .build(),
+            )
+            .unwrap();
+        assert!(table.encryption_manager().is_some());
+
+        let registered_ident =
+            TableIdent::new(namespace_ident, "registered_enc".into());
+        let registered_table = catalog
+            .register_table(
+                &registered_ident,
+                table.metadata_location().unwrap().to_string(),
+            )
+            .unwrap();
+        assert!(registered_table.encryption_manager().is_some());
+
+        let loaded_table = catalog.load_table(&registered_ident).unwrap();
+        assert!(loaded_table.encryption_manager().is_some());
     }
 
     fn build_table(ident: TableIdent) -> Table {

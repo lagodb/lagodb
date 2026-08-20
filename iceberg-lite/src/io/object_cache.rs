@@ -37,7 +37,7 @@ pub(crate) enum CachedItem {
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub(crate) enum CachedObjectKey {
     ManifestList((String, FormatVersion, SchemaId)),
-    Manifest(String),
+    Manifest((String, Option<u64>)),
 }
 
 /// Caches metadata objects deserialized from immutable files
@@ -127,7 +127,10 @@ impl ObjectCache {
             return manifest_file.load_manifest(&self.file_io).map(Arc::new);
         }
 
-        let key = CachedObjectKey::Manifest(manifest_file.manifest_path.clone());
+        let key = CachedObjectKey::Manifest((
+            manifest_file.manifest_path.clone(),
+            manifest_file.first_row_id,
+        ));
 
         let cache_entry = self
             .cache
@@ -324,7 +327,6 @@ mod tests {
             let mut writer = ManifestWriterBuilder::new(
                 self.next_manifest_file(),
                 Some(current_snapshot.snapshot_id()),
-                None,
                 current_schema.clone(),
                 current_partition_spec.as_ref().clone(),
             )
