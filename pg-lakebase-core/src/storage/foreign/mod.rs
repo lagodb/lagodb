@@ -44,6 +44,7 @@ impl SqlStateError for StorageError {
 }
 
 pub use access::{ObjectAccess, ObjectPrefixAccess};
+pub(crate) use catalog::ForeignCatalog;
 pub use catalog::{
     ForeignOption, ForeignOptionIter, ForeignOptionView, StorageOptions,
 };

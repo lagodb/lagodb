@@ -6,5 +6,6 @@
 //! implementation state.
 
 pub mod foreign;
+pub mod profile;
 pub mod service;
 pub mod volume;

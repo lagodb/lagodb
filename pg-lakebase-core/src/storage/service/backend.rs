@@ -1,8 +1,8 @@
 //! PostgreSQL-backend-local access to the runtime storage service.
 //!
 //! A backend caches one healthy foreground connection for each active managed
-//! volume or foreign user mapping. Every socket is attached to one physical
-//! storage context before object operations begin.
+//! volume, foreign user mapping, or caller-owned configured generation. Every
+//! socket is attached to one physical storage context before object operations begin.
 //!
 //! The cached socket is deliberately backend-scoped rather than transaction-
 //! or `ResourceOwner`-scoped: PostgreSQL error unwinding drops open Rust file
@@ -25,15 +25,16 @@ use super::StorageEndpoint;
 use super::connection::{
     BackendAttach, BackendAttachedContext, BackendContextKey,
     PostgresExternalFdPolicy, acquire_attached_client, attached_context,
+    configured_context,
 };
 use super::injection_points::StorageServiceInjectionPoints;
 
 /// Cloneable PostgreSQL-facing storage service handle.
 ///
-/// Clones share one backend-local attached context. Foreign contexts are weakly
-/// interned, so their cache entries and open handles define the socket/config
-/// lifetime. Managed contexts remain strongly cached by their bounded volume
-/// ID. Both kinds of socket participate in the same bounded idle cache.
+/// Clones share one backend-local attached context. Foreign and fresh configured
+/// contexts are weakly interned, so their owners define socket/config lifetime.
+/// Managed contexts remain strongly cached by their bounded volume ID. Every
+/// kind of socket participates in the same bounded idle cache.
 #[derive(Clone)]
 pub struct BackendStorageService {
     context: Rc<BackendAttachedContext>,
@@ -79,6 +80,23 @@ impl BackendStorageService {
             endpoint.socket_path(),
             BackendContextKey::Foreign(u32::from(umid) as u64),
             BackendAttach::Configured(config),
+            endpoint.max_idle_connections(),
+        )?;
+        Ok(Self { context })
+    }
+
+    /// Creates a fresh backend-local context for caller-owned credentials.
+    ///
+    /// Each call receives a new generation and never reuses a prior configured
+    /// connection. The context and its credentials live exactly as long as the
+    /// returned service and its clones.
+    pub fn for_configured(
+        endpoint: &StorageEndpoint,
+        config: Arc<StoreConfig>,
+    ) -> StorageResult<Self> {
+        let context = configured_context(
+            endpoint.socket_path(),
+            config,
             endpoint.max_idle_connections(),
         )?;
         Ok(Self { context })

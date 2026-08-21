@@ -29,16 +29,29 @@ impl fmt::Debug for ForeignOption<'_> {
 
 impl<'a> ForeignOption<'a> {
     fn is_secret(&self) -> bool {
-        matches!(
-            self.name.to_bytes(),
-            b"access_key_id"
-                | b"secret_access_key"
-                | b"token"
-                | b"service_account_key"
-                | b"access_key"
-                | b"bearer_token"
-                | b"client_secret"
-        )
+        Self::is_secret_name(self.name.to_bytes())
+    }
+
+    /// Classify option names whose values must never be exposed in diagnostics
+    /// or PostgreSQL utility-statement text.
+    pub fn is_secret_name(name: &[u8]) -> bool {
+        const SECRET_NAMES: &[&[u8]] = &[
+            b"access_key_id",
+            b"secret_access_key",
+            b"token",
+            b"credential",
+            b"service_account_key",
+            b"access_key",
+            b"bearer_token",
+            b"client_secret",
+        ];
+
+        SECRET_NAMES
+            .iter()
+            .any(|secret| name.eq_ignore_ascii_case(secret))
+            || name
+                .get(..b"header.".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"header."))
     }
 
     pub fn name(&self) -> &'a CStr {
@@ -181,6 +194,32 @@ pub(crate) struct ForeignCatalog {
 }
 
 impl ForeignCatalog {
+    pub(crate) fn mapping_exists(
+        server_oid: pg_sys::Oid,
+        effective_user: pg_sys::Oid,
+    ) -> bool {
+        [effective_user, pg_sys::InvalidOid]
+            .into_iter()
+            .any(|user_oid| {
+                // SAFETY: USERMAPPINGUSERSERVER has exactly the (user, server)
+                // OID keys supplied here. A non-null tuple owns one syscache pin.
+                let tuple = unsafe {
+                    pg_sys::SearchSysCache2(
+                        pg_sys::SysCacheIdentifier::USERMAPPINGUSERSERVER as i32,
+                        pg_sys::Datum::from(u32::from(user_oid) as usize),
+                        pg_sys::Datum::from(u32::from(server_oid) as usize),
+                    )
+                };
+                if tuple.is_null() {
+                    false
+                } else {
+                    // SAFETY: the successful lookup above owns this syscache pin.
+                    unsafe { pg_sys::ReleaseSysCache(tuple) };
+                    true
+                }
+            })
+    }
+
     pub(crate) fn load(
         relation_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,

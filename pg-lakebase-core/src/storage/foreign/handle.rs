@@ -1,12 +1,15 @@
 //! Provider-facing storage operations.
 
+use std::fmt;
 use std::rc::Rc;
 
 use pg_lakebase_storage::{
     ListSession, ObjectInfo, StagingFile, StagingPathResolver, StorageFile,
-    StorageResult, UploadInfo,
+    StorageResult, StoreConfig, UploadInfo,
 };
 use pgrx::pg_sys;
+
+use crate::storage::service::BackendStorageService;
 
 use super::cache::StorageCacheEntry;
 use super::identity::StorageIdentity;
@@ -20,6 +23,15 @@ pub struct StorageHandle {
     entry: Rc<StorageCacheEntry>,
 }
 
+impl fmt::Debug for StorageHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StorageHandle")
+            .field("identity", &self.entry.identity)
+            .finish_non_exhaustive()
+    }
+}
+
 impl StorageHandle {
     pub(crate) fn new(entry: Rc<StorageCacheEntry>) -> Self {
         Self { entry }
@@ -31,6 +43,16 @@ impl StorageHandle {
 
     pub fn umid(&self) -> pg_sys::Oid {
         self.entry.umid
+    }
+
+    /// Returns the validated configuration owned by this catalog-backed handle.
+    pub fn config(&self) -> &StoreConfig {
+        self.entry.config.as_ref()
+    }
+
+    /// Clones the operation-stable service bound to this catalog identity.
+    pub fn service(&self) -> BackendStorageService {
+        self.entry.service.clone()
     }
 
     /// Opens an object for reading.

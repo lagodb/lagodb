@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::raw::c_int;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use pg_lakebase_storage::StoreConfig;
 use pgrx::pg_sys;
 
 use crate::storage::service::BackendStorageService;
@@ -20,6 +22,7 @@ pub(crate) struct StorageCacheEntry {
     pub(crate) server_hashvalue: u32,
     pub(crate) mapping_hashvalue: u32,
     pub(crate) identity: StorageIdentity,
+    pub(crate) config: Arc<StoreConfig>,
     pub(crate) service: BackendStorageService,
 }
 

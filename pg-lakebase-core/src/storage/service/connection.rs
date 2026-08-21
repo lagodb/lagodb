@@ -2,7 +2,8 @@
 //!
 //! The PostgreSQL backend is single-threaded, so live contexts use `Rc`/`Weak`
 //! ownership. Context metadata remains interned while reusable sockets form a
-//! bounded backend-local idle cache. Open files retain their client generation
+//! bounded backend-local idle cache. Fresh configured contexts use monotonic,
+//! credential-free generation keys. Open files retain their client generation
 //! directly and therefore cannot be evicted underneath READ.
 
 use std::cell::{Cell, RefCell};
@@ -40,6 +41,21 @@ pub(crate) fn attached_context(
     })
 }
 
+pub(crate) fn configured_context(
+    socket_path: &Path,
+    config: Arc<StoreConfig>,
+    max_idle_connections: usize,
+) -> StorageResult<Rc<BackendAttachedContext>> {
+    ATTACHED_CONTEXTS.with(|manager| {
+        let mut manager = manager.try_borrow_mut().map_err(|_| {
+            StorageError::protocol(
+                "backend storage context manager is already in use",
+            )
+        })?;
+        Ok(manager.resolve_configured(socket_path, config, max_idle_connections))
+    })
+}
+
 pub(crate) fn acquire_attached_client(
     context: &Rc<BackendAttachedContext>,
 ) -> StorageResult<StorageClient> {
@@ -57,6 +73,7 @@ pub(crate) fn acquire_attached_client(
 pub(crate) enum BackendContextKey {
     Managed(u64),
     Foreign(u64),
+    Configured(u64),
 }
 
 #[derive(Clone)]
@@ -178,6 +195,7 @@ impl BackendAttachedContext {
 
 struct BackendConnectionManager {
     contexts: HashMap<BackendContextKey, CachedContext>,
+    next_configured_generation: u64,
     use_clock: u64,
     max_idle_connections: usize,
 }
@@ -186,23 +204,23 @@ enum CachedContext {
     /// Managed volume IDs are stable and bounded by runtime configuration, so
     /// their healthy sockets remain backend-cached across SQL statements.
     Managed(Rc<BackendAttachedContext>),
-    /// Foreign catalog entries own configured contexts. The manager must not
-    /// keep an invalidated UMID/config alive after that owner is discarded.
-    Foreign(Weak<BackendAttachedContext>),
+    /// Owners of foreign and one-response configured contexts control their
+    /// lifetime. The manager must not retain credentials after the owner drops.
+    Configured(Weak<BackendAttachedContext>),
 }
 
 impl CachedContext {
     fn context(&self) -> Option<Rc<BackendAttachedContext>> {
         match self {
             Self::Managed(context) => Some(Rc::clone(context)),
-            Self::Foreign(context) => context.upgrade(),
+            Self::Configured(context) => context.upgrade(),
         }
     }
 
     fn is_live(&self) -> bool {
         match self {
             Self::Managed(_) => true,
-            Self::Foreign(context) => context.strong_count() > 0,
+            Self::Configured(context) => context.strong_count() > 0,
         }
     }
 }
@@ -211,6 +229,7 @@ impl BackendConnectionManager {
     fn new() -> Self {
         Self {
             contexts: HashMap::new(),
+            next_configured_generation: 0,
             use_clock: 0,
             max_idle_connections: 1,
         }
@@ -242,12 +261,28 @@ impl BackendConnectionManager {
             BackendContextKey::Managed(_) => {
                 CachedContext::Managed(Rc::clone(&context))
             }
-            BackendContextKey::Foreign(_) => {
-                CachedContext::Foreign(Rc::downgrade(&context))
+            BackendContextKey::Foreign(_) | BackendContextKey::Configured(_) => {
+                CachedContext::Configured(Rc::downgrade(&context))
             }
         };
         self.contexts.insert(key, cached);
         context
+    }
+
+    fn resolve_configured(
+        &mut self,
+        socket_path: &Path,
+        config: Arc<StoreConfig>,
+        max_idle_connections: usize,
+    ) -> Rc<BackendAttachedContext> {
+        let generation = self.next_configured_generation;
+        self.next_configured_generation += 1;
+        self.resolve(
+            socket_path,
+            BackendContextKey::Configured(generation),
+            BackendAttach::Configured(config),
+            max_idle_connections,
+        )
     }
 
     fn acquire_client(

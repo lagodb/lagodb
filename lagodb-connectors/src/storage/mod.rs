@@ -13,17 +13,17 @@ pub(crate) use location::ObjectLocationKind;
 pub(crate) use object_input::{ObjectFiles, ObjectInput};
 pub(crate) use object_output::{AllocatedObject, ObjectFileSuffix, ObjectOutput};
 pub(crate) use upload::{StagedObjectUpload, StagedObjectWriter};
-pub(crate) use uri::{ObjectScheme, ObjectUri, StorageScope};
+pub(crate) use uri::ObjectUri;
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
 use pg_lakebase_core::storage::foreign::{
-    ForeignOptionView, ObjectAccess, ObjectPrefixAccess, StorageManager,
+    ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
+use pg_lakebase_core::storage::profile::{StorageServerCatalog, StorageServerPolicy};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::gucs::DefaultServerConfig;
 
 pub(crate) struct ResolvedStorageLocation {
     server_oid: pg_sys::Oid,
@@ -36,36 +36,30 @@ impl ResolvedStorageLocation {
         object: ObjectUri,
         explicit_server: Option<&str>,
     ) -> Result<Self, ConnectorError> {
-        let server_name = match explicit_server {
-            Some(server) => CString::new(server.as_bytes()).map_err(|_| {
-                ConnectorError::invalid_copy_option(
-                    "server",
-                    "must not contain a NUL byte",
-                )
-            })?,
-            None => {
-                let config = match object.scheme() {
-                    ObjectScheme::S3 => DefaultServerConfig::s3(),
-                    ObjectScheme::Gcs => DefaultServerConfig::gcs(),
-                    ObjectScheme::Azure => DefaultServerConfig::azure(),
-                };
-                config.server_name().ok_or_else(|| {
-                    ConnectorError::default_server_not_configured(
-                        object.scheme().as_str(),
-                        config.guc_name(),
+        let effective_user = unsafe { pg_sys::GetUserId() };
+        let server_oid = match explicit_server {
+            Some(server) => {
+                let server_name = std::ffi::CString::new(server).map_err(|_| {
+                    ConnectorError::invalid_copy_option(
+                        "server",
+                        "must not contain a NUL byte",
                     )
-                })?
+                })?;
+                let catalog = Self::explicit_server_catalog(
+                    effective_user,
+                    server_name.as_c_str(),
+                )?;
+                catalog.resolve_explicit(server, &object)?.oid()
             }
+            None => Self::server_catalog(effective_user)?
+                .resolve_implicit(&object)?
+                .oid(),
         };
-        let server_oid =
-            unsafe { pg_sys::get_foreign_server_oid(server_name.as_ptr(), true) };
-        if server_oid == pg_sys::InvalidOid {
-            return Err(ConnectorError::server_not_found(
-                &server_name.to_string_lossy(),
-            ));
-        }
-
-        Self::resolve_on_server(object, server_oid, unsafe { pg_sys::GetUserId() })
+        Ok(Self {
+            server_oid,
+            effective_user,
+            object,
+        })
     }
 
     pub(crate) fn resolve_foreign_object(
@@ -73,21 +67,34 @@ impl ResolvedStorageLocation {
         server_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
     ) -> Result<Self, ConnectorError> {
-        Self::resolve_on_server(object, server_oid, effective_user)
+        let catalog = StorageServerCatalog::load_explicit_oid(
+            Self::server_policy(),
+            effective_user,
+            server_oid,
+        )?;
+        let selected = catalog.resolve_explicit_oid(server_oid, &object)?;
+        Ok(Self {
+            server_oid: selected.oid(),
+            effective_user,
+            object,
+        })
     }
 
     pub(crate) fn resolve_for_ddl(
         object: ObjectUri,
         server_name: &CStr,
     ) -> Result<Self, ConnectorError> {
-        let server_oid =
-            unsafe { pg_sys::get_foreign_server_oid(server_name.as_ptr(), true) };
-        if server_oid == pg_sys::InvalidOid {
-            return Err(ConnectorError::server_not_found(
-                &server_name.to_string_lossy(),
-            ));
-        }
-        Self::resolve_on_server(object, server_oid, unsafe { pg_sys::GetUserId() })
+        let effective_user = unsafe { pg_sys::GetUserId() };
+        let catalog = Self::explicit_server_catalog(effective_user, server_name)?;
+        let server_name = server_name.to_str().map_err(|_| {
+            ConnectorError::invalid_option("server", "must be valid UTF-8")
+        })?;
+        let selected = catalog.resolve_explicit(server_name, &object)?;
+        Ok(Self {
+            server_oid: selected.oid(),
+            effective_user,
+            object,
+        })
     }
 
     pub(crate) fn server_uses_lakebase(server_name: &CStr) -> bool {
@@ -112,61 +119,30 @@ impl ResolvedStorageLocation {
         server.fdwid == lakebase_fdw
     }
 
-    fn resolve_on_server(
-        object: ObjectUri,
-        server_oid: pg_sys::Oid,
+    fn server_catalog(
         effective_user: pg_sys::Oid,
-    ) -> Result<Self, ConnectorError> {
-        // PostgreSQL returns a live catalog object for a valid server OID.
-        // The resolver never fabricates a foreign relation to reach this
-        // catalog boundary.
-        let server = unsafe { &*pg_sys::GetForeignServer(server_oid) };
-        let server_name =
-            unsafe { CStr::from_ptr(server.servername) }.to_string_lossy();
+    ) -> Result<StorageServerCatalog, ConnectorError> {
+        StorageServerCatalog::load(Self::server_policy(), effective_user)
+            .map_err(Into::into)
+    }
+
+    fn explicit_server_catalog(
+        effective_user: pg_sys::Oid,
+        server_name: &CStr,
+    ) -> Result<StorageServerCatalog, ConnectorError> {
+        StorageServerCatalog::load_explicit(
+            Self::server_policy(),
+            effective_user,
+            server_name,
+        )
+        .map_err(Into::into)
+    }
+
+    fn server_policy() -> StorageServerPolicy<'static> {
         let lakebase_fdw = unsafe {
             pg_sys::get_foreign_data_wrapper_oid(c"lakebase_fdw".as_ptr(), true)
         };
-        if server.fdwid != lakebase_fdw {
-            return Err(ConnectorError::server_wrong_fdw(&server_name));
-        }
-
-        let usage = unsafe {
-            pg_sys::object_aclcheck(
-                pg_sys::ForeignServerRelationId,
-                server_oid,
-                effective_user,
-                pg_sys::ACL_USAGE.into(),
-            )
-        };
-        if usage != pg_sys::AclResult::ACLCHECK_OK {
-            return Err(ConnectorError::server_usage_denied(&server_name));
-        }
-
-        // SAFETY: `GetForeignServer` returned the live catalog object and its
-        // options list remains valid for this cold-path resolution call.
-        let server_options = unsafe { ForeignOptionView::from_raw(server.options) };
-        let parsed = config::ServerOptions::from_view(server_options)?;
-        let provider = parsed.provider()?.ok_or_else(|| {
-            ConnectorError::invalid_option("provider", "is required")
-        })?;
-        if !provider.matches_scheme(object.scheme()) {
-            return Err(ConnectorError::provider_mismatch(
-                &server_name,
-                object.scheme().as_str(),
-            ));
-        }
-        if let Some(scope) = parsed.scope() {
-            let scope = StorageScope::parse(scope, provider)?;
-            if !scope.contains(&object) {
-                return Err(ConnectorError::scope_denied(&server_name));
-            }
-        }
-
-        Ok(Self {
-            server_oid,
-            effective_user,
-            object,
-        })
+        StorageServerPolicy::new(lakebase_fdw, None)
     }
 
     pub(crate) fn acquire_object_access(

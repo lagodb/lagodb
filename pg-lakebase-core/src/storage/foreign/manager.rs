@@ -138,7 +138,7 @@ impl StorageManager {
         Ok(ObjectPrefixAccess::new(store, staging, bucket, prefix))
     }
 
-    fn acquire_catalog<P>(
+    pub(crate) fn acquire_catalog<P>(
         &self,
         catalog: ForeignCatalog,
     ) -> Result<StorageHandle, StorageAcquireError<P::Error>>
@@ -159,8 +159,11 @@ impl StorageManager {
             P::build_store_config(catalog.options())
                 .map_err(StorageAcquireError::Provider)?,
         );
-        let service =
-            BackendStorageService::for_foreign(&self.endpoint, umid, config)?;
+        let service = BackendStorageService::for_foreign(
+            &self.endpoint,
+            umid,
+            Arc::clone(&config),
+        )?;
 
         let entry = StorageCache::with_current(|cache| {
             cache.insert(StorageCacheEntry {
@@ -168,6 +171,7 @@ impl StorageManager {
                 server_hashvalue: catalog.server_hashvalue(),
                 mapping_hashvalue: catalog.mapping_hashvalue(),
                 identity,
+                config,
                 service,
             })
         });

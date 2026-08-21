@@ -37,7 +37,5 @@ parquet = { version = "58", default-features = false, features = ["arrow", "snap
 serde = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 thiserror = "1.0"
-percent-encoding = "2.3"
-url = "2.5.7"
 uuid = { version = "1.16.0", features = ["v7"] }
 zstd = "0.13"
