@@ -231,6 +231,7 @@ impl MinioFixture {
             allow_http: true,
             virtual_hosted_style_request: false,
             skip_signature: false,
+            encryption: None,
         })
     }
 

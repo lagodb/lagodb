@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::backend::{
-    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig,
-    SecretString, StoreConfig,
+    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3Encryption,
+    S3StoreConfig, SecretString, StoreConfig,
 };
 use crate::error::StorageErrorKind;
 use crate::handle::{FileHandle, OpenFlags};
@@ -119,6 +119,7 @@ fn request_payloads_roundtrip() {
                 allow_http: true,
                 virtual_hosted_style_request: false,
                 skip_signature: false,
+                encryption: None,
             })),
         },
         WireRequestPayload::Open {
@@ -291,6 +292,9 @@ fn attach_configured_variants_roundtrip() {
             allow_http: false,
             virtual_hosted_style_request: true,
             skip_signature: false,
+            encryption: Some(S3Encryption::Kms {
+                key_id: Some("kms-key".to_string()),
+            }),
         }),
         StoreConfig::S3Compatible(S3CompatibleStoreConfig {
             endpoint: "http://127.0.0.1:9000".to_string(),
@@ -301,6 +305,11 @@ fn attach_configured_variants_roundtrip() {
             allow_http: true,
             virtual_hosted_style_request: false,
             skip_signature: false,
+            encryption: Some(S3Encryption::Custom {
+                key: SecretString::new(
+                    "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
+                ),
+            }),
         }),
         StoreConfig::Gcs(GcsStoreConfig {
             base_url: Some("https://storage.googleapis.com".to_string()),
@@ -311,6 +320,7 @@ fn attach_configured_variants_roundtrip() {
             application_credentials_path: Some(
                 "/tmp/application-default.json".to_string(),
             ),
+            bearer_token: Some(SecretString::new("gcs-token")),
             skip_signature: true,
         }),
         StoreConfig::Azure(AzureStoreConfig {
@@ -318,9 +328,11 @@ fn attach_configured_variants_roundtrip() {
             endpoint: Some("http://127.0.0.1:10000".to_string()),
             access_key: Some(SecretString::new("azure-access")),
             bearer_token: Some(SecretString::new("azure-token")),
+            sas_token: Some(SecretString::new("sig=azure-sas")),
             client_id: Some("client-id".to_string()),
             client_secret: Some(SecretString::new("client-secret")),
             tenant_id: Some("tenant-id".to_string()),
+            authority_host: Some("https://login.microsoftonline.com".to_string()),
             allow_http: true,
             use_emulator: false,
         }),

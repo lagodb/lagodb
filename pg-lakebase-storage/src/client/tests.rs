@@ -692,6 +692,7 @@ async fn cached_bytes_are_shared_across_credentials_for_one_physical_identity() 
         allow_http: true,
         virtual_hosted_style_request: false,
         skip_signature: false,
+        encryption: None,
     });
     let config_b = StoreConfig::S3Compatible(S3CompatibleStoreConfig {
         access_key_id: Some(SecretString::new("access-b")),

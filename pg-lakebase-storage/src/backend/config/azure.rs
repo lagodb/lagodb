@@ -54,6 +54,7 @@ impl AzureStoreConfig {
     fn uses_default_chain(&self) -> bool {
         self.access_key.is_none()
             && self.bearer_token.is_none()
+            && self.sas_token.is_none()
             && self.client_id.is_none()
             && self.client_secret.is_none()
             && self.tenant_id.is_none()
@@ -71,8 +72,12 @@ impl AzureStoreConfig {
         }
         validate_optional_non_empty("Azure client_id", self.client_id.as_deref())?;
         validate_optional_non_empty("Azure tenant_id", self.tenant_id.as_deref())?;
+        if let Some(authority_host) = &self.authority_host {
+            validate_endpoint("Azure authority_host", authority_host, false)?;
+        }
         validate_optional_secret("Azure access_key", self.access_key.as_ref())?;
         validate_optional_secret("Azure bearer_token", self.bearer_token.as_ref())?;
+        validate_optional_secret("Azure sas_token", self.sas_token.as_ref())?;
         validate_optional_secret("Azure client_secret", self.client_secret.as_ref())?;
         let client_secret_fields = usize::from(self.client_id.is_some())
             + usize::from(self.client_secret.is_some())
@@ -84,6 +89,7 @@ impl AzureStoreConfig {
         }
         let credential_sources = usize::from(self.access_key.is_some())
             + usize::from(self.bearer_token.is_some())
+            + usize::from(self.sas_token.is_some())
             + usize::from(client_secret_fields == 3);
         if credential_sources > 1 {
             return Err(StorageError::configuration(
@@ -122,6 +128,10 @@ impl AzureStoreConfig {
             builder =
                 builder.with_bearer_token_authorization(bearer_token.expose_secret());
         }
+        if let Some(sas_token) = &self.sas_token {
+            builder = builder
+                .with_config(AzureConfigKey::SasKey, sas_token.expose_secret());
+        }
         if let (Some(client_id), Some(client_secret), Some(tenant_id)) =
             (&self.client_id, &self.client_secret, &self.tenant_id)
         {
@@ -130,6 +140,9 @@ impl AzureStoreConfig {
                 client_secret.expose_secret(),
                 tenant_id,
             );
+        }
+        if let Some(authority_host) = &self.authority_host {
+            builder = builder.with_authority_host(authority_host);
         }
         if self.allow_http {
             builder = builder.with_allow_http(true);

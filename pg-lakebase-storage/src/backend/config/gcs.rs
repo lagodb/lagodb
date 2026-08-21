@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
-use object_store::{ObjectStore, RetryConfig};
+use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey};
+use object_store::{ObjectStore, RetryConfig, StaticCredentialProvider};
 
 use super::{
     GcsStoreConfig, finish_store_build, validate_endpoint, validate_optional_secret,
@@ -41,6 +41,7 @@ impl GcsStoreConfig {
         self.service_account_path.is_none()
             && self.service_account_key.is_none()
             && self.application_credentials_path.is_none()
+            && self.bearer_token.is_none()
             && !self.skip_signature
     }
 
@@ -52,12 +53,14 @@ impl GcsStoreConfig {
             "GCS service_account_key",
             self.service_account_key.as_ref(),
         )?;
+        validate_optional_secret("GCS bearer_token", self.bearer_token.as_ref())?;
         let credential_sources = usize::from(self.service_account_path.is_some())
             + usize::from(self.service_account_key.is_some())
-            + usize::from(self.application_credentials_path.is_some());
+            + usize::from(self.application_credentials_path.is_some())
+            + usize::from(self.bearer_token.is_some());
         if credential_sources > 1 {
             return Err(StorageError::configuration(
-                "GCS config must use at most one credential source: service_account_path, service_account_key or application_credentials_path",
+                "GCS config must use at most one credential source: service_account_path, service_account_key, application_credentials_path or bearer_token",
             ));
         }
         if self.skip_signature && credential_sources != 0 {
@@ -93,6 +96,13 @@ impl GcsStoreConfig {
         {
             builder =
                 builder.with_application_credentials(application_credentials_path);
+        }
+        if let Some(token) = &self.bearer_token {
+            builder = builder.with_credentials(Arc::new(
+                StaticCredentialProvider::new(GcpCredential {
+                    bearer: token.expose_secret().to_owned(),
+                }),
+            ));
         }
         if self.skip_signature {
             builder = builder.with_skip_signature(true);

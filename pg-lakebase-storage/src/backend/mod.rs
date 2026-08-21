@@ -34,8 +34,8 @@ mod probe;
 mod secret;
 
 pub use config::{
-    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig,
-    StoreConfig,
+    AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3Encryption,
+    S3StoreConfig, StoreConfig,
 };
 pub use configured::ConfiguredObjectBackend;
 pub use identity::BackendDataIdentity;

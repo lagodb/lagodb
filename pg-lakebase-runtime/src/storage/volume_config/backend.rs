@@ -41,6 +41,7 @@ impl StorageLocation {
                     allow_http: *allow_http,
                     virtual_hosted_style_request: *virtual_hosted_style_request,
                     skip_signature,
+                    encryption: None,
                 }
                 .into_canonical()
             }
@@ -59,6 +60,7 @@ impl StorageLocation {
                     service_account_path: None,
                     service_account_key,
                     application_credentials_path: None,
+                    bearer_token: None,
                     skip_signature,
                 })
             }

@@ -15,6 +15,17 @@ mod azure;
 mod gcs;
 mod s3;
 
+/// Server-side encryption applied to S3 object writes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum S3Encryption {
+    /// S3-managed keys (SSE-S3).
+    S3,
+    /// AWS KMS, using the AWS-managed `aws/s3` key when `key_id` is absent.
+    Kms { key_id: Option<String> },
+    /// Customer-provided, base64-encoded AES-256 key (SSE-C).
+    Custom { key: SecretString },
+}
+
 /// Credentials and transport tweaks for native AWS S3.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct S3StoreConfig {
@@ -26,6 +37,7 @@ pub struct S3StoreConfig {
     pub allow_http: bool,
     pub virtual_hosted_style_request: bool,
     pub skip_signature: bool,
+    pub encryption: Option<S3Encryption>,
 }
 
 /// Same surface as [`S3StoreConfig`] but with a mandatory custom endpoint (MinIO, Ceph, R2…).
@@ -39,6 +51,7 @@ pub struct S3CompatibleStoreConfig {
     pub allow_http: bool,
     pub virtual_hosted_style_request: bool,
     pub skip_signature: bool,
+    pub encryption: Option<S3Encryption>,
 }
 
 impl S3StoreConfig {
@@ -59,6 +72,7 @@ impl S3StoreConfig {
             allow_http,
             virtual_hosted_style_request,
             skip_signature,
+            encryption,
         } = self;
         match endpoint {
             Some(endpoint) => StoreConfig::S3Compatible(S3CompatibleStoreConfig {
@@ -70,6 +84,7 @@ impl S3StoreConfig {
                 allow_http,
                 virtual_hosted_style_request,
                 skip_signature,
+                encryption,
             }),
             None => StoreConfig::S3(S3StoreConfig {
                 region,
@@ -80,6 +95,7 @@ impl S3StoreConfig {
                 allow_http,
                 virtual_hosted_style_request,
                 skip_signature,
+                encryption,
             }),
         }
     }
@@ -92,6 +108,7 @@ pub struct GcsStoreConfig {
     pub service_account_path: Option<String>,
     pub service_account_key: Option<SecretString>,
     pub application_credentials_path: Option<String>,
+    pub bearer_token: Option<SecretString>,
     pub skip_signature: bool,
 }
 
@@ -103,9 +120,11 @@ pub struct AzureStoreConfig {
     pub endpoint: Option<String>,
     pub access_key: Option<SecretString>,
     pub bearer_token: Option<SecretString>,
+    pub sas_token: Option<SecretString>,
     pub client_id: Option<String>,
     pub client_secret: Option<SecretString>,
     pub tenant_id: Option<String>,
+    pub authority_host: Option<String>,
     pub allow_http: bool,
     pub use_emulator: bool,
 }
@@ -309,6 +328,7 @@ mod tests {
                     allow_http: false,
                     virtual_hosted_style_request: false,
                     skip_signature: false,
+                    encryption: None,
                 }),
             )
             .unwrap_err();

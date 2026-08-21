@@ -4,8 +4,8 @@ use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ObjectStore, RetryConfig};
 
 use super::{
-    S3CompatibleStoreConfig, S3StoreConfig, finish_store_build, validate_endpoint,
-    validate_optional_non_empty, validate_optional_secret,
+    S3CompatibleStoreConfig, S3Encryption, S3StoreConfig, finish_store_build,
+    validate_endpoint, validate_optional_non_empty, validate_optional_secret,
 };
 use crate::error::{StorageError, StorageResult};
 
@@ -79,6 +79,9 @@ impl S3StoreConfig {
                 "S3 skip_signature cannot be combined with explicit credentials",
             ));
         }
+        if let Some(encryption) = &self.encryption {
+            encryption.validate()?;
+        }
         Ok(())
     }
 
@@ -118,6 +121,9 @@ impl S3StoreConfig {
         if self.skip_signature {
             builder = builder.with_skip_signature(true);
         }
+        if let Some(encryption) = &self.encryption {
+            builder = encryption.apply(builder);
+        }
         builder = builder.with_retry(retry_config);
         finish_store_build(builder.build(), "S3", "bucket", bucket)
     }
@@ -155,6 +161,9 @@ impl S3CompatibleStoreConfig {
             return Err(StorageError::configuration(
                 "S3-compatible skip_signature cannot be combined with explicit credentials",
             ));
+        }
+        if let Some(encryption) = &self.encryption {
+            encryption.validate()?;
         }
         Ok(())
     }
@@ -194,8 +203,52 @@ impl S3CompatibleStoreConfig {
         if self.skip_signature {
             builder = builder.with_skip_signature(true);
         }
+        if let Some(encryption) = &self.encryption {
+            builder = encryption.apply(builder);
+        }
         builder = builder.with_retry(retry_config);
         finish_store_build(builder.build(), "S3-compatible", "bucket", bucket)
+    }
+}
+
+impl S3Encryption {
+    fn validate(&self) -> StorageResult<()> {
+        match self {
+            Self::Kms {
+                key_id: Some(key_id),
+            } => validate_optional_non_empty("S3 KMS key_id", Some(key_id)),
+            Self::Custom { key } => {
+                validate_optional_secret("S3 customer encryption key", Some(key))
+            }
+            Self::S3 | Self::Kms { key_id: None } => Ok(()),
+        }
+    }
+
+    fn apply(&self, mut builder: AmazonS3Builder) -> AmazonS3Builder {
+        match self {
+            Self::S3 => {
+                let key: AmazonS3ConfigKey = "aws_server_side_encryption"
+                    .parse()
+                    .expect("object_store documents the static SSE config key");
+                builder = builder.with_config(key, "AES256");
+            }
+            Self::Kms { key_id } => {
+                let encryption_key: AmazonS3ConfigKey = "aws_server_side_encryption"
+                    .parse()
+                    .expect("object_store documents the static SSE config key");
+                builder = builder.with_config(encryption_key, "aws:kms");
+                if let Some(key_id) = key_id {
+                    let kms_key: AmazonS3ConfigKey = "aws_sse_kms_key_id"
+                        .parse()
+                        .expect("object_store documents the static KMS config key");
+                    builder = builder.with_config(kms_key, key_id.as_str());
+                }
+            }
+            Self::Custom { key } => {
+                builder = builder.with_ssec_encryption(key.expose_secret());
+            }
+        }
+        builder
     }
 }
 
@@ -299,6 +352,7 @@ mod tests {
                 allow_http: false,
                 virtual_hosted_style_request: false,
                 skip_signature: false,
+                encryption: None,
             }
             .uses_default_chain()
         );
