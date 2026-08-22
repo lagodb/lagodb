@@ -1,7 +1,7 @@
-//! Error layering for the Iceberg table access method.
+//! Shared Iceberg domain errors and PostgreSQL boundary conversion.
 //!
-//! Keep Iceberg business logic on [`IcebergResult<T>`] and [`IcebergError`].
-//! The PostgreSQL table-AM callback boundary returns
+//! Keep shared engine and AM business logic on [`IcebergResult<T>`] and
+//! [`IcebergError`]. The PostgreSQL table-AM callback boundary returns
 //! `pg_lakebase_core::api::AmResult<T>`, which owns a PostgreSQL
 //! `ErrorReport` through a small error handle.
 //! The bridge is the `From<IcebergError> for ErrorReport` implementation in
@@ -11,8 +11,13 @@
 //! `.map_err(Into::into)` / `.into()` conversions in access-method code. If
 //! third-party errors need adaptation, keep that inside meaningful Iceberg
 //! object methods returning [`IcebergResult<T>`], then let the callback boundary
-//! perform the final conversion to PostgreSQL.
+//! perform the final conversion to PostgreSQL. FDW-specific errors wrap this
+//! type transparently and delegate [`SqlStateError`] to the source.
 
+use std::error::Error as StdError;
+use std::fmt::{Display, Formatter};
+
+use iceberg_lite::catalog::rest::{RestError, RestErrorKind};
 use pg_lakebase_core::diag::{PgError, SqlStateError, domain_error_report};
 use pg_lakebase_core::extension_worker::WorkerNotificationError;
 use pg_lakebase_core::object_cleanup::ObjectCleanupError;
@@ -22,7 +27,6 @@ use pg_lakebase_storage::{StorageError, StorageErrorKind};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
-use std::fmt::{Display, Formatter};
 use thiserror::Error;
 
 // ============================================================================
@@ -233,7 +237,7 @@ pub enum IcebergError {
     #[error("json error: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    /// AM-internal invariant violation. Used for "cannot happen" branches
+    /// Iceberg integration-internal invariant violation. Used for branches
     /// where a runtime guard remains because the type system does not yet
     /// encode the invariant. Surfacing one of these in production is a bug
     /// in `iceberg`, not a user error.
@@ -418,6 +422,30 @@ fn storage_sql_error_code(error: &StorageError) -> PgSqlErrorCode {
 }
 
 fn iceberg_lite_sql_error_code(error: &iceberg_lite::Error) -> PgSqlErrorCode {
+    if let Some(rest_error) = error
+        .source()
+        .and_then(|source| source.downcast_ref::<RestError>())
+    {
+        return match rest_error.kind() {
+            RestErrorKind::Unauthenticated => {
+                PgSqlErrorCode::ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION
+            }
+            RestErrorKind::Forbidden => {
+                PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
+            }
+            RestErrorKind::CommitConflict | RestErrorKind::Conflict => {
+                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+            }
+            RestErrorKind::RateLimited => {
+                PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
+            }
+            RestErrorKind::Server
+            | RestErrorKind::Client
+            | RestErrorKind::CommitStateUnknown
+            | RestErrorKind::Unexpected => PgSqlErrorCode::ERRCODE_FDW_ERROR,
+        };
+    }
+
     use iceberg_lite::ErrorKind;
     match error.kind() {
         ErrorKind::FeatureUnsupported => {

@@ -14,11 +14,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::injection_points::StorageInjectionPoints;
-use crate::storage::object_uri::resolve_object_uri;
-use crate::storage::transaction_resources::{
+use super::object_uri::resolve_object_uri;
+use super::transaction_resources::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
 };
-use crate::storage::wait_event::{StorageWaitEvent, StorageWaitGuard};
+use super::wait_event::{StorageWaitEvent, StorageWaitGuard};
 
 // The storage wire protocol accepts a u32 read length per request, and the
 // service clamps each response to its configured max_read_size. Keep the
@@ -26,7 +26,7 @@ use crate::storage::wait_event::{StorageWaitEvent, StorageWaitGuard};
 // `read_range` calls do not turn into multi-GB direct-I/O allocations.
 const OBJECT_READ_CHUNK_LEN: u32 = pg_lakebase_storage::DEFAULT_MAX_READ_SIZE;
 
-fn storage_err(e: StorageError) -> Error {
+pub(crate) fn storage_err(e: StorageError) -> Error {
     let kind = match e.kind() {
         pg_lakebase_storage::StorageErrorKind::NotFound => ErrorKind::DataInvalid,
         pg_lakebase_storage::StorageErrorKind::InvalidPath => ErrorKind::DataInvalid,
@@ -185,9 +185,7 @@ impl Storage for ObjectStorage {
             self.service.clone(),
         );
 
-        Ok(Box::new(ObjectWriter {
-            staging: Some(staging),
-        }))
+        Ok(Box::new(ObjectWriter::new(staging)))
     }
 
     fn finalize_write(&self, path: &str) -> Result<()> {
@@ -234,7 +232,7 @@ impl Storage for ObjectStorage {
     }
 }
 
-pub struct ObjectReader {
+pub(crate) struct ObjectReader {
     service: BackendStorageService,
     bucket: Arc<str>,
     key: Arc<str>,
@@ -242,7 +240,7 @@ pub struct ObjectReader {
 }
 
 impl ObjectReader {
-    fn new(
+    pub(crate) fn new(
         service: BackendStorageService,
         bucket: Arc<str>,
         key: Arc<str>,
@@ -404,8 +402,16 @@ impl FileRead for ObjectReader {
     }
 }
 
-pub struct ObjectWriter {
+pub(crate) struct ObjectWriter {
     staging: Option<StagingFile>,
+}
+
+impl ObjectWriter {
+    pub(crate) fn new(staging: StagingFile) -> Self {
+        Self {
+            staging: Some(staging),
+        }
+    }
 }
 
 impl std::io::Write for ObjectWriter {

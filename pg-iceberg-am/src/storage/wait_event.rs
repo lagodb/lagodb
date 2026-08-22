@@ -1,7 +1,7 @@
 use pgrx::pg_sys;
 use std::{ffi::CStr, sync::OnceLock};
 
-// Keep wait-event reporting in the PostgreSQL AM layer. The storage client and
+// Keep wait-event reporting in the PostgreSQL adapter layer. The storage client and
 // staging-file crate stay reusable outside a backend process.
 static STAGING_FILE_WRITE: OnceLock<u32> = OnceLock::new();
 static STAGING_FILE_SYNC: OnceLock<u32> = OnceLock::new();
@@ -9,7 +9,7 @@ static OBJECT_READ: OnceLock<u32> = OnceLock::new();
 static OBJECT_UPLOAD: OnceLock<u32> = OnceLock::new();
 
 #[derive(Clone, Copy)]
-pub(super) enum StorageWaitEvent {
+pub(crate) enum StorageWaitEvent {
     StagingFileWrite,
     StagingFileSync,
     ObjectRead,
@@ -33,10 +33,10 @@ impl StorageWaitEvent {
     }
 }
 
-pub(super) struct StorageWaitGuard;
+pub(crate) struct StorageWaitGuard;
 
 impl StorageWaitGuard {
-    pub(super) fn start(event: StorageWaitEvent) -> Self {
+    pub(crate) fn start(event: StorageWaitEvent) -> Self {
         unsafe {
             pg_sys::pgstat_report_wait_start(event.info());
         }

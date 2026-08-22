@@ -1,46 +1,13 @@
-use pg_lakebase_core::prelude::*;
 use pgrx::prelude::*;
-use std::sync::OnceLock;
 
-mod access;
-pub mod catalog;
-pub mod constants;
-mod customscan;
+mod config;
+mod engine;
 pub mod error;
-pub mod gucs;
-pub mod hooks;
-mod maintenance;
-pub mod options;
-mod predicate;
-mod relation_binding;
-pub mod storage;
-pub mod wal;
+pub mod foreign_table;
+mod managed_table;
+mod storage;
 
-use access::index::IcebergIndexFetch;
-use access::mutation::{IcebergModifyQueryState, IcebergModifyState};
-use access::scan::IcebergScan;
-
-/// Get the cached Iceberg TableAmRoutine pointer.
-/// This will initialize the routine if it hasn't been initialized yet.
-#[inline]
-pub fn get_iceberg_am_routine_ptr() -> *const pg_sys::TableAmRoutine {
-    let routine = IcebergTableAm::cached_am_routine();
-    &*routine as *const pg_sys::TableAmRoutine
-}
-
-// crypto primitive provider initialization required by rustls > v0.22.
-// It is not required by every FDW, but only call it when needed.
-// ref: https://docs.rs/rustls/latest/rustls/index.html#cryptography-providers
-static RUSTLS_CRYPTO_PROVIDER_LOCK: OnceLock<()> = OnceLock::new();
-
-#[allow(dead_code)]
-fn setup_rustls_default_crypto_provider() {
-    RUSTLS_CRYPTO_PROVIDER_LOCK.get_or_init(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .unwrap()
-    });
-}
+pub use managed_table::{IcebergTableAm, get_iceberg_am_routine_ptr};
 
 pg_module_magic!();
 
@@ -49,44 +16,14 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
-    setup_rustls_default_crypto_provider();
-    gucs::init();
-    hooks::init_hooks();
-    wal::init_wal_rmgr();
-    // Register the Iceberg CustomScan provider, then install the
-    // framework's `set_rel_pathlist_hook` router. Order matters:
-    // `customscan::init` is a no-op if no providers are registered,
-    // but the framework's design (see
-    // `pg_lakebase_core::customscan::init`) is "register all
-    // providers first, then install the hook in `_PG_init`".
-    customscan::register();
-    pg_lakebase_core::customscan::init();
-    pg_lakebase_core::table_maintenance::register_provider::<
-        maintenance::IcebergTableMaintenanceProvider,
-    >();
-}
-
-// ============================================================================
-//  Table Access Method Definition
-// ============================================================================
-
-#[pg_table_am(
-    version = "0.1.0",
-    author = "robertmu",
-    website = "https://github.com/robertmu/pg-lakebase"
-)]
-pub struct IcebergTableAm;
-
-impl TableAccessMethod for IcebergTableAm {
-    type ScanSession = IcebergScan;
-    type IndexFetchSession = IcebergIndexFetch;
-    type ModifyQueryState = IcebergModifyQueryState;
-    type ModifyState = IcebergModifyState;
-    type CopySession = IcebergModifyState;
-
-    fn access_method_oid() -> Option<pg_sys::Oid> {
-        crate::catalog::IcebergAccessMethod::oid()
-    }
+    // Preserve the established initialization order: the REST TLS provider is
+    // ready before any extension hooks, AM configuration/hooks precede the FDW
+    // utility hook, and executor/maintenance providers are registered last.
+    foreign_table::initialize_crypto_provider();
+    config::init();
+    managed_table::initialize_configuration_and_hooks();
+    foreign_table::register();
+    managed_table::register_providers();
 }
 
 #[cfg(test)]

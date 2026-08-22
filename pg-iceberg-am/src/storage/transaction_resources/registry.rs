@@ -32,7 +32,8 @@ struct MetadataAttemptState {
 #[derive(Debug)]
 struct MetadataResourceRegistry {
     active_attempt: Option<MetadataAttemptState>,
-    /// Resources selected by a successful CAS and retained until transaction end.
+    /// Resources selected by a successful catalog publication and retained until
+    /// transaction end.
     promoted: Vec<StorageResource>,
     /// Rejected resources whose immediate cleanup failed.
     cleanup_required: Vec<StorageResource>,

@@ -5,8 +5,9 @@ use pg_lakebase_core::storage::service::BackendStorageService;
 use pg_lakebase_core::wal::flush_wal;
 use pg_lakebase_storage::{ObjectLocation, StorageErrorKind};
 
-use crate::storage::LocalStorage;
-use crate::wal::record::log_delete_directory;
+use crate::storage::local_file_wal::record::log_delete_directory;
+
+use super::super::LocalStorage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ObjectFileState {

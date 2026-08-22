@@ -16,7 +16,9 @@ use pg_lakebase_core::transaction::cleanup::{
 use pg_lakebase_core::wal::flush_wal;
 
 use super::LocalStorage;
-use crate::wal::record::{delete_file_fits_wal, log_delete_files};
+use crate::storage::local_file_wal::record::{
+    delete_file_fits_wal, log_delete_files,
+};
 
 const MAX_DELETE_FAILURE_WARNINGS: usize = 8;
 const MAX_DELETE_PATH_WARNING_CHARS: usize = 512;

@@ -3,8 +3,8 @@
 //! Manages files and directories created during a transaction: local data files,
 //! table directories, and object-storage staging/uploaded files. Transaction-owned
 //! resources carry their savepoint nesting level. Metadata materialization
-//! resources live in a separate top-level-only registry until their catalog CAS
-//! succeeds or fails.
+//! resources live in a separate top-level-only registry until their catalog
+//! publication succeeds or fails.
 //!
 //! The module exposes a small set of domain-level registration functions. Internally
 //! a single [`StorageTransactionResource`] is lazily registered as a
@@ -17,8 +17,8 @@
 //!   recursively.
 //! - `ObjectFile(Uploaded)` → unlink the staging file (best-effort).
 //! - `ObjectFile(Staged)` → warn, then unlink the staging file (best-effort).
-//! - unresolved metadata-attempt resources → abort-style cleanup instead of
-//!   preserving files that no successful catalog CAS references.
+//! - unresolved metadata-materialization resources → abort-style cleanup instead
+//!   of preserving files that no successful catalog publication references.
 //! - final-action-canceled data/delete files → one aggregated post-commit
 //!   cleanup resource; local WAL-enabled storage flushes `DELETE_FILES` first.
 //! - Everything else → no-op.
@@ -49,10 +49,8 @@ use iceberg_lite::io::FileIO;
 use pg_lakebase_core::storage::service::BackendStorageService;
 use pg_lakebase_storage::ObjectLocation;
 
+use super::{LocalStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch};
 use crate::error::{IcebergError, IcebergResult};
-use crate::storage::{
-    LocalStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch,
-};
 
 use self::registry::{MetadataAttemptId, StorageTransactionResource};
 use self::resource::{ObjectFileState, StorageResource};
@@ -60,21 +58,21 @@ use self::resource::{ObjectFileState, StorageResource};
 mod registry;
 mod resource;
 
-/// Owns every storage resource produced by one metadata materialization and
-/// catalog CAS attempt.
+/// Owns every storage resource produced by one metadata materialization attempt.
 ///
 /// Files created while this scope is active are isolated from transaction-owned
-/// data files and savepoint state. A successful CAS moves them to the promoted
-/// metadata set: top-level commit preserves them, while top-level abort removes
-/// them. A rejected or dropped attempt performs abort-style cleanup immediately.
-#[must_use = "a metadata attempt must be promoted or discarded"]
-pub(crate) struct MetadataAttempt {
+/// data files and savepoint state. A successful catalog publication moves them
+/// to the promoted metadata set: top-level commit preserves them, while top-level
+/// abort removes them. A rejected attempt performs abort-style cleanup immediately.
+/// The type neither reads nor updates a metadata location and contains no CAS policy.
+#[must_use = "a metadata materialization attempt must be promoted or discarded"]
+pub(crate) struct MetadataMaterializationAttempt {
     resource: Rc<StorageTransactionResource>,
     id: MetadataAttemptId,
     resolved: bool,
 }
 
-impl MetadataAttempt {
+impl MetadataMaterializationAttempt {
     pub(crate) fn begin() -> IcebergResult<Self> {
         let resource = StorageTransactionResource::current();
         let id = resource.begin_metadata_attempt()?;
@@ -98,7 +96,7 @@ impl MetadataAttempt {
     }
 }
 
-impl Drop for MetadataAttempt {
+impl Drop for MetadataMaterializationAttempt {
     fn drop(&mut self) {
         if self.resolved {
             return;

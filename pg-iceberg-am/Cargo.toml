@@ -33,7 +33,13 @@ parquet = { version = "58", default-features = false, features = ["arrow"] }
 roaring = { workspace = true }
 tempfile = "3.10"
 bytes = "1.10.1"
+base64 = "0.22"
+md-5 = "0.10"
 rand = "0.9.3"
+url = "2.5.7"
+http = "1.3"
+socket2 = "0.6"
+ureq = { version = "=3.4.0", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 
 # Rustls is shared by some other dependencies but not directly used by pg-iceberg-am.
 # Since Rustls 0.22, it is required to choose the provider of the cryptographic

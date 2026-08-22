@@ -19,8 +19,8 @@
 //! - Object storage does not use this WAL path. Object stores provide their own
 //!   durability after successful writes, and orphan cleanup is handled outside
 //!   PostgreSQL redo.
-//! - `LocalStorage::default()` and [`LocalStorage::new`] both disable Iceberg
-//!   file WAL. Callers must opt in with [`LocalStorage::with_wal`] when
+//! - `LocalStorage::default()` disables Iceberg file WAL. Callers must opt in
+//!   with [`LocalStorage::with_wal`] when
 //!   PostgreSQL says the owning relation needs WAL.
 //! - When WAL is enabled, `WRITE_FILE` records are for best-effort, lossy
 //!   reconstruction during standby WAL replay or archive recovery. Local crash
@@ -36,13 +36,14 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use pgrx::pg_sys;
 
-use crate::wal::log_write_file;
+use crate::storage::local_file_wal::log_write_file;
+use crate::storage::transaction_resources::register_local_file_created;
 use iceberg_lite::Result;
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 
@@ -74,11 +75,6 @@ pub struct LocalStorage {
 }
 
 impl LocalStorage {
-    /// Create a new LocalStorage with default settings (no WAL).
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Create a new LocalStorage with WAL support configured.
     ///
     /// # Arguments
@@ -86,7 +82,7 @@ impl LocalStorage {
     ///
     /// # Example
     /// ```ignore
-    /// use pg_iceberg_am::storage::LocalStorage;
+    /// use crate::storage::LocalStorage;
     ///
     /// // Enable WAL for standby WAL replay or archive recovery
     /// let storage = LocalStorage::with_wal(true);
@@ -199,9 +195,7 @@ impl Storage for LocalStorage {
         // Create writer with Iceberg file WAL support if enabled.
         let writer = PgFileWrite::open_with_wal(path, self.needs_wal)?;
 
-        crate::storage::transaction_resources::register_local_file_created(
-            std::path::PathBuf::from(path),
-        );
+        register_local_file_created(PathBuf::from(path));
 
         Ok(Box::new(writer))
     }
@@ -471,20 +465,6 @@ pub struct PgFileWrite {
 // must not move it across backend threads.
 
 impl PgFileWrite {
-    /// Open a file for writing using PostgreSQL's VFD system.
-    ///
-    /// Creates the file if it doesn't exist and truncates it if it does.
-    /// WAL logging is disabled by default.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the file to open or create
-    ///
-    /// # Returns
-    /// A new `PgFileWrite` instance on success, or an error if the file cannot be opened.
-    pub fn open(path: &str) -> io::Result<Self> {
-        Self::open_with_wal(path, false)
-    }
-
     /// Open a file for writing with optional Iceberg file WAL support.
     ///
     /// Creates the file if it doesn't exist and truncates it if it does.
@@ -523,18 +503,6 @@ impl PgFileWrite {
             position: 0,
             needs_wal,
         })
-    }
-
-    /// Check if Iceberg file WAL logging is enabled for this writer.
-    #[inline]
-    pub fn needs_wal(&self) -> bool {
-        self.needs_wal
-    }
-
-    /// Enable or disable Iceberg file WAL logging for this writer.
-    #[inline]
-    pub fn set_needs_wal(&mut self, needs_wal: bool) {
-        self.needs_wal = needs_wal;
     }
 }
 
@@ -628,8 +596,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_matches_default_wal_policy() {
-        assert!(!LocalStorage::new().needs_wal());
+    fn default_disables_wal() {
         assert!(!LocalStorage::default().needs_wal());
     }
 
