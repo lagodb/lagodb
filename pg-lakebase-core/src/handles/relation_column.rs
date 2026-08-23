@@ -12,6 +12,7 @@ pub struct RelationColumn {
     name: Box<CStr>,
     type_oid: pg_sys::Oid,
     type_mod: i32,
+    not_null: bool,
 }
 
 impl RelationColumn {
@@ -33,6 +34,11 @@ impl RelationColumn {
     #[inline]
     pub fn type_mod(&self) -> i32 {
         self.type_mod
+    }
+
+    #[inline]
+    pub fn is_not_null(&self) -> bool {
+        self.not_null
     }
 
     /// Copy all non-dropped attributes from a tuple descriptor.
@@ -69,6 +75,7 @@ impl RelationColumn {
                     name,
                     type_oid: attribute.atttypid,
                     type_mod: attribute.atttypmod,
+                    not_null: attribute.attnotnull,
                 }
             })
             .collect::<Vec<_>>()

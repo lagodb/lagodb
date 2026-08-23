@@ -507,7 +507,8 @@ mod tests {
 
     unsafe extern "C-unwind" fn utility_pre(
         _context: *mut c_void,
-        _node: *mut pg_sys::Node,
+        _planned_stmt: *mut pg_sys::PlannedStmt,
+        _query_string: *const std::ffi::c_char,
     ) {
     }
 

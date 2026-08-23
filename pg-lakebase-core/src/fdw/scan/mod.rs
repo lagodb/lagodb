@@ -35,7 +35,7 @@ pub use plan_filter::{
 pub use projection::{ColumnRequirements, ScanProjection, ScanProjectionPolicy};
 pub use pushdown::{
     BeginForeignScanContext, ForeignExpressionValue, ForeignExprs,
-    ReScanForeignScanContext, RuntimeExpressionValues,
+    ReScanForeignScanContext, RuntimeExpressionValues, StartForeignScanContext,
 };
 pub use slot::{ScanDatumWriter, ScanOutputColumn, ScanSlotWriter};
 
@@ -46,3 +46,4 @@ pub(crate) use explain::explain_foreign_scan;
 pub(crate) use planning::{
     get_foreign_paths, get_foreign_plan, get_foreign_rel_size,
 };
+pub(crate) use state::ForeignScanStateWrapper;

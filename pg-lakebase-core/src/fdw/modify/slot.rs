@@ -11,8 +11,9 @@ use crate::handles::ValidItemPointer;
 use crate::tuple::{Cell, PgDatumRef, TupleSlotRow};
 use crate::wrapper::PgWrapper;
 
-use super::contract::ForeignModifyOutcome;
+use super::contract::{ForeignModifyOperation, ForeignModifyOutcome};
 use super::error::ForeignModifyError;
+use super::executor::map_outcome;
 use super::return_layout::ForeignModifyReturnColumn;
 use super::row_layout::ModifyRowLayout;
 use super::slot_buffer::ModifySlotBuffer;
@@ -416,7 +417,6 @@ impl<'layout> ForeignInsertBatch<'layout> {
         returned_item_pointer_required: bool,
         return_slot_required: bool,
     ) -> Self {
-        debug_assert!(!slots.is_null());
         Self {
             slots,
             len,
@@ -488,8 +488,14 @@ impl<'layout> ForeignInsertBatch<'layout> {
             let returned_slot = unsafe {
                 self.with_slot_unchecked(index, |slot| {
                     let outcome = operation(index, slot)?;
-                    super::executor::map_outcome(return_slot_required, slot, outcome)
-                        .map_err(&mut map_framework_error)
+                    map_outcome(
+                        ForeignModifyOperation::Insert,
+                        0,
+                        return_slot_required,
+                        slot,
+                        outcome,
+                    )
+                    .map_err(&mut map_framework_error)
                 })?
             };
             if !returned_slot.is_null() {

@@ -145,7 +145,7 @@ pub struct ForeignExpressionValue {
 
 /// Borrowed runtime values corresponding to `ForeignExprs` order.
 ///
-/// Providers consume these values in `begin`/`rescan`; `next_slot` does not
+/// Providers consume these values in `start`/`rescan`; `next_slot` does not
 /// expose them because a scan state must own any value needed on the row path.
 /// The framework evaluates them in PostgreSQL's standard per-tuple context and
 /// does not extend the lifetime of the returned Datum values.
@@ -175,13 +175,28 @@ impl<'a> RuntimeExpressionValues<'a> {
     }
 }
 
-/// Context passed when the provider is started.
+/// Context passed from PostgreSQL's `BeginForeignScan` callback.
 ///
-/// The framework initializes the executor-side wrapper during PostgreSQL's
-/// `BeginForeignScan` callback, but invokes the provider's `begin` only when
-/// the first valid parameter set is available or when the first row is
-/// requested for an unparameterized scan.
+/// Only rescan-stable filters are bound at this point. Providers should resolve
+/// stable relation/catalog state and prepare reusable scan planning here, but
+/// must leave cursor creation that depends on `PARAM_EXEC` to `start`.
 pub struct BeginForeignScanContext<'a, P: FdwScan + ?Sized> {
+    pub private_data: &'a P::PrivateData,
+    pub relation: RelationHandle<'a>,
+    pub snapshot: SnapshotHandle<'a>,
+    pub projection: &'a ScanProjection,
+    pub required_columns: &'a ColumnRequirements,
+    pub output_layout: ScanOutputLayout<'a>,
+    pub row_identity_requirement: ForeignRowIdentityRequirement,
+    pub filters: BoundFilterSet<'a, P::BoundPredicate>,
+    pub estate: *mut pg_sys::EState,
+    pub eflags: c_int,
+    pub(crate) effective_user_id: pg_sys::Oid,
+}
+
+/// Context passed when the provider starts reading its first parameter set.
+/// Dynamic filters and provider expressions are valid for this callback only.
+pub struct StartForeignScanContext<'a, P: FdwScan + ?Sized> {
     pub private_data: &'a P::PrivateData,
     pub relation: RelationHandle<'a>,
     pub snapshot: SnapshotHandle<'a>,
@@ -193,8 +208,6 @@ pub struct BeginForeignScanContext<'a, P: FdwScan + ?Sized> {
     pub expressions: RuntimeExpressionValues<'a>,
     pub estate: *mut pg_sys::EState,
     pub econtext: *mut pg_sys::ExprContext,
-    pub eflags: c_int,
-    pub(crate) effective_user_id: pg_sys::Oid,
 }
 
 impl<'a, P: FdwScan + ?Sized> BeginForeignScanContext<'a, P> {

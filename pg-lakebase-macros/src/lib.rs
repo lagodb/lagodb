@@ -11,8 +11,9 @@ use syn::{
 /// Generate PostgreSQL handler, validator, and metadata functions for an FDW.
 ///
 /// The provider's `ForeignDataWrapper::register` implementation calls
-/// `register_scan`, `register_modify`, `register_analyze`, and/or
-/// `register_truncate`. Keeping those calls in the trait implementation avoids
+/// `register_scan`, `register_modify`, `register_import_schema`,
+/// `register_analyze`, and/or `register_truncate`. Keeping those calls in the
+/// trait implementation avoids
 /// declaring the same capability a second time in the attribute. A procedural
 /// macro cannot inspect trait implementations elsewhere in the crate on stable
 /// Rust.

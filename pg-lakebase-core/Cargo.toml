@@ -27,6 +27,8 @@ pg-lakebase-storage = { path = "../pg-lakebase-storage" }
 bytes = "1.10"
 uuid = { version = "1.16", features = ["v7"] }
 serde = { version = "1", features = ["derive"] }
+percent-encoding = "2.3"
+url = "2.5.7"
 
 [dev-dependencies]
 pgrx-tests = { workspace = true }

@@ -9,6 +9,7 @@ use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::error::ForeignScanError;
 use super::projection::{ScanProjection, SlotWritePlan};
 use crate::handles::ValidItemPointer;
+use crate::tuple::SlotColumns;
 
 /// Executor layout derived once from the plan's slot-write contract.
 ///
@@ -19,6 +20,7 @@ use crate::handles::ValidItemPointer;
 pub(crate) struct SlotWriteLayout {
     output_columns: Box<[ScanOutputColumn]>,
     null_indices: Box<[usize]>,
+    slot_types: Box<[(pg_sys::Oid, i32)]>,
 }
 
 impl Default for SlotWriteLayout {
@@ -26,6 +28,7 @@ impl Default for SlotWriteLayout {
         Self {
             output_columns: Vec::new().into_boxed_slice(),
             null_indices: Vec::new().into_boxed_slice(),
+            slot_types: Vec::new().into_boxed_slice(),
         }
     }
 }
@@ -87,10 +90,15 @@ impl SlotWriteLayout {
             .enumerate()
             .filter_map(|(index, output)| (!output).then_some(index))
             .collect::<Vec<_>>();
+        let slot_types = attrs
+            .iter()
+            .map(|attr| (attr.atttypid, attr.atttypmod))
+            .collect::<Vec<_>>();
 
         Self {
             output_columns: output_columns.into_boxed_slice(),
             null_indices: null_indices.into_boxed_slice(),
+            slot_types: slot_types.into_boxed_slice(),
         }
     }
 
@@ -102,6 +110,11 @@ impl SlotWriteLayout {
     #[inline]
     fn output_columns(&self) -> &[ScanOutputColumn] {
         &self.output_columns
+    }
+
+    #[inline]
+    fn slot_types(&self) -> &[(pg_sys::Oid, i32)] {
+        &self.slot_types
     }
 
     /// Initialize positions that are never provider output for this scan.
@@ -131,6 +144,12 @@ impl<'a> ScanOutputLayout<'a> {
     pub fn columns(self) -> &'a [ScanOutputColumn] {
         self.layout.output_columns()
     }
+
+    /// PostgreSQL OID and typmod for every physical scan-slot destination.
+    #[inline]
+    pub fn slot_types(self) -> &'a [(pg_sys::Oid, i32)] {
+        self.layout.slot_types()
+    }
 }
 
 /// Relation attribute bound to an executor destination at Begin.
@@ -147,6 +166,12 @@ impl ScanOutputColumn {
     #[inline]
     pub const fn attno(self) -> pg_sys::AttrNumber {
         self.attno
+    }
+
+    /// Zero-based cell in the executor scan slot.
+    #[inline]
+    pub const fn destination(self) -> usize {
+        self.destination
     }
 }
 
@@ -245,6 +270,28 @@ impl<'a> ScanSlotWriter<'a> {
     pub unsafe fn datum_writer(&mut self) -> ScanDatumWriter<'_, 'a> {
         unsafe { self.begin_datum_output() };
         ScanDatumWriter { writer: self }
+    }
+
+    /// Prepare virtual-Datum output for a decoder that writes bound slot
+    /// destinations directly.
+    ///
+    /// This is the batch-decoder counterpart of [`Self::datum_writer`]. It
+    /// preserves a single output representation while allowing a decoder that
+    /// was validated against the Begin-time slot layout to reuse its existing
+    /// `SlotColumns` hot path.
+    ///
+    /// # Safety
+    ///
+    /// This method may be called at most once for a produced row and must not
+    /// be mixed with [`Self::datum_writer`] or [`Self::store_heap_tuple`]. The
+    /// decoder must write every column exposed by the scan's output layout,
+    /// and every bound destination must have been validated against this scan
+    /// slot. Pass-by-reference datums are allocated in PostgreSQL's current
+    /// per-tuple memory context.
+    #[inline]
+    pub unsafe fn datum_columns(&mut self) -> SlotColumns<'_> {
+        unsafe { self.begin_datum_output() };
+        unsafe { SlotColumns::new(self.slot, pg_sys::CurrentMemoryContext) }
     }
 
     /// Write a destination supplied by the Begin-time output layout.

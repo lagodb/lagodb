@@ -57,10 +57,19 @@ unsafe fn plan_custom_path<P: LakebaseCustomScanProvider>(
 
     let relation_oid =
         unsafe { PlanRelationResolver::new(root).rel_oid((*rel).relid) };
-    let planning_context =
-        FilterPlanningContext::new(relation_oid, unsafe { (*rel).relid }, unsafe {
-            pg_sys::get_rel_tablespace(relation_oid)
-        });
+    let planning_context = FilterPlanningContext::new(
+        relation_oid,
+        unsafe { (*rel).relid },
+        unsafe { pg_sys::get_rel_tablespace(relation_oid) },
+        unsafe {
+            let user = (*rel).userid;
+            if user == pg_sys::InvalidOid {
+                pg_sys::GetUserId()
+            } else {
+                user
+            }
+        },
+    );
     let mut filter_planner = P::begin_filter_planning(&planning_context)
         .map_err(CustomScanError::provider)?;
     let filters = unsafe {

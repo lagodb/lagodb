@@ -4,7 +4,7 @@ use pg_lakebase_core::fdw::{
     ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
     ForeignRowIdentityRequirement, ForeignScanError, PathVariantKind,
     ReScanForeignScanContext, ScanDatumWriter, ScanOutputColumn, ScanProjection,
-    ScanProjectionPolicy, ScanSlotWriter,
+    ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
 };
 use pgrx::IntoDatum;
 use pgrx::pg_sys;
@@ -240,12 +240,6 @@ impl FdwScan for FrameworkTestFdw {
     ) -> Result<Self::State, ForeignScanError> {
         let filters: Vec<RuntimeFilter> = ctx.filters.iter().copied().collect();
         let output_columns = ctx.output_layout.columns().to_vec();
-        TestTrace::record(TraceEvent::ScanBegin {
-            ordered: ctx.private_data.ordered,
-            planned_count: filters.len(),
-            filters: trace_filters(&filters),
-            projection: projection_name(ctx.projection),
-        });
         Ok(ScanState::new(
             TestStore::snapshot(ctx.relation.oid()),
             ctx.private_data.ordered,
@@ -257,6 +251,21 @@ impl FdwScan for FrameworkTestFdw {
                 ForeignRowIdentityRequirement::ItemPointer
             ),
         ))
+    }
+
+    fn start(
+        state: &mut Self::State,
+        ctx: StartForeignScanContext<'_, Self>,
+    ) -> Result<(), ForeignScanError> {
+        let filters = ctx.filters.iter().copied().collect::<Vec<_>>();
+        state.set_filters(filters);
+        TestTrace::record(TraceEvent::ScanBegin {
+            ordered: state.ordered,
+            planned_count: state.filters.len(),
+            filters: trace_filters(&state.filters),
+            projection: projection_name(ctx.projection),
+        });
+        Ok(())
     }
 
     fn next_slot(

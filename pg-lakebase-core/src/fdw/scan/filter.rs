@@ -95,11 +95,19 @@ impl<P: FilterPushdown> ForeignScanFilters<P> {
         Ok(Self { runtime })
     }
 
-    pub(crate) unsafe fn bind_initial(
+    pub(crate) unsafe fn bind_stable(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
     ) -> Result<(), ForeignScanError> {
-        unsafe { self.runtime.bind_initial(econtext) }?;
+        unsafe { self.runtime.bind_stable(econtext) }?;
+        Ok(())
+    }
+
+    pub(crate) unsafe fn bind_dynamic_initial(
+        &mut self,
+        econtext: *mut pg_sys::ExprContext,
+    ) -> Result<(), ForeignScanError> {
+        unsafe { self.runtime.bind_dynamic_initial(econtext) }?;
         Ok(())
     }
 

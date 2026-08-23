@@ -59,8 +59,8 @@ impl<D, S> ProviderPayload<D, S> {
             .then_some(self.provider_state.as_mut_ptr())
     }
 
-    /// Return the initialized provider-state address without repeating the
-    /// option conversion used by defensive lifecycle callers.
+    /// Return the initialized provider-state address when the callback
+    /// lifecycle already establishes that the state is present.
     ///
     /// # Safety
     ///
@@ -69,6 +69,18 @@ impl<D, S> ProviderPayload<D, S> {
     pub(crate) unsafe fn provider_state_ptr_unchecked(&mut self) -> *mut S {
         debug_assert!(self.provider_state_initialized);
         self.provider_state.as_mut_ptr()
+    }
+
+    /// Borrow the initialized provider state without repeating a lifecycle
+    /// branch at a caller that already owns that invariant.
+    ///
+    /// # Safety
+    ///
+    /// `install_provider_state` must have completed and `cleanup` must not
+    /// have started.
+    pub(crate) unsafe fn provider_state_unchecked(&self) -> &S {
+        debug_assert!(self.provider_state_initialized);
+        unsafe { self.provider_state.assume_init_ref() }
     }
 
     pub(crate) fn cleanup(&mut self) {

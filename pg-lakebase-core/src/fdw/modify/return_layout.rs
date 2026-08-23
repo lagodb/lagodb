@@ -55,11 +55,7 @@ impl ForeignModifyReturnLayout {
         rtindex: pg_sys::Index,
         requirements: &ForeignModifyReturnRequirements,
     ) -> Result<Self, ForeignModifyError> {
-        if targetlist.is_null()
-            || relation.is_null()
-            || rtindex == 0
-            || unsafe { (*relation).rd_att.is_null() }
-        {
+        if targetlist.is_null() || rtindex == 0 {
             return Err(ForeignModifyError::framework(
                 "foreign modify return layout has incomplete target metadata",
             ));
@@ -68,17 +64,10 @@ impl ForeignModifyReturnLayout {
         let mut columns = Vec::new();
         let mut whole_row_plan_attno = None;
         let length = unsafe { pg_sys::list_length(targetlist) };
-        if length < 0 {
-            return Err(ForeignModifyError::framework(
-                "foreign modify subplan targetlist has a negative length",
-            ));
-        }
         for index in 0..length {
             let target_entry = unsafe { pg_sys::list_nth(targetlist, index) }
                 as *mut pg_sys::TargetEntry;
-            if target_entry.is_null()
-                || unsafe { (*target_entry).xpr.type_ }
-                    != pg_sys::NodeTag::T_TargetEntry
+            if unsafe { (*target_entry).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
             {
                 return Err(ForeignModifyError::framework(
                     "foreign modify subplan targetlist has a malformed target entry",
@@ -90,6 +79,27 @@ impl ForeignModifyReturnLayout {
                 continue;
             }
             let name = unsafe { CStr::from_ptr((*target_entry).resname) };
+            let is_whole_row = name == WHOLE_ROW_NAME;
+            let is_return_column =
+                name.to_bytes().starts_with(RETURN_COLUMN_PREFIX.as_bytes());
+            if !is_whole_row && !is_return_column {
+                continue;
+            }
+            let expr = unsafe { (*target_entry).expr };
+            if unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
+                return Err(ForeignModifyError::framework(
+                    "foreign modify return target has a malformed expression",
+                ));
+            }
+            let var = expr.cast::<pg_sys::Var>();
+            let source_rtindex = Self::var_source_relation(var).ok_or_else(|| {
+                ForeignModifyError::framework(
+                    "foreign modify return target has a malformed source relation",
+                )
+            })?;
+            if source_rtindex != rtindex {
+                continue;
+            }
             let plan_attno = unsafe { (*target_entry).resno };
             if plan_attno <= 0 {
                 return Err(ForeignModifyError::framework(
@@ -108,20 +118,13 @@ impl ForeignModifyReturnLayout {
                 ));
             }
 
-            if name == WHOLE_ROW_NAME {
+            if is_whole_row {
                 if whole_row_plan_attno.replace(plan_index).is_some() {
                     return Err(ForeignModifyError::framework(
                         "foreign modify subplan has duplicate wholerow targets",
                     ));
                 }
-                let expr = unsafe { (*target_entry).expr };
-                if expr.is_null()
-                    || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var
-                    || !Self::whole_row_var_matches_relation(
-                        expr.cast::<pg_sys::Var>(),
-                        rtindex,
-                    )
-                {
+                if !Self::whole_row_var_matches_relation(var, rtindex) {
                     return Err(ForeignModifyError::framework(
                         "foreign modify wholerow target has a malformed expression",
                     ));
@@ -130,24 +133,15 @@ impl ForeignModifyReturnLayout {
             }
 
             let bytes = name.to_bytes();
-            if !bytes.starts_with(RETURN_COLUMN_PREFIX.as_bytes()) {
-                continue;
-            }
             let relation_attno = Self::parse_returning_attno(bytes)?;
             if !requirements.contains(relation_attno) {
                 return Err(ForeignModifyError::framework(
                     "foreign modify return target is not required by DELETE RETURNING",
                 ));
             }
-            let attribute =
-                RelationAttributeMetadata::from_relation(relation, relation_attno)?;
-            let expr = unsafe { (*target_entry).expr };
-            if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
-                return Err(ForeignModifyError::framework(
-                    "foreign modify return column has a malformed expression",
-                ));
-            }
-            let var = expr.cast::<pg_sys::Var>();
+            let attribute = unsafe {
+                RelationAttributeMetadata::from_relation(relation, relation_attno)
+            }?;
             if !Self::attribute_var_matches_relation(var, rtindex, relation_attno)
                 || unsafe { (*var).vartype } != attribute.type_oid
                 || unsafe { (*var).vartypmod } != attribute.type_mod
@@ -195,10 +189,12 @@ impl ForeignModifyReturnLayout {
                     !columns.iter().any(|column| column.relation_attno == *attno)
                 })
                 .map(|relation_attno| {
-                    let attribute = RelationAttributeMetadata::from_relation(
-                        relation,
-                        relation_attno,
-                    )?;
+                    let attribute = unsafe {
+                        RelationAttributeMetadata::from_relation(
+                            relation,
+                            relation_attno,
+                        )
+                    }?;
                     Ok(ForeignModifyReturnColumn {
                         plan_attno: 0,
                         plan_index: 0,
@@ -232,26 +228,14 @@ impl ForeignModifyReturnLayout {
         &self,
         tuple_desc: pg_sys::TupleDesc,
     ) -> Result<(), ForeignModifyError> {
-        if tuple_desc.is_null() {
-            return Err(ForeignModifyError::framework(
-                "foreign modify return layout has no plan-slot descriptor",
-            ));
-        }
-        let natts = unsafe { (*tuple_desc).natts };
-        if natts < 0
-            || (natts > 0 && unsafe { (*tuple_desc).attrs.as_ptr().is_null() })
-        {
-            return Err(ForeignModifyError::framework(
-                "foreign modify return layout has an invalid plan-slot descriptor",
-            ));
-        }
+        let natts = unsafe { (*tuple_desc).natts as usize };
         let max_plan_index = self
             .whole_row_plan_index
             .into_iter()
             .chain(self.columns.iter().map(|column| column.plan_index))
             .max();
         if let Some(plan_index) = max_plan_index
-            && plan_index >= natts as usize
+            && plan_index >= natts
         {
             return Err(ForeignModifyError::framework(
                 "foreign modify return target is outside its plan slot",
@@ -327,6 +311,24 @@ impl ForeignModifyReturnLayout {
                 )
             })?;
         Ok(attno)
+    }
+
+    fn var_source_relation(var: *mut pg_sys::Var) -> Option<pg_sys::Index> {
+        unsafe {
+            if (*var).varlevelsup != 0 {
+                return None;
+            }
+            if (*var).varno == INNER_VAR
+                || (*var).varno == OUTER_VAR
+                || (*var).varno == INDEX_VAR
+            {
+                ((*var).varnosyn != 0).then_some((*var).varnosyn)
+            } else {
+                pg_sys::Index::try_from((*var).varno)
+                    .ok()
+                    .filter(|source| *source != 0)
+            }
+        }
     }
 
     fn attribute_var_matches_relation(

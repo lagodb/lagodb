@@ -1,5 +1,5 @@
 use pg_lakebase_core::fdw::{
-    FdwModify, ForeignModifyBeginContext, ForeignModifyCapabilities,
+    FdwModify, FdwScan, ForeignModifyBeginContext, ForeignModifyCapabilities,
     ForeignModifyError, ForeignModifyOperation, ForeignModifyOutcome,
     ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyPrivate,
     ForeignModifyRelationContext, ForeignModifyState, ForeignPrivateReader,
@@ -49,6 +49,7 @@ pub struct ModifyState {
 impl FdwModify for FrameworkTestFdw {
     type ModifyPrivateData = ModifyPrivate;
     type ModifyState = ModifyState;
+    type TargetScanContext = ();
 
     fn capabilities(
         ctx: &ForeignModifyRelationContext<'_>,
@@ -89,6 +90,7 @@ impl FdwModify for FrameworkTestFdw {
 
     fn begin_modify(
         ctx: ForeignModifyBeginContext<'_, Self::ModifyPrivateData>,
+        _target_scan: Option<Self::TargetScanContext>,
     ) -> Result<Self::ModifyState, ForeignModifyError> {
         if ctx.row_identity_count() != 1
             && matches!(
@@ -106,6 +108,12 @@ impl FdwModify for FrameworkTestFdw {
             mode: ctx.private_data().mode,
             returned_item_pointer_required: ctx.returned_item_pointer_required(),
         })
+    }
+
+    fn target_scan_context(
+        _state: &<Self as FdwScan>::State,
+    ) -> Option<Self::TargetScanContext> {
+        None
     }
 }
 

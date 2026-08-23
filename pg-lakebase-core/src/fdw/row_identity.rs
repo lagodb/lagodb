@@ -141,6 +141,30 @@ impl RowIdentityLayout {
             let Some(kind) = Self::kind_for_name(name)? else {
                 continue;
             };
+            let expr = unsafe { (*target_entry).expr };
+            if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
+                return Err(ForeignRowIdentityError::MalformedIdentityExpression);
+            }
+            let var = expr.cast::<pg_sys::Var>();
+            if unsafe { (*var).varlevelsup } != 0 {
+                return Err(ForeignRowIdentityError::MalformedIdentityExpression);
+            }
+            let source_rtindex = unsafe {
+                if (*var).varno == INNER_VAR
+                    || (*var).varno == OUTER_VAR
+                    || (*var).varno == INDEX_VAR
+                {
+                    Some((*var).varnosyn)
+                } else {
+                    pg_sys::Index::try_from((*var).varno)
+                        .ok()
+                        .filter(|source| *source != 0)
+                }
+            }
+            .ok_or(ForeignRowIdentityError::MalformedIdentityExpression)?;
+            if source_rtindex != rtindex {
+                continue;
+            }
             let plan_attno = unsafe { (*target_entry).resno };
             if plan_attno <= 0 {
                 return Err(ForeignRowIdentityError::InvalidPlanAttribute);
@@ -157,11 +181,6 @@ impl RowIdentityLayout {
                 return Err(ForeignRowIdentityError::DuplicatePlanAttribute);
             }
 
-            let expr = unsafe { (*target_entry).expr };
-            if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
-                return Err(ForeignRowIdentityError::MalformedIdentityExpression);
-            }
-            let var = expr.cast::<pg_sys::Var>();
             let source_attno = match kind {
                 ForeignRowIdentityKind::ItemPointer => {
                     pg_sys::SelfItemPointerAttributeNumber as pg_sys::AttrNumber
@@ -186,10 +205,9 @@ impl RowIdentityLayout {
                     && (*var).varnosyn == rtindex
                     && (*var).varattnosyn == source_attno
             };
-            if unsafe { (*var).varlevelsup != 0 }
-                || !(is_direct_relation_var
-                    || is_join_output_var
-                    || is_projected_scan_var)
+            if !(is_direct_relation_var
+                || is_join_output_var
+                || is_projected_scan_var)
             {
                 return Err(ForeignRowIdentityError::MalformedIdentityExpression);
             }

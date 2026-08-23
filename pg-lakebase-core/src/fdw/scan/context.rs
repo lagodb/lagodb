@@ -119,6 +119,17 @@ impl<'a> ForeignRelContext<'a> {
         self.relation_oid
     }
 
+    /// Role PostgreSQL selected for this relation's foreign access.
+    #[inline]
+    pub fn effective_user_id(&self) -> pg_sys::Oid {
+        let user = unsafe { (*self.baserel).userid };
+        if user == pg_sys::InvalidOid {
+            unsafe { pg_sys::GetUserId() }
+        } else {
+            user
+        }
+    }
+
     /// Base relation's range-table index.
     #[inline]
     pub fn scan_relid(&self) -> pg_sys::Index {

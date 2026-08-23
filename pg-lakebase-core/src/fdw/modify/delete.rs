@@ -6,9 +6,7 @@ use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use super::super::row_identity::ModifyPlanSlot;
-use super::contract::{
-    FdwModify, ForeignModifyOperation, ForeignModifyOutcome, ForeignModifyState,
-};
+use super::contract::{FdwModify, ForeignModifyOutcome, ForeignModifyState};
 use super::error::{ForeignModifyError, ForeignModifyPhase};
 use super::executor::{state_wrapper_unchecked, with_modify_per_tuple_context};
 use super::slot::ModifySlot;
@@ -27,11 +25,12 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
     let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
-        debug_assert_eq!(wrapper.operation, ForeignModifyOperation::Delete);
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
         let per_tuple_context = wrapper.per_tuple_context;
         unsafe {
             with_modify_per_tuple_context(per_tuple_context, |conversion_context| {
+                let operation = wrapper.operation;
+                let command_id = wrapper.command_id;
                 let plan_view = {
                     ModifyPlanSlot::from_raw_unchecked(
                         plan_slot,
@@ -63,10 +62,9 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
                         ForeignModifyOutcome::Applied => {
                             row.finish(true)?;
                             let returned_slot = row.as_raw();
-                            if returned_slot.is_null()
-                                || ((*returned_slot).tts_flags as u32
-                                    & pg_sys::TTS_FLAG_EMPTY
-                                    != 0)
+                            if (*returned_slot).tts_flags as u32
+                                & pg_sys::TTS_FLAG_EMPTY
+                                != 0
                             {
                                 return Err(ForeignModifyError::framework(
                                     "foreign DELETE provider applied an empty returned row",
@@ -75,6 +73,14 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
                             Ok(returned_slot)
                         }
                         ForeignModifyOutcome::Skipped => Ok(ptr::null_mut()),
+                        ForeignModifyOutcome::SelfModified {
+                            modifying_command_id,
+                        } if modifying_command_id == command_id => {
+                            Ok(ptr::null_mut())
+                        }
+                        ForeignModifyOutcome::SelfModified { .. } => {
+                            Err(ForeignModifyError::self_modified(operation))
+                        }
                     }
                 } else {
                     let outcome = {
@@ -87,6 +93,14 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
                         // evaluates DELETE RETURNING or tableoid.
                         ForeignModifyOutcome::Applied => Ok(slot),
                         ForeignModifyOutcome::Skipped => Ok(ptr::null_mut()),
+                        ForeignModifyOutcome::SelfModified {
+                            modifying_command_id,
+                        } if modifying_command_id == command_id => {
+                            Ok(ptr::null_mut())
+                        }
+                        ForeignModifyOutcome::SelfModified { .. } => {
+                            Err(ForeignModifyError::self_modified(operation))
+                        }
                     }
                 }
             })

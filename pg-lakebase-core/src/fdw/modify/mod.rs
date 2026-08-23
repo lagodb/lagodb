@@ -16,6 +16,7 @@ mod row_layout;
 mod slot;
 mod slot_buffer;
 mod state;
+mod target_scan;
 
 pub use super::row_identity::{
     ForeignRowIdentity, ForeignRowIdentityKind, ModifyPlanSlot,

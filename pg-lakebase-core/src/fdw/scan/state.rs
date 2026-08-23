@@ -16,6 +16,7 @@ use super::private::DecodedScanPrivate;
 use super::projection::{ColumnRequirements, ScanProjection};
 use super::pushdown::{
     BeginForeignScanContext, ForeignExpressionValue, RuntimeExpressionValues,
+    StartForeignScanContext,
 };
 use super::slot::{ScanOutputLayout, ScanSlotWriter, SlotWriteLayout};
 use crate::handles::{RelationHandle, SnapshotHandle};
@@ -32,6 +33,7 @@ pub(crate) struct ForeignScanStateWrapper<P: FdwScan> {
     pub(crate) fdw_expr_states: *mut pg_sys::List,
     pub(crate) eflags: c_int,
     pub(crate) runtime_values: Vec<ForeignExpressionValue>,
+    provider_started: bool,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -60,6 +62,7 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
             fdw_expr_states,
             eflags,
             runtime_values: Vec::with_capacity(expression_count),
+            provider_started: false,
             _marker: PhantomData,
         }
     }
@@ -77,45 +80,31 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         self.payload.install_provider_state(state);
     }
 
-    /// Start the provider after PostgreSQL has populated any outer-scan
-    /// `PARAM_EXEC` values.  PostgreSQL initializes an inner ForeignScan before
-    /// the first outer tuple is available, so this must not run from the
-    /// `BeginForeignScan` callback itself.
+    #[inline]
+    pub(crate) fn provider_started(&self) -> bool {
+        self.provider_started
+    }
+
+    /// Initialize provider state from PostgreSQL's BeginForeignScan callback.
     ///
     /// # Safety
     ///
     /// `node` must be the live ForeignScanState that owns this wrapper.  The
     /// executor plan, relation, slot, expression context, and snapshot must
     /// remain valid for the synchronous provider callback.
-    pub(crate) unsafe fn begin_provider(
+    pub(crate) unsafe fn initialize_provider(
         &mut self,
         node: *mut pg_sys::ForeignScanState,
     ) -> Result<(), ForeignScanError> {
         if self.payload.provider_state_initialized() {
             return Ok(());
         }
-        if node.is_null() {
-            return Err(ForeignScanError::framework(
-                "provider start received a NULL ForeignScanState",
-            ));
-        }
         let plan = unsafe { (*node).ss.ps.plan } as *mut pg_sys::ForeignScan;
         let relation = unsafe { (*node).ss.ss_currentRelation };
         let estate = unsafe { (*node).ss.ps.state };
         let econtext = unsafe { (*node).ss.ps.ps_ExprContext };
-        if plan.is_null()
-            || unsafe { (*plan).scan.plan.type_ } != pg_sys::NodeTag::T_ForeignScan
-            || relation.is_null()
-            || estate.is_null()
-            || econtext.is_null()
-        {
-            return Err(ForeignScanError::framework(
-                "provider start has incomplete executor state",
-            ));
-        }
         let snapshot = unsafe { (*estate).es_snapshot };
         let query_context = unsafe { (*estate).es_query_cxt };
-        let per_tuple_context = unsafe { (*econtext).ecxt_per_tuple_memory };
         let effective_user_id = unsafe {
             if (*plan).checkAsUser != pg_sys::InvalidOid {
                 (*plan).checkAsUser
@@ -123,28 +112,14 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
                 pg_sys::GetUserId()
             }
         };
-        if snapshot.is_null()
-            || query_context.is_null()
-            || per_tuple_context.is_null()
-        {
-            return Err(ForeignScanError::framework(
-                "provider start has no snapshot, query, or per-tuple memory context",
-            ));
-        }
         let entry_context = unsafe { pg_sys::CurrentMemoryContext };
 
-        // The executor has already reset this context before delayed provider
-        // start: ExecScan does so for Iterate, and ReScanExprContext does so
-        // for a parameterized ReScan.  Runtime expression values are then
-        // evaluated against the current outer tuple, if this scan is the inner
-        // side of a Nested Loop.
         unsafe {
             self.filters
                 .as_mut()
                 .expect("FDW filters must remain installed until EndForeignScan")
-                .bind_initial(econtext)
+                .bind_stable(econtext)
         }?;
-        unsafe { self.refresh_runtime_values(econtext) }?;
 
         let provider_state = {
             let private_data = self.private_data();
@@ -161,9 +136,7 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
                     .as_ref()
                     .expect("FDW filters must remain installed until EndForeignScan")
                     .bound(),
-                expressions: self.runtime_values(),
                 estate,
-                econtext,
                 eflags: self.eflags,
                 effective_user_id,
             };
@@ -174,6 +147,60 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         };
         self.install_provider_state(provider_state);
         Ok(())
+    }
+
+    /// Bind dynamic parameters and start the provider after PostgreSQL has
+    /// populated the first valid outer-tuple values.
+    ///
+    /// # Safety
+    ///
+    /// `node` must be the live ForeignScanState that owns this wrapper.
+    pub(crate) unsafe fn start_provider(
+        &mut self,
+        node: *mut pg_sys::ForeignScanState,
+    ) -> Result<(), ForeignScanError> {
+        if self.provider_started {
+            return Ok(());
+        }
+        let relation = unsafe { (*node).ss.ss_currentRelation };
+        let estate = unsafe { (*node).ss.ps.state };
+        let econtext = unsafe { (*node).ss.ps.ps_ExprContext };
+        let snapshot = unsafe { (*estate).es_snapshot };
+        let query_context = unsafe { (*estate).es_query_cxt };
+        unsafe {
+            self.filters
+                .as_mut()
+                .expect("FDW filters must remain installed until EndForeignScan")
+                .bind_dynamic_initial(econtext)
+        }?;
+        unsafe { self.refresh_runtime_values(econtext) }?;
+
+        let state_ptr = unsafe { self.payload.provider_state_ptr_unchecked() };
+        let context = StartForeignScanContext {
+            private_data: self.private_data(),
+            relation: unsafe { RelationHandle::from_raw(relation) },
+            snapshot: unsafe { SnapshotHandle::from_raw(snapshot) },
+            projection: &self.projection,
+            required_columns: &self.required_columns,
+            output_layout: ScanOutputLayout::new(&self.write_layout),
+            row_identity_requirement: self.row_identity_requirement,
+            filters: self
+                .filters
+                .as_ref()
+                .expect("FDW filters must remain installed until EndForeignScan")
+                .bound(),
+            expressions: self.runtime_values(),
+            estate,
+            econtext,
+        };
+        let entry_context = unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
+        // SAFETY: provider initialization installed P::State at state_ptr. The
+        // callback is synchronous and the context borrows only sibling wrapper
+        // fields that remain live for its duration.
+        let result = unsafe { P::start(&mut *state_ptr, context) };
+        unsafe { pg_sys::MemoryContextSwitchTo(entry_context) };
+        self.provider_started = result.is_ok();
+        result
     }
 
     /// Evaluate all provider runtime expressions in their plan-list order.
@@ -193,30 +220,14 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         if self.fdw_expr_states.is_null() {
             return Ok(());
         }
-        if econtext.is_null() {
-            return Err(ForeignScanError::framework(
-                "FDW runtime expressions have no ExprContext",
-            ));
-        }
 
         // SAFETY: fdw_expr_states is non-NULL and executor-owned for this scan.
         let length = unsafe { pg_sys::list_length(self.fdw_expr_states) };
-        // SAFETY: econtext was checked non-NULL immediately above.
-        if unsafe { (*econtext).ecxt_per_tuple_memory.is_null() } {
-            return Err(ForeignScanError::framework(
-                "FDW runtime expressions have no per-tuple memory context",
-            ));
-        }
 
         for index in 0..length {
             // SAFETY: index is bounded by the live PostgreSQL list length.
             let state = unsafe { pg_sys::list_nth(self.fdw_expr_states, index) }
                 as *mut pg_sys::ExprState;
-            if state.is_null() {
-                return Err(ForeignScanError::framework(
-                    "fdw_exprs initialization produced a NULL ExprState",
-                ));
-            }
             let mut is_null = false;
             // SAFETY: state is a live ExprState. PostgreSQL switches to
             // econtext->ecxt_per_tuple_memory for this evaluation and restores
@@ -243,7 +254,7 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         &'a mut self,
         slot: *mut pg_sys::TupleTableSlot,
     ) -> ScanSlotWriter<'a> {
-        // SAFETY: Begin validated the slot layout; the datum-default state
+        // SAFETY: Begin compiled the slot layout; the datum-default state
         // belongs to this wrapper.
         unsafe {
             ScanSlotWriter::new(
@@ -263,6 +274,7 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         self.payload.cleanup();
         self.filters = None;
         self.runtime_values.clear();
+        self.provider_started = false;
         self.datum_defaults_initialized = false;
         self.fdw_expr_states = ptr::null_mut();
         self.projection = ScanProjection::Relation;

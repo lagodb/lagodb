@@ -26,6 +26,7 @@ pub struct ForeignModifyBeginContext<'a, D: ForeignModifyPrivate> {
     subplan_index: c_int,
     eflags: c_int,
     effective_user_id: pg_sys::Oid,
+    command_id: pg_sys::CommandId,
 }
 
 impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
@@ -44,6 +45,7 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
         subplan_index: c_int,
         eflags: c_int,
         effective_user_id: pg_sys::Oid,
+        command_id: pg_sys::CommandId,
     ) -> Self {
         Self {
             private_data,
@@ -60,6 +62,7 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
             subplan_index,
             eflags,
             effective_user_id,
+            command_id,
         }
     }
 
@@ -132,6 +135,12 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
     #[inline]
     pub fn effective_user_id(&self) -> pg_sys::Oid {
         self.effective_user_id
+    }
+
+    /// Command identifier fixed by PostgreSQL for this ModifyTable statement.
+    #[inline]
+    pub fn command_id(&self) -> pg_sys::CommandId {
+        self.command_id
     }
 }
 

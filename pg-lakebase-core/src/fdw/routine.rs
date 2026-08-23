@@ -2,6 +2,7 @@
 
 use pgrx::{AllocatedByPostgres, AllocatedByRust, PgBox, pg_sys};
 
+use super::import::{self, FdwImportSchema};
 use super::maintenance::{self, FdwAnalyze, FdwTruncate};
 use super::modify::{self, FdwModify};
 use super::scan::{self, FdwScan};
@@ -35,6 +36,11 @@ pub fn register_scan<P: FdwScan>(routine: &mut FdwRoutine) {
     routine.ReScanForeignScan = Some(scan::rescan_foreign_scan::<P>);
     routine.EndForeignScan = Some(scan::end_foreign_scan::<P>);
     routine.ExplainForeignScan = Some(scan::explain_foreign_scan::<P>);
+}
+
+/// Install the `IMPORT FOREIGN SCHEMA` callback for `P`.
+pub fn register_import_schema<P: FdwImportSchema>(routine: &mut FdwRoutine) {
+    routine.ImportForeignSchema = Some(import::import_foreign_schema::<P>);
 }
 
 /// Install the complete INSERT/UPDATE/DELETE callback group for `P`.

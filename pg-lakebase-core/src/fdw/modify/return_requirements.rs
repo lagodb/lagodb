@@ -27,11 +27,6 @@ impl ForeignModifyReturnRequirements {
         relation: pg_sys::Relation,
         rtindex: pg_sys::Index,
     ) -> Result<Self, ForeignModifyError> {
-        if relation.is_null() || unsafe { (*relation).rd_att.is_null() } {
-            return Err(ForeignModifyError::framework(
-                "foreign modify return analysis has no relation descriptor",
-            ));
-        }
         if returning.is_null() {
             return Ok(Self::default());
         }
@@ -73,13 +68,13 @@ impl ForeignModifyReturnRequirements {
             if attno == 0 {
                 all_columns = true;
             } else if attno > 0 {
-                RelationAttributeMetadata::from_relation(relation, attno)?;
+                unsafe { RelationAttributeMetadata::from_relation(relation, attno) }?;
                 columns.push(attno);
             }
         }
 
         if all_columns {
-            columns = Self::all_user_columns(relation)?;
+            columns = unsafe { Self::all_user_columns(relation) }?;
         }
         Ok(Self {
             columns: columns.into_boxed_slice(),
@@ -99,17 +94,12 @@ impl ForeignModifyReturnRequirements {
         result_relation: pg_sys::Index,
         subplan_index: c_int,
     ) -> Result<Self, ForeignModifyError> {
-        if plan.is_null() || subplan_index < 0 {
-            return Err(ForeignModifyError::framework(
-                "foreign modify return analysis has an incomplete modify plan",
-            ));
-        }
         let returning_lists = unsafe { (*plan).returningLists };
         let returning = if returning_lists.is_null() {
             ptr::null_mut()
         } else {
             let length = unsafe { pg_sys::list_length(returning_lists) };
-            if length < 0 || length <= subplan_index {
+            if length <= subplan_index {
                 return Err(ForeignModifyError::framework(
                     "foreign modify RETURNING-list index is outside its plan list",
                 ));
@@ -172,7 +162,8 @@ impl ForeignModifyReturnRequirements {
         rtindex: pg_sys::Index,
         attno: pg_sys::AttrNumber,
     ) -> Result<*mut pg_sys::Var, ForeignModifyError> {
-        let attribute = RelationAttributeMetadata::from_relation(relation, attno)?;
+        let attribute =
+            unsafe { RelationAttributeMetadata::from_relation(relation, attno) }?;
         let var = unsafe {
             pg_sys::makeVar(
                 rtindex as c_int,
@@ -183,28 +174,19 @@ impl ForeignModifyReturnRequirements {
                 0,
             )
         };
-        if var.is_null() {
-            return Err(ForeignModifyError::framework(
-                "PostgreSQL returned NULL while creating a DELETE RETURNING Var",
-            ));
-        }
         Ok(var)
     }
 
-    fn all_user_columns(
+    /// # Safety
+    ///
+    /// `relation` must be live with the descriptor PostgreSQL created for it.
+    unsafe fn all_user_columns(
         relation: pg_sys::Relation,
     ) -> Result<Vec<pg_sys::AttrNumber>, ForeignModifyError> {
         let tuple_desc = unsafe { (*relation).rd_att };
-        let natts = unsafe { (*tuple_desc).natts };
-        if natts < 0
-            || (natts > 0 && unsafe { (*tuple_desc).attrs.as_ptr().is_null() })
-        {
-            return Err(ForeignModifyError::framework(
-                "foreign modify return analysis has an invalid relation descriptor",
-            ));
-        }
+        let natts = unsafe { (*tuple_desc).natts as usize };
         let mut columns = Vec::new();
-        for index in 0..natts as usize {
+        for index in 0..natts {
             let attribute = unsafe { &*(*tuple_desc).attrs.as_ptr().add(index) };
             if !attribute.attisdropped {
                 columns.push(pg_sys::AttrNumber::try_from(index + 1).map_err(|_| {
@@ -227,31 +209,26 @@ pub(super) struct RelationAttributeMetadata {
 }
 
 impl RelationAttributeMetadata {
-    pub(super) fn from_relation(
+    /// # Safety
+    ///
+    /// `relation` must be live with the descriptor PostgreSQL created for it.
+    pub(super) unsafe fn from_relation(
         relation: pg_sys::Relation,
         attno: pg_sys::AttrNumber,
     ) -> Result<Self, ForeignModifyError> {
-        if relation.is_null() || unsafe { (*relation).rd_att.is_null() } {
-            return Err(ForeignModifyError::framework(
-                "foreign modify return column has no relation descriptor",
-            ));
-        }
         if attno <= 0 {
             return Err(ForeignModifyError::framework(
                 "foreign modify return column must be positive",
             ));
         }
         let tuple_desc = unsafe { (*relation).rd_att };
-        let natts = unsafe { (*tuple_desc).natts };
+        let natts = unsafe { (*tuple_desc).natts as usize };
         let relation_index = usize::try_from(attno as i32 - 1).map_err(|_| {
             ForeignModifyError::framework(
                 "foreign modify return column is out of range",
             )
         })?;
-        if natts < 0
-            || relation_index >= natts as usize
-            || (natts > 0 && unsafe { (*tuple_desc).attrs.as_ptr().is_null() })
-        {
+        if relation_index >= natts {
             return Err(ForeignModifyError::framework(
                 "foreign modify return column is outside the relation",
             ));

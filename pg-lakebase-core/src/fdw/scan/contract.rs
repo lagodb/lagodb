@@ -11,7 +11,9 @@ use super::error::ForeignScanError;
 use super::path_builder::ForeignPathBuilder;
 use super::pathkeys::ForeignPathKeys;
 use super::plan_filter::ForeignFilterExplainValues;
-use super::pushdown::{BeginForeignScanContext, ReScanForeignScanContext};
+use super::pushdown::{
+    BeginForeignScanContext, ReScanForeignScanContext, StartForeignScanContext,
+};
 use super::slot::ScanSlotWriter;
 
 /// Optional scan capability of an FDW provider.
@@ -88,11 +90,16 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
         Ok(None)
     }
 
-    /// Start provider execution and bind reusable output columns through
-    /// `ctx.output_layout`.
+    /// Initialize stable provider state during PostgreSQL's BeginForeignScan.
     fn begin(
         ctx: BeginForeignScanContext<'_, Self>,
     ) -> Result<Self::State, ForeignScanError>;
+
+    /// Bind the first valid dynamic parameter set and open the provider cursor.
+    fn start(
+        state: &mut Self::State,
+        ctx: StartForeignScanContext<'_, Self>,
+    ) -> Result<(), ForeignScanError>;
 
     /// Produce the next row.
     ///

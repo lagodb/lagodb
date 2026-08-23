@@ -9,7 +9,7 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::{PgLogLevel, PgSqlErrorCode};
 use thiserror::Error;
 
-use super::contract::FdwModify;
+use super::contract::{FdwModify, ForeignModifyOperation};
 use crate::diag::{
     PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
 };
@@ -128,6 +128,29 @@ impl ForeignModifyError {
         Self::new(ForeignModifyErrorKind::Framework {
             sqlerrcode: PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             message: message.to_string(),
+        })
+    }
+
+    pub(crate) fn self_modified(operation: ForeignModifyOperation) -> Self {
+        let action = match operation {
+            ForeignModifyOperation::Update => "updated",
+            ForeignModifyOperation::Delete => "deleted",
+            ForeignModifyOperation::Insert => {
+                return Self::framework(
+                    "foreign INSERT provider returned a self-modified outcome",
+                );
+            }
+        };
+        Self::new(ForeignModifyErrorKind::PgReport {
+            sqlerrcode: PgSqlErrorCode::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
+            message: format!(
+                "tuple to be {action} was already modified by an operation triggered by the current command"
+            ),
+            detail: None,
+            hint: Some(
+                "Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows."
+                    .to_owned(),
+            ),
         })
     }
 

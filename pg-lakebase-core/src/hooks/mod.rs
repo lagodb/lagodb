@@ -32,9 +32,10 @@ pub use object_access_hook::{
 pub use utility_consumer::{CopyConsumer, CopyRoute, register_copy_consumer};
 pub use utility_hook::{
     AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode, AlterTableStmtNode,
-    CopyStmtNode, CreateForeignTableStmtNode, CreateStmtNode, CreateTableAsStmtNode,
-    CreateTableSpaceStmtNode, PostUtilityContext, RenameStmtNode, UtilityHook,
-    UtilityNode, UtilityStmtNode, register_utility_hook,
+    AlterUserMappingStmtNode, CopyStmtNode, CreateForeignTableStmtNode,
+    CreateStmtNode, CreateTableAsStmtNode, CreateTableSpaceStmtNode,
+    CreateUserMappingStmtNode, PostUtilityContext, PreUtilityContext, RenameStmtNode,
+    UtilityHook, UtilityNode, UtilityStmtNode, VacuumStmtNode, register_utility_hook,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]

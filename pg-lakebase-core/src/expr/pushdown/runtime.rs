@@ -10,8 +10,6 @@ use super::{
     FilterValueBindings, FilterValueSlot, PlannedFilterRecord,
 };
 
-type BoundFilterSlots<B> = Vec<Option<BoundFilter<B>>>;
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RuntimeFilterError<E> {
     #[error("planned filter binding expression count does not match its metadata")]
@@ -94,26 +92,86 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
         })
     }
 
-    /// Evaluate every slot and bind every planned record once at Begin.
+    /// Bind records whose values are valid for the whole scan before provider
+    /// initialization. Dynamic executor parameters are deliberately left
+    /// untouched until the scan is started.
     ///
     /// # Safety
     ///
     /// `econtext` is the live executor ExprContext belonging to `parent` used
     /// during initialization.
-    pub(crate) unsafe fn bind_initial(
+    pub(crate) unsafe fn bind_stable(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
     ) -> Result<(), RuntimeFilterError<P::Error>> {
         debug_assert!(self.values.is_empty());
         debug_assert!(self.bound.is_empty());
+        self.bound = (0..self.planned.len()).map(|_| None).collect();
+        for (filter_index, filter) in self.planned.iter().enumerate() {
+            if !self.stable_records[filter_index] {
+                continue;
+            }
+            let range = filter.binding_range.clone();
+            let metadata = &self.binding_metadata[range.clone()];
+            let mut values = Vec::with_capacity(range.len());
+            for index in range {
+                values.push(unsafe {
+                    Self::evaluate(
+                        self.expr_states,
+                        index,
+                        self.binding_metadata[index],
+                        econtext,
+                    )
+                });
+            }
+            self.bound[filter_index] =
+                Self::bind_record(filter_index, filter, metadata, &values)?;
+        }
+        Ok(())
+    }
+
+    /// Bind all records for executor paths whose parameters are already valid
+    /// at their Begin callback.
+    pub(crate) unsafe fn bind_initial(
+        &mut self,
+        econtext: *mut pg_sys::ExprContext,
+    ) -> Result<(), RuntimeFilterError<P::Error>> {
+        unsafe { self.bind_stable(econtext) }?;
+        unsafe { self.bind_dynamic_initial(econtext) }
+    }
+
+    /// Bind the records that depend on `PARAM_EXEC` or outer-tuple values once
+    /// PostgreSQL has supplied the first valid parameter set.
+    ///
+    /// # Safety
+    ///
+    /// `econtext` is the live executor ExprContext belonging to `parent` used
+    /// during initialization.
+    pub(crate) unsafe fn bind_dynamic_initial(
+        &mut self,
+        econtext: *mut pg_sys::ExprContext,
+    ) -> Result<(), RuntimeFilterError<P::Error>> {
+        debug_assert_eq!(self.bound.len(), self.planned.len());
+        debug_assert!(self.values.is_empty());
+        if self.dynamic_slots.is_empty() {
+            return Ok(());
+        }
         for (index, &metadata) in self.binding_metadata.iter().enumerate() {
             self.values.push(unsafe {
                 Self::evaluate(self.expr_states, index, metadata, econtext)
             });
         }
-        self.bound =
-            Self::bind_values(&self.planned, &self.binding_metadata, &self.values)?;
         self.pending_values.clone_from(&self.values);
+        Self::bind_dynamic_records(
+            &self.planned,
+            &self.stable_records,
+            &self.binding_metadata,
+            &self.values,
+            &mut self.pending_bound,
+        )?;
+        for (filter_index, replacement) in self.pending_bound.drain(..) {
+            self.bound[filter_index] = replacement;
+        }
         Ok(())
     }
 
@@ -127,6 +185,9 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
         &mut self,
         econtext: *mut pg_sys::ExprContext,
     ) -> Result<(), RuntimeFilterError<P::Error>> {
+        if self.dynamic_slots.is_empty() {
+            return Ok(());
+        }
         debug_assert_eq!(self.values.len(), self.binding_metadata.len());
         debug_assert_eq!(self.pending_values.len(), self.values.len());
 
@@ -167,24 +228,6 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
         unsafe { FilterValue::from_raw(datum, is_null, metadata) }
     }
 
-    fn bind_values(
-        planned: &[PlannedFilterRecord<P::PlannedPredicate>],
-        binding_metadata: &[FilterValueSlot],
-        values: &[FilterValue],
-    ) -> Result<BoundFilterSlots<P::BoundPredicate>, RuntimeFilterError<P::Error>>
-    {
-        let mut replacement = Vec::with_capacity(planned.len());
-        for (filter_index, filter) in planned.iter().enumerate() {
-            replacement.push(Self::bind_record(
-                filter_index,
-                filter,
-                binding_metadata,
-                values,
-            )?);
-        }
-        Ok(replacement)
-    }
-
     fn bind_record(
         filter_index: usize,
         filter: &PlannedFilterRecord<P::PlannedPredicate>,
@@ -192,18 +235,16 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
         values: &[FilterValue],
     ) -> Result<Option<BoundFilter<P::BoundPredicate>>, RuntimeFilterError<P::Error>>
     {
-        let result = P::bind_filter(
-            &filter.planned,
-            FilterValueBindings::new(&values[filter.binding_range.clone()]),
-        )
-        .map_err(RuntimeFilterError::Provider)?;
+        let result =
+            P::bind_filter(&filter.planned, FilterValueBindings::new(values))
+                .map_err(RuntimeFilterError::Provider)?;
         match result {
             FilterBindResult::Bound(predicate) => Ok(Some(BoundFilter {
                 predicate,
-                rescan_stable: binding_metadata[filter.binding_range.clone()]
+                rescan_stable: binding_metadata
                     .iter()
                     .all(|value| value.source_kind.is_rescan_stable()),
-                static_values: binding_metadata[filter.binding_range.clone()]
+                static_values: binding_metadata
                     .iter()
                     .all(|value| value.source_kind.is_static()),
             })),
@@ -230,7 +271,13 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
             if stable_records[filter_index] {
                 continue;
             }
-            match Self::bind_record(filter_index, filter, binding_metadata, values) {
+            let range = filter.binding_range.clone();
+            match Self::bind_record(
+                filter_index,
+                filter,
+                &binding_metadata[range.clone()],
+                &values[range],
+            ) {
                 Ok(bound) => pending.push((filter_index, bound)),
                 Err(error) => {
                     pending.clear();
@@ -283,6 +330,32 @@ mod tests {
         FilterFragment, FilterPlan, FilterPlanningContext, FilterPushdownPlanner,
         FilterTypeMetadata, FilterValueSourceKind,
     };
+
+    type BoundFilterSlots<P> =
+        Vec<Option<BoundFilter<<P as FilterPushdown>::BoundPredicate>>>;
+
+    type RuntimeFilterResult<P, T> =
+        Result<T, RuntimeFilterError<<P as FilterPushdown>::Error>>;
+
+    fn bind_values<P: FilterPushdown>(
+        planned: &[PlannedFilterRecord<P::PlannedPredicate>],
+        binding_metadata: &[FilterValueSlot],
+        values: &[FilterValue],
+    ) -> RuntimeFilterResult<P, BoundFilterSlots<P>> {
+        planned
+            .iter()
+            .enumerate()
+            .map(|(filter_index, filter)| {
+                let range = filter.binding_range.clone();
+                RuntimeFilterState::<P>::bind_record(
+                    filter_index,
+                    filter,
+                    &binding_metadata[range.clone()],
+                    &values[range],
+                )
+            })
+            .collect()
+    }
 
     #[derive(Debug, thiserror::Error)]
     #[error("runtime filter test error")]
@@ -395,9 +468,8 @@ mod tests {
             ),
         ];
 
-        let bound =
-            RuntimeFilterState::<TestProvider>::bind_values(&filters, &[], &[])
-                .expect("Conservative binding may omit an unrepresentable predicate");
+        let bound = bind_values::<TestProvider>(&filters, &[], &[])
+            .expect("Conservative binding may omit an unrepresentable predicate");
 
         assert_eq!(bound.iter().filter(|entry| entry.is_some()).count(), 1);
         assert_eq!(bound[0].as_ref().map(|entry| entry.predicate), Some(7));
@@ -414,12 +486,10 @@ mod tests {
             ),
         ];
 
-        let error =
-            match RuntimeFilterState::<TestProvider>::bind_values(&filters, &[], &[])
-            {
-                Err(error) => error,
-                Ok(_) => panic!("Exact binding accepted an unrepresentable value"),
-            };
+        let error = match bind_values::<TestProvider>(&filters, &[], &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("Exact binding accepted an unrepresentable value"),
+        };
 
         assert!(matches!(
             error,

@@ -20,6 +20,7 @@ use super::private::decode_modify_private;
 use super::return_layout::ForeignModifyReturnLayout;
 use super::return_requirements::ForeignModifyReturnRequirements;
 use super::state::ForeignModifyStateWrapper;
+use super::target_scan::ForeignModifyTargetScan;
 
 impl<P: FdwModify> ForeignModifyStateWrapper<P> {
     /// Build and publish the normal INSERT/UPDATE/DELETE executor state.
@@ -38,51 +39,17 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         subplan_index: c_int,
         eflags: c_int,
     ) -> Result<(), ForeignModifyError> {
-        if mtstate.is_null() {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignModify received a NULL ModifyTableState",
-            ));
-        }
         if (eflags as u32) & pg_sys::EXEC_FLAG_EXPLAIN_ONLY != 0 {
             return Ok(());
-        }
-        if rinfo.is_null() || subplan_index != 0 {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignModify received an incomplete executor context or unsupported subplan index",
-            ));
-        }
-        if unsafe { !(*rinfo).ri_FdwState.is_null() } {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignModify received an already initialized fdw state",
-            ));
         }
 
         let relation = unsafe { (*rinfo).ri_RelationDesc };
         let estate = unsafe { (*mtstate).ps.state };
         let plan = unsafe { (*mtstate).ps.plan } as *mut pg_sys::ModifyTable;
-        if relation.is_null()
-            || estate.is_null()
-            || plan.is_null()
-            || unsafe { (*plan).plan.type_ } != pg_sys::NodeTag::T_ModifyTable
-        {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignModify has incomplete executor state",
-            ));
-        }
         let operation =
             ForeignModifyOperation::from_pg(unsafe { (*mtstate).operation })?;
-        if unsafe { (*plan).operation } != operation.as_pg() {
-            return Err(ForeignModifyError::framework(
-                "ModifyTable executor operation does not match its plan",
-            ));
-        }
         let query_context = unsafe { (*estate).es_query_cxt };
         let snapshot = unsafe { (*estate).es_snapshot };
-        if query_context.is_null() || snapshot.is_null() {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignModify has no query memory context or snapshot",
-            ));
-        }
 
         let decoded = unsafe { decode_modify_private::<P>(fdw_private) }?;
         if decoded.operation != operation {
@@ -95,7 +62,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 "FDW modify private data relation does not match the executor",
             ));
         }
-        validate_updated_columns(&decoded.updated_columns, relation)?;
+        unsafe { validate_updated_columns(&decoded.updated_columns, relation) }?;
 
         let (row_identity_layout, plan_tuple_desc) = match operation {
             ForeignModifyOperation::Insert => {
@@ -103,21 +70,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             }
             ForeignModifyOperation::Update | ForeignModifyOperation::Delete => {
                 let subplan_state = unsafe { (*mtstate).ps.lefttree };
-                if subplan_state.is_null()
-                    || unsafe { (*subplan_state).plan.is_null() }
-                {
-                    return Err(ForeignModifyError::framework(
-                        "BeginForeignModify has no initialized modify subplan",
-                    ));
-                }
                 let plan_slot = unsafe { (*subplan_state).ps_ResultTupleSlot };
-                if plan_slot.is_null()
-                    || unsafe { (*plan_slot).tts_tupleDescriptor.is_null() }
-                {
-                    return Err(ForeignModifyError::framework(
-                        "BeginForeignModify has no initialized subplan tuple descriptor",
-                    ));
-                }
                 let plan_tuple_desc = unsafe { (*plan_slot).tts_tupleDescriptor };
                 let targetlist = unsafe { (*(*subplan_state).plan).targetlist };
                 let layout = unsafe {
@@ -170,18 +123,33 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 return_requirements.requires_row()
                     || decoded.returned_item_pointer_required
             } else {
-                return_slot_required_for_modify(mtstate, rinfo, plan, operation)
+                unsafe {
+                    return_slot_required_for_modify(mtstate, rinfo, plan, operation)
+                }
             };
-        let per_tuple_context = unsafe { Self::per_tuple_context(estate)? };
+        let per_tuple_context = unsafe { Self::per_tuple_context(estate) };
         let effective_user_id =
             unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
-        // SAFETY: `relation` is the live executor result relation validated
-        // above and remains open for the modify state.
+        let target_scan = match operation {
+            ForeignModifyOperation::Insert => None,
+            ForeignModifyOperation::Update | ForeignModifyOperation::Delete => {
+                unsafe {
+                    ForeignModifyTargetScan::<P>::find(
+                        (*mtstate).ps.lefttree,
+                        (*relation).rd_id,
+                        (*rinfo).ri_RangeTableIndex,
+                    )
+                }?
+            }
+        };
+        // SAFETY: PostgreSQL keeps the live result relation open for the modify
+        // state.
         let mut wrapper = unsafe {
             Self::new(
                 decoded.private_data,
                 relation,
                 operation,
+                (*estate).es_output_cid,
                 decoded.updated_columns,
                 row_identity_layout,
                 plan_tuple_desc,
@@ -208,9 +176,10 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             subplan_index,
             eflags,
             effective_user_id,
+            unsafe { (*estate).es_output_cid },
         );
         let entry_context = unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
-        let provider_state = P::begin_modify(context);
+        let provider_state = P::begin_modify(context, target_scan);
         unsafe { pg_sys::MemoryContextSwitchTo(entry_context) };
         wrapper.install_provider_state(provider_state?);
         let wrapper_ptr = wrapper.leak_in(query_context);
@@ -228,46 +197,23 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         mtstate: *mut pg_sys::ModifyTableState,
         rinfo: *mut pg_sys::ResultRelInfo,
     ) -> Result<(), ForeignModifyError> {
-        if mtstate.is_null() || rinfo.is_null() {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignInsert received an incomplete executor context",
-            ));
-        }
-        if unsafe { !(*rinfo).ri_FdwState.is_null() } {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignInsert received an already initialized fdw state",
-            ));
-        }
         if unsafe { (*mtstate).operation } != pg_sys::CmdType::CMD_INSERT {
             return Err(ForeignModifyError::unsupported(
                 "FDW framework v1 does not support partition-routing inserts created by UPDATE or MERGE",
             ));
         }
         let plan = unsafe { (*mtstate).ps.plan } as *mut pg_sys::ModifyTable;
-        if !plan.is_null() {
-            if unsafe { (*plan).plan.type_ } != pg_sys::NodeTag::T_ModifyTable
-                || unsafe { (*plan).operation } != pg_sys::CmdType::CMD_INSERT
-            {
-                return Err(ForeignModifyError::framework(
-                    "BeginForeignInsert has a plan that does not match INSERT",
-                ));
-            }
-            if unsafe { (*plan).onConflictAction }
+        if !plan.is_null()
+            && (unsafe { (*plan).onConflictAction }
                 != pg_sys::OnConflictAction::ONCONFLICT_NONE
-                || !unsafe { (*plan).mergeActionLists }.is_null()
-            {
-                return Err(ForeignModifyError::unsupported(
-                    "FDW framework v1 does not support ON CONFLICT or MERGE",
-                ));
-            }
+                || !unsafe { (*plan).mergeActionLists }.is_null())
+        {
+            return Err(ForeignModifyError::unsupported(
+                "FDW framework v1 does not support ON CONFLICT or MERGE",
+            ));
         }
         let relation = unsafe { (*rinfo).ri_RelationDesc };
         let estate = unsafe { (*mtstate).ps.state };
-        if relation.is_null() || estate.is_null() {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignInsert has incomplete executor state",
-            ));
-        }
         let relation_context =
             unsafe { ForeignModifyRelationContext::from_raw(relation) }?;
         if !P::capabilities(&relation_context)?.supports_insert() {
@@ -276,11 +222,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             ));
         }
         let query_context = unsafe { (*estate).es_query_cxt };
-        if query_context.is_null() {
-            return Err(ForeignModifyError::framework(
-                "BeginForeignInsert has no query memory context",
-            ));
-        }
         let operation = ForeignModifyOperation::Insert;
         let returned_item_pointer_required = if plan.is_null() {
             false
@@ -294,11 +235,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 ));
             } else {
                 let root_result_relation = unsafe { (*mtstate).rootResultRelInfo };
-                if root_result_relation.is_null() {
-                    return Err(ForeignModifyError::framework(
-                        "BeginForeignInsert has no root result relation",
-                    ));
-                }
                 let returning = unsafe { pg_sys::list_nth(returning_lists, 0) }
                     as *mut pg_sys::List;
                 unsafe {
@@ -309,9 +245,10 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 }
             }
         };
-        let return_slot_required =
-            return_slot_required_for_modify(mtstate, rinfo, plan, operation);
-        let per_tuple_context = unsafe { Self::per_tuple_context(estate)? };
+        let return_slot_required = unsafe {
+            return_slot_required_for_modify(mtstate, rinfo, plan, operation)
+        };
+        let per_tuple_context = unsafe { Self::per_tuple_context(estate) };
         let effective_user_id =
             unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
         let mut context = ForeignInsertBeginContext::new(
@@ -330,8 +267,8 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 "foreign provider did not declare routed INSERT ctid support",
             ));
         }
-        // SAFETY: `relation` is the live routed-insert result relation validated
-        // above and remains open for the insert state.
+        // SAFETY: PostgreSQL keeps the live routed-insert result relation open
+        // for the insert state.
         let mut wrapper = unsafe {
             Self::new_insert(
                 relation,
@@ -339,6 +276,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 returned_item_pointer_required,
                 return_slot_required,
                 per_tuple_context,
+                (*estate).es_output_cid,
             )
         };
         wrapper.install_provider_state(provider_state);
@@ -352,7 +290,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
     /// `estate` must be the live executor state for this Begin callback.
     unsafe fn per_tuple_context(
         estate: *mut pg_sys::EState,
-    ) -> Result<pg_sys::MemoryContext, ForeignModifyError> {
+    ) -> pg_sys::MemoryContext {
         let econtext = unsafe {
             if (*estate).es_per_tuple_exprcontext.is_null() {
                 pg_sys::MakePerTupleExprContext(estate)
@@ -360,17 +298,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 (*estate).es_per_tuple_exprcontext
             }
         };
-        if econtext.is_null() {
-            return Err(ForeignModifyError::framework(
-                "foreign modify executor has no per-tuple expression context",
-            ));
-        }
-        let per_tuple_context = unsafe { (*econtext).ecxt_per_tuple_memory };
-        if per_tuple_context.is_null() {
-            return Err(ForeignModifyError::framework(
-                "foreign modify executor has no per-tuple memory context",
-            ));
-        }
-        Ok(per_tuple_context)
+        unsafe { (*econtext).ecxt_per_tuple_memory }
     }
 }

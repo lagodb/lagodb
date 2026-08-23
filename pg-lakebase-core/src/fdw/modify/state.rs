@@ -18,6 +18,7 @@ pub(crate) struct ForeignModifyStateWrapper<P: FdwModify> {
     pub(crate) payload: ProviderPayload<P::ModifyPrivateData, P::ModifyState>,
     pub(crate) row_layout: ModifyRowLayout,
     pub(crate) operation: ForeignModifyOperation,
+    pub(crate) command_id: pg_sys::CommandId,
     pub(crate) updated_columns: Box<[pg_sys::AttrNumber]>,
     pub(crate) row_identity_layout: RowIdentityLayout,
     pub(crate) plan_tuple_desc: pg_sys::TupleDesc,
@@ -39,6 +40,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         private_data: P::ModifyPrivateData,
         relation: pg_sys::Relation,
         operation: ForeignModifyOperation,
+        command_id: pg_sys::CommandId,
         updated_columns: Box<[pg_sys::AttrNumber]>,
         row_identity_layout: RowIdentityLayout,
         plan_tuple_desc: pg_sys::TupleDesc,
@@ -54,6 +56,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             payload: ProviderPayload::with_private(private_data),
             row_layout,
             operation,
+            command_id,
             updated_columns,
             row_identity_layout,
             plan_tuple_desc,
@@ -77,12 +80,14 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         returned_item_pointer_required: bool,
         return_slot_required: bool,
         per_tuple_context: pg_sys::MemoryContext,
+        command_id: pg_sys::CommandId,
     ) -> Self {
         let row_layout = unsafe { ModifyRowLayout::from_relation(relation) };
         Self {
             payload: ProviderPayload::empty(),
             row_layout,
             operation: ForeignModifyOperation::Insert,
+            command_id,
             updated_columns: Vec::new().into_boxed_slice(),
             row_identity_layout: RowIdentityLayout::empty(),
             plan_tuple_desc: ptr::null_mut(),

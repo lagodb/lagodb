@@ -16,6 +16,7 @@ pub struct FilterPlanningContext {
     relation_oid: pg_sys::Oid,
     scan_relid: pg_sys::Index,
     tablespace_oid: pg_sys::Oid,
+    effective_user_id: pg_sys::Oid,
 }
 
 impl FilterPlanningContext {
@@ -23,11 +24,13 @@ impl FilterPlanningContext {
         relation_oid: pg_sys::Oid,
         scan_relid: pg_sys::Index,
         tablespace_oid: pg_sys::Oid,
+        effective_user_id: pg_sys::Oid,
     ) -> Self {
         Self {
             relation_oid,
             scan_relid,
             tablespace_oid,
+            effective_user_id,
         }
     }
 
@@ -44,6 +47,13 @@ impl FilterPlanningContext {
     #[inline]
     pub const fn tablespace_oid(&self) -> pg_sys::Oid {
         self.tablespace_oid
+    }
+
+    /// Role selected by PostgreSQL for relation access (including view owner
+    /// semantics), or the session user when no override is present.
+    #[inline]
+    pub const fn effective_user_id(&self) -> pg_sys::Oid {
+        self.effective_user_id
     }
 }
 

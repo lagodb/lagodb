@@ -1,8 +1,10 @@
 //! Generic PostgreSQL Foreign Data Wrapper framework.
 //!
-//! Scan, modify, analyze, and truncate are optional capability facets of one
-//! provider identity. Their PostgreSQL callback lifecycles remain separate.
+//! Scan, modify, import-schema, analyze, and truncate are optional capability
+//! facets of one provider identity. Their PostgreSQL callback lifecycles remain
+//! separate.
 
+mod import;
 mod maintenance;
 mod modify;
 mod payload;
@@ -16,6 +18,7 @@ mod validation;
 pub use crate::plan_data::{
     PlanDataReader as ForeignPrivateReader, PlanDataWriter as ForeignPrivateWriter,
 };
+pub use import::{FdwImportSchema, ForeignImportError, ForeignImportSchemaContext};
 pub use maintenance::{
     FdwAnalyze, FdwTruncate, ForeignAnalyzeContext, ForeignAnalyzeSupport,
     ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
@@ -32,7 +35,8 @@ pub use modify::{
 };
 pub use provider::ForeignDataWrapper;
 pub use routine::{
-    FdwRoutine, register_analyze, register_modify, register_scan, register_truncate,
+    FdwRoutine, register_analyze, register_import_schema, register_modify,
+    register_scan, register_truncate,
 };
 pub use row_identity::{ForeignRowIdentityError, ForeignRowIdentityRequirement};
 pub use scan::{
@@ -44,7 +48,7 @@ pub use scan::{
     ForeignRelSize, ForeignRelSizeContext, ForeignScanError, ForeignScanPhase,
     PathVariantKind, ReScanForeignScanContext, Relids, RuntimeExpressionValues,
     ScanDatumWriter, ScanOutputColumn, ScanProjection, ScanProjectionPolicy,
-    ScanSlotWriter,
+    ScanSlotWriter, StartForeignScanContext,
 };
 pub use validation::ForeignValidationError;
 
@@ -57,8 +61,9 @@ pub mod __private {
 /// Common imports for FDW providers.
 pub mod prelude {
     pub use super::{
-        FdwAnalyze, FdwModify, FdwRoutine, FdwScan, FdwTruncate, ForeignDataWrapper,
+        FdwAnalyze, FdwImportSchema, FdwModify, FdwRoutine, FdwScan, FdwTruncate,
+        ForeignDataWrapper, ForeignImportError, ForeignImportSchemaContext,
         ForeignInsertBatch, ForeignValidationError, register_analyze,
-        register_modify, register_scan, register_truncate,
+        register_import_schema, register_modify, register_scan, register_truncate,
     };
 }

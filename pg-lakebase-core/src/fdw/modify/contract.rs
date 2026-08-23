@@ -4,8 +4,8 @@ use core::ffi::c_int;
 
 use pgrx::pg_sys;
 
-use super::super::provider::ForeignDataWrapper;
 use super::super::row_identity::{ForeignRowIdentityError, ModifyPlanSlot};
+use super::super::scan::FdwScan;
 use super::error::ForeignModifyError;
 use super::execution_context::{
     ForeignInsertBeginContext, ForeignModifyBeginContext,
@@ -174,8 +174,21 @@ impl<D> ForeignModifyPlanSpec<D> {
 /// Result of one provider row operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForeignModifyOutcome {
+    /// The provider applied the row operation.
     Applied,
+    /// The provider deliberately affected no row for a reason unrelated to a
+    /// current-transaction row claim.
     Skipped,
+    /// The target row was already changed in the current transaction.
+    ///
+    /// The framework compares the modifying command id with the current
+    /// `EState.es_output_cid`: duplicate join hits from the same command are
+    /// skipped, while a change made by a nested command raises PostgreSQL's
+    /// triggered-data-change violation.
+    /// Providers must return this only from UPDATE or DELETE.
+    SelfModified {
+        modifying_command_id: pg_sys::CommandId,
+    },
 }
 
 /// Copy-object-safe provider modify private data.
@@ -264,11 +277,13 @@ pub trait ForeignModifyState: 'static {
 }
 
 /// Combined statically dispatched scan and modify provider.
-pub trait FdwModify: ForeignDataWrapper + 'static {
+pub trait FdwModify: FdwScan + 'static {
     /// Modify private data is independent from scan planner private data.
     type ModifyPrivateData: ForeignModifyPrivate;
     /// Modify state is independent from scan executor state.
     type ModifyState: ForeignModifyState;
+    /// Owned relation-local context extracted from the exact target scan.
+    type TargetScanContext: 'static;
 
     fn capabilities(
         ctx: &ForeignModifyRelationContext<'_>,
@@ -284,7 +299,12 @@ pub trait FdwModify: ForeignDataWrapper + 'static {
 
     fn begin_modify(
         ctx: ForeignModifyBeginContext<'_, Self::ModifyPrivateData>,
+        target_scan: Option<Self::TargetScanContext>,
     ) -> Result<Self::ModifyState, ForeignModifyError>;
+
+    fn target_scan_context(
+        state: &<Self as FdwScan>::State,
+    ) -> Option<Self::TargetScanContext>;
 
     fn begin_insert(
         _ctx: &mut ForeignInsertBeginContext<'_>,

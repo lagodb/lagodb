@@ -3,8 +3,9 @@ use crate::diag::ReportableError;
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 use std::cell::RefCell;
-use std::ffi::c_void;
+use std::ffi::{CStr, c_char, c_void};
 use std::marker::PhantomData;
+use std::ptr;
 
 use crate::runtime_api::{
     RoutedUtilityPostHook, RoutedUtilityPreHook, UtilityHookDescriptor,
@@ -34,6 +35,11 @@ macro_rules! impl_utility_stmt_node {
 }
 
 impl_utility_stmt_node!(CopyStmtNode, pg_sys::CopyStmt, pg_sys::NodeTag::T_CopyStmt);
+impl_utility_stmt_node!(
+    VacuumStmtNode,
+    pg_sys::VacuumStmt,
+    pg_sys::NodeTag::T_VacuumStmt
+);
 impl_utility_stmt_node!(
     CreateForeignTableStmtNode,
     pg_sys::CreateForeignTableStmt,
@@ -74,11 +80,79 @@ impl_utility_stmt_node!(
     pg_sys::AlterTableSpaceOptionsStmt,
     pg_sys::NodeTag::T_AlterTableSpaceOptionsStmt
 );
+impl_utility_stmt_node!(
+    CreateUserMappingStmtNode,
+    pg_sys::CreateUserMappingStmt,
+    pg_sys::NodeTag::T_CreateUserMappingStmt
+);
+impl_utility_stmt_node!(
+    AlterUserMappingStmtNode,
+    pg_sys::AlterUserMappingStmt,
+    pg_sys::NodeTag::T_AlterUserMappingStmt
+);
 
 /// A safe wrapper around `pg_sys::Node`
 pub struct UtilityNode<'a> {
     ptr: *mut pg_sys::Node,
     _marker: PhantomData<&'a pg_sys::Node>,
+}
+
+/// Context for a utility hook before PostgreSQL executes the command.
+pub struct PreUtilityContext<'a> {
+    statement: UtilityNode<'a>,
+    planned_stmt: &'a pg_sys::PlannedStmt,
+    query_string: *const c_char,
+}
+
+impl<'a> PreUtilityContext<'a> {
+    unsafe fn new(
+        planned_stmt: *mut pg_sys::PlannedStmt,
+        query_string: *const c_char,
+    ) -> Self {
+        Self {
+            statement: unsafe { UtilityNode::new((*planned_stmt).utilityStmt) },
+            planned_stmt: unsafe { &*planned_stmt },
+            query_string,
+        }
+    }
+
+    pub fn statement_mut(&mut self) -> &mut UtilityNode<'a> {
+        &mut self.statement
+    }
+
+    /// Replace this statement's query text in place while retaining its byte
+    /// length, so downstream logging and statistics consumers cannot observe
+    /// credential literals. The parsed utility node remains unchanged.
+    pub fn redact_statement(&mut self, marker: &str) {
+        if self.query_string.is_null() {
+            return;
+        }
+        let query_len = unsafe { CStr::from_ptr(self.query_string) }
+            .to_bytes()
+            .len();
+        let start = usize::try_from(self.planned_stmt.stmt_location.max(0))
+            .unwrap_or(0)
+            .min(query_len);
+        let available = query_len - start;
+        let length = if self.planned_stmt.stmt_len > 0 {
+            usize::try_from(self.planned_stmt.stmt_len)
+                .unwrap_or(available)
+                .min(available)
+        } else {
+            available
+        };
+        if length == 0 {
+            return;
+        }
+        let marker = marker.as_bytes();
+        let marker_len = marker.len().min(length);
+        let destination =
+            unsafe { self.query_string.add(start).cast_mut().cast::<u8>() };
+        unsafe {
+            ptr::copy_nonoverlapping(marker.as_ptr(), destination, marker_len);
+            ptr::write_bytes(destination.add(marker_len), b' ', length - marker_len);
+        }
+    }
 }
 
 impl<'a> UtilityNode<'a> {
@@ -138,6 +212,12 @@ pub trait UtilityHook {
     }
 
     fn on_pre(&self, stmt: &mut UtilityNode) -> Result<(), UtilityHookError>;
+    fn on_pre_context(
+        &self,
+        context: &mut PreUtilityContext<'_>,
+    ) -> Result<(), UtilityHookError> {
+        self.on_pre(context.statement_mut())
+    }
     fn on_post(&self, context: &PostUtilityContext) -> Result<(), UtilityHookError>;
 }
 
@@ -202,18 +282,20 @@ impl UtilityHookCallbacks {
 #[pg_guard]
 unsafe extern "C-unwind" fn route_external_pre_hook(
     context: *mut c_void,
-    node: *mut pg_sys::Node,
+    planned_stmt: *mut pg_sys::PlannedStmt,
+    query_string: *const c_char,
 ) {
     // SAFETY: the runtime's atomic AM registration rejected null context
     // pointers, and this callback is stored with the originating layout.
     let context = unsafe { &*context.cast::<ExternalHookContext>() };
-    // SAFETY: the runtime passes the live PlannedStmt utility node supplied to
-    // its ProcessUtility callback.
-    let mut node = unsafe { UtilityNode::new(node) };
-    let tag = node.tag();
+    // SAFETY: the runtime passes the live PlannedStmt and query string supplied
+    // to its ProcessUtility callback.
+    let mut pre_context =
+        unsafe { PreUtilityContext::new(planned_stmt, query_string) };
+    let tag = pre_context.statement.tag();
     context
         .hook
-        .on_pre(&mut node)
+        .on_pre_context(&mut pre_context)
         .map_err(|error| {
             error.with_utility_context(
                 context.hook.name(),
@@ -297,13 +379,20 @@ mod tests {
 
     unsafe extern "C-unwind" fn test_route_hook(
         _context: *mut c_void,
+        _planned_stmt: *mut pg_sys::PlannedStmt,
+        _query_string: *const c_char,
+    ) {
+    }
+
+    unsafe extern "C-unwind" fn test_post_hook(
+        _context: *mut c_void,
         _node: *mut pg_sys::Node,
     ) {
     }
 
     const TEST_CALLBACKS: UtilityHookCallbacks = UtilityHookCallbacks {
         on_pre: test_route_hook,
-        on_post: test_route_hook,
+        on_post: test_post_hook,
     };
 
     struct TestHook;

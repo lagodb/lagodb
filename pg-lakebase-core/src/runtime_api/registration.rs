@@ -72,7 +72,7 @@ impl ProviderIdentity {
 }
 
 pub type RoutedUtilityPreHook =
-    unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::Node);
+    unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::PlannedStmt, *const c_char);
 pub type RoutedUtilityPostHook =
     unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::Node);
 

@@ -161,7 +161,11 @@ pub(crate) fn registered_hook_count() -> usize {
 mod tests {
     use super::*;
 
-    unsafe extern "C-unwind" fn pre(_context: *mut c_void, _node: *mut pg_sys::Node) {
+    unsafe extern "C-unwind" fn pre(
+        _context: *mut c_void,
+        _planned_stmt: *mut pg_sys::PlannedStmt,
+        _query_string: *const c_char,
+    ) {
     }
     unsafe extern "C-unwind" fn post(
         _context: *mut c_void,
@@ -453,7 +457,8 @@ unsafe extern "C-unwind" fn process_utility_router(
         hooks.for_each(|descriptor| {
             descriptor.on_pre.expect("validated utility pre-hook")(
                 descriptor.context,
-                target_node,
+                args.pstmt,
+                args.query_string,
             );
         });
 

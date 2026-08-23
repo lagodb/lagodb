@@ -3,7 +3,7 @@
 mod state;
 
 use pg_lakebase_core::fdw::{
-    FdwModify, ForeignInsertBeginContext, ForeignModifyBeginContext,
+    FdwModify, FdwScan, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyError, ForeignModifyPlanContext,
     ForeignModifyPlanSpec, ForeignModifyPrivate, ForeignModifyRelationContext,
     ForeignPrivateReader, ForeignPrivateWriter, ForeignUpdateTargetContext,
@@ -42,6 +42,7 @@ impl ForeignModifyPrivate for LakebaseModifyPrivate {
 impl FdwModify for Lakebase {
     type ModifyPrivateData = LakebaseModifyPrivate;
     type ModifyState = LakebaseModifyState;
+    type TargetScanContext = ();
 
     fn capabilities(
         context: &ForeignModifyRelationContext<'_>,
@@ -70,6 +71,7 @@ impl FdwModify for Lakebase {
 
     fn begin_modify(
         context: ForeignModifyBeginContext<'_, Self::ModifyPrivateData>,
+        _target_scan: Option<Self::TargetScanContext>,
     ) -> Result<Self::ModifyState, ForeignModifyError> {
         let planned_format = context.private_data().kind();
         let relation_oid = context.relation().oid();
@@ -86,6 +88,12 @@ impl FdwModify for Lakebase {
         })?;
         let inner = writer.begin_modify(context, output)?;
         Ok(LakebaseModifyState::new(inner))
+    }
+
+    fn target_scan_context(
+        _state: &<Self as FdwScan>::State,
+    ) -> Option<Self::TargetScanContext> {
+        None
     }
 
     fn begin_insert(

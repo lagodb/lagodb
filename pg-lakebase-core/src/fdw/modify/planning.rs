@@ -166,14 +166,14 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
     }
 }
 
-/// Validate the deliberately narrow first modify scope before provider code
-/// sees any planner data.
+/// Validate the ModifyTable entry corresponding to this result relation before
+/// provider code sees any planner data.
 unsafe fn validate_modify_plan(
     plan: *mut pg_sys::ModifyTable,
     result_relation: pg_sys::Index,
     subplan_index: c_int,
 ) -> Result<ForeignModifyOperation, ForeignModifyError> {
-    if plan.is_null() || subplan_index != 0 {
+    if plan.is_null() || subplan_index < 0 {
         return Err(ForeignModifyError::framework(
             "PlanForeignModify received an invalid plan or subplan index",
         ));
@@ -201,14 +201,13 @@ unsafe fn validate_modify_plan(
     }
     let result_relations = unsafe { (*plan).resultRelations };
     if result_relations.is_null()
-        || unsafe { pg_sys::list_length(result_relations) } != 1
-        || unsafe { pg_sys::list_nth_int(result_relations, 0) as pg_sys::Index }
-            != result_relation
-        || unsafe { (*plan).rootRelation } != 0
-        || unsafe { (*plan).nominalRelation } != result_relation
+        || subplan_index >= unsafe { pg_sys::list_length(result_relations) }
+        || unsafe {
+            pg_sys::list_nth_int(result_relations, subplan_index) as pg_sys::Index
+        } != result_relation
     {
-        return Err(ForeignModifyError::unsupported(
-            "FDW framework v1 supports one non-inherited result relation only",
+        return Err(ForeignModifyError::framework(
+            "PlanForeignModify result relation does not match its subplan index",
         ));
     }
     if unsafe { (*plan).plan.lefttree }.is_null() {

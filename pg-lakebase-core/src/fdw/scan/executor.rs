@@ -1,4 +1,4 @@
-//! Non-FFI scan executor validation and layout construction.
+//! Non-FFI scan executor layout construction.
 
 use core::slice;
 
@@ -9,14 +9,14 @@ use super::error::ForeignScanError;
 use super::projection::{ColumnRequirements, ScanProjection, SlotWritePlan};
 use super::slot::SlotWriteLayout;
 
-/// Validate executor-owned scan objects once and compile the row-write layout.
+/// Compile the row-write layout from executor-owned scan objects.
 ///
 /// # Safety
 ///
-/// `plan`, `relation`, and `slot` must be PostgreSQL executor pointers from the
-/// same live ForeignScan callback. The function validates their layout before
-/// any borrowed descriptor data escapes this call.
-pub(crate) unsafe fn validate_executor_layout(
+/// `plan`, `relation`, and `slot` must be the live objects PostgreSQL supplies
+/// to the same ForeignScan callback. Their descriptors must satisfy the
+/// executor contract established by `ExecInitForeignScan`.
+pub(crate) unsafe fn compile_executor_layout(
     plan: *mut pg_sys::ForeignScan,
     relation: pg_sys::Relation,
     projection: &ScanProjection,
@@ -25,53 +25,10 @@ pub(crate) unsafe fn validate_executor_layout(
     requirements: &ColumnRequirements,
     slot: *mut pg_sys::TupleTableSlot,
 ) -> Result<SlotWriteLayout, ForeignScanError> {
-    if plan.is_null() {
-        return Err(ForeignScanError::framework(
-            "ForeignScan executor has no ForeignScan plan",
-        ));
-    }
-    if slot.is_null() {
-        return Err(ForeignScanError::framework(
-            "ForeignScan executor did not initialize a scan slot",
-        ));
-    }
-    // SAFETY: slot is non-null and remains executor-owned for this validation.
-    if unsafe { (*slot).tts_ops } != unsafe { &pg_sys::TTSOpsHeapTuple } {
-        return Err(ForeignScanError::framework(
-            "ForeignScan executor scan slot is not TTSOpsHeapTuple",
-        ));
-    }
     let desc = unsafe { (*slot).tts_tupleDescriptor };
-    if desc.is_null() {
-        return Err(ForeignScanError::framework(
-            "ForeignScan executor scan slot has no TupleDesc",
-        ));
-    }
-    if unsafe { (*slot).tts_mcxt }.is_null() {
-        return Err(ForeignScanError::framework(
-            "ForeignScan executor scan slot has no memory context",
-        ));
-    }
-    if relation.is_null() || unsafe { (*relation).rd_att }.is_null() {
-        return Err(ForeignScanError::framework(
-            "ForeignScan executor relation has no TupleDesc",
-        ));
-    }
-    let natts = unsafe { (*desc).natts };
-    if natts < 0 {
-        return Err(ForeignScanError::framework(
-            "FDW executor scan slot has a TupleDesc with a negative width",
-        ));
-    }
-    let natts = natts as usize;
+    let natts = unsafe { (*desc).natts as usize };
     let relation_desc = unsafe { (*relation).rd_att };
-    let relation_natts = unsafe { (*relation_desc).natts };
-    if relation_natts < 0 {
-        return Err(ForeignScanError::framework(
-            "FDW executor relation has a TupleDesc with a negative width",
-        ));
-    }
-    let relation_natts = relation_natts as usize;
+    let relation_natts = unsafe { (*relation_desc).natts as usize };
     if row_identity.needs_item_pointer() && !projection.is_relation() {
         return Err(ForeignScanError::framework(
             "FDW item-pointer identity requires a relation-shaped scan slot",
@@ -94,7 +51,7 @@ pub(crate) unsafe fn validate_executor_layout(
             ));
         }
     }
-    // SAFETY: plan is non-null from the function entry check and remains live.
+    // SAFETY: plan is the live ForeignScan plan for this callback.
     let tlist = unsafe { (*plan).fdw_scan_tlist };
     match projection {
         ScanProjection::Relation => {
@@ -128,8 +85,7 @@ pub(crate) unsafe fn validate_executor_layout(
                 // SAFETY: tlist is live and index is bounded by its length.
                 let entry = unsafe { pg_sys::list_nth(tlist, index as i32) }
                     as *mut pg_sys::TargetEntry;
-                if entry.is_null()
-                    || unsafe { (*entry).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
+                if unsafe { (*entry).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
                     || unsafe { (*entry).resno as usize } != index + 1
                 {
                     return Err(ForeignScanError::framework(
@@ -138,8 +94,7 @@ pub(crate) unsafe fn validate_executor_layout(
                 }
                 // SAFETY: the preceding checks establish a live TargetEntry.
                 let expr = unsafe { (*entry).expr };
-                if expr.is_null()
-                    || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var
+                if unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var
                     || unsafe { (*expr.cast::<pg_sys::Var>()).varattno } != attno
                     || unsafe { (*expr.cast::<pg_sys::Var>()).varlevelsup } != 0
                     || unsafe { (*expr.cast::<pg_sys::Var>()).varno as pg_sys::Index }
@@ -168,8 +123,7 @@ pub(crate) unsafe fn validate_executor_layout(
             }
             let entry =
                 unsafe { pg_sys::list_nth(tlist, 0) } as *mut pg_sys::TargetEntry;
-            if entry.is_null()
-                || unsafe { (*entry).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
+            if unsafe { (*entry).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
                 || unsafe { (*entry).resno } != 1
                 || !unsafe { (*entry).resjunk }
             {
@@ -178,8 +132,7 @@ pub(crate) unsafe fn validate_executor_layout(
                 ));
             }
             let expr = unsafe { (*entry).expr };
-            if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Const
-            {
+            if unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Const {
                 return Err(ForeignScanError::framework(
                     "FDW synthetic-null scan tlist is not a Const",
                 ));

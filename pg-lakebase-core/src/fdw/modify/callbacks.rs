@@ -6,8 +6,8 @@ use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use super::super::row_identity::ModifyPlanSlot;
+use super::contract::FdwModify;
 use super::contract::ForeignModifyState;
-use super::contract::{FdwModify, ForeignModifyOperation};
 use super::error::{ForeignModifyError, ForeignModifyPhase};
 use super::executor::{
     end_modify, map_outcome, state_wrapper_unchecked, with_modify_per_tuple_context,
@@ -80,12 +80,13 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_insert<P: FdwModify>(
     let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
-        debug_assert_eq!(wrapper.operation, ForeignModifyOperation::Insert);
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
         let per_tuple_context = wrapper.per_tuple_context;
         unsafe {
             with_modify_per_tuple_context(per_tuple_context, |conversion_context| {
                 let return_slot_required = wrapper.return_slot_required;
+                let operation = wrapper.operation;
+                let command_id = wrapper.command_id;
                 let mut row = {
                     ModifySlot::from_raw(
                         slot,
@@ -99,7 +100,13 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_insert<P: FdwModify>(
                     state.prepare_insert(&mut row)?;
                     state.insert(&mut row)?
                 };
-                map_outcome(return_slot_required, &mut row, outcome)
+                map_outcome(
+                    operation,
+                    command_id,
+                    return_slot_required,
+                    &mut row,
+                    outcome,
+                )
             })
         }
     };
@@ -127,11 +134,9 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_batch_insert<P: FdwModify>(
     let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
-        debug_assert_eq!(wrapper.operation, ForeignModifyOperation::Insert);
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
         let per_tuple_context = wrapper.per_tuple_context;
         let input_count = unsafe { *num_slots };
-        debug_assert!(input_count >= 0);
         let input_count = input_count as usize;
         unsafe {
             with_modify_per_tuple_context(per_tuple_context, |conversion_context| {
@@ -182,7 +187,6 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_modify_batch_size<P: FdwModif
         }
 
         let wrapper = unsafe { &mut *(state as *mut ForeignModifyStateWrapper<P>) };
-        debug_assert_eq!(wrapper.operation, ForeignModifyOperation::Insert);
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
         let requested = unsafe { (&*state_ptr).batch_size()? };
         if requested < 1 {
@@ -234,12 +238,13 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_update<P: FdwModify>(
     let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
-        debug_assert_eq!(wrapper.operation, ForeignModifyOperation::Update);
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
         let per_tuple_context = wrapper.per_tuple_context;
         unsafe {
             with_modify_per_tuple_context(per_tuple_context, |conversion_context| {
                 let return_slot_required = wrapper.return_slot_required;
+                let operation = wrapper.operation;
+                let command_id = wrapper.command_id;
                 let mut row = {
                     ModifySlot::from_raw(
                         slot,
@@ -260,7 +265,13 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_update<P: FdwModify>(
                     state.prepare_update(&mut row, &plan_view)?;
                     state.update(&mut row, &plan_view)?
                 };
-                map_outcome(return_slot_required, &mut row, outcome)
+                map_outcome(
+                    operation,
+                    command_id,
+                    return_slot_required,
+                    &mut row,
+                    outcome,
+                )
             })
         }
     };

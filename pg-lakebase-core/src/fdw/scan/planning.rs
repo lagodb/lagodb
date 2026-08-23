@@ -65,6 +65,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_rel_size<P: FdwScan>(
             relation.relation_oid(),
             relation.scan_relid(),
             unsafe { pg_sys::get_rel_tablespace(relation.relation_oid()) },
+            relation.effective_user_id(),
         );
         let mut filter_planner = P::begin_filter_planning(&filter_context)
             .map_err(ForeignScanError::provider)?;

@@ -36,6 +36,14 @@ impl CustomScanPathPlanner {
             relation.rel_oid(),
             unsafe { (*rel).relid },
             relation.tablespace_oid(),
+            unsafe {
+                let user = (*rel).userid;
+                if user == pg_sys::InvalidOid {
+                    pg_sys::GetUserId()
+                } else {
+                    user
+                }
+            },
         );
         let mut filter_planner = provider.begin_filter_planning(&context, rel)?;
         let base_filters = unsafe {

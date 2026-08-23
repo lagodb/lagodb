@@ -21,9 +21,7 @@ use super::state::ForeignModifyStateWrapper;
 pub(super) unsafe fn state_wrapper_unchecked<P: FdwModify>(
     rinfo: *mut pg_sys::ResultRelInfo,
 ) -> *mut ForeignModifyStateWrapper<P> {
-    debug_assert!(!rinfo.is_null());
     let state = unsafe { (*rinfo).ri_FdwState };
-    debug_assert!(!state.is_null());
     state as *mut ForeignModifyStateWrapper<P>
 }
 
@@ -40,8 +38,6 @@ pub(super) unsafe fn with_modify_per_tuple_context<T, F>(
 where
     F: FnOnce(pg_sys::MemoryContext) -> Result<T, ForeignModifyError>,
 {
-    debug_assert!(!per_tuple_context.is_null());
-
     let entry_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = if entry_context == per_tuple_context {
         operation(per_tuple_context)
@@ -60,28 +56,17 @@ where
     result
 }
 
-pub(super) fn validate_updated_columns(
+/// Validate framework-owned updated-column metadata against the result relation.
+///
+/// # Safety
+///
+/// `relation` must be the live result relation supplied to BeginForeignModify.
+pub(super) unsafe fn validate_updated_columns(
     columns: &[pg_sys::AttrNumber],
     relation: pg_sys::Relation,
 ) -> Result<(), ForeignModifyError> {
-    if relation.is_null() {
-        return Err(ForeignModifyError::framework(
-            "foreign modify state has no result relation",
-        ));
-    }
     let tuple_desc = unsafe { (*relation).rd_att };
-    if tuple_desc.is_null() {
-        return Err(ForeignModifyError::framework(
-            "foreign modify relation has no tuple descriptor",
-        ));
-    }
-    let natts = unsafe { (*tuple_desc).natts };
-    if natts < 0 || unsafe { (*tuple_desc).attrs.as_ptr().is_null() } {
-        return Err(ForeignModifyError::framework(
-            "foreign modify relation has an invalid tuple descriptor",
-        ));
-    }
-    let natts = natts as usize;
+    let natts = unsafe { (*tuple_desc).natts as usize };
     for &attno in columns {
         let index = usize::try_from(attno as i32 - 1).map_err(|_| {
             ForeignModifyError::framework(
@@ -103,6 +88,8 @@ pub(super) fn validate_updated_columns(
 }
 
 pub(super) fn map_outcome(
+    operation: ForeignModifyOperation,
+    command_id: pg_sys::CommandId,
     return_slot_required: bool,
     row: &mut ModifySlot<'_>,
     outcome: ForeignModifyOutcome,
@@ -110,11 +97,6 @@ pub(super) fn map_outcome(
     match outcome {
         ForeignModifyOutcome::Applied => {
             let slot = row.as_raw();
-            if slot.is_null() {
-                return Err(ForeignModifyError::framework(
-                    "foreign modify provider applied a NULL row slot",
-                ));
-            }
             if unsafe { (*slot).tts_flags as u32 & pg_sys::TTS_FLAG_EMPTY != 0 } {
                 return Err(ForeignModifyError::framework(
                     "foreign modify provider applied an empty row slot",
@@ -124,18 +106,31 @@ pub(super) fn map_outcome(
             Ok(slot)
         }
         ForeignModifyOutcome::Skipped => Ok(ptr::null_mut()),
+        ForeignModifyOutcome::SelfModified { .. }
+            if matches!(operation, ForeignModifyOperation::Insert) =>
+        {
+            Err(ForeignModifyError::self_modified(operation))
+        }
+        ForeignModifyOutcome::SelfModified {
+            modifying_command_id,
+        } if modifying_command_id == command_id => Ok(ptr::null_mut()),
+        ForeignModifyOutcome::SelfModified { .. } => {
+            Err(ForeignModifyError::self_modified(operation))
+        }
     }
 }
 
-pub(super) fn return_slot_required_for_modify(
+/// # Safety
+///
+/// `mtstate` and `rinfo` must be the live executor objects PostgreSQL supplies
+/// to BeginForeignModify or BeginForeignInsert. `plan` is nullable only for the
+/// routed/COPY INSERT forms defined by PostgreSQL's FDW contract.
+pub(super) unsafe fn return_slot_required_for_modify(
     mtstate: *mut pg_sys::ModifyTableState,
     rinfo: *mut pg_sys::ResultRelInfo,
     plan: *mut pg_sys::ModifyTable,
     operation: ForeignModifyOperation,
 ) -> bool {
-    if rinfo.is_null() {
-        return false;
-    }
     // BeginForeignModify runs before ExecInitModifyTable initializes
     // ResultRelInfo.ri_WithCheckOptions and ri_projectReturning.  The plan
     // lists are already available at that boundary and are also the only
@@ -146,8 +141,7 @@ pub(super) fn return_slot_required_for_modify(
             !(*plan).returningLists.is_null()
                 || !(*plan).withCheckOptionLists.is_null()
         };
-    let transition_capture =
-        !mtstate.is_null() && unsafe { !(*mtstate).mt_transition_capture.is_null() };
+    let transition_capture = unsafe { !(*mtstate).mt_transition_capture.is_null() };
     let after_row_trigger = unsafe {
         let trigger = (*rinfo).ri_TrigDesc;
         !trigger.is_null()
@@ -166,9 +160,6 @@ pub(super) unsafe fn end_modify<P: FdwModify>(
     phase: ForeignModifyPhase,
 ) {
     let _ = estate;
-    if rinfo.is_null() {
-        return;
-    }
     let state = unsafe { (*rinfo).ri_FdwState };
     if state.is_null() {
         return;

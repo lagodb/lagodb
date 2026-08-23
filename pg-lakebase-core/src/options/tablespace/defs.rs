@@ -1,7 +1,7 @@
 use crate::options::schema::{self, OptionDef, OptionKind, OptionMutability};
 use pgrx::pg_sys;
 
-pub const PUBLIC_STORAGE_VOLUME_OPTION: &str = "lakebase_storage_volume";
+pub const PUBLIC_STORAGE_VOLUME_OPTION: &str = "storage_volume";
 pub const INTERNAL_STORAGE_VOLUME_ID_OPTION: &str = "lakebase_volume_id";
 
 static TABLESPACE_OPTION_DEFS: &[OptionDef] = &[
