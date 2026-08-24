@@ -5,10 +5,10 @@ use std::panic::AssertUnwindSafe;
 
 use pg_lakebase_core::diag::PgReportError;
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
-    ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
-    ForeignRelSizeContext, ReScanForeignScanContext, ScanOutputColumn,
-    ScanProjectionPolicy, ScanSlotWriter,
+    ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
+    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
+    ReScanForeignScanContext, ScanOutputColumn, ScanProjectionPolicy, ScanSlotWriter,
+    StartForeignScanContext,
 };
 use pgrx::{PgTryBuilder, pg_sys};
 
@@ -82,7 +82,7 @@ pub(super) struct JsonScanState {
 
 impl JsonScanState {
     pub(super) fn begin(
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, Lakebase>,
         files: ObjectFiles,
         compression: StreamCompression,
     ) -> Result<Self, ConnectorError> {

@@ -1,9 +1,9 @@
 //! PostgreSQL COPY text-format object and its validated options.
 
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ColumnRequirements, ForeignInsertBeginContext,
-    ForeignModifyBeginContext, ForeignModifyCapabilities, ForeignModifyOperation,
-    ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyRelationContext,
+    ColumnRequirements, ForeignInsertBeginContext, ForeignModifyBeginContext,
+    ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
+    ForeignModifyPlanSpec, ForeignModifyRelationContext, StartForeignScanContext,
 };
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_storage::StorageFile;
@@ -121,7 +121,7 @@ impl FormatReader for TextFormat {
 
     fn begin(
         self: Box<Self>,
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, Lakebase>,
         files: crate::storage::ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         let Self {

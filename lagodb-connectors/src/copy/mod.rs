@@ -65,7 +65,7 @@ impl ConnectorCopyConsumer {
         let filename = filename
             .to_str()
             .map_err(|_| ConnectorError::invalid_object_uri("must be valid UTF-8"))?;
-        let object = ObjectUri::parse(filename)?;
+        let object = ObjectUri::parse(filename).map_err(ConnectorError::from)?;
         let options =
             options::CopyCommandOptions::from_statement(statement, &object)?;
         let options = options.into_resolved();

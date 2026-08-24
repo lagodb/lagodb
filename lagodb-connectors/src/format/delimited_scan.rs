@@ -6,10 +6,10 @@ use pg_lakebase_core::copy::{
     CopyDataSource, CopyDocumentSource, CopyError, CopyFromScan,
 };
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
-    ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
-    ForeignRelSizeContext, ReScanForeignScanContext, ScanProjectionPolicy,
-    ScanSlotWriter,
+    ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
+    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
+    ReScanForeignScanContext, ScanProjectionPolicy, ScanSlotWriter,
+    StartForeignScanContext,
 };
 use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
@@ -83,7 +83,7 @@ pub(super) struct DelimitedScanState {
 
 impl DelimitedScanState {
     pub(super) fn begin(
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, Lakebase>,
         files: ObjectFiles,
         compression: StreamCompression,
         postgres_options: *mut pg_sys::List,

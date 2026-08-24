@@ -11,9 +11,9 @@ mod writer;
 
 use pg_lakebase_core::expr::pushdown::FilterPlanningContext;
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignInsertBeginContext, ForeignModifyBeginContext,
-    ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
-    ForeignModifyPlanSpec, ForeignModifyRelationContext,
+    ForeignInsertBeginContext, ForeignModifyBeginContext, ForeignModifyCapabilities,
+    ForeignModifyOperation, ForeignModifyPlanContext, ForeignModifyPlanSpec,
+    ForeignModifyRelationContext, StartForeignScanContext,
 };
 use pg_lakebase_core::plan_data::PlanDataReader;
 use pg_lakebase_storage::StorageFile;
@@ -84,7 +84,7 @@ impl FormatReader for ParquetFormat {
 
     fn begin(
         self: Box<Self>,
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, Lakebase>,
         files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         Ok(Box::new(scan::ParquetScanState::begin(context, files)?))

@@ -2,11 +2,10 @@
 
 use pg_lakebase_core::expr::pushdown::FilterPlanningContext;
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignAnalyzeSupport, ForeignPathBuilder,
-    ForeignPathContext, ForeignPathKeys, ForeignPlanContext, ForeignPlanSpec,
-    ForeignRelSize, ForeignRelSizeContext, ForeignSampleContext,
-    ForeignSampleStatistics, ForeignTableMaintenanceError, ReScanForeignScanContext,
-    ScanSlotWriter,
+    ForeignAnalyzeSupport, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
+    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
+    ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
+    ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
 };
 use pg_lakebase_core::plan_data::PlanDataReader;
 
@@ -74,7 +73,7 @@ pub(crate) trait FormatReader: FormatObject {
     /// Create executor state for the selected reader.
     fn begin(
         self: Box<Self>,
-        _context: BeginForeignScanContext<'_, Lakebase>,
+        _context: StartForeignScanContext<'_, Lakebase>,
         _files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         Err(ConnectorError::scan_not_implemented(self.kind()))

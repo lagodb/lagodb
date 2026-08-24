@@ -6,9 +6,9 @@ mod write;
 
 use apache_avro::{Reader, Schema};
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignInsertBeginContext, ForeignModifyBeginContext,
-    ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
-    ForeignModifyPlanSpec, ForeignModifyRelationContext,
+    ForeignInsertBeginContext, ForeignModifyBeginContext, ForeignModifyCapabilities,
+    ForeignModifyOperation, ForeignModifyPlanContext, ForeignModifyPlanSpec,
+    ForeignModifyRelationContext, StartForeignScanContext,
 };
 use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
@@ -61,7 +61,7 @@ impl FormatReader for AvroFormat {
 
     fn begin(
         self: Box<Self>,
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, Lakebase>,
         files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         Ok(Box::new(AvroScanState::begin(context, files)?))

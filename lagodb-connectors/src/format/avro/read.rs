@@ -5,10 +5,10 @@ use std::io::{self, Read};
 use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
-    ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
-    ForeignRelSizeContext, ReScanForeignScanContext, ScanOutputColumn,
-    ScanSlotWriter,
+    ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
+    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
+    ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
+    StartForeignScanContext,
 };
 use pg_lakebase_core::tuple::{
     ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, PG_EPOCH_DAYS_DIFF,
@@ -322,7 +322,7 @@ pub(super) struct AvroScanState {
 
 impl AvroScanState {
     pub(super) fn begin(
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, Lakebase>,
         mut files: ObjectFiles,
     ) -> Result<Self, ConnectorError> {
         let live = context.relation.live_columns();

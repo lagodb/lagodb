@@ -10,6 +10,7 @@ use pg_lakebase_core::fdw::{
 };
 use pg_lakebase_core::plan_data::PlanDataError;
 use pg_lakebase_core::storage::foreign::StorageAcquireError;
+use pg_lakebase_core::storage::profile::StorageProfileError;
 use pg_lakebase_core::tuple::{DecimalCodecError, JsonValueError};
 use pg_lakebase_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
@@ -114,32 +115,6 @@ pub(crate) enum ConnectorError {
     #[error("invalid object URI: {reason}")]
     InvalidObjectUri { reason: &'static str },
 
-    #[error("foreign server {server:?} does not exist")]
-    ServerNotFound { server: Box<str> },
-
-    #[error(
-        "no foreign server is configured for {scheme} object URIs; set {guc} or specify server"
-    )]
-    DefaultServerNotConfigured {
-        scheme: &'static str,
-        guc: &'static str,
-    },
-
-    #[error("foreign server {server:?} does not use lakebase_fdw")]
-    ServerWrongFdw { server: Box<str> },
-
-    #[error("permission denied for foreign server {server:?}")]
-    ServerUsageDenied { server: Box<str> },
-
-    #[error("foreign server {server:?} cannot access {scheme} object URIs")]
-    ProviderMismatch {
-        server: Box<str>,
-        scheme: &'static str,
-    },
-
-    #[error("object URI is outside foreign server {server:?} scope")]
-    ScopeDenied { server: Box<str> },
-
     #[error("COPY object format {format} is not implemented yet")]
     CopyNotImplemented { format: FormatKind },
 
@@ -151,6 +126,9 @@ pub(crate) enum ConnectorError {
 
     #[error("foreign table format changed after the plan was created")]
     PlanFormatChanged,
+
+    #[error("invalid connector scan lifecycle: {detail}")]
+    InvalidScanLifecycle { detail: &'static str },
 
     #[error("{format} format scan is not implemented")]
     ScanNotImplemented { format: FormatKind },
@@ -174,7 +152,10 @@ pub(crate) enum ConnectorError {
     Storage(#[from] StorageError),
 
     #[error(transparent)]
-    StorageAcquire(Box<StorageAcquireError<ConnectorError>>),
+    StorageProfile(#[from] StorageProfileError),
+
+    #[error(transparent)]
+    StorageAcquire(Box<StorageAcquireError<StorageProfileError>>),
 
     #[error(transparent)]
     ForeignModify(ForeignModifyError),
@@ -259,50 +240,6 @@ impl ConnectorError {
     }
 
     #[inline]
-    pub(crate) fn server_not_found(server: &str) -> Self {
-        Self::ServerNotFound {
-            server: server.into(),
-        }
-    }
-
-    #[inline]
-    pub(crate) const fn default_server_not_configured(
-        scheme: &'static str,
-        guc: &'static str,
-    ) -> Self {
-        Self::DefaultServerNotConfigured { scheme, guc }
-    }
-
-    #[inline]
-    pub(crate) fn server_wrong_fdw(server: &str) -> Self {
-        Self::ServerWrongFdw {
-            server: server.into(),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn server_usage_denied(server: &str) -> Self {
-        Self::ServerUsageDenied {
-            server: server.into(),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn provider_mismatch(server: &str, scheme: &'static str) -> Self {
-        Self::ProviderMismatch {
-            server: server.into(),
-            scheme,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn scope_denied(server: &str) -> Self {
-        Self::ScopeDenied {
-            server: server.into(),
-        }
-    }
-
-    #[inline]
     pub(crate) const fn copy_not_implemented(format: FormatKind) -> Self {
         Self::CopyNotImplemented { format }
     }
@@ -349,7 +286,7 @@ impl ConnectorError {
 
     #[inline]
     pub(crate) fn storage_acquire(
-        error: StorageAcquireError<ConnectorError>,
+        error: StorageAcquireError<StorageProfileError>,
     ) -> Self {
         Self::StorageAcquire(Box::new(error))
     }
@@ -442,28 +379,22 @@ impl SqlStateError for ConnectorError {
             Self::JsonIo { sqlerrcode, .. } => *sqlerrcode,
             Self::CopyStreamIo { sqlerrcode, .. } => *sqlerrcode,
             Self::Copy(error) => error.sql_error_code(),
-            Self::InvalidObjectUri { .. }
-            | Self::ProviderMismatch { .. }
-            | Self::DefaultServerNotConfigured { .. } => {
+            Self::InvalidObjectUri { .. } => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
-            Self::ServerNotFound { .. } => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
-            Self::ServerWrongFdw { .. }
-            | Self::CopyNotImplemented { .. }
-            | Self::CopyFromExactOnly { .. } => {
+            Self::CopyNotImplemented { .. } | Self::CopyFromExactOnly { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
-            }
-            Self::ServerUsageDenied { .. } | Self::ScopeDenied { .. } => {
-                PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
             }
             Self::InvalidPlanFormat { .. }
             | Self::InvalidFilterPlan { .. }
+            | Self::InvalidScanLifecycle { .. }
             | Self::PlanData(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::InvalidFilterDatum { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::PlanFormatChanged => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
             Self::Storage(error) => error.sql_error_code(),
+            Self::StorageProfile(error) => error.sql_error_code(),
             Self::StorageAcquire(error) => error.sql_error_code(),
             Self::ForeignModify(error) => error.sql_error_code(),
             Self::ScanNotImplemented { .. } | Self::ModifyNotImplemented { .. } => {

@@ -10,10 +10,10 @@ use parquet::arrow::arrow_reader::{
 };
 use pg_arrow_conv::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
 use pg_lakebase_core::fdw::{
-    BeginForeignScanContext, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
-    ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec, ForeignRelSize,
-    ForeignRelSizeContext, ReScanForeignScanContext, ScanOutputColumn,
-    ScanSlotWriter,
+    ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
+    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
+    ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
+    StartForeignScanContext,
 };
 use pg_lakebase_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
 use pgrx::pg_sys;
@@ -125,7 +125,7 @@ pub(super) struct ParquetScanState {
 
 impl ParquetScanState {
     pub(super) fn begin(
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, Lakebase>,
         mut files: ObjectFiles,
     ) -> Result<Self, ConnectorError> {
         let live = context.relation.live_columns();
