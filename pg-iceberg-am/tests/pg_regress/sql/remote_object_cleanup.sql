@@ -46,7 +46,7 @@ SELECT lakebase.create_storage_volume(
 
 CREATE TABLESPACE regress_object
 LOCATION '/tmp/iceberg_regress_object'
-WITH (lakebase_storage_volume = :'volume_name');
+WITH (storage_volume = :'volume_name');
 
 SELECT internal_volume_id AS volume_id,
        regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root

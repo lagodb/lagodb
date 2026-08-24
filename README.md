@@ -176,7 +176,7 @@ SELECT lakebase.create_storage_volume(
 
 CREATE TABLESPACE lake_s3
 LOCATION '/path/to/local/tablespace'
-WITH (lakebase_storage_volume = 'events-lake');
+WITH (storage_volume = 'events-lake');
 
 CREATE TABLE object_events (
     event_time timestamptz NOT NULL,

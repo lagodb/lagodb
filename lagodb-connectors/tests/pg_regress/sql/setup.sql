@@ -17,6 +17,7 @@ CREATE EXTENSION lagodb_connectors;
 
 SELECT endpoint AS lakebase_regress_endpoint,
        bucket AS lakebase_regress_bucket,
+       format('s3://%s/', bucket) AS lakebase_regress_scope,
        region AS lakebase_regress_region,
        access_key_id AS lakebase_regress_access_key_id,
        secret_access_key AS lakebase_regress_secret_access_key
@@ -31,6 +32,7 @@ CREATE SERVER lagodb_connectors_regress_s3
         provider 's3_compatible',
         endpoint :'lakebase_regress_endpoint',
         region :'lakebase_regress_region',
+        scope :'lakebase_regress_scope',
         allow_http 'true',
         virtual_hosted_style_request 'false'
     );

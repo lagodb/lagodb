@@ -56,28 +56,17 @@ Use `provider 's3'` for AWS S3, `provider 'gcs'` for `gs://` URIs, or
 the user mapping. When another role uses the server, grant it `USAGE` and
 create an appropriate user mapping for that role.
 
-Configure the default server for each URI scheme that the database uses:
+Give every server eligible for implicit selection an explicit object scope:
 
 ```sql
-ALTER DATABASE appdb
-SET lagodb_connectors.default_s3_server = 'pg_lakebase_s3';
+ALTER SERVER pg_lakebase_s3
+OPTIONS (ADD scope 's3://analytics-bucket/');
 ```
 
-The available settings are `lagodb_connectors.default_s3_server` for `s3://`,
-`lagodb_connectors.default_gcs_server` for `gs://`, and
-`lagodb_connectors.default_azure_server` for `az://`. They have no built-in
-server names. A database setting applies to new sessions; normal PostgreSQL
-setting precedence allows a role or the current session to override it:
-
-```sql
-ALTER ROLE analytics
-SET lagodb_connectors.default_s3_server = 'analytics_store';
-
-SET lagodb_connectors.default_s3_server = 'development_store';
-```
-
-If neither the applicable setting nor the COPY `server` option is present,
-the operation fails instead of selecting an arbitrary matching server.
+When COPY does not specify `server`, the connector enumerates accessible
+`lakebase_fdw` servers and selects the longest matching scope. Equal-length
+matches are rejected as ambiguous, and servers without `scope` participate
+only in explicit selection.
 
 After selecting the server, the connector verifies that it uses
 `lakebase_fdw`, its provider matches the URI, and the URI is within its

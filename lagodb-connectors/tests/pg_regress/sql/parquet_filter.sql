@@ -18,10 +18,13 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_filter
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'parquet_filter_path', format 'parquet');
 
+CREATE TABLE lagodb_connectors_regress.null_parameter_source (id integer);
+INSERT INTO lagodb_connectors_regress.null_parameter_source VALUES (NULL);
+
 -- Mirrored and ordinary integer comparisons are both evaluated by Parquet.
 SELECT coalesce(string_agg(id::text, ',' ORDER BY id), '<none>') AS ids
 FROM lagodb_connectors_regress.parquet_filter
-WHERE 1 < id AND bigint_col < 0;
+WHERE 1 < id AND bigint_col < 0::bigint;
 
 -- The ForeignScan reports provider-accepted predicates separately from local
 -- residual quals. This plan assertion verifies that filter pushdown occurred.
@@ -58,7 +61,7 @@ SELECT coalesce(
            string_agg(inner_rel.id::text, ',' ORDER BY inner_rel.id),
            '<none>'
        ) AS ids
-FROM (VALUES (NULL::integer)) AS outer_rel(id)
+FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
 CROSS JOIN LATERAL (
     SELECT id
     FROM lagodb_connectors_regress.parquet_filter
@@ -72,7 +75,7 @@ SELECT coalesce(
            string_agg(inner_rel.id::text, ',' ORDER BY inner_rel.id),
            '<none>'
        ) AS ids
-FROM (VALUES (NULL::integer)) AS outer_rel(id)
+FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
 CROSS JOIN LATERAL (
     SELECT id
     FROM lagodb_connectors_regress.parquet_filter
@@ -99,6 +102,111 @@ BEGIN
     RETURN plan::jsonb;
 END
 $$;
+
+-- Representative plans pin every supported predicate capability exercised
+-- above. Exact filters have no local residual; conservative pruning retains
+-- the original PostgreSQL Filter by contract.
+WITH explained AS (
+    SELECT lagodb_connectors_regress.explain_json(
+        $$SELECT id
+          FROM lagodb_connectors_regress.parquet_filter
+          WHERE 1 < id AND bigint_col < 0::bigint$$
+    ) AS value
+)
+SELECT value::text LIKE '%Pushed Filter%'
+   AND value::text LIKE '%id > 1%'
+   AND value::text LIKE '%bigint_col <%'
+   AND value::text LIKE '%::bigint%'
+   AND value::text NOT LIKE '%"Filter":%'
+       AS mirrored_and_pushdown_complete
+FROM explained;
+
+WITH explained AS (
+    SELECT lagodb_connectors_regress.explain_json(
+        $$SELECT inner_rel.id
+          FROM (VALUES (true)) AS outer_rel(flag)
+          CROSS JOIN LATERAL (
+              SELECT id
+              FROM lagodb_connectors_regress.parquet_filter
+              WHERE (NOT (smallint_col IS NULL) AND bool_col = outer_rel.flag)
+                 OR (smallint_col IS NULL AND bool_col <> outer_rel.flag)
+              OFFSET 0
+          ) AS inner_rel$$
+    ) AS value
+)
+SELECT value::text LIKE '%Pushed Filter%'
+   AND (value::text LIKE '%smallint_col IS NOT NULL%'
+        OR value::text LIKE '%NOT (smallint_col IS NULL)%')
+   AND value::text LIKE '%smallint_col IS NULL%'
+   AND value::text LIKE '%bool_col%'
+   AND value::text LIKE '%"Filter":%'
+       AS boolean_null_logic_pushdown_complete
+FROM explained;
+
+WITH explained AS (
+    SELECT lagodb_connectors_regress.explain_json(
+        $$SELECT id
+          FROM lagodb_connectors_regress.parquet_filter
+          WHERE varchar_col = 'varchar-one'
+             OR text_col COLLATE "C" > 'z' COLLATE "C"$$
+    ) AS value
+)
+SELECT value::text LIKE '%Pushed Filter%'
+   AND value::text LIKE '%varchar_col =%'
+   AND value::text LIKE '%text_col >%'
+   AND value::text NOT LIKE '%"Filter":%'
+       AS string_collation_pushdown_complete
+FROM explained;
+
+WITH explained AS (
+    SELECT lagodb_connectors_regress.explain_json(
+        $$SELECT inner_rel.id
+          FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
+          CROSS JOIN LATERAL (
+              SELECT id
+              FROM lagodb_connectors_regress.parquet_filter
+              WHERE id = outer_rel.id
+              OFFSET 0
+          ) AS inner_rel$$
+    ) AS value
+)
+SELECT value::text LIKE '%Pushed Filter%'
+   AND value::text LIKE '%id = $1%'
+   AND value::text NOT LIKE '%"Filter":%'
+       AS null_parameter_pushdown_complete
+FROM explained;
+
+WITH explained AS (
+    SELECT lagodb_connectors_regress.explain_json(
+        $$SELECT inner_rel.id
+          FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
+          CROSS JOIN LATERAL (
+              SELECT id
+              FROM lagodb_connectors_regress.parquet_filter
+              WHERE NOT (id = outer_rel.id)
+              OFFSET 0
+          ) AS inner_rel$$
+    ) AS value
+)
+SELECT value::text LIKE '%Pushed Filter%'
+   AND value::text LIKE '%id%'
+   AND value::text LIKE '%$1%'
+   AND value::text NOT LIKE '%"Filter":%'
+       AS null_parameter_not_pushdown_complete
+FROM explained;
+
+-- Unsupported arithmetic remains solely a PostgreSQL local residual.
+WITH explained AS (
+    SELECT lagodb_connectors_regress.explain_json(
+        $$SELECT id
+          FROM lagodb_connectors_regress.parquet_filter
+          WHERE id + 1 = 2$$
+    ) AS value
+)
+SELECT value::text NOT LIKE '%Pushed Filter%'
+   AND value::text LIKE '%"Filter":%'
+       AS unsupported_expression_remains_local
+FROM explained;
 
 -- A parameterized ForeignScan must use its persisted predicate description;
 -- ExplainForeignScan has no ancestor list for deparsing PARAM_EXEC expressions.

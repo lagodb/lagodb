@@ -42,7 +42,7 @@ SELECT lakebase.create_storage_volume(
 
 CREATE TABLESPACE regress_storage_socket_cancel_contexts
 LOCATION '/tmp/iceberg_regress_storage_socket_cancel_contexts'
-WITH (lakebase_storage_volume = :'volume_name');
+WITH (storage_volume = :'volume_name');
 
 SELECT internal_volume_id AS volume_id
 FROM lakebase.storage_volumes

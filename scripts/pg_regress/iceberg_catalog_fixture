@@ -1,0 +1,233 @@
+# Sourced by object_storage_fixture. The parent owns the shared lifecycle and
+# supplies Docker selection, state, MinIO credentials, labels and image policy.
+
+iceberg_wait_for_url() {
+    description=$1
+    url=$2
+    deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+    last_error=""
+
+    while :; do
+        if output=$(curl -fsS --max-time 1 "$url" 2>&1); then
+            return 0
+        fi
+        last_error=$output
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "${description} did not become ready within ${READY_TIMEOUT_SECONDS} seconds: ${last_error}" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
+iceberg_mapped_port() {
+    docker=$1
+    container_id=$2
+    service_port=$3
+    "$docker" port "$container_id" "${service_port}/tcp" \
+        | sed -n 's/.*://p' \
+        | head -n 1
+}
+
+iceberg_start_rest_container() {
+    docker=$1
+    network_id=$2
+    network_alias=$3
+    include_credentials=$4
+    warehouse_bucket=$5
+    warehouse_suffix=$6
+    mkdir -p "${STATE_DIR}/${network_alias}"
+    ensure_image "$docker" "$ICEBERG_REST_IMAGE"
+    rest_name="pg-lakebase-regress-${network_alias}-${PGPORT}-$$"
+    STARTED_REST_CONTAINER_ID=$("$docker" run \
+        --detach \
+        --publish 127.0.0.1::8181 \
+        --network "$network_id" \
+        --network-alias "$network_alias" \
+        --env "AWS_ACCESS_KEY_ID=${MINIO_USER}" \
+        --env "AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}" \
+        --env "AWS_REGION=${REGRESS_REGION}" \
+        --env CATALOG_CATALOG__IMPL=org.apache.iceberg.jdbc.JdbcCatalog \
+        --env CATALOG_URI=jdbc:sqlite:file:/state/catalog.db \
+        --env "CATALOG_WAREHOUSE=s3://${warehouse_bucket}/${warehouse_suffix}" \
+        --env CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO \
+        --env CATALOG_S3_ENDPOINT=http://minio:9000 \
+        --env CATALOG_S3_PATH__STYLE__ACCESS=true \
+        --env "CATALOG_INCLUDE__CREDENTIALS=${include_credentials}" \
+        --env "CATALOG_S3_ACCESS__KEY__ID=${MINIO_USER}" \
+        --env "CATALOG_S3_SECRET__ACCESS__KEY=${MINIO_PASSWORD}" \
+        --volume "${STATE_DIR}/${network_alias}:/state" \
+        --name "$rest_name" \
+        --label "${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VALUE}" \
+        --label "${PGPORT_LABEL_KEY}=${PGPORT}" \
+        --label "${STATE_DIR_LABEL_KEY}=${STATE_DIR}" \
+        "$ICEBERG_REST_IMAGE")
+    rest_port=$(iceberg_mapped_port \
+        "$docker" "$STARTED_REST_CONTAINER_ID" 8181)
+    STARTED_REST_URI="http://127.0.0.1:${rest_port}"
+    if ! iceberg_wait_for_url \
+        "Iceberg REST catalog ${network_alias}" \
+        "${STARTED_REST_URI}/v1/config"; then
+        "$docker" logs --tail 80 "$STARTED_REST_CONTAINER_ID" >&2 || true
+        "$docker" rm --force "$STARTED_REST_CONTAINER_ID" \
+            >/dev/null 2>&1 || true
+        exit 1
+    fi
+}
+
+iceberg_start_rest_catalog() {
+    docker=$1
+    network_id=$2
+
+    iceberg_start_rest_container \
+        "$docker" "$network_id" rest-vended true \
+        "$REGRESS_BUCKET" iceberg-vended
+    {
+        printf 'REST_CONTAINER_ID=%s\n' \
+            "$(state_quote "$STARTED_REST_CONTAINER_ID")"
+        printf 'REST_UPSTREAM_URI=%s\n' \
+            "$(state_quote "$STARTED_REST_URI")"
+    } >> "$STATE_ENV"
+
+    iceberg_start_rest_container \
+        "$docker" "$network_id" rest-fallback false \
+        "$REGRESS_FALLBACK_BUCKET" iceberg-fallback
+    {
+        printf 'FALLBACK_REST_CONTAINER_ID=%s\n' \
+            "$(state_quote "$STARTED_REST_CONTAINER_ID")"
+        printf 'FALLBACK_REST_URI=%s\n' \
+            "$(state_quote "$STARTED_REST_URI")"
+    } >> "$STATE_ENV"
+}
+
+iceberg_provision_tables() {
+    docker=$1
+    network_id=$2
+    iceberg_ensure_spark_image "$docker"
+    provision_file="${SCRIPT_DIR}/iceberg_provision.sql"
+    provision_log="${STATE_DIR}/spark-provision.log"
+    if "$docker" run --rm \
+        --network "$network_id" \
+        --env "AWS_ACCESS_KEY_ID=${MINIO_USER}" \
+        --env "AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}" \
+        --env "AWS_REGION=${REGRESS_REGION}" \
+        --volume "${provision_file}:/fixture/iceberg_provision.sql:ro" \
+        --entrypoint /opt/spark/bin/spark-sql \
+        "$SPARK_IMAGE" \
+        --hiveconf "fallback_second_bucket=${REGRESS_FALLBACK_SECOND_BUCKET}" \
+        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+        --conf spark.sql.catalog.rest=org.apache.iceberg.spark.SparkCatalog \
+        --conf spark.sql.catalog.rest.type=rest \
+        --conf spark.sql.catalog.rest.uri=http://rest-vended:8181 \
+        --conf "spark.sql.catalog.rest.warehouse=s3://${REGRESS_BUCKET}/iceberg-vended" \
+        --conf spark.sql.catalog.rest.io-impl=org.apache.iceberg.aws.s3.S3FileIO \
+        --conf spark.sql.catalog.rest.s3.endpoint=http://minio:9000 \
+        --conf spark.sql.catalog.rest.s3.path-style-access=true \
+        --conf spark.sql.catalog.fallback=org.apache.iceberg.spark.SparkCatalog \
+        --conf spark.sql.catalog.fallback.type=rest \
+        --conf spark.sql.catalog.fallback.uri=http://rest-fallback:8181 \
+        --conf "spark.sql.catalog.fallback.warehouse=s3://${REGRESS_FALLBACK_BUCKET}/iceberg-fallback" \
+        --conf spark.sql.catalog.fallback.io-impl=org.apache.iceberg.aws.s3.S3FileIO \
+        --conf spark.sql.catalog.fallback.s3.endpoint=http://minio:9000 \
+        --conf spark.sql.catalog.fallback.s3.path-style-access=true \
+        --conf spark.ui.enabled=false \
+        -f /fixture/iceberg_provision.sql >"$provision_log" 2>&1; then
+        return
+    fi
+
+    echo "Spark failed to provision Iceberg REST regression tables" >&2
+    cat "$provision_log" >&2
+    return 1
+}
+
+iceberg_ensure_spark_image() {
+    docker=$1
+    if "$docker" image inspect "$SPARK_IMAGE" >/dev/null 2>&1; then
+        return
+    fi
+    if [ "$SPARK_IMAGE" != "$DEFAULT_SPARK_IMAGE" ]; then
+        ensure_image "$docker" "$SPARK_IMAGE"
+        return
+    fi
+
+    ensure_image "$docker" "$SPARK_BASE_IMAGE"
+    build_log="${STATE_DIR}/spark-image-build.log"
+    if "$docker" build \
+        --build-arg "SPARK_BASE_IMAGE=${SPARK_BASE_IMAGE}" \
+        --tag "$SPARK_IMAGE" \
+        --file "${SCRIPT_DIR}/spark.Dockerfile" \
+        "$SCRIPT_DIR" >"$build_log" 2>&1; then
+        return
+    fi
+
+    echo "failed to build Spark-Iceberg regression image ${SPARK_IMAGE}" >&2
+    cat "$build_log" >&2
+    return 1
+}
+
+iceberg_start_proxy() {
+    description=$1
+    state_name=$2
+    upstream=$3
+    shift 3
+    port_file="${STATE_DIR}/${state_name}.port"
+    log_file="${STATE_DIR}/${state_name}.log"
+    python3 "${SCRIPT_DIR}/rest_catalog_proxy.py" \
+        --upstream "$upstream" \
+        --port-file "$port_file" "$@" >"$log_file" 2>&1 &
+    STARTED_PROXY_PID=$!
+    deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+    while [ ! -s "$port_file" ]; do
+        if ! kill -0 "$STARTED_PROXY_PID" 2>/dev/null; then
+            cat "$log_file" >&2
+            echo "${description} exited before becoming ready" >&2
+            exit 1
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            kill "$STARTED_PROXY_PID" >/dev/null 2>&1 || true
+            echo "${description} did not become ready" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    proxy_port=$(sed -n '1p' "$port_file")
+    case "$proxy_port" in
+        ''|*[!0-9]*)
+            kill "$STARTED_PROXY_PID" >/dev/null 2>&1 || true
+            echo "${description} wrote an invalid port" >&2
+            return 1
+            ;;
+    esac
+    STARTED_PROXY_URI="http://127.0.0.1:${proxy_port}"
+    if ! iceberg_wait_for_url \
+        "$description" "${STARTED_PROXY_URI}/v1/config"; then
+        kill "$STARTED_PROXY_PID" >/dev/null 2>&1 || true
+        cat "$log_file" >&2
+        return 1
+    fi
+}
+
+iceberg_start_vending_proxy() {
+    upstream=$1
+    s3_endpoint=$2
+    iceberg_start_proxy \
+        "REST vending proxy" vending-proxy "$upstream" \
+        --s3-endpoint "$s3_endpoint" \
+        --s3-region "$REGRESS_REGION" \
+        --require-vended-credentials
+    {
+        printf 'CATALOG_PROXY_PID=%s\n' "$(state_quote "$STARTED_PROXY_PID")"
+        printf 'REST_URI=%s\n' "$(state_quote "$STARTED_PROXY_URI")"
+    } >> "$STATE_ENV"
+}
+
+iceberg_start_failure_proxy() {
+    rest_uri=$1
+    iceberg_start_proxy \
+        "REST commit-failure proxy" failure-proxy "$rest_uri" \
+        --reject-transaction-commit
+    {
+        printf 'FAILURE_PROXY_PID=%s\n' "$(state_quote "$STARTED_PROXY_PID")"
+        printf 'FAILURE_REST_URI=%s\n' "$(state_quote "$STARTED_PROXY_URI")"
+    } >> "$STATE_ENV"
+}

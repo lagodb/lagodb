@@ -53,7 +53,6 @@ SELECT * FROM dml_lifecycle.cte_t ORDER BY id;
 
 -- Sibling ModifyTable nodes for the same relation share one executor-query
 -- file-ID namespace while retaining independent relation-local write states.
-COPY (
 WITH first_update AS (
     UPDATE dml_lifecycle.cte_t
     SET label = label || '_first'
@@ -71,12 +70,9 @@ FROM (
     UNION ALL
     SELECT * FROM second_update
 ) AS changed
-ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+ORDER BY id;
 
-COPY (
-    SELECT * FROM dml_lifecycle.cte_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT * FROM dml_lifecycle.cte_t ORDER BY id;
 
 -- MERGE insert-only still runs as CMD_MERGE in the outer CustomScan.
 CREATE TABLE dml_lifecycle.merge_insert_t (
@@ -120,9 +116,7 @@ UPDATE dml_lifecycle.update_delete_t
 SET label = label || '_updated'
 WHERE id IN (2, 4);
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.update_delete_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.update_delete_t ORDER BY id;
 
 -- tableoid is a logical relation identity and remains usable in DML quals.
 UPDATE dml_lifecycle.update_delete_t
@@ -169,9 +163,7 @@ SELECT * FROM dml_lifecycle.generated_t ORDER BY id;
 DELETE FROM dml_lifecycle.update_delete_t
 WHERE id IN (1, 3);
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.update_delete_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.update_delete_t ORDER BY id;
 
 -- An unqualified DELETE needs only Iceberg row identity metadata; no business
 -- columns should be projected or decoded.
@@ -216,9 +208,7 @@ ON target.id = source.id
 WHEN NOT MATCHED THEN
     INSERT (id, label) VALUES (source.id, source.label);
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.v1_dml_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.v1_dml_t ORDER BY id;
 
 -- Matched MERGE branches exercise the same AM update/delete/lock paths through
 -- PostgreSQL's MERGE executor.
@@ -235,13 +225,9 @@ ON target.id = source.id
 WHEN MATCHED THEN
     UPDATE SET label = source.label;
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.merge_update_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.merge_update_t ORDER BY id;
 INSERT INTO dml_lifecycle.merge_update_t VALUES (32, 'after_merge');
-COPY (
-    SELECT id, label FROM dml_lifecycle.merge_update_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.merge_update_t ORDER BY id;
 
 CREATE TABLE dml_lifecycle.merge_delete_t (
     id integer,
@@ -256,13 +242,9 @@ ON target.id = source.id
 WHEN MATCHED THEN
     DELETE;
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.merge_delete_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.merge_delete_t ORDER BY id;
 INSERT INTO dml_lifecycle.merge_delete_t VALUES (42, 'after_merge');
-COPY (
-    SELECT id, label FROM dml_lifecycle.merge_delete_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.merge_delete_t ORDER BY id;
 
 -- UPDATE ... FROM: only the target scan receives Modify identity binding; the
 -- Iceberg source remains a plain join input regardless of chosen scan path.
@@ -284,12 +266,8 @@ SET label = s.label
 FROM dml_lifecycle.upd_source AS s
 WHERE t.id = s.id;
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-COPY (
-    SELECT id, label FROM dml_lifecycle.upd_source ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id;
+SELECT id, label FROM dml_lifecycle.upd_source ORDER BY id;
 
 -- A materialized source and self-join exercise PostgreSQL ctid propagation
 -- through Materialize/Sort and a second scan of the target relation.
@@ -308,9 +286,7 @@ SET label = sibling.label || '_self'
 FROM dml_lifecycle.upd_target AS sibling
 WHERE target.id = sibling.id AND target.id = 2;
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id;
 
 EXPLAIN (COSTS OFF)
 UPDATE dml_lifecycle.upd_target
@@ -331,9 +307,7 @@ DELETE FROM dml_lifecycle.upd_target
 WHERE id = 3;
 RESET pg_lakebase.customscan_mode;
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id;
 
 -- Rewritten view DML retains PostgreSQL WITH CHECK OPTION enforcement.
 CREATE VIEW dml_lifecycle.generated_small AS

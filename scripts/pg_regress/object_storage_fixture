@@ -16,7 +16,12 @@ MINIO_IMAGE=${MINIO_IMAGE:-${DEFAULT_MINIO_IMAGE:?DEFAULT_MINIO_IMAGE is require
 MINIO_USER=${MINIO_USER:-${DEFAULT_MINIO_USER:?DEFAULT_MINIO_USER is required in ${OBJECT_STORAGE_ENV}}}
 MINIO_PASSWORD=${MINIO_PASSWORD:-${DEFAULT_MINIO_PASSWORD:?DEFAULT_MINIO_PASSWORD is required in ${OBJECT_STORAGE_ENV}}}
 MINIO_REGION=${MINIO_REGION:-${DEFAULT_MINIO_REGION:?DEFAULT_MINIO_REGION is required in ${OBJECT_STORAGE_ENV}}}
+ICEBERG_REST_IMAGE=${ICEBERG_REST_IMAGE:-${DEFAULT_ICEBERG_REST_IMAGE:?DEFAULT_ICEBERG_REST_IMAGE is required in ${OBJECT_STORAGE_ENV}}}
+SPARK_BASE_IMAGE=${SPARK_BASE_IMAGE:-${DEFAULT_SPARK_BASE_IMAGE:?DEFAULT_SPARK_BASE_IMAGE is required in ${OBJECT_STORAGE_ENV}}}
+SPARK_IMAGE=${SPARK_IMAGE:-${DEFAULT_SPARK_IMAGE:?DEFAULT_SPARK_IMAGE is required in ${OBJECT_STORAGE_ENV}}}
 REGRESS_BUCKET=${LAKEBASE_REGRESS_BUCKET:-lakebase-regress}
+REGRESS_FALLBACK_BUCKET=${LAKEBASE_REGRESS_FALLBACK_BUCKET:-${REGRESS_BUCKET}-iceberg-fallback-a}
+REGRESS_FALLBACK_SECOND_BUCKET=${LAKEBASE_REGRESS_FALLBACK_SECOND_BUCKET:-${REGRESS_BUCKET}-iceberg-fallback-b}
 REGRESS_REGION=${LAKEBASE_REGRESS_REGION:-$MINIO_REGION}
 READY_TIMEOUT_SECONDS=${LAKEBASE_REGRESS_READY_TIMEOUT_SECONDS:-30}
 FIXTURE_LABEL_KEY=pg-lakebase.fixture
@@ -24,14 +29,16 @@ FIXTURE_LABEL_VALUE=pg-regress-object-storage
 PGPORT_LABEL_KEY=pg-lakebase.pgport
 STATE_DIR_LABEL_KEY=pg-lakebase.state-dir
 
-if [ "${PGPORT:-}" = "" ]; then
-    echo "PGPORT is required to isolate pg_regress object-storage fixture state" >&2
-    exit 2
-fi
+case "${PGPORT:-}" in
+    ''|*[!0-9]*)
+        echo "PGPORT must be a decimal port number to isolate pg_regress fixture state" >&2
+        exit 2
+        ;;
+esac
 
 STATE_DIR="/tmp/pg_lakebase_object_regress_${PGPORT}"
 STATE_ENV="${STATE_DIR}/state.env"
-SETUP_CONTAINER_STARTED=0
+SETUP_STARTED=0
 
 docker_program() {
     if [ "${DOCKER:-}" != "" ]; then
@@ -61,13 +68,33 @@ container_name() {
     printf 'pg-lakebase-regress-minio-%s-%s\n' "$PGPORT" "$$"
 }
 
+network_name() {
+    printf 'pg-lakebase-regress-%s-%s\n' "$PGPORT" "$$"
+}
+
 teardown_container() {
     if [ -f "$STATE_ENV" ]; then
         # shellcheck disable=SC1090
         . "$STATE_ENV"
         docker=${DOCKER_PATH:-$(docker_program)}
+        if [ "${FAILURE_PROXY_PID:-}" != "" ]; then
+            kill "$FAILURE_PROXY_PID" >/dev/null 2>&1 || true
+        fi
+        if [ "${CATALOG_PROXY_PID:-}" != "" ]; then
+            kill "$CATALOG_PROXY_PID" >/dev/null 2>&1 || true
+        fi
+        if [ "${FALLBACK_REST_CONTAINER_ID:-}" != "" ]; then
+            "$docker" rm --force "$FALLBACK_REST_CONTAINER_ID" \
+                >/dev/null 2>&1 || true
+        fi
+        if [ "${REST_CONTAINER_ID:-}" != "" ]; then
+            "$docker" rm --force "$REST_CONTAINER_ID" >/dev/null 2>&1 || true
+        fi
         if [ "${CONTAINER_ID:-}" != "" ]; then
             "$docker" rm --force "$CONTAINER_ID" >/dev/null 2>&1 || true
+        fi
+        if [ "${NETWORK_ID:-}" != "" ]; then
+            "$docker" network rm "$NETWORK_ID" >/dev/null 2>&1 || true
         fi
     fi
     rm -rf "$STATE_DIR"
@@ -97,8 +124,32 @@ cleanup_stale_containers() {
     done
 }
 
+cleanup_stale_networks() {
+    docker=$1
+    network_ids=$("$docker" network ls -q \
+        --filter "label=${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VALUE}" \
+        2>/dev/null || true)
+
+    for network_id in $network_ids; do
+        network_pgport=$("$docker" network inspect \
+            --format "{{ index .Labels \"${PGPORT_LABEL_KEY}\" }}" \
+            "$network_id" 2>/dev/null || true)
+        network_state_dir=$("$docker" network inspect \
+            --format "{{ index .Labels \"${STATE_DIR_LABEL_KEY}\" }}" \
+            "$network_id" 2>/dev/null || true)
+
+        if [ "$network_pgport" = "$PGPORT" ]; then
+            "$docker" network rm "$network_id" >/dev/null 2>&1 || true
+        elif [ "$network_state_dir" != "" ] \
+            && [ "$network_state_dir" != "<no value>" ] \
+            && [ ! -d "$network_state_dir" ]; then
+            "$docker" network rm "$network_id" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
 cleanup_failed_setup() {
-    if [ "$SETUP_CONTAINER_STARTED" = "1" ]; then
+    if [ "$SETUP_STARTED" = "1" ]; then
         teardown_container
     fi
 }
@@ -131,6 +182,20 @@ wait_until_ready() {
     done
 }
 
+ensure_image() {
+    docker=$1
+    image=$2
+    if ! "$docker" image inspect "$image" >/dev/null 2>&1; then
+        if ! pull_output=$("$docker" pull "$image" 2>&1 >/dev/null); then
+            echo "failed to pull Docker image ${image}" >&2
+            echo "$pull_output" >&2
+            exit 1
+        fi
+    fi
+}
+
+. "${SCRIPT_DIR}/iceberg_catalog_fixture"
+
 setup() {
     teardown_container
     mkdir -p "$STATE_DIR"
@@ -146,36 +211,45 @@ setup() {
             ;;
     esac
     name=$(container_name)
+    fixture_network=$(network_name)
     cleanup_stale_containers "$docker"
+    cleanup_stale_networks "$docker"
 
-    if ! "$docker" image inspect "$MINIO_IMAGE" >/dev/null 2>&1; then
-        if ! pull_output=$("$docker" pull "$MINIO_IMAGE" 2>&1 >/dev/null); then
-            echo "failed to pull MinIO image ${MINIO_IMAGE}" >&2
-            echo "$pull_output" >&2
-            exit 1
-        fi
-    fi
+    ensure_image "$docker" "$MINIO_IMAGE"
+
+    network_id=$("$docker" network create \
+        --label "${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VALUE}" \
+        --label "${PGPORT_LABEL_KEY}=${PGPORT}" \
+        --label "${STATE_DIR_LABEL_KEY}=${STATE_DIR}" \
+        "$fixture_network")
+    {
+        printf 'DOCKER_PATH=%s\n' "$(state_quote "$docker")"
+        printf 'NETWORK_ID=%s\n' "$(state_quote "$network_id")"
+    } > "$STATE_ENV"
+    SETUP_STARTED=1
 
     container_id=$("$docker" run \
         --rm \
         --detach \
         --publish 127.0.0.1::9000 \
+        --network "$network_id" \
+        --network-alias minio \
         --env "MINIO_ROOT_USER=${MINIO_USER}" \
         --env "MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}" \
         --env "REGRESS_BUCKET=${REGRESS_BUCKET}" \
+        --env "REGRESS_FALLBACK_BUCKET=${REGRESS_FALLBACK_BUCKET}" \
+        --env "REGRESS_FALLBACK_SECOND_BUCKET=${REGRESS_FALLBACK_SECOND_BUCKET}" \
         --name "$name" \
         --label "${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VALUE}" \
         --label "${PGPORT_LABEL_KEY}=${PGPORT}" \
         --label "${STATE_DIR_LABEL_KEY}=${STATE_DIR}" \
         --entrypoint /bin/sh \
         "$MINIO_IMAGE" \
-        -c 'mkdir -p "/data/${REGRESS_BUCKET}" && /usr/bin/minio server /data')
+        -c 'mkdir -p "/data/${REGRESS_BUCKET}" "/data/${REGRESS_FALLBACK_BUCKET}" "/data/${REGRESS_FALLBACK_SECOND_BUCKET}" && /usr/bin/minio server /data')
 
     {
-        printf 'DOCKER_PATH=%s\n' "$(state_quote "$docker")"
         printf 'CONTAINER_ID=%s\n' "$(state_quote "$container_id")"
-    } > "$STATE_ENV"
-    SETUP_CONTAINER_STARTED=1
+    } >> "$STATE_ENV"
 
     port=$(mapped_port "$docker" "$container_id")
     if [ "$port" = "" ]; then
@@ -193,12 +267,28 @@ setup() {
         exit 1
     fi
 
+    iceberg_start_rest_catalog "$docker" "$network_id"
+    # shellcheck disable=SC1090
+    . "$STATE_ENV"
+    iceberg_provision_tables "$docker" "$network_id"
+    iceberg_start_vending_proxy "$REST_UPSTREAM_URI" "$endpoint"
+    # shellcheck disable=SC1090
+    . "$STATE_ENV"
+    iceberg_start_failure_proxy "$REST_URI"
+    # shellcheck disable=SC1090
+    . "$STATE_ENV"
+
     psql -X -v ON_ERROR_STOP=1 \
         --set=endpoint="$endpoint" \
         --set=bucket="$REGRESS_BUCKET" \
+        --set=fallback_bucket="$REGRESS_FALLBACK_BUCKET" \
+        --set=fallback_second_bucket="$REGRESS_FALLBACK_SECOND_BUCKET" \
         --set=region="$REGRESS_REGION" \
         --set=access_key_id="$MINIO_USER" \
-        --set=secret_access_key="$MINIO_PASSWORD" >/dev/null <<'SQL'
+        --set=secret_access_key="$MINIO_PASSWORD" \
+        --set=rest_uri="$REST_URI" \
+        --set=fallback_rest_uri="$FALLBACK_REST_URI" \
+        --set=failure_rest_uri="$FAILURE_REST_URI" >/dev/null <<'SQL'
 SET client_min_messages = warning;
 CREATE SCHEMA IF NOT EXISTS lakebase_regress;
 DROP TABLE IF EXISTS lakebase_regress.object_storage_fixture;
@@ -206,15 +296,25 @@ RESET client_min_messages;
 CREATE TABLE lakebase_regress.object_storage_fixture (
     endpoint text NOT NULL,
     bucket text NOT NULL,
+    fallback_bucket text NOT NULL,
+    fallback_second_bucket text NOT NULL,
     region text NOT NULL,
     access_key_id text NOT NULL,
-    secret_access_key text NOT NULL
+    secret_access_key text NOT NULL,
+    rest_uri text NOT NULL,
+    fallback_rest_uri text NOT NULL,
+    failure_rest_uri text NOT NULL
 );
 INSERT INTO lakebase_regress.object_storage_fixture
-VALUES (:'endpoint', :'bucket', :'region', :'access_key_id', :'secret_access_key');
+VALUES (
+    :'endpoint', :'bucket', :'fallback_bucket', :'fallback_second_bucket',
+    :'region', :'access_key_id',
+    :'secret_access_key', :'rest_uri', :'fallback_rest_uri',
+    :'failure_rest_uri'
+);
 SQL
 
-    SETUP_CONTAINER_STARTED=0
+    SETUP_STARTED=0
     trap - EXIT HUP INT TERM
     echo "object_storage_setup: true"
 }
@@ -222,13 +322,38 @@ SQL
 teardown() {
     teardown_container
     cleanup_stale_containers "$(docker_program)"
+    cleanup_stale_networks "$(docker_program)"
     echo "object_storage_teardown: true"
+}
+
+rest_stop() {
+    # shellcheck disable=SC1090
+    . "$STATE_ENV"
+    "${DOCKER_PATH:-$(docker_program)}" stop "$REST_CONTAINER_ID" >/dev/null
+    echo "iceberg_rest_stopped: true"
+}
+
+rest_start() {
+    # shellcheck disable=SC1090
+    . "$STATE_ENV"
+    docker=${DOCKER_PATH:-$(docker_program)}
+    "$docker" start "$REST_CONTAINER_ID" >/dev/null
+    iceberg_wait_for_url \
+        "Iceberg REST catalog" "${REST_UPSTREAM_URI}/v1/config"
+    echo "iceberg_rest_started: true"
+}
+
+reprovision() {
+    # shellcheck disable=SC1090
+    . "$STATE_ENV"
+    iceberg_provision_tables "${DOCKER_PATH:-$(docker_program)}" "$NETWORK_ID"
+    echo "object_storage_reprovisioned: true"
 }
 
 case "${1:-}" in
     setup)
         if [ "$#" -ne 1 ]; then
-            echo "usage: object_storage_fixture setup|teardown" >&2
+            echo "usage: object_storage_fixture setup|teardown|reprovision|rest-stop|rest-start" >&2
             exit 2
         fi
         setup
@@ -240,8 +365,17 @@ case "${1:-}" in
         fi
         teardown
         ;;
+    rest-stop)
+        rest_stop
+        ;;
+    rest-start)
+        rest_start
+        ;;
+    reprovision)
+        reprovision
+        ;;
     *)
-        echo "usage: object_storage_fixture setup|teardown" >&2
+        echo "usage: object_storage_fixture setup|teardown|reprovision|rest-stop|rest-start" >&2
         exit 2
         ;;
 esac

@@ -32,14 +32,11 @@ SELECT format('s3://%s/lagodb-connectors/copy/avro/exact.avro',
        format('s3://%s/lagodb-connectors/copy/native-bridge/sentinels.parquet',
               :'lakebase_regress_bucket') AS bridge_parquet
 \gset native_
-SET lagodb_connectors.default_s3_server = 'lagodb_connectors_regress_s3';
 COPY lagodb_connectors_regress.common_source
 TO :'native_avro_exact';
-SET lagodb_connectors.default_s3_server = 'missing_default_server';
 COPY lagodb_connectors_regress.common_source
 TO :'native_avro_prefix'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
-RESET lagodb_connectors.default_s3_server;
 COPY lagodb_connectors_regress.common_source
 TO :'native_avro_snappy'
 WITH (
@@ -50,10 +47,8 @@ WITH (
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_avro_exact;
 CREATE TABLE lagodb_connectors_regress.copy_avro_exact
     (:common_columns);
-SET lagodb_connectors.default_s3_server = 'lagodb_connectors_regress_s3';
 COPY lagodb_connectors_regress.copy_avro_exact
 FROM :'native_avro_exact';
-RESET lagodb_connectors.default_s3_server;
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_avro_snappy;
 CREATE TABLE lagodb_connectors_regress.copy_avro_snappy
     (:common_columns);

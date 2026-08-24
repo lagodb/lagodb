@@ -110,7 +110,7 @@ SELECT (pg_stat_file(:'path_sub_3', true)) is null as directory_missing_after_co
 
 -- Test custom table options for Iceberg access method.
 -- This test verifies that the IcebergTableHook correctly extracts and persists
--- table options defined in options.rs.
+-- table options defined in the options module.
 -- ============================================================================
 -- Test 1: Create table with default options (no custom options specified)
 -- ============================================================================

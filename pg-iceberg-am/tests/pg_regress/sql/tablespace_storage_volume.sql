@@ -24,7 +24,7 @@ SELECT lakebase.create_storage_volume(
 
 CREATE TABLESPACE iceberg_guard_dist
 LOCATION '/tmp/pg_iceberg_am_regress_guard_dist'
-WITH (lakebase_storage_volume = :'volume_name');
+WITH (storage_volume = :'volume_name');
 CREATE TABLESPACE iceberg_guard_native
 LOCATION '/tmp/pg_iceberg_am_regress_guard_native';
 
@@ -59,7 +59,7 @@ DECLARE
 BEGIN
     BEGIN
         EXECUTE 'ALTER TABLESPACE iceberg_guard_dist_renamed SET '
-                '(lakebase_storage_volume = ''another-volume'')';
+                '(storage_volume = ''another-volume'')';
     EXCEPTION WHEN feature_not_supported THEN
         public_rejected := true;
     END;
@@ -136,14 +136,14 @@ SELECT lakebase.create_storage_volume(
 
 CREATE TABLESPACE iceberg_volume_test
 LOCATION '/tmp/pg_iceberg_am_regress_spc'
-WITH (lakebase_storage_volume = :'volume_name');
+WITH (storage_volume = :'volume_name');
 
 SELECT array_length(spcoptions, 1) = 1
        AND (SELECT count(*) FROM unnest(spcoptions) AS option
             WHERE option LIKE 'lakebase_volume_id=%') = 1
        AND NOT EXISTS (
            SELECT 1 FROM unnest(spcoptions) AS option
-           WHERE option LIKE 'lakebase_storage_volume=%'
+           WHERE option LIKE 'storage_volume=%'
        ) AS internal_id_only
 FROM pg_tablespace
 WHERE spcname = 'iceberg_volume_test'

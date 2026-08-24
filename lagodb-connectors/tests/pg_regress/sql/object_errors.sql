@@ -133,11 +133,13 @@ FROM :'object_error_drift_parquet_prefix'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 
--- Provider mismatch and scope denial fail at DDL validation. Missing user
--- mapping fails when execution first acquires storage access.
+-- Provider mismatch, scope denial, and a missing user mapping all fail at DDL
+-- validation before PostgreSQL creates the foreign table.
 CREATE SERVER lagodb_connectors_regress_provider_gcs
     FOREIGN DATA WRAPPER lakebase_fdw
     OPTIONS (provider 'gcs');
+CREATE USER MAPPING FOR PUBLIC
+    SERVER lagodb_connectors_regress_provider_gcs;
 CREATE SERVER lagodb_connectors_regress_scope
     FOREIGN DATA WRAPPER lakebase_fdw
     OPTIONS (
@@ -180,8 +182,6 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.object_error_missing_mapping (
 )
 SERVER lagodb_connectors_regress_missing_mapping
 OPTIONS (path :'object_error_catalog_source_path', format 'text');
-SELECT count(*)
-FROM lagodb_connectors_regress.object_error_missing_mapping;
 \set VERBOSITY default
 
 RESET client_min_messages;
