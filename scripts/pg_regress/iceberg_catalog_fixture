@@ -36,7 +36,6 @@ iceberg_start_rest_container() {
     include_credentials=$4
     warehouse_bucket=$5
     warehouse_suffix=$6
-    mkdir -p "${STATE_DIR}/${network_alias}"
     ensure_image "$docker" "$ICEBERG_REST_IMAGE"
     rest_name="pg-lakebase-regress-${network_alias}-${PGPORT}-$$"
     STARTED_REST_CONTAINER_ID=$("$docker" run \
@@ -48,7 +47,7 @@ iceberg_start_rest_container() {
         --env "AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}" \
         --env "AWS_REGION=${REGRESS_REGION}" \
         --env CATALOG_CATALOG__IMPL=org.apache.iceberg.jdbc.JdbcCatalog \
-        --env CATALOG_URI=jdbc:sqlite:file:/state/catalog.db \
+        --env CATALOG_URI=jdbc:sqlite:file:/tmp/catalog.db \
         --env "CATALOG_WAREHOUSE=s3://${warehouse_bucket}/${warehouse_suffix}" \
         --env CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO \
         --env CATALOG_S3_ENDPOINT=http://minio:9000 \
@@ -56,7 +55,6 @@ iceberg_start_rest_container() {
         --env "CATALOG_INCLUDE__CREDENTIALS=${include_credentials}" \
         --env "CATALOG_S3_ACCESS__KEY__ID=${MINIO_USER}" \
         --env "CATALOG_S3_SECRET__ACCESS__KEY=${MINIO_PASSWORD}" \
-        --volume "${STATE_DIR}/${network_alias}:/state" \
         --name "$rest_name" \
         --label "${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VALUE}" \
         --label "${PGPORT_LABEL_KEY}=${PGPORT}" \
