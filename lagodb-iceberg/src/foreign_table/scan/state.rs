@@ -6,7 +6,7 @@ use pg_lakebase_core::fdw::{
 };
 
 use super::super::error::IcebergFdwError;
-use super::super::provider::IcebergFdw;
+use super::super::provider::LagodbIceberg;
 use super::super::relation::RestForeignTable;
 use super::super::schema::ForeignSchemaBinding;
 use super::super::source_identity::PlanSourceIdentity;
@@ -36,7 +36,7 @@ pub(crate) struct IcebergFdwScanState {
 
 impl IcebergFdwScanState {
     pub(crate) fn begin(
-        context: BeginForeignScanContext<'_, IcebergFdw>,
+        context: BeginForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<Self, ForeignScanError> {
         let resolved = RestForeignTable::resolve(
             context.relation.oid(),
@@ -123,7 +123,7 @@ impl IcebergFdwScanState {
 
     pub(crate) fn start(
         &mut self,
-        context: StartForeignScanContext<'_, IcebergFdw>,
+        context: StartForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<(), ForeignScanError> {
         if !matches!(self.cursor, ForeignScanCursor::Prepared) {
             return Err(IcebergFdwError::InvalidPlan {
@@ -184,7 +184,7 @@ impl IcebergFdwScanState {
 
     pub(crate) fn rescan(
         &mut self,
-        context: ReScanForeignScanContext<'_, IcebergFdw>,
+        context: ReScanForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<(), ForeignScanError> {
         if context.filters_changed {
             self.spec.set_row_filter(BoundIcebergPredicate::conjoin(

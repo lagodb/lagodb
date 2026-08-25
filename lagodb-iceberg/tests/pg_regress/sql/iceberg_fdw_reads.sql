@@ -23,11 +23,11 @@ CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA iceberg_fdw_read;
 CREATE SERVER iceberg_read_rest
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (uri :'regress_rest_uri');
 CREATE SERVER iceberg_read_fallback
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_fallback_rest_uri',
     enable_vended_credentials 'false'
@@ -37,7 +37,7 @@ CREATE USER MAPPING FOR CURRENT_USER SERVER iceberg_read_fallback;
 
 CREATE SERVER iceberg_read_storage_broad
 TYPE 'storage'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     provider 's3_compatible',
     endpoint :'regress_s3_endpoint',
@@ -48,7 +48,7 @@ OPTIONS (
 );
 CREATE SERVER iceberg_read_storage_narrow
 TYPE 'storage'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     provider 's3_compatible',
     endpoint :'regress_s3_endpoint',
@@ -59,7 +59,7 @@ OPTIONS (
 );
 CREATE SERVER iceberg_read_storage_b
 TYPE 'storage'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     provider 's3_compatible',
     endpoint :'regress_s3_endpoint',
@@ -222,7 +222,7 @@ SELECT * FROM iceberg_fdw_read.fallback_second_bucket ORDER BY id;
 
 CREATE SERVER iceberg_read_storage_ambiguous
 TYPE 'storage'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     provider 's3_compatible',
     endpoint :'regress_s3_endpoint',

@@ -10,7 +10,7 @@ use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 
 use super::delimited::{DelimitedOptions, DelimitedOptionsBuilder};
 use super::delimited_schema::DelimitedSchemaReader;
@@ -121,7 +121,7 @@ impl FormatReader for TextFormat {
 
     fn begin(
         self: Box<Self>,
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
         files: crate::storage::ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         let Self {

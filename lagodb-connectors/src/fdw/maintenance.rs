@@ -10,9 +10,9 @@ use pg_lakebase_core::storage::foreign::StorageManager;
 use crate::error::ConnectorError;
 use crate::storage::ObjectInput;
 
-use super::{Lakebase, ResolvedForeignRelation};
+use super::{LagodbConnectors, ResolvedForeignRelation};
 
-impl FdwAnalyze for Lakebase {
+impl FdwAnalyze for LagodbConnectors {
     fn analyze(
         ctx: &ForeignAnalyzeContext<'_>,
     ) -> Result<Option<ForeignAnalyzeSupport>, ForeignTableMaintenanceError> {
@@ -42,7 +42,7 @@ impl FdwAnalyze for Lakebase {
     }
 }
 
-impl FdwTruncate for Lakebase {
+impl FdwTruncate for LagodbConnectors {
     fn truncate(
         _ctx: &ForeignTruncateContext<'_>,
     ) -> Result<(), ForeignTableMaintenanceError> {

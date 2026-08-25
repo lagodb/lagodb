@@ -7,9 +7,9 @@ use pg_lakebase_core::fdw::{
 use crate::error::ConnectorError;
 use crate::format::{FormatKind, FormatScanPrivate};
 
-pub(crate) type LakebaseScanPrivate = FormatScanPrivate;
+pub(crate) type ConnectorScanPrivate = FormatScanPrivate;
 
-impl ForeignPlanPrivate for LakebaseScanPrivate {
+impl ForeignPlanPrivate for ConnectorScanPrivate {
     fn encode(
         &self,
         writer: &mut ForeignPrivateWriter,

@@ -17,10 +17,10 @@ use super::options::validate_catalog_options;
     author = "LagoDB",
     website = "https://github.com/robertmu/pg-lakebase"
 )]
-pub(crate) struct Lakebase;
+pub(crate) struct LagodbConnectors;
 
-impl ForeignDataWrapper for Lakebase {
-    const NAME: &'static CStr = c"lakebase_fdw";
+impl ForeignDataWrapper for LagodbConnectors {
+    const NAME: &'static CStr = c"lagodb_connectors";
 
     fn register(routine: &mut FdwRoutine) {
         register_scan::<Self>(routine);

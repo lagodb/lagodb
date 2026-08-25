@@ -8,7 +8,7 @@ use pg_lakebase_core::fdw::ForeignFilterExplainValues;
 use pg_lakebase_core::plan_data::{PlanDataReader, PlanDataWriter};
 
 use super::error::IcebergFdwError;
-use super::provider::IcebergFdw;
+use super::provider::LagodbIceberg;
 use super::relation::RestForeignTable;
 use super::source_identity::PlanSourceIdentity;
 use crate::engine::predicate::{
@@ -147,7 +147,7 @@ impl FilterPushdownPlanner for IcebergFdwFilterPlanner {
     }
 }
 
-impl FilterPushdown for IcebergFdw {
+impl FilterPushdown for LagodbIceberg {
     type Planner = IcebergFdwFilterPlanner;
     type PlannedPredicate = FdwPlannedPredicate;
     type BoundPredicate = BoundIcebergPredicate;

@@ -9,18 +9,18 @@ use pg_lakebase_core::fdw::{
     ForeignPrivateReader, ForeignPrivateWriter, ForeignUpdateTargetContext,
 };
 
-use super::{Lakebase, ResolvedForeignRelation};
+use super::{LagodbConnectors, ResolvedForeignRelation};
 use crate::error::ConnectorError;
 use crate::format::{FormatKind, FormatWritePrivate};
 use crate::gucs::WriteConfig;
 use crate::storage::{ObjectLocationKind, ObjectOutput};
 use pg_lakebase_core::storage::foreign::StorageManager;
 
-pub(crate) use state::LakebaseModifyState;
+pub(crate) use state::ConnectorModifyState;
 
-pub(crate) type LakebaseModifyPrivate = FormatWritePrivate;
+pub(crate) type ConnectorModifyPrivate = FormatWritePrivate;
 
-impl ForeignModifyPrivate for LakebaseModifyPrivate {
+impl ForeignModifyPrivate for ConnectorModifyPrivate {
     fn encode(
         &self,
         writer: &mut ForeignPrivateWriter,
@@ -39,9 +39,9 @@ impl ForeignModifyPrivate for LakebaseModifyPrivate {
     }
 }
 
-impl FdwModify for Lakebase {
-    type ModifyPrivateData = LakebaseModifyPrivate;
-    type ModifyState = LakebaseModifyState;
+impl FdwModify for LagodbConnectors {
+    type ModifyPrivateData = ConnectorModifyPrivate;
+    type ModifyState = ConnectorModifyState;
     type TargetScanContext = ();
 
     fn capabilities(
@@ -87,7 +87,7 @@ impl FdwModify for Lakebase {
             WriteConfig::from_guc().target_file_bytes()
         })?;
         let inner = writer.begin_modify(context, output)?;
-        Ok(LakebaseModifyState::new(inner))
+        Ok(ConnectorModifyState::new(inner))
     }
 
     fn target_scan_context(
@@ -109,6 +109,6 @@ impl FdwModify for Lakebase {
             WriteConfig::from_guc().target_file_bytes()
         })?;
         let inner = writer.begin_insert(context, output)?;
-        Ok(LakebaseModifyState::new(inner))
+        Ok(ConnectorModifyState::new(inner))
     }
 }

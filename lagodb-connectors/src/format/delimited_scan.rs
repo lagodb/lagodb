@@ -15,7 +15,7 @@ use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 
 use super::scan::{FormatScanPlanner, FormatScanPrivate, FormatScanState};
 use super::{FormatKind, StreamCompression, StreamDecoder};
@@ -69,7 +69,7 @@ impl FormatScanPlanner for DelimitedScanPlanner {
 
     fn build_plan(
         &mut self,
-        context: &ForeignPlanContext<'_, Lakebase>,
+        context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
         let mut plan = ForeignPlanSpec::new(context.path_private().to_owned());
         plan.projection_policy = ScanProjectionPolicy::RequireRelationShape;
@@ -83,7 +83,7 @@ pub(super) struct DelimitedScanState {
 
 impl DelimitedScanState {
     pub(super) fn begin(
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
         files: ObjectFiles,
         compression: StreamCompression,
         postgres_options: *mut pg_sys::List,
@@ -114,7 +114,7 @@ impl FormatScanState for DelimitedScanState {
 
     fn rescan(
         &mut self,
-        context: ReScanForeignScanContext<'_, Lakebase>,
+        context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ConnectorError> {
         Ok(self.decoder.rescan(context.econtext)?)
     }

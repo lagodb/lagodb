@@ -2,9 +2,9 @@
 
 CREATE ACCESS METHOD iceberg TYPE TABLE HANDLER iceberg_table_am_handler;
 
-CREATE FOREIGN DATA WRAPPER iceberg_fdw
-  HANDLER iceberg_fdw_fdw_handler
-  VALIDATOR iceberg_fdw_fdw_validator;
+CREATE FOREIGN DATA WRAPPER lagodb_iceberg
+  HANDLER lagodb_iceberg_fdw_handler
+  VALIDATOR lagodb_iceberg_fdw_validator;
 
 REVOKE ALL ON FUNCTION iceberg.maintenance_worker(internal) FROM PUBLIC;
 

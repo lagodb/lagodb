@@ -158,18 +158,15 @@ Query external Iceberg tables registered in an Iceberg REST catalog:
 ```sql
 CREATE SERVER iceberg_catalog
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (uri 'https://catalog.example.com');
 
 CREATE USER MAPPING FOR CURRENT_USER
 SERVER iceberg_catalog
 OPTIONS (credential 'my_client_id:my_client_secret');
 
-CREATE FOREIGN TABLE ext_iceberg_events (
-    event_time  timestamptz NOT NULL,
-    device_id   bigint      NOT NULL,
-    temperature double precision
-)
+-- Automatically fetches and binds columns from the Iceberg REST catalog schema
+CREATE FOREIGN TABLE ext_iceberg_events ()
 SERVER iceberg_catalog
 OPTIONS (
     catalog_name 'production',
@@ -189,11 +186,12 @@ Query raw data files (Parquet, CSV, JSON, Avro, Text) on object storage or expor
 
 ```sql
 CREATE SERVER s3_store
-FOREIGN DATA WRAPPER lakebase_fdw
+FOREIGN DATA WRAPPER lagodb_connectors
 OPTIONS (
     provider 's3_compatible',
     endpoint 'http://127.0.0.1:9000',
-    allow_http 'true'
+    allow_http 'true',
+    scope 's3://analytics/'  -- Enables automatic server matching for URIs under this scope
 );
 
 CREATE USER MAPPING FOR CURRENT_USER
@@ -204,16 +202,14 @@ OPTIONS (
 );
 
 -- Fast export directly to object storage as Parquet
+-- (Server is automatically matched by the longest matching scope 's3://analytics/',
+--  and format is automatically inferred from the '.parquet' suffix)
 COPY events
-TO 's3://analytics/exports/events.parquet'
-WITH (server 's3_store');
+TO 's3://analytics/exports/events.parquet';
 
 -- Or query raw Parquet files in object storage as a foreign table
-CREATE FOREIGN TABLE s3_logs (
-    id bigint,
-    occurred_at timestamptz,
-    payload text
-)
+-- (An empty column list '()' automatically infers columns and types from Parquet schema)
+CREATE FOREIGN TABLE s3_logs ()
 SERVER s3_store
 OPTIONS (
     path 's3://analytics/logs/',

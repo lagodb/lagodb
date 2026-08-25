@@ -8,7 +8,7 @@
 
 `lagodb-iceberg` is the Apache Iceberg extension for [`pg-lakebase`](../README.md). It provides two native PostgreSQL integration modes backed by a single shared Iceberg execution engine:
 1. **Managed Tables (`USING iceberg`)**: PostgreSQL relations with native Table Access Method (TableAM) integration, ACID transactions, and metadata lifecycle management.
-2. **Foreign Tables (`iceberg_fdw`)**: Foreign Data Wrapper (FDW) integration connecting PostgreSQL to existing tables in an external Iceberg REST Catalog without moving data.
+2. **Foreign Tables (`lagodb_iceberg`)**: Foreign Data Wrapper (FDW) integration connecting PostgreSQL to existing tables in an external Iceberg REST Catalog without moving data.
 
 Applications query and mutate Iceberg tables using ordinary PostgreSQL SQL and transaction semantics, while data and metadata remain in open Iceberg and Parquet formats.
 
@@ -114,7 +114,7 @@ Transaction Boundary (COMMIT / ROLLBACK)
 | Capability | Status | Description / Boundary |
 |---|---|---|
 | Managed Tables (`USING iceberg`) | Available | Full TableAM integration, local/object storage, PostgreSQL-backed catalog |
-| Foreign Tables (`iceberg_fdw`) | Available | REST catalog integration, read-only and read-write modes, `IMPORT FOREIGN SCHEMA` |
+| Foreign Tables (`lagodb_iceberg`) | Available | REST catalog integration, read-only and read-write modes, `IMPORT FOREIGN SCHEMA` |
 | SQL DML Operations | Available | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` |
 | Transactions & Isolation | Available | `READ COMMITTED` statement-level metadata visibility, savepoints, read-your-own-writes |
 | Predicate Pushdown | Available | File and row-group pruning with automatic residual qual evaluation in PostgreSQL |
@@ -156,7 +156,7 @@ SELECT * FROM events WHERE device_id = 101;
 -- 2. Iceberg Foreign Table (External REST Catalog)
 CREATE SERVER iceberg_catalog
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (uri 'https://catalog.example.com');
 
 CREATE USER MAPPING FOR CURRENT_USER

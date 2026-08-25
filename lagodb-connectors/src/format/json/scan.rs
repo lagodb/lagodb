@@ -13,7 +13,7 @@ use pg_lakebase_core::fdw::{
 use pgrx::{PgTryBuilder, pg_sys};
 
 use crate::error::ConnectorError;
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 use crate::gucs::ReadConfig;
 use crate::storage::ObjectFiles;
 
@@ -64,7 +64,7 @@ impl FormatScanPlanner for JsonScanPlanner {
 
     fn build_plan(
         &mut self,
-        context: &ForeignPlanContext<'_, Lakebase>,
+        context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
         let mut plan = ForeignPlanSpec::new(context.path_private().to_owned());
         plan.projection_policy = ScanProjectionPolicy::RequireRelationShape;
@@ -82,7 +82,7 @@ pub(super) struct JsonScanState {
 
 impl JsonScanState {
     pub(super) fn begin(
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
         files: ObjectFiles,
         compression: StreamCompression,
     ) -> Result<Self, ConnectorError> {
@@ -180,7 +180,7 @@ impl FormatScanState for JsonScanState {
 
     fn rescan(
         &mut self,
-        _context: ReScanForeignScanContext<'_, Lakebase>,
+        _context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ConnectorError> {
         self.stream.reset();
         Ok(())

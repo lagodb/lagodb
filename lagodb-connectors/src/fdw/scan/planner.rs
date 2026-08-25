@@ -9,27 +9,27 @@ use pg_lakebase_core::fdw::{
 
 use crate::format::FormatScanPlanner;
 
-use super::super::{Lakebase, ResolvedForeignRelation};
-use super::private::LakebaseScanPrivate;
-use super::state::LakebaseScanState;
+use super::super::{LagodbConnectors, ResolvedForeignRelation};
+use super::private::ConnectorScanPrivate;
+use super::state::ConnectorScanState;
 
 /// Planner state contains the selected format reader's scan planner. The
 /// format is resolved once during `GetForeignRelSize`; no format branch is
 /// needed in later callbacks.
-pub(crate) struct LakebaseScanPlanner {
+pub(crate) struct ConnectorScanPlanner {
     scan: Box<dyn FormatScanPlanner>,
 }
 
-impl FdwScan for Lakebase {
-    type PlannerState = LakebaseScanPlanner;
-    type PrivateData = LakebaseScanPrivate;
-    type State = LakebaseScanState;
+impl FdwScan for LagodbConnectors {
+    type PlannerState = ConnectorScanPlanner;
+    type PrivateData = ConnectorScanPrivate;
+    type State = ConnectorScanState;
 
     fn init_planner(
         context: &ForeignRelContext<'_>,
     ) -> Result<Self::PlannerState, ForeignScanError> {
         let relation = ResolvedForeignRelation::resolve(context.relation_oid())?;
-        Ok(LakebaseScanPlanner {
+        Ok(ConnectorScanPlanner {
             scan: relation.into_reader().planner(),
         })
     }
@@ -74,7 +74,7 @@ impl FdwScan for Lakebase {
     fn begin(
         context: BeginForeignScanContext<'_, Self>,
     ) -> Result<Self::State, ForeignScanError> {
-        LakebaseScanState::begin(context)
+        ConnectorScanState::begin(context)
     }
 
     fn next_slot(

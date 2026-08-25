@@ -19,7 +19,7 @@ use super::{
     FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
     FormatWriter, InferredSchema, StreamCompression,
 };
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 use crate::storage::ObjectOutput;
 
 /// CSV-format processor.
@@ -289,7 +289,7 @@ impl FormatReader for CsvFormat {
 
     fn begin(
         self: Box<Self>,
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
         files: crate::storage::ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         let Self {

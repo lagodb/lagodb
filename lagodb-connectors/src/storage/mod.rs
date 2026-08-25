@@ -17,6 +17,7 @@ pub(crate) use uri::ObjectUri;
 
 use std::ffi::CStr;
 
+use pg_lakebase_core::fdw::ForeignDataWrapper;
 use pg_lakebase_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
@@ -24,6 +25,7 @@ use pg_lakebase_core::storage::profile::{StorageServerCatalog, StorageServerPoli
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
+use crate::fdw::LagodbConnectors;
 
 pub(crate) struct ResolvedStorageLocation {
     server_oid: pg_sys::Oid,
@@ -97,26 +99,32 @@ impl ResolvedStorageLocation {
         })
     }
 
-    pub(crate) fn server_uses_lakebase(server_name: &CStr) -> bool {
+    pub(crate) fn server_uses_connectors(server_name: &CStr) -> bool {
         let server_oid =
             unsafe { pg_sys::get_foreign_server_oid(server_name.as_ptr(), true) };
         if server_oid == pg_sys::InvalidOid {
             return false;
         }
         let server = unsafe { &*pg_sys::GetForeignServer(server_oid) };
-        let lakebase_fdw = unsafe {
-            pg_sys::get_foreign_data_wrapper_oid(c"lakebase_fdw".as_ptr(), true)
+        let provider_oid = unsafe {
+            pg_sys::get_foreign_data_wrapper_oid(
+                LagodbConnectors::NAME.as_ptr(),
+                true,
+            )
         };
-        server.fdwid == lakebase_fdw
+        server.fdwid == provider_oid
     }
 
-    pub(crate) fn relation_uses_lakebase(relation_oid: pg_sys::Oid) -> bool {
+    pub(crate) fn relation_uses_connectors(relation_oid: pg_sys::Oid) -> bool {
         let table = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
         let server = unsafe { &*pg_sys::GetForeignServer(table.serverid) };
-        let lakebase_fdw = unsafe {
-            pg_sys::get_foreign_data_wrapper_oid(c"lakebase_fdw".as_ptr(), true)
+        let provider_oid = unsafe {
+            pg_sys::get_foreign_data_wrapper_oid(
+                LagodbConnectors::NAME.as_ptr(),
+                true,
+            )
         };
-        server.fdwid == lakebase_fdw
+        server.fdwid == provider_oid
     }
 
     fn server_catalog(
@@ -139,10 +147,13 @@ impl ResolvedStorageLocation {
     }
 
     fn server_policy() -> StorageServerPolicy<'static> {
-        let lakebase_fdw = unsafe {
-            pg_sys::get_foreign_data_wrapper_oid(c"lakebase_fdw".as_ptr(), true)
+        let provider_oid = unsafe {
+            pg_sys::get_foreign_data_wrapper_oid(
+                LagodbConnectors::NAME.as_ptr(),
+                true,
+            )
         };
-        StorageServerPolicy::new(lakebase_fdw, None)
+        StorageServerPolicy::new(provider_oid, None)
     }
 
     pub(crate) fn acquire_object_access(

@@ -16,7 +16,7 @@ use super::filter::{
     FormatFilterPlanner, FormatPlannedFilter, NoPushdownFilterPlanner,
 };
 use super::{FormatKind, FormatObject};
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 
 /// Format selection persisted in the core FDW plan envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub(crate) trait FormatReader: FormatObject {
     /// Create executor state for the selected reader.
     fn begin(
         self: Box<Self>,
-        _context: StartForeignScanContext<'_, Lakebase>,
+        _context: StartForeignScanContext<'_, LagodbConnectors>,
         _files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         Err(ConnectorError::scan_not_implemented(self.kind()))
@@ -125,7 +125,7 @@ pub(crate) trait FormatScanPlanner: 'static {
 
     fn build_plan(
         &mut self,
-        context: &ForeignPlanContext<'_, Lakebase>,
+        context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError>;
 }
 
@@ -168,7 +168,7 @@ impl FormatScanPlanner for NotImplementedScanPlanner {
 
     fn build_plan(
         &mut self,
-        _context: &ForeignPlanContext<'_, Lakebase>,
+        _context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
         Err(ConnectorError::scan_not_implemented(self.format))
     }
@@ -183,7 +183,7 @@ pub(crate) trait FormatScanState: 'static {
 
     fn rescan(
         &mut self,
-        context: ReScanForeignScanContext<'_, Lakebase>,
+        context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ConnectorError>;
 
     fn end(&mut self) -> Result<(), ConnectorError>;

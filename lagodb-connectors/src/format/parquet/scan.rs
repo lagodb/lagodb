@@ -19,7 +19,7 @@ use pg_lakebase_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 use crate::format::{
     FormatBoundFilter, FormatKind, FormatScanPlanner, FormatScanPrivate,
     FormatScanState,
@@ -94,7 +94,7 @@ impl FormatScanPlanner for ParquetScanPlanner {
 
     fn build_plan(
         &mut self,
-        context: &ForeignPlanContext<'_, Lakebase>,
+        context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
         Ok(ForeignPlanSpec::new(context.path_private().to_owned()))
     }
@@ -125,7 +125,7 @@ pub(super) struct ParquetScanState {
 
 impl ParquetScanState {
     pub(super) fn begin(
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
         mut files: ObjectFiles,
     ) -> Result<Self, ConnectorError> {
         let live = context.relation.live_columns();
@@ -343,7 +343,7 @@ impl FormatScanState for ParquetScanState {
 
     fn rescan(
         &mut self,
-        context: ReScanForeignScanContext<'_, Lakebase>,
+        context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ConnectorError> {
         if context.filters_changed {
             self.filters = Self::bound_filters(context.filters.iter());

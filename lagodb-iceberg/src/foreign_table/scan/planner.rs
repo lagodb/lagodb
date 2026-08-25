@@ -11,7 +11,7 @@ use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;
 use super::super::options::ForeignTableIdentity;
-use super::super::provider::IcebergFdw;
+use super::super::provider::LagodbIceberg;
 use super::private::IcebergFdwScanPrivate;
 use super::state::IcebergFdwScanState;
 
@@ -24,7 +24,7 @@ pub(crate) struct IcebergFdwScanPlanner {
     pages: f64,
 }
 
-impl FdwScan for IcebergFdw {
+impl FdwScan for LagodbIceberg {
     type PlannerState = IcebergFdwScanPlanner;
     type PrivateData = IcebergFdwScanPrivate;
     type State = IcebergFdwScanState;

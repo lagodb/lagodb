@@ -1,3 +1,3 @@
-CREATE FOREIGN DATA WRAPPER lakebase_fdw
-  HANDLER lakebase_fdw_handler
-  VALIDATOR lakebase_fdw_validator;
+CREATE FOREIGN DATA WRAPPER lagodb_connectors
+  HANDLER lagodb_connectors_fdw_handler
+  VALIDATOR lagodb_connectors_fdw_validator;

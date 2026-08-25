@@ -18,10 +18,10 @@ use super::options::IcebergFdwOptions;
     author = "LagoDB",
     website = "https://github.com/robertmu/pg-lakebase"
 )]
-pub(crate) struct IcebergFdw;
+pub(crate) struct LagodbIceberg;
 
-impl ForeignDataWrapper for IcebergFdw {
-    const NAME: &'static CStr = c"iceberg_fdw";
+impl ForeignDataWrapper for LagodbIceberg {
+    const NAME: &'static CStr = c"lagodb_iceberg";
 
     fn register(routine: &mut FdwRoutine) {
         register_scan::<Self>(routine);
@@ -38,7 +38,7 @@ impl ForeignDataWrapper for IcebergFdw {
     }
 }
 
-impl IcebergFdw {
+impl LagodbIceberg {
     /// Match the installed handler by its C entry-point identity. PostgreSQL
     /// renames do not change `pg_proc.prosrc`; replacing the FDW handler does.
     pub(crate) fn handles_server(server_oid: pg_sys::Oid) -> bool {
@@ -74,14 +74,14 @@ impl IcebergFdw {
                 )
             };
             unsafe { CStr::from_ptr(source) }.to_bytes()
-                == b"iceberg_fdw_fdw_handler_wrapper"
+                == b"lagodb_iceberg_fdw_handler_wrapper"
         };
         unsafe { pg_sys::ReleaseSysCache(tuple) };
         matches
     }
 }
 
-impl FdwImportSchema for IcebergFdw {
+impl FdwImportSchema for LagodbIceberg {
     fn import_schema(
         context: &ForeignImportSchemaContext<'_>,
     ) -> Result<Vec<CString>, ForeignImportError> {

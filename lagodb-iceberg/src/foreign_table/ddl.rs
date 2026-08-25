@@ -17,7 +17,7 @@ use super::error::IcebergFdwError;
 use super::options::{
     ForeignTableIdentity, MaterializedForeignOptions, RestCatalogConnection,
 };
-use super::provider::IcebergFdw;
+use super::provider::LagodbIceberg;
 use super::relation::RestForeignTable;
 use super::schema::ForeignTableSchema;
 
@@ -104,7 +104,7 @@ impl UtilityHook for IcebergForeignTableAlterGuard {
             return Ok(());
         }
         let foreign = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
-        if !IcebergFdw::handles_server(foreign.serverid) {
+        if !LagodbIceberg::handles_server(foreign.serverid) {
             return Ok(());
         }
         Err(IcebergFdwError::UnsupportedOperation {
@@ -152,7 +152,7 @@ impl UtilityHook for IcebergForeignTableVacuumGuard {
                 continue;
             }
             let foreign = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
-            if IcebergFdw::handles_server(foreign.serverid) {
+            if LagodbIceberg::handles_server(foreign.serverid) {
                 return Err(IcebergFdwError::UnsupportedOperation {
                     operation: "VACUUM on an Iceberg foreign table",
                 }
@@ -195,7 +195,7 @@ impl UtilityHook for IcebergForeignTableRenameGuard {
             return Ok(());
         }
         let foreign = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
-        if !IcebergFdw::handles_server(foreign.serverid) {
+        if !LagodbIceberg::handles_server(foreign.serverid) {
             return Ok(());
         }
         Err(IcebergFdwError::UnsupportedOperation {
@@ -238,7 +238,7 @@ impl<'a> ForeignTableCreateOperation<'a> {
         if server_oid == pg_sys::InvalidOid {
             return Ok(());
         }
-        if !IcebergFdw::handles_server(server_oid) {
+        if !LagodbIceberg::handles_server(server_oid) {
             return Ok(());
         }
         let effective_user = unsafe { pg_sys::GetUserId() };

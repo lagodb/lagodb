@@ -7,7 +7,7 @@ storage, Google Cloud Storage, and Azure Blob Storage, with `text`, `csv`,
 
 ## How it works
 
-The extension registers one foreign data wrapper, `lakebase_fdw`. A foreign
+The extension registers one foreign data wrapper, `lagodb_connectors`. A foreign
 server describes the storage provider, endpoint, region, and optional access
 scope, while a user mapping holds credentials. Foreign tables and object-URI
 `COPY` commands resolve storage through foreign servers and user mappings, so
@@ -36,7 +36,7 @@ CREATE EXTENSION pg_lakebase_runtime;
 CREATE EXTENSION lagodb_connectors;
 
 CREATE SERVER pg_lakebase_s3
-FOREIGN DATA WRAPPER lakebase_fdw
+FOREIGN DATA WRAPPER lagodb_connectors
 OPTIONS (
     provider 's3_compatible',
     endpoint 'http://127.0.0.1:9000',
@@ -64,12 +64,12 @@ OPTIONS (ADD scope 's3://analytics-bucket/');
 ```
 
 When COPY does not specify `server`, the connector enumerates accessible
-`lakebase_fdw` servers and selects the longest matching scope. Equal-length
+`lagodb_connectors` servers and selects the longest matching scope. Equal-length
 matches are rejected as ambiguous, and servers without `scope` participate
 only in explicit selection.
 
 After selecting the server, the connector verifies that it uses
-`lakebase_fdw`, its provider matches the URI, and the URI is within its
+`lagodb_connectors`, its provider matches the URI, and the URI is within its
 optional `scope`. The current role must have `USAGE` on the server. A user
 mapping for that role, or a `PUBLIC` user mapping, must also exist.
 
@@ -139,7 +139,7 @@ WITH (header true);
 
 ```sql
 CREATE SERVER object_store
-FOREIGN DATA WRAPPER lakebase_fdw
+FOREIGN DATA WRAPPER lagodb_connectors
 OPTIONS (
     provider 's3_compatible',
     endpoint 'http://127.0.0.1:9000',

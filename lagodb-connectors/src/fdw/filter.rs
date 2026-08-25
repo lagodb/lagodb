@@ -10,15 +10,15 @@ use crate::format::{
     FormatBoundFilter, FormatFilterPlanner, FormatKind, FormatPlannedFilter,
 };
 
-use super::{Lakebase, ResolvedForeignRelation};
+use super::{LagodbConnectors, ResolvedForeignRelation};
 use crate::error::ConnectorError;
 
 /// Planner state created once for one relation planning invocation.
-pub(crate) struct LakebaseFilterPlanner {
+pub(crate) struct ConnectorFilterPlanner {
     inner: Box<dyn FormatFilterPlanner>,
 }
 
-impl FilterPushdownPlanner for LakebaseFilterPlanner {
+impl FilterPushdownPlanner for ConnectorFilterPlanner {
     type PlannedPredicate = FormatPlannedFilter;
     type Error = ConnectorError;
 
@@ -31,15 +31,15 @@ impl FilterPushdownPlanner for LakebaseFilterPlanner {
 }
 
 /// Format-owned planned predicate exposed through the core adapter.
-pub(crate) type LakebasePlannedFilter = FormatPlannedFilter;
+pub(crate) type ConnectorPlannedFilter = FormatPlannedFilter;
 
 /// Format-owned bound predicate exposed through the core adapter.
-pub(crate) type LakebaseBoundFilter = FormatBoundFilter;
+pub(crate) type ConnectorBoundFilter = FormatBoundFilter;
 
-impl FilterPushdown for Lakebase {
-    type Planner = LakebaseFilterPlanner;
-    type PlannedPredicate = LakebasePlannedFilter;
-    type BoundPredicate = LakebaseBoundFilter;
+impl FilterPushdown for LagodbConnectors {
+    type Planner = ConnectorFilterPlanner;
+    type PlannedPredicate = ConnectorPlannedFilter;
+    type BoundPredicate = ConnectorBoundFilter;
     type Error = ConnectorError;
 
     fn begin_filter_planning(
@@ -47,7 +47,7 @@ impl FilterPushdown for Lakebase {
     ) -> Result<Self::Planner, Self::Error> {
         let selected = ResolvedForeignRelation::resolve(context.relation_oid())?;
         let reader = selected.into_reader();
-        Ok(LakebaseFilterPlanner {
+        Ok(ConnectorFilterPlanner {
             inner: reader.begin_filter_planning(context)?,
         })
     }

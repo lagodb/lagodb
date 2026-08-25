@@ -171,7 +171,7 @@ SELECT to_regclass('iceberg_fdw_regress.invalid_schema') IS NULL
 (1 row)
 
 INSERT INTO iceberg_fdw_regress.inferred VALUES (11, 'eleven');
-ERROR:  FDW provider "iceberg_fdw" callback PlanForeignModify failed: foreign provider does not support this modify operation
+ERROR:  FDW provider "lagodb_iceberg" callback PlanForeignModify failed: foreign provider does not support this modify operation
 ALTER FOREIGN TABLE iceberg_fdw_regress.writable ADD COLUMN extra integer;
 ERROR:  Iceberg foreign tables do not support ALTER FOREIGN TABLE
 ALTER FOREIGN TABLE iceberg_fdw_regress.writable RENAME TO renamed;
@@ -323,7 +323,7 @@ BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (40, 'forty');
 ALTER SERVER iceberg_rest OPTIONS (SET uri :'regress_failure_rest_uri');
 INSERT INTO iceberg_fdw_regress.writable VALUES (41, 'forty-one');
-ERROR:  FDW provider "iceberg_fdw" callback BeginForeignModify failed: FDW provider modify error: foreign server or user-mapping configuration changed after this writable transaction bound it
+ERROR:  FDW provider "lagodb_iceberg" callback BeginForeignModify failed: FDW provider modify error: foreign server or user-mapping configuration changed after this writable transaction bound it
 ROLLBACK;
 \set VERBOSITY default
 SELECT count(*) AS changed_binding_rows

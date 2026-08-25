@@ -13,7 +13,7 @@ use pg_lakebase_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use super::options::ForeignTableIdentity;
-use super::provider::IcebergFdw;
+use super::provider::LagodbIceberg;
 use super::relation::RestForeignTable;
 use super::scan::ForeignMutationScan;
 use super::schema::ForeignSchemaBinding;
@@ -21,7 +21,7 @@ use super::transaction::ForeignTransaction;
 use private::IcebergFdwModifyPrivate;
 use state::IcebergFdwModifyState;
 
-impl FdwModify for IcebergFdw {
+impl FdwModify for LagodbIceberg {
     type ModifyPrivateData = IcebergFdwModifyPrivate;
     type ModifyState = IcebergFdwModifyState;
     type TargetScanContext = ForeignMutationScan;
@@ -101,7 +101,7 @@ impl FdwModify for IcebergFdw {
     }
 }
 
-impl IcebergFdw {
+impl LagodbIceberg {
     fn begin_state(
         relation: &RelationHandle<'_>,
         effective_user: pg_sys::Oid,

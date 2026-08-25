@@ -56,7 +56,7 @@ SELECT payload FROM iceberg_fdw_read.filters WHERE id = 2;
 ------------------------------------------
  Foreign Scan on iceberg_fdw_read.filters
    Output: payload
-   Provider: iceberg_fdw
+   Provider: lagodb_iceberg
    Pushed Filter Exact: id = 2
    Recheck: id = 2
 (5 rows)
@@ -76,7 +76,7 @@ WHERE event_date = DATE '2024-01-02';
  Foreign Scan on iceberg_fdw_read.filters
    Output: id
    Filter: (filters.event_date = '01-02-2024'::date)
-   Provider: iceberg_fdw
+   Provider: lagodb_iceberg
    Pushed Filter Conservative: event_date = '01-02-2024'::date
 (5 rows)
 
@@ -111,7 +111,7 @@ WHERE payload IS NULL OR (id >= 2 AND NOT id = 4);
 -------------------------------------------------------------------
  Foreign Scan on iceberg_fdw_read.filters
    Output: id
-   Provider: iceberg_fdw
+   Provider: lagodb_iceberg
    Pushed Filter Exact: (payload IS NULL OR (id >= 2 AND id != 4))
    Recheck: (payload IS NULL OR (id >= 2 AND id != 4))
 (5 rows)
@@ -134,7 +134,7 @@ EXPLAIN (VERBOSE, COSTS OFF) EXECUTE iceberg_read_by_id(2);
 ------------------------------------------
  Foreign Scan on iceberg_fdw_read.filters
    Output: payload
-   Provider: iceberg_fdw
+   Provider: lagodb_iceberg
    Pushed Filter Exact: id = $1
    Recheck: id = $1
 (5 rows)
@@ -168,7 +168,7 @@ CROSS JOIN LATERAL (
          Output: "*VALUES*".column1
    ->  Foreign Scan on iceberg_fdw_read.filters
          Output: filters.payload
-         Provider: iceberg_fdw
+         Provider: lagodb_iceberg
          Pushed Filter Exact: id = $1
          Recheck: id = $1
 (9 rows)
@@ -203,7 +203,7 @@ EXECUTE iceberg_stale_read;
 object_storage_reprovisioned: true
 \set VERBOSITY terse
 EXECUTE iceberg_stale_read;
-ERROR:  FDW "iceberg_fdw" BeginForeignScan callback failed: FDW provider error: the Iceberg table generation or schema changed after planning
+ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: the Iceberg table generation or schema changed after planning
 \set VERBOSITY default
 DEALLOCATE iceberg_stale_read;
 DEALLOCATE iceberg_read_by_id;
@@ -262,7 +262,7 @@ SELECT * FROM iceberg_fdw_read.fallback_second_bucket ORDER BY id;
 
 CREATE SERVER iceberg_read_storage_ambiguous
 TYPE 'storage'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     provider 's3_compatible',
     endpoint :'regress_s3_endpoint',
@@ -278,7 +278,7 @@ OPTIONS (
 );
 \set VERBOSITY terse
 SELECT * FROM iceberg_fdw_read.fallback_main;
-ERROR:  FDW "iceberg_fdw" BeginForeignScan callback failed: FDW provider error: iceberg error: DataInvalid => failed to resolve PostgreSQL storage profile, source: storage profile "iceberg_read_storage_ambiguous" is ambiguous with "iceberg_read_storage_narrow" for scope "s3://lakebase-regress-iceberg-fallback-a/iceberg-fallback/fdw_regress/"
+ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: iceberg error: DataInvalid => failed to resolve PostgreSQL storage profile, source: storage profile "iceberg_read_storage_ambiguous" is ambiguous with "iceberg_read_storage_narrow" for scope "s3://lakebase-regress-iceberg-fallback-a/iceberg-fallback/fdw_regress/"
 \set VERBOSITY default
 SET client_min_messages = warning;
 DROP SCHEMA iceberg_fdw_read CASCADE;

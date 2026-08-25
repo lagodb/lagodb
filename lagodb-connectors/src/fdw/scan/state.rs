@@ -11,15 +11,15 @@ use pg_lakebase_core::fdw::{
 };
 use pg_lakebase_core::storage::foreign::StorageManager;
 
-use super::super::Lakebase;
+use super::super::LagodbConnectors;
 use crate::error::ConnectorError;
 
 /// Executor state owns the format object selected by the serialized plan.
-pub(crate) struct LakebaseScanState {
-    phase: LakebaseScanPhase,
+pub(crate) struct ConnectorScanState {
+    phase: ConnectorScanPhase,
 }
 
-enum LakebaseScanPhase {
+enum ConnectorScanPhase {
     Prepared {
         reader: Box<dyn FormatReader>,
         files: ObjectFiles,
@@ -28,9 +28,9 @@ enum LakebaseScanPhase {
     Transitioning,
 }
 
-impl LakebaseScanState {
+impl ConnectorScanState {
     pub(crate) fn begin(
-        context: BeginForeignScanContext<'_, Lakebase>,
+        context: BeginForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<Self, ForeignScanError> {
         let planned_format = context.private_data.kind();
         let selected = ResolvedForeignRelation::resolve(context.relation.oid())?;
@@ -43,23 +43,23 @@ impl LakebaseScanState {
         let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
         let files = ObjectInput::resolve(&target, &manager, format)?.open();
         Ok(Self {
-            phase: LakebaseScanPhase::Prepared { reader, files },
+            phase: ConnectorScanPhase::Prepared { reader, files },
         })
     }
 
     pub(crate) fn start(
         &mut self,
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ForeignScanError> {
-        let LakebaseScanPhase::Prepared { reader, files } =
-            mem::replace(&mut self.phase, LakebaseScanPhase::Transitioning)
+        let ConnectorScanPhase::Prepared { reader, files } =
+            mem::replace(&mut self.phase, ConnectorScanPhase::Transitioning)
         else {
             return Err(ConnectorError::InvalidScanLifecycle {
                 detail: "scan was started more than once",
             }
             .into());
         };
-        self.phase = LakebaseScanPhase::Active(reader.begin(context, files)?);
+        self.phase = ConnectorScanPhase::Active(reader.begin(context, files)?);
         Ok(())
     }
 
@@ -67,7 +67,7 @@ impl LakebaseScanState {
         &mut self,
         output: &mut ScanSlotWriter<'_>,
     ) -> Result<bool, ForeignScanError> {
-        let LakebaseScanPhase::Active(inner) = &mut self.phase else {
+        let ConnectorScanPhase::Active(inner) = &mut self.phase else {
             return Err(ConnectorError::InvalidScanLifecycle {
                 detail: "scan cursor is not active",
             }
@@ -78,9 +78,9 @@ impl LakebaseScanState {
 
     pub(crate) fn rescan(
         &mut self,
-        context: ReScanForeignScanContext<'_, Lakebase>,
+        context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ForeignScanError> {
-        let LakebaseScanPhase::Active(inner) = &mut self.phase else {
+        let ConnectorScanPhase::Active(inner) = &mut self.phase else {
             return Err(ConnectorError::InvalidScanLifecycle {
                 detail: "scan cursor is not active during rescan",
             }
@@ -90,7 +90,7 @@ impl LakebaseScanState {
     }
 
     pub(crate) fn end(&mut self) -> Result<(), ForeignScanError> {
-        if let LakebaseScanPhase::Active(inner) = &mut self.phase {
+        if let ConnectorScanPhase::Active(inner) = &mut self.phase {
             inner.end()?;
         }
         Ok(())

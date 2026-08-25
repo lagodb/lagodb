@@ -20,7 +20,7 @@ use pgrx::pg_sys;
 use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
 
 use crate::error::ConnectorError;
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 use crate::format::{
     FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState,
 };
@@ -77,7 +77,7 @@ impl FormatScanPlanner for AvroScanPlanner {
 
     fn build_plan(
         &mut self,
-        context: &ForeignPlanContext<'_, Lakebase>,
+        context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
         Ok(ForeignPlanSpec::new(context.path_private().to_owned()))
     }
@@ -322,7 +322,7 @@ pub(super) struct AvroScanState {
 
 impl AvroScanState {
     pub(super) fn begin(
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
         mut files: ObjectFiles,
     ) -> Result<Self, ConnectorError> {
         let live = context.relation.live_columns();
@@ -468,7 +468,7 @@ impl FormatScanState for AvroScanState {
 
     fn rescan(
         &mut self,
-        _context: ReScanForeignScanContext<'_, Lakebase>,
+        _context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ConnectorError> {
         self.files.reset();
         self.reader = None;

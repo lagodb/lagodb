@@ -12,7 +12,7 @@ use pg_lakebase_core::tuple::SlotColumns;
 use pgrx::pg_sys;
 use rand::Rng;
 
-use super::provider::IcebergFdw;
+use super::provider::LagodbIceberg;
 use super::relation::RestForeignTable;
 use super::schema::ForeignSchemaBinding;
 use super::transaction::{ForeignTableView, ForeignTransaction};
@@ -20,7 +20,7 @@ use crate::engine::scan::{ScanSource, ScanSpec};
 
 const MAX_ANALYZE_PAGES: u64 = u32::MAX as u64 - 1;
 
-impl FdwAnalyze for IcebergFdw {
+impl FdwAnalyze for LagodbIceberg {
     fn analyze(
         context: &ForeignAnalyzeContext<'_>,
     ) -> Result<Option<ForeignAnalyzeSupport>, ForeignTableMaintenanceError> {

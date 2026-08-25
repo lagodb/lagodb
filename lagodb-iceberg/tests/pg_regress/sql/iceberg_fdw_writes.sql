@@ -25,32 +25,32 @@ CREATE EXTENSION dblink;
 CREATE SCHEMA iceberg_fdw_regress;
 CREATE SERVER iceberg_rest
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_rest_uri'
 );
 CREATE SERVER iceberg_rest_failure
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_failure_rest_uri'
 );
 CREATE SERVER iceberg_rest_second
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_rest_uri'
 );
 CREATE SERVER iceberg_rest_fallback
 TYPE 'rest'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_fallback_rest_uri',
     enable_vended_credentials 'false'
 );
 CREATE SERVER bucket_a_storage
 TYPE 'storage'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     provider 's3_compatible',
     endpoint :'regress_s3_endpoint',
@@ -61,7 +61,7 @@ OPTIONS (
 );
 CREATE SERVER bucket_b_storage
 TYPE 'storage'
-FOREIGN DATA WRAPPER iceberg_fdw
+FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     provider 's3_compatible',
     endpoint :'regress_s3_endpoint',

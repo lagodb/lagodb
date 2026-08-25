@@ -19,7 +19,7 @@ use pg_lakebase_core::plan_data::PlanDataReader;
 use pg_lakebase_storage::StorageFile;
 
 use crate::error::ConnectorError;
-use crate::fdw::Lakebase;
+use crate::fdw::LagodbConnectors;
 use crate::storage::{ObjectFiles, ObjectOutput};
 
 use super::{
@@ -84,7 +84,7 @@ impl FormatReader for ParquetFormat {
 
     fn begin(
         self: Box<Self>,
-        context: StartForeignScanContext<'_, Lakebase>,
+        context: StartForeignScanContext<'_, LagodbConnectors>,
         files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         Ok(Box::new(scan::ParquetScanState::begin(context, files)?))

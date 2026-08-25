@@ -29,7 +29,7 @@ FROM lakebase_regress.object_storage_fixture
 \gset
 CREATE SCHEMA lagodb_connectors_regress;
 CREATE SERVER lagodb_connectors_regress_s3
-    FOREIGN DATA WRAPPER lakebase_fdw
+    FOREIGN DATA WRAPPER lagodb_connectors
     OPTIONS (
         provider 's3_compatible',
         endpoint :'lakebase_regress_endpoint',

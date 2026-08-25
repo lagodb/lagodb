@@ -63,7 +63,7 @@ impl ForeignTableDdlHook {
         statement: &mut pg_sys::CreateForeignTableStmt,
     ) -> Result<(), UtilityHookError> {
         let server_name = unsafe { CStr::from_ptr(statement.servername) };
-        if !ResolvedStorageLocation::server_uses_lakebase(server_name) {
+        if !ResolvedStorageLocation::server_uses_connectors(server_name) {
             return Ok(());
         }
 
@@ -128,12 +128,12 @@ impl ForeignTableDdlHook {
             return Ok(());
         }
         let relation = RelationGuard::open(relation_oid, pg_sys::NoLock as _)?;
-        let target_uses_lakebase = relation.as_handle().relkind() as u8
+        let target_uses_connectors = relation.as_handle().relkind() as u8
             == pg_sys::RELKIND_FOREIGN_TABLE
-            && ResolvedStorageLocation::relation_uses_lakebase(relation_oid);
+            && ResolvedStorageLocation::relation_uses_connectors(relation_oid);
 
         self.validate_alter_references(statement.cmds)?;
-        if target_uses_lakebase {
+        if target_uses_connectors {
             ForeignTableDefinitionPolicy::validate_alter(statement.cmds)?;
         }
         Ok(())
@@ -172,7 +172,7 @@ impl ForeignTableDdlHook {
         if relation_oid == pg_sys::InvalidOid
             || unsafe { pg_sys::get_rel_relkind(relation_oid) } as u8
                 != pg_sys::RELKIND_FOREIGN_TABLE
-            || !ResolvedStorageLocation::relation_uses_lakebase(relation_oid)
+            || !ResolvedStorageLocation::relation_uses_connectors(relation_oid)
         {
             return Ok(());
         }
@@ -211,7 +211,7 @@ impl ForeignTableDdlHook {
             };
             if unsafe { pg_sys::get_rel_relkind(relation_oid) } as u8
                 == pg_sys::RELKIND_FOREIGN_TABLE
-                && ResolvedStorageLocation::relation_uses_lakebase(relation_oid)
+                && ResolvedStorageLocation::relation_uses_connectors(relation_oid)
             {
                 return Err(ConnectorError::unsupported_foreign_table_definition(
                     "inheritance or partition attachment",

@@ -136,12 +136,12 @@ WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 -- Provider mismatch, scope denial, and a missing user mapping all fail at DDL
 -- validation before PostgreSQL creates the foreign table.
 CREATE SERVER lagodb_connectors_regress_provider_gcs
-    FOREIGN DATA WRAPPER lakebase_fdw
+    FOREIGN DATA WRAPPER lagodb_connectors
     OPTIONS (provider 'gcs');
 CREATE USER MAPPING FOR PUBLIC
     SERVER lagodb_connectors_regress_provider_gcs;
 CREATE SERVER lagodb_connectors_regress_scope
-    FOREIGN DATA WRAPPER lakebase_fdw
+    FOREIGN DATA WRAPPER lagodb_connectors
     OPTIONS (
         provider 's3_compatible',
         endpoint :'storage_endpoint',
@@ -157,7 +157,7 @@ CREATE USER MAPPING FOR PUBLIC
         secret_access_key :'storage_secret_access_key'
     );
 CREATE SERVER lagodb_connectors_regress_missing_mapping
-    FOREIGN DATA WRAPPER lakebase_fdw
+    FOREIGN DATA WRAPPER lagodb_connectors
     OPTIONS (
         provider 's3_compatible',
         endpoint :'storage_endpoint',

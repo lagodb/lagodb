@@ -8,17 +8,17 @@ use pg_lakebase_core::fdw::{
 use crate::format::FormatWriteState;
 
 /// Executor state owns the selected format writer for one modify lifecycle.
-pub(crate) struct LakebaseModifyState {
+pub(crate) struct ConnectorModifyState {
     inner: Box<dyn FormatWriteState>,
 }
 
-impl LakebaseModifyState {
+impl ConnectorModifyState {
     pub(crate) fn new(inner: Box<dyn FormatWriteState>) -> Self {
         Self { inner }
     }
 }
 
-impl ForeignModifyState for LakebaseModifyState {
+impl ForeignModifyState for ConnectorModifyState {
     fn batch_size(&self) -> Result<core::ffi::c_int, ForeignModifyError> {
         Ok(self.inner.batch_size()?)
     }
