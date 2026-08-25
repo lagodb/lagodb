@@ -1,483 +1,108 @@
-# pgrx Testing Design
+# Testing Architecture and Methodology
 
-This document defines how tests should be written for `lagodb-iceberg`.
-It is intentionally a design note, not just a troubleshooting note: the
-same rules should guide future tests.
+This document outlines the testing architecture, testing tiers, and execution guidelines for `lagodb-iceberg`.
 
-## Problem Summary
+## Testing Philosophy and Layered Architecture
 
-`lagodb-iceberg` is a PostgreSQL extension. Some code paths reference
-PostgreSQL backend symbols such as:
-
-- `PG_exception_stack`
-- `CurrentMemoryContext`
-- `palloc`
-- `pfree`
-- other `pg_sys` backend symbols
-
-Those symbols are available when PostgreSQL loads the extension shared
-library inside a backend process. They are not available in an ordinary
-Linux process running a Rust test binary.
-
-The observed failure looked like this:
+Testing a PostgreSQL-native lakehouse extension requires a strict separation of concerns. `lagodb-iceberg` uses a **4-tier layered testing matrix** to balance fast test feedback, deterministic execution, and end-to-end correctness.
 
 ```text
-symbol lookup error: undefined symbol: PG_exception_stack
++─────────────────────────────────────────────────────────────────────────────+
+| Tier 1: Host-Side Pure Unit Tests (`cargo test`)                            |
+| - Fast, deterministic, sub-second execution without PostgreSQL backend      |
+| - Expression algebra, capability policies, schema converters, statistics    |
++─────────────────────────────────────────────────────────────────────────────+
+                                       ▲
+                                       │
++─────────────────────────────────────────────────────────────────────────────+
+| Tier 2: PostgreSQL Backend Tests (`#[pgrx::pg_test]`)                       |
+| - Live PostgreSQL backend process context                                   |
+| - MemoryContext lifecycles, Datum extraction, syscache lookups, SPI queries |
++─────────────────────────────────────────────────────────────────────────────+
+                                       ▲
+                                       │
++─────────────────────────────────────────────────────────────────────────────+
+| Tier 3: SQL Regression & Isolation Suites (`pg_regress`, Isolation Specs)   |
+| - End-to-end SQL verification, DDL/DML coverage, transaction isolation      |
+| - Concurrency conflicts, savepoint rollbacks, schema evolution validation   |
++─────────────────────────────────────────────────────────────────────────────+
+                                       ▲
+                                       │
++─────────────────────────────────────────────────────────────────────────────+
+| Tier 4: Object Storage & Ecosystem E2E Tests                                |
+| - Real object stores (S3/MinIO, GCS, Azure) via storage volumes             |
+| - External REST Catalog synchronization and multi-table validation          |
++─────────────────────────────────────────────────────────────────────────────+
 ```
 
-This is not a Rust assertion failure and not a PostgreSQL SQL error. On
-Linux it is a dynamic loader failure while starting the host-side Rust test
-binary. The process cannot resolve a PostgreSQL backend symbol that was
-pulled into the executable.
+## The Execution Boundary Principle
 
-## Rust `cargo test`
+The fundamental architectural test rule is:
 
-`cargo test` compiles the crate in Rust test mode. That mode is roughly the
-same as invoking `rustc --test`: Rust builds a normal executable with a test
-runner, also called the test harness.
+> **Can this logic run safely in an ordinary host process, or does it require PostgreSQL backend process semantics?**
 
-The test harness is the generated program that:
+### 1. Host-Safe Logic (Tier 1)
 
-- discovers `#[test]` functions,
-- parses test-runner arguments such as `--nocapture`,
-- prints output like `running N tests`,
-- executes tests and reports `test name ... ok`.
+Logic that is pure Rust belongs in standard `#[test]` modules gated by `#[cfg(test)]`. This includes:
+- Pure Iceberg expression translation and simplification algebra.
+- Pushdown capability matrices and classification policies.
+- Type mapping tables and schema compatibility checks.
+- Static option parsing and configuration validators.
 
-When a crate is compiled in this test mode, Rust enables the cfg flag
-`test`. A host-only suite can be colocated with the production responsibility:
+**Rule**: Pure logic must not import or call PostgreSQL backend symbols (`palloc`, `CurrentMemoryContext`, `PG_exception_stack`, `pg_sys::*`). Keeping pure logic decoupled from PostgreSQL C ABI guarantees instant compilation and test execution.
 
-```rust
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn pure_logic() {}
-}
-```
+### 2. Backend-Dependent Logic (Tier 2)
 
-The code in that module runs in the host-side test process, not inside
-PostgreSQL. If the suite needs to be split for file-size or responsibility
-reasons, keep the child module next to the production code and retain the same
-`#[cfg(test)]` boundary.
+Logic that directly touches PostgreSQL backend internals belongs in `#[pgrx::pg_test]` modules gated by `#[cfg(feature = "pg_test")]`. This includes:
+- PostgreSQL `Datum` extraction, tuple slot unpacking, and varlena operations.
+- Syscache lookups and catalog metadata verification.
+- MemoryContext allocations and `ResourceOwner` cleanup handlers.
+- Direct SPI execution.
 
-For `lagodb-iceberg`, ordinary `#[test]` functions must only exercise logic
-that can run in a normal process without PostgreSQL backend state.
+### 3. Concurrency and Transaction Isolation (Tier 3)
 
-The `test` cfg is crate-local. If a test target depends on another workspace
-crate, that dependency is normally compiled without `cfg(test)`. It must not
-be used as a general "host process versus PostgreSQL backend" capability flag
-across crate boundaries.
+PostgreSQL transactional semantics (ACID, MVCC, read-your-own-writes, conflict detection) cannot be fully verified with single-threaded unit tests. We use:
+- **`pg_regress`**: SQL-level regression tests asserting output correctness across DDL, DML, partitioning, and maintenance commands.
+- **Isolation Tester Specs**: Multi-session concurrency specifications validating lock acquisition, concurrent commit serialization, and rollback safety.
 
-Linking also follows reachability, not execution. A host test does not need to
-call a backend callback to retain it: constructing a reachable descriptor that
-stores a `#[pg_guard]` function pointer is enough. The linker must then retain
-the expanded guard and resolve its PostgreSQL backend symbols.
+### 4. Fault Injection and Crash Testing
 
-## pgrx `#[pg_test]`
+To verify resilience against crashes, aborts, and network interruptions, tests leverage PostgreSQL 17's native **Injection Points** (`--enable-injection-points`):
+- Injecting errors at transactional boundaries to verify that uncommitted data/delete files are discarded without metadata corruption.
+- Testing background worker crash recovery and WAL replay safety.
 
-`#[pgrx::pg_test]` is different from ordinary `#[test]`. The macro expands
-into two pieces:
+## Test Execution Commands
 
-1. A SQL-callable function registered through pgrx, compiled into the
-   extension shared library.
-2. A host-side Rust `#[test]` wrapper that asks `pgrx-tests` to run that
-   SQL function in PostgreSQL.
-
-The wrapper still runs in the Rust test binary, but the body of the
-`#[pg_test]` function runs inside PostgreSQL after the extension has been
-installed and loaded.
-
-In pgrx 0.19.2, `pgrx-tests` calls test functions through SQL using the
-`tests` schema:
-
-```sql
-SELECT "tests"."<function_name>"();
-```
-
-That detail matters when tests are placed outside a Rust module literally
-named `tests`.
-
-## `cargo pgrx test`
-
-`cargo pgrx test pg17 --package lagodb-iceberg` is not a magic mode where all
-Rust tests run inside PostgreSQL.
-
-It produces and uses two different artifacts:
-
-1. A host-side Rust test executable, built by `cargo test`. This executable
-   runs the ordinary `#[test]` functions and the generated wrapper functions
-   for `#[pg_test]`.
-2. A PostgreSQL extension shared library, `lagodb_iceberg.so`, built and
-   installed by `pgrx-tests` when a `#[pg_test]` wrapper needs to call into
-   PostgreSQL. PostgreSQL loads this `.so`, and the actual `#[pg_test]`
-   function bodies run there.
-
-It first invokes a normal Rust test build with pgrx features enabled:
-
-```bash
-cargo test --features "pg17 pg_test" --no-default-features --package lagodb-iceberg
-```
-
-Ordinary `#[test]` functions still run in the host-side Rust test binary.
-Only `#[pg_test]` function bodies are executed inside PostgreSQL.
-
-During a `#[pg_test]`, `pgrx-tests` installs the extension using the
-`pg_test` feature so the SQL functions exist in `lagodb_iceberg.so`. That
-second build is not a Rust test-harness build, so `cfg(test)` is not the
-right condition for code that must be compiled into the extension for
-`#[pg_test]`.
-
-## cfg Rules
-
-Use these cfgs intentionally:
-
-```rust
-#[cfg(test)]
-mod tests {
-    // ordinary host-side `#[test]` functions
-}
-```
-
-This is for ordinary Rust unit tests. These tests run in the host-side Rust
-test process.
-
-```rust
-#[cfg(feature = "pg_test")]
-mod pg_test;
-```
-
-This is for pgrx backend tests. The `pg_test` Cargo feature is enabled by
-`cargo pgrx test` both when compiling the host-side wrappers and when
-building the extension shared library for test installation.
-
-Do not gate `#[pg_test]` modules only with `#[cfg(test)]`; the SQL functions
-would be visible to the host test wrapper but absent from the extension
-shared library built for PostgreSQL.
-
-For code that prepares callback descriptors, keep registry ownership and
-descriptor lifecycle logic independent from the backend callback binding.
-Production registration should supply the real `#[pg_guard]` trampolines;
-ordinary unit tests should supply host-safe callbacks to the same preparation
-logic. Test the real trampolines, and any logic that genuinely needs backend
-state, with `#[pg_test]`. Do not replace production callback bodies with
-`cfg(test)` panic stubs.
-
-## Current Module Layout
-
-The physical layout follows the execution boundary while keeping host tests
-with the production code they exercise. A small production module uses:
-
-```rust
-#[cfg(test)]
-mod tests {
-    // ordinary host-side `#[test]` functions
-}
-
-#[cfg(feature = "pg_test")]
-mod pg_test;
-```
-
-The host suite may be an inline child module, or a responsibility-focused
-production child module with its own inline tests when the parent file would
-become too large. The backend suite is a separate feature-gated `pg_test`
-module tree, for example:
-
-```text
-src/predicate/
-├── classifier.rs          # classifier + exhaustive host decision matrix
-├── policy/
-│   ├── mod.rs              # pure capability policy
-│   └── test.rs             # host policy tests + operator fixture matrix
-├── translator.rs          # translator semantics + host tests
-├── translator/
-│   ├── datum.rs           # Datum FFI + pure temporal conversion tests
-│   └── predicate_algebra.rs # algebra + its host tests
-└── pg_test/               # compiled only with feature = "pg_test"
-    ├── classifier.rs      # raw PG-node parser/classifier smoke
-    ├── collation.rs       # real catalog/syscache behavior
-    ├── datum.rs           # real Datum extraction/varlena behavior
-    ├── harness.rs         # shared synthetic PG-node and pipeline harness
-    ├── translator.rs      # representative cross-layer wiring
-```
-
-`policy/mod.rs` contains the pure capability policy and declares its
-host-test-gated `test` child. `policy/test.rs` keeps the ordinary host tests
-and the operator fixture matrix together because the matrix is consumed only
-by that host policy suite.
-
-Test-only construction support for types with private fields stays in a
-feature-gated child module of the owning production module, for example
-`relation_binding/pg_test.rs`.
-
-Backend files contain `#[pgrx::pg_test]` functions and declare the SQL schema
-with `#[pgrx::pg_schema] mod tests {}` when using `schema = "tests"`. They do
-not become ordinary host `#[test]` suites merely because pgrx also generates
-host-side wrappers.
-
-This keeps the execution boundary explicit, prevents PostgreSQL-facing test
-support from being owned by `customscan` when it tests predicate behavior,
-and avoids growing a single production source file without a responsibility
-boundary.
-
-Placement follows the behavior under test, not an accidental static-linkage
-property of a large function. If a pure policy matrix can run only in a
-backend because the same function also performs a syscache lookup, separate
-catalog fact resolution from the pure decision before adding more backend
-cases. Likewise, temporal epoch arithmetic is host logic even though extracting
-the raw value from a PostgreSQL `Datum` is backend-facing.
-
-Each rule has one exhaustive owner. The pure capability matrix belongs to
-`policy/mod.rs`; operand-shape and costing matrices belong to `classifier.rs`;
-epoch and infinity boundaries belong to `translator/datum.rs`. Backend suites
-verify their boundary wiring with representative cases and must not repeat
-those matrices through raw-node fixtures. This keeps backend runtime and test
-support proportional to the actual PostgreSQL boundary.
-
-## Why `pg_test.rs` Declares an Empty `tests` Schema
-
-`pg_test.rs` contains:
-
-```rust
-#[pgrx::pg_schema]
-mod tests {}
-
-#[pgrx::pg_test(schema = "tests")]
-fn test_rows_to_record_batch_empty() {
-    // ...
-}
-```
-
-This is required for pgrx SQL generation.
-
-`pgrx-tests` calls pg tests as:
-
-```sql
-SELECT "tests"."<function_name>"();
-```
-
-The functions in `pg_test.rs` therefore explicitly target the SQL schema
-`tests`:
-
-```rust
-#[pgrx::pg_test(schema = "tests")]
-```
-
-However, pgrx also requires manually targeted schemas to be declared in its
-generated extension SQL graph. If the schema is not declared, schema
-generation fails with:
-
-```text
-Got manual `schema = "tests"` setting, but that schema did not exist.
-```
-
-The empty module:
-
-```rust
-#[pgrx::pg_schema]
-mod tests {}
-```
-
-does not exist to organize Rust test code. Its purpose is to make pgrx
-generate:
-
-```sql
-CREATE SCHEMA IF NOT EXISTS tests;
-```
-
-That gives the manually placed `#[pg_test(schema = "tests")]` functions a
-valid PostgreSQL schema.
-
-## Native PostgreSQL Injection Points
-
-Tests of PostgreSQL `ERROR`, transaction abort, and background-worker crash
-paths use PostgreSQL 17's native injection-point facility. Prepare the pgrx
-server with:
-
-```bash
-cargo pgrx init --pg17=download \
-  --configure-flag=--enable-injection-points
-```
-
-The complete suite should be run through:
-
-```bash
-cargo xtask test-all pg17
-```
-
-Before running tests, `xtask` verifies `USE_INJECTION_POINTS` in the target
-server's `pg_config.h` and builds/installs PostgreSQL's upstream
-`src/test/modules/injection_points` extension with PGXS. Product extensions do
-not ship an attach/detach control plane.
-
-PostgreSQL 17 attachments are cluster-wide. `injection_points_set_local()` is
-used when the backend that attaches the callback also executes the tested
-operation: it restricts execution to that backend's PID and automatically
-detaches locally tracked points when the backend exits. It is not suitable for
-a callback that must run in another backend or dynamic worker. Native fault
-tests therefore follow these rules:
-
-- use a subsystem-specific, lower-case dash-separated point name;
-- for same-backend SQL faults, call `injection_points_set_local()` before
-  attaching and execute the tested operation in that same session;
-- for cross-process faults, attach immediately before triggering one controlled
-  operation and detach before making assertions that may stop the remainder of
-  the test;
-- add best-effort teardown to an existing fixture when a helper process owns a
-  cross-process attachment;
-- place call sites at statement/process lifecycle boundaries, never per row or
-  per storage write.
-
-The SQL regression files are passed to `pg_regress` as positional tests and run
-serially. Runtime framework tests must not add `pg_test`-only fields to shared
-state or feature-gated branches to production control flow. Use native
-injection points at genuine production lifecycle boundaries when a precise
-cross-process window is required. If no such boundary exists, test the
-externally observable scenario instead of adding a test-only production hook.
-
-### pg_regress fixture lifecycle
-
-With cargo-pgrx 0.19.2, `setup.sql` is the standard suite setup file. The
-remaining SQL files run serially in filename order; cargo-pgrx does not pass a
-schedule file to `pg_regress`. `zzz_finish.sql` is therefore the suite teardown
-for a complete run. Do not add a schedule until the runner actually supports
-one and the shared database, worker state, maintenance queue, and object-store
-fixtures have been proven independent.
-
-The worker framework has one feature-level regression file, `worker.sql`.
-Database assertions and fixture ownership stay in SQL. Its only process helper,
-`storage_worker_pause_guard`, accepts PIDs discovered by SQL and performs only
-SIGSTOP/SIGCONT plus fail-safe recovery; it does not connect to PostgreSQL or
-make worker-framework assertions. `setup.sql` and `zzz_finish.sql` resolve the
-current storage singleton PID before asking the guard to recover, so neither
-path signals a PID persisted by an earlier run.
-
-Run the complete SQL regression suite through `xtask`:
-
-```bash
-cargo xtask regress pg17
-```
-
-Pass one or more test names for a filtered run:
-
-```bash
-cargo xtask regress pg17 worker
-cargo xtask regress pg17 worker type_conversion
-```
-
-The `xtask` entry point prepares PostgreSQL's `injection_points` module,
-installs the production runtime and the pg_test-enabled Delta AM, prepends the
-selected PostgreSQL `bindir` to `PATH`, configures the required shared preload
-libraries, and always passes `--resetdb`. Reusing an existing regression
-database does not rerun `setup.sql`. A filtered worker run cleans its own SQL
-fixtures and releases its pause guard, while the next setup reclaims any MinIO
-container or paused singleton left by process termination. Run
-`cargo xtask regress pg17 zzz_finish` explicitly when immediate suite-level
-teardown is desired after a filtered run.
-
-## Root Cause in `access::conversion`
-
-The failure was traced to Row-to-Arrow tests that called:
-
-```rust
-RowRecordBatchBuilder::build()
-```
-
-That call path pulls in conversion code that can reference pgrx/PostgreSQL
-backend behavior, including numeric and memory-context related support.
-When those tests were ordinary `#[test]` functions, the host-side Rust test
-binary pulled in unresolved PostgreSQL backend symbols and failed to start
-on Linux.
-
-The fix was to move only those Row-to-Arrow tests into `pg_test.rs` and make
-them `#[pgrx::pg_test]`.
-
-The Iceberg-schema-to-Arrow-schema tests remained ordinary `#[test]`
-functions because they are pure mapping logic and do not need PostgreSQL
-backend state.
-
-## `shared_preload_libraries`
-
-`pg_lakebase_runtime` registers the shared launcher and storage worker, then
-loads `lagodb-iceberg`, which registers its custom WAL resource manager.
-
-For pgrx tests, PostgreSQL must load the extension at postmaster start:
-
-```rust
-vec![
-    "shared_preload_libraries = 'pg_lakebase_runtime'",
-    "pg_lakebase.provider_libraries = 'lagodb_iceberg'",
-]
-```
-
-Without this, PostgreSQL may reject initialization that must happen before
-normal database connections are accepted, such as postmaster-level GUCs or
-static background worker registration.
-
-## Test Placement Rules
-
-Use ordinary `#[test]` when all of the following are true:
-
-- The code is pure Rust logic.
-- The code can run in a normal Linux process.
-- The test does not call SPI, catalog APIs, memory-context APIs, `palloc`,
-  or other PostgreSQL backend functions.
-- The test does not pull in implementation paths that require PostgreSQL
-  backend symbols.
-
-Use `#[pgrx::pg_test]` when any of the following are true:
-
-- The test calls `pg_sys` backend functions.
-- The test uses SPI.
-- The test exercises PostgreSQL Datum extraction (especially varlena), memory
-  contexts, or PostgreSQL error handling. Pure arithmetic after extraction is
-  still a host-test responsibility.
-- The test depends on PostgreSQL catalogs, runtime type information, or real
-  backend OID semantics.
-- The specific behavior being verified cannot be separated from pgrx code
-  requiring backend symbols without distorting the production boundary.
-
-When static linkage alone forces a logically pure test into `#[pg_test]`, treat
-that as an architectural signal: resolve backend facts at an adapter boundary
-and pass a small domain value into pure logic. Do not introduce dependency
-injection solely for tests when no production boundary exists; the split must
-also clarify production ownership. Keep pure mapping and decision logic as
-ordinary `#[test]` so it stays fast and does not require a PostgreSQL cluster.
-
-## Practical Commands
-
-Run host-side unit tests:
-
+### Run Host-Side Unit Tests
+Runs all Tier 1 pure unit tests instantly:
 ```bash
 cargo test -p lagodb-iceberg --lib
 ```
 
-Run pgrx tests with PostgreSQL:
-
-The test server must already have `pg_lakebase_runtime` installed because
-`lagodb-iceberg` declares it as a PostgreSQL extension dependency. Install the
-runtime into the pgrx PostgreSQL 17 installation before running the AM test:
-
+### Run PostgreSQL Backend Tests
+Runs Tier 2 `#[pg_test]` tests inside an ephemeral PostgreSQL test cluster:
 ```bash
-cargo pgrx install \
-  --package pg-lakebase-runtime \
-  --pg-config "$(cargo pgrx info pg-config pg17)"
-```
+# Ensure the shared runtime is installed in the target pgrx installation
+cargo pgrx install --package pg-lakebase-runtime --pg-config "$(cargo pgrx info pg-config pg17)"
 
-```bash
+# Run backend tests
 cargo pgrx test pg17 --package lagodb-iceberg
 ```
 
-The expected split is:
+### Run SQL Regression Tests
+Runs the complete SQL regression suite:
+```bash
+cargo xtask regress pg17
+```
 
-- host `cargo test`: validates pure Rust unit tests;
-- `cargo pgrx test`: validates ordinary Rust tests plus `#[pg_test]`
-  wrappers, and runs `#[pg_test]` bodies inside PostgreSQL.
+### Run Full Test Suite (Unit, Backend, Isolation, E2E)
+Runs the complete end-to-end verification suite:
+```bash
+cargo xtask test-all pg17
+```
 
-## Design Principle
+## Summary of Best Practices
 
-The boundary is not "Rust test" versus "SQL test". The real boundary is:
-
-> Can this code path run correctly in an ordinary host process, or does it
-> require PostgreSQL backend process semantics?
-
-Host-safe code belongs in ordinary `#[test]`. PostgreSQL-dependent code
-belongs in `#[pg_test]`.
+1. **Maximize Tier 1 Coverage**: Keep core algorithms (planning, translation, algebra) in pure Rust to keep testing fast and deterministic.
+2. **Boundary-Proportional Backend Tests**: Use `#[pg_test]` specifically to verify the C FFI boundary, not to re-test pure algorithm matrices.
+3. **No Test-Only Production Pollutions**: Production code should not contain test-only flags or artificial branches; use native PostgreSQL injection points for fault simulation.

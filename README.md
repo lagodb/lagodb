@@ -7,9 +7,12 @@
 
 ## A lakehouse database built on PostgreSQL
 
-`pg-lakebase` is building a lakehouse database on
-[PostgreSQL](https://www.postgresql.org/). The goal is to bring PostgreSQL's SQL
-interface, transaction model, and ecosystem to open lakehouse table formats.
+`pg-lakebase` brings PostgreSQL's SQL interface, transaction model, and ecosystem to open lakehouse table formats and cloud object storage.
+
+With `pg-lakebase`, you can:
+- **Manage native Iceberg tables** directly within PostgreSQL (`USING iceberg`) with ACID transactions and local or object storage.
+- **Directly query and write external Iceberg tables** in an Iceberg REST catalog as foreign tables without migrating data.
+- **Query and exchange object storage files** (Parquet, CSV, JSON, Avro, Text) directly via foreign tables and high-performance object-URI `COPY` commands.
 
 The long-term vision includes first-class support for the
 [Apache Iceberg](https://iceberg.apache.org/),
@@ -24,14 +27,12 @@ search through the PostgreSQL SQL interface, with lake tables in object storage
 as the durable data layer. Neither the time-series nor vector capabilities are
 implemented today.
 
-Apache Iceberg is the first and currently the only implemented lakehouse table
-format. The other formats and capabilities are planned product directions, not
-current capabilities.
+Apache Iceberg and LagoDB object storage connectors are currently implemented. The other formats and capabilities are planned product directions, not current capabilities.
 
 > [!WARNING]
 > This project is under active development and is not recommended for
-> production workloads. [`lagodb-iceberg`](./lagodb-iceberg) is the primary
-> runnable extension. `pg-delta-am` is only a framework skeleton, not a Delta
+> production workloads. [`lagodb-iceberg`](./lagodb-iceberg) and [`lagodb-connectors`](./lagodb-connectors) are the primary
+> runnable extensions. `pg-delta-am` is only a framework skeleton, not a Delta
 > Lake implementation.
 
 ## Why pg-lakebase?
@@ -39,23 +40,27 @@ current capabilities.
 - **PostgreSQL as the database interface.** Use ordinary PostgreSQL SQL,
   transactions, drivers, and tools instead of adopting a separate interface
   for lakehouse data.
-- **Writable lakehouse tables.** Work with Iceberg-backed PostgreSQL tables
-  using common DML, transaction control, and supported schema changes, rather
-  than treating lakehouse data as read-only external files.
+- **Managed and foreign Iceberg tables.** Work with PostgreSQL-managed Iceberg
+  tables (`USING iceberg`) with ACID DML and transaction control, or directly
+  query external tables in an Iceberg REST catalog as foreign tables without
+  moving data.
+- **Direct object storage query & data interchange.** Query raw data files in S3,
+  GCS, or Azure Blob Storage (Parquet, CSV, JSON, Avro, Text) via foreign tables,
+  or perform fast parallel imports and exports using object-URI `COPY` commands
+  with `lagodb_connectors`.
 - **Local and object storage.** Keep Iceberg metadata and Parquet data on the
   local filesystem for simple deployments, or place object-backed tables in
   S3-compatible object storage through storage volumes while using the same
   PostgreSQL SQL interface. GCS and Azure providers are experimental.
-- **A unified database direction.** Build from the current Iceberg support
-  toward additional open lakehouse formats, time-series database capabilities
-  backed by lake tables, and vector search with lake tables in object storage
-  as the durable data layer.
+- **A unified database direction.** Build from the current Iceberg and object
+  connector support toward additional open lakehouse formats, time-series
+  capabilities, and vector search with lake tables in object storage.
 
-## Current Iceberg capabilities
+## Current capabilities
 
 The following capabilities are backed by implementation and regression or
 isolation tests in this repository. They do not imply complete coverage of
-every Iceberg specification feature or cross-engine interoperability.
+every format specification feature or cross-engine interoperability.
 Format-version terminology follows the
 [Apache Iceberg table specification](https://iceberg.apache.org/spec/#format-versioning),
 and isolation terminology follows the
@@ -63,12 +68,13 @@ and isolation terminology follows the
 
 | Area | What works today | Current boundary |
 |---|---|---|
-| PostgreSQL integration | Managed tables through `USING iceberg`; external REST-catalog tables through `iceberg_fdw` | Managed tables use the PostgreSQL-backed catalog; foreign tables preserve ownership in the external catalog. |
-| Iceberg format versions | Create Iceberg v1, v2, and v3 tables | Feature coverage varies by version. This is not a blanket claim that every feature in each specification is implemented; for example, row-level `UPDATE` and `DELETE` are rejected for v1 tables. |
+| PostgreSQL integration | Managed tables through `USING iceberg`; external REST-catalog Iceberg foreign tables; object storage foreign tables for raw data files | Managed tables use the PostgreSQL-backed catalog; foreign tables preserve ownership in the external catalog or object store. |
+| Object storage & data interchange | Direct object-URI `COPY TO` / `COPY FROM` and foreign tables over S3, GCS, and Azure for Parquet, CSV, JSON, Avro, and Text | Foreign tables support reading exact files or prefix directories, and append-only `INSERT`. Row-level `UPDATE`/`DELETE` are not supported for raw file foreign tables. |
+| Iceberg format versions | Create Iceberg v1, v2, and v3 tables | Feature coverage varies by version. Row-level `UPDATE` and `DELETE` are rejected for v1 tables. |
 | SQL operations | Managed-table `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY`; foreign-table `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and `COPY FROM` | Row-level changes use Iceberg delete semantics and therefore depend on the selected format version. |
 | Transactions and isolation | Statement-level Iceberg metadata visibility under `READ COMMITTED`, read-your-own-writes, commit, rollback, and savepoints | `SERIALIZABLE` currently strengthens Iceberg write-conflict validation but does not yet provide full PostgreSQL SSI semantics. `REPEATABLE READ` is not supported. |
 | Schema evolution | `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `DROP NOT NULL` | Other `ALTER TABLE` schema changes are rejected. |
-| Storage | Local filesystem and S3-compatible object storage through storage volumes | S3-compatible storage has repository end-to-end coverage. GCS and Azure providers exist but remain experimental. |
+| Storage & Volumes | Local filesystem and S3-compatible object storage through storage volumes | S3-compatible storage has repository end-to-end coverage. GCS and Azure providers exist but remain experimental. |
 | Partitioned tables | PostgreSQL declarative partitioning with partition-routed `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Each Iceberg leaf is managed as its own relation. |
 | Scan optimization | Predicate pushdown plus Iceberg file and Parquet row-group pruning for supported expressions | PostgreSQL retains residual predicates when required for correctness; some comparisons are deliberately not pushed when semantics could differ. |
 | Maintenance | `VACUUM`, `VACUUM FULL`, and scheduled automatic Iceberg maintenance | Maintenance remains subject to operational limits while the project is under development. |
@@ -90,44 +96,38 @@ Initialize PostgreSQL 17 with pgrx using an existing `pg_config`:
 cargo pgrx init --pg17=/path/to/pg_config
 ```
 
-Install the shared Lakebase services and the Iceberg extension into that PostgreSQL
-installation:
+Install the shared Lakebase runtime, the Iceberg extension, and the LagoDB connectors into that PostgreSQL installation:
 
 ```bash
 cargo pgrx install --package pg-lakebase-runtime --pg-config /path/to/pg_config
 cargo pgrx install --package lagodb-iceberg --pg-config /path/to/pg_config
+cargo pgrx install --package lagodb-connectors --pg-config /path/to/pg_config
 ```
 
-`lagodb-iceberg` depends on `pg-lakebase-runtime`. `cargo pgrx install`
-installs the package named by `--package`, so both commands are required;
-installing the Iceberg extension does not install the runtime artifacts.
-
-Preload the runtime, configure the provider libraries it owns, and restart
-PostgreSQL:
+Preload the runtime and configure the provider libraries in `postgresql.conf`, then restart PostgreSQL:
 
 ```conf
 shared_preload_libraries = 'pg_lakebase_runtime'
-pg_lakebase.provider_libraries = 'lagodb_iceberg'
-```
-
-List every enabled Lakebase AM and FDW provider in the second setting. For
-example, a cluster using Iceberg and the LagoDB connectors uses:
-
-```conf
 pg_lakebase.provider_libraries = 'lagodb_iceberg,lagodb_connectors'
 ```
 
-Provider libraries are loaded by the runtime during the same postmaster
-startup window. Adding or removing one requires a PostgreSQL restart.
-An object-URI COPY that no configured provider claims fails explicitly; it is
-never passed to PostgreSQL's server-local file COPY implementation.
+Provider libraries are loaded by the runtime during the postmaster startup window. Adding or removing one requires a PostgreSQL restart. An object-URI COPY that no configured provider claims fails explicitly; it is never passed to PostgreSQL's server-local file COPY implementation.
 
-Then connect to a database and run:
+### Try it in SQL
+
+Connect to your database and enable the extensions:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_lakebase_runtime;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+CREATE EXTENSION IF NOT EXISTS lagodb_connectors;
+```
 
+#### 1. Managed Iceberg tables (`USING iceberg`)
+
+Create and modify PostgreSQL-managed Iceberg tables with full ACID transactional semantics:
+
+```sql
 CREATE TABLE events (
     event_time  timestamptz NOT NULL,
     device_id   bigint      NOT NULL,
@@ -151,8 +151,79 @@ FROM events
 WHERE device_id = 101;
 ```
 
-This creates an Iceberg-backed table that applications can access through
-ordinary PostgreSQL SQL.
+#### 2. Iceberg foreign tables
+
+Query external Iceberg tables registered in an Iceberg REST catalog:
+
+```sql
+CREATE SERVER iceberg_catalog
+TYPE 'rest'
+FOREIGN DATA WRAPPER iceberg_fdw
+OPTIONS (uri 'https://catalog.example.com');
+
+CREATE USER MAPPING FOR CURRENT_USER
+SERVER iceberg_catalog
+OPTIONS (credential 'my_client_id:my_client_secret');
+
+CREATE FOREIGN TABLE ext_iceberg_events (
+    event_time  timestamptz NOT NULL,
+    device_id   bigint      NOT NULL,
+    temperature double precision
+)
+SERVER iceberg_catalog
+OPTIONS (
+    catalog_name 'production',
+    catalog_namespace 'analytics',
+    catalog_table_name 'events',
+    mode 'read_only'
+);
+
+SELECT *
+FROM ext_iceberg_events
+WHERE device_id = 101;
+```
+
+#### 3. LagoDB connectors (Object storage and direct COPY)
+
+Query raw data files (Parquet, CSV, JSON, Avro, Text) on object storage or export/import data directly with object URIs:
+
+```sql
+CREATE SERVER s3_store
+FOREIGN DATA WRAPPER lakebase_fdw
+OPTIONS (
+    provider 's3_compatible',
+    endpoint 'http://127.0.0.1:9000',
+    allow_http 'true'
+);
+
+CREATE USER MAPPING FOR CURRENT_USER
+SERVER s3_store
+OPTIONS (
+    access_key_id 'minioadmin',
+    secret_access_key 'minioadmin'
+);
+
+-- Fast export directly to object storage as Parquet
+COPY events
+TO 's3://analytics/exports/events.parquet'
+WITH (server 's3_store');
+
+-- Or query raw Parquet files in object storage as a foreign table
+CREATE FOREIGN TABLE s3_logs (
+    id bigint,
+    occurred_at timestamptz,
+    payload text
+)
+SERVER s3_store
+OPTIONS (
+    path 's3://analytics/logs/',
+    format 'parquet'
+);
+
+SELECT *
+FROM s3_logs
+WHERE id >= 100;
+```
 
 ## Use object storage
 
@@ -197,11 +268,9 @@ deployment's credential and filesystem security controls.
 
 ## Roadmap
 
-### Current — Reliable Iceberg tables
+### Current — Reliable Iceberg tables and object storage connectors
 
-Make writable Iceberg tables reliable, interoperable, and straightforward to
-deploy from PostgreSQL, with stronger format coverage, object-storage
-reliability, compatibility testing, packaging, and performance validation.
+Make writable Iceberg tables and LagoDB object storage connectors reliable, interoperable, and straightforward to deploy from PostgreSQL, with strong format coverage, object-storage reliability, compatibility testing, packaging, and performance validation.
 
 ### Next — Broader lakehouse format support
 
@@ -217,86 +286,10 @@ interface, with lake tables in object storage as the durable data layer.
 These roadmap items describe intended product outcomes. Their implementation
 designs will be documented separately as they are validated.
 
-## Architecture
-
-At a high level, `pg-lakebase` integrates lakehouse table implementations with
-PostgreSQL's table access, planning, execution, and transaction lifecycle, then
-routes table data to local or object storage.
-
-```text
-                 PostgreSQL SQL and transactions
-                               |
-                               v
-             +--------------------------------------+
-             | lagodb-iceberg                       |
-             |                                      |
-             | managed tables     foreign tables    |
-             | TableAM/CustomScan  iceberg_fdw      |
-             +----------+---------------+-----------+
-                        |               |
-                        |               v
-                        |       Iceberg REST catalog
-                        |
-                        v
-              Shared Iceberg scan/write engine
-                        |
-              +---------+--------------------------+
-              |                                    |
-              v                                    v
-     Local filesystem                         Object storage
-                                            storage volumes
-                                                   |
-                                                   v
-                                          pg-lakebase-storage
-                                         S3 / GCS / Azure
-```
-
-- The managed-table adapter makes `USING iceberg` tables PostgreSQL relations
-  and owns their PostgreSQL-backed metadata lifecycle.
-- The foreign-table adapter maps `iceberg_fdw` relations to existing tables in
-  an Iceberg REST catalog.
-- Managed CustomScan and foreign scan paths share predicate and projection
-  planning while preserving PostgreSQL evaluation wherever correctness
-  requires a residual predicate.
-- Transaction-local state provides statement-consistent reads and stages data
-  and schema changes until the PostgreSQL transaction boundary.
-- The shared worker and storage services route object-backed tables through
-  configured storage volumes.
-
 ## PostgreSQL support
 
 PostgreSQL 17 is the only currently supported version. Support for PostgreSQL
 16, 18, and 19 is planned.
-
-## Project components
-
-- [`lagodb-iceberg`](lagodb-iceberg) provides managed Iceberg tables and
-  REST-catalog Iceberg foreign tables through one shared engine.
-- [`pg-lakebase-core`](pg-lakebase-core) provides the reusable PostgreSQL
-  TableAM, CustomScan, and FDW frameworks, lifecycle adapters, and transaction
-  boundaries.
-- [`pg-lakebase-runtime`](pg-lakebase-runtime) provides shared workers,
-  runtime coordination, and storage-volume administration.
-- [`pg-arrow-conv`](pg-arrow-conv) provides Arrow/PostgreSQL value conversion.
-- [`iceberg-lite`](iceberg-lite) is the synchronous, PostgreSQL-oriented
-  Iceberg library derived from
-  [`iceberg-rust`](https://github.com/apache/iceberg-rust).
-- [`pg-lakebase-storage`](pg-lakebase-storage) provides the local cache and
-  object-storage service used by object-backed tables.
-
-`iceberg-lite` is adapted for PostgreSQL's synchronous execution model and
-custom I/O path. Changes to it should preserve a manageable merge path from the
-upstream `iceberg-rust` project.
-
-## Documentation and development
-
-- [Build from source](docs/build-from-source.md)
-- [Contributing and test commands](CONTRIBUTING.md)
-- [`lagodb-iceberg` details](lagodb-iceberg/README.md)
-- [`lagodb-iceberg` testing design](lagodb-iceberg/docs/testing.md)
-- [`pg-lakebase-core` framework](pg-lakebase-core/README.md)
-- [`pg-lakebase-storage` service](pg-lakebase-storage/README.md)
-- [`iceberg-lite` adaptation](iceberg-lite/README.md)
 
 ## License
 
