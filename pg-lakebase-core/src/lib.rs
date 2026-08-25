@@ -1,9 +1,9 @@
 #![allow(clippy::too_many_arguments)]
 
-//! pg-lakebase-core: A framework for building PostgreSQL Table Access Methods in Rust
+//! pg-lakebase-core: Rust framework for PostgreSQL table access methods and FDWs
 //!
-//! This library provides a safe, ergonomic API for implementing custom table access
-//! methods for PostgreSQL using the pgrx framework.
+//! This library provides safe lifecycle adapters for implementing custom table
+//! access methods and foreign data wrappers for PostgreSQL using pgrx.
 //!
 //! # Quick Start
 //!

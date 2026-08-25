@@ -21,7 +21,7 @@ differently:
   Rust libraries (`rlib`). They are *not* PostgreSQL extensions: they have no
   `pg_module_magic!()`, no `.control` file, and are never loaded by PostgreSQL
   on their own. They are consumed by the extension crates.
-- **Extension crates** (`pg-iceberg-am`) are loadable shared libraries
+- **Extension crates** (`lagodb-iceberg`) are loadable shared libraries
   (`cdylib`) that PostgreSQL installs and calls via SQL.
 
 The problem is that pgrx's `#[pg_test]` bodies must be compiled into a loadable
@@ -37,7 +37,7 @@ on several libraries at once without creating a cycle or inverting the
 production layering. Adding a new framework library means adding a module here,
 not a new crate.
 
-Product extensions such as `pg-iceberg-am` are themselves `cdylib`s and keep
+Product extensions such as `lagodb-iceberg` are themselves `cdylib`s and keep
 their own `#[pg_test]` tests inline; they do not belong here.
 
 ## What goes where
@@ -52,7 +52,7 @@ can run in an ordinary host process or requires PostgreSQL backend semantics:
   belongs here as a `#[pg_test]`.
 
 When in doubt, prefer `#[pg_test]` for PostgreSQL-facing paths. See
-[`pg-iceberg-am/docs/testing.md`](../pg-iceberg-am/docs/testing.md) for the full
+[`lagodb-iceberg/docs/testing.md`](../lagodb-iceberg/docs/testing.md) for the full
 host-versus-backend rationale.
 
 ## Running tests
@@ -77,4 +77,4 @@ cargo pgrx test pg17 --package pg-backend-tests
 
 - pgrx initialized: `cargo pgrx init --pg17=/path/to/pg_config`
 - No Docker required for these tests (unlike the full `cargo xtask test-all`
-  suite, which also runs Docker-based regress tests for `pg-iceberg-am`)
+  suite, which also runs Docker-based regress tests for `lagodb-iceberg`)

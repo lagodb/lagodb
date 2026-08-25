@@ -4,7 +4,7 @@ members = [
     "pg-delta-am",
     "pg-lakebase-core",
     "pg-lakebase-macros",
-    "pg-iceberg-am",
+    "lagodb-iceberg",
     "pg-arrow-conv",
     "pg-backend-tests",
     "iceberg-lite",

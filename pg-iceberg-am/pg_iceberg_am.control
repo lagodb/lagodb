@@ -1,6 +1,0 @@
-comment = 'Iceberg table developed by Robert Mu'
-default_version = '@CARGO_VERSION@'
-module_pathname = '$libdir/pg_iceberg_am'
-requires = 'pg_lakebase_runtime'
-relocatable = false
-superuser = true

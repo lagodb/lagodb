@@ -71,7 +71,7 @@ Level 1: base-relation filter pushdown
     -> provider reads files and emits rows
 ```
 
-This lets `pg-iceberg-am` prune Iceberg files and row groups and apply exact
+This lets `lagodb-iceberg` prune Iceberg files and row groups and apply exact
 row filters. It does not move joins, aggregates, global sort, or limit into a
 columnar engine. PostgreSQL still receives scan rows and executes those upper
 operators itself.
@@ -147,7 +147,7 @@ infrastructure proves out.
 ### Data path
 
 The v1 scan input should come from a custom DataFusion table provider backed by
-`pg-iceberg-am` scan planning:
+`lagodb-iceberg` scan planning:
 
 ```text
 DataFusion TableProvider::scan()
@@ -233,7 +233,7 @@ trait LakebaseDataFusionProvider {
 }
 ```
 
-The provider-specific v1 implementation for `pg-iceberg-am` should reuse
+The provider-specific v1 implementation for `lagodb-iceberg` should reuse
 `ScanSpec` and the existing Arrow batch cursor where possible. If the existing
 cursor API is too tied to PostgreSQL tuple slots, split out a pure Arrow
 `RecordBatch` stream first.
@@ -298,7 +298,7 @@ is more expensive than letting PostgreSQL drive the join.
 ### Phase 0 - Version and API foundation
 
 - Pick a DataFusion version compatible with the workspace Arrow version, or
-  upgrade Arrow across `iceberg-lite`, `pg-arrow-conv`, and `pg-iceberg-am`.
+  upgrade Arrow across `iceberg-lite`, `pg-arrow-conv`, and `lagodb-iceberg`.
 - Add a feature-gated DataFusion dependency in `pg-lakebase-core`.
 - Extract shared expression shippability helpers from the existing CustomScan
   filter framework.
@@ -354,7 +354,7 @@ pg-lakebase-core/
       explain.rs
       memory.rs
 
-pg-iceberg-am/src/
+lagodb-iceberg/src/
   datafusion/
     table_provider.rs
     execution_plan.rs
@@ -365,7 +365,7 @@ pg-iceberg-am/src/
 ## Open questions
 
 - Should the first table provider wrap the existing `IcebergBatchCursor`, or
-  should `pg-iceberg-am` expose a new pure Arrow stream API first?
+  should `lagodb-iceberg` expose a new pure Arrow stream API first?
 - Can DataFusion memory accounting be made strict enough for backend-local
   execution, or do we eventually need a worker process for resource isolation?
 - How much of PostgreSQL expression translation should live in core versus the

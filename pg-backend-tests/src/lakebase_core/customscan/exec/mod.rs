@@ -1,5 +1,5 @@
 //! Backend tests for CustomScan execution helpers.
-//! Full `ExecInitCustomScan` coverage lives in pg-iceberg-am regressions.
+//! Full `ExecInitCustomScan` coverage lives in lagodb-iceberg regressions.
 //!
 //! Split by subsystem so each file targets one exec helper / trampoline:
 //! - [`slice`]: binding/recheck expression sections + relation identity.

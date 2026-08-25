@@ -8,16 +8,16 @@ edition = { workspace = true }
 rust-version = { workspace = true }
 
 [lib]
-# rlib: linked into each extension cdylib (pg-iceberg-am today, FDW/Hudi/Delta
-# later). The crate is format-neutral and never produces a cdylib of its own.
+# rlib: linked into extension cdylibs (lagodb-iceberg managed and foreign tables
+# today, future Hudi/Delta implementations later). It never produces a cdylib.
 crate-type = ["rlib"]
 
 [features]
 # Default to pg17 so `cargo test -p pg-arrow-conv` (and any direct dependent)
 # selects a Postgres version without an explicit `--features`, matching
-# pg-lakebase-core / pg-iceberg-am / pg-backend-tests.
+# pg-lakebase-core / lagodb-iceberg / pg-backend-tests.
 default = ["pg17"]
-# Thread pg16/pg17 through to pgrx and core, matching pg-iceberg-am.
+# Thread pg16/pg17 through to pgrx and core, matching lagodb-iceberg.
 pg16 = ["pgrx/pg16", "pg-lakebase-core/pg16"]
 pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17"]
 

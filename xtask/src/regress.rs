@@ -148,7 +148,7 @@ impl RegressionTarget {
     pub(crate) fn run(self, runner: &RegressionRunner) -> Result<(), String> {
         match self {
             Self::All => {
-                println!("=== pg-iceberg-am SQL regression (PostgreSQL) ===\n");
+                println!("=== lagodb-iceberg SQL regression (PostgreSQL) ===\n");
                 runner.run(RegressionSuite::Iceberg, &[])?;
                 println!("\n=== LagoDB connectors SQL regression (PostgreSQL) ===\n");
                 runner.run(RegressionSuite::Connectors, &[])

@@ -1,0 +1,1528 @@
+-- customscan_pushdown.sql
+-- Predicate classification, pushdown contracts, pruning, fallback, and costing.
+
+-- ============================================================================
+-- Section: Basic exact predicate smoke test
+-- ============================================================================
+-- EXPLAIN and results for simple `WHERE a = 1` CustomScan pushdown.
+
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+
+-- ============================================================================
+-- Setup: an Iceberg table whose schema (`a integer, b text`) matches the
+-- Each INSERT opens a fresh DML session and finalizes one
+-- Parquet data file. We populate three rows so:
+--   - `WHERE a = 1` matches exactly one row, exercising the
+--     "single-row hit" shape that.
+--   - The other rows give us non-trivial result-set parity to verify
+--     against the SeqScan baseline.
+-- ============================================================================
+CREATE TABLE customscan_where_eq_t (
+    a integer,
+    b text
+) USING iceberg;
+
+INSERT INTO customscan_where_eq_t VALUES (1, 'one');
+INSERT INTO customscan_where_eq_t VALUES (2, 'two');
+INSERT INTO customscan_where_eq_t VALUES (3, 'three');
+
+SELECT COUNT(*) AS total_rows FROM customscan_where_eq_t;
+
+-- ============================================================================
+-- Test 1: EXPLAIN parity
+-- ============================================================================
+
+-- CustomScan path. Expected EXPLAIN shape (default TEXT):
+--   Custom Scan (lagodb-iceberg) on customscan_where_eq_t
+--     Pushed Filter: (a = 1)
+-- (no old-style diagnostic title, no default-mode provider-identity
+-- line, no count lines; `a = 1` is Exact and stripped from
+-- `plan.qual`, so there is no local residual `Filter:` line either)
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
+
+-- SeqScan baseline. Expected EXPLAIN shape:
+--   Seq Scan on customscan_where_eq_t
+--     Filter: (a = 1)
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
+
+-- ============================================================================
+-- Test 2: Result-set parity
+-- ============================================================================
+-- Both modes must return the exact same row set. `ORDER BY` makes the
+-- output deterministic so pg_regress diffs are stable.
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
+
+-- ============================================================================
+-- Test 3: EXPLAIN VERBOSE carries the provider identity and the
+-- classified labeled predicate lines.
+-- Under `force` and VERBOSE, the output carries `Scan Purpose: Query` and a `Provider:` line
+-- plus the deparsed predicate text on labeled lines `Pushed Filter
+-- Exact:` and `Recheck:` (both non-empty for this plan). The empty
+-- classes (`Pushed Filter Conservative:`, and any local residual) are
+-- omitted — only non-empty classes print labeled predicate lines
+--. No numeric count lines appear.
+-- ============================================================================
+
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_where_eq_t;
+-- Section: Exact predicate contract
+-- Exact-pushdown results and EXPLAIN match SeqScan (force vs off) for integer ops.
+
+
+-- ============================================================================
+-- Setup: create two parallel Iceberg tables, one with `int4` `id` and one
+-- with `int8` `id`, each populated across multiple data files so file-level
+-- pruning has something to do. Each INSERT statement opens a fresh DML
+-- session and produces one Parquet file with bounded `lower_bounds[id]` /
+-- `upper_bounds[id]` statistics.
+-- The second file in each table includes NULL ids. Exact comparisons omit the
+-- original qual from `plan.qual`, so the Iceberg predicate itself must match
+-- PostgreSQL three-valued WHERE semantics for these NULL-bearing files.
+-- ============================================================================
+
+CREATE TABLE customscan_exact_pushdown_int4 (
+    id integer,
+    payload text
+) USING iceberg;
+
+-- File 1: id in [1, 50]
+INSERT INTO customscan_exact_pushdown_int4
+SELECT g, 'i4_a_' || g
+FROM generate_series(1, 50) AS g;
+
+-- File 2: id in [100, 150] with three NULLs interleaved
+INSERT INTO customscan_exact_pushdown_int4
+SELECT
+    CASE WHEN g % 17 = 0 THEN NULL ELSE g END,
+    'i4_b_' || g
+FROM generate_series(100, 150) AS g;
+
+-- File 3: id in [1000, 1050]
+INSERT INTO customscan_exact_pushdown_int4
+SELECT g, 'i4_c_' || g
+FROM generate_series(1000, 1050) AS g;
+
+SELECT COUNT(*) AS int4_total_rows FROM customscan_exact_pushdown_int4;
+SELECT COUNT(*) AS int4_null_rows
+FROM customscan_exact_pushdown_int4 WHERE id IS NULL;
+
+CREATE TABLE customscan_exact_pushdown_int8 (
+    id bigint,
+    payload text
+) USING iceberg;
+
+-- File 1: id in [1, 50]
+INSERT INTO customscan_exact_pushdown_int8
+SELECT g::bigint, 'i8_a_' || g
+FROM generate_series(1, 50) AS g;
+
+-- File 2: id in [100, 150] with three NULLs interleaved
+INSERT INTO customscan_exact_pushdown_int8
+SELECT
+    CASE WHEN g % 17 = 0 THEN NULL ELSE g::bigint END,
+    'i8_b_' || g
+FROM generate_series(100, 150) AS g;
+
+-- File 3: id in [10_000_000_000, 10_000_000_050]
+INSERT INTO customscan_exact_pushdown_int8
+SELECT (10000000000 + g)::bigint, 'i8_c_' || g
+FROM generate_series(0, 50) AS g;
+
+SELECT COUNT(*) AS int8_total_rows FROM customscan_exact_pushdown_int8;
+SELECT COUNT(*) AS int8_null_rows
+FROM customscan_exact_pushdown_int8 WHERE id IS NULL;
+
+-- ============================================================================
+-- Block A: int4 Exact-promoted operators (opnos 96, 518, 97, 523, 521, 525)
+-- ============================================================================
+
+-- A.1 int4eq (=), opno 96
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+
+-- A.2 int4ne (<>), opno 518. This also checks NULL semantics: the three
+-- NULL rows must not satisfy `NULL <> 25`.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+
+-- A.3 int4lt (<), opno 97
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+
+-- A.4 int4le (<=), opno 523
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+
+-- A.5 int4gt (>), opno 521
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+
+-- A.6 int4ge (>=), opno 525
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+
+-- ============================================================================
+-- Block B: int8 Exact-promoted operators (opnos 410, 411, 412, 414, 413, 415)
+-- ============================================================================
+
+-- B.1 int8eq (=), opno 410. The literal lives in the >2^32 file to exercise
+-- the 64-bit comparison path specifically.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+
+-- B.2 int8ne (<>), opno 411
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+
+-- B.3 int8lt (<), opno 412
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+
+-- B.4 int8le (<=), opno 414
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+
+-- B.5 int8gt (>), opno 413
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+
+-- B.6 int8ge (>=), opno 415
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+
+-- ============================================================================
+-- Block C: NULL semantics and AND composition
+-- ============================================================================
+
+-- C.1 equality on the NULL-bearing int4 file.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+
+-- C.2 inequality on the NULL-bearing int4 file. NULL ids must not satisfy
+-- `NULL <> 119` on either path.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+
+-- C.3 AND of two Exact range clauses. Both clauses should be pushed and
+-- recorded for recheck; neither should remain residual.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+
+-- ============================================================================
+-- Block D: Type resolution through PG's resolved operator identity
+-- ============================================================================
+
+-- D.1 explicit int8 literal against an int8 column. This is the same
+-- allowlisted operator reached without relying on unknown-literal coercion.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+
+-- ============================================================================
+-- Block E: Collation / text comparisons are not Exact-promoted
+-- The Exact allowlist is restricted to collation-agnostic integer triples.
+-- These text predicates provide negative coverage for operator identity
+--: the provider planner must NOT promote text/collation
+-- triples to `Exact` even though the structural shape (`column op literal`)
+-- matches the Exact template.
+-- We assert this under `pg_lakebase.customscan_mode = 'force'` deliberately:
+-- `force` biases CustomPaths the framework deems legal and selects them
+-- regardless of cost. So the EXPLAIN under `force` directly reveals the
+-- provider planner's decision for text:
+--   - `Seq Scan` ⇒ planning returned `Unsupported`, no CustomPath emitted
+--     for text equality at all (the strongest negative case).
+--   - `Custom Scan` whose text clause was classified
+--     `ConservativePruning` ⇒ planning emitted a CustomPath. This is
+--     also acceptable: the ConservativePruning clause is pushed (it appears
+--     on the `Pushed Filter:` line, and under VERBOSE on the
+--     `Pushed Filter Conservative:` labeled line) but the original clause is
+--     ALSO retained as a local residual `Filter:` line — importantly it is
+--     NOT classified `Exact` (which would strip it from `plan.qual` and,
+--     under VERBOSE, label it `Pushed Filter Exact:`), which is what
+--     the Exact-pushdown soundness rule (recheckable clauses must never
+--     be classified Exact) forbids.
+-- Either outcome — but never an Exact classification of the text clause —
+-- proves the negative assertion. Using `force` here is consistent with the
+-- rest of this file and gives stronger diagnostic output than `auto`, where
+-- a SeqScan plan
+-- would conflate "no path emitted" with "path emitted but cost-lost".
+-- ============================================================================
+
+CREATE TABLE customscan_exact_pushdown_text (
+    id integer,
+    label text COLLATE "C"
+) USING iceberg;
+
+INSERT INTO customscan_exact_pushdown_text VALUES
+    (1, 'apple'),
+    (2, 'Banana'),
+    (3, 'banana'),
+    (4, 'Cherry'),
+    (5, 'cherry');
+
+-- E.1 text equality under the column collation. Under `force`, this must
+-- not classify the text clause as Exact (it must NOT appear on a VERBOSE
+-- `Pushed Filter Exact:` line) — text/collation triples are not allowlisted
+--.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+
+-- E.2 explicit COLLATE clause. This is also outside the Exact proof surface
+--. Same negative assertion as E.1 under `force`.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_exact_pushdown_int4;
+DROP TABLE customscan_exact_pushdown_int8;
+DROP TABLE customscan_exact_pushdown_text;
+-- Section: Partial predicate pushdown
+-- Partial pushdown: pushed + residual filters and results.
+
+
+-- ============================================================================
+-- Setup: an Iceberg table whose schema (`a integer, b text`) lets us
+-- exercise both an Exact pushable predicate (`a = 1`) and a
+-- structurally-unsupported predicate (`length(b) > 0`) over the same
+-- row population. Three rows give us non-trivial result-set parity
+-- against the SeqScan baseline.
+-- ============================================================================
+CREATE TABLE customscan_partial_pushdown_t (
+    a integer,
+    b text
+) USING iceberg;
+
+INSERT INTO customscan_partial_pushdown_t VALUES (1, 'one');
+INSERT INTO customscan_partial_pushdown_t VALUES (2, 'two');
+INSERT INTO customscan_partial_pushdown_t VALUES (3, '');
+
+SELECT COUNT(*) AS total_rows FROM customscan_partial_pushdown_t;
+
+-- ============================================================================
+-- Test 1: AND-partial pushdown
+-- ============================================================================
+-- `a = 1 AND length(b) > 0`:
+--   - `a = 1` is planned Exact and pushed; its contract derives EPQ recheck.
+--   - `length(b) > 0` stays in residual.
+--   - Result set must equal the SeqScan baseline (single row: (1, 'one')).
+
+-- CustomScan path (default TEXT): the CustomScan node carries a
+-- single `Pushed Filter: (a = 1)` line for the pushed (remote)
+-- predicate, while the local residual `length(b) > 0` is shown only
+-- by PG's standard `Filter:` line above it:
+--   Filter: (length(b) > 0)
+--   Pushed Filter: (a = 1)
+-- (no old-style diagnostic title, no default-mode provider-identity
+-- line, no counts)
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0;
+
+-- SeqScan baseline: filter is the original AND clause verbatim.
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0;
+
+-- Result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0
+ORDER BY a, b;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0
+ORDER BY a, b;
+
+-- VERBOSE: under VERBOSE the deparsed predicate text appears on
+-- labeled lines for each non-empty class.
+-- `Pushed Filter Exact:` and `Recheck:` both print the deparsed
+-- `(a = 1)`: the plan stores one pushed-expression provenance entry and
+-- derives the Exact recheck from its persisted contract. The
+-- `Pushed Filter Conservative:` class is
+-- empty and its label line is omitted (
+-- non-empty classes print labeled predicate lines); no numeric count
+-- lines appear.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0;
+
+-- ============================================================================
+-- Test 2: OR-no-pushdown
+-- ============================================================================
+-- `a = 1 OR length(b) > 0`:
+--   - The Unsupported child kills both the OR-Exact 
+--     4.5) and the OR-ConservativePruning-widening branches.
+--   - The whole OR is Unsupported; `split.pushed` is empty;
+--     Iceberg's `create_path` declines the variant; PG plans a
+--     SeqScan with the OR clause as Filter.
+--   - Result set must equal the SeqScan baseline run with
+--     `customscan_mode = 'off'`.
+
+-- "CustomScan" path under `force`. With no pushable clauses there
+-- is no CustomPath to bias toward, so this plan must be SeqScan.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0;
+
+-- SeqScan baseline: same filter shape.
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0;
+
+-- Result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0
+ORDER BY a, b;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0
+ORDER BY a, b;
+
+-- ============================================================================
+-- Test 3: row-valued NullTest residual survives OR widening
+-- ============================================================================
+-- PostgreSQL's row-valued IS NULL and IS NOT NULL tests are not complements.
+-- The negotiator may widen the OR to `(a = 1) OR (a = 2)` for conservative
+-- pruning, but PostgreSQL must evaluate the original `NOT (t IS NULL)` tree as
+-- the local residual. The additional `(1, NULL)` row distinguishes the correct
+-- three-row result from the incorrect two-row result produced by rewriting the
+-- row test to `t IS NOT NULL`.
+INSERT INTO customscan_partial_pushdown_t VALUES (1, NULL);
+
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT count(*) AS matched_rows
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT count(*) AS matched_rows
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_partial_pushdown_t;
+-- Section: Automatic path cost selection
+-- Cost-based path selection under the default pg_lakebase.customscan_mode = 'auto'.
+
+-- ============================================================================
+-- Auto-mode cost-based selection (the PRODUCTION default).
+-- Every other block in this suite pins 'force' or 'off' so the plan SHAPE is
+-- deterministic regardless of cost. This block instead exercises the default
+-- mode ('auto'), where the planner chooses purely on cost — the path the real
+-- workload takes:
+--   * A pushable predicate makes `create_path` emit a CustomPath. Its cost
+--     model (pg-lakebase-core `compute_costs`) does NOT reduce output rows
+--     (`path.rows` stays `parent->rows`); pruning savings land only in the
+--     SCANNED-volume terms: `scanned_pages = baserel.pages * fraction` and
+--     `scanned_tuples = baserel.tuples * fraction`, which drive the disk
+--     (`seq_page_cost * scanned_pages`) and per-tuple-CPU costs. `fraction` is
+--     `clauselist_selectivity` of ONLY the costed-pruning pushed clauses
+--     (`split.costed_pruning_exprs()`), clamped from below by
+--     `lagodb_iceberg.customscan_min_scan_fraction` (0.02). `id = 1500` is
+--     int4eq → ExactRowFilter → CostedPruning, so it counts; an unANALYZEd
+--     table gives it PG's DEFAULT_EQ_SEL (0.005), which the floor lifts to
+--     0.02. Either way fraction << 1, so the scaled disk+CPU cost sits far
+--     below the full SeqScan and 'auto' picks the Custom Scan WITHOUT any force
+--     bias. (The floor is a guard against a bogus near-zero selectivity, not
+--     the reason CustomScan wins.)
+--   * With NO pushable predicate, `create_path` returns `None` — no CustomPath
+--     is emitted at all — so 'auto' can only fall back to the Seq Scan
+--     baseline; the cost model never even gets a CustomScan to weigh.
+-- NB: only COSTED-pruning pushes scale the estimate. An UncostedBestEffort push
+-- (e.g. a date/timestamp ConservativePruning clause) is still applied for
+-- runtime pruning but leaves `fraction = 1.0`, so it would NOT flip 'auto' to a
+-- Custom Scan. That is exactly why this block uses an int equality — the case
+-- that wins on cost deterministically.
+-- The relation is sized across two data files so the Iceberg snapshot summary
+-- (`total-records` / `total-files-size`, surfaced via `relation_estimate_size`)
+-- gives the planner a real, non-zero (pages, tuples) baseline. EXPLAIN
+-- (COSTS OFF) asserts plan SHAPE only, so the exact cost numbers (which depend
+-- on parquet file size) never reach the .out and the assertion stays stable.
+-- ============================================================================
+CREATE TABLE customscan_auto_cost_t (
+    id integer,
+    payload text
+) USING iceberg;
+
+-- File 1: id in [1, 2000]
+INSERT INTO customscan_auto_cost_t
+SELECT g, 'auto_' || g
+FROM generate_series(1, 2000) AS g;
+
+-- File 2: id in [10000, 11999]
+INSERT INTO customscan_auto_cost_t
+SELECT g, 'auto_' || g
+FROM generate_series(10000, 11999) AS g;
+
+SELECT COUNT(*) AS auto_cost_rows FROM customscan_auto_cost_t;
+
+-- The default mode is already 'auto'; set it explicitly so the block is
+-- self-documenting and independent of any prior section's GUC state.
+SET pg_lakebase.customscan_mode = 'auto';
+
+-- A.1 Pushable equality under 'auto': the CustomPath's scan cost (disk +
+-- per-tuple CPU, scaled down by the costed-pruning selectivity) sits far below
+-- the full SeqScan, so the planner picks the Custom Scan on cost alone (no
+-- force bias). Default TEXT shows the `Pushed Filter: (id = 1500)` line; the
+-- Exact clause is stripped from `plan.qual`, so there is no residual `Filter:`.
+EXPLAIN (COSTS OFF)
+SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500;
+
+-- A.2 No predicate under 'auto': `create_path` sees an empty pushed set and
+-- returns `None`, so no CustomPath is emitted and the only candidate is the
+-- Seq Scan baseline.
+EXPLAIN (COSTS OFF)
+SELECT id, payload FROM customscan_auto_cost_t;
+
+-- A.3 The same predicate-free query under 'force' is STILL a Seq Scan: this
+-- proves A.2's Seq Scan is "no CustomPath was emitted" (empty pushed set), not
+-- merely "a CustomPath lost on cost". `force` can only bias CustomPaths the
+-- framework already emitted, and here there is none to bias.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, payload FROM customscan_auto_cost_t;
+
+-- A.4 Result-set parity: the cost-selected Custom Scan ('auto') returns the
+-- same row as the SeqScan baseline ('off').
+SET pg_lakebase.customscan_mode = 'auto';
+SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_auto_cost_t;
+
+-- ============================================================================
+-- Section: Conservative pruning
+-- ============================================================================
+-- ConservativePruning: file-level pushed filter + residual plan.qual parity vs SeqScan.
+
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+
+-- ============================================================================
+-- Setup: four Iceberg data files with disjoint `val` ranges (date column).
+-- Each INSERT finalizes one Parquet file with min/max statistics for
+-- `InclusiveMetricsEvaluator` pruning.
+--
+-- `val` is a `date` column: dates are mapped from disjoint integer ranges via
+-- `DATE '2001-01-01' + g`, so the four files keep disjoint, gap-separated
+-- min/max bounds (the same shape the original numeric fixture used) while
+-- exercising a still-enabled pushdown type.
+--
+-- The capability oracle (`predicate_pushdown_policy.rs`) tiers date comparisons
+-- (`date_eq`, `date_lt`, …) as `ConservativePruning`: the clause is pushed for
+-- pruning AND copied into `plan.qual` (residual). CustomScan therefore shows
+-- BOTH `Pushed Filter:` and `Filter:` with the same predicate text — unlike
+-- `ExactRowFilter`, which is stripped from `plan.qual` and appears only on
+-- `Pushed Filter:`.
+--
+-- Note: `numeric` comparison is intentionally NOT used here. With
+-- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false` (exact row filtering needs the
+-- bound Iceberg decimal precision/scale; a scale-naive row filter can produce
+-- false negatives the residual qual cannot recover), numeric comparisons are
+-- `Unsupported` and would not be
+-- pushed. `date` is a collation-free, fixed-offset `int32` comparison that maps
+-- exactly between PostgreSQL and Iceberg, so its row filter has no false
+-- negatives.
+-- ============================================================================
+CREATE TABLE customscan_conservative_pruning_t (
+    val date,
+    payload text
+) USING iceberg;
+
+-- File 1: val ∈ [2001-01-01 + 1, 2001-01-01 + 100]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file1_' || g
+FROM generate_series(1, 100) AS g;
+
+-- File 2: val ∈ [2001-01-01 + 200, 2001-01-01 + 300]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file2_' || g
+FROM generate_series(200, 300) AS g;
+
+-- File 3: val ∈ [2001-01-01 + 500, 2001-01-01 + 600]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file3_' || g
+FROM generate_series(500, 600) AS g;
+
+-- File 4: val ∈ [2001-01-01 + 800, 2001-01-01 + 900]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file4_' || g
+FROM generate_series(800, 900) AS g;
+
+SELECT COUNT(*) AS total_rows FROM customscan_conservative_pruning_t;
+
+-- ============================================================================
+-- Test 1: equality on a value in exactly one file (file 2).
+-- Pruning narrows to file 2; residual `Filter:` re-evaluates the equality on
+-- rows returned from the AM (ConservativePruning correctness backstop).
+-- ============================================================================
+
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+
+-- ============================================================================
+-- Test 2: equality in a gap between files (no row matches).
+-- Pruning may exclude every file; residual qual still yields zero rows.
+-- ============================================================================
+
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+
+-- ============================================================================
+-- Test 3: range spanning file 1 and part of file 2 (`val < base + 250`).
+-- Pruning drops files 3 and 4; residual `Filter:` applies the bound on
+-- surviving rows (100 from file 1 + 50 from file 2 = 150 rows).
+-- ============================================================================
+
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+
+-- ============================================================================
+-- Test 4: range straddling file boundaries (`val >= base + 50 AND val <= base + 550`).
+-- Both conjuncts are ConservativePruning; each appears on pushed and residual.
+-- Expected count: 51 + 101 + 51 = 203 rows.
+-- ============================================================================
+
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_conservative_pruning_t;
+-- Section: EXPLAIN pushdown contract split
+-- EXPLAIN splits ExactRowFilter vs ConservativePruning pushed filters (VERBOSE).
+
+
+-- ============================================================================
+-- Setup: an Iceberg table with an integer column (ExactRowFilter-pushable), a
+-- date column (ConservativePruning-pushable), and a default-collation text
+-- column (ordered comparison Unsupported). Two INSERT statements give two data
+-- files so file-level pruning is non-trivial; the assertions here are on plan
+-- shape and result-set parity.
+--
+-- The Conservative half uses `date` rather than `numeric`: with
+-- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false` numeric comparisons are
+-- `Unsupported` (exact row filtering needs bound decimal precision/scale).
+-- `date` is a collation-free, fixed-offset `int32` comparison that
+-- maps exactly between PostgreSQL and Iceberg, so it remains a valid
+-- ConservativePruning clause for exercising the Exact-vs-Conservative split.
+-- ============================================================================
+CREATE TABLE customscan_explain_split_t (
+    id integer,
+    d date,
+    descr text
+) USING iceberg;
+
+-- File 1: id in [1, 3], d in 2023 (before the 2024-01-01 boundary)
+INSERT INTO customscan_explain_split_t VALUES
+    (1, DATE '2023-01-15', 'apple'),
+    (2, DATE '2023-06-20', 'mango'),
+    (3, DATE '2023-12-31', 'cherry');
+-- File 2: id in [4, 6], d in 2024+ (on/after the boundary)
+INSERT INTO customscan_explain_split_t VALUES
+    (4, DATE '2024-01-10', 'date'),
+    (5, DATE '2024-06-15', 'fig'),
+    (6, DATE '2024-12-31', 'grape');
+
+SELECT COUNT(*) AS total_rows FROM customscan_explain_split_t;
+
+-- ============================================================================
+-- Test 1: a query mixing an integer `ExactRowFilter` clause and a date
+-- `ConservativePruning` clause shows the expected ExactRowFilter vs
+-- ConservativePruning split.
+-- `WHERE id = 2 AND d < DATE '2024-01-01'`:
+--   - `id = 2` is `int4 =` (opno 96), which the oracle marks `ExactRowFilter`. The
+--     framework strips it from `plan.qual`, so it appears ONLY on the
+--     `Pushed Filter:` line — never as a residual `Filter:` clause.
+--   - `d < DATE '2024-01-01'` is `date_lt` (opno 1095), which the oracle marks
+--     `ConservativePruning`. It is pushed for pruning (so it joins the
+--     `Pushed Filter:` line) AND kept in `plan.qual` for PG to re-evaluate (so
+--     it ALSO shows on the residual `Filter:` line).
+-- Expected EXPLAIN under `force` (default TEXT):
+--   Custom Scan (lagodb-iceberg) on customscan_explain_split_t
+--     Filter: (d < '2024-01-01'::date)                          <- ConservativePruning only (residual)
+--     Pushed Filter: (d < '2024-01-01'::date) AND (id = 2)      <- ConservativePruning + ExactRowFilter (pushed)
+-- The integer ExactRowFilter clause `id = 2` is absent from `Filter:` (stripped
+-- from `plan.qual`); the date ConservativePruning clause `d < '2024-01-01'` is
+-- present on BOTH lines. The ` AND `-join order on the `Pushed Filter:` line
+-- follows `custom_exprs` order, which is incidental — what this test pins is
+-- the ExactRowFilter vs ConservativePruning SPLIT (which clause is residual vs
+-- pushed), not the conjunct order.
+-- ============================================================================
+
+-- CustomScan path: the ExactRowFilter vs ConservativePruning split is visible on the scan node.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01';
+
+-- SeqScan baseline: the original AND clause is the verbatim Filter.
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01';
+
+-- Result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01'
+ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01'
+ORDER BY id;
+
+-- ============================================================================
+-- Test 2: a query whose ONLY predicate is an `Unsupported`-collation `text`
+-- clause shows NO discounted CustomPath.
+-- `WHERE descr < 'mango'` is ordered `text` comparison (`text_lt`, opno 664)
+-- under the DEFAULT database collation. The provider planner treats the default
+-- collation as unsafe for ordered text (only the explicit C/POSIX OID is
+-- safe), so the clause is `Unsupported`: the path summary has no planned
+-- filter, `create_path` returns `None`, and
+-- no CustomPath is emitted. Under `force` the plan therefore falls back to
+-- SeqScan with the `<` clause as the verbatim Filter — there is NO
+-- `Custom Scan (lagodb-iceberg)` node and NO `Pushed Filter:` line.
+-- ============================================================================
+
+-- Under `force`: no pushable clause ⇒ no CustomPath to bias toward ⇒ SeqScan.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango';
+
+-- SeqScan baseline: same filter shape.
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango';
+
+-- Result-set parity (residual qual decides matches).
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango'
+ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango'
+ORDER BY id;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_explain_split_t;
+-- Section: Type and residual equivalence
+-- Residual result parity across pushdown operand types.
+
+
+-- Pin the session timezone so `timestamptz` literals and stored values are
+-- compared against a fixed absolute instant (the writer pins the Arrow column
+-- timezone to '+00:00').
+SET timezone = 'UTC';
+
+-- ============================================================================
+-- Part 1: numeric — comparison pushdown is DISABLED (residual-only), plus the
+-- NaN / out-of-range literals must still evaluate without error
+-- ============================================================================
+-- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false`: the only filter API the
+-- provider has applies the predicate as a row-level Arrow filter. Numeric
+-- comparison can only be exact with bound decimal precision/scale and
+-- operator-aware literal conversion; otherwise scale handling can produce false
+-- negatives the residual qual cannot recover. The provider planner therefore
+-- marks numeric comparison `Unsupported`, so `val < 100.5` is NOT pushed.
+-- Because it is the only
+-- predicate, the path summary has no planned filter, `create_path`
+-- returns `None`, and no CustomPath is emitted — under `force` the plan falls
+-- back to SeqScan, identical to `off`. The residual qual decides every row, so
+-- force/off results stay in parity. This Part is a regression guard that
+-- numeric stays disabled; date/timestamp (Part 2) carry the live
+-- ConservativePruning coverage.
+CREATE TABLE rq_numeric (
+    id integer,
+    val numeric(10, 2)
+) USING iceberg;
+
+-- File 1: val in [10.50, 99.99]
+INSERT INTO rq_numeric VALUES (1, 10.50), (2, 50.00), (3, 99.99);
+-- File 2: val in [100.50, 999.99]
+INSERT INTO rq_numeric VALUES (4, 100.50), (5, 200.00), (6, 999.99);
+
+SELECT COUNT(*) AS rq_numeric_rows FROM rq_numeric;
+
+-- 1.1 numeric ordered comparison (`< 100.5`): Unsupported ⇒ no pushdown ⇒
+-- SeqScan under `force` (no `Pushed Filter:`, no `Custom Scan` node), and the
+-- residual qual decides. force/off EXPLAIN and results match.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+
+-- 1.2 numeric 'NaN' literal: numeric comparison is not pushed at all, so the
+-- residual qual decides — WITHOUT error. PG sorts NaN greater than every
+-- number, so `val < 'NaN'` matches every non-NULL row. Both modes must agree
+-- and neither may raise.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
+
+-- 1.3 numeric out-of-range literal (wider than the Iceberg decimal /
+-- Decimal128/D128 38-digit range): also never pushed; the residual qual decides without
+-- error. `val < 1e40` is true for every stored value.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;
+
+-- ============================================================================
+-- Part 2: date / timestamp / timestamptz — pushable ConservativePruning
+-- ============================================================================
+-- date_ge (1098) / timestamp_ge (2065) / timestamptz_ge (1325) are all marked
+-- `ConservativePruning` by the provider planner and bound using the shared
+-- `PG_EPOCH_DAYS_DIFF` / `PG_EPOCH_USECS_DIFF` constants, so pushed bounds
+-- align with the storage write side. File 1 (2020/2021) is pruned by the
+-- `>= 2024-01-01` predicates; file 2 survives.
+CREATE TABLE rq_temporal (
+    id integer,
+    d date,
+    ts timestamp,
+    tstz timestamptz
+) USING iceberg;
+
+-- File 1: pre-2024
+INSERT INTO rq_temporal VALUES
+    (1, DATE '2020-03-15', TIMESTAMP '2020-03-15 08:00:00', TIMESTAMPTZ '2020-03-15 08:00:00+00'),
+    (2, DATE '2021-07-20', TIMESTAMP '2021-07-20 16:30:00', TIMESTAMPTZ '2021-07-20 16:30:00+00');
+-- File 2: 2024 and later
+INSERT INTO rq_temporal VALUES
+    (3, DATE '2024-06-15', TIMESTAMP '2024-06-15 12:34:56', TIMESTAMPTZ '2024-06-15 12:34:56+00'),
+    (4, DATE '2025-01-10', TIMESTAMP '2025-01-10 23:59:59', TIMESTAMPTZ '2025-01-10 23:59:59+00');
+
+SELECT COUNT(*) AS rq_temporal_rows FROM rq_temporal;
+
+-- 2.1 date comparison (`>= DATE '2024-01-01'`).
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
+
+-- 2.2 timestamp comparison (`>= TIMESTAMP '2024-01-01 00:00:00'`).
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
+
+-- 2.3 timestamptz comparison (`>= TIMESTAMPTZ '2024-01-01 00:00:00+00'`).
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+
+-- ============================================================================
+-- Part 3: text — safe collation (pushable) vs unsafe collation (residual-only)
+-- ============================================================================
+-- `label` carries an explicit C collation (deterministic, byte-ordered), so
+-- `label = 'bravo'` (texteq, deterministic) and `label < 'delta'` (text_lt
+-- under C) are both pushable ConservativePruning. `note` carries the default collation
+-- OID, which the oracle treats as unsafe for ordered text, so `note < 'cherry'`
+-- is NOT pushed. `<>` is `Unsupported` for every collation.
+CREATE TABLE rq_text (
+    id integer,
+    label text COLLATE "C",
+    note text
+) USING iceberg;
+
+-- File 1
+INSERT INTO rq_text VALUES (1, 'alpha', 'apple'), (2, 'bravo', 'banana'), (3, 'charlie', 'cherry');
+-- File 2
+INSERT INTO rq_text VALUES (4, 'delta', 'date'), (5, 'echo', 'elderberry'), (6, 'foxtrot', 'fig');
+
+SELECT COUNT(*) AS rq_text_rows FROM rq_text;
+
+-- 3.1 SAFE: text equality under a deterministic (C) collation — pushable.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
+
+-- 3.2 SAFE: ordered text comparison under the C collation — pushable.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
+
+-- 3.3 UNSAFE: `<>` is Unsupported for every collation — not pushed, residual
+-- decides. Under `force` there is no pushable clause, so the plan falls back
+-- to SeqScan; the result must still equal the `off` baseline.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
+
+-- 3.4 UNSAFE: ordered text under the DEFAULT collation OID — the oracle treats
+-- the default collation as unsafe for ordered text (only the explicit C/POSIX
+-- OID is safe), so `note < 'cherry'` is NOT pushed. Residual decides; parity.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+RESET timezone;
+DROP TABLE rq_numeric;
+DROP TABLE rq_temporal;
+DROP TABLE rq_text;
+-- Section: Unsupported predicate fallback
+-- Unsupported-only quals emit no CustomPath; results unchanged.
+
+
+-- ============================================================================
+-- Setup: an Iceberg table with an integer column (which the oracle marks
+-- Exact-pushable) and a text column (whose `<>` comparison the oracle marks
+-- Unsupported). Three rows give non-trivial result-set parity.
+-- ============================================================================
+CREATE TABLE customscan_unsupported_only_t (
+    id integer,
+    label text
+) USING iceberg;
+
+INSERT INTO customscan_unsupported_only_t VALUES (1, 'alpha');
+INSERT INTO customscan_unsupported_only_t VALUES (2, 'bravo');
+INSERT INTO customscan_unsupported_only_t VALUES (3, 'charlie');
+
+SELECT COUNT(*) AS total_rows FROM customscan_unsupported_only_t;
+
+-- ============================================================================
+-- Test 1: an `Unsupported`-only variant yields NO discounted CustomPath
+--.
+-- `WHERE label <> 'bravo'`:
+--   - The sole candidate clause is `text <>`. The oracle returns
+--     `Unsupported`, so the clause stays in residual and the path summary has
+--     no planned filter.
+--   - `create_path` sees an empty planned-filter summary and returns
+--     `None`. No CustomPath is emitted, so even under `force` the plan
+--     falls back to SeqScan with the `<>` clause as the Filter.
+-- ============================================================================
+
+-- Under `force`: no pushable clause ⇒ no CustomPath to bias toward ⇒
+-- SeqScan. The `<>` clause appears verbatim as the SeqScan Filter; there
+-- is NO `Custom Scan (lagodb-iceberg)` node and NO `Pushed Filter:` line.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+
+-- SeqScan baseline: same filter shape.
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+
+-- Result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+
+-- ============================================================================
+-- Test 2: positive control — a translatable clause DOES yield a CustomPath.
+-- This proves the Test 1 SeqScan fallback is genuinely the capability gate
+-- declining the variant, not an artifact of the harness. `WHERE id = 2` is
+-- `int4 =` (opno 96), which the provider planner plans as `Exact`: the path
+-- summary is non-empty, so `create_path` emits a CustomPath,
+-- and under `force` the plan is a Custom Scan carrying the pushed predicate.
+-- ============================================================================
+
+-- Under `force`: the Exact integer clause is pushable, so a CustomPath
+-- exists and is selected. The Exact clause is stripped from `plan.qual`
+-- (no local residual `Filter:` line) and shown on the `Pushed Filter:` line.
+SET pg_lakebase.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+
+-- SeqScan baseline.
+SET pg_lakebase.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+
+-- Result-set parity.
+SET pg_lakebase.customscan_mode = 'force';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+
+SET pg_lakebase.customscan_mode = 'off';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+RESET pg_lakebase.customscan_mode;
+DROP TABLE customscan_unsupported_only_t;

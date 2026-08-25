@@ -4,7 +4,7 @@
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
-**A reusable Rust framework for PostgreSQL-native lake-table access methods.**
+**A reusable Rust framework for PostgreSQL-native lake-table integrations.**
 
 `pg-lakebase-core` is the framework layer between PostgreSQL's C callback
 interfaces and a concrete table-format implementation. It concentrates the
@@ -17,20 +17,22 @@ behind Rust traits instead of rebuilding those boundaries in every extension.
 | Provider needs to... | `pg-lakebase-core` provides... |
 |---|---|
 | Implement a PostgreSQL table access method | TAM traits and callback adapters for scans, relations, indexes, DML, DDL, and COPY |
+| Implement a PostgreSQL foreign data wrapper | FDW traits and callback adapters for scan, modify, analyze, schema import, and truncate |
 | Push safe predicates into a lake-table scan | Complete-expression planning, cost gates, residual/recheck ownership, and runtime value binding for CustomScan and FDW |
 | Move values between PostgreSQL and a storage writer | Typed datum/slot views, owned `Cell`/`Row` values, and columnar batch abstractions |
 | Survive PostgreSQL ERROR, abort, and commit boundaries | Typed handles, `ResourceOwner` cleanup, transaction/subtransaction callbacks, and lifecycle state |
 | Integrate storage-specific PostgreSQL facilities | Catalog/options helpers, hooks, WAL registration, background-worker scaffolding, and diagnostics |
 
-The reference consumer is [pg-iceberg-am](../pg-iceberg-am), which implements
-an Apache Iceberg TAM and CustomScan provider on top of these frameworks.
+The reference consumer is [lagodb-iceberg](../lagodb-iceberg), which implements
+an Apache Iceberg TAM, CustomScan provider, and REST-catalog FDW on top of these
+frameworks.
 
 ## What this crate is—and is not
 
 `pg-lakebase-core` is a framework layer, not a storage-format implementation.
-It does not read or write Iceberg, Delta Lake, or Hudi metadata itself. FDW
-support is a workspace-level direction and is not part of this crate's current
-public API.
+It does not read or write Iceberg, Delta Lake, or Hudi metadata itself. Its TAM,
+CustomScan, and FDW APIs only adapt PostgreSQL lifecycles; concrete providers
+retain format-specific planning, metadata, and storage policy.
 
 ## Architecture
 
@@ -51,13 +53,16 @@ in safe Rust for their business logic.
             concrete storage implementation
 ```
 
-Two seams connect a provider to PostgreSQL:
+Three seams connect a provider to PostgreSQL:
 
 - The **TableAM seam** handles the storage engine callbacks: scanning,
   inserting, updating, deleting, and the relation/index/DDL lifecycle.
 - The **CustomScan seam** plugs into the planner (`set_rel_pathlist_hook`) and
   executor. It is independent of the TableAM callbacks and is what carries
   predicate pushdown.
+- The **FDW seam** adapts PostgreSQL foreign scan, modify, analyze, import, and
+  truncate callbacks while leaving catalog and storage semantics in the
+  provider.
 
 ## Provider API shape
 
@@ -90,7 +95,9 @@ impl TableAccessMethod for MyTableAm {
 The AM type implements the stateless facet traits, while the associated session
 types implement their operation lifecycles. A provider that needs predicate
 pushdown implements the CustomScan provider trait and registers it from
-`_PG_init`. See [pg-iceberg-am](../pg-iceberg-am) for a complete consumer.
+`_PG_init`. FDW providers implement only the capability traits they expose.
+See [lagodb-iceberg](../lagodb-iceberg) for a complete consumer of both adapter
+families.
 
 ## What the framework provides
 

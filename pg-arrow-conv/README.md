@@ -12,9 +12,10 @@ PostgreSQL tuple slot expects, and turns buffered PostgreSQL values back into an
 Arrow array. It knows about Arrow and PostgreSQL only — it never names a table
 format such as Iceberg, Delta, or Hudi.
 
-The crate is a library (`rlib`) linked into the extension crates that need it
-(today [pg-iceberg-am](../pg-iceberg-am); planned Hudi/Delta access methods and
-an Iceberg FDW). It is not a PostgreSQL extension itself and produces no
+The crate is a library (`rlib`) linked into the extension crates that need it.
+Today [lagodb-iceberg](../lagodb-iceberg) uses it for both managed tables and
+Iceberg foreign tables; future Hudi/Delta implementations can reuse the same
+conversion layer. It is not a PostgreSQL extension itself and produces no
 `cdylib`.
 
 ## Why this crate exists

@@ -8,8 +8,8 @@ mod regress;
 
 use regress::{RegressionRunner, RegressionSuite, RegressionTarget};
 
-const EXTENSION_PACKAGE: &str = "pg-iceberg-am";
-const EXTENSION_NAME: &str = "pg_iceberg_am";
+const EXTENSION_PACKAGE: &str = "lagodb-iceberg";
+const EXTENSION_NAME: &str = "lagodb_iceberg";
 const RUNTIME_PACKAGE: &str = "pg-lakebase-runtime";
 const RUNTIME_NAME: &str = "pg_lakebase_runtime";
 const DELTA_AM_PACKAGE: &str = "pg-delta-am";
@@ -162,7 +162,7 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     )?;
     let regression = RegressionRunner::prepare(pg_version)?;
 
-    println!("\n=== Phase 4: pg-iceberg-am SQL regression (PostgreSQL) ===\n");
+    println!("\n=== Phase 4: lagodb-iceberg SQL regression (PostgreSQL) ===\n");
     regression.run(RegressionSuite::Iceberg, &[])?;
 
     println!("\n=== Phase 5: LagoDB connectors SQL regression (PostgreSQL) ===\n");
@@ -282,7 +282,7 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
     pg_major(pg_version)?;
 
     let workspace = workspace_root();
-    let tests_dir = workspace.join("pg-iceberg-am/tests/isolation");
+    let tests_dir = workspace.join("lagodb-iceberg/tests/isolation");
     let target_dir = workspace
         .join("target/isolation")
         .join(pg_version.to_string_lossy().as_ref());

@@ -1,0 +1,6 @@
+comment = 'LagoDB Apache Iceberg managed and foreign tables'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/lagodb_iceberg'
+requires = 'pg_lakebase_runtime'
+relocatable = false
+superuser = true

@@ -2,7 +2,7 @@
 //!
 //! `StorageEndpoint::from_config` (and `from_pg_gucs`) resolve default paths
 //! through `pg_sys::DataDir`, a PostgreSQL backend data symbol. Per
-//! `pg-iceberg-am/docs/testing.md`, a code path that transitively references
+//! `lagodb-iceberg/docs/testing.md`, a code path that transitively references
 //! backend symbols cannot be exercised from an ordinary host `#[test]`: the
 //! host test binary would fail to load with an unresolved `DataDir` symbol.
 //! These tests therefore live here as `#[pg_test]` and run inside PostgreSQL.

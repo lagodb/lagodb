@@ -1,0 +1,81 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_lock s2_enable_locked s2_wait_deferred s1_commit s2_retry s2_wait_maintained s2_verify
+step s1_begin: BEGIN;
+step s1_lock: 
+  LOCK TABLE automatic_compaction_iso.t IN SHARE UPDATE EXCLUSIVE MODE;
+
+step s2_enable_locked: 
+  DO $$
+  BEGIN
+    EXECUTE format(
+      'ALTER DATABASE %I SET lagodb_iceberg.auto_maintenance_enabled = on',
+      current_database()
+    );
+  END
+  $$;
+
+step s2_wait_deferred: 
+  DO $$
+  DECLARE deadline timestamptz := clock_timestamp() + interval '30 seconds';
+  BEGIN
+    LOOP
+      EXIT WHEN (
+        SELECT maintenance_due_at > clock_timestamp()
+        FROM iceberg.iceberg_metadata
+        WHERE relid = 'automatic_compaction_iso.t'::regclass
+      );
+      IF clock_timestamp() >= deadline THEN
+        RAISE EXCEPTION 'automatic compaction did not defer the locked relation';
+      END IF;
+      PERFORM pg_sleep(0.1);
+    END LOOP;
+  END
+  $$;
+
+step s1_commit: COMMIT;
+step s2_retry: 
+  UPDATE iceberg.iceberg_metadata
+  SET maintenance_due_at = '-infinity'
+  WHERE relid = 'automatic_compaction_iso.t'::regclass;
+  SELECT lakebase.request_worker_wakeup(
+    'lagodb_iceberg', 'iceberg_maintenance'
+  );
+
+request_worker_wakeup
+---------------------
+                     
+(1 row)
+
+step s2_wait_maintained: 
+  DO $$
+  DECLARE deadline timestamptz := clock_timestamp() + interval '30 seconds';
+  BEGIN
+    LOOP
+      EXIT WHEN (
+        SELECT current_data_objects = 1
+        FROM lakebase.table_maintenance_stats('automatic_compaction_iso.t')
+      );
+      IF clock_timestamp() >= deadline THEN
+        RAISE EXCEPTION 'automatic compaction did not compact unlocked relation';
+      END IF;
+      PERFORM pg_sleep(0.1);
+    END LOOP;
+  END
+  $$;
+
+step s2_verify: 
+  SELECT (SELECT current_data_objects
+          FROM lakebase.table_maintenance_stats('automatic_compaction_iso.t')) = 1
+           AS compacted,
+         (SELECT maintenance_due_at IS NULL
+          FROM iceberg.iceberg_metadata
+          WHERE relid = 'automatic_compaction_iso.t'::regclass) AS due_cleared,
+         (SELECT array_agg(id ORDER BY id) FROM automatic_compaction_iso.t)
+           = ARRAY[1, 2, 3, 4, 5, 6] AS rows_preserved;
+
+compacted|due_cleared|rows_preserved
+---------+-----------+--------------
+t        |t          |t             
+(1 row)
+

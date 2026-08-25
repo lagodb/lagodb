@@ -2,11 +2,11 @@
 target/
 
 # Test data and results
-pg-iceberg-am/tests/isolation/output_iso/
-pg-iceberg-am/tests/pg_regress/log/
-pg-iceberg-am/tests/pg_regress/results/
-pg-iceberg-am/tests/pg_regress/regression.diffs
-pg-iceberg-am/tests/pg_regress/regression.out
+lagodb-iceberg/tests/isolation/output_iso/
+lagodb-iceberg/tests/pg_regress/log/
+lagodb-iceberg/tests/pg_regress/results/
+lagodb-iceberg/tests/pg_regress/regression.diffs
+lagodb-iceberg/tests/pg_regress/regression.out
 lagodb-connectors/tests/pg_regress/log/
 lagodb-connectors/tests/pg_regress/results/
 lagodb-connectors/tests/pg_regress/regression.diffs

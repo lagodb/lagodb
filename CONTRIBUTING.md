@@ -1,6 +1,6 @@
 # Contributing
 
-The primary SQL-facing implementation is `pg-iceberg-am` on PostgreSQL 17.
+The primary SQL-facing implementation is `lagodb-iceberg` on PostgreSQL 17.
 Changes should preserve PostgreSQL lifecycle semantics, keep the Iceberg
 storage path as the product focus, and avoid presenting the Delta skeleton as
 a second implementation.
@@ -9,9 +9,9 @@ a second implementation.
 
 | Path | Responsibility |
 |---|---|
-| [`pg-iceberg-am`](pg-iceberg-am) | Current Apache Iceberg Table Access Method extension |
+| [`lagodb-iceberg`](lagodb-iceberg) | Managed and REST-catalog foreign Apache Iceberg tables |
 | [`pg-lakebase-runtime`](pg-lakebase-runtime) | Shared workers, runtime coordination, and storage-volume control plane |
-| [`pg-lakebase-core`](pg-lakebase-core) | PostgreSQL TAM and CustomScan framework |
+| [`pg-lakebase-core`](pg-lakebase-core) | PostgreSQL TableAM, CustomScan, and FDW frameworks |
 | [`pg-arrow-conv`](pg-arrow-conv) | Arrow/PostgreSQL value conversion |
 | [`iceberg-lite`](iceberg-lite) | Synchronous PostgreSQL-oriented Iceberg library |
 | [`pg-lakebase-storage`](pg-lakebase-storage) | Local cache and object-storage service |
@@ -45,8 +45,8 @@ cargo pgrx init --pg17=download \
 
 Useful focused commands include:
 
-The AM pgrx test requires the runtime extension to be installed in the target
-pgrx PostgreSQL installation. Install it once before running the focused AM
+The Iceberg pgrx test requires the runtime extension to be installed in the target
+pgrx PostgreSQL installation. Install it once before running the focused Iceberg
 test if it is not already present:
 
 ```bash
@@ -56,20 +56,20 @@ cargo pgrx install \
 ```
 
 ```bash
-cargo pgrx test pg17 --package pg-iceberg-am
+cargo pgrx test pg17 --package lagodb-iceberg
 cargo xtask isolation pg17
 cargo test --package pg-lakebase-storage --features integration --test e2e
 ```
 
 The detailed pgrx testing model, including the distinction between ordinary
 Rust tests and `#[pgrx::pg_test]`, is documented in
-[`pg-iceberg-am/docs/testing.md`](pg-iceberg-am/docs/testing.md).
+[`lagodb-iceberg/docs/testing.md`](lagodb-iceberg/docs/testing.md).
 
 ## Test locations
 
-- SQL regression inputs: [`pg-iceberg-am/tests/pg_regress/sql`](pg-iceberg-am/tests/pg_regress/sql)
-- SQL expected output: [`pg-iceberg-am/tests/pg_regress/expected`](pg-iceberg-am/tests/pg_regress/expected)
-- Isolation specifications: [`pg-iceberg-am/tests/isolation/specs`](pg-iceberg-am/tests/isolation/specs)
+- SQL regression inputs: [`lagodb-iceberg/tests/pg_regress/sql`](lagodb-iceberg/tests/pg_regress/sql)
+- SQL expected output: [`lagodb-iceberg/tests/pg_regress/expected`](lagodb-iceberg/tests/pg_regress/expected)
+- Isolation specifications: [`lagodb-iceberg/tests/isolation/specs`](lagodb-iceberg/tests/isolation/specs)
 - Framework backend tests: [`pg-backend-tests`](pg-backend-tests)
 - Storage-service E2E tests: [`pg-lakebase-storage/tests/e2e`](pg-lakebase-storage/tests/e2e)
 

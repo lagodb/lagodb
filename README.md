@@ -30,7 +30,7 @@ current capabilities.
 
 > [!WARNING]
 > This project is under active development and is not recommended for
-> production workloads. [`pg-iceberg-am`](./pg-iceberg-am) is the primary
+> production workloads. [`lagodb-iceberg`](./lagodb-iceberg) is the primary
 > runnable extension. `pg-delta-am` is only a framework skeleton, not a Delta
 > Lake implementation.
 
@@ -63,8 +63,9 @@ and isolation terminology follows the
 
 | Area | What works today | Current boundary |
 |---|---|---|
+| PostgreSQL integration | Managed tables through `USING iceberg`; external REST-catalog tables through `iceberg_fdw` | Managed tables use the PostgreSQL-backed catalog; foreign tables preserve ownership in the external catalog. |
 | Iceberg format versions | Create Iceberg v1, v2, and v3 tables | Feature coverage varies by version. This is not a blanket claim that every feature in each specification is implemented; for example, row-level `UPDATE` and `DELETE` are rejected for v1 tables. |
-| SQL operations | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Row-level changes use Iceberg delete semantics and therefore depend on the selected format version. |
+| SQL operations | Managed-table `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY`; foreign-table `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and `COPY FROM` | Row-level changes use Iceberg delete semantics and therefore depend on the selected format version. |
 | Transactions and isolation | Statement-level Iceberg metadata visibility under `READ COMMITTED`, read-your-own-writes, commit, rollback, and savepoints | `SERIALIZABLE` currently strengthens Iceberg write-conflict validation but does not yet provide full PostgreSQL SSI semantics. `REPEATABLE READ` is not supported. |
 | Schema evolution | `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `DROP NOT NULL` | Other `ALTER TABLE` schema changes are rejected. |
 | Storage | Local filesystem and S3-compatible object storage through storage volumes | S3-compatible storage has repository end-to-end coverage. GCS and Azure providers exist but remain experimental. |
@@ -72,9 +73,10 @@ and isolation terminology follows the
 | Scan optimization | Predicate pushdown plus Iceberg file and Parquet row-group pruning for supported expressions | PostgreSQL retains residual predicates when required for correctness; some comparisons are deliberately not pushed when semantics could differ. |
 | Maintenance | `VACUUM`, `VACUUM FULL`, and scheduled automatic Iceberg maintenance | Maintenance remains subject to operational limits while the project is under development. |
 
-External Iceberg catalogs and interoperability validation with engines such as
-Spark, Flink, and Trino are planned. The current SQL-facing implementation uses
-a PostgreSQL-backed Iceberg metadata catalog.
+The managed-table path uses a PostgreSQL-backed Iceberg metadata catalog. The
+foreign-table path binds to existing Iceberg REST catalogs and supports
+`IMPORT FOREIGN SCHEMA`. Broader interoperability validation with engines such
+as Spark, Flink, and Trino remains planned.
 
 ## Quick start
 
@@ -88,31 +90,31 @@ Initialize PostgreSQL 17 with pgrx using an existing `pg_config`:
 cargo pgrx init --pg17=/path/to/pg_config
 ```
 
-Install the shared Lakebase services and the Iceberg access method into that PostgreSQL
+Install the shared Lakebase services and the Iceberg extension into that PostgreSQL
 installation:
 
 ```bash
 cargo pgrx install --package pg-lakebase-runtime --pg-config /path/to/pg_config
-cargo pgrx install --package pg-iceberg-am --pg-config /path/to/pg_config
+cargo pgrx install --package lagodb-iceberg --pg-config /path/to/pg_config
 ```
 
-`pg-iceberg-am` depends on `pg-lakebase-runtime`. `cargo pgrx install`
+`lagodb-iceberg` depends on `pg-lakebase-runtime`. `cargo pgrx install`
 installs the package named by `--package`, so both commands are required;
-installing the access method does not install the runtime artifacts.
+installing the Iceberg extension does not install the runtime artifacts.
 
 Preload the runtime, configure the provider libraries it owns, and restart
 PostgreSQL:
 
 ```conf
 shared_preload_libraries = 'pg_lakebase_runtime'
-pg_lakebase.provider_libraries = 'pg_iceberg_am'
+pg_lakebase.provider_libraries = 'lagodb_iceberg'
 ```
 
 List every enabled Lakebase AM and FDW provider in the second setting. For
 example, a cluster using Iceberg and the LagoDB connectors uses:
 
 ```conf
-pg_lakebase.provider_libraries = 'pg_iceberg_am,lagodb_connectors'
+pg_lakebase.provider_libraries = 'lagodb_iceberg,lagodb_connectors'
 ```
 
 Provider libraries are loaded by the runtime during the same postmaster
@@ -124,7 +126,7 @@ Then connect to a database and run:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_lakebase_runtime;
-CREATE EXTENSION IF NOT EXISTS pg_iceberg_am;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
 CREATE TABLE events (
     event_time  timestamptz NOT NULL,
@@ -226,12 +228,19 @@ routes table data to local or object storage.
                                |
                                v
              +--------------------------------------+
-             | pg-iceberg-am                        |
-             | Iceberg table access method          |
-             | + custom scan paths                  |
-             +------------------+-------------------+
-                                |
-              +-----------------+------------------+
+             | lagodb-iceberg                       |
+             |                                      |
+             | managed tables     foreign tables    |
+             | TableAM/CustomScan  iceberg_fdw      |
+             +----------+---------------+-----------+
+                        |               |
+                        |               v
+                        |       Iceberg REST catalog
+                        |
+                        v
+              Shared Iceberg scan/write engine
+                        |
+              +---------+--------------------------+
               |                                    |
               v                                    v
      Local filesystem                         Object storage
@@ -242,10 +251,13 @@ routes table data to local or object storage.
                                          S3 / GCS / Azure
 ```
 
-- The PostgreSQL Table Access Method integration makes `USING iceberg` tables
-  PostgreSQL relations rather than a separate query API.
-- Custom scan paths push supported predicates into Iceberg scans for pruning
-  while preserving PostgreSQL evaluation wherever required for correctness.
+- The managed-table adapter makes `USING iceberg` tables PostgreSQL relations
+  and owns their PostgreSQL-backed metadata lifecycle.
+- The foreign-table adapter maps `iceberg_fdw` relations to existing tables in
+  an Iceberg REST catalog.
+- Managed CustomScan and foreign scan paths share predicate and projection
+  planning while preserving PostgreSQL evaluation wherever correctness
+  requires a residual predicate.
 - Transaction-local state provides statement-consistent reads and stages data
   and schema changes until the PostgreSQL transaction boundary.
 - The shared worker and storage services route object-backed tables through
@@ -258,10 +270,10 @@ PostgreSQL 17 is the only currently supported version. Support for PostgreSQL
 
 ## Project components
 
-- [`pg-iceberg-am`](pg-iceberg-am) is the current SQL-facing Iceberg table
-  implementation.
-- [`pg-lakebase-core`](pg-lakebase-core) provides the reusable PostgreSQL Table
-  Access Method and CustomScan framework, lifecycle adapters, and transaction
+- [`lagodb-iceberg`](lagodb-iceberg) provides managed Iceberg tables and
+  REST-catalog Iceberg foreign tables through one shared engine.
+- [`pg-lakebase-core`](pg-lakebase-core) provides the reusable PostgreSQL
+  TableAM, CustomScan, and FDW frameworks, lifecycle adapters, and transaction
   boundaries.
 - [`pg-lakebase-runtime`](pg-lakebase-runtime) provides shared workers,
   runtime coordination, and storage-volume administration.
@@ -280,8 +292,8 @@ upstream `iceberg-rust` project.
 
 - [Build from source](docs/build-from-source.md)
 - [Contributing and test commands](CONTRIBUTING.md)
-- [`pg-iceberg-am` details](pg-iceberg-am/README.md)
-- [`pg-iceberg-am` testing design](pg-iceberg-am/docs/testing.md)
+- [`lagodb-iceberg` details](lagodb-iceberg/README.md)
+- [`lagodb-iceberg` testing design](lagodb-iceberg/docs/testing.md)
 - [`pg-lakebase-core` framework](pg-lakebase-core/README.md)
 - [`pg-lakebase-storage` service](pg-lakebase-storage/README.md)
 - [`iceberg-lite` adaptation](iceberg-lite/README.md)
