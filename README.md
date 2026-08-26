@@ -125,15 +125,34 @@ CREATE EXTENSION IF NOT EXISTS lagodb_connectors;
 
 #### 1. Managed Iceberg tables (`USING iceberg`)
 
-Create and modify PostgreSQL-managed Iceberg tables with full ACID transactional semantics:
+Create and modify PostgreSQL-managed Iceberg tables with full ACID transactional semantics. Managed tables support two storage foundations: **object storage** (via a storage volume tablespace) and the **local filesystem** (via standard local tablespaces or the default tablespace).
+
+**Object-storage backed**
+
+Bind the table to a PostgreSQL tablespace linked to a storage volume so table data (Parquet) and Iceberg metadata live in object storage:
 
 ```sql
+-- 1. Create a storage volume pointing to your object store (e.g. S3 / MinIO)
+SELECT lakebase.create_storage_volume(
+    'events-lake',
+    's3://my-lake-bucket/pg-lakebase',
+    '{"type":"default_chain"}'::jsonb,
+    '{"region":"us-east-1"}'::jsonb
+);
+
+-- 2. Bind the storage volume to a PostgreSQL tablespace
+CREATE TABLESPACE lake_s3
+LOCATION '/path/to/local/tablespace'
+WITH (storage_volume = 'events-lake');
+
+-- 3. Create the managed Iceberg table in that tablespace
 CREATE TABLE events (
     event_time  timestamptz NOT NULL,
     device_id   bigint      NOT NULL,
     temperature double precision
-) USING iceberg;
+) USING iceberg TABLESPACE lake_s3;
 
+-- 4. ACID transactions (writes commit metadata snapshots and Parquet data directly to object storage)
 BEGIN;
 
 INSERT INTO events VALUES
@@ -149,6 +168,19 @@ COMMIT;
 SELECT *
 FROM events
 WHERE device_id = 101;
+```
+
+**Local filesystem backed**
+
+Store Iceberg tables directly on the local filesystem by using a standard local tablespace (created without a `storage_volume`) or PostgreSQL's default tablespace:
+
+```sql
+-- Standard local tablespace or default database storage:
+CREATE TABLE local_events (
+    event_time  timestamptz NOT NULL,
+    device_id   bigint      NOT NULL,
+    temperature double precision
+) USING iceberg;
 ```
 
 #### 2. Iceberg foreign tables
@@ -220,47 +252,6 @@ SELECT *
 FROM s3_logs
 WHERE id >= 100;
 ```
-
-## Use object storage
-
-Object-backed Iceberg tables are configured through a **storage volume** and a
-PostgreSQL tablespace. Storage-volume administration requires a superuser and
-is a nontransactional operation. Invoke the administration function as the
-only expression in a standalone top-level `SELECT`; do not call it from an
-explicit transaction, function, procedure, trigger, `DO` block, CTE, subquery,
-or pipelined batch.
-
-The following example uses an S3 bucket and the provider's default credential
-chain. Replace the bucket, prefix, region, and local tablespace path for the
-deployment. The `LOCATION` directory must be an existing, empty absolute path
-that PostgreSQL can use for tablespace metadata.
-
-```sql
-SELECT lakebase.create_storage_volume(
-    'events-lake',
-    's3://my-lake-bucket/pg-lakebase',
-    '{"type":"default_chain"}'::jsonb,
-    '{"region":"us-east-1"}'::jsonb
-);
-
-CREATE TABLESPACE lake_s3
-LOCATION '/path/to/local/tablespace'
-WITH (storage_volume = 'events-lake');
-
-CREATE TABLE object_events (
-    event_time timestamptz NOT NULL,
-    device_id bigint NOT NULL,
-    payload text
-) USING iceberg TABLESPACE lake_s3;
-```
-
-The same storage-volume API includes experimental providers for `gs://`
-locations in Google Cloud Storage and `az://` locations in Azure Blob Storage.
-These providers do not yet have the same end-to-end test coverage as the
-S3-compatible path. Credentials and provider options are validated by the
-runtime and persisted in the PostgreSQL data directory's protected
-storage-volume configuration. They are not encrypted by PostgreSQL; use the
-deployment's credential and filesystem security controls.
 
 ## Roadmap
 
