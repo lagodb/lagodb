@@ -34,8 +34,8 @@ pub mod pg_test {
 
     pub fn postgresql_conf_options() -> Vec<&'static str> {
         vec![
-            "shared_preload_libraries = 'pg_lakebase_runtime'",
-            "pg_lakebase.provider_libraries = 'lagodb_iceberg'",
+            "shared_preload_libraries = 'lagodb_base'",
+            "lagodb.provider_libraries = 'lagodb_iceberg'",
         ]
     }
 }

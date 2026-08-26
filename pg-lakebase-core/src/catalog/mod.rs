@@ -1,4 +1,4 @@
-//! Catalog access helpers and Lakebase catalog object IDs.
+//! Catalog access helpers and LagoDB catalog object IDs.
 
 mod access;
 mod ids;
@@ -9,8 +9,8 @@ pub use access::{
     CatalogSnapshot, CatalogUpdateResult, CatalogWriter,
 };
 pub use ids::{
-    LAKEBASE_SCHEMA, TABLE_OPTIONS_PKEY, TABLE_OPTIONS_TABLE,
-    get_lakebase_namespace_oid, get_table_options_oid, get_table_options_pkey_oid,
+    LAGODB_SCHEMA, TABLE_OPTIONS_PKEY, TABLE_OPTIONS_TABLE, get_lagodb_namespace_oid,
+    get_table_options_oid, get_table_options_pkey_oid,
 };
 pub(crate) use ids::{MaintenanceCatalogIds, get_maintenance_catalog_ids};
 pub(crate) use syscache::search_syscache2;

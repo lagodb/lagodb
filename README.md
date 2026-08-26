@@ -96,10 +96,10 @@ Initialize PostgreSQL 17 with pgrx using an existing `pg_config`:
 cargo pgrx init --pg17=/path/to/pg_config
 ```
 
-Install the shared Lakebase runtime, the Iceberg extension, and the LagoDB connectors into that PostgreSQL installation:
+Install the LagoDB base extension, the Iceberg extension, and the LagoDB connectors into that PostgreSQL installation:
 
 ```bash
-cargo pgrx install --package pg-lakebase-runtime --pg-config /path/to/pg_config
+cargo pgrx install --package lagodb-base --pg-config /path/to/pg_config
 cargo pgrx install --package lagodb-iceberg --pg-config /path/to/pg_config
 cargo pgrx install --package lagodb-connectors --pg-config /path/to/pg_config
 ```
@@ -107,8 +107,8 @@ cargo pgrx install --package lagodb-connectors --pg-config /path/to/pg_config
 Preload the runtime and configure the provider libraries in `postgresql.conf`, then restart PostgreSQL:
 
 ```conf
-shared_preload_libraries = 'pg_lakebase_runtime'
-pg_lakebase.provider_libraries = 'lagodb_iceberg,lagodb_connectors'
+shared_preload_libraries = 'lagodb_base'
+lagodb.provider_libraries = 'lagodb_iceberg,lagodb_connectors'
 ```
 
 Provider libraries are loaded by the runtime during the postmaster startup window. Adding or removing one requires a PostgreSQL restart. An object-URI COPY that no configured provider claims fails explicitly; it is never passed to PostgreSQL's server-local file COPY implementation.
@@ -118,7 +118,7 @@ Provider libraries are loaded by the runtime during the postmaster startup windo
 Connect to your database and enable the extensions:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS pg_lakebase_runtime;
+CREATE EXTENSION IF NOT EXISTS lagodb_base;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 CREATE EXTENSION IF NOT EXISTS lagodb_connectors;
 ```
@@ -133,7 +133,7 @@ Bind the table to a PostgreSQL tablespace linked to a storage volume so table da
 
 ```sql
 -- 1. Create a storage volume pointing to your object store (e.g. S3 / MinIO)
-SELECT lakebase.create_storage_volume(
+SELECT lagodb.create_storage_volume(
     'events-lake',
     's3://my-lake-bucket/pg-lakebase',
     '{"type":"default_chain"}'::jsonb,

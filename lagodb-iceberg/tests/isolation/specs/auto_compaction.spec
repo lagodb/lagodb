@@ -94,7 +94,7 @@ step s2_retry {
   UPDATE iceberg.iceberg_metadata
   SET maintenance_due_at = '-infinity'
   WHERE relid = 'automatic_compaction_iso.t'::regclass;
-  SELECT lakebase.request_worker_wakeup(
+  SELECT lagodb.request_worker_wakeup(
     'lagodb_iceberg', 'iceberg_maintenance'
   );
 }
@@ -105,7 +105,7 @@ step s2_wait_maintained {
     LOOP
       EXIT WHEN (
         SELECT current_data_objects = 1
-        FROM lakebase.table_maintenance_stats('automatic_compaction_iso.t')
+        FROM lagodb.table_maintenance_stats('automatic_compaction_iso.t')
       );
       IF clock_timestamp() >= deadline THEN
         RAISE EXCEPTION 'automatic compaction did not compact unlocked relation';
@@ -117,7 +117,7 @@ step s2_wait_maintained {
 }
 step s2_verify {
   SELECT (SELECT current_data_objects
-          FROM lakebase.table_maintenance_stats('automatic_compaction_iso.t')) = 1
+          FROM lagodb.table_maintenance_stats('automatic_compaction_iso.t')) = 1
            AS compacted,
          (SELECT maintenance_due_at IS NULL
           FROM iceberg.iceberg_metadata

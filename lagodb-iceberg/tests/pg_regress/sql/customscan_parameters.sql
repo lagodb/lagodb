@@ -86,14 +86,14 @@ SET enable_nestloop = on;
 -- Under `off`, EXPLAIN shows the same nestloop topology with a `Seq Scan
 -- on customscan_ord_lake` inner whose join predicate is an ordinary
 -- `Filter:` line — the baseline against which parity is asserted.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_ord_outer o
 JOIN customscan_ord_lake l ON l.k = o.id
 ORDER BY o.id, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_ord_outer o
@@ -116,13 +116,13 @@ ORDER BY o.id, l.payload;
 
 -- The two row blocks must be byte-identical: enabling pushdown must not
 -- change which rows come back.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_ord_outer o
 JOIN customscan_ord_lake l ON l.k = o.id
 ORDER BY o.id, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_ord_outer o
 JOIN customscan_ord_lake l ON l.k = o.id
@@ -133,7 +133,7 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 -- ============================================================================
 -- Cleanup
@@ -228,7 +228,7 @@ SET enable_nestloop = on;
 -- Filter`). This is what makes the result-parity check below a real
 -- test of multi-outer pushdown rather than a tautology (see header
 -- rationale).
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT o1.id, o2.id2, l.k, l.k2, l.payload
 FROM customscan_mo_o1 o1
@@ -259,14 +259,14 @@ ORDER BY o1.id, o2.id2, l.k;
 -- relation would admit an off-diagonal pair and diverge from the
 -- baseline. The two row blocks (force then off) must be byte-identical
 --.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 SELECT o1.id, o2.id2, l.k, l.k2, l.payload
 FROM customscan_mo_o1 o1
 JOIN customscan_mo_o2 o2 ON o1.grp = o2.grp
 JOIN customscan_mo_lake l ON l.k = o1.id AND l.k2 = o2.id2
 ORDER BY o1.id, o2.id2, l.k;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 SELECT o1.id, o2.id2, l.k, l.k2, l.payload
 FROM customscan_mo_o1 o1
 JOIN customscan_mo_o2 o2 ON o1.grp = o2.grp
@@ -278,7 +278,7 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 -- ============================================================================
 -- Cleanup
@@ -400,7 +400,7 @@ SET enable_nestloop = on;
 --     `Filter: ((k >= 0) AND ((k + 1) = o.id))` — the conjunction
 --     evaluated by ordinary PG scan-qual machinery, not by Iceberg
 --     pushdown.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
@@ -413,7 +413,7 @@ CROSS JOIN LATERAL (
 ) l
 ORDER BY o.id, l.k, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
@@ -435,7 +435,7 @@ ORDER BY o.id, l.k, l.payload;
 -- survive the baserestrict. Both paths must return the same row
 -- set. A regression where the framework pushed the bogus join
 -- clause as Exact would silently drop rows here.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
 CROSS JOIN LATERAL (
@@ -447,7 +447,7 @@ CROSS JOIN LATERAL (
 ) l
 ORDER BY o.id, l.k, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
 CROSS JOIN LATERAL (
@@ -547,14 +547,14 @@ SELECT COUNT(*) AS join_lake_total_rows FROM customscan_var_join_lake;
 --   - A `Nested Loop` plan node with the same topology.
 --   - The join equality evaluated by ordinary PG join machinery
 --     (a `Join Filter:` on the Nested Loop), not by Iceberg pushdown.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
 JOIN customscan_var_join_lake l ON l.k = o.id
 ORDER BY o.id, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
@@ -572,13 +572,13 @@ ORDER BY o.id, l.payload;
 -- manifest/file pruning, reopen the cursor. If the framework had
 -- stuck with the previous outer tuple's bound value, the result
 -- set would diverge from the SeqScan baseline.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
 JOIN customscan_var_join_lake l ON l.k = o.id
 ORDER BY o.id, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 SELECT o.id, o.label, l.k, l.payload
 FROM customscan_var_outer o
 JOIN customscan_var_join_lake l ON l.k = o.id
@@ -591,7 +591,7 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 DROP TABLE customscan_var_lake;
 DROP TABLE customscan_var_join_lake;
@@ -697,25 +697,25 @@ ORDER BY id, payload;
 -- Plan guards: the parameterized prepared statement should plan a
 -- CustomScan when CustomScan is enabled, and an ordinary seqscan when
 -- it is disabled.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF) EXECUTE customscan_rescan_p1(25);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF) EXECUTE customscan_rescan_p1_baseline(25);
 
 -- A.1: bound value lives in file 1.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(25);
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_rescan_p1_baseline(25);
 
 -- A.2: bound value lives in file 2 (NULL-bearing file). 105 is NOT
 -- one of the NULL ids (105 % 17 = 3 ≠ 0), so the lake row is real;
 -- the NULL rows must drop on both sides because `NULL = 105` is NULL
 -- and PG WHERE treats NULL as FALSE.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(105);
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_rescan_p1_baseline(105);
 
 -- A.2b: bound value matches one of the NULL ids of file 2 (119 IS one
@@ -724,21 +724,21 @@ EXECUTE customscan_rescan_p1_baseline(105);
 -- file 2's bounds [100, 150] (file 2 IS scanned), but residual
 -- filtering drops every NULL row, so the result is empty on both
 -- sides.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(119);
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_rescan_p1_baseline(119);
 
 -- A.3: bound value lives in file 3.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(1025);
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_rescan_p1_baseline(1025);
 
 -- A.4: bound value matches NO row (gap between files 1 and 2).
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(75);
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_rescan_p1_baseline(75);
 
 -- A.5: PG generic-plan path — PG normally switches to the generic
@@ -751,7 +751,7 @@ EXECUTE customscan_rescan_p1_baseline(75);
 -- the two row blocks: the row set returned by `EXECUTE` against any
 -- bound value must still match the baseline regardless of which plan
 -- flavor PG chose internally.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(1);
 EXECUTE customscan_rescan_p1(50);
 EXECUTE customscan_rescan_p1(100);
@@ -769,19 +769,19 @@ EXECUTE customscan_rescan_p1(1050);
 -- pg_regress diffs the EXPLAIN block byte-for-byte; a regression
 -- where the generic plan silently falls back to Seq Scan would show
 -- up here as well as in the parity row blocks below.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF) EXECUTE customscan_rescan_p1(1);
 
 -- Post-generic-plan parity: re-EXECUTE both sides with the same
 -- bound values and let pg_regress compare the row blocks.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(1);
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_rescan_p1_baseline(1);
 
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(1050);
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_rescan_p1_baseline(1050);
 
 DEALLOCATE customscan_rescan_p1;
@@ -854,7 +854,7 @@ SET enable_nestloop = on;
 -- CustomScan when CustomScan is enabled, and an ordinary Seq Scan
 -- (rescanned per outer tuple) when it is disabled. Print both shapes
 -- so the .out file documents the executor topology under each GUC.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 WITH outer_rel(id) AS (
     VALUES (1), (25), (100), (1000), (1050)
@@ -869,7 +869,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.id;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 WITH outer_rel(id) AS (
     VALUES (1), (25), (100), (1000), (1050)
@@ -885,7 +885,7 @@ CROSS JOIN LATERAL (
 ORDER BY outer_rel.id;
 
 -- B.1: 5-row outer, every outer.id matches a unique inner row.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 WITH outer_rel(id) AS (
     VALUES (1), (25), (100), (1000), (1050)
 )
@@ -899,7 +899,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.id;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 WITH outer_rel(id) AS (
     VALUES (1), (25), (100), (1000), (1050)
 )
@@ -917,7 +917,7 @@ ORDER BY outer_rel.id;
 -- rescan must return zero rows for that outer tuple (which means
 -- the framework correctly re-resolved the new param value rather
 -- than reusing a stale predicate from the previous outer tuple).
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 WITH outer_rel(id) AS (
     VALUES (25), (75), (100)
 )
@@ -931,7 +931,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.id;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 WITH outer_rel(id) AS (
     VALUES (25), (75), (100)
 )
@@ -955,7 +955,7 @@ ORDER BY outer_rel.id;
 -- state, and the framework never compares Datum values for equality
 -- to short-circuit (
 -- correctness-bearing trigger).
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 WITH outer_rel(id) AS (
     VALUES (1), (1), (25), (25), (1000), (1000)
 )
@@ -969,7 +969,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.id, lake.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 WITH outer_rel(id) AS (
     VALUES (1), (1), (25), (25), (1000), (1000)
 )
@@ -1010,7 +1010,7 @@ ORDER BY outer_rel.id, lake.payload;
 --     `Filter:` line, inside a `Nested Loop` (so rescan still fires).
 --   - `off`: `Seq Scan` with the full conjunction in `Filter:`,
 --     also inside a `Nested Loop` (matching topology).
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 WITH outer_rel(unrelated) AS (
     VALUES (10), (20), (30)
@@ -1026,7 +1026,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.unrelated, lake.id, lake.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 WITH outer_rel(unrelated) AS (
     VALUES (10), (20), (30)
@@ -1042,7 +1042,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.unrelated, lake.id, lake.payload;
 
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 WITH outer_rel(unrelated) AS (
     VALUES (10), (20), (30)
 )
@@ -1057,7 +1057,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_rel.unrelated, lake.id, lake.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 WITH outer_rel(unrelated) AS (
     VALUES (10), (20), (30)
 )
@@ -1093,7 +1093,7 @@ INSERT INTO customscan_rescan_date_lake VALUES
 -- type_conversion.
 SET DateStyle = 'ISO, MDY';
 
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 WITH outer_rel(d, marker) AS (
     VALUES (DATE '2024-01-01', 1), (DATE 'infinity', 2)
 )
@@ -1112,7 +1112,7 @@ CROSS JOIN LATERAL (
 ) lake
 ORDER BY outer_marker, lake_marker, lake.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 WITH outer_rel(d, marker) AS (
     VALUES (DATE '2024-01-01', 1), (DATE 'infinity', 2)
 )
@@ -1138,7 +1138,7 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 -- ============================================================================
 -- Cleanup
@@ -1235,10 +1235,10 @@ CROSS JOIN LATERAL (
 ) l
 ORDER BY o.sel, l.sel, l.payload;
 
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF) EXECUTE customscan_collide_plan(1);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF) EXECUTE customscan_collide_plan(1);
 
 DEALLOCATE customscan_collide_plan;
@@ -1272,10 +1272,10 @@ CROSS JOIN LATERAL (
 ORDER BY o.sel, l.sel, l.payload;
 
 -- B.1 $1 = 1: tag = 1 rows that also match a correlated outer.sel.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_q(1);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_collide_q(1);
 
 -- B.2 $1 = 0: a DIFFERENT EXTERN value selects a different `tag` class.
@@ -1283,18 +1283,18 @@ EXECUTE customscan_collide_q(1);
 -- versa), B.1 and B.2 would not differ in the way the baseline says
 -- they should. Running both EXTERN values against the same EXEC-driven
 -- correlation pins the independence of the two ParamKeys.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_q(0);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_collide_q(0);
 
 -- B.3 $1 = 2: third `tag` class, exercising file 1 (tag = g % 3) where
 -- tag = 2 occurs and file 2 (tag = g % 2) where it does not.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_q(2);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_collide_q(2);
 
 DEALLOCATE customscan_collide_q;
@@ -1327,19 +1327,19 @@ ORDER BY o.sel, l.sel, l.payload;
 
 -- C.1 $1 = 0: across the rescans, only rows whose tag = 0 AND whose sel
 -- matches the current outer tuple survive.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_rescan(0);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_collide_rescan(0);
 
 -- C.2 $1 = 1: same rescan sequence, different EXTERN value. Demonstrates
 -- the EXTERN `$1` predicate re-applies unchanged on every rescan while
 -- the EXEC value steps per outer tuple.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_rescan(1);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_collide_rescan(1);
 
 DEALLOCATE customscan_collide_rescan;
@@ -1349,7 +1349,7 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 -- ============================================================================
 -- Cleanup
@@ -1412,20 +1412,20 @@ SELECT id, payload FROM customscan_null_param_lake WHERE id = $1 ORDER BY id, pa
 -- non-NULL bound value is used here; EXPLAIN does not execute, so no NULL is
 -- resolved and the plan shape is value-independent (it is identical before
 -- and after the fix).
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF) EXECUTE customscan_null_param_p1(1);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF) EXECUTE customscan_null_param_p1_baseline(1);
 
 -- A.2 EXECUTE p(NULL): a strict `id = NULL` comparison is UNKNOWN, which a
 -- WHERE context filters out, so the correct result is 0 rows. The expected
 -- `.out` encodes 0 rows. On UNFIXED code, the `force` block raises `ERROR`
 -- (NullLiteral escalated to ereport(ERROR)) — the bug-confirming diff.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_null_param_p1(NULL);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_null_param_p1_baseline(NULL);
 
 DEALLOCATE customscan_null_param_p1;
@@ -1490,14 +1490,14 @@ SET enable_nestloop = on;
 -- the inner side (Exact pushdown realized at the scan node, recovered from
 -- the EquivalenceClass by enumeration pass (b)); `off` => Nested Loop whose
 -- join predicate is a `Join Filter:`.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.id AS lake_id, l.payload
 FROM customscan_null_param_outer o
 JOIN customscan_null_param_join_lake l ON l.id = o.id
 ORDER BY o.id, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT o.id, o.label, l.id AS lake_id, l.payload
 FROM customscan_null_param_outer o
@@ -1510,13 +1510,13 @@ ORDER BY o.id, l.payload;
 -- that single row. On UNFIXED code, the `force` block raises `ERROR` when
 -- the NULL outer row's rescan reaches the translator — the bug-confirming
 -- diff.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 SELECT o.id, o.label, l.id AS lake_id, l.payload
 FROM customscan_null_param_outer o
 JOIN customscan_null_param_join_lake l ON l.id = o.id
 ORDER BY o.id, l.payload;
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 SELECT o.id, o.label, l.id AS lake_id, l.payload
 FROM customscan_null_param_outer o
 JOIN customscan_null_param_join_lake l ON l.id = o.id
@@ -1527,7 +1527,7 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 DROP TABLE customscan_null_param_join_lake;
 
@@ -1579,16 +1579,16 @@ ORDER BY id, payload;
 -- C.1 EXECUTE with `$1` NULL: `id = NULL` is UNKNOWN, so the `AlwaysFalse`
 -- fold drags the conjunction to false → 0 rows. Byte-identical between
 -- `force` (CustomScan) and `off` (SeqScan baseline).
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_null_param_mixed_p(NULL);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_null_param_mixed_p_baseline(NULL);
 
 DEALLOCATE customscan_null_param_mixed_p;
 DEALLOCATE customscan_null_param_mixed_p_baseline;
 RESET plan_cache_mode;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 DROP TABLE customscan_null_param_mixed;
 
@@ -1619,16 +1619,16 @@ SELECT id, payload FROM customscan_null_param_lake WHERE id = $1 ORDER BY id, pa
 -- `Exact` predicate and used for pruning; it matches exactly row 5. The result
 -- is byte-identical between `force` (CustomScan pushdown) and `off` (SeqScan
 -- baseline) — the non-NULL pruning is preserved.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_null_param_p_nonnull(5);
 
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXECUTE customscan_null_param_p_nonnull_baseline(5);
 
 DEALLOCATE customscan_null_param_p_nonnull;
 DEALLOCATE customscan_null_param_p_nonnull_baseline;
 RESET plan_cache_mode;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 -- ============================================================================
 -- Cleanup

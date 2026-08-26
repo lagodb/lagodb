@@ -62,7 +62,7 @@ $$;
 SET iceberg.mutation_buffer_flush_mb = 1;
 
 -- Run the complete matrix through the provider CustomScan target path.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 
 CREATE TABLE dml_self_modified.force_target (
     id integer,
@@ -247,7 +247,7 @@ COPY (
 
 -- Repeat with query CustomScan optimization disabled. Modify-purpose
 -- CustomScan remains mandatory correctness infrastructure.
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 
 CREATE TABLE dml_self_modified.seqscan_target (
     id integer,
@@ -382,7 +382,7 @@ COPY (
     ORDER BY id
 ) TO STDOUT WITH (FORMAT csv);
 
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 RESET iceberg.mutation_buffer_flush_mb;
 
 SET client_min_messages = warning;

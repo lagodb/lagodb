@@ -2,8 +2,8 @@ use crate::diag::PgError;
 use pgrx::pg_sys;
 use std::ffi::CStr;
 
-/// The schema name where lakebase objects are stored.
-pub const LAKEBASE_SCHEMA: &CStr = c"lakebase";
+/// The schema name where LagoDB objects are stored.
+pub const LAGODB_SCHEMA: &CStr = c"lagodb";
 
 /// The table name for storing custom table options.
 pub const TABLE_OPTIONS_TABLE: &CStr = c"table_options";
@@ -21,28 +21,28 @@ pub(crate) struct MaintenanceCatalogIds {
     pub(crate) target_index: pg_sys::Oid,
 }
 
-pub fn get_lakebase_namespace_oid() -> Result<pg_sys::Oid, PgError> {
-    super::get_namespace_oid(LAKEBASE_SCHEMA, false)
+pub fn get_lagodb_namespace_oid() -> Result<pg_sys::Oid, PgError> {
+    super::get_namespace_oid(LAGODB_SCHEMA, false)
 }
 
 pub fn get_table_options_oid() -> Result<pg_sys::Oid, PgError> {
-    let schema_oid = get_lakebase_namespace_oid()?;
+    let schema_oid = get_lagodb_namespace_oid()?;
     super::get_relation_oid(TABLE_OPTIONS_TABLE, schema_oid)
 }
 
 pub fn get_table_options_pkey_oid() -> Result<pg_sys::Oid, PgError> {
-    let schema_oid = get_lakebase_namespace_oid()?;
+    let schema_oid = get_lagodb_namespace_oid()?;
     super::get_relation_oid(TABLE_OPTIONS_PKEY, schema_oid)
 }
 
 /// Resolve the maintenance catalog only after its extension SQL is installed.
 /// Results are deliberately not cached so a long-lived backend can recover
-/// after `DROP EXTENSION pg_lakebase_runtime;
-/// CREATE EXTENSION pg_lakebase_runtime` installs replacement catalog objects
+/// after `DROP EXTENSION lagodb_base;
+/// CREATE EXTENSION lagodb_base` installs replacement catalog objects
 /// with new OIDs.
 pub(crate) fn get_maintenance_catalog_ids()
 -> Result<Option<MaintenanceCatalogIds>, PgError> {
-    let schema = super::get_namespace_oid(LAKEBASE_SCHEMA, true)?;
+    let schema = super::get_namespace_oid(LAGODB_SCHEMA, true)?;
     if schema == pg_sys::InvalidOid {
         return Ok(None);
     }

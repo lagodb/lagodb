@@ -8,11 +8,11 @@
 -- Install the shared Lakebase services once for the regression database.
 -- Individual AM tests may drop/recreate lagodb_iceberg, but the base-owned
 -- maintenance queue and database-local worker registration must survive.
-CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION lagodb_base;
 
 SELECT extname
 FROM pg_extension
-WHERE extname = 'pg_lakebase_runtime';
+WHERE extname = 'lagodb_base';
 
 -- Recover a storage singleton paused by an interrupted worker cancellation
 -- test. The PID is resolved afresh; the guard never trusts an old stored PID.
@@ -35,11 +35,11 @@ CREATE EXTENSION IF NOT EXISTS injection_points;
 DO $$
 BEGIN
     PERFORM injection_points_detach(
-        'lakebase-worker-after-database-connection'
+        'lagodb-worker-after-database-connection'
     );
 EXCEPTION WHEN internal_error THEN
     IF SQLERRM <>
-       'could not detach injection point "lakebase-worker-after-database-connection"'
+       'could not detach injection point "lagodb-worker-after-database-connection"'
     THEN
         RAISE;
     END IF;
@@ -50,11 +50,11 @@ DROP DATABASE IF EXISTS lakebase_runtime_source WITH (FORCE);
 DROP ROLE IF EXISTS lakebase_runtime_non_superuser;
 
 -- Remove durable cancellation fixtures left by an interrupted run.
-DELETE FROM lakebase.maintenance_queue
+DELETE FROM lagodb.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000004';
 WITH dropped AS (
-    SELECT lakebase.drop_storage_volume(storage_volume_name)
-    FROM lakebase.storage_volumes
+    SELECT lagodb.drop_storage_volume(storage_volume_name)
+    FROM lagodb.storage_volumes
     WHERE storage_volume_name =
           'regress-worker-statement-cancel-' || current_database()
 )

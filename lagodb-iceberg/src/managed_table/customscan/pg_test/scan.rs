@@ -22,7 +22,7 @@ mod tests {
                 "INSERT INTO cs_slot_first_e2e VALUES (1, 'alpha', '\\xdead'::bytea)",
                 "INSERT INTO cs_slot_first_e2e VALUES (2, NULL, '\\xbeef'::bytea)",
                 "INSERT INTO cs_slot_first_e2e VALUES (3, 'gamma', NULL)",
-                "SET pg_lakebase.customscan_mode = 'force'",
+                "SET lagodb.customscan_mode = 'force'",
             ] {
                 client.update(stmt, None, &[])?;
             }
@@ -82,7 +82,7 @@ mod tests {
                 "INSERT INTO cs_subplan_projected VALUES (3, 'gamma', 30, 'c')",
                 "CREATE TEMP TABLE cs_subplan_keys (id integer)",
                 "INSERT INTO cs_subplan_keys VALUES (1), (3)",
-                "SET pg_lakebase.customscan_mode = 'force'",
+                "SET lagodb.customscan_mode = 'force'",
             ] {
                 client.update(stmt, None, &[])?;
             }
@@ -129,7 +129,7 @@ mod tests {
             for stmt in [
                 "CREATE TABLE cs_relabel_filter (id integer) USING iceberg",
                 "INSERT INTO cs_relabel_filter VALUES (1), (2), (3)",
-                "SET pg_lakebase.customscan_mode = 'force'",
+                "SET lagodb.customscan_mode = 'force'",
                 "SET plan_cache_mode = force_generic_plan",
                 "PREPARE cs_relabel_filter_query (oid) AS \
                  SELECT id FROM cs_relabel_filter WHERE id = $1::int4",

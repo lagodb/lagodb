@@ -143,12 +143,12 @@ SELECT count(*) AS mixed_rows_after_delete FROM dml_lifecycle.mixed_am;
 
 -- Cross-partition UPDATE may route the destination INSERT before that leaf's
 -- target scan executes; relation snapshot context is pinned at outer binding.
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 UPDATE dml_lifecycle.part_dml
 SET id = 130, label = label || '_moved'
 WHERE id = 20
 RETURNING id, label;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 COPY (
     SELECT id, label, tableoid::regclass

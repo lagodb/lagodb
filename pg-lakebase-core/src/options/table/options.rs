@@ -1,7 +1,7 @@
 //! Table option persistence for access-method-specific options.
 //!
 //! Options are extracted from `CREATE TABLE`, validated against the table AM's
-//! schema, and persisted in `lakebase.table_options` for later rd_amcache load.
+//! schema, and persisted in `lagodb.table_options` for later rd_amcache load.
 
 use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use crate::diag::{PgError, SqlStateError, domain_error_report};

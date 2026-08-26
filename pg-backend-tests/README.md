@@ -57,8 +57,8 @@ host-versus-backend rationale.
 
 ## Running tests
 
-The backend tests preload `pg_lakebase_runtime`, which is the production owner
-of shared `pg_lakebase.*` GUCs and the cross-DSO runtime ABI. The full workspace
+The backend tests preload `lagodb_base`, which is the production owner
+of shared `lagodb.*` GUCs and the cross-DSO runtime ABI. The full workspace
 runner installs that extension before starting the test cluster:
 
 ```bash
@@ -68,7 +68,7 @@ cargo xtask test-all pg17
 To run only this crate, install the current runtime build first:
 
 ```bash
-cargo pgrx install --package pg-lakebase-runtime \
+cargo pgrx install --package lagodb-base \
   --pg-config "$(cargo pgrx info pg-config pg17)"
 cargo pgrx test pg17 --package pg-backend-tests
 ```

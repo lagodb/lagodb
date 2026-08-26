@@ -4,7 +4,7 @@ DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA vacuum_correctness_test;
 SELECT extension_name, worker_name
-FROM lakebase.workers
+FROM lagodb.workers
 WHERE extension_name = 'lagodb_iceberg'
   AND worker_name = 'iceberg_maintenance';
  extension_name |     worker_name     
@@ -148,16 +148,16 @@ FROM (
 GROUP BY format;
 -- This shared setting is registered/backed by runtime but consumed in the AM.
 -- A value of one prevents the minimum-five-file rewrite group from forming.
-SET pg_lakebase.vacuum_max_group_objects = 1;
+SET lagodb.vacuum_max_group_objects = 1;
 VACUUM vacuum_correctness_test.t;
 SELECT provider, format, current_data_objects
-FROM lakebase.table_maintenance_stats('vacuum_correctness_test.t');
+FROM lagodb.table_maintenance_stats('vacuum_correctness_test.t');
  provider | format | current_data_objects 
 ----------+--------+----------------------
  iceberg  | v2     |                    5
 (1 row)
 
-RESET pg_lakebase.vacuum_max_group_objects;
+RESET lagodb.vacuum_max_group_objects;
 VACUUM vacuum_correctness_test.t;
 VACUUM vacuum_correctness_test.t_v1;
 VACUUM vacuum_correctness_test.t_v3;
@@ -235,7 +235,7 @@ FROM (VALUES
     ('vacuum_correctness_test.t_full'::regclass),
     ('vacuum_correctness_test.t_v3_full'::regclass)
 ) AS relations(relid)
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(relations.relid) AS stats
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(relations.relid) AS stats
 ORDER BY stats.format;
  provider | format | current_data_objects 
 ----------+--------+----------------------
@@ -286,7 +286,7 @@ FROM vacuum_failure_recovery_t;
 (1 row)
 
 SELECT current_data_objects = 6 AS failed_attempt_not_published
-FROM lakebase.table_maintenance_stats('vacuum_failure_recovery_t');
+FROM lagodb.table_maintenance_stats('vacuum_failure_recovery_t');
  failed_attempt_not_published 
 ------------------------------
  t
@@ -311,7 +311,7 @@ FROM vacuum_failure_recovery_t;
 (1 row)
 
 SELECT current_data_objects = 1 AS retry_compacted
-FROM lakebase.table_maintenance_stats('vacuum_failure_recovery_t');
+FROM lagodb.table_maintenance_stats('vacuum_failure_recovery_t');
  retry_compacted 
 -----------------
  t
@@ -353,7 +353,7 @@ FROM (VALUES
     ('vacuum_full_routing_test.partitioned_t_a'::regclass),
     ('vacuum_full_routing_test.partitioned_t_b'::regclass)
 ) AS leaves(relid)
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(leaves.relid);
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(leaves.relid);
  full_analyze_compacted_each_leaf 
 ----------------------------------
  t
@@ -387,7 +387,7 @@ FROM (VALUES
     ('vacuum_full_routing_test.partitioned_t_a'::regclass),
     ('vacuum_full_routing_test.partitioned_t_b'::regclass)
 ) AS leaves(relid)
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(leaves.relid);
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(leaves.relid);
  each_leaf_compacted 
 ---------------------
  t
@@ -410,7 +410,7 @@ INSERT INTO vacuum_full_routing_test.database_wide_t VALUES (5);
 INSERT INTO vacuum_full_routing_test.database_wide_t VALUES (6);
 VACUUM (FULL, SKIP_LOCKED);
 SELECT current_data_objects = 1 AS database_wide_provider_routed
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'vacuum_full_routing_test.database_wide_t'
 );
  database_wide_provider_routed 
@@ -442,7 +442,7 @@ VACUUM (FULL) vacuum_full_routing_test.security_t;
 RESET client_min_messages;
 RESET ROLE;
 SELECT current_data_objects = 6 AS nonowner_did_not_rewrite
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'vacuum_full_routing_test.security_t'
 );
  nonowner_did_not_rewrite 
@@ -452,7 +452,7 @@ FROM lakebase.table_maintenance_stats(
 
 VACUUM (FULL) vacuum_full_routing_test.security_t;
 SELECT current_data_objects = 1 AS owner_rewrite_succeeded
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'vacuum_full_routing_test.security_t'
 );
  owner_rewrite_succeeded 
@@ -503,7 +503,7 @@ SELECT roots.format,
        END AS current_data_on_failure,
        stats.current_data_objects = 1 AS one_current_data_file
 FROM object_matrix_roots AS roots
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(roots.relid) AS stats
 ORDER BY roots.format;
    format    | current_data_on_failure | one_current_data_file 
 -------------+-------------------------+-----------------------
@@ -525,12 +525,12 @@ WITH observations AS (
            stats.current_data_objects,
            stats.retained_data_objects
     FROM object_matrix_roots AS roots
-    CROSS JOIN LATERAL lakebase.observe_object_tree(
+    CROSS JOIN LATERAL lagodb.observe_object_tree(
         :'volume_id',
         :'lakebase_regress_bucket',
         roots.prefix
     ) AS observed
-    CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats
+    CROSS JOIN LATERAL lagodb.table_maintenance_stats(roots.relid) AS stats
 )
 SELECT format,
        CASE WHEN objects_after < objects_before

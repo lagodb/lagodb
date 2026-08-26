@@ -1,6 +1,6 @@
 //! Consumer-side API for the runtime-owned storage service.
 //!
-//! The `pg_lakebase` runtime extension is the only crate that registers storage
+//! The `lagodb_base` runtime extension is the only crate that registers storage
 //! GUC backing statics and the static storage background worker. Access-method
 //! crates use this module only to discover the service endpoint that PostgreSQL
 //! has already registered globally.
@@ -18,11 +18,11 @@ mod socket_wait;
 
 pub use backend::BackendStorageService;
 
-const ENABLED_GUC: &CStr = c"pg_lakebase.storage_server_enabled";
-const SOCKET_PATH_GUC: &CStr = c"pg_lakebase.storage_server_socket_path";
-const CACHE_DIR_GUC: &CStr = c"pg_lakebase.storage_server_cache_dir";
+const ENABLED_GUC: &CStr = c"lagodb.storage_server_enabled";
+const SOCKET_PATH_GUC: &CStr = c"lagodb.storage_server_socket_path";
+const CACHE_DIR_GUC: &CStr = c"lagodb.storage_server_cache_dir";
 const MAX_IDLE_CONNECTIONS_GUC: &CStr =
-    c"pg_lakebase.storage_backend_max_idle_connections";
+    c"lagodb.storage_backend_max_idle_connections";
 const DEFAULT_SOCKET_FILE: &str = "storage.sock";
 const DEFAULT_CACHE_DIR: &str = "storage-cache";
 
@@ -97,13 +97,13 @@ impl StorageEndpoint {
     /// # Errors
     ///
     /// Returns a configuration error when
-    /// `pg_lakebase.storage_server_enabled = off`.
+    /// `lagodb.storage_server_enabled = off`.
     pub fn require_enabled(self) -> StorageResult<Self> {
         if self.enabled {
             Ok(self)
         } else {
             Err(StorageError::configuration(
-                "pg_lakebase storage server is disabled",
+                "LagoDB storage server is disabled",
             ))
         }
     }
@@ -170,7 +170,7 @@ fn read_positive_usize_guc(name: &CStr) -> StorageResult<usize> {
 fn read_required_guc(name: &CStr) -> StorageResult<String> {
     read_guc(name)?.ok_or_else(|| {
         StorageError::configuration(format!(
-            "{} is not registered; preload the pg_lakebase runtime extension",
+            "{} is not registered; preload the lagodb_base runtime extension",
             name.to_string_lossy(),
         ))
     })
@@ -192,7 +192,7 @@ fn read_guc(name: &CStr) -> StorageResult<Option<String>> {
         // SAFETY: `raw` is the palloc'd string returned above.
         unsafe { pg_sys::pfree(raw.cast()) };
         return Err(StorageError::configuration(format!(
-            "{} is only a PostgreSQL custom GUC placeholder; preload the pg_lakebase runtime extension",
+            "{} is only a PostgreSQL custom GUC placeholder; preload the lagodb_base runtime extension",
             name.to_string_lossy(),
         )));
     }

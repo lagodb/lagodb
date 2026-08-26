@@ -302,7 +302,7 @@ is more expensive than letting PostgreSQL drive the join.
 - Add a feature-gated DataFusion dependency in `pg-lakebase-core`.
 - Extract shared expression shippability helpers from the existing CustomScan
   filter framework.
-- Add a GUC such as `pg_lakebase.enable_datafusion_offload`.
+- Add a GUC such as `lagodb.enable_datafusion_offload`.
 
 ### Phase 1 - Single-relation DataFusion scan
 

@@ -19,14 +19,14 @@ mod tests {
     fn explicit_paths_are_returned_verbatim() {
         let endpoint = StorageEndpoint::from_config(
             true,
-            Some(PathBuf::from("/tmp/lakebase.sock")),
+            Some(PathBuf::from("/tmp/lagodb.sock")),
             Some(PathBuf::from("/tmp/lakebase-cache")),
             8,
         )
         .expect("explicit paths resolve without consulting the data directory");
 
         assert!(endpoint.is_enabled());
-        assert_eq!(endpoint.socket_path(), Path::new("/tmp/lakebase.sock"));
+        assert_eq!(endpoint.socket_path(), Path::new("/tmp/lagodb.sock"));
         assert_eq!(endpoint.cache_dir(), Path::new("/tmp/lakebase-cache"));
         assert_eq!(endpoint.max_idle_connections(), 8);
     }

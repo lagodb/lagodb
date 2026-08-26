@@ -83,7 +83,7 @@ impl RegressionRunner {
             .arg(format!("shared_preload_libraries='{RUNTIME_NAME}'"))
             .arg("--postgresql-conf")
             .arg(format!(
-                "pg_lakebase.provider_libraries='{}'",
+                "lagodb.provider_libraries='{}'",
                 suite.provider_libraries()
             ));
         command.args(tests);

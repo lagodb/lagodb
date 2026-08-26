@@ -10,7 +10,7 @@ a second implementation.
 | Path | Responsibility |
 |---|---|
 | [`lagodb-iceberg`](lagodb-iceberg) | Managed and REST-catalog foreign Apache Iceberg tables |
-| [`pg-lakebase-runtime`](pg-lakebase-runtime) | Shared workers, runtime coordination, and storage-volume control plane |
+| [`lagodb-base`](lagodb-base) | Shared workers, runtime coordination, and storage-volume control plane |
 | [`pg-lakebase-core`](pg-lakebase-core) | PostgreSQL TableAM, CustomScan, and FDW frameworks |
 | [`pg-arrow-conv`](pg-arrow-conv) | Arrow/PostgreSQL value conversion |
 | [`iceberg-lite`](iceberg-lite) | Synchronous PostgreSQL-oriented Iceberg library |
@@ -51,7 +51,7 @@ test if it is not already present:
 
 ```bash
 cargo pgrx install \
-  --package pg-lakebase-runtime \
+  --package lagodb-base \
   --pg-config "$(cargo pgrx info pg-config pg17)"
 ```
 

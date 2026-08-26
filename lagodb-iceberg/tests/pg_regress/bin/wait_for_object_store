@@ -17,7 +17,7 @@ while :; do
         --set=volume_id="$volume_id" \
         --set=namespace="$namespace" 2>&1 <<'SQL'
 SELECT objects = 0
-FROM lakebase.observe_object_tree(
+FROM lagodb.observe_object_tree(
     :'volume_id', :'namespace', '__lakebase_regress_probe__'
 );
 SQL

@@ -41,11 +41,11 @@ CREATE EXTENSION IF NOT EXISTS injection_points;
 DO $$
 BEGIN
     PERFORM injection_points_detach(
-        'lakebase-worker-after-database-connection'
+        'lagodb-worker-after-database-connection'
     );
 EXCEPTION WHEN internal_error THEN
     IF SQLERRM <>
-       'could not detach injection point "lakebase-worker-after-database-connection"'
+       'could not detach injection point "lagodb-worker-after-database-connection"'
     THEN
         RAISE;
     END IF;
@@ -56,7 +56,7 @@ RESET client_min_messages;
 -- Template databases must never enter the coordinator scheduler through
 -- registration, explicit wake, ALTER DATABASE SET, or deregistration.
 \connect :runtime_template_database
-CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION lagodb_base;
 CREATE PROCEDURE public.assert_template_worker_excluded(test_case text)
 LANGUAGE plpgsql
 AS $$
@@ -66,35 +66,35 @@ DECLARE
     );
 BEGIN
     IF EXISTS (
-           SELECT FROM lakebase.process_status
+           SELECT FROM lagodb.process_status
            WHERE process_kind = 'coordinator'
              AND database_oid = database_id
        ) OR EXISTS (
-           SELECT FROM lakebase.worker_status
+           SELECT FROM lagodb.worker_status
            WHERE database_oid = database_id
        ) OR EXISTS (
            SELECT FROM pg_stat_activity
            WHERE datid = database_id
              AND backend_type IN (
-                 'pg-lakebase coordinator',
-                 'pg-lakebase worker'
+                 'lagodb coordinator',
+                 'lagodb worker'
              )
        )
     THEN
-        RAISE EXCEPTION '% started a Lakebase worker', test_case;
+        RAISE EXCEPTION '% started a LagoDB worker', test_case;
     END IF;
 END
 $$;
 SELECT pg_sleep(1);
 CALL public.assert_template_worker_excluded('template registration');
-SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 SELECT pg_sleep(1);
 CALL public.assert_template_worker_excluded('template SQL wake');
 ALTER DATABASE :runtime_template_database
-    SET pg_lakebase.customscan_mode = auto;
+    SET lagodb.customscan_mode = auto;
 SELECT pg_sleep(1);
 CALL public.assert_template_worker_excluded('template ALTER DATABASE SET');
-SELECT lakebase.deregister_worker('maintenance');
+SELECT lagodb.deregister_worker('maintenance');
 SELECT pg_sleep(1);
 CALL public.assert_template_worker_excluded('template deregistration');
 DROP PROCEDURE public.assert_template_worker_excluded(text);
@@ -114,12 +114,12 @@ DECLARE
 BEGIN
     SET LOCAL ROLE lakebase_runtime_non_superuser;
     BEGIN
-        EXECUTE 'CREATE EXTENSION pg_lakebase_runtime';
+        EXECUTE 'CREATE EXTENSION lagodb_base';
     EXCEPTION WHEN insufficient_privilege THEN
         denied := true;
     END;
     IF NOT denied OR EXISTS (
-        SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime'
+        SELECT FROM pg_extension WHERE extname = 'lagodb_base'
     ) THEN
         RAISE EXCEPTION 'non-superuser Lakebase installation was allowed';
     END IF;
@@ -127,12 +127,12 @@ END
 $$;
 
 BEGIN;
-CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION lagodb_base;
 ROLLBACK;
 DO $$
 BEGIN
     IF EXISTS (
-        SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime'
+        SELECT FROM pg_extension WHERE extname = 'lagodb_base'
     ) THEN
         RAISE EXCEPTION 'CREATE EXTENSION rollback leaked the extension';
     END IF;
@@ -141,13 +141,13 @@ $$;
 
 BEGIN;
 SAVEPOINT before_runtime;
-CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION lagodb_base;
 ROLLBACK TO SAVEPOINT before_runtime;
 COMMIT;
 DO $$
 BEGIN
     IF EXISTS (
-        SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime'
+        SELECT FROM pg_extension WHERE extname = 'lagodb_base'
     ) THEN
         RAISE EXCEPTION 'savepoint rollback leaked the extension';
     END IF;
@@ -156,7 +156,7 @@ $$;
 
 BEGIN;
 SAVEPOINT commit_runtime;
-CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION lagodb_base;
 RELEASE SAVEPOINT commit_runtime;
 COMMIT;
 
@@ -170,12 +170,12 @@ DECLARE
 BEGIN
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE database_oid = (
                     SELECT oid FROM pg_database
                     WHERE datname = current_database()
                   )
-              AND extension_name = 'pg_lakebase_runtime'
+              AND extension_name = 'lagodb_base'
               AND worker_name = 'maintenance'
               AND registration_state = 'registered'
               AND NOT needs_restart
@@ -196,7 +196,7 @@ BEGIN
             '[]'
         )
         INTO status_details
-        FROM lakebase.worker_status AS status
+        FROM lagodb.worker_status AS status
         WHERE database_oid = (
             SELECT oid FROM pg_database WHERE datname = current_database()
         );
@@ -209,7 +209,7 @@ CALL public.worker_regress_assert_runtime_idle('CREATE EXTENSION commit');
 
 BEGIN;
 SAVEPOINT before_runtime_drop;
-DROP EXTENSION pg_lakebase_runtime;
+DROP EXTENSION lagodb_base;
 ROLLBACK TO SAVEPOINT before_runtime_drop;
 COMMIT;
 CALL public.worker_regress_assert_runtime_idle(
@@ -217,7 +217,7 @@ CALL public.worker_regress_assert_runtime_idle(
 );
 
 BEGIN;
-DROP EXTENSION pg_lakebase_runtime;
+DROP EXTENSION lagodb_base;
 ROLLBACK;
 CALL public.worker_regress_assert_runtime_idle('DROP EXTENSION rollback');
 
@@ -227,13 +227,13 @@ DECLARE
     rejected boolean := false;
 BEGIN
     BEGIN
-        EXECUTE 'DROP EXTENSION pg_lakebase_runtime';
+        EXECUTE 'DROP EXTENSION lagodb_base';
     EXCEPTION WHEN dependent_objects_still_exist THEN
         rejected := true;
     END;
     IF NOT rejected
        OR NOT EXISTS (
-           SELECT FROM pg_extension WHERE extname = 'pg_lakebase_runtime'
+           SELECT FROM pg_extension WHERE extname = 'lagodb_base'
        )
        OR NOT EXISTS (
            SELECT FROM pg_extension WHERE extname = 'lagodb_iceberg'
@@ -244,7 +244,7 @@ BEGIN
 END
 $$;
 
-INSERT INTO lakebase.maintenance_queue (
+INSERT INTO lagodb.maintenance_queue (
     item_id, operation, volume_id, object_namespace, object_path, producer,
     attempt_count, not_before, failed, created_at
 ) VALUES (
@@ -254,13 +254,13 @@ INSERT INTO lakebase.maintenance_queue (
 
 BEGIN;
 SET LOCAL client_min_messages = warning;
-DROP EXTENSION pg_lakebase_runtime CASCADE;
+DROP EXTENSION lagodb_base CASCADE;
 DO $$
 BEGIN
     IF EXISTS (
            SELECT FROM pg_extension
-           WHERE extname IN ('pg_lakebase_runtime', 'lagodb_iceberg')
-       ) OR to_regclass('lakebase.maintenance_queue') IS NOT NULL
+           WHERE extname IN ('lagodb_base', 'lagodb_iceberg')
+       ) OR to_regclass('lagodb.maintenance_queue') IS NOT NULL
     THEN
         RAISE EXCEPTION 'CASCADE did not remove runtime-owned SQL state';
     END IF;
@@ -274,7 +274,7 @@ SELECT EXISTS (
            SELECT FROM pg_extension
            WHERE extname = 'lagodb_iceberg'
        ) AND EXISTS (
-           SELECT FROM lakebase.maintenance_queue
+           SELECT FROM lagodb.maintenance_queue
            WHERE item_id = '00000000-0000-0000-0000-000000000001'
        ) AS cascade_rollback_restored_sql_state;
 DO $$
@@ -284,7 +284,7 @@ DECLARE
 BEGIN
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE extension_name = 'lagodb_iceberg'
               AND worker_name = 'iceberg_maintenance'
               AND registration_state = 'registered'
@@ -310,7 +310,7 @@ DECLARE
 BEGIN
     SET LOCAL ROLE lakebase_runtime_non_superuser;
     BEGIN
-        PERFORM lakebase.deregister_worker('maintenance');
+        PERFORM lagodb.deregister_worker('maintenance');
     EXCEPTION WHEN insufficient_privilege THEN
         denied := true;
     END;
@@ -335,7 +335,7 @@ DECLARE
     deadline timestamptz := clock_timestamp() + interval '3 seconds';
 BEGIN
     IF NOT EXISTS (
-        SELECT FROM lakebase.workers
+        SELECT FROM lagodb.workers
         WHERE worker_name = 'iceberg_maintenance'
     ) THEN
         RAISE EXCEPTION '% did not restore the worker catalog registration',
@@ -343,7 +343,7 @@ BEGIN
     END IF;
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE extension_name = 'lagodb_iceberg'
               AND worker_name = 'iceberg_maintenance'
               AND registration_state = 'registered'
@@ -361,11 +361,11 @@ BEGIN
         SELECT jsonb_build_object(
             'catalog', coalesce((
                 SELECT jsonb_agg(to_jsonb(worker))
-                FROM lakebase.workers AS worker
+                FROM lagodb.workers AS worker
             ), '[]'::jsonb),
             'worker', coalesce((
                 SELECT jsonb_agg(to_jsonb(status))
-                FROM lakebase.worker_status AS status
+                FROM lagodb.worker_status AS status
             ), '[]'::jsonb)
         )::text INTO details;
         RAISE EXCEPTION '% did not restore the worker registration', test_case
@@ -384,14 +384,14 @@ DECLARE
     deadline timestamptz := clock_timestamp() + interval '3 seconds';
 BEGIN
     IF EXISTS (
-        SELECT FROM lakebase.workers
+        SELECT FROM lagodb.workers
         WHERE worker_name = 'iceberg_maintenance'
     ) THEN
         RAISE EXCEPTION '% retained the worker catalog registration', test_case;
     END IF;
     LOOP
         SELECT NOT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE extension_name = 'lagodb_iceberg'
               AND worker_name = 'iceberg_maintenance'
         ) INTO observed;
@@ -405,11 +405,11 @@ BEGIN
         SELECT jsonb_build_object(
             'catalog', coalesce((
                 SELECT jsonb_agg(to_jsonb(worker))
-                FROM lakebase.workers AS worker
+                FROM lagodb.workers AS worker
             ), '[]'::jsonb),
             'worker', coalesce((
                 SELECT jsonb_agg(to_jsonb(status))
-                FROM lakebase.worker_status AS status
+                FROM lagodb.worker_status AS status
             ), '[]'::jsonb)
         )::text INTO details;
         RAISE EXCEPTION '% retained the worker registration', test_case
@@ -426,26 +426,26 @@ CREATE EXTENSION lagodb_iceberg;
 CALL pg_temp.assert_iceberg_worker_registered('initial registration');
 DELETE FROM worker_deregister_results;
 
-SELECT lakebase.deregister_worker(
+SELECT lagodb.deregister_worker(
     'lakebase-worker-does-not-exist', true
 );
-SELECT lakebase.deregister_worker(-2147483648, true);
+SELECT lagodb.deregister_worker(-2147483648, true);
 
 BEGIN;
-SELECT lakebase.deregister_worker('iceberg_maintenance');
+SELECT lagodb.deregister_worker('iceberg_maintenance');
 ROLLBACK;
 CALL pg_temp.assert_iceberg_worker_registered('worker_deregister_name_abort');
 
 BEGIN;
 SAVEPOINT before_name_deregister;
-SELECT lakebase.deregister_worker('iceberg_maintenance');
+SELECT lagodb.deregister_worker('iceberg_maintenance');
 ROLLBACK TO SAVEPOINT before_name_deregister;
 COMMIT;
 CALL pg_temp.assert_iceberg_worker_registered(
     'worker_deregister_name_savepoint_rollback'
 );
 
-SELECT lakebase.deregister_worker('iceberg_maintenance');
+SELECT lagodb.deregister_worker('iceberg_maintenance');
 CALL pg_temp.assert_iceberg_worker_absent('worker_deregister_name_commit');
 
 DROP EXTENSION lagodb_iceberg;
@@ -455,8 +455,8 @@ DELETE FROM worker_deregister_results
 WHERE test_case = 'ID transaction setup';
 
 BEGIN;
-SELECT lakebase.deregister_worker((
-    SELECT worker_id FROM lakebase.workers
+SELECT lagodb.deregister_worker((
+    SELECT worker_id FROM lagodb.workers
     WHERE worker_name = 'iceberg_maintenance'
 ));
 ROLLBACK;
@@ -464,8 +464,8 @@ CALL pg_temp.assert_iceberg_worker_registered('worker_deregister_id_abort');
 
 BEGIN;
 SAVEPOINT before_id_deregister;
-SELECT lakebase.deregister_worker((
-    SELECT worker_id FROM lakebase.workers
+SELECT lagodb.deregister_worker((
+    SELECT worker_id FROM lagodb.workers
     WHERE worker_name = 'iceberg_maintenance'
 ));
 ROLLBACK TO SAVEPOINT before_id_deregister;
@@ -474,8 +474,8 @@ CALL pg_temp.assert_iceberg_worker_registered(
     'worker_deregister_id_savepoint_rollback'
 );
 
-SELECT lakebase.deregister_worker((
-    SELECT worker_id FROM lakebase.workers
+SELECT lagodb.deregister_worker((
+    SELECT worker_id FROM lagodb.workers
     WHERE worker_name = 'iceberg_maintenance'
 ));
 CALL pg_temp.assert_iceberg_worker_absent('worker_deregister_id_commit');
@@ -495,7 +495,7 @@ ORDER BY test_case;
 
 -- 4. Wake, RunAfter, and crash-backoff scheduling.
 \connect :runtime_database
-INSERT INTO lakebase.maintenance_queue (
+INSERT INTO lagodb.maintenance_queue (
     item_id, operation, volume_id, object_namespace, object_path, producer,
     attempt_count, not_before, failed, created_at
 ) VALUES (
@@ -503,7 +503,7 @@ INSERT INTO lakebase.maintenance_queue (
     'runtime-lifecycle-test', 0, clock_timestamp() + interval '1 hour', false,
     clock_timestamp()
 );
-SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 DO $$
 DECLARE
     observed boolean := false;
@@ -512,12 +512,12 @@ DECLARE
 BEGIN
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE database_oid = (
                     SELECT oid FROM pg_database
                     WHERE datname = current_database()
                   )
-              AND extension_name = 'pg_lakebase_runtime'
+              AND extension_name = 'lagodb_base'
               AND worker_name = 'maintenance'
               AND needs_restart
               AND restart_after_ms IS NOT NULL
@@ -532,7 +532,7 @@ BEGIN
     IF NOT observed THEN
         SELECT coalesce(jsonb_agg(to_jsonb(status))::text, '[]')
         INTO status_details
-        FROM lakebase.worker_status AS status
+        FROM lagodb.worker_status AS status
         WHERE database_oid = (
             SELECT oid FROM pg_database WHERE datname = current_database()
         );
@@ -542,7 +542,7 @@ BEGIN
 END
 $$;
 
-INSERT INTO lakebase.maintenance_queue (
+INSERT INTO lagodb.maintenance_queue (
     item_id, operation, volume_id, object_namespace, object_path, producer,
     attempt_count, not_before, failed, created_at
 ) VALUES (
@@ -550,7 +550,7 @@ INSERT INTO lakebase.maintenance_queue (
     'runtime-lifecycle-test', 0, clock_timestamp(), false, clock_timestamp()
 );
 SET ROLE lakebase_runtime_non_superuser;
-SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 RESET ROLE;
 DO $$
 DECLARE
@@ -559,7 +559,7 @@ DECLARE
 BEGIN
     LOOP
         EXIT WHEN EXISTS (
-            SELECT FROM lakebase.maintenance_queue
+            SELECT FROM lagodb.maintenance_queue
             WHERE item_id = '00000000-0000-0000-0000-000000000003'
               AND failed
         );
@@ -569,18 +569,18 @@ BEGIN
         PERFORM pg_sleep(0.05);
     END LOOP;
     IF NOT EXISTS (
-        SELECT FROM lakebase.maintenance_queue
+        SELECT FROM lagodb.maintenance_queue
         WHERE item_id = '00000000-0000-0000-0000-000000000003'
           AND failed
     ) THEN
         SELECT jsonb_build_object(
             'workers', coalesce((
                 SELECT jsonb_agg(to_jsonb(status))
-                FROM lakebase.worker_status AS status
+                FROM lagodb.worker_status AS status
             ), '[]'::jsonb),
             'queue', coalesce((
                 SELECT jsonb_agg(to_jsonb(item))
-                FROM lakebase.maintenance_status AS item
+                FROM lagodb.maintenance_status AS item
             ), '[]'::jsonb)
         )::text INTO status_details;
         RAISE EXCEPTION 'committed wakeup did not advance scheduled worker'
@@ -588,7 +588,7 @@ BEGIN
     END IF;
 END
 $$;
-DELETE FROM lakebase.maintenance_queue
+DELETE FROM lagodb.maintenance_queue
 WHERE item_id IN (
     '00000000-0000-0000-0000-000000000002',
     '00000000-0000-0000-0000-000000000003'
@@ -596,11 +596,11 @@ WHERE item_id IN (
 
 \connect :regress_database
 SELECT injection_points_attach(
-    'lakebase-worker-after-database-connection',
+    'lagodb-worker-after-database-connection',
     'error'
 );
 \connect :runtime_database
-SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 DO $$
 DECLARE
     observed boolean := false;
@@ -609,12 +609,12 @@ DECLARE
 BEGIN
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE database_oid = (
                     SELECT oid FROM pg_database
                     WHERE datname = current_database()
                   )
-              AND extension_name = 'pg_lakebase_runtime'
+              AND extension_name = 'lagodb_base'
               AND worker_name = 'maintenance'
               AND needs_restart
               AND process_state = 'restarting'
@@ -629,7 +629,7 @@ BEGIN
     IF NOT observed THEN
         SELECT coalesce(jsonb_agg(to_jsonb(status))::text, '[]')
         INTO status_details
-        FROM lakebase.worker_status AS status;
+        FROM lagodb.worker_status AS status;
         RAISE EXCEPTION 'worker injection did not enter crash backoff'
             USING DETAIL = status_details;
     END IF;
@@ -637,10 +637,10 @@ END
 $$;
 \connect :regress_database
 SELECT injection_points_detach(
-    'lakebase-worker-after-database-connection'
+    'lagodb-worker-after-database-connection'
 );
 \connect :runtime_database
-SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 CALL public.worker_regress_assert_runtime_idle('injection recovery');
 
 SELECT oid::text AS runtime_database_oid
@@ -649,14 +649,14 @@ WHERE datname = current_database()
 \gset
 DROP PROCEDURE public.worker_regress_assert_runtime_idle(text);
 SET client_min_messages = warning;
-DROP EXTENSION pg_lakebase_runtime CASCADE;
+DROP EXTENSION lagodb_base CASCADE;
 RESET client_min_messages;
 DO $$
 BEGIN
     IF EXISTS (
            SELECT FROM pg_extension
-           WHERE extname IN ('pg_lakebase_runtime', 'lagodb_iceberg')
-       ) OR to_regclass('lakebase.maintenance_queue') IS NOT NULL
+           WHERE extname IN ('lagodb_base', 'lagodb_iceberg')
+       ) OR to_regclass('lagodb.maintenance_queue') IS NOT NULL
     THEN
         RAISE EXCEPTION 'committed CASCADE retained runtime-owned SQL state';
     END IF;
@@ -664,7 +664,7 @@ END
 $$;
 \connect :regress_database
 SELECT set_config(
-    'pg_lakebase.worker_regress_runtime_database_oid',
+    'lagodb.worker_regress_runtime_database_oid',
     :'runtime_database_oid',
     false
 ) AS configured_runtime_database_oid
@@ -676,9 +676,9 @@ DECLARE
 BEGIN
     LOOP
         SELECT NOT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE database_oid = current_setting(
-                'pg_lakebase.worker_regress_runtime_database_oid'
+                'lagodb.worker_regress_runtime_database_oid'
             )::oid
         ) INTO observed;
         EXIT WHEN observed;
@@ -707,7 +707,7 @@ FROM lakebase_regress.object_storage_fixture
 SELECT 'regress-worker-statement-cancel-' || current_database()
        AS cancel_volume_name
 \gset
-SELECT lakebase.create_storage_volume(
+SELECT lagodb.create_storage_volume(
     :'cancel_volume_name',
     format('s3://%s', :'lakebase_regress_bucket'),
     jsonb_build_object(
@@ -723,7 +723,7 @@ SELECT lakebase.create_storage_volume(
 ) AS created_cancel_volume
 \gset
 SELECT internal_volume_id::text AS cancel_volume_id
-FROM lakebase.storage_volumes
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'cancel_volume_name'
 \gset
 CREATE TEMP TABLE worker_cancel_fixture AS
@@ -741,7 +741,7 @@ BEGIN
         BEGIN
             SELECT objects = 0
             INTO ready
-            FROM lakebase.observe_object_tree(
+            FROM lagodb.observe_object_tree(
                 fixture.volume_id,
                 fixture.object_namespace,
                 '__lakebase_regress_probe__'
@@ -770,12 +770,12 @@ DECLARE
 BEGIN
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE database_oid = (
                     SELECT oid FROM pg_database
                     WHERE datname = current_database()
                   )
-              AND extension_name = 'pg_lakebase_runtime'
+              AND extension_name = 'lagodb_base'
               AND worker_name = 'maintenance'
               AND process_state = 'stopped'
               AND pid IS NULL
@@ -793,7 +793,7 @@ BEGIN
 END
 $$;
 
-INSERT INTO lakebase.maintenance_queue (
+INSERT INTO lagodb.maintenance_queue (
     item_id, operation, volume_id, object_namespace, object_path, producer,
     attempt_count, not_before, failed, created_at
 ) VALUES (
@@ -818,7 +818,7 @@ SELECT pg_backend_pid()::text AS lakebase_regress_backend_pid,
     \quit 1
 \endif
 
-SELECT lakebase.request_worker_wakeup('pg_lakebase_runtime', 'maintenance');
+SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 DO $$
 DECLARE
     reached boolean := false;
@@ -826,13 +826,13 @@ DECLARE
 BEGIN
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status AS worker
+            SELECT FROM lagodb.worker_status AS worker
             JOIN pg_stat_activity AS activity ON activity.pid = worker.pid
             WHERE worker.database_oid = (
                     SELECT oid FROM pg_database
                     WHERE datname = current_database()
                   )
-              AND worker.extension_name = 'pg_lakebase_runtime'
+              AND worker.extension_name = 'lagodb_base'
               AND worker.worker_name = 'maintenance'
               AND worker.process_state = 'running'
               AND activity.wait_event_type = 'Extension'
@@ -849,12 +849,12 @@ BEGIN
 END
 $$;
 SELECT worker.pid::text AS cancel_worker_pid
-FROM lakebase.worker_status AS worker
+FROM lagodb.worker_status AS worker
 JOIN pg_stat_activity AS activity ON activity.pid = worker.pid
 WHERE worker.database_oid = (
         SELECT oid FROM pg_database WHERE datname = current_database()
       )
-  AND worker.extension_name = 'pg_lakebase_runtime'
+  AND worker.extension_name = 'lagodb_base'
   AND worker.worker_name = 'maintenance'
   AND worker.process_state = 'running'
   AND activity.wait_event_type = 'Extension'
@@ -874,12 +874,12 @@ DECLARE
 BEGIN
     LOOP
         SELECT EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE database_oid = (
                     SELECT oid FROM pg_database
                     WHERE datname = current_database()
                   )
-              AND extension_name = 'pg_lakebase_runtime'
+              AND extension_name = 'lagodb_base'
               AND worker_name = 'maintenance'
               AND failure_count = 1
               AND needs_restart
@@ -910,15 +910,15 @@ DECLARE
 BEGIN
     LOOP
         SELECT NOT EXISTS (
-            SELECT FROM lakebase.maintenance_queue
+            SELECT FROM lagodb.maintenance_queue
             WHERE item_id = '00000000-0000-0000-0000-000000000004'
         ) AND EXISTS (
-            SELECT FROM lakebase.worker_status
+            SELECT FROM lagodb.worker_status
             WHERE database_oid = (
                     SELECT oid FROM pg_database
                     WHERE datname = current_database()
                   )
-              AND extension_name = 'pg_lakebase_runtime'
+              AND extension_name = 'lagodb_base'
               AND worker_name = 'maintenance'
               AND failure_count = 0
               AND process_state = 'stopped'
@@ -936,12 +936,12 @@ BEGIN
     END IF;
 END
 $$;
-DELETE FROM lakebase.maintenance_queue
+DELETE FROM lagodb.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000004';
-SELECT lakebase.drop_storage_volume(:'cancel_volume_name');
+SELECT lagodb.drop_storage_volume(:'cancel_volume_name');
 
 SELECT 'worker_test_restored_iceberg_registration: ' || EXISTS (
-           SELECT FROM lakebase.worker_status
+           SELECT FROM lagodb.worker_status
            WHERE extension_name = 'lagodb_iceberg'
              AND worker_name = 'iceberg_maintenance'
              AND registration_state = 'registered'

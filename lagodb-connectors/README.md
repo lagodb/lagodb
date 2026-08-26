@@ -32,7 +32,7 @@ user mapping. This S3-compatible example is suitable for MinIO and similar
 services:
 
 ```sql
-CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION lagodb_base;
 CREATE EXTENSION lagodb_connectors;
 
 CREATE SERVER pg_lakebase_s3

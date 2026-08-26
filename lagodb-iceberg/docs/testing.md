@@ -83,7 +83,7 @@ cargo test -p lagodb-iceberg --lib
 Runs Tier 2 `#[pg_test]` tests inside an ephemeral PostgreSQL test cluster:
 ```bash
 # Ensure the shared runtime is installed in the target pgrx installation
-cargo pgrx install --package pg-lakebase-runtime --pg-config "$(cargo pgrx info pg-config pg17)"
+cargo pgrx install --package lagodb-base --pg-config "$(cargo pgrx info pg-config pg17)"
 
 # Run backend tests
 cargo pgrx test pg17 --package lagodb-iceberg

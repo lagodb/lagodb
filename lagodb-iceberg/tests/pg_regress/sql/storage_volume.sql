@@ -15,19 +15,19 @@ TO '/tmp/_regress_socket_path.txt';
 \! rm -f /tmp/_regress_socket_path.txt
 
 SELECT current_setting(
-           'pg_lakebase.storage_volume_retirement_grace_period_seconds'
+           'lagodb.storage_volume_retirement_grace_period_seconds'
 ) = '604800' AS volume_retirement_grace_period_default
 \gset
 \echo volume_retirement_grace_period_default: :volume_retirement_grace_period_default
 
 SELECT loaded_volume_count AS loaded_before
-FROM lakebase.storage_service_status
+FROM lagodb.storage_service_status
 \gset
 
 CREATE TEMP TABLE storage_volume_reload_baseline AS
 SELECT reload_generation,
        loaded_volume_count::bigint AS initial_loaded_volume_count
-FROM lakebase.storage_service_status;
+FROM lagodb.storage_service_status;
 
 CREATE FUNCTION pg_temp.storage_volume_wait_for_reload(
     require_loaded boolean,
@@ -42,7 +42,7 @@ BEGIN
     LOOP
         SELECT *
         INTO current_status
-        FROM lakebase.storage_service_status;
+        FROM lagodb.storage_service_status;
 
         EXIT WHEN current_status.reload_generation > (
                       SELECT reload_generation
@@ -76,7 +76,7 @@ $$;
 
 SELECT 'regress-bgw-' || gen_random_uuid() AS volume_name
 \gset
-SELECT lakebase.create_storage_volume(
+SELECT lagodb.create_storage_volume(
     :'volume_name',
     's3://storage-bgworker-regress/root',
     '{"type":"anonymous"}'::jsonb,
@@ -85,7 +85,7 @@ SELECT lakebase.create_storage_volume(
 \gset
 
 SELECT count(*) = 1 AS config_visible
-FROM lakebase.storage_volumes
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
   AND provider = 's3'
   AND credential_type = 'anonymous'
@@ -98,17 +98,17 @@ SELECT pg_temp.storage_volume_wait_for_reload(true, false) AS ignored
 
 SELECT loaded_volume_count >= :loaded_before::bigint + 1
            AND last_error IS NULL AS registry_loaded
-FROM lakebase.storage_service_status
+FROM lagodb.storage_service_status
 \gset
 \echo registry_loaded: :registry_loaded
 
 SELECT :'volume_name' || '-renamed' AS renamed_volume
 \gset
-SELECT lakebase.rename_storage_volume(:'volume_name', :'renamed_volume')
+SELECT lagodb.rename_storage_volume(:'volume_name', :'renamed_volume')
        AS ignored
 \gset
 SELECT count(*) = 1 AS rename_visible
-FROM lakebase.storage_volumes
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'renamed_volume'
   AND internal_volume_id IS NOT NULL
 \gset
@@ -116,16 +116,16 @@ WHERE storage_volume_name = :'renamed_volume'
 
 UPDATE storage_volume_reload_baseline AS baseline
 SET reload_generation = status.reload_generation
-FROM lakebase.storage_service_status AS status;
+FROM lagodb.storage_service_status AS status;
 
-SELECT lakebase.update_storage_volume_credentials(
+SELECT lagodb.update_storage_volume_credentials(
     :'renamed_volume',
     '{"type":"s3_access_key","access_key_id":"regress-key",'
     '"secret_access_key":"regress-secret"}'::jsonb
 ) AS ignored
 \gset
 SELECT count(*) = 1 AS credential_update_visible
-FROM lakebase.storage_volumes
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'renamed_volume'
   AND credential_type = 's3_access_key'
 \gset
@@ -137,15 +137,15 @@ SELECT pg_temp.storage_volume_wait_for_reload(true, true) AS ignored
 SELECT loaded_volume_count >= :loaded_before::bigint + 1
            AND last_reload_replaced >= 1
            AND last_error IS NULL AS replacement_loaded
-FROM lakebase.storage_service_status
+FROM lagodb.storage_service_status
 \gset
 \echo replacement_loaded: :replacement_loaded
 
 UPDATE storage_volume_reload_baseline AS baseline
 SET reload_generation = status.reload_generation
-FROM lakebase.storage_service_status AS status;
+FROM lagodb.storage_service_status AS status;
 
-SELECT lakebase.reload_storage_volumes() AS ignored
+SELECT lagodb.reload_storage_volumes() AS ignored
 \gset
 
 SELECT pg_temp.storage_volume_wait_for_reload(false, false) AS ignored
@@ -177,7 +177,7 @@ RESET client_min_messages;
 
 SELECT 'regress-guard-' || gen_random_uuid() AS volume_name
 \gset
-SELECT lakebase.create_storage_volume(
+SELECT lagodb.create_storage_volume(
     :'volume_name',
     's3://tablespace-guard-regress/root',
     '{"type":"anonymous"}'::jsonb,
@@ -194,7 +194,7 @@ LOCATION '/tmp/lagodb_iceberg_regress_guard_native';
 -- Rename is allowed; every SET/RESET is rejected for a Lakebase tablespace.
 ALTER TABLESPACE iceberg_guard_dist RENAME TO iceberg_guard_dist_renamed;
 SELECT count(*) = 1 AS rename_allowed
-FROM lakebase.storage_volumes AS volume
+FROM lagodb.storage_volumes AS volume
 JOIN pg_tablespace AS tablespace
   ON tablespace.oid = volume.bound_tablespace_oid
 WHERE volume.storage_volume_name = :'volume_name'
@@ -289,7 +289,7 @@ RESET client_min_messages;
 
 SELECT 'regress-tablespace-' || gen_random_uuid() AS volume_name
 \gset
-SELECT lakebase.create_storage_volume(
+SELECT lagodb.create_storage_volume(
     :'volume_name',
     's3://tablespace-option-regress/root',
     '{"type":"anonymous"}'::jsonb,
@@ -314,7 +314,7 @@ WHERE spcname = 'iceberg_volume_test'
 \echo internal_id_only: :internal_id_only
 
 SELECT count(*) = 1 AS binding_visible
-FROM lakebase.storage_volumes AS volume
+FROM lagodb.storage_volumes AS volume
 JOIN pg_tablespace AS tablespace
   ON tablespace.oid = volume.bound_tablespace_oid
 WHERE volume.storage_volume_name = :'volume_name'
@@ -324,7 +324,7 @@ WHERE volume.storage_volume_name = :'volume_name'
 
 DROP TABLESPACE iceberg_volume_test;
 SELECT count(*) = 1 AS retirement_visible_after_drop
-FROM lakebase.storage_volumes
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
   AND lifecycle = 'retiring'
   AND bound_tablespace_oid IS NULL
@@ -361,7 +361,7 @@ RESET client_min_messages;
 
 SELECT 'regress-cleanup-cancel-' || gen_random_uuid() AS volume_name
 \gset
-SELECT lakebase.create_storage_volume(
+SELECT lagodb.create_storage_volume(
     :'volume_name',
     format('s3://%s', :'lakebase_regress_bucket'),
     jsonb_build_object(
@@ -382,7 +382,7 @@ LOCATION '/tmp/iceberg_regress_storage_socket_cancel_contexts'
 WITH (storage_volume = :'volume_name');
 
 SELECT internal_volume_id AS volume_id
-FROM lakebase.storage_volumes
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
 \gset
 \setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id

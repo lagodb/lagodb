@@ -33,7 +33,7 @@ session s2
 step s2_vacuum { VACUUM vacuum_cas_iso.t; }
 step s2_verify {
   SELECT (SELECT current_data_objects
-          FROM lakebase.table_maintenance_stats('vacuum_cas_iso.t')) = 1
+          FROM lagodb.table_maintenance_stats('vacuum_cas_iso.t')) = 1
            AS compacted,
          (SELECT maintenance_due_at = 'infinity'
           FROM iceberg.iceberg_metadata

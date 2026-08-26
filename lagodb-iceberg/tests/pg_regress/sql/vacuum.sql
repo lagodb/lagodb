@@ -6,7 +6,7 @@ CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA vacuum_correctness_test;
 
 SELECT extension_name, worker_name
-FROM lakebase.workers
+FROM lagodb.workers
 WHERE extension_name = 'lagodb_iceberg'
   AND worker_name = 'iceberg_maintenance';
 SELECT current_setting('lagodb_iceberg.auto_maintenance_enabled') AS auto_enabled,
@@ -144,12 +144,12 @@ GROUP BY format;
 
 -- This shared setting is registered/backed by runtime but consumed in the AM.
 -- A value of one prevents the minimum-five-file rewrite group from forming.
-SET pg_lakebase.vacuum_max_group_objects = 1;
+SET lagodb.vacuum_max_group_objects = 1;
 VACUUM vacuum_correctness_test.t;
 SELECT provider, format, current_data_objects
-FROM lakebase.table_maintenance_stats('vacuum_correctness_test.t');
+FROM lagodb.table_maintenance_stats('vacuum_correctness_test.t');
 
-RESET pg_lakebase.vacuum_max_group_objects;
+RESET lagodb.vacuum_max_group_objects;
 VACUUM vacuum_correctness_test.t;
 VACUUM vacuum_correctness_test.t_v1;
 VACUUM vacuum_correctness_test.t_v3;
@@ -211,7 +211,7 @@ FROM (VALUES
     ('vacuum_correctness_test.t_full'::regclass),
     ('vacuum_correctness_test.t_v3_full'::regclass)
 ) AS relations(relid)
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(relations.relid) AS stats
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(relations.relid) AS stats
 ORDER BY stats.format;
 
 DROP SCHEMA vacuum_correctness_test CASCADE;
@@ -252,7 +252,7 @@ SELECT count(*) = :rows_before::bigint AS rows_preserved_after_failure,
            = :'digest_before' AS content_preserved_after_failure
 FROM vacuum_failure_recovery_t;
 SELECT current_data_objects = 6 AS failed_attempt_not_published
-FROM lakebase.table_maintenance_stats('vacuum_failure_recovery_t');
+FROM lagodb.table_maintenance_stats('vacuum_failure_recovery_t');
 SELECT count(*) = :objects_before_failure::bigint
        AS failed_attempt_artifacts_cleaned
 FROM pg_ls_dir(:'failure_root', true, false);
@@ -263,7 +263,7 @@ SELECT count(*) = :rows_before::bigint AS rows_preserved_after_retry,
            = :'digest_before' AS content_preserved_after_retry
 FROM vacuum_failure_recovery_t;
 SELECT current_data_objects = 1 AS retry_compacted
-FROM lakebase.table_maintenance_stats('vacuum_failure_recovery_t');
+FROM lagodb.table_maintenance_stats('vacuum_failure_recovery_t');
 
 DROP TABLE vacuum_failure_recovery_t;
 DROP EXTENSION lagodb_iceberg CASCADE;
@@ -306,7 +306,7 @@ FROM (VALUES
     ('vacuum_full_routing_test.partitioned_t_a'::regclass),
     ('vacuum_full_routing_test.partitioned_t_b'::regclass)
 ) AS leaves(relid)
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(leaves.relid);
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(leaves.relid);
 SELECT bool_and(reltuples::bigint = 5) AS full_analyze_updated_each_leaf
 FROM pg_class
 WHERE oid IN (
@@ -327,7 +327,7 @@ FROM (VALUES
     ('vacuum_full_routing_test.partitioned_t_a'::regclass),
     ('vacuum_full_routing_test.partitioned_t_b'::regclass)
 ) AS leaves(relid)
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(leaves.relid);
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(leaves.relid);
 SELECT array_agg(id ORDER BY id) = ARRAY[10, 20] AS heap_rows_preserved
 FROM vacuum_full_routing_test.heap_t;
 
@@ -342,7 +342,7 @@ INSERT INTO vacuum_full_routing_test.database_wide_t VALUES (6);
 
 VACUUM (FULL, SKIP_LOCKED);
 SELECT current_data_objects = 1 AS database_wide_provider_routed
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'vacuum_full_routing_test.database_wide_t'
 );
 SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6]
@@ -365,12 +365,12 @@ VACUUM (FULL) vacuum_full_routing_test.security_t;
 RESET client_min_messages;
 RESET ROLE;
 SELECT current_data_objects = 6 AS nonowner_did_not_rewrite
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'vacuum_full_routing_test.security_t'
 );
 VACUUM (FULL) vacuum_full_routing_test.security_t;
 SELECT current_data_objects = 1 AS owner_rewrite_succeeded
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'vacuum_full_routing_test.security_t'
 );
 REVOKE SELECT ON vacuum_full_routing_test.security_t FROM vacuum_full_nonowner;
@@ -403,7 +403,7 @@ RESET client_min_messages;
 \! rm -rf /tmp/iceberg_regress_vacuum_object_matrix/*
 
 SELECT 'regress-vacuum-matrix-' || gen_random_uuid() AS volume_name \gset
-SELECT lakebase.create_storage_volume(
+SELECT lagodb.create_storage_volume(
     :'volume_name',
     format('s3://%s', :'lakebase_regress_bucket'),
     jsonb_build_object(
@@ -424,7 +424,7 @@ WITH (storage_volume = :'volume_name');
 
 SELECT internal_volume_id AS volume_id,
        regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
-FROM lakebase.storage_volumes
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
 \gset
 
@@ -540,7 +540,7 @@ WITH relations(format, relid) AS (
 )
 SELECT roots.*, observed.objects AS objects_before
 FROM roots
-CROSS JOIN LATERAL lakebase.observe_object_tree(
+CROSS JOIN LATERAL lagodb.observe_object_tree(
     :'volume_id',
     :'lakebase_regress_bucket',
     roots.prefix
@@ -604,7 +604,7 @@ SELECT roots.format,
        END AS current_data_on_failure,
        stats.current_data_objects = 1 AS one_current_data_file
 FROM object_matrix_roots AS roots
-CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats
+CROSS JOIN LATERAL lagodb.table_maintenance_stats(roots.relid) AS stats
 ORDER BY roots.format;
 
 WITH observations AS (
@@ -617,12 +617,12 @@ WITH observations AS (
            stats.current_data_objects,
            stats.retained_data_objects
     FROM object_matrix_roots AS roots
-    CROSS JOIN LATERAL lakebase.observe_object_tree(
+    CROSS JOIN LATERAL lagodb.observe_object_tree(
         :'volume_id',
         :'lakebase_regress_bucket',
         roots.prefix
     ) AS observed
-    CROSS JOIN LATERAL lakebase.table_maintenance_stats(roots.relid) AS stats
+    CROSS JOIN LATERAL lagodb.table_maintenance_stats(roots.relid) AS stats
 )
 SELECT format,
        CASE WHEN objects_after < objects_before

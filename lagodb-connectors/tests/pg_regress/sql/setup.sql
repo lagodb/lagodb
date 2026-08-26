@@ -12,7 +12,7 @@
 SET TIME ZONE 'UTC';
 SET client_min_messages = warning;
 
-CREATE EXTENSION pg_lakebase_runtime;
+CREATE EXTENSION lagodb_base;
 CREATE EXTENSION lagodb_connectors;
 
 SELECT endpoint AS lakebase_regress_endpoint,

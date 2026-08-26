@@ -45,7 +45,7 @@ Applications query and mutate Iceberg tables using ordinary PostgreSQL SQL and t
                                       |
                                       v
 +------------------------------------------------------------------------------+
-| Storage & I/O Subsystem (iceberg-lite / pg-lakebase-runtime)                 |
+| Storage & I/O Subsystem (iceberg-lite / lagodb-base)                 |
 | - Local filesystem (with optional WAL integration)                           |
 | - Object storage volumes (S3 / MinIO, GCS, Azure Blob Storage)               |
 +------------------------------------------------------------------------------+
@@ -126,17 +126,17 @@ Transaction Boundary (COMMIT / ROLLBACK)
 
 ### 1. Configure `postgresql.conf`
 
-`lagodb-iceberg` requires `pg-lakebase-runtime` to coordinate background workers and storage services. Preload both in `postgresql.conf`:
+`lagodb-iceberg` requires `lagodb-base` to coordinate background workers and storage services. Preload both in `postgresql.conf`:
 
 ```conf
-shared_preload_libraries = 'pg_lakebase_runtime'
-pg_lakebase.provider_libraries = 'lagodb_iceberg'
+shared_preload_libraries = 'lagodb_base'
+lagodb.provider_libraries = 'lagodb_iceberg'
 ```
 
 ### 2. SQL Usage
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS pg_lakebase_runtime;
+CREATE EXTENSION IF NOT EXISTS lagodb_base;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
 -- 1. Managed Iceberg Table (ACID DML)

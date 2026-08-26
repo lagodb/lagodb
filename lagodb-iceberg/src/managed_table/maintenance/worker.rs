@@ -1,4 +1,4 @@
-//! Bounded opportunistic Iceberg maintenance scheduled by `pg_lakebase_runtime`.
+//! Bounded opportunistic Iceberg maintenance scheduled by `lagodb_base`.
 
 use std::time::Duration;
 

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "pg-lakebase-runtime",
+    "lagodb-base",
     "pg-delta-am",
     "pg-lakebase-core",
     "pg-lakebase-macros",

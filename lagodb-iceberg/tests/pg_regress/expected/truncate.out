@@ -2,7 +2,7 @@
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA truncate_table_test;
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 CREATE TABLE truncate_table_test.t (
     id integer,
     payload text

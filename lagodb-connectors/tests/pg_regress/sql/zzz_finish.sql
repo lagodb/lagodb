@@ -7,7 +7,7 @@ DROP SERVER IF EXISTS lagodb_connectors_regress_scope CASCADE;
 DROP SERVER IF EXISTS lagodb_connectors_regress_missing_mapping CASCADE;
 DROP SERVER IF EXISTS lagodb_connectors_regress_s3 CASCADE;
 DROP EXTENSION IF EXISTS lagodb_connectors CASCADE;
-DROP EXTENSION IF EXISTS pg_lakebase_runtime CASCADE;
+DROP EXTENSION IF EXISTS lagodb_base CASCADE;
 DROP TABLE IF EXISTS lakebase_regress.object_storage_fixture;
 DROP SCHEMA IF EXISTS lakebase_regress;
 RESET client_min_messages;

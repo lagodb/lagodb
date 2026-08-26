@@ -14,7 +14,7 @@ pub(crate) struct ManagedTablePropertyUpdate {
 
 impl ManagedTablePropertyUpdate {
     /// Resolve AM-owned PostgreSQL options into a catalog-independent update.
-    /// RESET removes an override from `lakebase.table_options`; the AM option
+    /// RESET removes an override from `lagodb.table_options`; the AM option
     /// resolver supplies the CREATE default before this object is constructed.
     pub(crate) fn from_options(options: ResolvedIcebergOptions) -> Self {
         Self {

@@ -55,7 +55,7 @@ $$;
 -- must publish neither its appended data nor its position delete.
 SET iceberg.mutation_buffer_flush_mb = 1;
 -- Run the complete matrix through the provider CustomScan target path.
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 CREATE TABLE dml_self_modified.force_target (
     id integer,
     label text
@@ -244,7 +244,7 @@ COPY (
 5,after_rollback
 -- Repeat with query CustomScan optimization disabled. Modify-purpose
 -- CustomScan remains mandatory correctness infrastructure.
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 CREATE TABLE dml_self_modified.seqscan_target (
     id integer,
     label text
@@ -384,7 +384,7 @@ COPY (
 ) TO STDOUT WITH (FORMAT csv);
 8,outer_different
 9,nested_different
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 RESET iceberg.mutation_buffer_flush_mb;
 SET client_min_messages = warning;
 DROP SCHEMA dml_self_modified CASCADE;

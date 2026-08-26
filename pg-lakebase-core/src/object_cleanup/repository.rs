@@ -378,7 +378,7 @@ fn notify_worker() -> Result<(), ObjectCleanupError> {
     const NOTIFIER: crate::extension_worker::WorkerNotifier =
         crate::extension_worker::WorkerNotifier::new(
             crate::extension_worker::WorkerIdentity::new(
-                c"pg_lakebase_runtime",
+                c"lagodb_base",
                 c"maintenance",
             ),
         );

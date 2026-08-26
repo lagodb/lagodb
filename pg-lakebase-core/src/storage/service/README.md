@@ -8,13 +8,13 @@ The `pg_lakebase` runtime extension owns the storage singleton. Access-method
 crates resolve the endpoint with `StorageEndpoint::from_pg_gucs()`, which reads
 PostgreSQL's global GUC registry by name:
 
-- `pg_lakebase.storage_server_enabled`
-- `pg_lakebase.storage_server_socket_path`
-- `pg_lakebase.storage_server_cache_dir`
-- `pg_lakebase.storage_backend_max_idle_connections`
+- `lagodb.storage_server_enabled`
+- `lagodb.storage_server_socket_path`
+- `lagodb.storage_server_cache_dir`
+- `lagodb.storage_backend_max_idle_connections`
 
 This avoids rlib static duplication: AM crates never read a `GucSetting` static
 compiled into their own shared object.
 
-`lakebase.workers` stores database-local extension workers only. The storage
+`lagodb.workers` stores database-local extension workers only. The storage
 server is a runtime-owned static bgworker and is never inserted into that table.

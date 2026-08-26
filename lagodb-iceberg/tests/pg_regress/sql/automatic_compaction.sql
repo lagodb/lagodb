@@ -57,7 +57,7 @@ BEGIN
     LOOP
         EXIT WHEN (
             SELECT current_data_objects < 6
-            FROM lakebase.table_maintenance_stats(
+            FROM lagodb.table_maintenance_stats(
                 'automatic_compaction_test.eligible'
             )
         );
@@ -70,7 +70,7 @@ END
 $$;
 
 SELECT current_data_objects < 6 AS worker_compacted_eligible_table
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'automatic_compaction_test.eligible'
 );
 SELECT maintenance_due_at IS NULL AS successful_attempt_cleared_due
@@ -105,7 +105,7 @@ BEGIN
     LOOP
         EXIT WHEN (
             SELECT current_data_objects < 7
-            FROM lakebase.table_maintenance_stats(
+            FROM lagodb.table_maintenance_stats(
                 'automatic_compaction_test.eligible'
             )
         );
@@ -118,11 +118,11 @@ END
 $$;
 
 SELECT current_data_objects < 7 AS writes_scheduled_compaction
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'automatic_compaction_test.eligible'
 );
 SELECT current_data_objects = 6 AS worker_did_not_scan_clean_registry_rows
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'automatic_compaction_test.cold'
 );
 SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]

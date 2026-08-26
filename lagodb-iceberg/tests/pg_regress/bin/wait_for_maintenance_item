@@ -20,7 +20,7 @@ while :; do
         --set=object_path="$object_path" 2>&1 <<'SQL'
 SELECT NOT EXISTS (
     SELECT 1
-    FROM lakebase.maintenance_queue
+    FROM lagodb.maintenance_queue
     WHERE volume_id = :'volume_id'
       AND object_namespace = :'namespace'
       AND (
@@ -55,7 +55,7 @@ SELECT item_id,
        revision,
        not_before,
        last_error
-FROM lakebase.maintenance_status
+FROM lagodb.maintenance_status
 WHERE volume_id = :'volume_id'
   AND object_namespace = :'namespace'
   AND (
@@ -73,20 +73,20 @@ SELECT extension_name,
        needs_restart,
        restart_after_ms,
        stop_requested
-FROM lakebase.worker_status
+FROM lagodb.worker_status
 WHERE database_oid = (
     SELECT oid
     FROM pg_catalog.pg_database
     WHERE datname = pg_catalog.current_database()
 )
-  AND extension_name = 'pg_lakebase_runtime'
+  AND extension_name = 'lagodb_base'
   AND worker_name = 'maintenance';
 
 SELECT process_kind,
        database_oid,
        state,
        pid
-FROM lakebase.process_status
+FROM lagodb.process_status
 WHERE process_kind IN ('supervisor', 'coordinator')
   AND (database_oid IS NULL
        OR database_oid = (

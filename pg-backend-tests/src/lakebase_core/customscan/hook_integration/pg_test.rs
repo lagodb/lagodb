@@ -59,7 +59,7 @@ mod tests {
         ]);
 
         let plan = explain_text_with_setup(
-            &["SET LOCAL pg_lakebase.customscan_mode = 'force'"],
+            &["SET LOCAL lagodb.customscan_mode = 'force'"],
             "SELECT * FROM hook_plain_force_t WHERE a = 1",
         );
 
@@ -78,7 +78,7 @@ mod tests {
         ]);
 
         let plan = explain_text_with_setup(
-            &["SET LOCAL pg_lakebase.customscan_mode = 'off'"],
+            &["SET LOCAL lagodb.customscan_mode = 'off'"],
             "SELECT * FROM hook_plain_off_t WHERE a = 1",
         );
 
@@ -97,7 +97,7 @@ mod tests {
         ]);
 
         let plan = explain_text_with_setup(
-            &["SET LOCAL pg_lakebase.customscan_mode = 'force'"],
+            &["SET LOCAL lagodb.customscan_mode = 'force'"],
             "SELECT * FROM hook_plain_unsupported_t WHERE (a + 1) = 2",
         );
 
@@ -120,7 +120,7 @@ mod tests {
 
         let plan = explain_text_with_setup(
             &[
-                "SET LOCAL pg_lakebase.customscan_mode = 'force'",
+                "SET LOCAL lagodb.customscan_mode = 'force'",
                 "SET LOCAL enable_hashjoin = off",
                 "SET LOCAL enable_mergejoin = off",
             ],
@@ -146,7 +146,7 @@ mod tests {
 
         let plan = explain_text_with_setup(
             &[
-                "SET LOCAL pg_lakebase.customscan_mode = 'force'",
+                "SET LOCAL lagodb.customscan_mode = 'force'",
                 "SET LOCAL enable_hashjoin = off",
                 "SET LOCAL enable_mergejoin = off",
             ],
@@ -168,7 +168,7 @@ mod tests {
         ]);
 
         let plan = explain_text_with_options(
-            &["SET LOCAL pg_lakebase.customscan_mode = 'force'"],
+            &["SET LOCAL lagodb.customscan_mode = 'force'"],
             "VERBOSE, COSTS OFF",
             "SELECT * FROM hook_widen_accept_t WHERE (a = 1 AND b < 10) OR a = 2",
         );
@@ -202,7 +202,7 @@ mod tests {
         run_batch(&[
             "DROP TABLE IF EXISTS hook_codec_wrong_tag_t",
             "CREATE TEMP TABLE hook_codec_wrong_tag_t(a int4)",
-            "SET LOCAL pg_lakebase.customscan_mode = 'force'",
+            "SET LOCAL lagodb.customscan_mode = 'force'",
         ]);
 
         Spi::run("SELECT * FROM hook_codec_wrong_tag_t WHERE a = 1")
@@ -216,7 +216,7 @@ mod tests {
         run_batch(&[
             "DROP TABLE IF EXISTS hook_codec_trailing_t",
             "CREATE TEMP TABLE hook_codec_trailing_t(a int4)",
-            "SET LOCAL pg_lakebase.customscan_mode = 'force'",
+            "SET LOCAL lagodb.customscan_mode = 'force'",
         ]);
 
         Spi::run("SELECT * FROM hook_codec_trailing_t WHERE a = 1").expect(

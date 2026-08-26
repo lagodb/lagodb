@@ -3154,6 +3154,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "lagodb-base"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "pg-lakebase-core",
+ "pg-lakebase-storage",
+ "pgrx",
+ "pgrx-pg-config",
+ "pgrx-tests",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lagodb-connectors"
 version = "0.1.0"
 dependencies = [
@@ -4133,26 +4153,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "pg-lakebase-runtime"
-version = "0.1.0"
-dependencies = [
- "cc",
- "libc",
- "pg-lakebase-core",
- "pg-lakebase-storage",
- "pgrx",
- "pgrx-pg-config",
- "pgrx-tests",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

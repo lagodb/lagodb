@@ -133,12 +133,12 @@ slots, encoder/decoder equivalence, buffer/flush behavior, and toast detoast —
 are `#[pg_test]` tests hosted in the aggregator crate
 [pg-backend-tests](../pg-backend-tests):
 
-The aggregator preloads `pg_lakebase_runtime`. Install that runtime into the
+The aggregator preloads `lagodb_base`. Install that runtime into the
 target pgrx PostgreSQL installation before running the test:
 
 ```bash
 cargo pgrx install \
-  --package pg-lakebase-runtime \
+  --package lagodb-base \
   --pg-config "$(cargo pgrx info pg-config pg17)"
 
 cargo pgrx test pg17 --package pg-backend-tests

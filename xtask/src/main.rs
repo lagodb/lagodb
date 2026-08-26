@@ -10,8 +10,8 @@ use regress::{RegressionRunner, RegressionSuite, RegressionTarget};
 
 const EXTENSION_PACKAGE: &str = "lagodb-iceberg";
 const EXTENSION_NAME: &str = "lagodb_iceberg";
-const RUNTIME_PACKAGE: &str = "pg-lakebase-runtime";
-const RUNTIME_NAME: &str = "pg_lakebase_runtime";
+const RUNTIME_PACKAGE: &str = "lagodb-base";
+const RUNTIME_NAME: &str = "lagodb_base";
 const DELTA_AM_PACKAGE: &str = "pg-delta-am";
 const DELTA_AM_NAME: &str = "pg_delta_am";
 const CONNECTORS_PACKAGE: &str = "lagodb-connectors";
@@ -335,7 +335,7 @@ fn run_isolation(pg_version: &OsStr, specs: &[OsString]) -> Result<(), String> {
     fs::write(
         &temp_config,
         format!(
-            "shared_preload_libraries = '{RUNTIME_NAME}'\npg_lakebase.provider_libraries = '{EXTENSION_NAME}'\n"
+            "shared_preload_libraries = '{RUNTIME_NAME}'\nlagodb.provider_libraries = '{EXTENSION_NAME}'\n"
         ),
     )
     .map_err(|error| format!("failed to write {}: {error}", temp_config.display()))?;

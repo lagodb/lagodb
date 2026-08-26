@@ -16,11 +16,11 @@ CREATE EXTENSION IF NOT EXISTS injection_points;
 DO $$
 BEGIN
     PERFORM injection_points_detach(
-        'lakebase-worker-after-database-connection'
+        'lagodb-worker-after-database-connection'
     );
 EXCEPTION WHEN internal_error THEN
     IF SQLERRM <>
-       'could not detach injection point "lakebase-worker-after-database-connection"'
+       'could not detach injection point "lagodb-worker-after-database-connection"'
     THEN
         RAISE;
     END IF;
@@ -32,10 +32,10 @@ DROP ROLE IF EXISTS lakebase_runtime_non_superuser;
 SELECT 'regress-worker-statement-cancel-' || current_database()
        AS cancel_volume_name
 \gset
-DELETE FROM lakebase.maintenance_queue
+DELETE FROM lagodb.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000004';
-SELECT lakebase.drop_storage_volume(:'cancel_volume_name')
-FROM lakebase.storage_volumes
+SELECT lagodb.drop_storage_volume(:'cancel_volume_name')
+FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'cancel_volume_name';
  drop_storage_volume 
 ---------------------

@@ -1,4 +1,4 @@
-//! Reads the runtime-owned `pg_lakebase.customscan_mode` through the stable ABI.
+//! Reads the runtime-owned `lagodb.customscan_mode` through the stable ABI.
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum CustomScanMode {

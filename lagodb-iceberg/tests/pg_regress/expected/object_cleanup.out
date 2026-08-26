@@ -27,7 +27,7 @@ SELECT list_succeeded
        AND delete_succeeded
        AND succeeded
        AND error IS NULL AS storage_volume_probe_ok
-FROM lakebase.probe_storage_volume(:'volume_name');
+FROM lagodb.probe_storage_volume(:'volume_name');
  storage_volume_probe_ok 
 -------------------------
  t
@@ -49,7 +49,7 @@ SELECT :'volume_id' AS volume_id,
 \setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
 SELECT objects > 0 AS tree_exists_before_drop
-FROM lakebase.observe_object_tree(
+FROM lagodb.observe_object_tree(
     :'volume_id', :'object_namespace', :'object_path'
 );
  tree_exists_before_drop 
@@ -61,7 +61,7 @@ DROP TABLE remote_cleanup_drop;
 \! bin/wait_for_maintenance_item 30
 maintenance_complete: true
 SELECT objects = 0 AS tree_empty_after_drop
-FROM lakebase.observe_object_tree(
+FROM lagodb.observe_object_tree(
     :'volume_id', :'object_namespace', :'object_path'
 );
  tree_empty_after_drop 
@@ -77,10 +77,10 @@ FROM pg_class WHERE relname = 'remote_cleanup_drop';
 (1 row)
 
 SELECT process_state AS object_cleanup_worker_state
-FROM lakebase.worker_status
+FROM lagodb.worker_status
 WHERE database_oid = (SELECT oid FROM pg_catalog.pg_database
                       WHERE datname = pg_catalog.current_database())
-  AND extension_name = 'pg_lakebase_runtime' AND worker_name = 'maintenance'
+  AND extension_name = 'lagodb_base' AND worker_name = 'maintenance'
 \gset
 \echo object_cleanup_worker_state: :object_cleanup_worker_state
 object_cleanup_worker_state: stopped
@@ -112,7 +112,7 @@ DROP TABLE remote_cleanup_rollback;
 \! bin/wait_for_maintenance_item 30
 maintenance_complete: true
 SELECT objects = 0 AS rollback_tree_empty_after_cleanup
-FROM lakebase.observe_object_tree(
+FROM lagodb.observe_object_tree(
     :'volume_id', :'object_namespace', :'object_path'
 );
  rollback_tree_empty_after_cleanup 
@@ -127,14 +127,14 @@ DROP TABLESPACE regress_object;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 SELECT operation, state, attempt_count
-FROM lakebase.maintenance_status
+FROM lagodb.maintenance_status
 ORDER BY item_id;
  operation | state | attempt_count 
 -----------+-------+---------------
 (0 rows)
 
 BEGIN;
-INSERT INTO lakebase.maintenance_queue
+INSERT INTO lagodb.maintenance_queue
     (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, created_at)
 VALUES
@@ -143,7 +143,7 @@ VALUES
     (gen_random_uuid(), 1, 1, 'bucket', 'data/a.parquet',
      'synthetic-delta', 0, clock_timestamp(), false, clock_timestamp());
 SELECT count(*) AS duplicate_objects_are_distinct
-FROM lakebase.maintenance_queue;
+FROM lagodb.maintenance_queue;
  duplicate_objects_are_distinct 
 --------------------------------
                               2
@@ -151,7 +151,7 @@ FROM lakebase.maintenance_queue;
 
 ROLLBACK;
 SELECT count(*) AS abort_removed_items
-FROM lakebase.maintenance_queue;
+FROM lagodb.maintenance_queue;
  abort_removed_items 
 ---------------------
                    0
@@ -159,18 +159,18 @@ FROM lakebase.maintenance_queue;
 
 BEGIN;
 SAVEPOINT maintenance_sp;
-INSERT INTO lakebase.maintenance_queue
+INSERT INTO lagodb.maintenance_queue
     (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, created_at)
 VALUES (gen_random_uuid(), 2, 1, 'bucket', 'table-root/',
         'synthetic-drop', 0, clock_timestamp(), false, clock_timestamp());
-INSERT INTO lakebase.maintenance_queue
+INSERT INTO lagodb.maintenance_queue
     (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, created_at)
 VALUES (gen_random_uuid(), 2, 1, 'bucket', 'table-root/',
         'synthetic-drop', 0, clock_timestamp(), false, clock_timestamp());
 SELECT count(*) AS duplicate_trees_are_distinct
-FROM lakebase.maintenance_queue;
+FROM lagodb.maintenance_queue;
  duplicate_trees_are_distinct 
 ------------------------------
                             2
@@ -178,7 +178,7 @@ FROM lakebase.maintenance_queue;
 
 ROLLBACK TO SAVEPOINT maintenance_sp;
 SELECT count(*) AS savepoint_removed_items
-FROM lakebase.maintenance_queue;
+FROM lagodb.maintenance_queue;
  savepoint_removed_items 
 -------------------------
                        0
@@ -186,7 +186,7 @@ FROM lakebase.maintenance_queue;
 
 COMMIT;
 SELECT count(*) AS queue_empty_at_end
-FROM lakebase.maintenance_queue;
+FROM lagodb.maintenance_queue;
  queue_empty_at_end 
 --------------------
                   0
@@ -195,27 +195,27 @@ FROM lakebase.maintenance_queue;
 -- The operator retry path is a Rust catalog update, not an SQL UPDATE helper.
 SELECT gen_random_uuid() AS retry_id \gset
 BEGIN;
-INSERT INTO lakebase.maintenance_queue
+INSERT INTO lagodb.maintenance_queue
     (item_id, operation, volume_id, object_namespace, object_path, producer,
      attempt_count, not_before, failed, last_error, created_at)
 VALUES (:'retry_id', 1, 1, 'bucket', 'retry/object',
         'synthetic-retry', 7, clock_timestamp(), true, 'forced failure',
         clock_timestamp());
-SELECT lakebase.retry_maintenance_item(:'retry_id') AS failed_item_retried;
+SELECT lagodb.retry_maintenance_item(:'retry_id') AS failed_item_retried;
  failed_item_retried 
 ---------------------
  t
 (1 row)
 
 SELECT state, attempt_count, last_error IS NULL AS error_cleared
-FROM lakebase.maintenance_status
+FROM lagodb.maintenance_status
 WHERE item_id = :'retry_id';
  state | attempt_count | error_cleared 
 -------+---------------+---------------
  ready |             0 | t
 (1 row)
 
-SELECT lakebase.retry_maintenance_item(:'retry_id') AS ready_item_not_retried;
+SELECT lagodb.retry_maintenance_item(:'retry_id') AS ready_item_not_retried;
  ready_item_not_retried 
 ------------------------
  f

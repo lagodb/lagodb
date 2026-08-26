@@ -25,13 +25,13 @@ SELECT pg_stat_file(:'iceberg_path', true) IS NULL
        AS iceberg_drop_hook_survived_delta_registration;
 
 SELECT provider, format, current_data_objects
-FROM lakebase.table_maintenance_stats('multi_am_delta');
+FROM lagodb.table_maintenance_stats('multi_am_delta');
 
 SELECT delta.duplicate_iceberg_registration_rejected()
        AS duplicate_am_owner_rejected;
 
 SELECT provider, format
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     (SELECT oid FROM pg_class WHERE relname = 'multi_am_delta')
 );
 

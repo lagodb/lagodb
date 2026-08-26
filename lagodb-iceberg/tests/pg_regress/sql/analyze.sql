@@ -80,7 +80,7 @@ WHERE schemaname = 'analyze_test'
 -- A later snapshot with the same delete file must not replace the last
 -- visibility-aware estimate with the physical manifest row count.
 INSERT INTO deletes_t VALUES (201, 'live');
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 CREATE FUNCTION explain_plan_rows(query text) RETURNS bigint
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -93,7 +93,7 @@ $$;
 SELECT explain_plan_rows('SELECT * FROM analyze_test.deletes_t') = 160
        AS stale_live_estimate_preserved;
 DROP FUNCTION explain_plan_rows(text);
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 
 CREATE TABLE transaction_t (id integer) USING iceberg;
 INSERT INTO transaction_t SELECT generate_series(1, 100);

@@ -75,7 +75,7 @@ BEGIN
     LOOP
         EXIT WHEN (
             SELECT current_data_objects < 6
-            FROM lakebase.table_maintenance_stats(
+            FROM lagodb.table_maintenance_stats(
                 'automatic_compaction_test.eligible'
             )
         );
@@ -87,7 +87,7 @@ BEGIN
 END
 $$;
 SELECT current_data_objects < 6 AS worker_compacted_eligible_table
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'automatic_compaction_test.eligible'
 );
  worker_compacted_eligible_table 
@@ -135,7 +135,7 @@ BEGIN
     LOOP
         EXIT WHEN (
             SELECT current_data_objects < 7
-            FROM lakebase.table_maintenance_stats(
+            FROM lagodb.table_maintenance_stats(
                 'automatic_compaction_test.eligible'
             )
         );
@@ -147,7 +147,7 @@ BEGIN
 END
 $$;
 SELECT current_data_objects < 7 AS writes_scheduled_compaction
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'automatic_compaction_test.eligible'
 );
  writes_scheduled_compaction 
@@ -156,7 +156,7 @@ FROM lakebase.table_maintenance_stats(
 (1 row)
 
 SELECT current_data_objects = 6 AS worker_did_not_scan_clean_registry_rows
-FROM lakebase.table_maintenance_stats(
+FROM lagodb.table_maintenance_stats(
     'automatic_compaction_test.cold'
 );
  worker_did_not_scan_clean_registry_rows 

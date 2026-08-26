@@ -69,7 +69,7 @@ pub mod wal;
 /// ResourceOwner-scoped cleanup callbacks.  Distinct from transaction events.
 pub mod resource;
 
-/// Exact-build C ABI published by `pg-lakebase-runtime` through rendezvous.
+/// Exact-build C ABI published by `lagodb-base` through rendezvous.
 pub mod runtime_api;
 
 /// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.

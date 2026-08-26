@@ -87,7 +87,7 @@ CREATE TABLE iceberg_default_test (
 ) USING iceberg;
 -- Verify: No options should be stored (or empty options)
 SELECT relid::regclass::text AS table_name, options
-FROM lakebase.table_options
+FROM lagodb.table_options
 WHERE relid = 'iceberg_default_test'::regclass;
  table_name | options 
 ------------+---------
@@ -105,7 +105,7 @@ CREATE TABLE iceberg_format_test (
 );
 -- Verify the option is stored
 SELECT relid::regclass::text AS table_name, options
-FROM lakebase.table_options
+FROM lagodb.table_options
 WHERE relid = 'iceberg_format_test'::regclass;
      table_name      |      options       
 ---------------------+--------------------
@@ -126,7 +126,7 @@ CREATE TABLE iceberg_multi_opts_test (
 );
 -- Verify all options are stored correctly
 SELECT relid::regclass::text AS table_name, options
-FROM lakebase.table_options
+FROM lagodb.table_options
 WHERE relid = 'iceberg_multi_opts_test'::regclass;
        table_name        |                                       options                                        
 -------------------------+--------------------------------------------------------------------------------------
@@ -145,7 +145,7 @@ CREATE TABLE iceberg_compression_test (
 );
 -- Verify the compression option
 SELECT relid::regclass::text AS table_name, options
-FROM lakebase.table_options
+FROM lagodb.table_options
 WHERE relid = 'iceberg_compression_test'::regclass;
         table_name        |                 options                  
 --------------------------+------------------------------------------
@@ -163,7 +163,7 @@ CREATE TABLE iceberg_enum_opt_test (
 );
 -- Verify the enum option
 SELECT relid::regclass::text AS table_name, options
-FROM lakebase.table_options
+FROM lagodb.table_options
 WHERE relid = 'iceberg_enum_opt_test'::regclass;
       table_name       |            options             
 -----------------------+--------------------------------
@@ -187,7 +187,7 @@ COPY (
         'write.update.isolation-level=serializable',
         'write.merge.isolation-level=snapshot'
     ]::text[]
-    FROM lakebase.table_options
+    FROM lagodb.table_options
     WHERE relid = 'iceberg_isolation_opts_test'::regclass
 ) TO STDOUT;
 t
@@ -203,7 +203,7 @@ CREATE TABLE test_schema.iceberg_schema_test (
 );
 -- Verify the option is stored with correct schema-qualified name
 SELECT relid::regclass::text AS table_name, options
-FROM lakebase.table_options
+FROM lagodb.table_options
 WHERE relid = 'test_schema.iceberg_schema_test'::regclass;
            table_name            |      options       
 ---------------------------------+--------------------
@@ -215,7 +215,7 @@ DROP SCHEMA test_schema;
 -- ============================================================================
 -- Clean up: Verify no orphaned entries remain
 -- ============================================================================
-SELECT COUNT(*) AS orphan_count FROM lakebase.table_options;
+SELECT COUNT(*) AS orphan_count FROM lagodb.table_options;
  orphan_count 
 --------------
             0

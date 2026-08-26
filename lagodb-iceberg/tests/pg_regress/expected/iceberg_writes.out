@@ -402,7 +402,7 @@ WHERE id = 999;
 
 -- The GUC controls query optimization only. Modify-purpose CustomScan remains
 -- mandatory so row identity and OCC context cannot be disabled.
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 UPDATE dml_lifecycle.upd_target
 SET label = label || '_seqscan'
@@ -422,7 +422,7 @@ SET label = label || '_seqscan'
 WHERE id = 1;
 DELETE FROM dml_lifecycle.upd_target
 WHERE id = 3;
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id;
  id |        label         
 ----+----------------------

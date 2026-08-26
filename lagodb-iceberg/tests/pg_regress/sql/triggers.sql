@@ -6,7 +6,7 @@ CREATE EXTENSION lagodb_iceberg;
 -- Query-level TriggerRowStore ownership and routing.
 CREATE SCHEMA dml_trigger_query_state;
 
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 
 CREATE TABLE dml_trigger_query_state.target (
     id integer,
@@ -205,9 +205,9 @@ AFTER UPDATE ON dml_trigger_query_state.seq_target
 FOR EACH ROW EXECUTE FUNCTION dml_trigger_query_state.audit_parity();
 INSERT INTO dml_trigger_query_state.force_target VALUES (1, 'old');
 INSERT INTO dml_trigger_query_state.seq_target VALUES (1, 'old');
-SET pg_lakebase.customscan_mode = 'force';
+SET lagodb.customscan_mode = 'force';
 UPDATE dml_trigger_query_state.force_target SET label = 'new' WHERE id = 1;
-SET pg_lakebase.customscan_mode = 'off';
+SET lagodb.customscan_mode = 'off';
 UPDATE dml_trigger_query_state.seq_target SET label = 'new' WHERE id = 1;
 COPY (
     SELECT old_label, new_label, count(*)
@@ -215,7 +215,7 @@ COPY (
     GROUP BY old_label, new_label
 ) TO STDOUT WITH (FORMAT csv);
 
-RESET pg_lakebase.customscan_mode;
+RESET lagodb.customscan_mode;
 SET client_min_messages = warning;
 DROP SCHEMA dml_trigger_query_state CASCADE;
 RESET client_min_messages;

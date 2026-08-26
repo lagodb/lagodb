@@ -8,7 +8,7 @@ CREATE FOREIGN DATA WRAPPER lagodb_iceberg
 
 REVOKE ALL ON FUNCTION iceberg.maintenance_worker(internal) FROM PUBLIC;
 
-SELECT lakebase.register_worker(
+SELECT lagodb.register_worker(
     'iceberg_maintenance',
     'iceberg.maintenance_worker(internal)'::regprocedure
 );

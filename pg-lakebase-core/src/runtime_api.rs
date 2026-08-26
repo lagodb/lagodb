@@ -2,7 +2,7 @@
 //!
 //! # Trust model
 //!
-//! This is an internal ABI between `pg-lakebase-runtime` and provider DSOs built
+//! This is an internal ABI between `lagodb-base` and provider DSOs built
 //! against the same `pg-lakebase-core` SDK release. It is not a general C
 //! plugin interface and does not attempt to make arbitrary addresses or
 //! malformed foreign allocations safe to inspect.
@@ -37,7 +37,7 @@ pub use storage_volume::{
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
 
-pub const RUNTIME_API_RENDEZVOUS: &CStr = c"pg_lakebase.runtime_api";
+pub const RUNTIME_API_RENDEZVOUS: &CStr = c"lagodb.runtime_api";
 // The provider descriptor includes capability flags so the router can reject
 // unsupported compound operations before any provider performs irreversible
 // work.
@@ -411,11 +411,11 @@ static RUNTIME_API_CACHE: OnceLock<&'static RuntimeApi> = OnceLock::new();
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeApiError {
     #[error(
-        "pg_lakebase runtime API is not published; load pg_lakebase_runtime before loading provider extensions"
+        "LagoDB runtime API is not published; load the lagodb_base extension before loading provider extensions"
     )]
     Unavailable,
     #[error(
-        "incompatible pg_lakebase runtime API size {actual_size}; expected exactly {expected_size}"
+        "incompatible LagoDB runtime API size {actual_size}; expected exactly {expected_size}"
     )]
     Incompatible {
         actual_size: u32,
@@ -432,7 +432,7 @@ pub enum RuntimeRegistrationError {
     #[error("runtime rejected an invalid provider registration")]
     InvalidProviderRegistration,
     #[error(
-        "provider registration is only allowed during runtime bootstrap; add its library to pg_lakebase.provider_libraries and restart PostgreSQL"
+        "provider registration is only allowed during runtime bootstrap; add its library to lagodb.provider_libraries and restart PostgreSQL"
     )]
     OutsideProviderBootstrap,
     #[error(
@@ -448,13 +448,13 @@ pub enum RuntimeRegistrationError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorkerWakeupError {
-    #[error("pg_lakebase runtime is not loaded through shared_preload_libraries")]
+    #[error("LagoDB runtime is not loaded through shared_preload_libraries")]
     RuntimeNotPreloaded,
     #[error("worker-owning extension is not installed in the current database")]
     ExtensionNotInstalled,
-    #[error("invalid Lakebase worker wakeup request")]
+    #[error("invalid LagoDB worker wakeup request")]
     InvalidRequest,
-    #[error("Lakebase runtime returned unknown worker wakeup status {0}")]
+    #[error("LagoDB runtime returned unknown worker wakeup status {0}")]
     UnknownStatus(u32),
 }
 
