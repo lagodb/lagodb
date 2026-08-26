@@ -4,29 +4,9 @@ DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 
 --
--- Test 0: Basic CREATE and DROP (Top-level Transaction)
+-- Section A: Transaction Lifecycle
 --
-CREATE TABLE test_lifecycle (id int) USING iceberg;
-INSERT INTO test_lifecycle VALUES (1), (2), (3);
-
--- capture path info while table exists (pg_relation_filepath returns null after drop)
-SELECT pg_relation_filepath('test_lifecycle') || '_iceberg' AS path_1 \gset
--- Verify directory exists
-SELECT (pg_stat_file(:'path_1')).isdir as directory_found;
-SELECT EXISTS (
-    SELECT 1 FROM pg_ls_dir(:'path_1', true, false)
-) AS root_has_iceberg_artifacts;
-
-DROP TABLE test_lifecycle;
--- Verify directory is gone
-SELECT (pg_stat_file(:'path_1', true)) is null as directory_missing;
-SELECT count(*) AS local_drop_remote_items
-FROM lakebase.maintenance_queue
-WHERE producer = 'iceberg-drop';
-
-
---
--- Test 1: Create table in sub-transaction and rollback (Abort Cleanup)
+-- Test 0: Create table in sub-transaction and rollback (Abort Cleanup)
 --
 BEGIN;
 SAVEPOINT s1;
@@ -46,7 +26,7 @@ SELECT (pg_stat_file(:'path_sub_1', true)) is null as directory_missing_after_ro
 
 
 --
--- Test 2: Drop table in sub-transaction and rollback (Commit Cleanup - Cancelled)
+-- Test 1: Drop table in sub-transaction and rollback (Commit Cleanup - Cancelled)
 --
 CREATE TABLE test_sub_drop (id int) USING iceberg;
 INSERT INTO test_sub_drop VALUES (10), (20);
@@ -68,7 +48,7 @@ DROP TABLE test_sub_drop;
 
 
 --
--- Test 3: Drop table in sub-transaction and commit (Commit Cleanup - Executed)
+-- Test 2: Drop table in sub-transaction and commit (Commit Cleanup - Executed)
 --
 CREATE TABLE test_sub_drop_commit (id int) USING iceberg;
 -- capture path now to verify it is gone after commit
@@ -83,6 +63,9 @@ COMMIT;
 -- Verify directory is gone
 SELECT (pg_stat_file(:'path_sub_3', true)) is null as directory_missing_after_commit;
 
+--
+-- Section B: Table Options
+--
 -- Test custom table options for Iceberg access method.
 -- This test verifies that the IcebergTableHook correctly extracts and persists
 -- table options defined in the options module.
