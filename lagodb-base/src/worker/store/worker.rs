@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use pg_lakebase_core::extension_worker::WorkerSchedule;
+use lagodb_core::extension_worker::WorkerSchedule;
 use pgrx::prelude::*;
 
 use crate::diag;

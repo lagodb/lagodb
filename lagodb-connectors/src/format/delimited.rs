@@ -2,8 +2,8 @@
 
 use std::ffi::{CStr, CString, c_void};
 
-use pg_lakebase_core::fdw::ColumnRequirements;
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::fdw::ColumnRequirements;
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

@@ -5,12 +5,12 @@
 
 SET client_min_messages = warning;
 
-SELECT bucket AS lakebase_regress_bucket
-FROM lakebase_regress.object_storage_fixture
+SELECT bucket AS lagodb_regress_bucket
+FROM lagodb_regress.object_storage_fixture
 \gset
 
 SELECT format('s3://%s/lagodb-connectors/seed/parquet-prefix/',
-              :'lakebase_regress_bucket') AS parquet_filter_path
+              :'lagodb_regress_bucket') AS parquet_filter_path
 \gset
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_filter

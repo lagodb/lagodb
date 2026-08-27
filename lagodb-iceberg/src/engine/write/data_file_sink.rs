@@ -15,8 +15,8 @@ use iceberg_lite::writer::file_writer::location_generator::{
 };
 use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
+use lagodb_core::prelude::TupleSlotRow;
 use parquet::file::properties::WriterProperties;
-use pg_lakebase_core::prelude::TupleSlotRow;
 
 use crate::engine::schema::column_mapping::WriteColumns;
 use crate::engine::schema::relation::RelationShape;

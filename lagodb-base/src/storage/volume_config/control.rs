@@ -1,7 +1,7 @@
 //! Storage-volume control-plane operations shared by SQL and DDL adapters.
 
-use pg_lakebase_core::options::TablespaceBinding;
-use pg_lakebase_core::storage::volume::StorageVolumeId;
+use lagodb_core::options::TablespaceBinding;
+use lagodb_core::storage::volume::StorageVolumeId;
 use pgrx::pg_sys;
 use serde_json::Value;
 

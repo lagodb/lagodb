@@ -11,7 +11,7 @@ use std::sync::Arc;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{AddColumn, Transaction};
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};

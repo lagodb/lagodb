@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 set -eu
 
-cleanup_injection_point=lakebase-iceberg-object-reader-before-drop
-foreground_injection_point=lakebase-storage-foreground-before-open
-cleanup_application_name=lakebase-storage-cleanup-cancel
-foreground_application_name=lakebase-storage-foreground-cancel
+cleanup_injection_point=lagodb-iceberg-object-reader-before-drop
+foreground_injection_point=lagodb-storage-foreground-before-open
+cleanup_application_name=lagodb-storage-cleanup-cancel
+foreground_application_name=lagodb-storage-foreground-cancel
 output_file="/tmp/lagodb_storage_socket_cancel_contexts_${PGPORT:-unknown}_$$.out"
 client_pid=
 storage_pid=

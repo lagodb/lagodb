@@ -1,11 +1,11 @@
 //! Relation-scoped `FilterFragment` to Iceberg planned-predicate conversion.
 
-use pg_lakebase_core::expr::pushdown::{
+use lagodb_core::expr::pushdown::{
     FilterFragment, FilterNode, FilterPlan, FilterPlanningContext,
     FilterPushdownPlanner, FilterScalar, FilterValueSourceKind,
 };
-use pg_lakebase_core::expr::{PgComparisonOp, PushdownCosting};
-use pg_lakebase_core::handles::RelationGuard;
+use lagodb_core::expr::{PgComparisonOp, PushdownCosting};
+use lagodb_core::handles::RelationGuard;
 use pgrx::pg_sys;
 use std::sync::Arc;
 

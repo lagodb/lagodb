@@ -2,15 +2,15 @@
 \setenv PGDATABASE :DBNAME
 \set QUIET 1
 SET client_min_messages = warning;
-SELECT pid::text AS lakebase_regress_storage_pid
+SELECT pid::text AS lagodb_regress_storage_pid
 FROM pg_stat_activity
 WHERE backend_type = 'lagodb-storage'
 \gset
 SELECT current_setting('port') || '-' || current_database()
-       AS lakebase_regress_slot
+       AS lagodb_regress_slot
 \gset
-\setenv LAKEBASE_REGRESS_STORAGE_PID :lakebase_regress_storage_pid
-\setenv LAKEBASE_REGRESS_SLOT :lakebase_regress_slot
+\setenv LAGODB_REGRESS_STORAGE_PID :lagodb_regress_storage_pid
+\setenv LAGODB_REGRESS_SLOT :lagodb_regress_slot
 \! bin/storage_worker_pause_guard recover
 CREATE EXTENSION IF NOT EXISTS injection_points;
 DO $$
@@ -27,8 +27,8 @@ EXCEPTION WHEN internal_error THEN
 END
 $$;
 DROP EXTENSION injection_points;
-DROP DATABASE IF EXISTS lakebase_runtime_source WITH (FORCE);
-DROP ROLE IF EXISTS lakebase_runtime_non_superuser;
+DROP DATABASE IF EXISTS lagodb_runtime_source WITH (FORCE);
+DROP ROLE IF EXISTS lagodb_runtime_non_superuser;
 SELECT 'regress-worker-statement-cancel-' || current_database()
        AS cancel_volume_name
 \gset
@@ -43,7 +43,7 @@ SET client_min_messages = warning;
 DROP TABLE IF EXISTS remote_cleanup_drop;
 DROP TABLE IF EXISTS remote_cleanup_rollback;
 DROP TABLESPACE IF EXISTS regress_object;
-DROP TABLE IF EXISTS lakebase_regress.object_storage_fixture;
-DROP SCHEMA IF EXISTS lakebase_regress;
+DROP TABLE IF EXISTS lagodb_regress.object_storage_fixture;
+DROP SCHEMA IF EXISTS lagodb_regress;
 RESET client_min_messages;
 \! ../../../scripts/pg_regress/object_storage_fixture teardown

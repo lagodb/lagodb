@@ -437,9 +437,7 @@ impl VacuumPlanner {
         groups: &mut Vec<RewriteGroup>,
         policy: VacuumPolicy,
     ) -> IcebergResult<()> {
-        if policy.mode
-            == pg_lakebase_core::table_maintenance::TableMaintenanceMode::Full
-        {
+        if policy.mode == lagodb_core::table_maintenance::TableMaintenanceMode::Full {
             return Ok(());
         }
         let mut selected_objects = 0_u64;

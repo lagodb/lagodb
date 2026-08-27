@@ -19,15 +19,15 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg13", "p
 
 [features]
 default = ["pg17"]
-pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakebase-core/pg16"]
-pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakebase-core/pg17"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "lagodb-core/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "lagodb-core/pg17"]
 pg18 = []
 pg19 = []
 pg_test = []
 
 [dependencies]
 pgrx = { workspace = true }
-pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
+lagodb-core = { path = "../lagodb-core", default-features = false }
 lagodb-storage = { workspace = true }
 libc = "0.2"
 thiserror = "1.0.63"

@@ -1,8 +1,8 @@
 //! Avro schema construction and PostgreSQL-to-Avro field binding.
 
 use apache_avro::Schema;
-use pg_lakebase_core::handles::RelationColumn;
-use pg_lakebase_core::tuple::{
+use lagodb_core::handles::RelationColumn;
+use lagodb_core::tuple::{
     ColumnDatumTarget, Decimal128NumericCodec, numeric_precision_scale,
 };
 use pgrx::pg_sys;
@@ -291,7 +291,7 @@ impl AvroWritePlan {
             .collect::<Vec<_>>();
         let schema = serde_json::json!({
             "type": "record",
-            "name": "lakebase_record",
+            "name": "lagodb_record",
             "fields": schema_fields,
         });
         Ok(Self {

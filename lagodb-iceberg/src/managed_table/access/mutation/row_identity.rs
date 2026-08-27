@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use iceberg_lite::expr::Predicate;
-use pg_lakebase_core::prelude::{AmModifyQueryState, AmResult, ItemPointer};
+use lagodb_core::prelude::{AmModifyQueryState, AmResult, ItemPointer};
 use pgrx::pg_sys;
 
 use crate::engine::write::{

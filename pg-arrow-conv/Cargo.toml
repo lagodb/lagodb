@@ -15,15 +15,15 @@ crate-type = ["rlib"]
 [features]
 # Default to pg17 so `cargo test -p pg-arrow-conv` (and any direct dependent)
 # selects a Postgres version without an explicit `--features`, matching
-# pg-lakebase-core / lagodb-iceberg / pg-backend-tests.
+# lagodb-core / lagodb-iceberg / pg-backend-tests.
 default = ["pg17"]
 # Thread pg16/pg17 through to pgrx and core, matching lagodb-iceberg.
-pg16 = ["pgrx/pg16", "pg-lakebase-core/pg16"]
-pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17"]
+pg16 = ["pgrx/pg16", "lagodb-core/pg16"]
+pg17 = ["pgrx/pg17", "lagodb-core/pg17"]
 
 [dependencies]
 pgrx = { workspace = true }
-pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
+lagodb-core = { path = "../lagodb-core", default-features = false }
 arrow-array = "58"
 arrow-schema = "58"
 arrow-buffer = "58"
@@ -38,4 +38,4 @@ arrow-array = "58"
 arrow-schema = "58"
 pgrx = { workspace = true }
 uuid = { version = "1.16.0" }
-pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
+lagodb-core = { path = "../lagodb-core", default-features = false }

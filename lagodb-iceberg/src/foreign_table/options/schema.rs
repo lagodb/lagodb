@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use http::header::{HeaderName, HeaderValue};
-use pg_lakebase_core::storage::foreign::ForeignOptionView;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 use url::Url;
 

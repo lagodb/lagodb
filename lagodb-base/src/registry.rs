@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, c_char};
 
-use pg_lakebase_core::catalog;
+use lagodb_core::catalog;
 use pgrx::{IntoDatum, pg_sys};
 
 use crate::catalog::worker::{

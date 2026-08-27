@@ -485,7 +485,7 @@ BEGIN;
 INSERT INTO iceberg_fdw_regress.failure_writable VALUES (99, 'not-published');
 COMMIT;
 WARNING:  local transaction committed but Iceberg REST catalog publication for regress:fdw_regress.writable failed: Unexpected, context: { status: 503 Service Unavailable, type: CommitStateUnknown, code: 503 } => regression fixture rejected publication, source: REST catalog returned HTTP status 503 Service Unavailable; external table state is unknown
-DETAIL:  pg-lakebase
+DETAIL:  lagodb
 SELECT count(*) AS unpublished_remote_rows
 FROM iceberg_fdw_regress.rebound WHERE id = 99;
  unpublished_remote_rows 

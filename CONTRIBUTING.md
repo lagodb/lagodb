@@ -11,7 +11,7 @@ a second implementation.
 |---|---|
 | [`lagodb-iceberg`](lagodb-iceberg) | Managed and REST-catalog foreign Apache Iceberg tables |
 | [`lagodb-base`](lagodb-base) | Shared workers, runtime coordination, and storage-volume control plane |
-| [`pg-lakebase-core`](pg-lakebase-core) | PostgreSQL TableAM, CustomScan, and FDW frameworks |
+| [`lagodb-core`](lagodb-core) | PostgreSQL TableAM, CustomScan, and FDW frameworks |
 | [`pg-arrow-conv`](pg-arrow-conv) | Arrow/PostgreSQL value conversion |
 | [`iceberg-lite`](iceberg-lite) | Synchronous PostgreSQL-oriented Iceberg library |
 | [`lagodb-storage`](https://github.com/lagodb/lagodb-storage) | Local cache and object-storage service maintained in a separate repository |

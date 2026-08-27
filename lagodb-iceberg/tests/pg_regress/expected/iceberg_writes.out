@@ -392,8 +392,8 @@ SET label = label
 WHERE id = 999;
                        QUERY PLAN                       
 --------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Update on upd_target
          ->  Custom Scan (lagodb-iceberg) on upd_target
                Scan Purpose: Modify
@@ -409,8 +409,8 @@ SET label = label || '_seqscan'
 WHERE id = 1;
                        QUERY PLAN                       
 --------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Update on upd_target
          ->  Custom Scan (lagodb-iceberg) on upd_target
                Scan Purpose: Modify

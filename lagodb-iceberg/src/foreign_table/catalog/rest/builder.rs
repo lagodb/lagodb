@@ -6,7 +6,7 @@ use iceberg_lite::catalog::rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_lite::catalog::{CatalogBuilder, SessionContext};
 use iceberg_lite::encryption::kms::KmsClientFactory;
 use iceberg_lite::{Error, ErrorKind, Result};
-use pg_lakebase_core::storage::service::StorageEndpoint;
+use lagodb_core::storage::service::StorageEndpoint;
 use pgrx::pg_sys;
 
 use super::http::PgRestHttpTransport;

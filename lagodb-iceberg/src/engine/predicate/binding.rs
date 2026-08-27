@@ -4,10 +4,10 @@ use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
 };
 use iceberg_lite::spec::Datum;
-use pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
-use pg_lakebase_core::expr::pushdown::{
+use lagodb_core::expr::pushdown::{
     FilterBindResult, FilterValue, FilterValueBindings,
 };
+use pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 use pgrx::FromDatum;
 
 use super::error::IcebergFilterError;

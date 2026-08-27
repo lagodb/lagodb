@@ -1,5 +1,5 @@
 //! Columnar read-side adapters: the two halves core's
-//! [`BatchRowCursor<Source, Decoder>`](pg_lakebase_core::batch) consumes.
+//! [`BatchRowCursor<Source, Decoder>`](lagodb_core::batch) consumes.
 //!
 //! - [`ArrowBatchSource`] (impl [`AmScanBatchSource`]) feeds one Arrow
 //!   `RecordBatch` at a time from any fallible Arrow batch iterator.
@@ -21,9 +21,9 @@ use arrow_array::{
     TimestampMicrosecondArray, TimestampNanosecondArray,
 };
 use arrow_schema::DataType;
-use pg_lakebase_core::api::{AmError, AmResult};
-use pg_lakebase_core::batch::{AmScanBatchSource, BatchRowDecoder};
-use pg_lakebase_core::tuple::{
+use lagodb_core::api::{AmError, AmResult};
+use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
+use lagodb_core::tuple::{
     ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, Decimal128NumericCodec,
     SlotColumns, StringView,
 };

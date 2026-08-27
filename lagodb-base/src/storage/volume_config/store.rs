@@ -32,7 +32,7 @@ impl StorageVolumeConfigStore {
     }
 
     pub(crate) fn for_data_directory(data_directory: impl AsRef<Path>) -> Self {
-        let directory = data_directory.as_ref().join("pg_lakebase");
+        let directory = data_directory.as_ref().join("lagodb");
         Self {
             config_path: directory.join("storage-volumes.json"),
             directory,

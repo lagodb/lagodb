@@ -1,10 +1,10 @@
 //! Reader-owned filter pushdown contracts.
 
-use pg_lakebase_core::expr::pushdown::{
+use lagodb_core::expr::pushdown::{
     FilterBindResult, FilterFragment, FilterPlan, FilterValueBindings,
 };
-use pg_lakebase_core::fdw::ForeignFilterExplainValues;
-use pg_lakebase_core::plan_data::PlanDataWriter;
+use lagodb_core::fdw::ForeignFilterExplainValues;
+use lagodb_core::plan_data::PlanDataWriter;
 
 use crate::error::ConnectorError;
 

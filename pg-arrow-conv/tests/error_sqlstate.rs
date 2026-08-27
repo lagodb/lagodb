@@ -1,9 +1,9 @@
 //! SQLSTATE classification for every `ArrowConversionError` variant and the
 //! `DecimalCodecError` routing. Pure enum mapping, so these run as host tests.
 
+use lagodb_core::diag::SqlStateError;
+use lagodb_core::tuple::{DatumConversionError, DecimalCodecError};
 use pg_arrow_conv::ArrowConversionError;
-use pg_lakebase_core::diag::SqlStateError;
-use pg_lakebase_core::tuple::{DatumConversionError, DecimalCodecError};
 use pgrx::datum::datetime_support::DateTimeConversionError;
 use pgrx::datum::numeric_support::error::Error as PgNumericError;
 use pgrx::prelude::PgSqlErrorCode;

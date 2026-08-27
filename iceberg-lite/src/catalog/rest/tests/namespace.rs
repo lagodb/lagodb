@@ -53,18 +53,18 @@ fn create_get_and_drop_namespace_use_the_rest_wire_shapes() {
         ExpectedExchange::post(format!("{CATALOG_URI}/v1/namespaces"))
             .json_body(serde_json::json!({
                 "namespace": ["ns1", "ns11"],
-                "properties": {"owner": "lakebase"}
+                "properties": {"owner": "lagodb"}
             }))
             .respond(
                 StatusCode::OK,
-                r#"{"namespace":["ns1","ns11"],"properties":{"owner":"lakebase"}}"#,
+                r#"{"namespace":["ns1","ns11"],"properties":{"owner":"lagodb"}}"#,
             ),
     );
     fixture.expect(
         ExpectedExchange::get(format!("{CATALOG_URI}/v1/namespaces/ns1%1Fns11"))
             .respond(
                 StatusCode::OK,
-                r#"{"namespace":["ns1","ns11"],"properties":{"owner":"lakebase"}}"#,
+                r#"{"namespace":["ns1","ns11"],"properties":{"owner":"lagodb"}}"#,
             ),
     );
     fixture.expect(
@@ -73,7 +73,7 @@ fn create_get_and_drop_namespace_use_the_rest_wire_shapes() {
     );
     let catalog = fixture.catalog([]);
     let ident = NamespaceIdent::from_strs(["ns1", "ns11"]).unwrap();
-    let properties = HashMap::from([("owner".to_owned(), "lakebase".to_owned())]);
+    let properties = HashMap::from([("owner".to_owned(), "lagodb".to_owned())]);
 
     assert_eq!(
         catalog

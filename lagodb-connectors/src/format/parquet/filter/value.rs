@@ -15,8 +15,8 @@ use arrow_array::{
 };
 use arrow_ord::cmp;
 use arrow_schema::{ArrowError, DataType};
-use pg_lakebase_core::expr::pushdown::{FilterColumn, FilterValue, FilterValueSlot};
-use pg_lakebase_core::tuple::ColumnDatumTarget;
+use lagodb_core::expr::pushdown::{FilterColumn, FilterValue, FilterValueSlot};
+use lagodb_core::tuple::ColumnDatumTarget;
 use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
 
 use crate::error::ConnectorError;

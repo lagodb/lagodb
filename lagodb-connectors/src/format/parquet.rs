@@ -9,14 +9,14 @@ mod schema;
 mod write;
 mod writer;
 
-use lagodb_storage::StorageFile;
-use pg_lakebase_core::expr::pushdown::FilterPlanningContext;
-use pg_lakebase_core::fdw::{
+use lagodb_core::expr::pushdown::FilterPlanningContext;
+use lagodb_core::fdw::{
     ForeignInsertBeginContext, ForeignModifyBeginContext, ForeignModifyCapabilities,
     ForeignModifyOperation, ForeignModifyPlanContext, ForeignModifyPlanSpec,
     ForeignModifyRelationContext, StartForeignScanContext,
 };
-use pg_lakebase_core::plan_data::PlanDataReader;
+use lagodb_core::plan_data::PlanDataReader;
+use lagodb_storage::StorageFile;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;

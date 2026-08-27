@@ -1,11 +1,11 @@
 //! LagoDB connector templates for foreign-table maintenance capabilities.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     FdwAnalyze, FdwTruncate, ForeignAnalyzeContext, ForeignAnalyzeSupport,
     ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
     ForeignTruncateContext,
 };
-use pg_lakebase_core::storage::foreign::StorageManager;
+use lagodb_core::storage::foreign::StorageManager;
 
 use crate::error::ConnectorError;
 use crate::storage::ObjectInput;

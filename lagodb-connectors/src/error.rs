@@ -2,17 +2,17 @@
 
 use std::error::Error as StdError;
 
-use lagodb_storage::StorageError;
-use pg_lakebase_core::copy::CopyError;
-use pg_lakebase_core::diag::{PgReportError, SqlStateError};
-use pg_lakebase_core::fdw::{
+use lagodb_core::copy::CopyError;
+use lagodb_core::diag::{PgReportError, SqlStateError};
+use lagodb_core::fdw::{
     ForeignModifyError, ForeignScanError, ForeignTableMaintenanceError,
     ForeignValidationError,
 };
-use pg_lakebase_core::plan_data::PlanDataError;
-use pg_lakebase_core::storage::foreign::StorageAcquireError;
-use pg_lakebase_core::storage::profile::StorageProfileError;
-use pg_lakebase_core::tuple::{DecimalCodecError, JsonValueError};
+use lagodb_core::plan_data::PlanDataError;
+use lagodb_core::storage::foreign::StorageAcquireError;
+use lagodb_core::storage::profile::StorageProfileError;
+use lagodb_core::tuple::{DecimalCodecError, JsonValueError};
+use lagodb_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
@@ -59,7 +59,7 @@ pub(crate) enum ConnectorError {
     Arrow(#[from] arrow_schema::ArrowError),
 
     #[error("PostgreSQL datum conversion failed: {0}")]
-    DatumConversion(#[from] pg_lakebase_core::tuple::DatumConversionError),
+    DatumConversion(#[from] lagodb_core::tuple::DatumConversionError),
 
     #[error("PostgreSQL numeric conversion failed: {0}")]
     DecimalCodec(#[from] DecimalCodecError),

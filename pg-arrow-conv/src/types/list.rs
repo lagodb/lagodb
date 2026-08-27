@@ -19,7 +19,7 @@ use arrow_array::{
     Int32Array, Int64Array, LargeStringArray, ListArray, StringArray,
 };
 use arrow_schema::{DataType, FieldRef};
-use pg_lakebase_core::tuple::{Cell, ColumnDatumCodec, StringView};
+use lagodb_core::tuple::{Cell, ColumnDatumCodec, StringView};
 // Aliased to avoid colliding with the `arrow_array::Array` trait (used as
 // `&dyn Array`); `PgArray` is the borrowed PostgreSQL array view.
 use pgrx::pg_sys;

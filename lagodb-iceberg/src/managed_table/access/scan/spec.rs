@@ -6,8 +6,8 @@ use iceberg_lite::expr::Predicate;
 use iceberg_lite::overlay::SnapshotDelta;
 use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
-use pg_lakebase_core::access::mutation::ModifyScanBinding;
-use pg_lakebase_core::prelude::OwnedScanKeys;
+use lagodb_core::access::mutation::ModifyScanBinding;
+use lagodb_core::prelude::OwnedScanKeys;
 use pgrx::pg_sys;
 
 use super::cursor::IcebergBatchCursor;

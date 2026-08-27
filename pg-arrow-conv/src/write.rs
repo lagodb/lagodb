@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;
-use pg_lakebase_core::batch::BatchBuffer;
-use pg_lakebase_core::tuple::{
+use lagodb_core::batch::BatchBuffer;
+use lagodb_core::tuple::{
     ColumnDatumTarget, SlotDatumIndex, SlotDatums, TupleSlotRow,
 };
 use pgrx::pg_sys;

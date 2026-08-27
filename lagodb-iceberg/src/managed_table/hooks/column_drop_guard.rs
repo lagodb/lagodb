@@ -11,8 +11,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use pg_lakebase_core::hooks::HookError;
-use pg_lakebase_core::transaction::{self, TransactionResource};
+use lagodb_core::hooks::HookError;
+use lagodb_core::transaction::{self, TransactionResource};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 

@@ -1,7 +1,7 @@
 //! Errors owned by the Iceberg planned-filter facet.
 
-use pg_lakebase_core::diag::SqlStateError;
-use pg_lakebase_core::plan_data::PlanDataError;
+use lagodb_core::diag::SqlStateError;
+use lagodb_core::plan_data::PlanDataError;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 

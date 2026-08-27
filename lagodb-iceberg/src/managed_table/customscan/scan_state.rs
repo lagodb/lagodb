@@ -8,9 +8,9 @@ use crate::managed_table::access::mutation::{
 };
 use crate::managed_table::access::scan::{IcebergBatchCursor, ScanSpec};
 use iceberg_lite::expr::Predicate;
-use pg_lakebase_core::access::mutation::ModifyScanBinding;
-use pg_lakebase_core::customscan::modify::ModifyBindContext;
-use pg_lakebase_core::customscan::provider::{
+use lagodb_core::access::mutation::ModifyScanBinding;
+use lagodb_core::customscan::modify::ModifyBindContext;
+use lagodb_core::customscan::provider::{
     BeginContext, CustomScanError, EndContext, NextSlotContext, ReScanContext,
     ScanPurpose,
 };

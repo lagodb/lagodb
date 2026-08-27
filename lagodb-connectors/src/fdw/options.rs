@@ -1,6 +1,6 @@
 //! FDW catalog-option routing and foreign-table option resolution.
 
-use pg_lakebase_core::storage::foreign::ForeignOptionView;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

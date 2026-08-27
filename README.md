@@ -1,4 +1,4 @@
-# pg-lakebase
+# LagoDB
 
 [![Build Status](https://github.com/robertmu/pg-lakebase/workflows/CI/badge.svg)](https://github.com/robertmu/pg-lakebase/actions)
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
@@ -7,9 +7,9 @@
 
 ## A lakehouse database built on PostgreSQL
 
-`pg-lakebase` brings PostgreSQL's SQL interface, transaction model, and ecosystem to open lakehouse table formats and cloud object storage.
+LagoDB brings PostgreSQL's SQL interface, transaction model, and ecosystem to open lakehouse table formats and cloud object storage.
 
-With `pg-lakebase`, you can:
+With LagoDB, you can:
 - **Manage native Iceberg tables** directly within PostgreSQL (`USING iceberg`) with ACID transactions and local or object storage.
 - **Directly query and write external Iceberg tables** in an Iceberg REST catalog as foreign tables without migrating data.
 - **Query and exchange object storage files** (Parquet, CSV, JSON, Avro, Text) directly via foreign tables and high-performance object-URI `COPY` commands.
@@ -20,7 +20,7 @@ The long-term vision includes first-class support for the
 [Apache Hudi](https://hudi.apache.org/) lakehouse table formats.
 
 Beyond table formats, one future goal is to add time-series database
-capabilities to `pg-lakebase`, using lake tables as the storage foundation for
+capabilities to LagoDB, using lake tables as the storage foundation for
 ingesting, managing, and analyzing time-series data at scale. Another future
 goal is to support vector data and exact and approximate nearest-neighbor
 search through the PostgreSQL SQL interface, with lake tables in object storage
@@ -35,7 +35,7 @@ Apache Iceberg and LagoDB object storage connectors are currently implemented. T
 > runnable extensions. `pg-delta-am` is only a framework skeleton, not a Delta
 > Lake implementation.
 
-## Why pg-lakebase?
+## Why LagoDB?
 
 - **PostgreSQL as the database interface.** Use ordinary PostgreSQL SQL,
   transactions, drivers, and tools instead of adopting a separate interface
@@ -135,7 +135,7 @@ Bind the table to a PostgreSQL tablespace linked to a storage volume so table da
 -- 1. Create a storage volume pointing to your object store (e.g. S3 / MinIO)
 SELECT lagodb.create_storage_volume(
     'events-lake',
-    's3://my-lake-bucket/pg-lakebase',
+    's3://my-lake-bucket/lagodb',
     '{"type":"default_chain"}'::jsonb,
     '{"region":"us-east-1"}'::jsonb
 );

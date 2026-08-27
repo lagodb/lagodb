@@ -3,7 +3,7 @@ use std::ffi::CStr;
 use iceberg_lite::overlay::DeleteFileIdentity;
 use iceberg_lite::scan::FileScanTask;
 use iceberg_lite::spec::DataFile;
-use pg_lakebase_core::table_maintenance::{
+use lagodb_core::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMetric,
     TableMaintenanceMode, TableMaintenanceReport,
 };
@@ -187,7 +187,7 @@ impl ExclusiveTransactionAction for PreparedVacuum {
 impl PreparedVacuum {
     pub(crate) fn report_success(&self, report: &TableMaintenanceReport) {
         if self.verbose {
-            pg_lakebase_core::diag::report_notice(format_args!(
+            lagodb_core::diag::report_notice(format_args!(
                 "Iceberg VACUUM: groups={}, input_files={}, input_bytes={}, output_files={}, output_bytes={}, expired_snapshots={}, rewritten_manifests={}, queued_deletions={}, cas_retries={}",
                 report.groups_rewritten,
                 report.input_objects,
@@ -214,7 +214,7 @@ impl PreparedVacuum {
                         metric.value
                     );
                 }
-                pg_lakebase_core::diag::report_notice(format_args!(
+                lagodb_core::diag::report_notice(format_args!(
                     "Iceberg VACUUM stages: {metrics}"
                 ));
             }

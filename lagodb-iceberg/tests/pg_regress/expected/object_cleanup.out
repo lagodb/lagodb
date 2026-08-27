@@ -38,16 +38,16 @@ USING iceberg TABLESPACE regress_object;
 INSERT INTO remote_cleanup_drop
 SELECT generate_series(1, 1000);
 SELECT :'volume_id' AS volume_id,
-       :'lakebase_regress_bucket' AS object_namespace,
+       :'lagodb_regress_bucket' AS object_namespace,
        :'effective_root' || '/'
        || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
        || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
        || '/' || pg_relation_filenode('remote_cleanup_drop')::text
        || '_iceberg/' AS object_path
 \gset
-\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
-\setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 SELECT objects > 0 AS tree_exists_before_drop
 FROM lagodb.observe_object_tree(
     :'volume_id', :'object_namespace', :'object_path'
@@ -98,16 +98,16 @@ FROM remote_cleanup_rollback;
 (1 row)
 
 SELECT :'volume_id' AS volume_id,
-       :'lakebase_regress_bucket' AS object_namespace,
+       :'lagodb_regress_bucket' AS object_namespace,
        :'effective_root' || '/'
        || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
        || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
        || '/' || pg_relation_filenode('remote_cleanup_rollback')::text
        || '_iceberg/' AS object_path
 \gset
-\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
-\setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 DROP TABLE remote_cleanup_rollback;
 \! bin/wait_for_maintenance_item 30
 maintenance_complete: true

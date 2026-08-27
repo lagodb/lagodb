@@ -4,18 +4,18 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
-use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{
-    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
-};
-use pg_arrow_conv::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
     ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
     ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
     StartForeignScanContext,
 };
-use pg_lakebase_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
+use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{
+    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
+};
+use pg_arrow_conv::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

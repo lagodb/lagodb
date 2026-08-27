@@ -2,11 +2,11 @@
 
 use arrow_schema::{DataType, Field, TimeUnit};
 use bytes::Bytes;
+use lagodb_core::tuple::numeric_precision_scale;
 use lagodb_storage::StorageFile;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::errors::ParquetError;
 use parquet::file::metadata::ParquetMetaDataReader;
-use pg_lakebase_core::tuple::numeric_precision_scale;
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 use std::sync::Arc;
 

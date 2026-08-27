@@ -10,7 +10,7 @@ use iceberg_lite::io::FileIO;
 use iceberg_lite::spec::TableMetadata;
 use iceberg_lite::table::Table;
 use iceberg_lite::transaction::Transaction;
-use pg_lakebase_core::diag;
+use lagodb_core::diag;
 use pgrx::pg_sys;
 
 use crate::engine::write::TxTableCommitPlan;

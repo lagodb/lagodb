@@ -9,7 +9,7 @@ WHERE backend_type = 'lagodb-storage'
 \gset
 \echo worker_running: :worker_running
 
-COPY (SELECT current_setting('data_directory') || '/pg_lakebase/storage.sock')
+COPY (SELECT current_setting('data_directory') || '/lagodb/storage.sock')
 TO '/tmp/_regress_socket_path.txt';
 \! test -S "$(cat /tmp/_regress_socket_path.txt)" && echo "socket_exists: true" || echo "socket_exists: false"
 \! rm -f /tmp/_regress_socket_path.txt
@@ -191,7 +191,7 @@ WITH (storage_volume = :'volume_name');
 CREATE TABLESPACE iceberg_guard_native
 LOCATION '/tmp/lagodb_iceberg_regress_guard_native';
 
--- Rename is allowed; every SET/RESET is rejected for a Lakebase tablespace.
+-- Rename is allowed; every SET/RESET is rejected for a LagoDB tablespace.
 ALTER TABLESPACE iceberg_guard_dist RENAME TO iceberg_guard_dist_renamed;
 SELECT count(*) = 1 AS rename_allowed
 FROM lagodb.storage_volumes AS volume
@@ -201,7 +201,7 @@ WHERE volume.storage_volume_name = :'volume_name'
   AND tablespace.spcname = 'iceberg_guard_dist_renamed'
   AND EXISTS (
       SELECT 1 FROM unnest(tablespace.spcoptions) AS option
-      WHERE option LIKE 'lakebase_volume_id=%'
+      WHERE option LIKE 'lagodb_volume_id=%'
   )
 \gset
 \echo rename_allowed: :rename_allowed
@@ -228,7 +228,7 @@ BEGIN
     END;
     BEGIN
         EXECUTE 'ALTER TABLESPACE iceberg_guard_dist_renamed SET '
-                '(lakebase_volume_id = 999)';
+                '(lagodb_volume_id = 999)';
     EXCEPTION WHEN feature_not_supported THEN
         internal_rejected := true;
     END;
@@ -272,7 +272,7 @@ WHERE spcname = 'iceberg_guard_dist_renamed'
   AND array_length(spcoptions, 1) = 1
   AND EXISTS (
       SELECT 1 FROM unnest(spcoptions) AS option
-      WHERE option LIKE 'lakebase_volume_id=%'
+      WHERE option LIKE 'lagodb_volume_id=%'
   )
 \gset
 \echo internal_id_unchanged: :internal_id_unchanged
@@ -303,7 +303,7 @@ WITH (storage_volume = :'volume_name');
 
 SELECT array_length(spcoptions, 1) = 1
        AND (SELECT count(*) FROM unnest(spcoptions) AS option
-            WHERE option LIKE 'lakebase_volume_id=%') = 1
+            WHERE option LIKE 'lagodb_volume_id=%') = 1
        AND NOT EXISTS (
            SELECT 1 FROM unnest(spcoptions) AS option
            WHERE option LIKE 'storage_volume=%'
@@ -341,12 +341,12 @@ WHERE storage_volume_name = :'volume_name'
 -- response wait processes cancel immediately and poisons its connection.
 \setenv PGDATABASE :DBNAME
 
-SELECT endpoint AS lakebase_regress_endpoint,
-       bucket AS lakebase_regress_bucket,
-       region AS lakebase_regress_region,
-       access_key_id AS lakebase_regress_access_key_id,
-       secret_access_key AS lakebase_regress_secret_access_key
-FROM lakebase_regress.object_storage_fixture
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
 \gset
 
 SET client_min_messages = warning;
@@ -363,15 +363,15 @@ SELECT 'regress-cleanup-cancel-' || gen_random_uuid() AS volume_name
 \gset
 SELECT lagodb.create_storage_volume(
     :'volume_name',
-    format('s3://%s', :'lakebase_regress_bucket'),
+    format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
-        'access_key_id', :'lakebase_regress_access_key_id',
-        'secret_access_key', :'lakebase_regress_secret_access_key'
+        'access_key_id', :'lagodb_regress_access_key_id',
+        'secret_access_key', :'lagodb_regress_secret_access_key'
     ),
     jsonb_build_object(
-        'region', :'lakebase_regress_region',
-        'endpoint', :'lakebase_regress_endpoint',
+        'region', :'lagodb_regress_region',
+        'endpoint', :'lagodb_regress_endpoint',
         'allow_http', true
     )
 ) AS created_volume
@@ -385,8 +385,8 @@ SELECT internal_volume_id AS volume_id
 FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
 \gset
-\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
-\setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :lakebase_regress_bucket
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :lagodb_regress_bucket
 \! bin/wait_for_object_store 30
 
 CREATE TABLE storage_socket_cancel_contexts_t (id integer)

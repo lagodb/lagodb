@@ -1,10 +1,10 @@
 //! Runtime-owned storage-volume route resolver.
 
-use pg_lakebase_core::runtime_api::{
+use lagodb_core::runtime_api::{
     StorageVolumeRouteOutput, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
-use pg_lakebase_core::storage::volume::StorageVolumeId;
+use lagodb_core::storage::volume::StorageVolumeId;
 use pgrx::PgMemoryContexts;
 
 #[pgrx::pg_guard]

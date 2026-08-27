@@ -9,8 +9,8 @@
 use std::ffi::c_char;
 use std::ptr;
 
-use pg_lakebase_core::diag::PgError;
-use pg_lakebase_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
+use lagodb_core::diag::PgError;
+use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
 use pgrx::{PgTryBuilder, pg_sys};
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};

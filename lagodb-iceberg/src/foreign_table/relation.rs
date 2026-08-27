@@ -3,7 +3,7 @@
 use iceberg_lite::catalog::rest::RestCatalog;
 use iceberg_lite::catalog::{Catalog, NamespaceIdent, TableIdent};
 use iceberg_lite::table::Table;
-use pg_lakebase_core::storage::foreign::ForeignOptionView;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;

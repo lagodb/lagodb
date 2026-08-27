@@ -17,13 +17,13 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg17"]
-pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "pg-lakebase-core/pg16", "pg-arrow-conv/pg16"]
-pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "pg-lakebase-core/pg17", "pg-arrow-conv/pg17"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "lagodb-core/pg16", "pg-arrow-conv/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "lagodb-core/pg17", "pg-arrow-conv/pg17"]
 pg_test = []
 
 [dependencies]
 pgrx = { workspace = true }
-pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
+lagodb-core = { path = "../lagodb-core", default-features = false }
 lagodb-storage = { workspace = true }
 pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
 iceberg-lite = { path = "../iceberg-lite" }

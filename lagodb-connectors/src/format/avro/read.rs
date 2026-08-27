@@ -4,17 +4,17 @@ use std::io::{self, Read};
 
 use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
-use lagodb_storage::StorageFile;
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
     ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
     ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
     StartForeignScanContext,
 };
-use pg_lakebase_core::tuple::{
+use lagodb_core::tuple::{
     ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, PG_EPOCH_DAYS_DIFF,
     PG_EPOCH_USECS_DIFF, StringView, numeric_precision_scale,
 };
+use lagodb_storage::StorageFile;
 use pgrx::datum::{USECS_PER_DAY, Uuid as PgUuid};
 use pgrx::pg_sys;
 use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};

@@ -3,7 +3,7 @@ use std::ffi::CStr;
 use std::fmt;
 
 use iceberg_lite::catalog::rest::RestCatalog;
-use pg_lakebase_core::storage::foreign::ForeignOptionView;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use super::super::catalog::rest::PgRestCatalogBuilder;

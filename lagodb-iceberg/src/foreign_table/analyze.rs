@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use iceberg_lite::scan::FileScanTask;
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     FdwAnalyze, ForeignAnalyzeContext, ForeignAnalyzeSupport, ForeignSampleContext,
     ForeignSampleStatistics, ForeignTableMaintenanceError,
 };
-use pg_lakebase_core::handles::HeapTupleGuard;
-use pg_lakebase_core::tuple::SlotColumns;
+use lagodb_core::handles::HeapTupleGuard;
+use lagodb_core::tuple::SlotColumns;
 use pgrx::pg_sys;
 use rand::Rng;
 

@@ -7,17 +7,17 @@ use crate::managed_table::catalog::table_properties::ManagedTablePropertyUpdate;
 use crate::managed_table::catalog::{IcebergAccessMethod, IcebergRelationExt};
 use crate::managed_table::hooks::column_drop_guard::ControlledColumnDrops;
 use crate::managed_table::options::{ICEBERG_TABLE_OPTIONS, ResolvedIcebergOptions};
-use pg_lakebase_core::catalog::{
+use lagodb_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, get_tablespace_oid,
     range_var_get_relid,
 };
-use pg_lakebase_core::handles::RelationGuard;
-use pg_lakebase_core::hooks::{
+use lagodb_core::handles::RelationGuard;
+use lagodb_core::hooks::{
     AlterTableMoveAllStmtNode, AlterTableStmtNode, CreateStmtNode,
     CreateTableAsStmtNode, HookError, PostUtilityContext, RenameStmtNode,
     UtilityHook, UtilityHookError, UtilityNode, register_utility_hook,
 };
-use pg_lakebase_core::options::{TableOptionAlterations, TableOptions};
+use lagodb_core::options::{TableOptionAlterations, TableOptions};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use std::ffi::CStr;

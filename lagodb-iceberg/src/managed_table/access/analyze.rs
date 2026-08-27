@@ -13,9 +13,9 @@ mod sampling;
 pub(crate) use population::AnalyzePopulation;
 
 use iceberg_lite::scan::{FileScanTask, TableScan};
+use lagodb_core::api::AnalyzeTupleOutcome;
+use lagodb_core::prelude::*;
 use pg_arrow_conv::ArrowColumnDecoder;
-use pg_lakebase_core::api::AnalyzeTupleOutcome;
-use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};

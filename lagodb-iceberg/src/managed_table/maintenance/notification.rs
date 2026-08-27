@@ -1,6 +1,6 @@
 //! Notifications owned by Iceberg automatic maintenance.
 
-use pg_lakebase_core::extension_worker::{WorkerIdentity, WorkerNotifier};
+use lagodb_core::extension_worker::{WorkerIdentity, WorkerNotifier};
 
 use crate::error::{IcebergError, IcebergResult};
 

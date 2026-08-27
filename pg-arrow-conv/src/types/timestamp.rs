@@ -12,7 +12,7 @@ use arrow_array::builder::{ArrayBuilder, PrimitiveBuilder};
 use arrow_array::types::{
     ArrowTimestampType, TimestampMicrosecondType, TimestampNanosecondType,
 };
-use pg_lakebase_core::tuple::Cell;
+use lagodb_core::tuple::Cell;
 use pgrx::prelude::{Timestamp, TimestampWithTimeZone};
 use pgrx::{FromDatum, pg_sys};
 

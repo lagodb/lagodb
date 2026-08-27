@@ -11,8 +11,8 @@ mod format;
 mod gucs;
 mod storage;
 
-use pg_lakebase_core::hooks::freeze_hooks;
-use pg_lakebase_core::runtime_api::ProviderIdentity;
+use lagodb_core::hooks::freeze_hooks;
+use lagodb_core::runtime_api::ProviderIdentity;
 use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();

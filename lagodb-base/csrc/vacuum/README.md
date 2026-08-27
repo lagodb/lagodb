@@ -11,7 +11,7 @@
 - Public contract SHA-256:
   `273a972adfd62e0579ec22ff35c5f38cbf69ac5c2140a8e682883c6a14675449`
 
-`lakebase_vacuum.c` is a narrow reconstruction of the private option parsing,
+`lagodb_vacuum.c` is a narrow reconstruction of the private option parsing,
 relation expansion and per-relation transaction boundaries needed to route a
 table-maintenance provider in place of PostgreSQL's `cluster_rel()`. Native
 relations remain delegated to PostgreSQL.

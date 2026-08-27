@@ -2,7 +2,7 @@
 //!
 //! Format-neutral Arrow⇆PostgreSQL value conversion. Dispatches on the pair
 //! `(arrow_schema::DataType, PgColumnType)` and depends only on `arrow`,
-//! `pgrx`, and `pg-lakebase-core` — never on a table-format crate.
+//! `pgrx`, and `lagodb-core` — never on a table-format crate.
 //!
 //! - [`resolve_column_rule`] picks a [`ColumnRule`] for a column once.
 //! - [`ColumnReader::bind`] resolves a semantic batch column's concrete Arrow

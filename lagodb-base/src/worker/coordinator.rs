@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::extension_worker::WorkerTransaction;
+use lagodb_core::diag::PgReportError;
+use lagodb_core::extension_worker::WorkerTransaction;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 

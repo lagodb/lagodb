@@ -1,10 +1,10 @@
 //! Core filter-pushdown adapter.
 
-use pg_lakebase_core::expr::pushdown::{
+use lagodb_core::expr::pushdown::{
     FilterBindResult, FilterFragment, FilterPlan, FilterPlanningContext,
     FilterPushdown, FilterPushdownPlanner, FilterValueBindings,
 };
-use pg_lakebase_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
 use crate::format::{
     FormatBoundFilter, FormatFilterPlanner, FormatKind, FormatPlannedFilter,

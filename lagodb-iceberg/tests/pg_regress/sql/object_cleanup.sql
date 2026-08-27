@@ -9,12 +9,12 @@
 -- interpolate psql variables (OT_WHOLE_LINE); \setenv (OT_NORMAL) does.
 \setenv PGDATABASE :DBNAME
 
-SELECT endpoint AS lakebase_regress_endpoint,
-       bucket AS lakebase_regress_bucket,
-       region AS lakebase_regress_region,
-       access_key_id AS lakebase_regress_access_key_id,
-       secret_access_key AS lakebase_regress_secret_access_key
-FROM lakebase_regress.object_storage_fixture
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
 \gset
 
 SET client_min_messages = warning;
@@ -52,15 +52,15 @@ RESET client_min_messages;
 SELECT 'regress-object-' || gen_random_uuid() AS volume_name \gset
 SELECT lagodb.create_storage_volume(
     :'volume_name',
-    format('s3://%s', :'lakebase_regress_bucket'),
+    format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
-        'access_key_id', :'lakebase_regress_access_key_id',
-        'secret_access_key', :'lakebase_regress_secret_access_key'
+        'access_key_id', :'lagodb_regress_access_key_id',
+        'secret_access_key', :'lagodb_regress_secret_access_key'
     ),
     jsonb_build_object(
-        'region', :'lakebase_regress_region',
-        'endpoint', :'lakebase_regress_endpoint',
+        'region', :'lagodb_regress_region',
+        'endpoint', :'lagodb_regress_endpoint',
         'allow_http', true
     )
 ) AS created_volume \gset
@@ -75,8 +75,8 @@ FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
 \gset
 
-\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
-\setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :lakebase_regress_bucket
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :lagodb_regress_bucket
 \! bin/wait_for_object_store 30
 
 \set ECHO all
@@ -94,7 +94,7 @@ INSERT INTO remote_cleanup_drop
 SELECT generate_series(1, 1000);
 
 SELECT :'volume_id' AS volume_id,
-       :'lakebase_regress_bucket' AS object_namespace,
+       :'lagodb_regress_bucket' AS object_namespace,
        :'effective_root' || '/'
        || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
        || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
@@ -102,9 +102,9 @@ SELECT :'volume_id' AS volume_id,
        || '_iceberg/' AS object_path
 \gset
 
-\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
-\setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 SELECT objects > 0 AS tree_exists_before_drop
 FROM lagodb.observe_object_tree(
     :'volume_id', :'object_namespace', :'object_path'
@@ -138,16 +138,16 @@ SELECT array_agg(id ORDER BY id) AS rows_after_drop_rollback
 FROM remote_cleanup_rollback;
 
 SELECT :'volume_id' AS volume_id,
-       :'lakebase_regress_bucket' AS object_namespace,
+       :'lagodb_regress_bucket' AS object_namespace,
        :'effective_root' || '/'
        || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
        || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
        || '/' || pg_relation_filenode('remote_cleanup_rollback')::text
        || '_iceberg/' AS object_path
 \gset
-\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
-\setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :object_namespace
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 DROP TABLE remote_cleanup_rollback;
 
 \! bin/wait_for_maintenance_item 30

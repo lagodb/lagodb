@@ -35,7 +35,7 @@ services:
 CREATE EXTENSION lagodb_base;
 CREATE EXTENSION lagodb_connectors;
 
-CREATE SERVER pg_lakebase_s3
+CREATE SERVER lagodb_s3
 FOREIGN DATA WRAPPER lagodb_connectors
 OPTIONS (
     provider 's3_compatible',
@@ -44,7 +44,7 @@ OPTIONS (
 );
 
 CREATE USER MAPPING FOR CURRENT_USER
-SERVER pg_lakebase_s3
+SERVER lagodb_s3
 OPTIONS (
     access_key_id 'minioadmin',
     secret_access_key 'minioadmin'
@@ -59,7 +59,7 @@ create an appropriate user mapping for that role.
 Give every server eligible for implicit selection an explicit object scope:
 
 ```sql
-ALTER SERVER pg_lakebase_s3
+ALTER SERVER lagodb_s3
 OPTIONS (ADD scope 's3://analytics-bucket/');
 ```
 
@@ -172,7 +172,7 @@ CREATE FOREIGN TABLE external_events (
     occurred_at timestamptz,
     payload text
 )
-SERVER pg_lakebase_s3
+SERVER lagodb_s3
 OPTIONS (
     path 's3://analytics/events/',
     format 'parquet'
@@ -191,7 +191,7 @@ schema while creating the foreign table:
 
 ```sql
 CREATE FOREIGN TABLE inferred_events ()
-SERVER pg_lakebase_s3
+SERVER lagodb_s3
 OPTIONS (
     path 's3://analytics/events/',
     format 'parquet'

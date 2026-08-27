@@ -4,12 +4,12 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use arrow_schema::{Field, Schema};
+use lagodb_core::batch::BatchBuffer;
+use lagodb_core::copy::{CopyColumnLayout, CopyDataDestination, CopyError};
+use lagodb_core::diag::PgReportError;
 use pg_arrow_conv::{
     BoundDatumBuffer, BoundDatumColumnPlan, PgColumnType, resolve_column_rule,
 };
-use pg_lakebase_core::batch::BatchBuffer;
-use pg_lakebase_core::copy::{CopyColumnLayout, CopyDataDestination, CopyError};
-use pg_lakebase_core::diag::PgReportError;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::{PgTryBuilder, pg_sys};
 

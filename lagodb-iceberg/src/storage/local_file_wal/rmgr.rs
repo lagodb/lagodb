@@ -4,8 +4,8 @@ use super::record::{
     SIZE_OF_DELETE_DIRECTORY, SIZE_OF_DELETE_FILES, SIZE_OF_WRITE_FILE,
     WriteFileHeader,
 };
-use pg_lakebase_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
-use pg_lakebase_core::{diag, wal};
+use lagodb_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
+use lagodb_core::{diag, wal};
 
 use pgrx::pg_sys;
 

@@ -52,15 +52,15 @@ SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 -- `root->all_result_relids`. The framework classifies that base scan as
 -- `ScanPurpose::Modify`. Modify-purpose CustomScan is mandatory correctness
 -- infrastructure, so both `force` and `off` select it; the GUC only controls
--- Query-purpose scans. PG17 DML wraps the input with LakebaseModifyTable.
+-- Query-purpose scans. PG17 DML wraps the input with LagoDBModifyTable.
 -- A.1 UPDATE lake
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
                            QUERY PLAN                            
 -----------------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Update on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
                Scan Purpose: Modify
@@ -72,8 +72,8 @@ EXPLAIN (COSTS OFF)
 UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
                            QUERY PLAN                            
 -----------------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Update on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
                Scan Purpose: Modify
@@ -86,8 +86,8 @@ EXPLAIN (COSTS OFF)
 DELETE FROM customscan_dml_lake WHERE k = 1;
                            QUERY PLAN                            
 -----------------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Delete on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
                Scan Purpose: Modify
@@ -99,8 +99,8 @@ EXPLAIN (COSTS OFF)
 DELETE FROM customscan_dml_lake WHERE k = 1;
                            QUERY PLAN                            
 -----------------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Delete on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
                Scan Purpose: Modify
@@ -116,8 +116,8 @@ ON t.k = s.k
 WHEN MATCHED THEN UPDATE SET v = s.v;
                             QUERY PLAN                             
 -------------------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Merge on customscan_dml_lake t
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake t
                Scan Purpose: Modify
@@ -132,8 +132,8 @@ ON t.k = s.k
 WHEN MATCHED THEN UPDATE SET v = s.v;
                             QUERY PLAN                             
 -------------------------------------------------------------------
- Custom Scan (LakebaseModifyTable)
-   Executor: PG17 Lakebase ModifyTable fork
+ Custom Scan (LagoDBModifyTable)
+   Executor: PG17 LagoDB ModifyTable fork
    ->  Merge on customscan_dml_lake t
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake t
                Scan Purpose: Modify
@@ -244,7 +244,7 @@ SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR SHARE;
 -- ============================================================================
 -- `ctid`, `xmin`, `xmax`, `cmin`, `cmax` are the rejected system
 -- attno set in `is_rejected_system_attno`
--- (`pg-lakebase-core/src/customscan/hook.rs`). The path-stage gate
+-- (`lagodb-core/src/customscan/hook.rs`). The path-stage gate
 -- walks `rel->reltarget->exprs`, `baserestrictinfo`, and
 -- `joininfo` for any `Var` whose `varattno` matches one of those
 -- five negative attno values; the first hit triggers
@@ -299,7 +299,7 @@ SELECT xmin, xmax FROM customscan_dml_lake WHERE k = 1;
 -- from `is_rejected_system_attno` because the next_slot wrapper
 -- sets `slot->tts_tableOid = RelationGetRelid(scan_rel)` on every
 -- non-empty returned slot (
--- `pg-lakebase-core/src/customscan/exec.rs::next_slot_wrapper`).
+-- `lagodb-core/src/customscan/exec.rs::next_slot_wrapper`).
 -- PG's `ExecEvalSysVar` resolves `tableoid` straight out of
 -- `slot->tts_tableOid`, so projecting `tableoid` does not require
 -- any lake-AM-side support beyond the wrapper's tts_tableOid stamp.

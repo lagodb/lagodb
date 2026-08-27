@@ -1,9 +1,9 @@
 //! Slot-first query and mutation cursors.
 
 use arrow_array::{Int64Array, RecordBatch};
+use lagodb_core::access::mutation::ModifyScanBinding;
+use lagodb_core::prelude::*;
 use pg_arrow_conv::{ArrowColumnDecoder, BoundBatch};
-use pg_lakebase_core::access::mutation::ModifyScanBinding;
-use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 
 use crate::engine::scan::IcebergQueryCursor;

@@ -10,7 +10,7 @@ SELECT endpoint,
        region,
        access_key_id,
        secret_access_key
-FROM lakebase_regress.object_storage_fixture
+FROM lagodb_regress.object_storage_fixture
 \gset storage_
 
 \setenv OBJECT_STORAGE_ENDPOINT :storage_endpoint

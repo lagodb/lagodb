@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
 use iceberg_lite::io::FileIO;
-use pg_lakebase_core::object_cleanup::{
+use lagodb_core::object_cleanup::{
     ObjectCleanupContext, ObjectCleanupItemRef, ObjectCleanupQueue,
     object_cleanup_batch_items,
 };
-use pg_lakebase_core::table_maintenance::TableMaintenanceReport;
+use lagodb_core::table_maintenance::TableMaintenanceReport;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};

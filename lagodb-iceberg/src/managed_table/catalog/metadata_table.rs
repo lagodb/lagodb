@@ -16,12 +16,12 @@
 
 use std::ffi::CStr;
 
-use pg_lakebase_core::catalog::{
+use lagodb_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, CatalogUpdateResult,
     get_namespace_oid, get_relation_oid,
 };
-use pg_lakebase_core::diag::PgError;
-use pg_lakebase_core::handles::HeapTupleGuard;
+use lagodb_core::diag::PgError;
+use lagodb_core::handles::HeapTupleGuard;
 use pgrx::prelude::TimestampWithTimeZone;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 

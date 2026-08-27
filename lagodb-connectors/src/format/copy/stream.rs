@@ -3,8 +3,8 @@
 use std::io::{self, Read};
 use std::mem;
 
+use lagodb_core::copy::{CopyDataDestination, CopyDataSource, CopyError};
 use lagodb_storage::StorageFile;
-use pg_lakebase_core::copy::{CopyDataDestination, CopyDataSource, CopyError};
 
 use crate::error::ConnectorError;
 use crate::format::{

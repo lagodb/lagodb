@@ -2,9 +2,9 @@
 
 use std::ffi::CStr;
 
-use pg_lakebase_core::diag::{PgReportError, SqlStateError};
-use pg_lakebase_core::options::{TablespaceCacheError, get_tablespace};
-use pg_lakebase_core::storage::service::BackendStorageService;
+use lagodb_core::diag::{PgReportError, SqlStateError};
+use lagodb_core::options::{TablespaceCacheError, get_tablespace};
+use lagodb_core::storage::service::BackendStorageService;
 use pgrx::datum::JsonB;
 use pgrx::prelude::*;
 

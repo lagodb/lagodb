@@ -1,6 +1,6 @@
 # pg-backend-tests
 
-**Backend (`#[pg_test]`) integration tests for the pg-lakebase framework library crates.**
+**Backend (`#[pg_test]`) integration tests for the LagoDB framework library crates.**
 
 This crate is a single test-only PostgreSQL extension that hosts the
 `#[pg_test]` tests for every framework *library* crate that needs a live
@@ -9,7 +9,7 @@ PostgreSQL backend. These are the tests that cannot run under an ordinary
 round-tripping, `palloc`/memory contexts, slot writes, planner node
 construction, SPI, and PostgreSQL output functions.
 
-It currently aggregates the backend tests for `pg-lakebase-core` and
+It currently aggregates the backend tests for `lagodb-core` and
 `pg-arrow-conv`, one module per crate.
 
 ## Why this crate exists
@@ -17,7 +17,7 @@ It currently aggregates the backend tests for `pg-lakebase-core` and
 The workspace has two kinds of Rust code that look similar but are built very
 differently:
 
-- **Framework library crates** (`pg-lakebase-core`, `pg-arrow-conv`) are plain
+- **Framework library crates** (`lagodb-core`, `pg-arrow-conv`) are plain
   Rust libraries (`rlib`). They are *not* PostgreSQL extensions: they have no
   `pg_module_magic!()`, no `.control` file, and are never loaded by PostgreSQL
   on their own. They are consumed by the extension crates.

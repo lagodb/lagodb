@@ -1,8 +1,8 @@
 //! PG-native Text/CSV Foreign Table INSERT encoding.
 
-use pg_lakebase_core::copy::CopyRowEncoder;
-use pg_lakebase_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::copy::CopyRowEncoder;
+use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

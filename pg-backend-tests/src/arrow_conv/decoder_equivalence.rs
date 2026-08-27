@@ -24,10 +24,10 @@ mod tests {
     };
     use arrow_array::types::{Int16Type, Int32Type};
     use arrow_array::{Array, ArrayRef, ListArray};
+    use lagodb_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
     use pg_arrow_conv::{
         ColumnReader, ColumnRule, PgColumnType, resolve_column_rule,
     };
-    use pg_lakebase_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
     use pgrx::pg_sys;
     use pgrx::prelude::*;
     use proptest::prelude::*;

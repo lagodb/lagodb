@@ -57,7 +57,7 @@
 pub mod record;
 pub mod rmgr;
 
-use pg_lakebase_core::wal::register_wal_rmgr;
+use lagodb_core::wal::register_wal_rmgr;
 
 pub(crate) use record::log_write_file;
 use rmgr::{ICEBERG_RMGR_ID_U8, IcebergRmgr};

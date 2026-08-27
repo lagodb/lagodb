@@ -1,10 +1,10 @@
 //! Transactional Iceberg DROP TABLE orchestration.
 
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::object_cleanup::{
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::object_cleanup::{
     ObjectCleanupContext, ObjectCleanupItemRef, ObjectCleanupQueue, ObjectTreeTarget,
 };
-use pg_lakebase_core::options::{TableOptions, get_tablespace};
+use lagodb_core::options::{TableOptions, get_tablespace};
 
 use super::metadata_table::IcebergMetadata;
 use super::metadata_tracker::TxMetadata;

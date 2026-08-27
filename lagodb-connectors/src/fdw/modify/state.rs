@@ -1,6 +1,6 @@
 //! Executor-side delegation to one initialized format writer.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignInsertBatch, ForeignModifyError, ForeignModifyOutcome, ForeignModifyState,
     ModifyPlanSlot, ModifySlot,
 };

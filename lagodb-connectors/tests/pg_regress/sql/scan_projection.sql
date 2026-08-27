@@ -3,12 +3,12 @@
 SET TIME ZONE 'UTC';
 SET client_min_messages = warning;
 
-SELECT bucket AS lakebase_regress_bucket
-FROM lakebase_regress.object_storage_fixture
+SELECT bucket AS lagodb_regress_bucket
+FROM lagodb_regress.object_storage_fixture
 \gset
 
 SELECT format('s3://%s/lagodb-connectors/scan/reorder.parquet',
-              :'lakebase_regress_bucket') AS reorder_path
+              :'lagodb_regress_bucket') AS reorder_path
 \gset projection_
 
 -- A small native Parquet object makes projection and column-order failures

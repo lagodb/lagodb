@@ -1,9 +1,9 @@
 //! Canonical-CSV bridges for NDJSON COPY FROM and COPY TO.
 
-use pg_lakebase_core::copy::{
+use lagodb_core::copy::{
     CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError,
 };
-use pg_lakebase_core::tuple::BoundJsonObjectEncoder;
+use lagodb_core::tuple::BoundJsonObjectEncoder;
 use pgrx::memcxt::PgMemoryContexts;
 
 use crate::error::ConnectorError;

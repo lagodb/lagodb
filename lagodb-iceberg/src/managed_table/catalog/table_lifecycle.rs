@@ -6,9 +6,9 @@ use crate::managed_table::storage::StorageContext;
 use crate::storage::transaction_resources::register_table_dir_created;
 use iceberg_lite::catalog::TableCreation;
 use iceberg_lite::spec::{SortOrder, UnboundPartitionSpec};
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::object_cleanup::{ObjectCleanupQueue, ObjectTreeTarget};
-use pg_lakebase_core::options::get_tablespace;
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::object_cleanup::{ObjectCleanupQueue, ObjectTreeTarget};
+use lagodb_core::options::get_tablespace;
 use pgrx::pg_sys;
 use std::sync::OnceLock;
 

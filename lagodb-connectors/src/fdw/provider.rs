@@ -2,11 +2,11 @@
 
 use core::ffi::CStr;
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     FdwRoutine, ForeignDataWrapper, ForeignValidationError, register_analyze,
     register_modify, register_scan, register_truncate,
 };
-use pg_lakebase_core::pg_fdw;
+use lagodb_core::pg_fdw;
 use pgrx::pg_sys;
 
 use super::options::validate_catalog_options;

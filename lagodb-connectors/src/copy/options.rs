@@ -6,7 +6,7 @@
 //! the connector-owned option names; the selected format validates its COPY
 //! compression and PostgreSQL-option semantics.
 
-use pg_lakebase_core::copy::{CopyOptionView, CopyStatement};
+use lagodb_core::copy::{CopyOptionView, CopyStatement};
 
 use crate::error::ConnectorError;
 use crate::format::{FormatKind, ResolvedCopyFormat};

@@ -90,8 +90,8 @@ pub(crate) mod host_matrix {
 
 use std::collections::HashSet;
 
-use pg_lakebase_core::expr::PgComparisonOp;
-use pg_lakebase_core::expr::pushdown::{
+use lagodb_core::expr::PgComparisonOp;
+use lagodb_core::expr::pushdown::{
     FilterColumn, FilterTypeMetadata, FilterValueSlot, FilterValueSourceKind,
 };
 use pgrx::pg_sys;

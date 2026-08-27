@@ -1,10 +1,10 @@
 //! Row-location-bearing cursor for writable foreign-table target scans.
 
 use arrow_array::{Int64Array, RecordBatch};
+use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
+use lagodb_core::fdw::{ForeignScanError, ScanSlotWriter};
+use lagodb_core::handles::ValidItemPointer;
 use pg_arrow_conv::{ArrowColumnDecoder, BoundBatch};
-use pg_lakebase_core::batch::{AmScanBatchSource, BatchRowDecoder};
-use pg_lakebase_core::fdw::{ForeignScanError, ScanSlotWriter};
-use pg_lakebase_core::handles::ValidItemPointer;
 
 use crate::engine::scan::MutationScanInput;
 use crate::engine::scan::batch::{

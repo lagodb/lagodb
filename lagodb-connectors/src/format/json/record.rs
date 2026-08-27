@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ops::Range;
 
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::tuple::{ColumnDatumTarget, JsonDatumEncoder, JsonDatumKind};
+use lagodb_core::diag::PgReportError;
+use lagodb_core::tuple::{ColumnDatumTarget, JsonDatumEncoder, JsonDatumKind};
 use pgrx::{PgTryBuilder, pg_sys};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;

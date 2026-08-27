@@ -7,8 +7,8 @@ use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
-use pg_lakebase_core::diag::ReportableError;
-use pg_lakebase_core::runtime_api::UtilityHookDescriptor;
+use lagodb_core::diag::ReportableError;
+use lagodb_core::runtime_api::UtilityHookDescriptor;
 use pgrx::{pg_guard, pg_sys};
 
 use crate::hooks;

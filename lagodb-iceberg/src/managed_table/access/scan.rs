@@ -23,9 +23,9 @@ pub(crate) use crate::engine::scan::ScanSpec;
 pub use cursor::IcebergBatchCursor;
 pub(crate) use spec::LoadedScanMetadata;
 
-use pg_lakebase_core::access::scan::virtual_slot_callbacks_with_tid;
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::prelude::*;
+use lagodb_core::access::scan::virtual_slot_callbacks_with_tid;
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 
 use crate::engine::schema::relation::RelationShape;

@@ -20,15 +20,14 @@ impl StorageWaitEvent {
     fn info(self) -> u32 {
         match self {
             Self::StagingFileWrite => *STAGING_FILE_WRITE.get_or_init(|| {
-                register_extension_event(c"PgLakebaseStagingFileWrite")
+                register_extension_event(c"PgLagoDBStagingFileWrite")
             }),
-            Self::StagingFileSync => *STAGING_FILE_SYNC.get_or_init(|| {
-                register_extension_event(c"PgLakebaseStagingFileSync")
-            }),
+            Self::StagingFileSync => *STAGING_FILE_SYNC
+                .get_or_init(|| register_extension_event(c"PgLagoDBStagingFileSync")),
             Self::ObjectRead => *OBJECT_READ
-                .get_or_init(|| register_extension_event(c"PgLakebaseObjectRead")),
+                .get_or_init(|| register_extension_event(c"PgLagoDBObjectRead")),
             Self::ObjectUpload => *OBJECT_UPLOAD
-                .get_or_init(|| register_extension_event(c"PgLakebaseObjectUpload")),
+                .get_or_init(|| register_extension_event(c"PgLagoDBObjectUpload")),
         }
     }
 }

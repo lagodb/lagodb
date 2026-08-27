@@ -1,8 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use lagodb_core::transaction::{self, TransactionResource};
 use lagodb_storage::ObjectLocation;
-use pg_lakebase_core::transaction::{self, TransactionResource};
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};

@@ -6,9 +6,9 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 
-volume_id=${LAKEBASE_REGRESS_VOLUME_ID:?LAKEBASE_REGRESS_VOLUME_ID is required}
-namespace=${LAKEBASE_REGRESS_OBJECT_NAMESPACE:?LAKEBASE_REGRESS_OBJECT_NAMESPACE is required}
-object_path=${LAKEBASE_REGRESS_OBJECT_PATH:?LAKEBASE_REGRESS_OBJECT_PATH is required}
+volume_id=${LAGODB_REGRESS_VOLUME_ID:?LAGODB_REGRESS_VOLUME_ID is required}
+namespace=${LAGODB_REGRESS_OBJECT_NAMESPACE:?LAGODB_REGRESS_OBJECT_NAMESPACE is required}
+object_path=${LAGODB_REGRESS_OBJECT_PATH:?LAGODB_REGRESS_OBJECT_PATH is required}
 timeout_seconds=$1
 deadline=$(( $(date +%s) + timeout_seconds ))
 last_error=""

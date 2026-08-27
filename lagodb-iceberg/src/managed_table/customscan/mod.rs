@@ -8,20 +8,20 @@ mod pg_test;
 
 use core::ffi::CStr;
 
-use pg_lakebase_core::customscan::modify::{
-    LakebaseCustomModifyProvider, ModifyBindContext, ModifyCapabilities,
+use lagodb_core::customscan::modify::{
+    LagodbCustomModifyProvider, ModifyBindContext, ModifyCapabilities,
     register_provider as register_modify_provider,
 };
-use pg_lakebase_core::customscan::provider::{
+use lagodb_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-    CustomScanError, EndContext, LakebaseCustomScanProvider, NextSlotContext,
+    CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
     NoPrivateData, PathContext, PathVariant, ReScanContext, RelationContext,
     register_provider as register_scan_provider,
 };
-use pg_lakebase_core::expr::pushdown::{
+use lagodb_core::expr::pushdown::{
     FilterBindResult, FilterPlanningContext, FilterPushdown, FilterValueBindings,
 };
-use pg_lakebase_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
 
 use crate::engine::predicate::{
@@ -37,7 +37,7 @@ use crate::managed_table::gucs::scan_fraction;
 
 use scan_state::IcebergScanState;
 
-/// Zero-sized marker for the Iceberg [`LakebaseCustomScanProvider`].
+/// Zero-sized marker for the Iceberg [`LagodbCustomScanProvider`].
 struct IcebergCustomScanProvider;
 
 impl FilterPushdown for IcebergCustomScanProvider {
@@ -85,7 +85,7 @@ impl From<IcebergError> for CustomScanError {
     }
 }
 
-impl LakebaseCustomScanProvider for IcebergCustomScanProvider {
+impl LagodbCustomScanProvider for IcebergCustomScanProvider {
     const NAME: &'static CStr = c"lagodb-iceberg";
 
     type PrivateData = NoPrivateData;
@@ -137,10 +137,10 @@ impl LakebaseCustomScanProvider for IcebergCustomScanProvider {
     }
 }
 
-impl LakebaseCustomModifyProvider for IcebergCustomScanProvider {
+impl LagodbCustomModifyProvider for IcebergCustomScanProvider {
     type AccessMethod = IcebergTableAm;
 
-    const MODIFY_NAME: &'static CStr = c"LakebaseModifyTable";
+    const MODIFY_NAME: &'static CStr = c"LagoDBModifyTable";
 
     const MODIFY_CAPABILITIES: ModifyCapabilities = ModifyCapabilities::NONE;
 
@@ -168,8 +168,8 @@ pub(super) fn register() {
 
 #[cfg(test)]
 mod sqlstate_tests {
-    use pg_lakebase_core::customscan::provider::CustomScanError;
-    use pg_lakebase_core::diag::SqlStateError;
+    use lagodb_core::customscan::provider::CustomScanError;
+    use lagodb_core::diag::SqlStateError;
     use pgrx::prelude::PgSqlErrorCode;
 
     use crate::error::IcebergError;

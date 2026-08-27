@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
+use lagodb_core::fdw::{
+    ForeignAnalyzeSupport, ForeignSampleContext, ForeignSampleStatistics,
+    ForeignTableMaintenanceError,
+};
+use lagodb_core::handles::HeapTupleGuard;
+use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
 };
 use pg_arrow_conv::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
-use pg_lakebase_core::fdw::{
-    ForeignAnalyzeSupport, ForeignSampleContext, ForeignSampleStatistics,
-    ForeignTableMaintenanceError,
-};
-use pg_lakebase_core::handles::HeapTupleGuard;
-use pg_lakebase_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 

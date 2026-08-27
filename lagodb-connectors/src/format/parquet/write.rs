@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use arrow_schema::{Field, Schema};
+use lagodb_core::batch::BatchBuffer;
+use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
+use lagodb_core::handles::RelationHandle;
 use pg_arrow_conv::{
     BoundWriteBuffer, BoundWriteColumnPlan, PgColumnType, resolve_column_rule,
 };
-use pg_lakebase_core::batch::BatchBuffer;
-use pg_lakebase_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
-use pg_lakebase_core::handles::RelationHandle;
 
 use crate::error::ConnectorError;
 use crate::format::{FormatWriteState, ParquetWriteCompression};

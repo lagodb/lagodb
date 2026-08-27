@@ -3,13 +3,13 @@
 mod private;
 mod state;
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     FdwModify, FdwScan, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyError, ForeignModifyOperation,
     ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyRelationContext,
     ForeignUpdateTargetContext,
 };
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use super::options::ForeignTableIdentity;

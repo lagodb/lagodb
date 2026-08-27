@@ -2359,9 +2359,9 @@ name = "lagodb-base"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "lagodb-core",
  "lagodb-storage",
  "libc",
- "pg-lakebase-core",
  "pgrx",
  "pgrx-pg-config",
  "pgrx-tests",
@@ -2386,16 +2386,35 @@ dependencies = [
  "bytes",
  "chrono",
  "flate2",
+ "lagodb-core",
  "lagodb-storage",
  "parquet",
  "pg-arrow-conv",
- "pg-lakebase-core",
  "pgrx",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "lagodb-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cc",
+ "lagodb-macros",
+ "lagodb-storage",
+ "percent-encoding",
+ "pgrx",
+ "pgrx-pg-config",
+ "pgrx-tests",
+ "proptest",
+ "serde",
+ "thiserror 1.0.69",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2409,12 +2428,12 @@ dependencies = [
  "bytes",
  "http",
  "iceberg-lite",
+ "lagodb-core",
  "lagodb-storage",
  "libc",
  "md-5 0.10.6",
  "parquet",
  "pg-arrow-conv",
- "pg-lakebase-core",
  "pgrx",
  "pgrx-tests",
  "proptest",
@@ -2428,6 +2447,15 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "lagodb-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -3220,7 +3248,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
- "pg-lakebase-core",
+ "lagodb-core",
  "pgrx",
  "proptest",
  "thiserror 1.0.69",
@@ -3234,8 +3262,8 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "bytes",
+ "lagodb-core",
  "pg-arrow-conv",
- "pg-lakebase-core",
  "pgrx",
  "pgrx-tests",
  "proptest",
@@ -3246,36 +3274,8 @@ dependencies = [
 name = "pg-delta-am"
 version = "0.1.0"
 dependencies = [
- "pg-lakebase-core",
+ "lagodb-core",
  "pgrx",
-]
-
-[[package]]
-name = "pg-lakebase-core"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "cc",
- "lagodb-storage",
- "percent-encoding",
- "pg-lakebase-macros",
- "pgrx",
- "pgrx-pg-config",
- "pgrx-tests",
- "proptest",
- "serde",
- "thiserror 1.0.69",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "pg-lakebase-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]

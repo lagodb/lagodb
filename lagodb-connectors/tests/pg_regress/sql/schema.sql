@@ -3,36 +3,36 @@
 SET TIME ZONE 'UTC';
 SET client_min_messages = warning;
 
-SELECT bucket AS lakebase_regress_bucket
-FROM lakebase_regress.object_storage_fixture
+SELECT bucket AS lagodb_regress_bucket
+FROM lagodb_regress.object_storage_fixture
 \gset
 
 SELECT format('s3://%s/lagodb-connectors/seed/common-exact.txt',
-              :'lakebase_regress_bucket') AS schema_text_exact,
+              :'lagodb_regress_bucket') AS schema_text_exact,
        format('s3://%s/lagodb-connectors/seed/common-prefix/',
-              :'lakebase_regress_bucket') AS schema_text_prefix,
+              :'lagodb_regress_bucket') AS schema_text_prefix,
        format('s3://%s/lagodb-connectors/seed/common-exact.csv',
-              :'lakebase_regress_bucket') AS schema_csv_exact,
+              :'lagodb_regress_bucket') AS schema_csv_exact,
        format('s3://%s/lagodb-connectors/seed/common-prefix-csv/',
-              :'lakebase_regress_bucket') AS schema_csv_prefix,
+              :'lagodb_regress_bucket') AS schema_csv_prefix,
        format('s3://%s/lagodb-connectors/seed/common-header.csv',
-              :'lakebase_regress_bucket') AS schema_csv_header,
+              :'lagodb_regress_bucket') AS schema_csv_header,
        format('s3://%s/lagodb-connectors/seed/json-exact.json',
-              :'lakebase_regress_bucket') AS schema_json_exact,
+              :'lagodb_regress_bucket') AS schema_json_exact,
        format('s3://%s/lagodb-connectors/seed/json-prefix/',
-              :'lakebase_regress_bucket') AS schema_json_prefix,
+              :'lagodb_regress_bucket') AS schema_json_prefix,
        format('s3://%s/lagodb-connectors/seed/json-compressed.json.gz',
-              :'lakebase_regress_bucket') AS schema_json_compressed,
+              :'lagodb_regress_bucket') AS schema_json_compressed,
        format('s3://%s/lagodb-connectors/seed/common-exact.avro',
-              :'lakebase_regress_bucket') AS schema_avro_exact,
+              :'lagodb_regress_bucket') AS schema_avro_exact,
        format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
-              :'lakebase_regress_bucket') AS schema_avro_prefix,
+              :'lagodb_regress_bucket') AS schema_avro_prefix,
        format('s3://%s/lagodb-connectors/seed/parquet-exact.parquet',
-              :'lakebase_regress_bucket') AS schema_parquet_exact,
+              :'lagodb_regress_bucket') AS schema_parquet_exact,
        format('s3://%s/lagodb-connectors/seed/parquet-prefix/',
-              :'lakebase_regress_bucket') AS schema_parquet_prefix,
+              :'lagodb_regress_bucket') AS schema_parquet_prefix,
        format('s3://%s/lagodb-connectors/seed/parquet-exact.parquet.gz',
-              :'lakebase_regress_bucket') AS invalid_parquet_path
+              :'lagodb_regress_bucket') AS invalid_parquet_path
 \gset
 
 -- An empty column list invokes the connector DDL hook. Text/CSV infer scalar

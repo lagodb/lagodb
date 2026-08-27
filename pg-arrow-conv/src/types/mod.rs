@@ -19,7 +19,7 @@
 use std::borrow::Cow;
 
 use arrow_array::{Array, ArrayRef};
-use pg_lakebase_core::tuple::Cell;
+use lagodb_core::tuple::Cell;
 use pgrx::pg_sys;
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};

@@ -8,7 +8,7 @@
 //!   `ROLLBACK TO SAVEPOINT`,
 //! - one final metadata materialization during top-level pre-commit.
 //!
-//! It also implements [`TransactionResource`] so the pg-lakebase-core
+//! It also implements [`TransactionResource`] so the lagodb-core
 //! transaction framework can drive it through pre-commit / commit / abort /
 //! sub-abort callbacks.
 //!
@@ -28,8 +28,8 @@ use iceberg_lite::io::FileIO;
 use iceberg_lite::overlay::DeleteFileIdentity;
 use iceberg_lite::spec::{DataFile, TableMetadata};
 use iceberg_lite::transaction::{PreparedSchemaUpdate, RowDeltaValidation};
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
+use lagodb_core::diag::PgReportError;
+use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -102,7 +102,7 @@ impl TxMetadata {
     /// Get (or lazily install) the `TxMetadata` for the current transaction.
     ///
     /// The first call inside a transaction also registers the instance with
-    /// pg-lakebase-core's transaction framework, pinned at top-level
+    /// lagodb-core's transaction framework, pinned at top-level
     /// (`nest_level = 1`) so it survives any savepoint abort and can run
     /// `commit_all` in `on_pre_commit`.
     pub fn current() -> Rc<TxMetadata> {
@@ -515,7 +515,7 @@ impl TransactionResource for TxMetadata {
     }
 
     fn on_abort_sub(&self, current_nest_level: i32) {
-        // `current_nest_level` is the level being aborted, matching pg-lakebase-core's
+        // `current_nest_level` is the level being aborted, matching lagodb-core's
         // resource removal rule (resources with `nest_level >= current_nest_level`
         // are removed from the resource list).
         self.rollback_to_level(current_nest_level);

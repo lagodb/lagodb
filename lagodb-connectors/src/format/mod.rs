@@ -25,7 +25,7 @@ mod write;
 
 use std::fmt::{self, Display, Formatter};
 
-use pg_lakebase_core::plan_data::PlanDataReader;
+use lagodb_core::plan_data::PlanDataReader;
 
 use crate::error::ConnectorError;
 

@@ -2,7 +2,7 @@
 
 use std::ffi::{CStr, CString};
 
-use pg_lakebase_core::fdw::ForeignFilterExplainValues;
+use lagodb_core::fdw::ForeignFilterExplainValues;
 use pgrx::pg_sys;
 
 use super::{PlannedColumn, PlannedNode};

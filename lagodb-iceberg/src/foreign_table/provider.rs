@@ -2,12 +2,12 @@
 
 use std::ffi::{CStr, CString};
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     FdwImportSchema, FdwRoutine, ForeignDataWrapper, ForeignImportError,
     ForeignImportSchemaContext, ForeignValidationError, register_analyze,
     register_import_schema, register_modify, register_scan,
 };
-use pg_lakebase_core::pg_fdw;
+use lagodb_core::pg_fdw;
 use pgrx::pg_sys;
 
 use super::import::IcebergSchemaImporter;

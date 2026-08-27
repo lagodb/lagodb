@@ -12,30 +12,30 @@
 -- uses exact objects for formats whose direct input contract is exact-only.
 SET TIME ZONE 'UTC';
 SET client_min_messages = warning;
-SELECT bucket AS lakebase_regress_bucket
-FROM lakebase_regress.object_storage_fixture
+SELECT bucket AS lagodb_regress_bucket
+FROM lagodb_regress.object_storage_fixture
 \gset
 SELECT format('s3://%s/lagodb-connectors/seed/common-prefix/',
-              :'lakebase_regress_bucket') AS seed_text_prefix,
+              :'lagodb_regress_bucket') AS seed_text_prefix,
        format('s3://%s/lagodb-connectors/seed/common-prefix-csv/',
-              :'lakebase_regress_bucket') AS seed_csv_prefix,
+              :'lagodb_regress_bucket') AS seed_csv_prefix,
        format('s3://%s/lagodb-connectors/seed/json-prefix/',
-              :'lakebase_regress_bucket') AS seed_json_prefix,
+              :'lagodb_regress_bucket') AS seed_json_prefix,
        format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
-              :'lakebase_regress_bucket') AS seed_avro_prefix,
+              :'lagodb_regress_bucket') AS seed_avro_prefix,
        format('s3://%s/lagodb-connectors/seed/parquet-prefix/',
-              :'lakebase_regress_bucket') AS seed_parquet_prefix
+              :'lagodb_regress_bucket') AS seed_parquet_prefix
 \gset
 SELECT format('s3://%s/lagodb-connectors/round-trip/text.txt',
-              :'lakebase_regress_bucket') AS round_text,
+              :'lagodb_regress_bucket') AS round_text,
        format('s3://%s/lagodb-connectors/round-trip/csv.csv',
-              :'lakebase_regress_bucket') AS round_csv,
+              :'lagodb_regress_bucket') AS round_csv,
        format('s3://%s/lagodb-connectors/round-trip/json.json',
-              :'lakebase_regress_bucket') AS round_json,
+              :'lagodb_regress_bucket') AS round_json,
        format('s3://%s/lagodb-connectors/round-trip/avro.avro',
-              :'lakebase_regress_bucket') AS round_avro,
+              :'lagodb_regress_bucket') AS round_avro,
        format('s3://%s/lagodb-connectors/round-trip/parquet/',
-              :'lakebase_regress_bucket') AS round_parquet
+              :'lagodb_regress_bucket') AS round_parquet
 \gset
 CREATE FOREIGN TABLE lagodb_connectors_regress.round_text_input
     (:common_columns)

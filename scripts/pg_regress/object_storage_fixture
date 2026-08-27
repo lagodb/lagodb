@@ -19,15 +19,15 @@ MINIO_REGION=${MINIO_REGION:-${DEFAULT_MINIO_REGION:?DEFAULT_MINIO_REGION is req
 ICEBERG_REST_IMAGE=${ICEBERG_REST_IMAGE:-${DEFAULT_ICEBERG_REST_IMAGE:?DEFAULT_ICEBERG_REST_IMAGE is required in ${OBJECT_STORAGE_ENV}}}
 SPARK_BASE_IMAGE=${SPARK_BASE_IMAGE:-${DEFAULT_SPARK_BASE_IMAGE:?DEFAULT_SPARK_BASE_IMAGE is required in ${OBJECT_STORAGE_ENV}}}
 SPARK_IMAGE=${SPARK_IMAGE:-${DEFAULT_SPARK_IMAGE:?DEFAULT_SPARK_IMAGE is required in ${OBJECT_STORAGE_ENV}}}
-REGRESS_BUCKET=${LAKEBASE_REGRESS_BUCKET:-lakebase-regress}
-REGRESS_FALLBACK_BUCKET=${LAKEBASE_REGRESS_FALLBACK_BUCKET:-${REGRESS_BUCKET}-iceberg-fallback-a}
-REGRESS_FALLBACK_SECOND_BUCKET=${LAKEBASE_REGRESS_FALLBACK_SECOND_BUCKET:-${REGRESS_BUCKET}-iceberg-fallback-b}
-REGRESS_REGION=${LAKEBASE_REGRESS_REGION:-$MINIO_REGION}
-READY_TIMEOUT_SECONDS=${LAKEBASE_REGRESS_READY_TIMEOUT_SECONDS:-30}
-FIXTURE_LABEL_KEY=pg-lagodb.fixture
+REGRESS_BUCKET=${LAGODB_REGRESS_BUCKET:-lagodb-regress}
+REGRESS_FALLBACK_BUCKET=${LAGODB_REGRESS_FALLBACK_BUCKET:-${REGRESS_BUCKET}-iceberg-fallback-a}
+REGRESS_FALLBACK_SECOND_BUCKET=${LAGODB_REGRESS_FALLBACK_SECOND_BUCKET:-${REGRESS_BUCKET}-iceberg-fallback-b}
+REGRESS_REGION=${LAGODB_REGRESS_REGION:-$MINIO_REGION}
+READY_TIMEOUT_SECONDS=${LAGODB_REGRESS_READY_TIMEOUT_SECONDS:-30}
+FIXTURE_LABEL_KEY=lagodb.fixture
 FIXTURE_LABEL_VALUE=pg-regress-object-storage
-PGPORT_LABEL_KEY=pg-lagodb.pgport
-STATE_DIR_LABEL_KEY=pg-lagodb.state-dir
+PGPORT_LABEL_KEY=lagodb.pgport
+STATE_DIR_LABEL_KEY=lagodb.state-dir
 
 case "${PGPORT:-}" in
     ''|*[!0-9]*)
@@ -36,7 +36,7 @@ case "${PGPORT:-}" in
         ;;
 esac
 
-STATE_DIR="/tmp/pg_lakebase_object_regress_${PGPORT}"
+STATE_DIR="/tmp/lagodb_object_regress_${PGPORT}"
 STATE_ENV="${STATE_DIR}/state.env"
 SETUP_STARTED=0
 
@@ -65,11 +65,11 @@ state_quote() {
 }
 
 container_name() {
-    printf 'pg-lakebase-regress-minio-%s-%s\n' "$PGPORT" "$$"
+    printf 'lagodb-regress-minio-%s-%s\n' "$PGPORT" "$$"
 }
 
 network_name() {
-    printf 'pg-lakebase-regress-%s-%s\n' "$PGPORT" "$$"
+    printf 'lagodb-regress-%s-%s\n' "$PGPORT" "$$"
 }
 
 teardown_container() {
@@ -290,10 +290,10 @@ setup() {
         --set=fallback_rest_uri="$FALLBACK_REST_URI" \
         --set=failure_rest_uri="$FAILURE_REST_URI" >/dev/null <<'SQL'
 SET client_min_messages = warning;
-CREATE SCHEMA IF NOT EXISTS lakebase_regress;
-DROP TABLE IF EXISTS lakebase_regress.object_storage_fixture;
+CREATE SCHEMA IF NOT EXISTS lagodb_regress;
+DROP TABLE IF EXISTS lagodb_regress.object_storage_fixture;
 RESET client_min_messages;
-CREATE TABLE lakebase_regress.object_storage_fixture (
+CREATE TABLE lagodb_regress.object_storage_fixture (
     endpoint text NOT NULL,
     bucket text NOT NULL,
     fallback_bucket text NOT NULL,
@@ -305,7 +305,7 @@ CREATE TABLE lakebase_regress.object_storage_fixture (
     fallback_rest_uri text NOT NULL,
     failure_rest_uri text NOT NULL
 );
-INSERT INTO lakebase_regress.object_storage_fixture
+INSERT INTO lagodb_regress.object_storage_fixture
 VALUES (
     :'endpoint', :'bucket', :'fallback_bucket', :'fallback_second_bucket',
     :'region', :'access_key_id',

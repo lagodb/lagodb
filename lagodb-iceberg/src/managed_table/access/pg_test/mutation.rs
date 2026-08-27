@@ -2,7 +2,7 @@
 
 #[pgrx::pg_schema]
 mod tests {
-    use pg_lakebase_core::prelude::*;
+    use lagodb_core::prelude::*;
     use pgrx::pg_sys;
 
     use crate::engine::write::RelationRowRegistry;

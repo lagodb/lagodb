@@ -1,7 +1,7 @@
 use std::fmt;
 
-use pg_lakebase_core::diag::{PgError, PgReportError, SqlStateError};
-use pg_lakebase_core::object_cleanup::ObjectCleanupError;
+use lagodb_core::diag::{PgError, PgReportError, SqlStateError};
+use lagodb_core::object_cleanup::ObjectCleanupError;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 

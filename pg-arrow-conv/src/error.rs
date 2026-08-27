@@ -2,8 +2,8 @@
 
 use std::borrow::Cow;
 
-use pg_lakebase_core::diag::{PgError, SqlStateError};
-use pg_lakebase_core::tuple::{DatumConversionError, DecimalCodecError};
+use lagodb_core::diag::{PgError, SqlStateError};
+use lagodb_core::tuple::{DatumConversionError, DecimalCodecError};
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 

@@ -1,7 +1,7 @@
 //! Owned, copyObject-serializable Iceberg predicate plans.
 
-use pg_lakebase_core::expr::pushdown::FilterValueSlotId;
-use pg_lakebase_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::expr::pushdown::FilterValueSlotId;
+use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
 use super::error::IcebergFilterError;
 

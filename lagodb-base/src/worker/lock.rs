@@ -2,7 +2,7 @@ use pgrx::pg_sys;
 
 // SQL advisory locks use classes 1 and 2; pg_extension_base uses 20 and 21.
 // A private class keeps this internal lifecycle protocol out of both spaces.
-const LAKEBASE_DATABASE_LOCK_CLASS: u16 = 0x4c42;
+const LAGODB_DATABASE_LOCK_CLASS: u16 = 0x4c42;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DatabaseLifecycleLock {
@@ -51,7 +51,7 @@ impl DatabaseLifecycleLock {
             locktag_field1: self.database_oid,
             locktag_field2: self.database_oid,
             locktag_field3: 0,
-            locktag_field4: LAKEBASE_DATABASE_LOCK_CLASS,
+            locktag_field4: LAGODB_DATABASE_LOCK_CLASS,
             locktag_type: pg_sys::LockTagType::LOCKTAG_ADVISORY as u8,
             locktag_lockmethodid: pg_sys::USER_LOCKMETHOD as u8,
         }

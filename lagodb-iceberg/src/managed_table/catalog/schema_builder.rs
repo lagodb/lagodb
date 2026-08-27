@@ -28,9 +28,9 @@ use iceberg_lite::spec::{
     ListType, NestedField, NestedFieldRef, PrimitiveType, SCHEMA_NAME_DELIMITER,
     Schema, Type,
 };
-use pg_lakebase_core::diag;
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::tuple::{NumericTypmod, numeric_precision_scale};
+use lagodb_core::diag;
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::tuple::{NumericTypmod, numeric_precision_scale};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -414,7 +414,7 @@ pub(crate) fn column_type_to_iceberg_type(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_lakebase_core::tuple::numeric_typmod;
+    use lagodb_core::tuple::numeric_typmod;
 
     #[test]
     fn pg_type_constructors_default_typmod_to_minus_one() {

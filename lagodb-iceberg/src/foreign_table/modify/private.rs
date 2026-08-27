@@ -1,6 +1,6 @@
 //! Copy-object-safe writable-table identity for a foreign modify plan.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignModifyError, ForeignModifyPrivate, ForeignPrivateReader,
     ForeignPrivateWriter,
 };

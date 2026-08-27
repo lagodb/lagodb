@@ -245,7 +245,7 @@ SELECT count(*) AS objects_before_failure
 FROM pg_ls_dir(:'failure_root', true, false)
 \gset
 
-\! output="$(psql -XAtq -v ON_ERROR_STOP=1 -c "SELECT injection_points_set_local()" -c "SELECT injection_points_attach('lakebase-iceberg-vacuum-after-rewrite', 'error')" -c "VACUUM vacuum_failure_recovery_t" 2>&1)"; status=$?; if test "$status" -ne 0 && printf '%s\n' "$output" | grep -Fq 'error triggered for injection point lakebase-iceberg-vacuum-after-rewrite'; then echo "injected_vacuum_failed: true"; else echo "injected_vacuum_failed: false"; fi
+\! output="$(psql -XAtq -v ON_ERROR_STOP=1 -c "SELECT injection_points_set_local()" -c "SELECT injection_points_attach('lagodb-iceberg-vacuum-after-rewrite', 'error')" -c "VACUUM vacuum_failure_recovery_t" 2>&1)"; status=$?; if test "$status" -ne 0 && printf '%s\n' "$output" | grep -Fq 'error triggered for injection point lagodb-iceberg-vacuum-after-rewrite'; then echo "injected_vacuum_failed: true"; else echo "injected_vacuum_failed: false"; fi
 
 SELECT count(*) = :rows_before::bigint AS rows_preserved_after_failure,
        md5(string_agg(id::text || ':' || payload, ',' ORDER BY id))
@@ -385,12 +385,12 @@ DROP EXTENSION lagodb_iceberg CASCADE;
 -- Object storage VACUUM correctness and asynchronous cleanup.
 \setenv PGDATABASE :DBNAME
 
-SELECT endpoint AS lakebase_regress_endpoint,
-       bucket AS lakebase_regress_bucket,
-       region AS lakebase_regress_region,
-       access_key_id AS lakebase_regress_access_key_id,
-       secret_access_key AS lakebase_regress_secret_access_key
-FROM lakebase_regress.object_storage_fixture
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
 \gset
 
 SET client_min_messages = warning;
@@ -405,15 +405,15 @@ RESET client_min_messages;
 SELECT 'regress-vacuum-matrix-' || gen_random_uuid() AS volume_name \gset
 SELECT lagodb.create_storage_volume(
     :'volume_name',
-    format('s3://%s', :'lakebase_regress_bucket'),
+    format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
-        'access_key_id', :'lakebase_regress_access_key_id',
-        'secret_access_key', :'lakebase_regress_secret_access_key'
+        'access_key_id', :'lagodb_regress_access_key_id',
+        'secret_access_key', :'lagodb_regress_secret_access_key'
     ),
     jsonb_build_object(
-        'region', :'lakebase_regress_region',
-        'endpoint', :'lakebase_regress_endpoint',
+        'region', :'lagodb_regress_region',
+        'endpoint', :'lagodb_regress_endpoint',
         'allow_http', true
     )
 ) AS created_volume \gset
@@ -428,8 +428,8 @@ FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
 \gset
 
-\setenv LAKEBASE_REGRESS_VOLUME_ID :volume_id
-\setenv LAKEBASE_REGRESS_OBJECT_NAMESPACE :lakebase_regress_bucket
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :lagodb_regress_bucket
 \! bin/wait_for_object_store 30
 
 CREATE TABLE object_v1_ordinary (id integer, payload text)
@@ -542,7 +542,7 @@ SELECT roots.*, observed.objects AS objects_before
 FROM roots
 CROSS JOIN LATERAL lagodb.observe_object_tree(
     :'volume_id',
-    :'lakebase_regress_bucket',
+    :'lagodb_regress_bucket',
     roots.prefix
 ) AS observed;
 
@@ -554,27 +554,27 @@ VACUUM (FULL) object_v2_full;
 VACUUM (FULL) object_v3_full;
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v1-ordinary' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v2-ordinary' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v3-ordinary' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v1-full' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v2-full' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v3-full' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 
 \set ECHO all
@@ -619,7 +619,7 @@ WITH observations AS (
     FROM object_matrix_roots AS roots
     CROSS JOIN LATERAL lagodb.observe_object_tree(
         :'volume_id',
-        :'lakebase_regress_bucket',
+        :'lagodb_regress_bucket',
         roots.prefix
     ) AS observed
     CROSS JOIN LATERAL lagodb.table_maintenance_stats(roots.relid) AS stats
@@ -654,27 +654,27 @@ DROP TABLE object_v1_ordinary, object_v2_ordinary, object_v3_ordinary,
            object_v1_full, object_v2_full, object_v3_full;
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v1-ordinary' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v2-ordinary' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v3-ordinary' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v1-full' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v2-full' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 SELECT prefix AS object_path FROM object_matrix_roots
 WHERE format = 'v3-full' \gset
-\setenv LAKEBASE_REGRESS_OBJECT_PATH :object_path
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 DROP TABLESPACE regress_vacuum_object_matrix;
 DROP EXTENSION lagodb_iceberg CASCADE;

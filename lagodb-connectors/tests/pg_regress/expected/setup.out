@@ -19,30 +19,30 @@ SET TIME ZONE 'UTC';
 SET client_min_messages = warning;
 CREATE EXTENSION lagodb_base;
 CREATE EXTENSION lagodb_connectors;
-SELECT endpoint AS lakebase_regress_endpoint,
-       bucket AS lakebase_regress_bucket,
-       format('s3://%s/', bucket) AS lakebase_regress_scope,
-       region AS lakebase_regress_region,
-       access_key_id AS lakebase_regress_access_key_id,
-       secret_access_key AS lakebase_regress_secret_access_key
-FROM lakebase_regress.object_storage_fixture
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       format('s3://%s/', bucket) AS lagodb_regress_scope,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
 \gset
 CREATE SCHEMA lagodb_connectors_regress;
 CREATE SERVER lagodb_connectors_regress_s3
     FOREIGN DATA WRAPPER lagodb_connectors
     OPTIONS (
         provider 's3_compatible',
-        endpoint :'lakebase_regress_endpoint',
-        region :'lakebase_regress_region',
-        scope :'lakebase_regress_scope',
+        endpoint :'lagodb_regress_endpoint',
+        region :'lagodb_regress_region',
+        scope :'lagodb_regress_scope',
         allow_http 'true',
         virtual_hosted_style_request 'false'
     );
 CREATE USER MAPPING FOR PUBLIC
     SERVER lagodb_connectors_regress_s3
     OPTIONS (
-        access_key_id :'lakebase_regress_access_key_id',
-        secret_access_key :'lakebase_regress_secret_access_key'
+        access_key_id :'lagodb_regress_access_key_id',
+        secret_access_key :'lagodb_regress_secret_access_key'
     );
 CREATE TABLE lagodb_connectors_regress.common_source (
     id integer,
@@ -219,57 +219,57 @@ ORDER BY source.id;
 -- Seed objects are shared by the foreign-table and schema-inference tests.
 -- Their keys are different from the direct-COPY outputs used by the copy tests.
 SELECT format('s3://%s/lagodb-connectors/seed/common-exact.txt',
-              :'lakebase_regress_bucket') AS seed_text_exact,
+              :'lagodb_regress_bucket') AS seed_text_exact,
        format('s3://%s/lagodb-connectors/seed/common-prefix/',
-              :'lakebase_regress_bucket') AS seed_text_prefix,
+              :'lagodb_regress_bucket') AS seed_text_prefix,
        format('s3://%s/lagodb-connectors/seed/common-prefix/part-a.txt',
-              :'lakebase_regress_bucket') AS seed_text_part_a,
+              :'lagodb_regress_bucket') AS seed_text_part_a,
        format('s3://%s/lagodb-connectors/seed/common-prefix/part-b.txt',
-              :'lakebase_regress_bucket') AS seed_text_part_b,
+              :'lagodb_regress_bucket') AS seed_text_part_b,
        format('s3://%s/lagodb-connectors/seed/common-exact.csv',
-              :'lakebase_regress_bucket') AS seed_csv_exact,
+              :'lagodb_regress_bucket') AS seed_csv_exact,
        format('s3://%s/lagodb-connectors/seed/common-prefix-csv/',
-              :'lakebase_regress_bucket') AS seed_csv_prefix,
+              :'lagodb_regress_bucket') AS seed_csv_prefix,
        format('s3://%s/lagodb-connectors/seed/common-prefix-csv/part-a.csv',
-              :'lakebase_regress_bucket') AS seed_csv_part_a,
+              :'lagodb_regress_bucket') AS seed_csv_part_a,
        format('s3://%s/lagodb-connectors/seed/common-prefix-csv/part-b.csv',
-              :'lakebase_regress_bucket') AS seed_csv_part_b,
+              :'lagodb_regress_bucket') AS seed_csv_part_b,
        format('s3://%s/lagodb-connectors/seed/common-header.csv',
-              :'lakebase_regress_bucket') AS seed_csv_header,
+              :'lagodb_regress_bucket') AS seed_csv_header,
        format('s3://%s/lagodb-connectors/seed/common-exact.avro',
-              :'lakebase_regress_bucket') AS seed_avro_exact,
+              :'lagodb_regress_bucket') AS seed_avro_exact,
        format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
-              :'lakebase_regress_bucket') AS seed_avro_prefix,
+              :'lagodb_regress_bucket') AS seed_avro_prefix,
        format('s3://%s/lagodb-connectors/seed/common-prefix-avro/part-a.avro',
-              :'lakebase_regress_bucket') AS seed_avro_part_a,
+              :'lagodb_regress_bucket') AS seed_avro_part_a,
        format('s3://%s/lagodb-connectors/seed/common-prefix-avro/part-b.avro',
-              :'lakebase_regress_bucket') AS seed_avro_part_b,
+              :'lagodb_regress_bucket') AS seed_avro_part_b,
        format('s3://%s/lagodb-connectors/seed/json-exact.json',
-              :'lakebase_regress_bucket') AS seed_json_exact,
+              :'lagodb_regress_bucket') AS seed_json_exact,
        format('s3://%s/lagodb-connectors/seed/json-prefix/',
-              :'lakebase_regress_bucket') AS seed_json_prefix,
+              :'lagodb_regress_bucket') AS seed_json_prefix,
        format('s3://%s/lagodb-connectors/seed/json-prefix/part-a.json',
-              :'lakebase_regress_bucket') AS seed_json_part_a,
+              :'lagodb_regress_bucket') AS seed_json_part_a,
        format('s3://%s/lagodb-connectors/seed/json-prefix/part-b.json',
-              :'lakebase_regress_bucket') AS seed_json_part_b,
+              :'lagodb_regress_bucket') AS seed_json_part_b,
        format('s3://%s/lagodb-connectors/seed/json-compressed.json.gz',
-              :'lakebase_regress_bucket') AS seed_json_compressed,
+              :'lagodb_regress_bucket') AS seed_json_compressed,
        format('s3://%s/lagodb-connectors/seed/parquet-exact.parquet',
-              :'lakebase_regress_bucket') AS seed_parquet_exact,
+              :'lagodb_regress_bucket') AS seed_parquet_exact,
        format('s3://%s/lagodb-connectors/seed/parquet-prefix/',
-              :'lakebase_regress_bucket') AS seed_parquet_prefix,
+              :'lagodb_regress_bucket') AS seed_parquet_prefix,
        format('s3://%s/lagodb-connectors/seed/parquet-prefix/part-a.parquet',
-              :'lakebase_regress_bucket') AS seed_parquet_part_a,
+              :'lagodb_regress_bucket') AS seed_parquet_part_a,
        format('s3://%s/lagodb-connectors/seed/parquet-prefix/part-b.parquet',
-              :'lakebase_regress_bucket') AS seed_parquet_part_b,
+              :'lagodb_regress_bucket') AS seed_parquet_part_b,
        format('s3://%s/lagodb-connectors/seed/extra-exact.txt',
-              :'lakebase_regress_bucket') AS seed_extra_text_exact,
+              :'lagodb_regress_bucket') AS seed_extra_text_exact,
        format('s3://%s/lagodb-connectors/seed/extra-prefix/',
-              :'lakebase_regress_bucket') AS seed_extra_text_prefix,
+              :'lagodb_regress_bucket') AS seed_extra_text_prefix,
        format('s3://%s/lagodb-connectors/seed/extra-exact.csv',
-              :'lakebase_regress_bucket') AS seed_extra_csv_exact,
+              :'lagodb_regress_bucket') AS seed_extra_csv_exact,
        format('s3://%s/lagodb-connectors/seed/extra-prefix-csv/',
-              :'lakebase_regress_bucket') AS seed_extra_csv_prefix
+              :'lagodb_regress_bucket') AS seed_extra_csv_prefix
 \gset
 COPY lagodb_connectors_regress.common_source
 TO :'seed_text_exact'

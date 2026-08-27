@@ -10,7 +10,7 @@ step s1_touch_metadata:
 step s2_vacuum_full: VACUUM (FULL) vacuum_orphan_iso.t; <waiting ...>
 step s1_commit: COMMIT;
 s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
-DETAIL:  pg-lakebase
+DETAIL:  lagodb
 step s2_vacuum_full: <... completed>
 step s2_verify: 
   SELECT (SELECT array_agg(id ORDER BY id) FROM vacuum_orphan_iso.t)

@@ -6,7 +6,7 @@
 
 ## PostgreSQL-native Apache Iceberg Engine
 
-`lagodb-iceberg` is the Apache Iceberg extension for [`pg-lakebase`](../README.md). It provides two native PostgreSQL integration modes backed by a single shared Iceberg execution engine:
+`lagodb-iceberg` is the Apache Iceberg extension for [LagoDB](../README.md). It provides two native PostgreSQL integration modes backed by a single shared Iceberg execution engine:
 1. **Managed Tables (`USING iceberg`)**: PostgreSQL relations with native Table Access Method (TableAM) integration, ACID transactions, and metadata lifecycle management.
 2. **Foreign Tables (`lagodb_iceberg`)**: Foreign Data Wrapper (FDW) integration connecting PostgreSQL to existing tables in an external Iceberg REST Catalog without moving data.
 
@@ -186,7 +186,7 @@ For testing methodology, test matrix guidelines, and test execution commands, se
 ## Further Reading
 
 - [Root Project README](../README.md)
-- [Core Framework README](../pg-lakebase-core/README.md)
+- [Core Framework README](../lagodb-core/README.md)
 - [Build from Source Guide](../docs/build-from-source.md)
 - [Testing Architecture](docs/testing.md)
 

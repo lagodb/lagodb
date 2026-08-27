@@ -7,9 +7,9 @@ use std::rc::Rc;
 use arrow_array::{Int64Array, RecordBatch};
 use iceberg_lite::arrow::SelectedRowsReadRequest;
 use iceberg_lite::scan::{FileScanTask, TableScan};
+use lagodb_core::api::{AnalyzeTupleOutcome, TRIGGER_ROW_BLOCK_BASE};
+use lagodb_core::prelude::*;
 use pg_arrow_conv::{ArrowBatchSource, ArrowColumnDecoder, BoundBatch};
-use pg_lakebase_core::api::{AnalyzeTupleOutcome, TRIGGER_ROW_BLOCK_BASE};
-use pg_lakebase_core::prelude::*;
 
 use super::sampling::SampledPosition;
 use crate::engine::scan::batch::{

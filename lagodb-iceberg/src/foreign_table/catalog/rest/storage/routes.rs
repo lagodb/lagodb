@@ -8,11 +8,11 @@ use iceberg_lite::io::{
     FileMetadata, FileWrite, OpenedFile, Storage, StorageCredential,
 };
 use iceberg_lite::{Error, ErrorKind, Result};
-use lagodb_storage::{StagingPathResolver, StorageErrorKind, StoreConfig};
-use pg_lakebase_core::storage::profile::{
+use lagodb_core::storage::profile::{
     ObjectScheme, ObjectUri, ObjectUriPrefix, ScopedStorageProfile, StorageProfiles,
 };
-use pg_lakebase_core::storage::service::{BackendStorageService, StorageEndpoint};
+use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
+use lagodb_storage::{StagingPathResolver, StorageErrorKind, StoreConfig};
 
 use super::cache::{
     CatalogStorageIdentity, ConfiguredStorageCache, ConfiguredStorageRouteId,

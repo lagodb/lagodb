@@ -55,7 +55,7 @@ SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 -- `root->all_result_relids`. The framework classifies that base scan as
 -- `ScanPurpose::Modify`. Modify-purpose CustomScan is mandatory correctness
 -- infrastructure, so both `force` and `off` select it; the GUC only controls
--- Query-purpose scans. PG17 DML wraps the input with LakebaseModifyTable.
+-- Query-purpose scans. PG17 DML wraps the input with LagoDBModifyTable.
 
 -- A.1 UPDATE lake
 SET lagodb.customscan_mode = 'force';
@@ -154,7 +154,7 @@ SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR SHARE;
 -- ============================================================================
 -- `ctid`, `xmin`, `xmax`, `cmin`, `cmax` are the rejected system
 -- attno set in `is_rejected_system_attno`
--- (`pg-lakebase-core/src/customscan/hook.rs`). The path-stage gate
+-- (`lagodb-core/src/customscan/hook.rs`). The path-stage gate
 -- walks `rel->reltarget->exprs`, `baserestrictinfo`, and
 -- `joininfo` for any `Var` whose `varattno` matches one of those
 -- five negative attno values; the first hit triggers
@@ -190,7 +190,7 @@ SELECT xmin, xmax FROM customscan_dml_lake WHERE k = 1;
 -- from `is_rejected_system_attno` because the next_slot wrapper
 -- sets `slot->tts_tableOid = RelationGetRelid(scan_rel)` on every
 -- non-empty returned slot (
--- `pg-lakebase-core/src/customscan/exec.rs::next_slot_wrapper`).
+-- `lagodb-core/src/customscan/exec.rs::next_slot_wrapper`).
 -- PG's `ExecEvalSysVar` resolves `tableoid` straight out of
 -- `slot->tts_tableOid`, so projecting `tableoid` does not require
 -- any lake-AM-side support beyond the wrapper's tts_tableOid stamp.

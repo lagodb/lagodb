@@ -10,27 +10,27 @@
 -- Direct COPY paths for Avro and Parquet container formats.
 SET TIME ZONE 'UTC';
 SET client_min_messages = warning;
-SELECT bucket AS lakebase_regress_bucket
-FROM lakebase_regress.object_storage_fixture
+SELECT bucket AS lagodb_regress_bucket
+FROM lagodb_regress.object_storage_fixture
 \gset
 SELECT format('s3://%s/lagodb-connectors/copy/avro/exact.avro',
-              :'lakebase_regress_bucket') AS avro_exact,
+              :'lagodb_regress_bucket') AS avro_exact,
        format('s3://%s/lagodb-connectors/copy/avro/prefix/',
-              :'lakebase_regress_bucket') AS avro_prefix,
+              :'lagodb_regress_bucket') AS avro_prefix,
        format('s3://%s/lagodb-connectors/copy/avro/snappy.avro',
-              :'lakebase_regress_bucket') AS avro_snappy,
+              :'lagodb_regress_bucket') AS avro_snappy,
        format('s3://%s/lagodb-connectors/copy/parquet/exact.parquet',
-              :'lakebase_regress_bucket') AS parquet_exact,
+              :'lagodb_regress_bucket') AS parquet_exact,
        format('s3://%s/lagodb-connectors/copy/parquet/prefix/',
-              :'lakebase_regress_bucket') AS parquet_prefix,
+              :'lagodb_regress_bucket') AS parquet_prefix,
        format('s3://%s/lagodb-connectors/copy/parquet/zstd.parquet',
-              :'lakebase_regress_bucket') AS parquet_zstd,
+              :'lagodb_regress_bucket') AS parquet_zstd,
        format('s3://%s/lagodb-connectors/copy/native-bridge/sentinels.json',
-              :'lakebase_regress_bucket') AS bridge_json,
+              :'lagodb_regress_bucket') AS bridge_json,
        format('s3://%s/lagodb-connectors/copy/native-bridge/sentinels.avro',
-              :'lakebase_regress_bucket') AS bridge_avro,
+              :'lagodb_regress_bucket') AS bridge_avro,
        format('s3://%s/lagodb-connectors/copy/native-bridge/sentinels.parquet',
-              :'lakebase_regress_bucket') AS bridge_parquet
+              :'lagodb_regress_bucket') AS bridge_parquet
 \gset native_
 COPY lagodb_connectors_regress.common_source
 TO :'native_avro_exact';

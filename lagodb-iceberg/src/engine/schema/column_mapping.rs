@@ -27,12 +27,12 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use iceberg_lite::spec::Schema as IcebergSchema;
+use lagodb_core::batch::BatchBuffer;
+use lagodb_core::tuple::TupleSlotRow;
 use pg_arrow_conv::{
     ArrowColumnDecoder, BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule,
     DatumCodec, DecodedColumn, PgColumnType,
 };
-use pg_lakebase_core::batch::BatchBuffer;
-use pg_lakebase_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
 use super::relation::{RelationFieldBinding, RelationFieldMap, RelationShape};

@@ -3,7 +3,7 @@
 use std::num::NonZeroU64;
 
 use chrono::{Datelike, Utc};
-use pg_lakebase_core::storage::foreign::{
+use lagodb_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
 use uuid::Uuid;

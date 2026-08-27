@@ -15,7 +15,7 @@ use arrow_array::builder::{
     Int64Builder, ListBuilder, StringBuilder,
 };
 use arrow_schema::FieldRef;
-use pg_lakebase_core::tuple::DetoastedVarlena;
+use lagodb_core::tuple::DetoastedVarlena;
 use pgrx::{Array as PgArray, FromDatum, pg_sys};
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};

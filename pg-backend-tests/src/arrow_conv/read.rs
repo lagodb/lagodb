@@ -12,10 +12,10 @@ mod tests {
     use arrow_array::Int32Array;
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
+    use lagodb_core::batch::AmScanBatchSource;
     use pg_arrow_conv::{
         ArrowBatchSource, ArrowConversionError, ColumnRule, DatumCodec, DecodedColumn,
     };
-    use pg_lakebase_core::batch::AmScanBatchSource;
     use pgrx::pg_sys;
     use pgrx::prelude::*;
 

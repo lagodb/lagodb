@@ -9,12 +9,12 @@ mod write;
 
 use std::io::BufReader;
 
-use lagodb_storage::StorageFile;
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignInsertBeginContext, ForeignModifyBeginContext, ForeignModifyCapabilities,
     ForeignModifyOperation, ForeignModifyPlanContext, ForeignModifyPlanSpec,
     ForeignModifyRelationContext, StartForeignScanContext,
 };
+use lagodb_storage::StorageFile;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;

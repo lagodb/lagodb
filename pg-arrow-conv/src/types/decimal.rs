@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
-use pg_lakebase_core::tuple::{Cell, Decimal128NumericCodec, DecimalCodecError};
+use lagodb_core::tuple::{Cell, Decimal128NumericCodec, DecimalCodecError};
 use pgrx::pg_sys;
 use pgrx::prelude::AnyNumeric;
 

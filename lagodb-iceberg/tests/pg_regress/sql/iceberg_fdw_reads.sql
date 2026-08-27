@@ -11,7 +11,7 @@ SELECT rest_uri AS regress_rest_uri,
        region AS regress_s3_region,
        access_key_id AS regress_s3_access_key_id,
        secret_access_key AS regress_s3_secret_access_key
-FROM lakebase_regress.object_storage_fixture
+FROM lagodb_regress.object_storage_fixture
 \gset
 \set regress_bucket_a_scope 's3://' :regress_fallback_bucket '/'
 \set regress_bucket_a_narrow_scope 's3://' :regress_fallback_bucket '/iceberg-fallback/fdw_regress/'

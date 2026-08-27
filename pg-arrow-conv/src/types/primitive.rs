@@ -14,7 +14,7 @@ use std::sync::Arc;
 use arrow_array::builder::{ArrayBuilder, BooleanBuilder, PrimitiveBuilder};
 use arrow_array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
 use arrow_array::{ArrayRef, ArrowPrimitiveType};
-use pg_lakebase_core::tuple::Cell;
+use lagodb_core::tuple::Cell;
 use pgrx::{FromDatum, pg_sys};
 
 use super::{ColumnAppend, cell_type_mismatch, read_bound};

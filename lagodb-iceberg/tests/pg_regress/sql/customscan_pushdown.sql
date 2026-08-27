@@ -825,7 +825,7 @@ DROP TABLE customscan_partial_pushdown_t;
 -- mode ('auto'), where the planner chooses purely on cost — the path the real
 -- workload takes:
 --   * A pushable predicate makes `create_path` emit a CustomPath. Its cost
---     model (pg-lakebase-core `compute_costs`) does NOT reduce output rows
+--     model (lagodb-core `compute_costs`) does NOT reduce output rows
 --     (`path.rows` stays `parent->rows`); pruning savings land only in the
 --     SCANNED-volume terms: `scanned_pages = baserel.pages * fraction` and
 --     `scanned_tuples = baserel.tuples * fraction`, which drive the disk

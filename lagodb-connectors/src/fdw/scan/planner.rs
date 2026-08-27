@@ -1,6 +1,6 @@
 //! Planner-side scan delegation.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     BeginForeignScanContext, FdwScan, ForeignFilterExplainValues, ForeignPathBuilder,
     ForeignPathContext, ForeignPathKeys, ForeignPlanContext, ForeignPlanSpec,
     ForeignRelContext, ForeignRelSize, ForeignRelSizeContext, ForeignScanError,

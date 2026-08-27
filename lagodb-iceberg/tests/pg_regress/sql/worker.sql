@@ -4,10 +4,10 @@
 \set ECHO none
 \set QUIET 1
 \set regress_database :DBNAME
-\set runtime_database lakebase_runtime_source
-\set runtime_template_database lakebase_runtime_template
-\set runtime_template_copy lakebase_runtime_template_copy
-\set runtime_role lakebase_runtime_non_superuser
+\set runtime_database lagodb_runtime_source
+\set runtime_template_database lagodb_runtime_template
+\set runtime_template_copy lagodb_runtime_template_copy
+\set runtime_role lagodb_runtime_non_superuser
 \setenv PGDATABASE :regress_database
 SET client_min_messages = warning;
 
@@ -16,17 +16,17 @@ DO $$
 BEGIN
     IF EXISTS (
         SELECT FROM pg_database
-        WHERE datname = 'lakebase_runtime_template_copy'
+        WHERE datname = 'lagodb_runtime_template_copy'
           AND datistemplate
     ) THEN
-        EXECUTE 'ALTER DATABASE lakebase_runtime_template_copy IS_TEMPLATE false';
+        EXECUTE 'ALTER DATABASE lagodb_runtime_template_copy IS_TEMPLATE false';
     END IF;
     IF EXISTS (
         SELECT FROM pg_database
-        WHERE datname = 'lakebase_runtime_template'
+        WHERE datname = 'lagodb_runtime_template'
           AND datistemplate
     ) THEN
-        EXECUTE 'ALTER DATABASE lakebase_runtime_template IS_TEMPLATE false';
+        EXECUTE 'ALTER DATABASE lagodb_runtime_template IS_TEMPLATE false';
     END IF;
 END
 $$;
@@ -112,7 +112,7 @@ DO $$
 DECLARE
     denied boolean := false;
 BEGIN
-    SET LOCAL ROLE lakebase_runtime_non_superuser;
+    SET LOCAL ROLE lagodb_runtime_non_superuser;
     BEGIN
         EXECUTE 'CREATE EXTENSION lagodb_base';
     EXCEPTION WHEN insufficient_privilege THEN
@@ -121,7 +121,7 @@ BEGIN
     IF NOT denied OR EXISTS (
         SELECT FROM pg_extension WHERE extname = 'lagodb_base'
     ) THEN
-        RAISE EXCEPTION 'non-superuser Lakebase installation was allowed';
+        RAISE EXCEPTION 'non-superuser LagoDB installation was allowed';
     END IF;
 END
 $$;
@@ -308,7 +308,7 @@ DO $$
 DECLARE
     denied boolean := false;
 BEGIN
-    SET LOCAL ROLE lakebase_runtime_non_superuser;
+    SET LOCAL ROLE lagodb_runtime_non_superuser;
     BEGIN
         PERFORM lagodb.deregister_worker('maintenance');
     EXCEPTION WHEN insufficient_privilege THEN
@@ -427,7 +427,7 @@ CALL pg_temp.assert_iceberg_worker_registered('initial registration');
 DELETE FROM worker_deregister_results;
 
 SELECT lagodb.deregister_worker(
-    'lakebase-worker-does-not-exist', true
+    'lagodb-worker-does-not-exist', true
 );
 SELECT lagodb.deregister_worker(-2147483648, true);
 
@@ -549,7 +549,7 @@ INSERT INTO lagodb.maintenance_queue (
     '00000000-0000-0000-0000-000000000003', 999, 1, 'test', 'ready',
     'runtime-lifecycle-test', 0, clock_timestamp(), false, clock_timestamp()
 );
-SET ROLE lakebase_runtime_non_superuser;
+SET ROLE lagodb_runtime_non_superuser;
 SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 RESET ROLE;
 DO $$
@@ -697,27 +697,27 @@ DROP ROLE :runtime_role;
 DROP EXTENSION injection_points;
 
 -- 5. Extension-worker statement cancellation on a real storage request.
-SELECT endpoint AS lakebase_regress_endpoint,
-       bucket AS lakebase_regress_bucket,
-       region AS lakebase_regress_region,
-       access_key_id AS lakebase_regress_access_key_id,
-       secret_access_key AS lakebase_regress_secret_access_key
-FROM lakebase_regress.object_storage_fixture
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
 \gset
 SELECT 'regress-worker-statement-cancel-' || current_database()
        AS cancel_volume_name
 \gset
 SELECT lagodb.create_storage_volume(
     :'cancel_volume_name',
-    format('s3://%s', :'lakebase_regress_bucket'),
+    format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
-        'access_key_id', :'lakebase_regress_access_key_id',
-        'secret_access_key', :'lakebase_regress_secret_access_key'
+        'access_key_id', :'lagodb_regress_access_key_id',
+        'secret_access_key', :'lagodb_regress_secret_access_key'
     ),
     jsonb_build_object(
-        'region', :'lakebase_regress_region',
-        'endpoint', :'lakebase_regress_endpoint',
+        'region', :'lagodb_regress_region',
+        'endpoint', :'lagodb_regress_endpoint',
         'allow_http', true
     )
 ) AS created_cancel_volume
@@ -728,7 +728,7 @@ WHERE storage_volume_name = :'cancel_volume_name'
 \gset
 CREATE TEMP TABLE worker_cancel_fixture AS
 SELECT :'cancel_volume_id'::bigint AS volume_id,
-       :'lakebase_regress_bucket'::text AS object_namespace;
+       :'lagodb_regress_bucket'::text AS object_namespace;
 DO $$
 DECLARE
     ready boolean := false;
@@ -744,7 +744,7 @@ BEGIN
             FROM lagodb.observe_object_tree(
                 fixture.volume_id,
                 fixture.object_namespace,
-                '__lakebase_regress_probe__'
+                '__lagodb_regress_probe__'
             );
         EXCEPTION WHEN OTHERS THEN
             ready := false;
@@ -798,21 +798,21 @@ INSERT INTO lagodb.maintenance_queue (
     attempt_count, not_before, failed, created_at
 ) VALUES (
     '00000000-0000-0000-0000-000000000004', 1, :'cancel_volume_id',
-    :'lakebase_regress_bucket', 'worker-cancel-test/blocked-object',
+    :'lagodb_regress_bucket', 'worker-cancel-test/blocked-object',
     'worker-cancel-test', 0, clock_timestamp(), false, clock_timestamp()
 );
 
-SELECT pid::text AS lakebase_regress_storage_pid
+SELECT pid::text AS lagodb_regress_storage_pid
 FROM pg_stat_activity
 WHERE backend_type = 'lagodb-storage'
 \gset
-SELECT pg_backend_pid()::text AS lakebase_regress_backend_pid,
+SELECT pg_backend_pid()::text AS lagodb_regress_backend_pid,
        current_setting('port') || '-' || current_database()
-           AS lakebase_regress_slot
+           AS lagodb_regress_slot
 \gset
-\setenv LAKEBASE_REGRESS_STORAGE_PID :lakebase_regress_storage_pid
-\setenv LAKEBASE_REGRESS_BACKEND_PID :lakebase_regress_backend_pid
-\setenv LAKEBASE_REGRESS_SLOT :lakebase_regress_slot
+\setenv LAGODB_REGRESS_STORAGE_PID :lagodb_regress_storage_pid
+\setenv LAGODB_REGRESS_BACKEND_PID :lagodb_regress_backend_pid
+\setenv LAGODB_REGRESS_SLOT :lagodb_regress_slot
 \! bin/storage_worker_pause_guard start
 \if :SHELL_ERROR
     \quit 1

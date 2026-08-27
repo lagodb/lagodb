@@ -2,10 +2,10 @@
 
 use std::ffi::CStr;
 
-use pg_lakebase_core::catalog::{find_all_inheritors, range_var_get_relid};
-use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
-use pg_lakebase_core::hooks::{HookError, UtilityHookError};
-use pg_lakebase_core::options::TableOptionAlterations;
+use lagodb_core::catalog::{find_all_inheritors, range_var_get_relid};
+use lagodb_core::handles::{RelationGuard, RelationHandle};
+use lagodb_core::hooks::{HookError, UtilityHookError};
+use lagodb_core::options::TableOptionAlterations;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 

@@ -1,4 +1,4 @@
-//! GUC definitions for the pg-lakebase storage background worker.
+//! GUC definitions for the LagoDB storage background worker.
 //!
 //! Most GUCs use `GucContext::Postmaster` (require a PostgreSQL restart).
 //! Runtime-tunable parameters use `GucContext::Sighup` and take effect after

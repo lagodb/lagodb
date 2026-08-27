@@ -8,7 +8,7 @@
 //!
 //! The module exposes a small set of domain-level registration functions. Internally
 //! a single [`StorageTransactionResource`] is lazily registered as a
-//! [`pg_lakebase_core::transaction::TransactionResource`] the first time any
+//! [`lagodb_core::transaction::TransactionResource`] the first time any
 //! storage resource is recorded.
 //!
 //! **Commit behaviour:**
@@ -46,8 +46,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
+use lagodb_core::storage::service::BackendStorageService;
 use lagodb_storage::ObjectLocation;
-use pg_lakebase_core::storage::service::BackendStorageService;
 
 use super::{LocalStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch};
 use crate::error::{IcebergError, IcebergResult};
@@ -102,7 +102,7 @@ impl Drop for MetadataMaterializationAttempt {
             return;
         }
         if let Err(error) = self.resource.discard_metadata_attempt(self.id) {
-            pg_lakebase_core::diag::report_warning(format_args!(
+            lagodb_core::diag::report_warning(format_args!(
                 "failed to discard unresolved metadata resource attempt: {}",
                 error
             ));

@@ -9,11 +9,11 @@
 use std::fmt;
 
 use iceberg_lite::io::FileIO;
-use pg_lakebase_core::diag;
-use pg_lakebase_core::transaction::cleanup::{
+use lagodb_core::diag;
+use lagodb_core::transaction::cleanup::{
     CleanupTiming, PendingDelete, register_pending_delete,
 };
-use pg_lakebase_core::wal::flush_wal;
+use lagodb_core::wal::flush_wal;
 
 use super::LocalStorage;
 use crate::storage::local_file_wal::record::{

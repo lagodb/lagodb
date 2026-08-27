@@ -11,7 +11,7 @@ mod service_account;
 mod sql_api;
 mod store;
 
-use pg_lakebase_core::storage::volume::{StorageVolumeId, StorageVolumeRoute};
+use lagodb_core::storage::volume::{StorageVolumeId, StorageVolumeRoute};
 
 pub(crate) use binding::{handles_utility, utility_post, utility_pre};
 pub(crate) use credential::CredentialConfig;

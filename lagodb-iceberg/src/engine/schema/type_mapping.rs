@@ -40,10 +40,10 @@
 
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::spec::{NestedField, PrimitiveType, Schema as IcebergSchema, Type};
+use lagodb_core::tuple::numeric_typmod;
 use pg_arrow_conv::{
     ArrowConversionError, ColumnRule, PgColumnType, resolve_column_rule,
 };
-use pg_lakebase_core::tuple::numeric_typmod;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};

@@ -5,9 +5,9 @@ FAILSAFE_SECONDS=120
 START_TIMEOUT_SECONDS=5
 RELEASE_TIMEOUT_SECONDS=5
 
-storage_pid=${LAKEBASE_REGRESS_STORAGE_PID:-}
-backend_pid=${LAKEBASE_REGRESS_BACKEND_PID:-}
-slot=${LAKEBASE_REGRESS_SLOT:-}
+storage_pid=${LAGODB_REGRESS_STORAGE_PID:-}
+backend_pid=${LAGODB_REGRESS_BACKEND_PID:-}
+slot=${LAGODB_REGRESS_SLOT:-}
 
 validate_pid() {
     name=$1
@@ -23,7 +23,7 @@ validate_pid() {
 validate_slot() {
     case "$slot" in
         ''|*[!A-Za-z0-9_.-]*)
-            echo "LAKEBASE_REGRESS_SLOT contains unsupported characters" >&2
+            echo "LAGODB_REGRESS_SLOT contains unsupported characters" >&2
             exit 2
             ;;
     esac
@@ -93,8 +93,8 @@ daemon() {
 }
 
 start() {
-    validate_pid LAKEBASE_REGRESS_STORAGE_PID "$storage_pid"
-    validate_pid LAKEBASE_REGRESS_BACKEND_PID "$backend_pid"
+    validate_pid LAGODB_REGRESS_STORAGE_PID "$storage_pid"
+    validate_pid LAGODB_REGRESS_BACKEND_PID "$backend_pid"
     validate_slot
     kill -0 "$storage_pid"
     kill -0 "$backend_pid"
@@ -132,7 +132,7 @@ start() {
 }
 
 release() {
-    validate_pid LAKEBASE_REGRESS_STORAGE_PID "$storage_pid"
+    validate_pid LAGODB_REGRESS_STORAGE_PID "$storage_pid"
     validate_slot
     root=$(state_root)
     if run_dir=$(read_active_run "$root"); then
@@ -151,7 +151,7 @@ release() {
 }
 
 recover() {
-    validate_pid LAKEBASE_REGRESS_STORAGE_PID "$storage_pid"
+    validate_pid LAGODB_REGRESS_STORAGE_PID "$storage_pid"
     validate_slot
     root=$(state_root)
     if run_dir=$(read_active_run "$root"); then

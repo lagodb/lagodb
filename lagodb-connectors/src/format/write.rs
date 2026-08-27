@@ -1,6 +1,6 @@
 //! Writer capability owned by one concrete format.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignInsertBatch, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyOutcome, ForeignModifyPlanContext,
     ForeignModifyPlanSpec, ForeignModifyRelationContext, ForeignUpdateTargetContext,

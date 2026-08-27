@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# pg-lakebase use unstable rust to run linters, such as `clippy` and `rustfmt`. But this will not affect downstream users,
+# LagoDB uses unstable Rust to run linters, such as `clippy` and `rustfmt`. But this will not affect downstream users,
 # and only MSRV is required.
 #
 # The channel is exactly same day for our MSRV.

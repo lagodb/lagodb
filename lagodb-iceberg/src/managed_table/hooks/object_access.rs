@@ -1,8 +1,8 @@
 use crate::managed_table::catalog::IcebergRelationExt;
 use crate::managed_table::catalog::table_drop::IcebergTableDrop;
 use crate::managed_table::hooks::column_drop_guard::ControlledColumnDrops;
-use pg_lakebase_core::handles::{RelationGuard, RelationHandle};
-use pg_lakebase_core::hooks::{
+use lagodb_core::handles::{RelationGuard, RelationHandle};
+use lagodb_core::hooks::{
     self, HookError, OBJECT_ACCESS_DROP, ObjectAccessEvent, ObjectAccessFilter,
     ObjectAccessHook, ObjectAccessHookError,
 };

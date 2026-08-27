@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use iceberg_lite::spec::DataFile;
-use pg_lakebase_core::tuple::TupleSlotRow;
+use lagodb_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
 use super::{

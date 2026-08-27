@@ -1,7 +1,7 @@
 //! Format-specific option dispatch and validated format state.
 
+use lagodb_core::storage::foreign::ForeignOptionView;
 use lagodb_storage::StorageFile;
-use pg_lakebase_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

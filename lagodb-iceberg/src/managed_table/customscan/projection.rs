@@ -1,6 +1,6 @@
 //! Projection policy for Iceberg CustomScan tuple production.
 
-use pg_lakebase_core::customscan::provider::{
+use lagodb_core::customscan::provider::{
     CustomScanError, NeededColumns, ScanTupleDescriptor,
 };
 use pgrx::pg_sys;

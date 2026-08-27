@@ -278,7 +278,7 @@ OPTIONS (
 );
 \set VERBOSITY terse
 SELECT * FROM iceberg_fdw_read.fallback_main;
-ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: iceberg error: DataInvalid => failed to resolve PostgreSQL storage profile, source: storage profile "iceberg_read_storage_ambiguous" is ambiguous with "iceberg_read_storage_narrow" for scope "s3://lakebase-regress-iceberg-fallback-a/iceberg-fallback/fdw_regress/"
+ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: iceberg error: DataInvalid => failed to resolve PostgreSQL storage profile, source: storage profile "iceberg_read_storage_ambiguous" is ambiguous with "iceberg_read_storage_narrow" for scope "s3://lagodb-regress-iceberg-fallback-a/iceberg-fallback/fdw_regress/"
 \set VERBOSITY default
 SET client_min_messages = warning;
 DROP SCHEMA iceberg_fdw_read CASCADE;

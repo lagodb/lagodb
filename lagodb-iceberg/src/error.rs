@@ -2,7 +2,7 @@
 //!
 //! Keep shared engine and AM business logic on [`IcebergResult<T>`] and
 //! [`IcebergError`]. The PostgreSQL table-AM callback boundary returns
-//! `pg_lakebase_core::api::AmResult<T>`, which owns a PostgreSQL
+//! `lagodb_core::api::AmResult<T>`, which owns a PostgreSQL
 //! `ErrorReport` through a small error handle.
 //! The bridge is the `From<IcebergError> for ErrorReport` implementation in
 //! this file, so callback methods can use normal `?` propagation.
@@ -18,12 +18,12 @@ use std::error::Error as StdError;
 use std::fmt::{Display, Formatter};
 
 use iceberg_lite::catalog::rest::{RestError, RestErrorKind};
+use lagodb_core::diag::{PgError, SqlStateError, domain_error_report};
+use lagodb_core::extension_worker::WorkerNotificationError;
+use lagodb_core::object_cleanup::ObjectCleanupError;
+use lagodb_core::options::TablespaceError;
+use lagodb_core::options::{TableOptionError, TablespaceCacheError};
 use lagodb_storage::{StorageError, StorageErrorKind};
-use pg_lakebase_core::diag::{PgError, SqlStateError, domain_error_report};
-use pg_lakebase_core::extension_worker::WorkerNotificationError;
-use pg_lakebase_core::object_cleanup::ObjectCleanupError;
-use pg_lakebase_core::options::TablespaceError;
-use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -375,9 +375,7 @@ impl From<IcebergError> for ErrorReport {
 
 pub type IcebergResult<T> = Result<T, IcebergError>;
 
-impl From<IcebergError>
-    for pg_lakebase_core::table_maintenance::TableMaintenanceError
-{
+impl From<IcebergError> for lagodb_core::table_maintenance::TableMaintenanceError {
     fn from(source: IcebergError) -> Self {
         Self::provider(source)
     }
@@ -581,14 +579,16 @@ mod tests {
                 "FixedSizeBinary(16)".into(),
                 "expected uuid".into(),
             ),
-            pg_arrow_conv::ArrowConversionError::ArrowTypeMismatch("Int32Array".into()),
+            pg_arrow_conv::ArrowConversionError::ArrowTypeMismatch(
+                "Int32Array".into(),
+            ),
             // DATA_EXCEPTION group
             pg_arrow_conv::ArrowConversionError::ValueOutOfRange(
                 "value out of range".into(),
             ),
-            pg_arrow_conv::ArrowConversionError::NumericError(PgNumericError::Invalid(
-                "not a numeric".into(),
-            )),
+            pg_arrow_conv::ArrowConversionError::NumericError(
+                PgNumericError::Invalid("not a numeric".into()),
+            ),
             pg_arrow_conv::ArrowConversionError::DatetimeConversionError(
                 DateTimeConversionError::FieldOverflow,
             ),
@@ -597,7 +597,7 @@ mod tests {
                 arrow_schema::ArrowError::SchemaError("bad schema".into()),
             ),
             pg_arrow_conv::ArrowConversionError::DecimalCodec(
-                pg_lakebase_core::tuple::DecimalCodecError::InvalidBinaryRepresentation {
+                lagodb_core::tuple::DecimalCodecError::InvalidBinaryRepresentation {
                     message: "malformed numeric bytes".into(),
                 },
             ),
@@ -668,7 +668,7 @@ mod tests {
     /// routing that must hold.
     #[test]
     fn decimal_codec_error_sqlstate_classes_survive_the_boundary() {
-        use pg_lakebase_core::tuple::DecimalCodecError;
+        use lagodb_core::tuple::DecimalCodecError;
 
         let cases: [(DecimalCodecError, PgSqlErrorCode); 4] = [
             (

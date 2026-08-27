@@ -119,7 +119,7 @@ pub enum ColumnRule {
     Binary,
     /// `Binary` or `LargeBinary` containing complete PostgreSQL JSONB
     /// internal-varlena bytes. This is a provider-selected physical codec, not
-    /// the representation of [`Cell::Jsonb`](pg_lakebase_core::tuple::Cell).
+    /// the representation of [`Cell::Jsonb`](lagodb_core::tuple::Cell).
     PostgresJsonbVarlena,
     /// `FixedSizeBinary(len)` mapped to `bytea`.
     FixedBinary {

@@ -9,11 +9,11 @@ use std::ptr;
 
 use pgrx::{pg_guard, pg_sys};
 
-use pg_lakebase_core::diag::ReportableError;
-use pg_lakebase_core::handles::{RelationHandle, VacuumParamsHandle};
-use pg_lakebase_core::hooks::{HookError, UtilityHookPhase};
+use lagodb_core::diag::ReportableError;
+use lagodb_core::handles::{RelationHandle, VacuumParamsHandle};
+use lagodb_core::hooks::{HookError, UtilityHookPhase};
 
-use pg_lakebase_core::table_maintenance::{
+use lagodb_core::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
     TableMaintenanceOptions, TableMaintenanceRequest, TableMaintenanceRouter,
 };
@@ -21,21 +21,21 @@ use pg_lakebase_core::table_maintenance::{
 use super::ProcessUtilityArgs;
 
 unsafe extern "C" {
-    fn lakebase_parse_vacuum_full(
+    fn lagodb_parse_vacuum_full(
         stmt: *mut pg_sys::VacuumStmt,
         params: *mut pg_sys::VacuumParams,
     ) -> bool;
-    fn lakebase_expand_vacuum_relations(
+    fn lagodb_expand_vacuum_relations(
         stmt: *mut pg_sys::VacuumStmt,
         params: *mut pg_sys::VacuumParams,
         context: pg_sys::MemoryContext,
     ) -> *mut pg_sys::List;
-    fn lakebase_relation_access_method(relid: pg_sys::Oid) -> pg_sys::Oid;
-    fn lakebase_copy_node_to_context(
+    fn lagodb_relation_access_method(relid: pg_sys::Oid) -> pg_sys::Oid;
+    fn lagodb_copy_node_to_context(
         node: *const c_void,
         context: pg_sys::MemoryContext,
     ) -> *mut c_void;
-    fn lakebase_vacuum_provider_relation(
+    fn lagodb_vacuum_provider_relation(
         relation: *mut pg_sys::VacuumRelation,
         params: *mut pg_sys::VacuumParams,
         callback: unsafe extern "C-unwind" fn(
@@ -132,7 +132,7 @@ unsafe fn copy_stmt_in_portal(
     stmt: *mut pg_sys::VacuumStmt,
 ) -> *mut pg_sys::VacuumStmt {
     unsafe {
-        lakebase_copy_node_to_context(stmt.cast(), pg_sys::PortalContext)
+        lagodb_copy_node_to_context(stmt.cast(), pg_sys::PortalContext)
             .cast::<pg_sys::VacuumStmt>()
     }
 }
@@ -147,7 +147,7 @@ unsafe fn delegate_native_run(
         // Native VACUUM commits between relations. Both the statement and its
         // relation list must therefore outlive the current transaction.
         (*stmt).rels =
-            lakebase_copy_node_to_context(relations.cast(), pg_sys::PortalContext)
+            lagodb_copy_node_to_context(relations.cast(), pg_sys::PortalContext)
                 .cast::<pg_sys::List>();
         // standard_ProcessUtility allocates a ParseState in
         // CurrentMemoryContext before ExecVacuum commits the current
@@ -172,7 +172,7 @@ unsafe fn delegate_provider_analyze(
     unsafe {
         let stmt = copy_stmt_in_portal(original);
         let copied_relation =
-            lakebase_copy_node_to_context(relation.cast(), pg_sys::PortalContext)
+            lagodb_copy_node_to_context(relation.cast(), pg_sys::PortalContext)
                 .cast::<pg_sys::VacuumRelation>();
         (*stmt).rels = pg_sys::lappend(ptr::null_mut(), copied_relation.cast());
         (*stmt).options = ptr::null_mut();
@@ -221,7 +221,7 @@ unsafe fn preflight_provider_analyze(
         for index in 0..count {
             let relation =
                 pg_sys::list_nth(expanded, index).cast::<pg_sys::VacuumRelation>();
-            let am = lakebase_relation_access_method((*relation).oid);
+            let am = lagodb_relation_access_method((*relation).oid);
             if am == pg_sys::InvalidOid
                 || !TableMaintenanceRouter::is_registered_am(am).report_unwrap()
             {
@@ -251,7 +251,7 @@ pub(crate) unsafe fn try_route_vacuum_full(
 ) -> bool {
     unsafe {
         let mut params = pg_sys::VacuumParams::default();
-        if !lakebase_parse_vacuum_full(stmt, &mut params) {
+        if !lagodb_parse_vacuum_full(stmt, &mut params) {
             return false;
         }
         if !TableMaintenanceRouter::has_providers() {
@@ -263,11 +263,8 @@ pub(crate) unsafe fn try_route_vacuum_full(
 
         pg_sys::PreventInTransactionBlock(is_top_level, c"VACUUM".as_ptr());
         let command_time = TableMaintenanceCommandTime::now().report_unwrap();
-        let expanded = lakebase_expand_vacuum_relations(
-            stmt,
-            &mut params,
-            pg_sys::PortalContext,
-        );
+        let expanded =
+            lagodb_expand_vacuum_relations(stmt, &mut params, pg_sys::PortalContext);
         preflight_provider_analyze(expanded, &params);
         let mut provider_context = ProviderContext {
             command_time,
@@ -279,7 +276,7 @@ pub(crate) unsafe fn try_route_vacuum_full(
         for index in 0..count {
             let relation =
                 pg_sys::list_nth(expanded, index).cast::<pg_sys::VacuumRelation>();
-            let am = lakebase_relation_access_method((*relation).oid);
+            let am = lagodb_relation_access_method((*relation).oid);
             let is_provider = am != pg_sys::InvalidOid
                 && TableMaintenanceRouter::is_registered_am(am).report_unwrap();
             if !is_provider {
@@ -291,7 +288,7 @@ pub(crate) unsafe fn try_route_vacuum_full(
                 delegate_native_run(args, stmt, native_run);
                 native_run = ptr::null_mut();
             }
-            let result = lakebase_vacuum_provider_relation(
+            let result = lagodb_vacuum_provider_relation(
                 relation,
                 &mut params,
                 execute_provider,

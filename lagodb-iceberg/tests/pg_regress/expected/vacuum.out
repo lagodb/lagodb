@@ -274,7 +274,7 @@ SELECT pg_relation_filepath('vacuum_failure_recovery_t') || '_iceberg'
 SELECT count(*) AS objects_before_failure
 FROM pg_ls_dir(:'failure_root', true, false)
 \gset
-\! output="$(psql -XAtq -v ON_ERROR_STOP=1 -c "SELECT injection_points_set_local()" -c "SELECT injection_points_attach('lakebase-iceberg-vacuum-after-rewrite', 'error')" -c "VACUUM vacuum_failure_recovery_t" 2>&1)"; status=$?; if test "$status" -ne 0 && printf '%s\n' "$output" | grep -Fq 'error triggered for injection point lakebase-iceberg-vacuum-after-rewrite'; then echo "injected_vacuum_failed: true"; else echo "injected_vacuum_failed: false"; fi
+\! output="$(psql -XAtq -v ON_ERROR_STOP=1 -c "SELECT injection_points_set_local()" -c "SELECT injection_points_attach('lagodb-iceberg-vacuum-after-rewrite', 'error')" -c "VACUUM vacuum_failure_recovery_t" 2>&1)"; status=$?; if test "$status" -ne 0 && printf '%s\n' "$output" | grep -Fq 'error triggered for injection point lagodb-iceberg-vacuum-after-rewrite'; then echo "injected_vacuum_failed: true"; else echo "injected_vacuum_failed: false"; fi
 injected_vacuum_failed: true
 SELECT count(*) = :rows_before::bigint AS rows_preserved_after_failure,
        md5(string_agg(id::text || ':' || payload, ',' ORDER BY id))
@@ -527,7 +527,7 @@ WITH observations AS (
     FROM object_matrix_roots AS roots
     CROSS JOIN LATERAL lagodb.observe_object_tree(
         :'volume_id',
-        :'lakebase_regress_bucket',
+        :'lagodb_regress_bucket',
         roots.prefix
     ) AS observed
     CROSS JOIN LATERAL lagodb.table_maintenance_stats(roots.relid) AS stats

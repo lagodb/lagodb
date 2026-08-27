@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
 use lagodb_storage::{StorageError, StorageResult, StoreConfig};
-use pg_lakebase_core::storage::service::{BackendStorageService, StorageEndpoint};
 use pgrx::pg_sys;
 
 use super::routes::ObjectProvider;

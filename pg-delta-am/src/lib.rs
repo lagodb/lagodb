@@ -5,8 +5,8 @@
 //! gives the shared runtime a second real AM owner for cross-DSO registration
 //! coverage. It must not be treated as a Delta storage implementation.
 
-use pg_lakebase_core::table_maintenance::{
-    LakebaseTableMaintenanceProvider, TableMaintenanceError, TableMaintenanceReport,
+use lagodb_core::table_maintenance::{
+    LagodbTableMaintenanceProvider, TableMaintenanceError, TableMaintenanceReport,
     TableMaintenanceRequest, TableMaintenanceStats,
 };
 use pgrx::prelude::*;
@@ -18,7 +18,7 @@ mod pg_test_support;
 
 struct DeltaMaintenanceProvider;
 
-impl LakebaseTableMaintenanceProvider for DeltaMaintenanceProvider {
+impl LagodbTableMaintenanceProvider for DeltaMaintenanceProvider {
     const NAME: &'static std::ffi::CStr = c"delta";
     const EXTENSION_NAME: &'static std::ffi::CStr = c"pg_delta_am";
     const LIBRARY_NAME: &'static std::ffi::CStr = c"pg_delta_am";
@@ -40,7 +40,7 @@ impl LakebaseTableMaintenanceProvider for DeltaMaintenanceProvider {
     }
 
     fn inspect(
-        _relation: &pg_lakebase_core::handles::RelationHandle<'_>,
+        _relation: &lagodb_core::handles::RelationHandle<'_>,
     ) -> Result<TableMaintenanceStats, TableMaintenanceError> {
         Ok(TableMaintenanceStats {
             format: Some("delta-skeleton".to_owned()),
@@ -53,7 +53,7 @@ impl LakebaseTableMaintenanceProvider for DeltaMaintenanceProvider {
            RETURNS table_am_handler
            LANGUAGE c STRICT
            AS 'MODULE_PATHNAME', 'delta_table_am_handler_wrapper';")]
-fn delta_table_am_handler() -> pg_lakebase_core::TableAmRoutine {
+fn delta_table_am_handler() -> lagodb_core::TableAmRoutine {
     let heap_handler_oid =
         unsafe { pg_sys::fmgr_internal_function(c"heap_tableam_handler".as_ptr()) };
     assert_ne!(
@@ -66,7 +66,7 @@ fn delta_table_am_handler() -> pg_lakebase_core::TableAmRoutine {
         !routine.is_null(),
         "PostgreSQL returned a null heap table-AM routine"
     );
-    unsafe { pg_lakebase_core::TableAmRoutine::from_pg(routine.cast_mut()) }
+    unsafe { lagodb_core::TableAmRoutine::from_pg(routine.cast_mut()) }
 }
 
 pgrx::extension_sql!(
@@ -80,6 +80,5 @@ pgrx::extension_sql!(
 extern "C-unwind" fn _PG_init() {
     #[cfg(feature = "pg_test")]
     pg_test_support::init_hooks();
-    pg_lakebase_core::table_maintenance::register_provider::<DeltaMaintenanceProvider>(
-    );
+    lagodb_core::table_maintenance::register_provider::<DeltaMaintenanceProvider>();
 }

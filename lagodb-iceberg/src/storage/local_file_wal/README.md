@@ -78,7 +78,7 @@ and cannot close the crash window between PostgreSQL commit and emission of the
 cleanup record.
 
 That operation belongs to this Iceberg resource manager, not to
-`pg_lakebase_core::wal`: core owns generic custom-rmgr mechanics, while local
+`lagodb_core::wal`: core owns generic custom-rmgr mechanics, while local
 Iceberg path policy, record layout, validation, and redo belong in
 `lagodb-iceberg/src/storage/local_file_wal`. It should only be emitted for local storage using the
 Iceberg `WRITE_FILE` WAL path. Object/distributed storage must continue to use

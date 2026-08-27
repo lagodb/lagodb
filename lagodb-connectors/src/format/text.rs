@@ -1,12 +1,12 @@
 //! PostgreSQL COPY text-format object and its validated options.
 
-use lagodb_storage::StorageFile;
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ColumnRequirements, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
     ForeignModifyPlanSpec, ForeignModifyRelationContext, StartForeignScanContext,
 };
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::handles::RelationHandle;
+use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

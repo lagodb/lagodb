@@ -4,7 +4,7 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 
 use iceberg_lite::spec::Schema as IcebergSchema;
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;

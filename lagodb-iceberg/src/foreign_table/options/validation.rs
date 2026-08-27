@@ -1,5 +1,5 @@
-use pg_lakebase_core::fdw::ForeignValidationError;
-use pg_lakebase_core::storage::profile::StorageProfileConfig;
+use lagodb_core::fdw::ForeignValidationError;
+use lagodb_core::storage::profile::StorageProfileConfig;
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;

@@ -1,5 +1,5 @@
 use crate::managed_table::IcebergTableAm;
-use pg_lakebase_core::prelude::*;
+use lagodb_core::prelude::*;
 
 pub struct IcebergIndexFetch;
 

@@ -4,13 +4,13 @@ use core::ffi::c_void;
 use core::ptr;
 use std::ffi::{CStr, CString};
 
-use pg_lakebase_core::hooks::{
+use lagodb_core::hooks::{
     AlterTableStmtNode, AlterUserMappingStmtNode, CreateForeignTableStmtNode,
     CreateUserMappingStmtNode, PostUtilityContext, PreUtilityContext, RenameStmtNode,
     UtilityHook, UtilityHookError, UtilityNode, VacuumStmtNode,
     register_utility_hook,
 };
-use pg_lakebase_core::storage::foreign::{ForeignOption, ForeignOptionView};
+use lagodb_core::storage::foreign::{ForeignOption, ForeignOptionView};
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;

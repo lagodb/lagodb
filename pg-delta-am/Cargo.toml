@@ -14,10 +14,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg17"]
-pg16 = ["pgrx/pg16", "pg-lakebase-core/pg16"]
-pg17 = ["pgrx/pg17", "pg-lakebase-core/pg17"]
+pg16 = ["pgrx/pg16", "lagodb-core/pg16"]
+pg17 = ["pgrx/pg17", "lagodb-core/pg17"]
 pg_test = []
 
 [dependencies]
 pgrx = { workspace = true }
-pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
+lagodb-core = { path = "../lagodb-core", default-features = false }

@@ -5,15 +5,15 @@ mod pruning;
 mod runtime;
 mod value;
 
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::expr::PushdownCosting;
-use pg_lakebase_core::expr::pushdown::{
+use lagodb_core::diag::PgReportError;
+use lagodb_core::expr::PushdownCosting;
+use lagodb_core::expr::pushdown::{
     FilterBindResult, FilterColumn, FilterFragment, FilterNode, FilterPlan,
     FilterPlanningContext, FilterScalar, FilterValueBindings, FilterValueSlotId,
 };
-use pg_lakebase_core::fdw::ForeignFilterExplainValues;
-use pg_lakebase_core::handles::RelationGuard;
-use pg_lakebase_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::fdw::ForeignFilterExplainValues;
+use lagodb_core::handles::RelationGuard;
+use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

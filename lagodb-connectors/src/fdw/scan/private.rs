@@ -1,6 +1,6 @@
 //! FDW plan-private format selection.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignPlanPrivate, ForeignPrivateReader, ForeignPrivateWriter, ForeignScanError,
 };
 

@@ -4,12 +4,12 @@ use std::time::Instant;
 
 use iceberg_lite::spec::TableMetadata;
 use iceberg_lite::table::Table;
-use parquet::file::properties::WriterProperties;
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::table_maintenance::{
-    LakebaseTableMaintenanceProvider, TableMaintenanceError, TableMaintenanceMode,
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::table_maintenance::{
+    LagodbTableMaintenanceProvider, TableMaintenanceError, TableMaintenanceMode,
     TableMaintenanceReport, TableMaintenanceRequest, TableMaintenanceStats,
 };
+use parquet::file::properties::WriterProperties;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
@@ -447,7 +447,7 @@ impl IcebergTableMaintenanceProvider {
     }
 }
 
-impl LakebaseTableMaintenanceProvider for IcebergTableMaintenanceProvider {
+impl LagodbTableMaintenanceProvider for IcebergTableMaintenanceProvider {
     const NAME: &'static CStr = c"iceberg";
     const EXTENSION_NAME: &'static CStr = c"lagodb_iceberg";
     const LIBRARY_NAME: &'static CStr = c"lagodb_iceberg";

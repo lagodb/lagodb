@@ -1,6 +1,6 @@
 //! Explicit SQL cache invalidation for externally replaced exact object keys.
 
-use pg_lakebase_core::diag::PgReportError;
+use lagodb_core::diag::PgReportError;
 use pgrx::prelude::*;
 
 use crate::error::ConnectorError;

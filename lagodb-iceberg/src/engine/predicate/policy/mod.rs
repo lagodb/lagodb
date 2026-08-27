@@ -1,7 +1,7 @@
 //! Shared Iceberg capability policy and PostgreSQL operator mapping.
 
-use pg_lakebase_core::expr::PgComparisonIdentity;
-use pg_lakebase_core::expr::pushdown::{FilterColumn, FilterValueSlot};
+use lagodb_core::expr::PgComparisonIdentity;
+use lagodb_core::expr::pushdown::{FilterColumn, FilterValueSlot};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
 use super::plan::PlannedValueType;

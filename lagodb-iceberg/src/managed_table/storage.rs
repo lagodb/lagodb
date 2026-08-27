@@ -4,9 +4,9 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
+use lagodb_core::options::get_tablespace;
+use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
 use lagodb_storage::StagingPathResolver;
-use pg_lakebase_core::options::get_tablespace;
-use pg_lakebase_core::storage::service::{BackendStorageService, StorageEndpoint};
 use pgrx::pg_sys;
 
 use crate::error::IcebergResult;
@@ -61,7 +61,7 @@ impl StorageContext {
     }
 
     fn distributed(
-        opts: &pg_lakebase_core::options::CachedTablespaceOpts,
+        opts: &lagodb_core::options::CachedTablespaceOpts,
         storage_service: BackendStorageService,
         staging_resolver: StagingPathResolver,
     ) -> IcebergResult<Self> {

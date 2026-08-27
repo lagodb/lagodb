@@ -1,6 +1,6 @@
 //! Connector adapter for the shared core storage-profile schema.
 
-use pg_lakebase_core::storage::profile::StorageProfileConfig;
+use lagodb_core::storage::profile::StorageProfileConfig;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

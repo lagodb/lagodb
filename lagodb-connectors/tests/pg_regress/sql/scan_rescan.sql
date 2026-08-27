@@ -5,18 +5,18 @@
 
 SET client_min_messages = warning;
 
-SELECT bucket AS lakebase_regress_bucket
-FROM lakebase_regress.object_storage_fixture
+SELECT bucket AS lagodb_regress_bucket
+FROM lagodb_regress.object_storage_fixture
 \gset
 
 SELECT format('s3://%s/lagodb-connectors/seed/common-prefix/',
-              :'lakebase_regress_bucket') AS text_path,
+              :'lagodb_regress_bucket') AS text_path,
        format('s3://%s/lagodb-connectors/seed/json-prefix/',
-              :'lakebase_regress_bucket') AS json_path,
+              :'lagodb_regress_bucket') AS json_path,
        format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
-              :'lakebase_regress_bucket') AS avro_path,
+              :'lagodb_regress_bucket') AS avro_path,
        format('s3://%s/lagodb-connectors/seed/parquet-prefix/',
-              :'lakebase_regress_bucket') AS parquet_path
+              :'lagodb_regress_bucket') AS parquet_path
 \gset rescan_
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.rescan_text

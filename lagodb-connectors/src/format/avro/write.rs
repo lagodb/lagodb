@@ -4,9 +4,9 @@ mod encoder;
 mod ocf;
 mod plan;
 
-use pg_lakebase_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::tuple::SlotDatumIndex;
+use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::tuple::SlotDatumIndex;
 
 use crate::error::ConnectorError;
 use crate::format::{

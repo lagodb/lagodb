@@ -1,6 +1,6 @@
 //! PostgreSQL TableAM identity and callback type registration.
 
-use pg_lakebase_core::prelude::*;
+use lagodb_core::prelude::*;
 use pgrx::prelude::*;
 
 use super::access::index::IcebergIndexFetch;

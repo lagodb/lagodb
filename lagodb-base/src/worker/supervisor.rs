@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use pg_lakebase_core::diag::{PgError, PgReportError};
-use pg_lakebase_core::extension_worker::WorkerTransaction;
+use lagodb_core::diag::{PgError, PgReportError};
+use lagodb_core::extension_worker::WorkerTransaction;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
@@ -158,7 +158,7 @@ impl Supervisor {
     }
 
     fn scan_databases() -> Result<DatabaseCatalogSnapshot, PgError> {
-        use pg_lakebase_core::catalog::{CatalogRelation, CatalogSnapshot};
+        use lagodb_core::catalog::{CatalogRelation, CatalogSnapshot};
 
         let relation = CatalogRelation::open(
             pg_sys::DatabaseRelationId,

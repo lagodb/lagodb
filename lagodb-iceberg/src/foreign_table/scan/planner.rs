@@ -1,6 +1,6 @@
 //! PostgreSQL planner adapter for the shared Iceberg reader.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     BeginForeignScanContext, FdwScan, ForeignFilterExplainValues, ForeignPathBuilder,
     ForeignPathContext, ForeignPathKeys, ForeignPathSpec, ForeignPlanContext,
     ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,

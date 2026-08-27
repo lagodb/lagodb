@@ -34,7 +34,7 @@ What actually differs between consumers is *not* the value conversion. It is:
   positions, while an FDW maps them to foreign-table columns.
 
 Pulling the value rules into one crate means each consumer implements the
-[pg-lakebase-core](../pg-lakebase-core) framework interfaces once and never
+[lagodb-core](../lagodb-core) framework interfaces once and never
 rewrites the conversion logic. Each consumer keeps its own schema mapping and
 column model; `pg-arrow-conv` takes over the moment an Arrow schema exists and
 hands back datums (or arrays) with no knowledge of where the Arrow came from.
@@ -62,7 +62,7 @@ format-neutral resolver never infers that representation from `JSONBOID`.
 
 ## Two worlds, one set of rules
 
-`pg-arrow-conv` mirrors the row/column split that `pg-lakebase-core` defines, and
+`pg-arrow-conv` mirrors the row/column split that `lagodb-core` defines, and
 keeps both sides driven by the same per-column rule so a value converted one way
 is bit-identical to the same value converted the other.
 
@@ -77,11 +77,11 @@ representation:
   on flush.
 
 The read half implements the `AmScanBatchSource` / `BatchRowDecoder` traits from
-`pg-lakebase-core`; the relation-bound write buffer implements `BatchBuffer`
+`lagodb-core`; the relation-bound write buffer implements `BatchBuffer`
 while keeping its provider-specific source binding in `pg-arrow-conv`.
 
 **Row world (FDW and row-mode).** A row-at-a-time consumer (an FDW, a row-mode
-access method, or buffering and `EXPLAIN` rendering) works through `pg-lakebase-core`'s
+access method, or buffering and `EXPLAIN` rendering) works through `lagodb-core`'s
 owned `Cell`/`Row` types instead. After the caller establishes the row bound,
 the bound `ColumnReader::read_cell_unchecked` extracts a standard semantic
 Arrow value into a `Cell`, and the same `ColumnRule` builds an Arrow array from
@@ -101,7 +101,7 @@ the calling shim has already switched to, so per-row resets reclaim them
 correctly.
 
 Errors use the same domain-error machinery as the rest of the workspace.
-`ArrowConversionError` is a `thiserror` enum that implements `pg-lakebase-core`'s
+`ArrowConversionError` is a `thiserror` enum that implements `lagodb-core`'s
 `SqlStateError`, so each variant maps to a `PgSqlErrorCode` (datatype mismatch,
 data exception, or internal error). Consumers embed it with a `#[from]` variant
 in their own error type and delegate the SQLSTATE, so a conversion failure
@@ -116,7 +116,7 @@ workspace is layered.
 - PostgreSQL 16 or 17
 - pgrx 0.19.2
 
-Dependencies are limited to `pgrx`, `pg-lakebase-core`, the `arrow-*` crates, and
+Dependencies are limited to `pgrx`, `lagodb-core`, the `arrow-*` crates, and
 `uuid`. The crate deliberately does **not** depend on any table-format crate.
 
 ## Testing

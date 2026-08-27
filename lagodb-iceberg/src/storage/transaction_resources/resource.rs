@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use iceberg_lite::io::FileIO;
+use lagodb_core::storage::service::BackendStorageService;
+use lagodb_core::wal::flush_wal;
 use lagodb_storage::{ObjectLocation, StorageErrorKind};
-use pg_lakebase_core::storage::service::BackendStorageService;
-use pg_lakebase_core::wal::flush_wal;
 
 use crate::storage::local_file_wal::record::log_delete_directory;
 
@@ -93,7 +93,7 @@ impl StorageResource {
                     flush_wal(lsn);
                 }
                 if let Err(error) = file_io.remove_dir_all(location) {
-                    pg_lakebase_core::diag::report_warning(format_args!(
+                    lagodb_core::diag::report_warning(format_args!(
                         "failed to delete table directory '{}': {}",
                         location, error
                     ));
@@ -112,7 +112,7 @@ impl StorageResource {
                 state: ObjectFileState::Staged,
                 ..
             } => {
-                pg_lakebase_core::diag::report_warning(format_args!(
+                lagodb_core::diag::report_warning(format_args!(
                     "committing staged object file '{}' before upload completed; removing staging file '{}'",
                     location,
                     staging_path.display()
@@ -130,7 +130,7 @@ impl StorageResource {
                 match file_io.remove_dir_all(location) {
                     Ok(()) => true,
                     Err(error) => {
-                        pg_lakebase_core::diag::report_warning(format_args!(
+                        lagodb_core::diag::report_warning(format_args!(
                             "failed to delete table directory '{}': {}",
                             location, error
                         ));
@@ -151,7 +151,7 @@ impl StorageResource {
                             true
                         }
                         Err(error) => {
-                            pg_lakebase_core::diag::report_warning(format_args!(
+                            lagodb_core::diag::report_warning(format_args!(
                                 "failed to delete uploaded object '{}': {}",
                                 location, error
                             ));
@@ -183,7 +183,7 @@ impl StorageResource {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(error) => {
-                pg_lakebase_core::diag::report_warning(format_args!(
+                lagodb_core::diag::report_warning(format_args!(
                     "failed to unlink '{}': {}",
                     path.display(),
                     error

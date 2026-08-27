@@ -1,13 +1,13 @@
 //! Reader-owned scan, filter, and pathkey contracts.
 
-use pg_lakebase_core::expr::pushdown::FilterPlanningContext;
-use pg_lakebase_core::fdw::{
+use lagodb_core::expr::pushdown::FilterPlanningContext;
+use lagodb_core::fdw::{
     ForeignAnalyzeSupport, ForeignPathBuilder, ForeignPathContext, ForeignPathKeys,
     ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
     ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
     ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
 };
-use pg_lakebase_core::plan_data::PlanDataReader;
+use lagodb_core::plan_data::PlanDataReader;
 
 use crate::error::ConnectorError;
 use crate::storage::ObjectFiles;

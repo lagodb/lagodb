@@ -7,8 +7,8 @@
 
 use std::cell::Cell;
 
-use pg_lakebase_core::hooks::HookError;
-use pg_lakebase_core::runtime_api::{
+use lagodb_core::hooks::HookError;
+use lagodb_core::runtime_api::{
     UTILITY_ROUTE_CONSUMED, UTILITY_ROUTE_PASS_THROUGH, UtilityConsumerDescriptor,
 };
 use pgrx::pg_sys;

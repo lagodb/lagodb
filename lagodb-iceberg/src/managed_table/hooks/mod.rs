@@ -17,7 +17,7 @@
 //! module only routes PostgreSQL hook events into those parsers and into the
 //! Iceberg catalog.
 
-use pg_lakebase_core::access::mutation;
+use lagodb_core::access::mutation;
 
 mod column_drop_guard;
 pub mod object_access;

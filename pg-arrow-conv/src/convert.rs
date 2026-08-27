@@ -12,7 +12,7 @@
 //! concrete Arrow array once per batch.
 
 use arrow_array::ArrayRef;
-use pg_lakebase_core::tuple::Row;
+use lagodb_core::tuple::Row;
 
 use crate::error::ArrowConversionResult;
 use crate::rule::ColumnRule;

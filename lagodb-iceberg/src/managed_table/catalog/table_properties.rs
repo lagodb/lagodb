@@ -1,6 +1,6 @@
 //! AM option adaptation for shared Iceberg table-property updates.
 
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::handles::RelationHandle;
 
 use crate::engine::write::PreparedTablePropertyUpdate;
 use crate::error::IcebergResult;

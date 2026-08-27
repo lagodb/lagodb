@@ -5,11 +5,11 @@ use core::mem;
 
 use crate::format::{FormatReader, FormatScanState};
 use crate::storage::{ObjectFiles, ObjectInput};
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignScanError, ReScanForeignScanContext,
     ScanSlotWriter, StartForeignScanContext,
 };
-use pg_lakebase_core::storage::foreign::StorageManager;
+use lagodb_core::storage::foreign::StorageManager;
 
 use super::super::LagodbConnectors;
 use crate::error::ConnectorError;

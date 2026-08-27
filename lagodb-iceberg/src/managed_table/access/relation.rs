@@ -2,11 +2,11 @@ use crate::error::IcebergResult;
 use crate::managed_table::IcebergTableAm;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::storage::StorageContext;
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::diag::report_warning;
-use pg_lakebase_core::prelude::*;
-use pg_lakebase_core::table_maintenance::{
-    LakebaseTableMaintenanceProvider, TableMaintenanceBudget,
+use lagodb_core::diag::PgReportError;
+use lagodb_core::diag::report_warning;
+use lagodb_core::prelude::*;
+use lagodb_core::table_maintenance::{
+    LagodbTableMaintenanceProvider, TableMaintenanceBudget,
     TableMaintenanceCommandTime, TableMaintenanceMode, TableMaintenanceOptions,
     TableMaintenanceRequest,
 };
@@ -53,7 +53,7 @@ impl AmRelation for IcebergTableAm {
         }
         let command_time = TableMaintenanceCommandTime::now()
             .map_err(PgReportError::from_domain_error)?;
-        <crate::managed_table::maintenance::IcebergTableMaintenanceProvider as LakebaseTableMaintenanceProvider>::execute(
+        <crate::managed_table::maintenance::IcebergTableMaintenanceProvider as LagodbTableMaintenanceProvider>::execute(
             TableMaintenanceRequest {
                 relation: rel,
                 mode: TableMaintenanceMode::Routine,

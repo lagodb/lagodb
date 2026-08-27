@@ -7,7 +7,7 @@ documentation.
 
 ## Required semantics
 
-`pg-lakebase` exposes Iceberg tables through PostgreSQL access-method behavior,
+LagoDB exposes Iceberg tables through PostgreSQL access-method behavior,
 so PostgreSQL-like Read Committed semantics must be preserved:
 
 - A later statement in the same transaction must see data files appended by
@@ -311,9 +311,9 @@ Relevant references:
 - Snowflake Read Committed:
   <https://docs.snowflake.com/en/sql-reference/transactions#read-committed-isolation-level>
 
-## Design implications for `pg-lakebase`
+## Design implications for LagoDB
 
-`pg-lakebase` exposes a stronger transaction surface than most open-source
+LagoDB exposes a stronger transaction surface than most open-source
 Iceberg query engines because PostgreSQL users expect multi-statement
 transactions and Read Committed visibility. Iceberg's metadata commit protocol is
 necessary but not sufficient for that SQL contract.
@@ -326,7 +326,7 @@ The current solution is an iceberg-lite overlay:
 - Top-level commit materializes the delta with `SnapshotDeltaAction` and
   publishes the resulting metadata location through catalog CAS.
 
-This is the chosen direction for `pg-lakebase` now. It keeps the architecture
+This is the chosen direction for LagoDB now. It keeps the architecture
 centered on Iceberg metadata and iceberg-lite while avoiding statement-time
 manifest and metadata writes. The pg_lake-style PostgreSQL heap file catalog is
 useful as a comparison point, but it is not part of the current roadmap: the

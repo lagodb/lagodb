@@ -3,7 +3,7 @@
 use std::ffi::{CStr, CString};
 
 use iceberg_lite::catalog::{Catalog, NamespaceIdent};
-use pg_lakebase_core::fdw::{ForeignImportError, ForeignImportSchemaContext};
+use lagodb_core::fdw::{ForeignImportError, ForeignImportSchemaContext};
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;

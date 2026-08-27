@@ -17,11 +17,11 @@ pub(crate) use uri::ObjectUri;
 
 use std::ffi::CStr;
 
-use pg_lakebase_core::fdw::ForeignDataWrapper;
-use pg_lakebase_core::storage::foreign::{
+use lagodb_core::fdw::ForeignDataWrapper;
+use lagodb_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
-use pg_lakebase_core::storage::profile::{StorageServerCatalog, StorageServerPolicy};
+use lagodb_core::storage::profile::{StorageServerCatalog, StorageServerPolicy};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

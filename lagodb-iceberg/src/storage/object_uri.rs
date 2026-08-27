@@ -46,26 +46,26 @@ fn outside_root(uri: &str, effective_base_uri: &str) -> Error {
 mod tests {
     use super::*;
 
-    const ROOT: &str = "s3://my-lake/lakebase/7";
+    const ROOT: &str = "s3://my-lake/lagodb/7";
 
     #[test]
     fn strips_the_effective_root() {
-        let uri = "s3://my-lake/lakebase/7/metadata/v1.json";
+        let uri = "s3://my-lake/lagodb/7/metadata/v1.json";
         let offset = resolve_object_uri(ROOT, uri).unwrap();
-        assert_eq!(&uri[offset..], "lakebase/7/metadata/v1.json");
+        assert_eq!(&uri[offset..], "lagodb/7/metadata/v1.json");
     }
 
     #[test]
     fn rejects_root_and_foreign_uris() {
         assert!(resolve_object_uri(ROOT, ROOT).is_err());
-        assert!(resolve_object_uri(ROOT, "s3://my-lake/lakebase/70/file").is_err());
-        assert!(resolve_object_uri(ROOT, "gs://my-lake/lakebase/7/file").is_err());
+        assert!(resolve_object_uri(ROOT, "s3://my-lake/lagodb/70/file").is_err());
+        assert!(resolve_object_uri(ROOT, "gs://my-lake/lagodb/7/file").is_err());
     }
 
     #[test]
     fn accepts_only_a_volume_rooted_relative_key() {
         assert_eq!(
-            resolve_object_uri(ROOT, "lakebase/7/metadata/v1.json").unwrap(),
+            resolve_object_uri(ROOT, "lagodb/7/metadata/v1.json").unwrap(),
             0
         );
         assert!(resolve_object_uri(ROOT, "metadata/v1.json").is_err());

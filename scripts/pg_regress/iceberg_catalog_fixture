@@ -37,7 +37,7 @@ iceberg_start_rest_container() {
     warehouse_bucket=$5
     warehouse_suffix=$6
     ensure_image "$docker" "$ICEBERG_REST_IMAGE"
-    rest_name="pg-lakebase-regress-${network_alias}-${PGPORT}-$$"
+    rest_name="lagodb-regress-${network_alias}-${PGPORT}-$$"
     STARTED_REST_CONTAINER_ID=$("$docker" run \
         --detach \
         --publish 127.0.0.1::8181 \

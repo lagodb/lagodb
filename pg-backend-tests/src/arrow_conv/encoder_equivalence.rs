@@ -19,11 +19,11 @@ mod tests {
 
     use arrow_array::Array;
     use arrow_schema::{Field, Schema};
+    use lagodb_core::batch::BatchBuffer;
+    use lagodb_core::tuple::{Row, RowDatumCodec, TupleSlotRow};
     use pg_arrow_conv::{
         ArrowColumnEncoder, BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule,
     };
-    use pg_lakebase_core::batch::BatchBuffer;
-    use pg_lakebase_core::tuple::{Row, RowDatumCodec, TupleSlotRow};
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
     use proptest::prelude::*;

@@ -1,6 +1,6 @@
 use super::rmgr::ICEBERG_RMGR_ID;
-use pg_lakebase_core::diag;
-use pg_lakebase_core::wal::{WalRecordBuilder, XLogRecPtr};
+use lagodb_core::diag;
+use lagodb_core::wal::{WalRecordBuilder, XLogRecPtr};
 
 // ============================================================================
 // WAL operation types

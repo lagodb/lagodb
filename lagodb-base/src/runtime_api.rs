@@ -5,7 +5,7 @@ mod storage_volume;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 
-use pg_lakebase_core::runtime_api::{
+use lagodb_core::runtime_api::{
     AbiHeader, MaintenanceProvider, PROVIDER_CAPABILITIES_KNOWN,
     ProviderRegistration, REGISTER_DUPLICATE_ACCESS_METHOD, REGISTER_DUPLICATE_NAME,
     REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RuntimeApi, RuntimeMaintenanceConfig,
@@ -292,12 +292,11 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
 struct ProviderRegistrationRef<'a> {
     provider: crate::provider_bootstrap::ValidatedProviderIdentity<'a>,
     maintenance_provider: Option<ValidatedProvider<'a>>,
-    utility: &'a [pg_lakebase_core::runtime_api::UtilityHookDescriptor],
-    utility_consumers:
-        &'a [pg_lakebase_core::runtime_api::UtilityConsumerDescriptor],
-    object_access: &'a [pg_lakebase_core::runtime_api::ObjectAccessHookDescriptor],
+    utility: &'a [lagodb_core::runtime_api::UtilityHookDescriptor],
+    utility_consumers: &'a [lagodb_core::runtime_api::UtilityConsumerDescriptor],
+    object_access: &'a [lagodb_core::runtime_api::ObjectAccessHookDescriptor],
     object_access_str:
-        &'a [pg_lakebase_core::runtime_api::ObjectAccessStrHookDescriptor],
+        &'a [lagodb_core::runtime_api::ObjectAccessStrHookDescriptor],
 }
 
 impl<'a> ProviderRegistrationRef<'a> {
@@ -484,7 +483,7 @@ pub(crate) fn init() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_lakebase_core::runtime_api::{
+    use lagodb_core::runtime_api::{
         MaintenanceReport, MaintenanceRequest, MaintenanceStats, ProviderIdentity,
         UtilityHookDescriptor,
     };

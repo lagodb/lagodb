@@ -1,13 +1,13 @@
 use std::cell::RefCell;
 use std::ffi::CStr;
 
-use pg_lakebase_core::catalog::get_tablespace_oid;
-use pg_lakebase_core::diag::{PgReportError, SqlStateError};
-use pg_lakebase_core::options::{
+use lagodb_core::catalog::get_tablespace_oid;
+use lagodb_core::diag::{PgReportError, SqlStateError};
+use lagodb_core::options::{
     CreateTablespaceStorageOptions, TablespaceBinding, TablespaceCacheError,
     TablespaceError, is_distributed_tablespace,
 };
-use pg_lakebase_core::storage::volume::StorageVolumeId;
+use lagodb_core::storage::volume::StorageVolumeId;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -25,7 +25,7 @@ enum BindingError {
     #[error(transparent)]
     Volume(#[from] StorageVolumeError),
     #[error("failed to resolve created tablespace: {0}")]
-    Catalog(#[from] pg_lakebase_core::diag::PgError),
+    Catalog(#[from] lagodb_core::diag::PgError),
     #[error("cannot alter options of a LagoDB tablespace")]
     AlterOptions,
 }

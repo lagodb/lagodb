@@ -14,11 +14,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use lagodb_core::storage::service::StorageEndpoint;
 use lagodb_storage::{
     CacheCleanupConfig, CacheRuntimeConfig, StorageRuntimeConfig,
     StorageServerConfig, StorageServiceConfig,
 };
-use pg_lakebase_core::storage::service::StorageEndpoint;
 
 use super::gucs;
 

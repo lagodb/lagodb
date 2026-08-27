@@ -5,10 +5,10 @@ use std::panic::AssertUnwindSafe;
 
 use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
-use pg_lakebase_core::copy::{
+use lagodb_core::copy::{
     CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError,
 };
-use pg_lakebase_core::diag::PgReportError;
+use lagodb_core::diag::PgReportError;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::{PgTryBuilder, pg_sys};
 

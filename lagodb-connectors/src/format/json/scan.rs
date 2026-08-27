@@ -3,8 +3,8 @@
 use std::ffi::CStr;
 use std::panic::AssertUnwindSafe;
 
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::fdw::{
+use lagodb_core::diag::PgReportError;
+use lagodb_core::fdw::{
     ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
     ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
     ReScanForeignScanContext, ScanOutputColumn, ScanProjectionPolicy, ScanSlotWriter,

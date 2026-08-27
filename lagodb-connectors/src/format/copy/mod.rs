@@ -8,11 +8,11 @@ mod canonical_csv;
 mod json;
 mod stream;
 
-use pg_lakebase_core::copy::{
+use lagodb_core::copy::{
     CopyColumnLayout, CopyContext, CopyDataDestination, CopyDataSource, CopyError,
     CopyOptionView,
 };
-use pg_lakebase_core::storage::foreign::StorageManager;
+use lagodb_core::storage::foreign::StorageManager;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

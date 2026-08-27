@@ -1,8 +1,8 @@
 //! Native NDJSON Foreign Table INSERT writer.
 
-use pg_lakebase_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::tuple::{BoundJsonObjectEncoder, SlotDatumIndex};
+use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::tuple::{BoundJsonObjectEncoder, SlotDatumIndex};
 
 use crate::error::ConnectorError;
 use crate::storage::ObjectOutput;

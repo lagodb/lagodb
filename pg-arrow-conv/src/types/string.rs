@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, StringBuilder};
-use pg_lakebase_core::tuple::{Cell, DetoastedVarlena};
+use lagodb_core::tuple::{Cell, DetoastedVarlena};
 use pgrx::pg_sys;
 
 use super::{ColumnAppend, cell_type_mismatch};

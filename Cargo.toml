@@ -2,8 +2,8 @@
 members = [
     "lagodb-base",
     "pg-delta-am",
-    "pg-lakebase-core",
-    "pg-lakebase-macros",
+    "lagodb-core",
+    "lagodb-macros",
     "lagodb-iceberg",
     "pg-arrow-conv",
     "pg-backend-tests",

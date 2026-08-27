@@ -9,27 +9,27 @@
 \set id_payload_columns 'id integer, payload text'
 -- Direct COPY capability errors and their SQLSTATE contracts.
 SET client_min_messages = warning;
-SELECT bucket AS lakebase_regress_bucket
-FROM lakebase_regress.object_storage_fixture
+SELECT bucket AS lagodb_regress_bucket
+FROM lagodb_regress.object_storage_fixture
 \gset
 SELECT format('s3://%s/lagodb-connectors/seed/common-prefix/',
-              :'lakebase_regress_bucket') AS text_prefix,
+              :'lagodb_regress_bucket') AS text_prefix,
        format('s3://%s/lagodb-connectors/seed/common-prefix-csv/',
-              :'lakebase_regress_bucket') AS csv_prefix,
+              :'lagodb_regress_bucket') AS csv_prefix,
        format('s3://%s/lagodb-connectors/seed/json-prefix/',
-              :'lakebase_regress_bucket') AS json_prefix,
+              :'lagodb_regress_bucket') AS json_prefix,
        format('s3://%s/lagodb-connectors/seed/common-prefix-avro/',
-              :'lakebase_regress_bucket') AS avro_prefix,
+              :'lagodb_regress_bucket') AS avro_prefix,
        format('s3://%s/lagodb-connectors/copy-errors/missing.txt',
-              :'lakebase_regress_bucket') AS missing_text,
+              :'lagodb_regress_bucket') AS missing_text,
        format('s3://%s/lagodb-connectors/copy-errors/negative.json',
-              :'lakebase_regress_bucket') AS negative_json,
+              :'lagodb_regress_bucket') AS negative_json,
        format('s3://%s/lagodb-connectors/copy-errors/negative.parquet',
-              :'lakebase_regress_bucket') AS negative_parquet,
+              :'lagodb_regress_bucket') AS negative_parquet,
        format('s3://%s/lagodb-connectors/copy-errors/unsupported.avro',
-              :'lakebase_regress_bucket') AS unsupported_avro,
+              :'lagodb_regress_bucket') AS unsupported_avro,
        format('s3://%s/lagodb-connectors/copy-errors/unsupported.parquet',
-              :'lakebase_regress_bucket') AS unsupported_parquet
+              :'lagodb_regress_bucket') AS unsupported_parquet
 \gset copy_error_
 DROP TABLE IF EXISTS lagodb_connectors_regress.copy_error_common;
 CREATE TABLE lagodb_connectors_regress.copy_error_common

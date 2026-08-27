@@ -5,9 +5,9 @@ use std::collections::BTreeSet;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::spec::{DataFile, FormatVersion};
 use iceberg_lite::transaction::{RowDeltaValidation, RowLevelCommand};
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::prelude::*;
 use parquet::file::properties::WriterProperties;
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 
 use super::plan::{ModifyCommand, TargetDependency, ValidationPlan};

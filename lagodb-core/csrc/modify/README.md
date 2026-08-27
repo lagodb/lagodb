@@ -1,0 +1,60 @@
+# ModifyTable C fork
+
+## PostgreSQL 17 provenance
+
+- Baseline release: PostgreSQL 17.10
+- Upstream tag: `REL_17_10`
+- Source: `src/backend/executor/nodeModifyTable.c`
+- Vendored pristine copy: `upstream/node_modify_table.pg17.c`
+- Vendored SHA-256:
+  `4757e3ce690f5370f1cda6fdcdd10106ca31e31b5e5aa89b233d1297cadac38b`
+- Fork: `lagodb_node_modify_table.c`
+- Copied scope: the complete file, preserving helper order and control flow
+- LagoDB edits: symbol prefixing, standard `ctid`/`wholerow` extraction,
+  slot-first insert/update/delete bridge calls, and the exported executor entry
+
+The fork is not a global replacement for PostgreSQL's `ExecModifyTable`.
+Planner-selected LagoDB targets are wrapped in an outer CustomScan and call
+the exported entry; every other ModifyTable node continues to use PostgreSQL's
+registered executor methods. The complete upstream control flow is retained
+because row triggers, transition tables, WCO/RLS, MERGE, partition routing,
+generated columns, and RETURNING are executor responsibilities that cannot be
+reconstructed safely as independent table-AM callbacks.
+
+The C bridge resolves a `ResultRelInfo` only when the active result relation
+changes. Per-row trigger and mutation branches reuse the cached opaque
+`ResultRelationState`; they must not call back into Rust for provider discovery
+or hash-map lookup.
+
+For immediate AFTER ROW triggers, the fork gives PostgreSQL a statement-local
+synthetic `ctid`; `tuple_fetch_row_version` resolves that carrier from a
+query-level, relation-keyed PostgreSQL tuplestore populated from the
+already-carried wholerow. A core-owned temporary-ID namespace routes sibling
+ModifyTable nodes and nested SPI queries without relation-OID guessing. This
+follows the FDW storage model without changing shared relcache `relkind` or
+retaining complete rows in a Rust `HashMap`. Two bounded read slots cover
+repeated OLD/NEW fetches for multiple triggers. Deferrable AFTER ROW triggers
+are rejected because their event lifetime exceeds the query-local tuplestore.
+
+Audit a PostgreSQL minor update with:
+
+```sh
+diff -u upstream/node_modify_table.pg17.c lagodb_node_modify_table.c
+```
+
+Replace the pristine copy from the new `REL_17_STABLE` release, reapply the
+`LAGODB BEGIN/END` sections, and reconcile every local `PG_VERSION_NUM`
+compatibility branch before running the full PG17 regression suite. Concurrent
+identity-aware EPQ and PostgreSQL indexes remain deliberately unsupported for
+Iceberg relations.
+
+Confirmed minor compatibility epochs are kept at their semantic sites:
+
+- PG17.1 added `ResultRelInfo::ri_needLockTagTuple` and its tuple-lock flow;
+- PG17.6 added the merge-aware `ExecBR*TriggersNew()` entry points and inherited
+  MERGE root-relation projection initialization;
+- PG17.7 added `CheckValidResultRelNew()` while retaining the older entry point.
+
+The fork selects those paths with local `PG_VERSION_NUM` branches. Other PG17
+minor differences remain part of the baseline diff review; they must not be
+promoted into global minor-version rejection.

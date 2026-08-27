@@ -240,7 +240,7 @@ step s1_lock_share: LOCK TABLE iceberg.iceberg_metadata IN SHARE MODE;
 step s2_commit: COMMIT; <waiting ...>
 step s1_commit: COMMIT;
 s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
-DETAIL:  pg-lakebase
+DETAIL:  lagodb
 step s2_commit: <... completed>
 step s5_final_verify: 
   SELECT 
@@ -272,7 +272,7 @@ step s2_insert_batch:
 step s2_commit: COMMIT; <waiting ...>
 step s1_commit: COMMIT;
 s2: NOTICE:  Concurrent Iceberg update detected, rebasing...
-DETAIL:  pg-lakebase
+DETAIL:  lagodb
 step s2_commit: <... completed>
 step s5_final_verify: 
   SELECT 

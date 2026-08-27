@@ -2,16 +2,16 @@
 
 use std::io::{self, Read};
 
-use lagodb_storage::StorageFile;
-use pg_lakebase_core::copy::{
+use lagodb_core::copy::{
     CopyDataSource, CopyDocumentSource, CopyError, CopyFromScan,
 };
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
     ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
     ReScanForeignScanContext, ScanProjectionPolicy, ScanSlotWriter,
     StartForeignScanContext,
 };
+use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

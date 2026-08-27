@@ -14,10 +14,8 @@ use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{
     PreparedTransaction, RowDeltaValidation, Transaction,
 };
-use pg_lakebase_core::diag::{
-    PgReportError, error_source_chain_detail, report_warning,
-};
-use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
+use lagodb_core::diag::{PgReportError, error_source_chain_detail, report_warning};
+use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 

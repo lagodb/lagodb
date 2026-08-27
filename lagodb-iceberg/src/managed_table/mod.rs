@@ -30,8 +30,8 @@ pub(crate) fn register_providers() {
 
     // Register every provider before installing the framework router.
     customscan::register();
-    pg_lakebase_core::customscan::init();
-    pg_lakebase_core::table_maintenance::register_provider::<
+    lagodb_core::customscan::init();
+    lagodb_core::table_maintenance::register_provider::<
         maintenance::IcebergTableMaintenanceProvider,
     >();
 }

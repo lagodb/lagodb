@@ -2,7 +2,7 @@
 
 use std::ffi::CStr;
 
-use pg_lakebase_core::diag::PgReportError;
+use lagodb_core::diag::PgReportError;
 use pgrx::{PgSqlErrorCode, pg_sys};
 
 /// Build the fail-closed error for a URI-form COPY filename after every

@@ -1,7 +1,7 @@
 use crate::managed_table::IcebergTableAm;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::storage::StorageContext;
-use pg_lakebase_core::prelude::*;
+use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 
 impl IcebergTableAm {

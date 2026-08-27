@@ -9,13 +9,13 @@ use arrow_array::ArrayRef;
 use arrow_array::builder::{
     ArrayBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
 };
-use pg_lakebase_core::tuple::{Cell, DetoastedVarlena};
+use lagodb_core::tuple::{Cell, DetoastedVarlena};
 use pgrx::datum::Uuid;
 use pgrx::{FromDatum, PgTryBuilder, fcinfo, pg_sys};
 
 use super::{ColumnAppend, cell_type_mismatch, read_bound};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
-use pg_lakebase_core::diag::PgError;
+use lagodb_core::diag::PgError;
 
 // ---------------------------------------------------------------------------
 // Codec

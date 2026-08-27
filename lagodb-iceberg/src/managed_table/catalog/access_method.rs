@@ -17,7 +17,7 @@
 
 use std::ffi::CStr;
 
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::managed_table::constants::ICEBERG_AM_NAME;

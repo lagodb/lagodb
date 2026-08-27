@@ -4,13 +4,13 @@ use iceberg_lite::expr::Predicate;
 use iceberg_lite::spec::FormatVersion;
 use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{RowDeltaValidation, RowLevelCommand};
-use parquet::file::properties::WriterProperties;
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignInsertBatch, ForeignModifyError, ForeignModifyOperation,
     ForeignModifyOutcome, ForeignModifyState, ForeignRowIdentity, ModifyPlanSlot,
     ModifySlot,
 };
-use pg_lakebase_core::handles::ItemPointer;
+use lagodb_core::handles::ItemPointer;
+use parquet::file::properties::WriterProperties;
 use pgrx::pg_sys;
 
 use super::super::relation::RemoteTableKey;

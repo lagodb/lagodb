@@ -22,7 +22,7 @@
 
 use std::ffi::CStr;
 
-use pg_lakebase_core::copy::{CopyContext, CopyOptionView};
+use lagodb_core::copy::{CopyContext, CopyOptionView};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

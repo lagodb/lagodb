@@ -4,10 +4,10 @@ use std::rc::Rc;
 
 use crate::diag;
 use crate::worker::ensure_preloaded;
-use pg_lakebase_core::diag::{PgReportError, SqlStateError};
-use pg_lakebase_core::options::{TablespaceCacheError, get_tablespace};
-use pg_lakebase_core::storage::volume::StorageVolumeId;
-use pg_lakebase_core::transaction::{self, TransactionResource, TransactionResult};
+use lagodb_core::diag::{PgReportError, SqlStateError};
+use lagodb_core::options::{TablespaceCacheError, get_tablespace};
+use lagodb_core::storage::volume::StorageVolumeId;
+use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;

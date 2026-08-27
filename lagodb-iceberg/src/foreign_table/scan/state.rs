@@ -1,6 +1,6 @@
 //! Executor state backed by `ScanSpec` and the shared query cursor core.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignRowIdentityRequirement, ForeignScanError,
     ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
 };

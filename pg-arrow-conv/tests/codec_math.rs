@@ -1,8 +1,8 @@
 //! Host tests for the public PG↔Unix epoch helpers. Pure integer arithmetic,
 //! no PostgreSQL backend required.
 
+use lagodb_core::tuple::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 use pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
-use pg_lakebase_core::tuple::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 
 // --- pg_epoch_days_to_unix_days ----------------------------------------------
 

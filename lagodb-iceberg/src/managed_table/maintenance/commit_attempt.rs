@@ -10,7 +10,7 @@ use std::time::Instant;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{ApplyTransactionAction, Transaction};
-use pg_lakebase_core::table_maintenance::TableMaintenanceReport;
+use lagodb_core::table_maintenance::TableMaintenanceReport;
 
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
 

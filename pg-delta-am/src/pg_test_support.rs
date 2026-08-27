@@ -1,11 +1,11 @@
 //! Backend-only probes for the cross-DSO runtime regression suite.
 
-use pg_lakebase_core::hooks::{
+use lagodb_core::hooks::{
     OBJECT_ACCESS_DROP, ObjectAccessEvent, ObjectAccessFilter, ObjectAccessHook,
     ObjectAccessHookError, PostUtilityContext, UtilityHook, UtilityHookError,
     UtilityNode,
 };
-use pg_lakebase_core::runtime_api::{
+use lagodb_core::runtime_api::{
     MaintenanceProvider, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
     ProviderIdentity, ProviderRegistration, RuntimeClient, RuntimeRegistrationError,
 };
@@ -51,10 +51,10 @@ impl UtilityHook for DeltaUtilityTestHook {
 }
 
 pub(super) fn init_hooks() {
-    pg_lakebase_core::hooks::register_object_access_hook(Box::new(
+    lagodb_core::hooks::register_object_access_hook(Box::new(
         DeltaObjectAccessTestHook,
     ));
-    pg_lakebase_core::hooks::register_utility_hook(
+    lagodb_core::hooks::register_utility_hook(
         pg_sys::NodeTag::T_CommentStmt,
         Box::new(DeltaUtilityTestHook),
     );

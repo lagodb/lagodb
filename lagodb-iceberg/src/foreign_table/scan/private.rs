@@ -1,6 +1,6 @@
 //! Copy-object-safe REST table identity carried by an FDW plan.
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     ForeignPlanPrivate, ForeignPrivateReader, ForeignPrivateWriter, ForeignScanError,
 };
 

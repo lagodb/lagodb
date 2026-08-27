@@ -12,11 +12,11 @@
 
 mod options;
 
-use pg_lakebase_core::copy::{
+use lagodb_core::copy::{
     CopyCompletion, CopyContext, CopyError, CopyFromDriver, CopyFromSpec,
     CopyToDriver, CopyToSpec,
 };
-use pg_lakebase_core::hooks::{CopyConsumer, CopyRoute, register_copy_consumer};
+use lagodb_core::hooks::{CopyConsumer, CopyRoute, register_copy_consumer};
 
 use crate::error::ConnectorError;
 use crate::storage::{ObjectUri, ResolvedStorageLocation};

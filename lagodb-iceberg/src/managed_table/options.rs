@@ -11,12 +11,12 @@
 //! in `crate::managed_table::hooks::table_ddl`.
 
 use iceberg_lite::spec::{FormatVersion, IsolationLevel, TableProperties};
-use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
-use pg_lakebase_core::handles::RelationHandle;
-use pg_lakebase_core::options::table::{
+use lagodb_core::handles::RelationHandle;
+use lagodb_core::options::table::{
     AmCache, AmCacheRef, AmCacheValue, AmCacheable, TableOptionError, TableOptions,
 };
-use pg_lakebase_core::options::{OptionDef, OptionKind, OptionMutability};
+use lagodb_core::options::{OptionDef, OptionKind, OptionMutability};
+use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use std::collections::HashMap;
 
 // ============================================================================

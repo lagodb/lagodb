@@ -8,14 +8,14 @@ INSERT INTO multi_am_delta VALUES (1), (2);
 
 SELECT pre_count AS utility_pre_before, post_count AS utility_post_before
 FROM delta.utility_hook_counts() \gset
-COMMENT ON TABLE multi_am_delta IS 'Lakebase utility router';
+COMMENT ON TABLE multi_am_delta IS 'LagoDB utility router';
 SELECT pre_count = :utility_pre_before + 1
        AND post_count = :utility_post_before + 1
        AS delta_utility_hook_advanced
 FROM delta.utility_hook_counts();
 
 -- Bootstrapping Delta must not replace the Iceberg callbacks registered in
--- the same Lakebase hook directories.
+-- the same LagoDB hook directories.
 CREATE TABLE multi_am_iceberg (id integer) USING iceberg;
 INSERT INTO multi_am_iceberg VALUES (1);
 SELECT pg_relation_filepath('multi_am_iceberg') || '_iceberg'

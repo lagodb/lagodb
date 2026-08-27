@@ -9,7 +9,7 @@
 mod pg_test;
 
 use iceberg_lite::spec::Schema as IcebergSchema;
-use pg_lakebase_core::handles::RelationHandle;
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};

@@ -7,7 +7,7 @@
 //! bounds aligned with stored manifest bounds; the rest are crate-internal.
 
 use arrow_array::types::{Date32Type, Time64MicrosecondType};
-use pg_lakebase_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+use lagodb_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
 use pgrx::{FromDatum, pg_sys};
 

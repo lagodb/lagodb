@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 
-use pg_lakebase_core::options::TablespaceBinding;
-use pg_lakebase_core::storage::volume::StorageVolumeId;
-use pg_lakebase_core::storage::volume::StorageVolumeRoute;
+use lagodb_core::options::TablespaceBinding;
+use lagodb_core::storage::volume::StorageVolumeId;
+use lagodb_core::storage::volume::StorageVolumeRoute;
 use pgrx::pg_sys;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -181,9 +181,9 @@ impl StorageLocation {
 
     pub(crate) fn effective_root_for_compact_id(&self, compact_id: &str) -> String {
         if self.configured_root_prefix().is_empty() {
-            format!("lakebase/{compact_id}")
+            format!("lagodb/{compact_id}")
         } else {
-            format!("{}/lakebase/{compact_id}", self.configured_root_prefix())
+            format!("{}/lagodb/{compact_id}", self.configured_root_prefix())
         }
     }
 

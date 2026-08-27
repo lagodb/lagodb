@@ -37,11 +37,9 @@ fn active_pg_config() -> Option<&'static PgFeature> {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=csrc/vacuum/lakebase_vacuum.c");
-    println!("cargo:rerun-if-changed=csrc/vacuum/lakebase_vacuum.h");
-    println!(
-        "cargo:rerun-if-changed=../pg-lakebase-core/csrc/compat/lakebase_pg_compat.h"
-    );
+    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.c");
+    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.h");
+    println!("cargo:rerun-if-changed=../lagodb-core/csrc/compat/lagodb_pg_compat.h");
 
     let Some(pg_feature) = active_pg_config() else {
         return;
@@ -65,11 +63,11 @@ fn main() {
     });
 
     cc::Build::new()
-        .file("csrc/vacuum/lakebase_vacuum.c")
-        .include(PathBuf::from("../pg-lakebase-core/csrc/compat"))
+        .file("csrc/vacuum/lagodb_vacuum.c")
+        .include(PathBuf::from("../lagodb-core/csrc/compat"))
         .include(PathBuf::from("csrc/vacuum"))
         .include(include)
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter")
-        .compile("lakebase_runtime_pg_bridges");
+        .compile("lagodb_runtime_pg_bridges");
 }

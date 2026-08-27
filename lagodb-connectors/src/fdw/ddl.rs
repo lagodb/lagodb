@@ -3,12 +3,12 @@
 use std::ffi::CStr;
 use std::ptr;
 
-use pg_lakebase_core::handles::RelationGuard;
-use pg_lakebase_core::hooks::{
+use lagodb_core::handles::RelationGuard;
+use lagodb_core::hooks::{
     AlterTableStmtNode, CreateForeignTableStmtNode, PostUtilityContext, UtilityHook,
     UtilityHookError, UtilityNode, register_utility_hook,
 };
-use pg_lakebase_core::storage::foreign::{ForeignOptionView, StorageManager};
+use lagodb_core::storage::foreign::{ForeignOptionView, StorageManager};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

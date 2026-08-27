@@ -1,4 +1,4 @@
-use pg_lakebase_core::storage::foreign::ForeignOptionView;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;

@@ -1,8 +1,8 @@
-use pg_lakebase_core::object_cleanup::{
+use lagodb_core::object_cleanup::{
     ObjectCleanupItemId, ObjectCleanupQueue, ObjectTreeObserver,
     run_object_cleanup_worker,
 };
-use pg_lakebase_core::table_maintenance::TableMaintenanceRouter;
+use lagodb_core::table_maintenance::TableMaintenanceRouter;
 use pgrx::PgRelation;
 use pgrx::datum::{Internal, Uuid};
 use pgrx::prelude::*;
@@ -75,8 +75,8 @@ mod lagodb {
             name!(retained_data_bytes, i64),
         ),
     > {
-        use pg_lakebase_core::diag::{PgReportError, ReportableError};
-        let relation = pg_lakebase_core::handles::RelationGuard::open(
+        use lagodb_core::diag::{PgReportError, ReportableError};
+        let relation = lagodb_core::handles::RelationGuard::open(
             relation.oid(),
             pg_sys::AccessShareLock as _,
         )
@@ -121,9 +121,9 @@ mod lagodb {
         namespace: &str,
         prefix: &str,
     ) -> TableIterator<'static, (name!(objects, i64), name!(bytes, i64))> {
-        use pg_lakebase_core::diag::PgReportError;
+        use lagodb_core::diag::PgReportError;
         let volume_id =
-            pg_lakebase_core::storage::volume::StorageVolumeId::try_from(volume_id)
+            lagodb_core::storage::volume::StorageVolumeId::try_from(volume_id)
                 .unwrap_or_else(|_| pgrx::error!("invalid storage volume id"));
         let stats = ObjectTreeObserver::connect(std::time::Duration::from_secs(5))
             .and_then(|observer| observer.observe(volume_id, namespace, prefix))
@@ -332,7 +332,7 @@ mod lagodb {
         // SAFETY: this SQL-inaccessible `internal` argument is supplied only
         // by the worker entry point.
         let worker_context = unsafe {
-            pg_lakebase_core::extension_worker::WorkerContext::from_internal(
+            lagodb_core::extension_worker::WorkerContext::from_internal(
                 &worker_context,
             )
         };

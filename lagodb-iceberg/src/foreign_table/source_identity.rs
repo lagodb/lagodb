@@ -1,7 +1,7 @@
 //! Plan-scoped identity for one loaded Iceberg table generation.
 
 use iceberg_lite::table::Table;
-use pg_lakebase_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use uuid::{Uuid, fmt::Hyphenated};
 
 use super::error::IcebergFdwError;

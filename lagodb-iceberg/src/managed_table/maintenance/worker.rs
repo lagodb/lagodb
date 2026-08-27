@@ -2,13 +2,13 @@
 
 use std::time::Duration;
 
-use pg_lakebase_core::diag::{PgReportError, report_warning};
-use pg_lakebase_core::extension_worker::{
+use lagodb_core::diag::{PgReportError, report_warning};
+use lagodb_core::extension_worker::{
     WorkerContext, WorkerSchedule, WorkerTransaction,
 };
-use pg_lakebase_core::handles::RelationGuard;
-use pg_lakebase_core::table_maintenance::{
-    LakebaseTableMaintenanceProvider, TableMaintenanceBudget,
+use lagodb_core::handles::RelationGuard;
+use lagodb_core::table_maintenance::{
+    LagodbTableMaintenanceProvider, TableMaintenanceBudget,
     TableMaintenanceCommandTime, TableMaintenanceMode, TableMaintenanceOptions,
     TableMaintenanceRequest,
 };
@@ -81,7 +81,7 @@ fn maintain_relation(
         .map_err(PgReportError::from_domain_error)?;
     let relation = relation.as_handle();
     let expected_am =
-        <IcebergTableMaintenanceProvider as LakebaseTableMaintenanceProvider>::access_method_oid();
+        <IcebergTableMaintenanceProvider as LagodbTableMaintenanceProvider>::access_method_oid();
     if expected_am != Some(relation.access_method_oid()) {
         IcebergMetadata::finish_maintenance(
             relid,
@@ -216,7 +216,7 @@ mod iceberg {
     #[pg_extern]
     fn maintenance_worker(worker_context: Internal) -> i64 {
         // SAFETY: this SQL-inaccessible `internal` argument is supplied only
-        // by the pg-lakebase runtime extension-worker wrapper.
+        // by the LagoDB runtime extension-worker wrapper.
         let worker_context = unsafe { WorkerContext::from_internal(&worker_context) };
         run(&worker_context).into_raw()
     }

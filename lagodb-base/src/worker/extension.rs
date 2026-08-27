@@ -7,8 +7,8 @@ use crate::diag;
 use crate::error::LagodbError;
 use crate::registry;
 use crate::worker::state::WorkerKey;
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::extension_worker::{
+use lagodb_core::diag::PgReportError;
+use lagodb_core::extension_worker::{
     WorkerContextRaw, WorkerSchedule, WorkerTransaction,
 };
 

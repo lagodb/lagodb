@@ -4,7 +4,7 @@ SET TIME ZONE 'UTC';
 SET client_min_messages = warning;
 
 SELECT bucket
-FROM lakebase_regress.object_storage_fixture
+FROM lagodb_regress.object_storage_fixture
 \gset storage_
 
 SELECT format('s3://%s/lagodb-connectors/empty/text.txt',

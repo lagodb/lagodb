@@ -1,10 +1,10 @@
 use std::ffi::{CStr, CString};
 
-use pg_lakebase_core::catalog::{
+use lagodb_core::catalog::{
     self, CatalogRelation, CatalogScanKey, CatalogSnapshot, LAGODB_SCHEMA,
 };
-use pg_lakebase_core::diag::PgError;
-use pg_lakebase_core::handles::HeapTupleGuard;
+use lagodb_core::diag::PgError;
+use lagodb_core::handles::HeapTupleGuard;
 use pgrx::{FromDatum, IntoDatum, PgTryBuilder, pg_sys};
 
 use crate::error::{LagodbError, LagodbResult, WorkerCatalogOperation};

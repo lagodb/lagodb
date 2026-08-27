@@ -2,7 +2,7 @@
 
 mod state;
 
-use pg_lakebase_core::fdw::{
+use lagodb_core::fdw::{
     FdwModify, FdwScan, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyError, ForeignModifyPlanContext,
     ForeignModifyPlanSpec, ForeignModifyPrivate, ForeignModifyRelationContext,
@@ -14,7 +14,7 @@ use crate::error::ConnectorError;
 use crate::format::{FormatKind, FormatWritePrivate};
 use crate::gucs::WriteConfig;
 use crate::storage::{ObjectLocationKind, ObjectOutput};
-use pg_lakebase_core::storage::foreign::StorageManager;
+use lagodb_core::storage::foreign::StorageManager;
 
 pub(crate) use state::ConnectorModifyState;
 

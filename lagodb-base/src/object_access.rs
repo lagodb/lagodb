@@ -5,8 +5,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
 use crate::{hooks, storage::volume_config::on_object_access};
-use pg_lakebase_core::diag::PgReportError;
-use pg_lakebase_core::runtime_api::{
+use lagodb_core::diag::PgReportError;
+use lagodb_core::runtime_api::{
     OBJECT_ACCESS_EVENTS_KNOWN, ObjectAccessHookDescriptor,
     ObjectAccessStrHookDescriptor, object_access_event_mask,
 };
@@ -432,9 +432,7 @@ unsafe extern "C-unwind" fn object_access_str_router(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_lakebase_core::runtime_api::{
-        OBJECT_ACCESS_DROP, OBJECT_ACCESS_POST_CREATE,
-    };
+    use lagodb_core::runtime_api::{OBJECT_ACCESS_DROP, OBJECT_ACCESS_POST_CREATE};
 
     unsafe extern "C-unwind" fn object_callback(
         _context: *mut c_void,

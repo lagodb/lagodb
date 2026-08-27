@@ -7,9 +7,9 @@ use iceberg_lite::metadata_columns::{
     RESERVED_FIELD_ID_POS,
 };
 use iceberg_lite::scan::ArrowRecordBatchIterator;
+use lagodb_core::prelude::*;
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use pg_arrow_conv::ArrowBatchSource;
-use pg_lakebase_core::prelude::*;
 use pgrx::pg_sys;
 
 use crate::error::IcebergError;

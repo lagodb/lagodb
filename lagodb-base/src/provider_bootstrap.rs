@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::mem::{size_of, take};
 
-use pg_lakebase_core::runtime_api::{
+use lagodb_core::runtime_api::{
     PROVIDER_KIND_ACCESS_METHOD, PROVIDER_KIND_FOREIGN_DATA_WRAPPER,
     ProviderIdentity, REGISTER_DUPLICATE_NAME, REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP,
     REGISTER_PROVIDER_LIBRARY_MISMATCH,
@@ -95,7 +95,7 @@ impl<'a> ValidatedProviderIdentity<'a> {
     /// # Safety
     ///
     /// `identity` must satisfy the trusted internal ABI pointer contract
-    /// documented by `pg_lakebase_core::runtime_api`.
+    /// documented by `lagodb_core::runtime_api`.
     pub(crate) unsafe fn from_raw(identity: *const ProviderIdentity) -> Option<Self> {
         // SAFETY: the caller supplies a live, aligned descriptor under the
         // internal runtime ABI contract; `as_ref` handles the permitted null.
