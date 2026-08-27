@@ -31,7 +31,7 @@ impl fmt::Display for ObjectCleanupCatalogOperation {
 #[derive(Debug, thiserror::Error)]
 pub enum ObjectCleanupError {
     #[error("invalid maintenance target: {0}")]
-    InvalidTarget(#[from] pg_lakebase_storage::StorageError),
+    InvalidTarget(#[from] lagodb_storage::StorageError),
 
     #[error("failed to {operation} maintenance queue catalog: {source}")]
     Catalog {

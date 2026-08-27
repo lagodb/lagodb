@@ -9,7 +9,7 @@ this path.
 
 1. Register storage GUC backing statics.
 2. Clean the postmaster-wide staging directory once at startup.
-3. Register one static bgworker named `pg-lakebase-storage` when
+3. Register one static bgworker named `lagodb-storage` when
    `lagodb.storage_server_enabled = on`.
 
 The worker connects to SPI with `Some("postgres")`. PostgreSQL 17 cannot open

@@ -3,7 +3,7 @@
 use crate::storage::foreign::{
     ForeignOptionView, StorageConfigProvider, StorageOptions,
 };
-use pg_lakebase_storage::{
+use lagodb_storage::{
     AzureStoreConfig, GcsStoreConfig, S3CompatibleStoreConfig, S3StoreConfig,
     SecretString, StoreConfig,
 };

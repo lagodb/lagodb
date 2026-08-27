@@ -1,10 +1,8 @@
 use std::time::Duration;
 
-use pg_lakebase_storage::protocol::{
-    MAX_BULK_DELETE_OBJECT_KEYS, MAX_LIST_PAGE_SIZE,
-};
-use pg_lakebase_storage::{
+use lagodb_storage::{
     DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS, LIST_CURSOR_IDLE_TTL_MS,
+    MAX_BULK_DELETE_OBJECT_KEYS, MAX_LIST_PAGE_SIZE,
 };
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
 

@@ -8,7 +8,7 @@
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
-use pg_lakebase_storage::{StorageError, StorageResult};
+use lagodb_storage::{StorageError, StorageResult};
 use pgrx::pg_sys;
 
 mod backend;

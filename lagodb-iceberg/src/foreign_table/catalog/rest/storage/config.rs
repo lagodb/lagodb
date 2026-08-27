@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 use iceberg_lite::{Error, ErrorKind, Result};
-use md5::{Digest as _, Md5};
-use pg_lakebase_storage::{
+use lagodb_storage::{
     AzureStoreConfig, GcsStoreConfig, S3Encryption, S3StoreConfig, SecretString,
     StoreConfig,
 };
+use md5::{Digest as _, Md5};
 
 use super::routes::ObjectProvider;
 
@@ -385,7 +385,7 @@ impl<'a> ProviderConfig<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_lakebase_storage::S3CompatibleStoreConfig;
+    use lagodb_storage::S3CompatibleStoreConfig;
 
     #[test]
     fn client_region_overrides_s3_region() {

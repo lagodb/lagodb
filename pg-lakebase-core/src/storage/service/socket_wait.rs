@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::ptr::{self, NonNull};
 use std::time::Instant;
 
-use pg_lakebase_storage::{SocketInterest, SocketWait, SocketWaitContext};
+use lagodb_storage::{SocketInterest, SocketWait, SocketWaitContext};
 use pgrx::pg_sys;
 
 pub(super) struct PostgresSocketWait {

@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use iceberg_lite::Result;
 use iceberg_lite::io::{Storage, StorageConfig, StorageFactory};
+use lagodb_storage::StagingPathResolver;
 use pg_lakebase_core::storage::foreign::StorageManager;
 use pg_lakebase_core::storage::profile::{StorageProfileError, StorageProfiles};
 use pg_lakebase_core::storage::service::StorageEndpoint;
-use pg_lakebase_storage::StagingPathResolver;
 use pgrx::pg_sys;
 
 use super::cache::CatalogStorageIdentity;

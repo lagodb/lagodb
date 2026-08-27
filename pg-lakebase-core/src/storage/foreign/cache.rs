@@ -4,7 +4,7 @@ use std::os::raw::c_int;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use pg_lakebase_storage::StoreConfig;
+use lagodb_storage::StoreConfig;
 use pgrx::pg_sys;
 
 use crate::storage::service::BackendStorageService;

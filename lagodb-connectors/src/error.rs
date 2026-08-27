@@ -2,6 +2,7 @@
 
 use std::error::Error as StdError;
 
+use lagodb_storage::StorageError;
 use pg_lakebase_core::copy::CopyError;
 use pg_lakebase_core::diag::{PgReportError, SqlStateError};
 use pg_lakebase_core::fdw::{
@@ -12,7 +13,6 @@ use pg_lakebase_core::plan_data::PlanDataError;
 use pg_lakebase_core::storage::foreign::StorageAcquireError;
 use pg_lakebase_core::storage::profile::StorageProfileError;
 use pg_lakebase_core::tuple::{DecimalCodecError, JsonValueError};
-use pg_lakebase_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 

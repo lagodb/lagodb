@@ -3,7 +3,7 @@
 use std::fmt;
 use std::rc::Rc;
 
-use pg_lakebase_storage::{
+use lagodb_storage::{
     ListSession, ObjectInfo, StagingFile, StagingPathResolver, StorageFile,
     StorageResult, StoreConfig, UploadInfo,
 };

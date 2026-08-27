@@ -8,7 +8,6 @@ members = [
     "pg-arrow-conv",
     "pg-backend-tests",
     "iceberg-lite",
-    "pg-lakebase-storage",
     "lagodb-connectors",
     "xtask",
 ]
@@ -28,6 +27,7 @@ pgrx = { version = "=0.19.2" }
 pgrx-pg-sys = { version = "=0.19.2" }
 pgrx-tests = { version = "=0.19.2" }
 roaring = { version = "0.11" }
+lagodb-storage = { git = "https://github.com/lagodb/lagodb-storage.git", rev = "1b7428de428725c5a403f45c35532efae427c9c8" }
 
 # The 'dev' profile is used when you run `cargo build`.
 [profile.dev]

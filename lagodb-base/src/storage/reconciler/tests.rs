@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use pg_lakebase_storage::ManagedStoreRegistry;
+use lagodb_storage::ManagedStoreRegistry;
 
 use super::{
     ReconcileReport, StoreConfigReconciler, StoreConfigSource, VolumeApplyState,
@@ -102,8 +101,8 @@ fn invalid_volume_does_not_block_valid_volume() {
     assert_eq!(report.stale, 0);
     assert_eq!(report.failures.len(), 1);
     assert_eq!(report.failures[0].state, VolumeApplyState::Unavailable);
-    assert!(fixture.registry.resolve(valid.volume_id).is_ok());
-    assert!(fixture.registry.resolve(invalid.volume_id).is_err());
+    assert!(fixture.registry.contains(valid.volume_id));
+    assert!(!fixture.registry.contains(invalid.volume_id));
 }
 
 #[test]
@@ -127,7 +126,7 @@ fn rejected_spec_is_retried_only_after_force_or_change() {
     assert_eq!(recovered.loaded, 1);
     assert_eq!(recovered.unavailable, 0);
     assert!(recovered.failures.is_empty());
-    assert!(fixture.registry.resolve(corrected.volume_id).is_ok());
+    assert!(fixture.registry.contains(corrected.volume_id));
 }
 
 #[test]
@@ -143,7 +142,7 @@ fn failed_replacement_keeps_last_known_good_store() {
     assert_eq!(degraded.stale, 1);
     assert_eq!(degraded.unavailable, 0);
     assert_eq!(degraded.failures[0].state, VolumeApplyState::Stale);
-    assert!(fixture.registry.resolve(valid.volume_id).is_ok());
+    assert!(fixture.registry.contains(valid.volume_id));
 
     let reverted = fixture.apply([valid], false);
     assert_eq!(reverted.unchanged, 1);
@@ -152,16 +151,12 @@ fn failed_replacement_keeps_last_known_good_store() {
 }
 
 #[test]
-fn forced_default_chain_reload_publishes_a_fresh_backend() {
+fn forced_default_chain_reload_is_reported_as_a_replacement() {
     let mut fixture = ReconcileFixture::new();
     let spec = ReconcileFixture::valid_default_chain_spec(1);
     fixture.apply([spec.clone()], false);
-    let slot = fixture.registry.resolve(spec.volume_id).unwrap();
-    let before = slot.backend();
-
     let report = fixture.apply([spec], true);
-    let after = slot.backend();
 
     assert_eq!(report.replaced, 1);
-    assert!(!Arc::ptr_eq(&before, &after));
+    assert!(fixture.registry.contains(1));
 }

@@ -1,6 +1,6 @@
 //! Conversion from validated volume domain objects to storage backends.
 
-use pg_lakebase_storage::{
+use lagodb_storage::{
     AzureStoreConfig, GcsStoreConfig, S3StoreConfig, SecretString, StoreConfig,
 };
 

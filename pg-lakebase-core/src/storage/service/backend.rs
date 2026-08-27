@@ -14,7 +14,7 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use pg_lakebase_storage::{
+use lagodb_storage::{
     ListSession, ObjectInfo, StagingFile, StagingPathResolver, StorageClient,
     StorageError, StorageFile, StorageProbeResult, StorageResult, StoreConfig,
     UploadInfo,
@@ -158,9 +158,9 @@ impl BackendStorageService {
         &self,
         bucket: &str,
         key: &str,
-    ) -> StorageResult<pg_lakebase_storage::ObjectLocation> {
+    ) -> StorageResult<lagodb_storage::ObjectLocation> {
         let client = self.acquire_client()?;
-        pg_lakebase_storage::ObjectLocation::new(
+        lagodb_storage::ObjectLocation::new(
             client.backend_identity().clone(),
             bucket,
             key,

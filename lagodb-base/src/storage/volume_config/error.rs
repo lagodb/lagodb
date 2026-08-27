@@ -140,7 +140,7 @@ pub(crate) enum StorageVolumeError {
         source: ConfigSecurityError,
     },
     #[error("storage backend configuration is invalid")]
-    BackendConfig(#[from] pg_lakebase_storage::StorageError),
+    BackendConfig(#[from] lagodb_storage::StorageError),
     #[error("storage volume invariant failed: {0}")]
     Invariant(&'static str),
 }

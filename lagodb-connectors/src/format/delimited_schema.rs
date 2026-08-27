@@ -2,10 +2,10 @@
 
 use std::ffi::CStr;
 
+use lagodb_storage::StorageFile;
 use pg_lakebase_core::copy::{
     CopyRawFieldReader, CopyRawRecord, CopyTextInputValidator,
 };
-use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

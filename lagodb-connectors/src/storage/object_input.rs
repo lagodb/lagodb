@@ -1,9 +1,9 @@
 //! Object collection resolution for COPY FROM and foreign scans.
 
+use lagodb_storage::StorageFile;
 use pg_lakebase_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
-use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

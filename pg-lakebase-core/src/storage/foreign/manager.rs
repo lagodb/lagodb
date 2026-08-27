@@ -1,9 +1,7 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use pg_lakebase_storage::{
-    StagingPathResolver, StorageError, StorageResult, StoreConfig,
-};
+use lagodb_storage::{StagingPathResolver, StorageError, StorageResult, StoreConfig};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;

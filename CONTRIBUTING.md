@@ -14,7 +14,7 @@ a second implementation.
 | [`pg-lakebase-core`](pg-lakebase-core) | PostgreSQL TableAM, CustomScan, and FDW frameworks |
 | [`pg-arrow-conv`](pg-arrow-conv) | Arrow/PostgreSQL value conversion |
 | [`iceberg-lite`](iceberg-lite) | Synchronous PostgreSQL-oriented Iceberg library |
-| [`pg-lakebase-storage`](pg-lakebase-storage) | Local cache and object-storage service |
+| [`lagodb-storage`](https://github.com/lagodb/lagodb-storage) | Local cache and object-storage service maintained in a separate repository |
 | [`pg-delta-am`](pg-delta-am) | Experimental access-method skeleton; not Delta storage |
 | [`xtask`](xtask) | Workspace test orchestration |
 
@@ -29,12 +29,12 @@ cargo xtask test-all pg17
 ```
 
 The full command runs workspace unit tests, pgrx backend tests, extension
-tests, SQL regression, isolation tests, and the object-storage E2E suite. It
-requires:
+tests, SQL regression, and isolation tests. It requires:
 
 - a pgrx-managed PostgreSQL 17 configured with
   `--enable-injection-points`; and
-- Docker for the MinIO-backed object-storage tests.
+- Docker for the object-storage, Iceberg REST catalog, and Spark fixtures used
+  by the SQL regression suites.
 
 Initialize the injection-enabled server with:
 
@@ -58,7 +58,15 @@ cargo pgrx install \
 ```bash
 cargo pgrx test pg17 --package lagodb-iceberg
 cargo xtask isolation pg17
-cargo test --package pg-lakebase-storage --features integration --test e2e
+```
+
+The storage service has its own test suite and CI in the separate
+[`lagodb-storage`](https://github.com/lagodb/lagodb-storage) repository. From a
+sibling checkout, run its E2E suite as an independent project:
+
+```bash
+cd ../lagodb-storage
+cargo test --features integration --test e2e
 ```
 
 The detailed pgrx testing model, including the distinction between ordinary
@@ -71,7 +79,7 @@ Rust tests and `#[pgrx::pg_test]`, is documented in
 - SQL expected output: [`lagodb-iceberg/tests/pg_regress/expected`](lagodb-iceberg/tests/pg_regress/expected)
 - Isolation specifications: [`lagodb-iceberg/tests/isolation/specs`](lagodb-iceberg/tests/isolation/specs)
 - Framework backend tests: [`pg-backend-tests`](pg-backend-tests)
-- Storage-service E2E tests: [`pg-lakebase-storage/tests/e2e`](pg-lakebase-storage/tests/e2e)
+- Storage-service E2E tests: [`lagodb-storage/tests/e2e`](https://github.com/lagodb/lagodb-storage/tree/main/tests/e2e)
 
 The full test command prepares PostgreSQL's upstream `injection_points` test
 extension from the pgrx-managed source tree. Product extensions do not expose

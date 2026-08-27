@@ -5,12 +5,12 @@ mod read;
 mod write;
 
 use apache_avro::{Reader, Schema};
+use lagodb_storage::StorageFile;
 use pg_lakebase_core::fdw::{
     ForeignInsertBeginContext, ForeignModifyBeginContext, ForeignModifyCapabilities,
     ForeignModifyOperation, ForeignModifyPlanContext, ForeignModifyPlanSpec,
     ForeignModifyRelationContext, StartForeignScanContext,
 };
-use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

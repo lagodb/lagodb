@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use pg_lakebase_storage::{StorageClient, StorageError};
+use lagodb_storage::{StorageClient, StorageError};
 
 use super::item::{ObjectCleanupItem, ObjectCleanupItemId};
 use super::runner::{

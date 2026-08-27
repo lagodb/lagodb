@@ -11,7 +11,7 @@ mod handle;
 mod identity;
 mod manager;
 
-use pg_lakebase_storage::{StorageError, StorageErrorKind};
+use lagodb_storage::{StorageError, StorageErrorKind};
 use pgrx::prelude::PgSqlErrorCode;
 
 use crate::diag::SqlStateError;

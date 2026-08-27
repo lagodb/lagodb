@@ -1,6 +1,6 @@
 //! Validated physical storage targets consumed by the cleanup executor.
 
-use pg_lakebase_storage::{ObjectPath, StorageError};
+use lagodb_storage::{ObjectPath, StorageError};
 
 use crate::storage::volume::StorageVolumeId;
 

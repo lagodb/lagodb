@@ -4,9 +4,9 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
+use lagodb_storage::StagingPathResolver;
 use pg_lakebase_core::options::get_tablespace;
 use pg_lakebase_core::storage::service::{BackendStorageService, StorageEndpoint};
-use pg_lakebase_storage::StagingPathResolver;
 use pgrx::pg_sys;
 
 use crate::error::IcebergResult;

@@ -5,7 +5,7 @@
 -- its desired registry exclusively from the machine-managed volume snapshot.
 SELECT count(*) = 1 AS worker_running
 FROM pg_stat_activity
-WHERE backend_type = 'pg-lakebase-storage'
+WHERE backend_type = 'lagodb-storage'
 \gset
 \echo worker_running: :worker_running
 
@@ -153,7 +153,7 @@ SELECT pg_temp.storage_volume_wait_for_reload(false, false) AS ignored
 
 SELECT count(*) = 1 AS worker_still_running
 FROM pg_stat_activity
-WHERE backend_type = 'pg-lakebase-storage'
+WHERE backend_type = 'lagodb-storage'
 \gset
 \echo worker_still_running: :worker_still_running
 

@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pg_lakebase_storage::{StorageClient, StorageError, StorageErrorKind};
+use lagodb_storage::{StorageClient, StorageError, StorageErrorKind};
 
 use super::item::{ObjectCleanupItem, ObjectCleanupTarget};
 

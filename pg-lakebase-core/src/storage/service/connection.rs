@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
-use pg_lakebase_storage::{
+use lagodb_storage::{
     ExternalFdLease, ExternalFdPolicy, StorageClient, StorageError, StorageResult,
     StoreConfig,
 };

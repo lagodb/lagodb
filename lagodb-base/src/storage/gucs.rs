@@ -6,7 +6,7 @@
 
 use std::ffi::CString;
 
-use pg_lakebase_storage::{
+use lagodb_storage::{
     DEFAULT_CACHE_CLEANUP_BATCH_BYTES, DEFAULT_CACHE_CLEANUP_BATCH_ITEMS,
     DEFAULT_CACHE_CLEANUP_INTERVAL, DEFAULT_CACHE_CLEANUP_START_PERCENT,
     DEFAULT_CACHE_CLEANUP_TARGET_PERCENT, DEFAULT_CACHE_TOUCH_GRANULARITY,
@@ -57,7 +57,7 @@ static CACHE_CLEANUP_BATCH_MB: GucSetting<i32> = GucSetting::<i32>::new(
 pub fn init() {
     GucRegistry::define_bool_guc(
         c"lagodb.storage_server_enabled",
-        c"Start pg-lakebase-storage background worker",
+        c"Start lagodb-storage background worker",
         c"When true, a background worker running the local storage service is started at postmaster startup.",
         &ENABLED,
         GucContext::Postmaster,
@@ -66,7 +66,7 @@ pub fn init() {
 
     GucRegistry::define_string_guc(
         c"lagodb.storage_server_socket_path",
-        c"Unix socket path for pg-lakebase-storage",
+        c"Unix socket path for lagodb-storage",
         c"Absolute path to the Unix socket. Empty or unset means derive from DataDir.",
         &SOCKET_PATH,
         GucContext::Postmaster,
@@ -75,7 +75,7 @@ pub fn init() {
 
     GucRegistry::define_string_guc(
         c"lagodb.storage_server_cache_dir",
-        c"Cache directory for pg-lakebase-storage",
+        c"Cache directory for lagodb-storage",
         c"Absolute path to the local cache directory. Empty or unset means derive from DataDir.",
         &CACHE_DIR,
         GucContext::Postmaster,
@@ -96,7 +96,7 @@ pub fn init() {
     GucRegistry::define_int_guc(
         c"lagodb.storage_server_shutdown_timeout_ms",
         c"Shutdown timeout in milliseconds for the storage worker",
-        c"Maximum time to wait for in-flight connections during shutdown.",
+        c"Maximum time to stop the server task and shut down its Tokio runtime.",
         &SHUTDOWN_TIMEOUT_MS,
         100,
         60000,

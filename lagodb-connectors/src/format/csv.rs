@@ -1,5 +1,6 @@
 //! PostgreSQL COPY CSV-format object and its validated options.
 
+use lagodb_storage::StorageFile;
 use pg_lakebase_core::fdw::{
     ColumnRequirements, ForeignInsertBeginContext, ForeignModifyBeginContext,
     ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
@@ -7,7 +8,6 @@ use pg_lakebase_core::fdw::{
 };
 use pg_lakebase_core::handles::RelationHandle;
 use pg_lakebase_core::storage::foreign::ForeignOptionView;
-use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

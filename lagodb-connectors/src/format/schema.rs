@@ -5,8 +5,8 @@ use std::ffi::CString;
 use std::io::{self, Read};
 
 use arrow_schema::{DataType, Schema, TimeUnit};
+use lagodb_storage::StorageFile;
 use pg_lakebase_core::copy::{CopyDataSource, CopyError};
-use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

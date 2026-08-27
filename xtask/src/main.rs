@@ -171,18 +171,6 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     println!("\n=== Phase 6: Isolation tests (PostgreSQL) ===\n");
     run_isolation(pg_version, &[])?;
 
-    println!("\n=== Phase 7: pg-lakebase-storage E2E (Docker/MinIO) ===\n");
-    run_command(
-        Command::new("cargo")
-            .arg("test")
-            .arg("--package")
-            .arg("pg-lakebase-storage")
-            .arg("--features")
-            .arg("integration")
-            .arg("--test")
-            .arg("e2e"),
-    )?;
-
     println!();
     println!("=== All tests passed! ({pg_ver_str}) ===");
     Ok(())

@@ -5,7 +5,7 @@
 //! transaction session. Providers receive raw storage primitives and own their
 //! operation lifecycle.
 
-use pg_lakebase_storage::{
+use lagodb_storage::{
     ListSession, ObjectInfo, StagingFile, StagingPathResolver, StorageError,
     StorageFile, StorageResult, UploadInfo,
 };

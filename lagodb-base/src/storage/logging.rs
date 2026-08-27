@@ -116,7 +116,7 @@ impl PgLogBridge {
 /// failure), PostgreSQL's error recursion will call `proc_exit`, which is
 /// acceptable: the logging subsystem is broken and the bgworker should exit.
 pub(super) fn emit_pg_log(elevel: i32, message: &str) {
-    const PREFIX: &str = "[pg-lakebase-storage] ";
+    const PREFIX: &str = "[lagodb-storage] ";
 
     unsafe {
         if !pg_sys::message_level_is_interesting(elevel) {

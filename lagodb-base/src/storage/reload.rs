@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use pg_lakebase_storage::{StorageRuntime, StorageRuntimeConfig};
+use lagodb_storage::{StorageRuntime, StorageRuntimeConfig};
 use pgrx::pg_sys;
 
 use super::catalog::VolumeConfigSource;

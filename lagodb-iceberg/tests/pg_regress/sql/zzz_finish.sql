@@ -4,7 +4,7 @@
 SET client_min_messages = warning;
 SELECT pid::text AS lakebase_regress_storage_pid
 FROM pg_stat_activity
-WHERE backend_type = 'pg-lakebase-storage'
+WHERE backend_type = 'lagodb-storage'
 \gset
 SELECT current_setting('port') || '-' || current_database()
        AS lakebase_regress_slot

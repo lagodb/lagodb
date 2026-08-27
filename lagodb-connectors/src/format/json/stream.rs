@@ -3,7 +3,7 @@
 use std::io::{self, BufRead, BufReader, Read};
 use std::num::NonZeroUsize;
 
-use pg_lakebase_storage::StorageFile;
+use lagodb_storage::StorageFile;
 
 use crate::error::ConnectorError;
 use crate::storage::ObjectFiles;

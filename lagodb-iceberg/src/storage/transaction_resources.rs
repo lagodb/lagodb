@@ -46,8 +46,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
+use lagodb_storage::ObjectLocation;
 use pg_lakebase_core::storage::service::BackendStorageService;
-use pg_lakebase_storage::ObjectLocation;
 
 use super::{LocalStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch};
 use crate::error::{IcebergError, IcebergResult};

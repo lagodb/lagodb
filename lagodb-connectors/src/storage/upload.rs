@@ -4,13 +4,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use lagodb_storage::{StagingFile, StorageError, StorageErrorKind, StorageResult};
 use pg_lakebase_core::diag::report_warning;
 use pg_lakebase_core::storage::foreign::ObjectAccess;
 use pg_lakebase_core::transaction::cleanup::{
     PendingDelete, register_pending_delete,
-};
-use pg_lakebase_storage::{
-    StagingFile, StorageError, StorageErrorKind, StorageResult,
 };
 
 use super::AllocatedObject;

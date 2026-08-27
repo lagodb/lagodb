@@ -167,7 +167,7 @@ schema mapping, object-storage cache interaction, and transaction-local overlay
 semantics. Bypassing that layer would duplicate correctness-sensitive logic.
 
 Later, a deeper DataFusion file source can read selected Parquet files directly
-from `pg-lakebase-storage` cache paths or from an object-store implementation,
+from `lagodb-storage` cache paths or from an object-store implementation,
 but only after Iceberg delete semantics and overlay visibility are preserved.
 
 ### Planner integration

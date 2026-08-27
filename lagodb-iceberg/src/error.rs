@@ -18,12 +18,12 @@ use std::error::Error as StdError;
 use std::fmt::{Display, Formatter};
 
 use iceberg_lite::catalog::rest::{RestError, RestErrorKind};
+use lagodb_storage::{StorageError, StorageErrorKind};
 use pg_lakebase_core::diag::{PgError, SqlStateError, domain_error_report};
 use pg_lakebase_core::extension_worker::WorkerNotificationError;
 use pg_lakebase_core::object_cleanup::ObjectCleanupError;
 use pg_lakebase_core::options::TablespaceError;
 use pg_lakebase_core::options::{TableOptionError, TablespaceCacheError};
-use pg_lakebase_storage::{StorageError, StorageErrorKind};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -155,7 +155,7 @@ pub enum IcebergError {
     TableOptionError(#[from] TableOptionError),
 
     #[error("storage error: {0}")]
-    StorageError(#[from] pg_lakebase_storage::StorageError),
+    StorageError(#[from] lagodb_storage::StorageError),
 
     #[error("maintenance error: {0}")]
     ObjectCleanupError(#[from] ObjectCleanupError),

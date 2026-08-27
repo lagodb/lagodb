@@ -210,7 +210,7 @@ mod lagodb {
                 false,
                 false,
                 false,
-                Some(error.wire_message()),
+                Some(error.diagnostic_message()),
             ),
         };
         TableIterator::new(std::iter::once(row))

@@ -2,6 +2,7 @@
 
 use std::io::{self, Read};
 
+use lagodb_storage::StorageFile;
 use pg_lakebase_core::copy::{
     CopyDataSource, CopyDocumentSource, CopyError, CopyFromScan,
 };
@@ -11,7 +12,6 @@ use pg_lakebase_core::fdw::{
     ReScanForeignScanContext, ScanProjectionPolicy, ScanSlotWriter,
     StartForeignScanContext,
 };
-use pg_lakebase_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

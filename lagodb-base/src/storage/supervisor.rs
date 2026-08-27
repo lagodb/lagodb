@@ -14,8 +14,8 @@ use pgrx::bgworkers::BackgroundWorker;
 use pgrx::pg_sys;
 use tokio_util::sync::CancellationToken;
 
+use lagodb_storage::{ManagedStoreRegistry, StorageRuntime};
 use pg_lakebase_core::pg_latch::BackendLatch;
-use pg_lakebase_storage::{ManagedStoreRegistry, StorageRuntime};
 
 use super::catalog::VolumeConfigSource;
 use super::config::StorageWorkerConfig;
@@ -24,7 +24,7 @@ use super::reload::{StorageReconciler, SupervisorReloadState};
 use super::state::StorageStatusStore;
 use super::volume_config::StorageVolumeConfigStore;
 
-type ServerTask = tokio::task::JoinHandle<pg_lakebase_storage::StorageResult<()>>;
+type ServerTask = tokio::task::JoinHandle<lagodb_storage::StorageResult<()>>;
 pub struct StorageWorkerSupervisor {
     config: StorageWorkerConfig,
     log_bridge: PgLogBridge,
@@ -126,7 +126,7 @@ impl StorageWorkerSupervisor {
             .worker_threads(self.config.startup.worker_threads)
             .enable_all()
             .build()
-            .expect("failed to create pg-lakebase-storage tokio runtime")
+            .expect("failed to create lagodb-storage tokio runtime")
     }
 
     fn build_reconciler(
@@ -182,17 +182,15 @@ impl StorageWorkerSupervisor {
         let service_config = startup_config.service_config.clone();
 
         runtime.spawn(async move {
-            let server = pg_lakebase_storage::StorageServerBuilder::new(
-                &socket_path,
-                &cache_dir,
-            )
-            .with_server_config(server_config)
-            .with_service_config(service_config)
-            .with_managed_store_registry(registry)
-            .with_runtime(storage_runtime)
-            .with_tracing_request_observer()
-            .bind()
-            .await?;
+            let server =
+                lagodb_storage::StorageServerBuilder::new(&socket_path, &cache_dir)
+                    .with_server_config(server_config)
+                    .with_service_config(service_config)
+                    .with_managed_store_registry(registry)
+                    .with_runtime(storage_runtime)
+                    .with_tracing_request_observer()
+                    .bind()
+                    .await?;
 
             server.serve_until(shutdown).await
         })
@@ -336,6 +334,9 @@ impl StorageWorkerSupervisor {
         shutdown_timeout: Duration,
     ) {
         let deadline = Instant::now() + shutdown_timeout;
+        // `serve_until` stops the accept loop but deliberately leaves established
+        // connections detached. Runtime shutdown below is their terminal boundary; the
+        // storage server does not implement server-level connection draining.
         self.wait_for_server_shutdown(&runtime, server_handle, deadline);
         let runtime_budget = deadline
             .saturating_duration_since(Instant::now())

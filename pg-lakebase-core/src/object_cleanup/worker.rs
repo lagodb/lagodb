@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pg_lakebase_storage::StorageError;
+use lagodb_storage::StorageError;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 

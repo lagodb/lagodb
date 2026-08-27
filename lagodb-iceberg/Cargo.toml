@@ -24,7 +24,7 @@ pg_test = []
 [dependencies]
 pgrx = { workspace = true }
 pg-lakebase-core = { path = "../pg-lakebase-core", default-features = false }
-pg-lakebase-storage = { path = "../pg-lakebase-storage" }
+lagodb-storage = { workspace = true }
 pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
 iceberg-lite = { path = "../iceberg-lite" }
 thiserror = "1.0"

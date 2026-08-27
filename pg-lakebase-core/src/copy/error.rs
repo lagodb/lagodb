@@ -2,7 +2,7 @@
 
 use std::error::Error as StdError;
 
-use pg_lakebase_storage::StorageError;
+use lagodb_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 

@@ -1,21 +1,29 @@
 //! Random-access adapter from a storage-service object to Parquet's reader.
 
 use std::io::{self, Read};
-use std::sync::Arc;
+use std::rc::Rc;
 
 use bytes::Bytes;
+use lagodb_storage::StorageFile;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::reader::{ChunkReader, Length};
-use pg_lakebase_storage::StorageFile;
 
 pub(crate) struct ParquetObjectReader {
-    file: Arc<StorageFile>,
+    file: Rc<StorageFile>,
 }
+
+// SAFETY: The connector only constructs, uses, and drops this adapter on the
+// PostgreSQL backend thread. The synchronous Parquet readers used here do not
+// move it to a worker thread or invoke its read methods concurrently. The
+// underlying StorageFile intentionally remains !Send and !Sync; these impls
+// are confined to this crate-private PostgreSQL adapter boundary.
+unsafe impl Send for ParquetObjectReader {}
+unsafe impl Sync for ParquetObjectReader {}
 
 impl ParquetObjectReader {
     pub(crate) fn new(file: StorageFile) -> Self {
         Self {
-            file: Arc::new(file),
+            file: Rc::new(file),
         }
     }
 }
@@ -37,7 +45,7 @@ impl ChunkReader for ParquetObjectReader {
             )));
         }
         Ok(ParquetObjectRange {
-            file: Arc::clone(&self.file),
+            file: Rc::clone(&self.file),
             position: start,
         })
     }
@@ -78,7 +86,7 @@ impl ChunkReader for ParquetObjectReader {
 }
 
 pub(crate) struct ParquetObjectRange {
-    file: Arc<StorageFile>,
+    file: Rc<StorageFile>,
     position: u64,
 }
 

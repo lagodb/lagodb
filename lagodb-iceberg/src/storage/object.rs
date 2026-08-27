@@ -1,11 +1,9 @@
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
+use lagodb_storage::{StagingFile, StagingPathResolver, StorageError, StorageFile};
 use pg_lakebase_core::object_cleanup::ObjectTarget;
 use pg_lakebase_core::storage::service::BackendStorageService;
 use pg_lakebase_core::storage::volume::StorageVolumeId;
-use pg_lakebase_storage::{
-    StagingFile, StagingPathResolver, StorageError, StorageFile,
-};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -24,12 +22,12 @@ use super::wait_event::{StorageWaitEvent, StorageWaitGuard};
 // service clamps each response to its configured max_read_size. Keep the
 // adapter chunk size aligned with the default service clamp so large Iceberg
 // `read_range` calls do not turn into multi-GB direct-I/O allocations.
-const OBJECT_READ_CHUNK_LEN: u32 = pg_lakebase_storage::DEFAULT_MAX_READ_SIZE;
+const OBJECT_READ_CHUNK_LEN: u32 = lagodb_storage::DEFAULT_MAX_READ_SIZE;
 
 pub(crate) fn storage_err(e: StorageError) -> Error {
     let kind = match e.kind() {
-        pg_lakebase_storage::StorageErrorKind::NotFound => ErrorKind::DataInvalid,
-        pg_lakebase_storage::StorageErrorKind::InvalidPath => ErrorKind::DataInvalid,
+        lagodb_storage::StorageErrorKind::NotFound => ErrorKind::DataInvalid,
+        lagodb_storage::StorageErrorKind::InvalidPath => ErrorKind::DataInvalid,
         _ => ErrorKind::IoError,
     };
     Error::new(kind, format!("{e}")).with_source(e)
@@ -145,7 +143,7 @@ impl Storage for ObjectStorage {
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
         match self.service.head(self.bucket.as_ref(), path) {
             Ok(info) => Ok(Some(FileMetadata { size: info.size })),
-            Err(e) if e.kind() == pg_lakebase_storage::StorageErrorKind::NotFound => {
+            Err(e) if e.kind() == lagodb_storage::StorageErrorKind::NotFound => {
                 Ok(None)
             }
             Err(e) => Err(storage_err(e)),
@@ -238,6 +236,16 @@ pub(crate) struct ObjectReader {
     key: Arc<str>,
     file: StorageFile,
 }
+
+// SAFETY: `ObjectReader` is an adapter for `iceberg_lite::io::FileRead`, whose
+// upstream contract requires `Send + Sync`. PostgreSQL constructs, uses,
+// clones, and drops every reader on one backend main thread. Neither the
+// extension nor its synchronous executor transfers a reader to another
+// thread or invokes it concurrently. The contained `StorageFile` deliberately
+// remains `!Send + !Sync`; this unsafe boundary is confined to the host adapter
+// that owns the PostgreSQL execution invariant.
+unsafe impl Send for ObjectReader {}
+unsafe impl Sync for ObjectReader {}
 
 impl ObjectReader {
     pub(crate) fn new(
@@ -367,11 +375,9 @@ impl std::io::Read for ObjectReader {
 impl std::io::Seek for ObjectReader {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         let seek_pos = match pos {
-            SeekFrom::Start(offset) => pg_lakebase_storage::SeekFrom::Start(offset),
-            SeekFrom::End(offset) => pg_lakebase_storage::SeekFrom::End(offset),
-            SeekFrom::Current(offset) => {
-                pg_lakebase_storage::SeekFrom::Current(offset)
-            }
+            SeekFrom::Start(offset) => lagodb_storage::SeekFrom::Start(offset),
+            SeekFrom::End(offset) => lagodb_storage::SeekFrom::End(offset),
+            SeekFrom::Current(offset) => lagodb_storage::SeekFrom::Current(offset),
         };
         Ok(self.file.seek(seek_pos))
     }
@@ -392,7 +398,7 @@ impl FileRead for ObjectReader {
             .service
             .open(self.bucket.as_ref(), self.key.as_ref())
             .map_err(std::io::Error::other)?;
-        new_file.seek(pg_lakebase_storage::SeekFrom::Start(pos));
+        new_file.seek(lagodb_storage::SeekFrom::Start(pos));
         Ok(Box::new(ObjectReader::new(
             self.service.clone(),
             Arc::clone(&self.bucket),

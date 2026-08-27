@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use pg_lakebase_storage::{StorageClient, StorageResult};
+use lagodb_storage::{StorageClient, StorageResult};
 
 use crate::storage::service::StorageEndpoint;
 
@@ -45,12 +45,12 @@ impl ObjectTreeObserver {
         for entry in client.list(target.namespace(), Some(target.prefix())) {
             let entry = entry?;
             result.objects = result.objects.checked_add(1).ok_or_else(|| {
-                pg_lakebase_storage::StorageError::resource_exhausted(
+                lagodb_storage::StorageError::resource_exhausted(
                     "object-tree count exceeds u64",
                 )
             })?;
             result.bytes = result.bytes.checked_add(entry.size).ok_or_else(|| {
-                pg_lakebase_storage::StorageError::resource_exhausted(
+                lagodb_storage::StorageError::resource_exhausted(
                     "object-tree byte count exceeds u64",
                 )
             })?;

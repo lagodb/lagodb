@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use iceberg_lite::io::FileIO;
+use lagodb_storage::{ObjectLocation, StorageErrorKind};
 use pg_lakebase_core::storage::service::BackendStorageService;
 use pg_lakebase_core::wal::flush_wal;
-use pg_lakebase_storage::{ObjectLocation, StorageErrorKind};
 
 use crate::storage::local_file_wal::record::log_delete_directory;
 

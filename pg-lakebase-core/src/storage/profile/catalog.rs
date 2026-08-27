@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use pg_lakebase_storage::StoreConfig;
+use lagodb_storage::StoreConfig;
 use pgrx::pg_sys;
 
 use crate::storage::foreign::{

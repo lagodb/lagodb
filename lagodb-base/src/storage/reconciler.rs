@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
 
+use lagodb_storage::{ManagedStoreRegistry, StorageError, StoreConfig};
 use pg_lakebase_core::diag::error_source_chain_detail;
-use pg_lakebase_storage::{ManagedStoreRegistry, StorageError, StoreConfig};
 
 use super::volume_config::{CredentialConfig, StorageLocation, StorageVolumeError};
 

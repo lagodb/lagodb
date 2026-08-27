@@ -5,7 +5,7 @@ cleanup_injection_point=lakebase-iceberg-object-reader-before-drop
 foreground_injection_point=lakebase-storage-foreground-before-open
 cleanup_application_name=lakebase-storage-cleanup-cancel
 foreground_application_name=lakebase-storage-foreground-cancel
-output_file="/tmp/pg_lakebase_storage_socket_cancel_contexts_${PGPORT:-unknown}_$$.out"
+output_file="/tmp/lagodb_storage_socket_cancel_contexts_${PGPORT:-unknown}_$$.out"
 client_pid=
 storage_pid=
 
@@ -80,7 +80,7 @@ trap cleanup EXIT HUP INT TERM
 storage_pid=$(psql_scalar "
     SELECT pid
     FROM pg_stat_activity
-    WHERE backend_type = 'pg-lakebase-storage'
+    WHERE backend_type = 'lagodb-storage'
 ")
 
 PGAPPNAME=$cleanup_application_name psql -XAtq -v ON_ERROR_STOP=1 \

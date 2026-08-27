@@ -61,8 +61,8 @@ pub(crate) fn init() {
     let _keep =
         lagodb_base_storage_bgworker_main as extern "C-unwind" fn(pg_sys::Datum);
 
-    BackgroundWorkerBuilder::new("pg-lakebase-storage")
-        .set_type("pg-lakebase-storage")
+    BackgroundWorkerBuilder::new("lagodb-storage")
+        .set_type("lagodb-storage")
         .set_library(LIBRARY_NAME)
         .set_function(WORKER_FUNCTION)
         // `enable_spi_access` sets BGWORKER_BACKEND_DATABASE_CONNECTION and
@@ -81,7 +81,7 @@ pub(crate) fn runtime_status() -> StorageRuntimeStatus {
 fn cleanup_staging_dir() {
     let (_, _, cache_dir) = resolved_endpoint().into_parts();
     let staging_dir =
-        pg_lakebase_storage::StagingPathResolver::new(cache_dir).staging_dir();
+        lagodb_storage::StagingPathResolver::new(cache_dir).staging_dir();
     if !staging_dir.exists() {
         return;
     }
