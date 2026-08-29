@@ -48,10 +48,10 @@ impl ColumnDatumTarget {
     /// Validate the framework's UTF-8 semantic capability without assuming a
     /// particular target OID. This is used by Arrow rules that have not yet
     /// been paired with a concrete PostgreSQL attribute.
-    pub fn validate_utf8_server_encoding() -> Result<(), DatumConversionError> {
+    pub fn validate_utf8_server_encoding() -> Result<(), Utf8ServerEncodingError> {
         let encoding = unsafe { pg_sys::GetDatabaseEncoding() };
         if encoding != pg_sys::pg_enc::PG_UTF8 as i32 {
-            return Err(DatumConversionError::UnsupportedServerEncoding { encoding });
+            return Err(Utf8ServerEncodingError { encoding });
         }
         Ok(())
     }
@@ -202,6 +202,37 @@ pub enum DatumConversionError {
     Postgres(PgError),
 }
 
+/// The database encoding cannot satisfy a semantic UTF-8 conversion contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Utf8ServerEncodingError {
+    encoding: i32,
+}
+
+impl Utf8ServerEncodingError {
+    #[inline]
+    pub const fn encoding(self) -> i32 {
+        self.encoding
+    }
+}
+
+impl fmt::Display for Utf8ServerEncodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "semantic UTF-8 conversion requires UTF-8 server encoding, found encoding {}",
+            self.encoding
+        )
+    }
+}
+
+impl Error for Utf8ServerEncodingError {}
+
+impl SqlStateError for Utf8ServerEncodingError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+    }
+}
+
 impl DatumConversionError {
     #[inline]
     const fn incompatible(target: Oid) -> Self {
@@ -265,6 +296,15 @@ impl From<PgError> for DatumConversionError {
     #[inline]
     fn from(error: PgError) -> Self {
         Self::Postgres(error)
+    }
+}
+
+impl From<Utf8ServerEncodingError> for DatumConversionError {
+    #[inline]
+    fn from(error: Utf8ServerEncodingError) -> Self {
+        Self::UnsupportedServerEncoding {
+            encoding: error.encoding(),
+        }
     }
 }
 

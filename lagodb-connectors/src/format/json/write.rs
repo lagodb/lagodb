@@ -10,7 +10,7 @@ use crate::storage::ObjectOutput;
 use super::record::JsonColumnPlan;
 use crate::format::{
     EmptyOutputPolicy, FormatKind, FormatWriteState, ObjectSetWriter,
-    StreamCompression, StreamEncoderFactory,
+    StreamCompression, StreamEncoderFactory, StreamFormat,
 };
 
 pub(super) struct JsonWriteState {
@@ -58,7 +58,7 @@ impl JsonWriteState {
             encoder,
             writer: Some(ObjectSetWriter::new(
                 output,
-                StreamEncoderFactory::new(FormatKind::Json, compression),
+                StreamEncoderFactory::new(StreamFormat::Json, compression),
             )),
         })
     }

@@ -4,9 +4,8 @@ use core::ffi::CStr;
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Formatter};
 
-use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
-use pgrx::prelude::{PgLogLevel, PgSqlErrorCode};
+use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
 use crate::diag::{
@@ -66,13 +65,8 @@ impl ForeignImportError {
         })
     }
 
-    pub(crate) fn report_after_switch(
-        self,
-        prior_context: pg_sys::MemoryContext,
-    ) -> ! {
-        unsafe { pg_sys::MemoryContextSwitchTo(prior_context) };
-        ErrorReport::from(self).report(PgLogLevel::ERROR);
-        unreachable!()
+    pub(crate) fn report(self) -> ! {
+        PgReportError::raise(ErrorReport::from(self))
     }
 
     fn collect_report_parts(

@@ -97,29 +97,26 @@ impl IcebergFdwModifyState {
         let sinks = MutationSinks::new(rows, deletes)?;
         let validation = match operation {
             ForeignModifyOperation::Insert => None,
-            ForeignModifyOperation::Update | ForeignModifyOperation::Delete => {
+            ForeignModifyOperation::Update => {
                 let properties = table
                     .metadata()
                     .table_properties()
                     .map_err(IcebergError::from)?;
-                let command = match operation {
-                    ForeignModifyOperation::Update => RowLevelCommand::Update,
-                    ForeignModifyOperation::Delete => RowLevelCommand::Delete,
-                    ForeignModifyOperation::Insert => unreachable!(),
-                };
-                let table_isolation = match operation {
-                    ForeignModifyOperation::Update => {
-                        properties.write_update_isolation_level
-                    }
-                    ForeignModifyOperation::Delete => {
-                        properties.write_delete_isolation_level
-                    }
-                    ForeignModifyOperation::Insert => unreachable!(),
-                };
                 Some((
-                    command,
+                    RowLevelCommand::Update,
                     PgTransactionIsolation::current()?
-                        .effective_iceberg(table_isolation),
+                        .effective_iceberg(properties.write_update_isolation_level),
+                ))
+            }
+            ForeignModifyOperation::Delete => {
+                let properties = table
+                    .metadata()
+                    .table_properties()
+                    .map_err(IcebergError::from)?;
+                Some((
+                    RowLevelCommand::Delete,
+                    PgTransactionIsolation::current()?
+                        .effective_iceberg(properties.write_delete_isolation_level),
                 ))
             }
         };

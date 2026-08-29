@@ -3,7 +3,8 @@
 use apache_avro::Schema;
 use lagodb_core::handles::RelationColumn;
 use lagodb_core::tuple::{
-    ColumnDatumTarget, Decimal128NumericCodec, numeric_precision_scale,
+    ColumnDatumTarget, DatumConversionError, Decimal128NumericCodec,
+    numeric_precision_scale,
 };
 use pgrx::pg_sys;
 
@@ -272,7 +273,8 @@ impl AvroWritePlan {
         if fields.iter().any(|(_, kind)| {
             matches!(kind, AvroValueKind::String | AvroValueKind::Name)
         }) {
-            ColumnDatumTarget::validate_utf8_server_encoding()?;
+            ColumnDatumTarget::validate_utf8_server_encoding()
+                .map_err(DatumConversionError::from)?;
         }
         let kinds = fields
             .iter()

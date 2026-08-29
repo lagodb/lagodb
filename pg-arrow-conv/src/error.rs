@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 
 use lagodb_core::diag::{PgError, SqlStateError};
-use lagodb_core::tuple::{DatumConversionError, DecimalCodecError};
+use lagodb_core::tuple::{
+    DatumConversionError, DecimalCodecError, Utf8ServerEncodingError,
+};
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
@@ -127,6 +129,12 @@ impl SqlStateError for ArrowConversionError {
 impl From<DatumConversionError> for ArrowConversionError {
     fn from(error: DatumConversionError) -> Self {
         Self::DatumConversion(error)
+    }
+}
+
+impl From<Utf8ServerEncodingError> for ArrowConversionError {
+    fn from(error: Utf8ServerEncodingError) -> Self {
+        Self::DatumConversion(error.into())
     }
 }
 

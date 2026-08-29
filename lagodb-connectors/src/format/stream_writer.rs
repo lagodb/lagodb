@@ -6,9 +6,16 @@ use crate::error::ConnectorError;
 use crate::storage::{ObjectFileSuffix, StagedObjectWriter};
 
 use super::{
-    FileWriteProgress, FormatKind, ObjectFileEncoder, ObjectFileEncoderFactory,
+    FileWriteProgress, ObjectFileEncoder, ObjectFileEncoderFactory,
     StreamCompression, StreamEncoder,
 };
+
+#[derive(Clone, Copy)]
+pub(crate) enum StreamFormat {
+    Text,
+    Csv,
+    Json,
+}
 
 pub(crate) struct StreamEncoderFactory {
     compression: StreamCompression,
@@ -17,20 +24,17 @@ pub(crate) struct StreamEncoderFactory {
 }
 
 impl StreamEncoderFactory {
-    pub(crate) fn new(format: FormatKind, compression: StreamCompression) -> Self {
+    pub(crate) fn new(format: StreamFormat, compression: StreamCompression) -> Self {
         let suffix = match (format, compression) {
-            (FormatKind::Text, StreamCompression::None) => "text",
-            (FormatKind::Text, StreamCompression::Gzip) => "text.gz",
-            (FormatKind::Text, StreamCompression::Zstd) => "text.zst",
-            (FormatKind::Csv, StreamCompression::None) => "csv",
-            (FormatKind::Csv, StreamCompression::Gzip) => "csv.gz",
-            (FormatKind::Csv, StreamCompression::Zstd) => "csv.zst",
-            (FormatKind::Json, StreamCompression::None) => "json",
-            (FormatKind::Json, StreamCompression::Gzip) => "json.gz",
-            (FormatKind::Json, StreamCompression::Zstd) => "json.zst",
-            (FormatKind::Avro | FormatKind::Parquet, _) => {
-                unreachable!("container formats do not use the stream encoder")
-            }
+            (StreamFormat::Text, StreamCompression::None) => "text",
+            (StreamFormat::Text, StreamCompression::Gzip) => "text.gz",
+            (StreamFormat::Text, StreamCompression::Zstd) => "text.zst",
+            (StreamFormat::Csv, StreamCompression::None) => "csv",
+            (StreamFormat::Csv, StreamCompression::Gzip) => "csv.gz",
+            (StreamFormat::Csv, StreamCompression::Zstd) => "csv.zst",
+            (StreamFormat::Json, StreamCompression::None) => "json",
+            (StreamFormat::Json, StreamCompression::Gzip) => "json.gz",
+            (StreamFormat::Json, StreamCompression::Zstd) => "json.zst",
         };
         Self {
             compression,

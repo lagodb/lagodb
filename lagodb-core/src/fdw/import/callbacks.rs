@@ -16,7 +16,6 @@ pub(crate) unsafe extern "C-unwind" fn import_foreign_schema<P: FdwImportSchema>
     statement: *mut pg_sys::ImportForeignSchemaStmt,
     server_oid: pg_sys::Oid,
 ) -> *mut pg_sys::List {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let context =
             unsafe { ForeignImportSchemaContext::from_raw(statement, server_oid) };
@@ -34,8 +33,6 @@ pub(crate) unsafe extern "C-unwind" fn import_foreign_schema<P: FdwImportSchema>
 
     match result {
         Ok(commands) => commands,
-        Err(error) => error
-            .with_callback::<P>()
-            .report_after_switch(prior_context),
+        Err(error) => error.with_callback::<P>().report(),
     }
 }

@@ -27,7 +27,6 @@ pub(crate) unsafe extern "C-unwind" fn begin_foreign_modify<P: FdwModify>(
     subplan_index: c_int,
     eflags: c_int,
 ) {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = unsafe {
         ForeignModifyStateWrapper::<P>::begin(
             mtstate,
@@ -41,7 +40,7 @@ pub(crate) unsafe extern "C-unwind" fn begin_foreign_modify<P: FdwModify>(
     if let Err(error) = result {
         error
             .with_provider_phase::<P>(ForeignModifyPhase::Begin)
-            .report_after_switch(prior_context);
+            .report();
     }
 }
 
@@ -54,14 +53,13 @@ pub(crate) unsafe extern "C-unwind" fn begin_foreign_insert<P: FdwModify>(
     mtstate: *mut pg_sys::ModifyTableState,
     rinfo: *mut pg_sys::ResultRelInfo,
 ) {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result =
         unsafe { ForeignModifyStateWrapper::<P>::begin_insert(mtstate, rinfo) };
 
     if let Err(error) = result {
         error
             .with_provider_phase::<P>(ForeignModifyPhase::BeginInsert)
-            .report_after_switch(prior_context);
+            .report();
     }
 }
 
@@ -77,7 +75,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_insert<P: FdwModify>(
     slot: *mut pg_sys::TupleTableSlot,
     _plan_slot: *mut pg_sys::TupleTableSlot,
 ) -> *mut pg_sys::TupleTableSlot {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
@@ -115,7 +112,7 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_insert<P: FdwModify>(
         Ok(slot) => slot,
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::Insert)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 
@@ -131,7 +128,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_batch_insert<P: FdwModify>(
     _plan_slots: *mut *mut pg_sys::TupleTableSlot,
     num_slots: *mut c_int,
 ) -> *mut *mut pg_sys::TupleTableSlot {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
@@ -165,7 +161,7 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_batch_insert<P: FdwModify>(
         }
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::BatchInsert)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 
@@ -179,7 +175,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_batch_insert<P: FdwModify>(
 pub(crate) unsafe extern "C-unwind" fn get_foreign_modify_batch_size<P: FdwModify>(
     rinfo: *mut pg_sys::ResultRelInfo,
 ) -> c_int {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let state = unsafe { (*rinfo).ri_FdwState };
         if state.is_null() {
@@ -220,7 +215,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_modify_batch_size<P: FdwModif
         Ok(size) => size,
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::BatchInsert)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 
@@ -235,7 +230,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_update<P: FdwModify>(
     slot: *mut pg_sys::TupleTableSlot,
     plan_slot: *mut pg_sys::TupleTableSlot,
 ) -> *mut pg_sys::TupleTableSlot {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
@@ -280,7 +274,7 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_update<P: FdwModify>(
         Ok(slot) => slot,
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::Update)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 

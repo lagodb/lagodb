@@ -58,11 +58,10 @@ pub unsafe extern "C-unwind" fn begin_custom_scan_trampoline<
     estate: *mut pg_sys::EState,
     eflags: c_int,
 ) {
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     if let Err(error) = unsafe { begin_custom_scan::<P>(node, estate, eflags) } {
         error
             .with_callback_phase(P::NAME, CustomScanPhase::Begin)
-            .report_after_switch(prior_ctx);
+            .report();
     }
 }
 
@@ -190,11 +189,10 @@ pub unsafe extern "C-unwind" fn rescan_custom_scan_trampoline<
 >(
     node: *mut pg_sys::CustomScanState,
 ) {
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     if let Err(error) = unsafe { rescan_custom_scan::<P>(node) } {
         error
             .with_callback_phase(P::NAME, CustomScanPhase::ReScan)
-            .report_after_switch(prior_ctx);
+            .report();
     }
 }
 

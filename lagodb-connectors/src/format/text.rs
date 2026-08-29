@@ -12,7 +12,7 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
 
-use super::delimited::{DelimitedOptions, DelimitedOptionsBuilder};
+use super::delimited::{DelimitedFormat, DelimitedOptions, DelimitedOptionsBuilder};
 use super::delimited_schema::DelimitedSchemaReader;
 use super::{
     FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
@@ -176,7 +176,7 @@ impl FormatWriter for TextFormat {
             super::delimited_write::DelimitedWriteState::begin(
                 context.relation(),
                 output,
-                FormatKind::Text,
+                DelimitedFormat::Text,
                 compression,
                 postgres_options,
                 false,
@@ -198,7 +198,7 @@ impl FormatWriter for TextFormat {
             super::delimited_write::DelimitedWriteState::begin(
                 context.relation(),
                 output,
-                FormatKind::Text,
+                DelimitedFormat::Text,
                 compression,
                 postgres_options,
                 false,

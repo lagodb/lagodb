@@ -22,7 +22,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
     slot: *mut pg_sys::TupleTableSlot,
     plan_slot: *mut pg_sys::TupleTableSlot,
 ) -> *mut pg_sys::TupleTableSlot {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let wrapper = unsafe { &mut *state_wrapper_unchecked::<P>(rinfo) };
         let state_ptr = unsafe { wrapper.provider_state_ptr_unchecked() };
@@ -111,6 +110,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
         Ok(slot) => slot,
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::Delete)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }

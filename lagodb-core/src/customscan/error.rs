@@ -4,7 +4,6 @@ use core::ffi::CStr;
 use std::ffi::CString;
 use std::fmt::Display;
 
-use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -208,19 +207,9 @@ impl CustomScanError {
         })
     }
 
-    /// Restore the pre-callback memory context, then raise via [`custom_scan_error_report`].
-    pub(crate) fn report_after_switch(self, prior_ctx: pg_sys::MemoryContext) -> ! {
-        unsafe {
-            pg_sys::MemoryContextSwitchTo(prior_ctx);
-        }
-        self.report();
-    }
-
     /// Raise as a PostgreSQL ERROR via [`custom_scan_error_report`].
-    fn report(self) -> ! {
-        pgrx::pg_sys::panic::ErrorReport::from(self)
-            .report(pgrx::prelude::PgLogLevel::ERROR);
-        unreachable!()
+    pub(crate) fn report(self) -> ! {
+        PgReportError::raise(ErrorReport::from(self))
     }
 
     pub(crate) fn framework(message: impl Display) -> Self {

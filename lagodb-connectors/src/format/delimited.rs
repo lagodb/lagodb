@@ -8,7 +8,31 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
-use super::FormatOption;
+use super::{FormatKind, FormatOption, StreamFormat};
+
+#[derive(Clone, Copy)]
+pub(crate) enum DelimitedFormat {
+    Text,
+    Csv,
+}
+
+impl DelimitedFormat {
+    #[inline]
+    pub(crate) const fn kind(self) -> FormatKind {
+        match self {
+            Self::Text => FormatKind::Text,
+            Self::Csv => FormatKind::Csv,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn stream(self) -> StreamFormat {
+        match self {
+            Self::Text => StreamFormat::Text,
+            Self::Csv => StreamFormat::Csv,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct DelimitedOptions {

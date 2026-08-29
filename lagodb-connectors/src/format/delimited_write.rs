@@ -8,6 +8,7 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 use crate::storage::ObjectOutput;
 
+use super::delimited::DelimitedFormat;
 use super::{
     EmptyOutputPolicy, FormatKind, FormatWriteState, ObjectSetWriter,
     StreamCompression, StreamEncoderFactory,
@@ -24,7 +25,7 @@ impl DelimitedWriteState {
     pub(super) fn begin(
         relation: &RelationHandle<'_>,
         output: ObjectOutput,
-        format: FormatKind,
+        format: DelimitedFormat,
         compression: StreamCompression,
         postgres_options: *mut pg_sys::List,
         write_header: bool,
@@ -34,14 +35,14 @@ impl DelimitedWriteState {
         // option list allocated in this PostgreSQL execution context.
         let mut encoder =
             unsafe { CopyRowEncoder::begin(relation.as_raw(), postgres_options) }?;
-        let mut factory = StreamEncoderFactory::new(format, compression);
+        let mut factory = StreamEncoderFactory::new(format.stream(), compression);
         if write_header {
             factory.set_header(encoder.header()?.into());
         }
         Ok(Self {
             encoder,
             writer: Some(ObjectSetWriter::new(output, factory)),
-            format,
+            format: format.kind(),
         })
     }
 }

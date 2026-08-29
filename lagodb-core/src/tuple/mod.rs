@@ -27,7 +27,10 @@ mod slot_row;
 mod varlena;
 
 pub use cell::{ByteaView, Cell, StringView};
-pub use datum::{ColumnDatumCodec, ColumnDatumTarget, DatumConversionError};
+pub use datum::{
+    ColumnDatumCodec, ColumnDatumTarget, DatumConversionError,
+    Utf8ServerEncodingError,
+};
 pub use json::{JsonText, JsonValueError, JsonbValue};
 pub use json_encode::{BoundJsonObjectEncoder, JsonDatumEncoder, JsonDatumKind};
 pub use numeric::{

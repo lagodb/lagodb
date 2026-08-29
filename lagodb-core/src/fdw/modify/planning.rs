@@ -27,7 +27,6 @@ pub(crate) unsafe extern "C-unwind" fn add_foreign_update_targets<P: FdwModify>(
     target_rte: *mut pg_sys::RangeTblEntry,
     target_relation: pg_sys::Relation,
 ) {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let mut context = unsafe {
             ForeignUpdateTargetContext::from_raw(
@@ -43,7 +42,7 @@ pub(crate) unsafe extern "C-unwind" fn add_foreign_update_targets<P: FdwModify>(
     if let Err(error) = result {
         error
             .with_provider_phase::<P>(ForeignModifyPhase::AddUpdateTargets)
-            .report_after_switch(prior_context);
+            .report();
     }
 }
 
@@ -54,7 +53,6 @@ pub(crate) unsafe extern "C-unwind" fn add_foreign_update_targets<P: FdwModify>(
 pub(crate) unsafe extern "C-unwind" fn is_foreign_rel_updatable<P: FdwModify>(
     relation: pg_sys::Relation,
 ) -> c_int {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let context = unsafe { ForeignModifyRelationContext::from_raw(relation) }?;
         P::capabilities(&context)
@@ -64,7 +62,7 @@ pub(crate) unsafe extern "C-unwind" fn is_foreign_rel_updatable<P: FdwModify>(
         Ok(capabilities) => capabilities.flags(),
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::Capabilities)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 
@@ -78,7 +76,6 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
     result_relation: pg_sys::Index,
     subplan_index: c_int,
 ) -> *mut pg_sys::List {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let operation =
             unsafe { validate_modify_plan(plan, result_relation, subplan_index) }?;
@@ -162,7 +159,7 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
         Ok(private_data) => private_data,
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::Plan)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 

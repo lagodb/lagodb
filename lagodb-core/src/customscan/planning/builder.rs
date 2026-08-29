@@ -380,29 +380,39 @@ mod tests {
                 }
 
                 fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-                    unreachable!()
+                    unreachable!(
+                        "custom scan execution lifecycle is not exercised in builder tests"
+                    )
                 }
 
                 fn begin(
                     _ctx: BeginContext<'_, Self>,
                 ) -> Result<(), CustomScanError> {
-                    unreachable!()
+                    unreachable!(
+                        "custom scan execution lifecycle is not exercised in builder tests"
+                    )
                 }
 
                 fn next_slot(
                     _ctx: NextSlotContext<'_, Self>,
                 ) -> Result<bool, CustomScanError> {
-                    unreachable!()
+                    unreachable!(
+                        "custom scan execution lifecycle is not exercised in builder tests"
+                    )
                 }
 
                 fn rescan(
                     _ctx: ReScanContext<'_, Self>,
                 ) -> Result<(), CustomScanError> {
-                    unreachable!()
+                    unreachable!(
+                        "custom scan execution lifecycle is not exercised in builder tests"
+                    )
                 }
 
                 fn end(_ctx: EndContext<'_, Self>) -> Result<(), CustomScanError> {
-                    unreachable!()
+                    unreachable!(
+                        "custom scan execution lifecycle is not exercised in builder tests"
+                    )
                 }
             }
         };

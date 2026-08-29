@@ -61,29 +61,39 @@ mod tests {
                 }
 
                 fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-                    unreachable!("glue method-table tests do not call create_state");
+                    unreachable!(
+                        "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
+                    );
                 }
 
                 fn begin(
                     _ctx: BeginContext<'_, Self>,
                 ) -> Result<(), CustomScanError> {
-                    unreachable!("glue method-table tests do not call begin");
+                    unreachable!(
+                        "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
+                    );
                 }
 
                 fn next_slot(
                     _ctx: NextSlotContext<'_, Self>,
                 ) -> Result<bool, CustomScanError> {
-                    unreachable!("glue method-table tests do not call next_slot");
+                    unreachable!(
+                        "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
+                    );
                 }
 
                 fn rescan(
                     _ctx: ReScanContext<'_, Self>,
                 ) -> Result<(), CustomScanError> {
-                    unreachable!("glue method-table tests do not call rescan");
+                    unreachable!(
+                        "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
+                    );
                 }
 
                 fn end(_ctx: EndContext<'_, Self>) -> Result<(), CustomScanError> {
-                    unreachable!("glue method-table tests do not call end");
+                    unreachable!(
+                        "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
+                    );
                 }
             }
         };

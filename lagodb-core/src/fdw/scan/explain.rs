@@ -270,7 +270,6 @@ pub(crate) unsafe extern "C-unwind" fn explain_foreign_scan<P: FdwScan>(
     node: *mut pg_sys::ForeignScanState,
     es: *mut pg_sys::ExplainState,
 ) {
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         if node.is_null() || es.is_null() {
             return Err(ForeignScanError::framework(
@@ -295,6 +294,6 @@ pub(crate) unsafe extern "C-unwind" fn explain_foreign_scan<P: FdwScan>(
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignScanPhase::Explain)
-            .report_after_switch(prior_ctx);
+            .report();
     }
 }

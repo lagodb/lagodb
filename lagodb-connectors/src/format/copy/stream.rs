@@ -8,8 +8,8 @@ use lagodb_storage::StorageFile;
 
 use crate::error::ConnectorError;
 use crate::format::{
-    EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression, StreamDecoder,
-    StreamEncoderFactory,
+    EmptyOutputPolicy, ObjectSetWriter, StreamCompression, StreamDecoder,
+    StreamEncoderFactory, StreamFormat,
 };
 use crate::storage::ObjectOutput;
 
@@ -69,7 +69,7 @@ impl ObjectCopyDestination {
     pub(super) fn new(
         output: ObjectOutput,
         compression: StreamCompression,
-        format: FormatKind,
+        format: StreamFormat,
         header: bool,
     ) -> Self {
         let factory = StreamEncoderFactory::new(format, compression);

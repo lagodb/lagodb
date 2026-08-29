@@ -1,19 +1,51 @@
 //! Table-AM callbacks used by COPY FROM.
 //!
 //! PG17 ModifyTable mutation is intercepted by `LagoDBModifyTable` and calls the
-//! slot-first Rust SPI directly. Reaching a row-mutation table-AM callback is
-//! therefore an unsupported executor path, not a compatibility fallback.
+//! slot-first Rust SPI directly. Speculative insertion can only arrive from
+//! `nodeModifyTable`, so reaching its callbacks violates that routing invariant.
+//! PostgreSQL also invokes delete/update/lock callbacks from independent paths
+//! such as logical replication, triggers, and `LockRows`; those remain normal
+//! unsupported table-AM capabilities.
 
-use crate::api::TableAccessMethod;
-use crate::diag::ReportableError;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+
+use crate::api::{TableAccessMethod, unsupported_callback};
+use crate::diag::{PgReportError, ReportableError, SqlStateError};
 use crate::handles::BulkInsertStateHandle;
 use crate::tuple::{TupleSlotBatch, TupleSlotRow};
+use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
 use super::session::with_current_relation_session;
 
-fn custom_modifytable_only(callback: &'static str) -> ! {
-    pgrx::error!("{callback} reached the Iceberg table AM outside LagoDBModifyTable")
+#[derive(Debug, Clone, Copy)]
+struct SpeculativeInsertRoutingError {
+    callback: &'static str,
+}
+
+impl SpeculativeInsertRoutingError {
+    const fn outside_modify_table(callback: &'static str) -> Self {
+        Self { callback }
+    }
+}
+
+impl Display for SpeculativeInsertRoutingError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} bypassed the registered Custom ModifyTable executor",
+            self.callback
+        )
+    }
+}
+
+impl Error for SpeculativeInsertRoutingError {}
+
+impl SqlStateError for SpeculativeInsertRoutingError {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+    }
 }
 
 #[pg_guard]
@@ -81,7 +113,10 @@ pub(super) extern "C-unwind" fn tuple_insert_speculative(
     _bistate: *mut pg_sys::BulkInsertStateData,
     _spec_token: u32,
 ) {
-    custom_modifytable_only("tuple_insert_speculative")
+    PgReportError::from(SpeculativeInsertRoutingError::outside_modify_table(
+        "tuple_insert_speculative",
+    ))
+    .report()
 }
 
 #[pg_guard]
@@ -91,7 +126,10 @@ pub(super) extern "C-unwind" fn tuple_complete_speculative(
     _spec_token: u32,
     _succeeded: bool,
 ) {
-    custom_modifytable_only("tuple_complete_speculative")
+    PgReportError::from(SpeculativeInsertRoutingError::outside_modify_table(
+        "tuple_complete_speculative",
+    ))
+    .report()
 }
 
 #[pg_guard]
@@ -105,7 +143,7 @@ pub(super) extern "C-unwind" fn tuple_delete(
     _tmfd: *mut pg_sys::TM_FailureData,
     _changing_part: bool,
 ) -> pg_sys::TM_Result::Type {
-    custom_modifytable_only("tuple_delete")
+    unsupported_callback("tuple_delete").report_unwrap()
 }
 
 #[pg_guard]
@@ -121,7 +159,7 @@ pub(super) extern "C-unwind" fn tuple_update(
     _lockmode: *mut pg_sys::LockTupleMode::Type,
     _update_indexes: *mut pg_sys::TU_UpdateIndexes::Type,
 ) -> pg_sys::TM_Result::Type {
-    custom_modifytable_only("tuple_update")
+    unsupported_callback("tuple_update").report_unwrap()
 }
 
 #[pg_guard]
@@ -136,5 +174,5 @@ pub(super) extern "C-unwind" fn tuple_lock(
     _flags: u8,
     _tmfd: *mut pg_sys::TM_FailureData,
 ) -> pg_sys::TM_Result::Type {
-    custom_modifytable_only("tuple_lock")
+    unsupported_callback("tuple_lock").report_unwrap()
 }

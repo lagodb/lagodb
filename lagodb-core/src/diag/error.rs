@@ -93,7 +93,15 @@ impl PgReportError {
 
     #[inline]
     pub fn report(self) -> ! {
-        self.into_report().report(PgLogLevel::ERROR);
+        Self::raise(self.into_report())
+    }
+
+    /// Raise an already-structured report at a core-owned PostgreSQL boundary.
+    #[inline]
+    pub(crate) fn raise(report: ErrorReport) -> ! {
+        report.report(PgLogLevel::ERROR);
+        // pgrx guarantees that ERROR reporting does not return, but its
+        // `ErrorReport::report` signature is `()` rather than `!`.
         unreachable!()
     }
 

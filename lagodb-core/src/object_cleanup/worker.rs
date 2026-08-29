@@ -244,7 +244,11 @@ impl ObjectCleanupWorkerSupervisor {
                 ObjectCleanupExecutionOutcome::Permanent(error) => {
                     ObjectCleanupRepository::fail(item.as_ref(), &error.to_string())
                 }
-                ObjectCleanupExecutionOutcome::Cancelled => unreachable!(),
+                ObjectCleanupExecutionOutcome::Cancelled => {
+                    unreachable!(
+                        "cancelled cleanup outcomes are filtered out before persisting"
+                    )
+                }
             });
             if let Err(error) = update {
                 if !self.persistence_warning_emitted {

@@ -12,7 +12,7 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
-use super::delimited::{DelimitedOptions, DelimitedOptionsBuilder};
+use super::delimited::{DelimitedFormat, DelimitedOptions, DelimitedOptionsBuilder};
 use super::delimited_schema::DelimitedSchemaReader;
 use super::{
     FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
@@ -345,7 +345,7 @@ impl FormatWriter for CsvFormat {
             super::delimited_write::DelimitedWriteState::begin(
                 context.relation(),
                 output,
-                FormatKind::Csv,
+                DelimitedFormat::Csv,
                 compression,
                 postgres_options,
                 write_header,
@@ -368,7 +368,7 @@ impl FormatWriter for CsvFormat {
             super::delimited_write::DelimitedWriteState::begin(
                 context.relation(),
                 output,
-                FormatKind::Csv,
+                DelimitedFormat::Csv,
                 compression,
                 postgres_options,
                 write_header,

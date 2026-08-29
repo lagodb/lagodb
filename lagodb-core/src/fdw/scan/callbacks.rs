@@ -26,8 +26,6 @@ pub(crate) unsafe extern "C-unwind" fn begin_foreign_scan<P: FdwScan>(
     node: *mut pg_sys::ForeignScanState,
     eflags: c_int,
 ) {
-    // SAFETY: PostgreSQL invokes this callback with a live executor context.
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         if (eflags as u32) & pg_sys::EXEC_FLAG_EXPLAIN_ONLY != 0 {
             // PostgreSQL will not call Iterate for EXPLAIN_ONLY.  Leaving
@@ -104,7 +102,7 @@ pub(crate) unsafe extern "C-unwind" fn begin_foreign_scan<P: FdwScan>(
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignScanPhase::Begin)
-            .report_after_switch(prior_ctx);
+            .report();
     }
 }
 
@@ -116,8 +114,6 @@ pub(crate) unsafe extern "C-unwind" fn begin_foreign_scan<P: FdwScan>(
 pub(crate) unsafe extern "C-unwind" fn iterate_foreign_scan<P: FdwScan>(
     node: *mut pg_sys::ForeignScanState,
 ) -> *mut pg_sys::TupleTableSlot {
-    // SAFETY: PostgreSQL invokes this callback with a live executor context.
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let state_raw = unsafe { (*node).fdw_state };
         // SAFETY: ExecInitForeignScan calls BeginForeignScan before Iterate,
@@ -159,7 +155,7 @@ pub(crate) unsafe extern "C-unwind" fn iterate_foreign_scan<P: FdwScan>(
         Ok(slot) => slot,
         Err(error) => error
             .with_callback_phase::<P>(ForeignScanPhase::Iterate)
-            .report_after_switch(prior_ctx),
+            .report(),
     }
 }
 
@@ -251,7 +247,7 @@ pub(crate) unsafe extern "C-unwind" fn rescan_foreign_scan<P: FdwScan>(
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignScanPhase::ReScan)
-            .report_after_switch(prior_ctx);
+            .report();
     }
 }
 

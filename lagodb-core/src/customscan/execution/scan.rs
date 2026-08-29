@@ -42,7 +42,7 @@ pub unsafe extern "C-unwind" fn next_slot_wrapper<P: LagodbCustomScanProvider>(
         Ok(slot) => slot,
         Err(error) => error
             .with_callback_phase(P::NAME, CustomScanPhase::NextSlot)
-            .report_after_switch(prior_ctx),
+            .report(),
     }
 }
 

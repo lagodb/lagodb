@@ -59,7 +59,7 @@ use parquet::ParquetFormat;
 pub(crate) use parquet::{
     ParquetObjectReader, ParquetObjectWriter, parquet_arrow_type,
 };
-pub(crate) use stream_writer::StreamEncoderFactory;
+pub(crate) use stream_writer::{StreamEncoderFactory, StreamFormat};
 use text::TextFormat;
 
 /// A supported external object format.

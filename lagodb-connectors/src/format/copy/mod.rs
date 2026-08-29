@@ -22,6 +22,7 @@ use crate::storage::{
 };
 
 use super::avro::{AvroCopyDestination, AvroCopySource};
+use super::delimited::DelimitedFormat;
 use super::parquet::{ParquetCopyDestination, ParquetCopySource};
 use super::{
     AvroWriteCompression, FormatKind, ParquetWriteCompression, StreamCompression,
@@ -77,27 +78,22 @@ impl ResolvedCopyFormat {
         Self::validate_options(options, kind)?;
         let suffix = StreamCompression::from_suffix(object.key());
         match kind {
-            FormatKind::Text | FormatKind::Csv | FormatKind::Json => {
-                let compression = match explicit_compression {
-                    Some(value) => {
-                        StreamCompression::parse(value).ok_or_else(|| {
-                            ConnectorError::invalid_copy_option(
-                                "compression",
-                                "must be none, gzip, or zstd for a stream format",
-                            )
-                        })?
-                    }
-                    None => suffix.unwrap_or(StreamCompression::None),
-                };
-                let header = !copy_from
-                    && matches!(kind, FormatKind::Text | FormatKind::Csv)
-                    && Self::copy_to_header_enabled(options)?;
-                Ok(match kind {
-                    FormatKind::Text => Self::Text(compression, header),
-                    FormatKind::Csv => Self::Csv(compression, header),
-                    FormatKind::Json => Self::Json(compression),
-                    FormatKind::Avro | FormatKind::Parquet => unreachable!(),
-                })
+            FormatKind::Text => {
+                let compression =
+                    Self::resolve_stream_compression(explicit_compression, suffix)?;
+                let header = !copy_from && Self::copy_to_header_enabled(options)?;
+                Ok(Self::Text(compression, header))
+            }
+            FormatKind::Csv => {
+                let compression =
+                    Self::resolve_stream_compression(explicit_compression, suffix)?;
+                let header = !copy_from && Self::copy_to_header_enabled(options)?;
+                Ok(Self::Csv(compression, header))
+            }
+            FormatKind::Json => {
+                let compression =
+                    Self::resolve_stream_compression(explicit_compression, suffix)?;
+                Ok(Self::Json(compression))
             }
             FormatKind::Avro if copy_from => {
                 Self::reject_container_read_compression(
@@ -147,10 +143,10 @@ impl ResolvedCopyFormat {
     ) -> Result<Box<dyn FormatCopySource>, CopyError> {
         match self {
             Self::Text(compression, _) => {
-                Self::open_stream_source(location, compression, FormatKind::Text)
+                Self::open_stream_source(location, compression, DelimitedFormat::Text)
             }
             Self::Csv(compression, _) => {
-                Self::open_stream_source(location, compression, FormatKind::Csv)
+                Self::open_stream_source(location, compression, DelimitedFormat::Csv)
             }
             Self::ParquetRead => {
                 let manager = StorageManager::from_pg_gucs()?;
@@ -211,13 +207,13 @@ impl ResolvedCopyFormat {
             Self::Text(compression, header) => Self::open_stream_destination(
                 location,
                 compression,
-                FormatKind::Text,
+                DelimitedFormat::Text,
                 header,
             ),
             Self::Csv(compression, header) => Self::open_stream_destination(
                 location,
                 compression,
-                FormatKind::Csv,
+                DelimitedFormat::Csv,
                 header,
             ),
             Self::ParquetWrite(compression) => {
@@ -259,12 +255,13 @@ impl ResolvedCopyFormat {
     fn open_stream_source(
         location: &ResolvedStorageLocation,
         compression: StreamCompression,
-        format: FormatKind,
+        format: DelimitedFormat,
     ) -> Result<Box<dyn FormatCopySource>, CopyError> {
-        if ObjectLocationKind::classify(location.object_key(), format)?
+        let kind = format.kind();
+        if ObjectLocationKind::classify(location.object_key(), kind)?
             != ObjectLocationKind::Exact
         {
-            return Err(ConnectorError::copy_from_exact_only(format).into());
+            return Err(ConnectorError::copy_from_exact_only(kind).into());
         }
         let object = location.acquire_object_access_from_pg_gucs()?;
         let source = stream::ObjectCopySource::new(
@@ -277,15 +274,20 @@ impl ResolvedCopyFormat {
     fn open_stream_destination(
         location: &ResolvedStorageLocation,
         compression: StreamCompression,
-        format: FormatKind,
+        format: DelimitedFormat,
         header: bool,
     ) -> Result<Box<dyn FormatCopyDestination>, CopyError> {
         let manager = StorageManager::from_pg_gucs()?;
-        let output = ObjectOutput::resolve(location, &manager, format, || {
-            WriteConfig::from_guc().target_file_bytes()
-        })?;
-        let destination =
-            stream::ObjectCopyDestination::new(output, compression, format, header);
+        let output =
+            ObjectOutput::resolve(location, &manager, format.kind(), || {
+                WriteConfig::from_guc().target_file_bytes()
+            })?;
+        let destination = stream::ObjectCopyDestination::new(
+            output,
+            compression,
+            format.stream(),
+            header,
+        );
         Ok(Box::new(StreamCopyDestination {
             destination,
             format,
@@ -303,6 +305,21 @@ impl ResolvedCopyFormat {
             ));
         }
         Ok(())
+    }
+
+    fn resolve_stream_compression(
+        explicit: Option<&str>,
+        suffix: Option<StreamCompression>,
+    ) -> Result<StreamCompression, ConnectorError> {
+        match explicit {
+            Some(value) => StreamCompression::parse(value).ok_or_else(|| {
+                ConnectorError::invalid_copy_option(
+                    "compression",
+                    "must be none, gzip, or zstd for a stream format",
+                )
+            }),
+            None => Ok(suffix.unwrap_or(StreamCompression::None)),
+        }
     }
 
     fn reject_container_suffix(
@@ -367,7 +384,7 @@ impl ResolvedCopyFormat {
 
 struct StreamCopySource {
     source: stream::ObjectCopySource,
-    format: FormatKind,
+    format: DelimitedFormat,
 }
 
 impl CopyDataSource for StreamCopySource {
@@ -392,7 +409,7 @@ impl FormatCopySource for StreamCopySource {
 
 struct StreamCopyDestination {
     destination: stream::ObjectCopyDestination,
-    format: FormatKind,
+    format: DelimitedFormat,
 }
 
 impl CopyDataDestination for StreamCopyDestination {
@@ -418,7 +435,7 @@ impl FormatCopyDestination for StreamCopyDestination {
 
 fn postgres_options(
     context: &CopyContext<'_>,
-    format: FormatKind,
+    format: DelimitedFormat,
 ) -> *mut pg_sys::List {
     let options = context.statement().option_view().without_names(&[
         b"server".as_slice(),
@@ -426,11 +443,8 @@ fn postgres_options(
         b"compression".as_slice(),
     ]);
     let value = match format {
-        FormatKind::Text => c"text",
-        FormatKind::Csv => c"csv",
-        FormatKind::Json | FormatKind::Avro | FormatKind::Parquet => {
-            unreachable!("only PostgreSQL text and csv formats use this COPY bridge")
-        }
+        DelimitedFormat::Text => c"text",
+        DelimitedFormat::Csv => c"csv",
     };
     unsafe {
         let option = pg_sys::makeDefElem(

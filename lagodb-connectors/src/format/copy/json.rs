@@ -12,7 +12,7 @@ use crate::format::json::{
 };
 use crate::format::{
     EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression,
-    StreamEncoderFactory,
+    StreamEncoderFactory, StreamFormat,
 };
 use crate::gucs::ReadConfig;
 use crate::storage::{ObjectFiles, ObjectOutput};
@@ -196,7 +196,7 @@ impl JsonCopyDestination {
             encoder,
             writer: ObjectSetWriter::new(
                 output,
-                StreamEncoderFactory::new(FormatKind::Json, self.compression),
+                StreamEncoderFactory::new(StreamFormat::Json, self.compression),
             ),
         });
         Ok(())

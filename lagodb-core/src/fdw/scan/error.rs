@@ -4,7 +4,6 @@ use core::ffi::CStr;
 use std::error::Error as StdError;
 use std::fmt::Display;
 
-use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::{PgLogLevel, PgSqlErrorCode};
 use thiserror::Error;
@@ -156,25 +155,13 @@ impl ForeignScanError {
         })
     }
 
-    /// Restore the memory context that was current on callback entry, then
-    /// raise this error as a PostgreSQL ERROR.
-    pub(crate) fn report_after_switch(self, prior_ctx: pg_sys::MemoryContext) -> ! {
-        // SAFETY: every trampoline captures `prior_ctx` from PostgreSQL at
-        // callback entry and keeps it live until error reporting completes.
-        unsafe {
-            pg_sys::MemoryContextSwitchTo(prior_ctx);
-        }
-        self.report(PgLogLevel::ERROR)
+    pub(crate) fn report(self) -> ! {
+        PgReportError::raise(ErrorReport::from(self))
     }
 
     /// Report a teardown error without interrupting framework cleanup.
     pub(crate) fn report_warning(self) {
         ErrorReport::from(self).report(PgLogLevel::WARNING);
-    }
-
-    fn report(self, level: PgLogLevel) -> ! {
-        ErrorReport::from(self).report(level);
-        unreachable!()
     }
 }
 

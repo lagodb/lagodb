@@ -396,12 +396,14 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
 
         let plan = state.ps.plan.cast::<pg_sys::ModifyTable>();
         let actions = unsafe { modify_actions(plan) }?;
-        if !P::MODIFY_CAPABILITIES.speculative_insert()
-            && unsafe { (*plan).onConflictAction }
-                != pg_sys::OnConflictAction::ONCONFLICT_NONE
+        // The PG17 executor implements ON CONFLICT through speculative
+        // TableAM callbacks. The Custom ModifyTable bridge has no speculative
+        // relation state, so reject ON CONFLICT before executor entry.
+        if unsafe { (*plan).onConflictAction }
+            != pg_sys::OnConflictAction::ONCONFLICT_NONE
         {
             return Err(feature_not_supported(
-                "the Custom ModifyTable provider does not support speculative insertion",
+                "speculative insertion is not supported by Custom ModifyTable",
             ));
         }
 

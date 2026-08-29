@@ -16,7 +16,9 @@ use thiserror::Error;
 use crate::diag::{PgError, SqlStateError};
 use crate::wrapper::{PgOutputCString, PgWrapper};
 
-use super::datum::{ColumnDatumTarget, DatumConversionError};
+use super::datum::{
+    ColumnDatumTarget, DatumConversionError, Utf8ServerEncodingError,
+};
 use super::json_encode::JsonDatumKind;
 
 /// An owned, PostgreSQL-validated `json` value.
@@ -114,18 +116,18 @@ impl SqlStateError for JsonValueError {
     }
 }
 
+impl From<Utf8ServerEncodingError> for JsonValueError {
+    fn from(error: Utf8ServerEncodingError) -> Self {
+        Self::UnsupportedServerEncoding {
+            encoding: error.encoding(),
+        }
+    }
+}
+
 impl JsonText {
     /// Validate and own JSON text through PostgreSQL's `json_in` function.
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
-        match ColumnDatumTarget::validate_utf8_server_encoding() {
-            Ok(()) => {}
-            Err(DatumConversionError::UnsupportedServerEncoding { encoding }) => {
-                return Err(JsonValueError::UnsupportedServerEncoding { encoding });
-            }
-            Err(_) => unreachable!(
-                "UTF-8 capability validation returned an unrelated datum error"
-            ),
-        }
+        ColumnDatumTarget::validate_utf8_server_encoding()?;
         let input = CString::new(text)?;
         let datum = unsafe { PgWrapper::json_input_from_cstr(input.as_ptr())? }
             .ok_or(JsonValueError::NullInput)?;
@@ -223,15 +225,7 @@ impl JsonbValue {
     /// Validate JSON text and normalize it through PostgreSQL's JSONB input
     /// and output functions.
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
-        match ColumnDatumTarget::validate_utf8_server_encoding() {
-            Ok(()) => {}
-            Err(DatumConversionError::UnsupportedServerEncoding { encoding }) => {
-                return Err(JsonValueError::UnsupportedServerEncoding { encoding });
-            }
-            Err(_) => unreachable!(
-                "UTF-8 capability validation returned an unrelated datum error"
-            ),
-        }
+        ColumnDatumTarget::validate_utf8_server_encoding()?;
         let input = CString::new(text)?;
         let datum = unsafe { PgWrapper::jsonb_input_from_cstr(input.as_ptr())? }
             .ok_or(JsonValueError::NullInput)?;

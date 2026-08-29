@@ -50,18 +50,39 @@ pub enum JsonDatumKind {
     Unsupported,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum JsonDatumCategory {
+    Boolean,
+    Numeric,
+    Date(pg_sys::Oid),
+    Json,
+    String,
+    Array,
+    Composite,
+    Cast,
+    Unsupported,
+}
+
 /// Begin-time PostgreSQL Datum-to-JSON conversion plan.
 #[derive(Clone, Copy, Debug)]
 pub struct JsonDatumEncoder {
-    category: PgJsonTypeCategory,
+    category: JsonDatumCategory,
     output_function: pg_sys::Oid,
-    kind: JsonDatumKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum JsonObjectDatumEncoder {
+    Boolean,
+    Numeric { output_function: pg_sys::Oid },
+    Date { type_oid: pg_sys::Oid },
+    Json { output_function: pg_sys::Oid },
+    String { output_function: pg_sys::Oid },
 }
 
 struct BoundJsonOutputColumn {
     prefix: Box<[u8]>,
     prefix_len: i32,
-    encoder: JsonDatumEncoder,
+    encoder: JsonObjectDatumEncoder,
 }
 
 /// Relation-bound PostgreSQL Datum-to-JSON object encoder.
@@ -97,37 +118,64 @@ impl JsonDatumEncoder {
             .catch_others(|error| Err(PgError::from(error)))
             .execute()
         }?;
-        let kind = match category {
-            JSONTYPE_BOOL => JsonDatumKind::Boolean,
-            JSONTYPE_NUMERIC => JsonDatumKind::Numeric,
-            JSONTYPE_DATE | JSONTYPE_TIMESTAMP | JSONTYPE_TIMESTAMPTZ
-            | JSONTYPE_OTHER => JsonDatumKind::String,
-            JSONTYPE_JSON | JSONTYPE_JSONB => JsonDatumKind::Json,
-            JSONTYPE_ARRAY => JsonDatumKind::Array,
-            JSONTYPE_COMPOSITE => JsonDatumKind::Composite,
-            JSONTYPE_CAST => JsonDatumKind::Cast,
-            _ => JsonDatumKind::Unsupported,
+        let category = match category {
+            JSONTYPE_BOOL => JsonDatumCategory::Boolean,
+            JSONTYPE_NUMERIC => JsonDatumCategory::Numeric,
+            JSONTYPE_DATE => JsonDatumCategory::Date(pg_sys::DATEOID),
+            JSONTYPE_TIMESTAMP => JsonDatumCategory::Date(pg_sys::TIMESTAMPOID),
+            JSONTYPE_TIMESTAMPTZ => JsonDatumCategory::Date(pg_sys::TIMESTAMPTZOID),
+            JSONTYPE_JSON | JSONTYPE_JSONB => JsonDatumCategory::Json,
+            JSONTYPE_OTHER => JsonDatumCategory::String,
+            JSONTYPE_ARRAY => JsonDatumCategory::Array,
+            JSONTYPE_COMPOSITE => JsonDatumCategory::Composite,
+            JSONTYPE_CAST => JsonDatumCategory::Cast,
+            _ => JsonDatumCategory::Unsupported,
         };
         Ok(Self {
             category,
             output_function,
-            kind,
         })
     }
 
     #[inline]
     pub const fn kind(self) -> JsonDatumKind {
-        self.kind
+        match self.category {
+            JsonDatumCategory::Boolean => JsonDatumKind::Boolean,
+            JsonDatumCategory::Numeric => JsonDatumKind::Numeric,
+            JsonDatumCategory::Date(_) | JsonDatumCategory::String => {
+                JsonDatumKind::String
+            }
+            JsonDatumCategory::Json => JsonDatumKind::Json,
+            JsonDatumCategory::Array => JsonDatumKind::Array,
+            JsonDatumCategory::Composite => JsonDatumKind::Composite,
+            JsonDatumCategory::Cast => JsonDatumKind::Cast,
+            JsonDatumCategory::Unsupported => JsonDatumKind::Unsupported,
+        }
     }
 
-    fn supports_object_output(self) -> bool {
-        matches!(
-            self.kind,
-            JsonDatumKind::Boolean
-                | JsonDatumKind::Numeric
-                | JsonDatumKind::String
-                | JsonDatumKind::Json
-        )
+    fn object_encoder(self) -> Result<JsonObjectDatumEncoder, JsonValueError> {
+        let encoder = match self.category {
+            JsonDatumCategory::Boolean => JsonObjectDatumEncoder::Boolean,
+            JsonDatumCategory::Numeric => JsonObjectDatumEncoder::Numeric {
+                output_function: self.output_function,
+            },
+            JsonDatumCategory::Date(type_oid) => {
+                JsonObjectDatumEncoder::Date { type_oid }
+            }
+            JsonDatumCategory::Json => JsonObjectDatumEncoder::Json {
+                output_function: self.output_function,
+            },
+            JsonDatumCategory::String => JsonObjectDatumEncoder::String {
+                output_function: self.output_function,
+            },
+            JsonDatumCategory::Array
+            | JsonDatumCategory::Composite
+            | JsonDatumCategory::Cast
+            | JsonDatumCategory::Unsupported => {
+                return Err(JsonValueError::UnsupportedOutputKind(self.kind()));
+            }
+        };
+        Ok(encoder)
     }
 }
 
@@ -139,9 +187,7 @@ impl BoundJsonObjectEncoder {
         let mut buffer = JsonEncodeBuffer::new()?;
         let mut bound = Vec::new();
         for (index, (name, encoder)) in columns.into_iter().enumerate() {
-            if !encoder.supports_object_output() {
-                return Err(JsonValueError::UnsupportedOutputKind(encoder.kind()));
-            }
+            let encoder = encoder.object_encoder()?;
             let prefix = buffer.encode_key_prefix(index, name)?;
             let prefix_len = i32::try_from(prefix.len())
                 .map_err(|_| JsonValueError::OutputTooLarge)?;
@@ -273,19 +319,18 @@ impl JsonEncodeBuffer {
     /// # Safety
     ///
     /// `datum` must be valid for the type used to bind `encoder`.
-    unsafe fn append_datum(&mut self, encoder: JsonDatumEncoder, datum: Datum) {
-        match encoder.category {
-            JSONTYPE_BOOL => {
+    unsafe fn append_datum(&mut self, encoder: JsonObjectDatumEncoder, datum: Datum) {
+        match encoder {
+            JsonObjectDatumEncoder::Boolean => {
                 self.append_bytes(if unsafe { pg_sys::DatumGetBool(datum) } {
                     b"true"
                 } else {
                     b"false"
                 })
             }
-            JSONTYPE_NUMERIC => {
-                let output = unsafe {
-                    pg_sys::OidOutputFunctionCall(encoder.output_function, datum)
-                };
+            JsonObjectDatumEncoder::Numeric { output_function } => {
+                let output =
+                    unsafe { pg_sys::OidOutputFunctionCall(output_function, datum) };
                 let first = unsafe { *output.cast::<u8>() };
                 let second = unsafe { *output.add(1).cast::<u8>() };
                 let is_json_number = first.is_ascii_digit()
@@ -301,16 +346,7 @@ impl JsonEncodeBuffer {
                 }
                 unsafe { pg_sys::pfree(output.cast()) };
             }
-            category
-            @ (JSONTYPE_DATE | JSONTYPE_TIMESTAMP | JSONTYPE_TIMESTAMPTZ) => {
-                let type_oid = match category {
-                    JSONTYPE_DATE => pg_sys::DATEOID,
-                    JSONTYPE_TIMESTAMP => pg_sys::TIMESTAMPOID,
-                    JSONTYPE_TIMESTAMPTZ => pg_sys::TIMESTAMPTZOID,
-                    _ => unreachable!(
-                        "the matched JSON datetime category is exhaustive"
-                    ),
-                };
+            JsonObjectDatumEncoder::Date { type_oid } => {
                 let mut output = [0 as c_char; pg_sys::MAXDATELEN as usize + 1];
                 unsafe {
                     pg_sys::JsonEncodeDateTime(
@@ -329,24 +365,19 @@ impl JsonEncodeBuffer {
                 };
                 self.append_byte(b'"');
             }
-            JSONTYPE_JSON | JSONTYPE_JSONB => {
-                let output = unsafe {
-                    pg_sys::OidOutputFunctionCall(encoder.output_function, datum)
-                };
+            JsonObjectDatumEncoder::Json { output_function } => {
+                let output =
+                    unsafe { pg_sys::OidOutputFunctionCall(output_function, datum) };
                 unsafe {
                     pg_sys::appendStringInfoString(self.buffer.as_ptr(), output)
                 };
                 unsafe { pg_sys::pfree(output.cast()) };
             }
-            JSONTYPE_OTHER => {
-                let output = unsafe {
-                    pg_sys::OidOutputFunctionCall(encoder.output_function, datum)
-                };
+            JsonObjectDatumEncoder::String { output_function } => {
+                let output =
+                    unsafe { pg_sys::OidOutputFunctionCall(output_function, datum) };
                 unsafe { pg_sys::escape_json(self.buffer.as_ptr(), output) };
                 unsafe { pg_sys::pfree(output.cast()) };
-            }
-            _ => {
-                unreachable!("unsupported JSON categories are rejected while binding")
             }
         }
     }

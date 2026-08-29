@@ -21,7 +21,6 @@ pub(crate) unsafe extern "C-unwind" fn analyze_foreign_table<P: FdwAnalyze>(
     acquire_function: *mut pg_sys::AcquireSampleRowsFunc,
     total_pages: *mut pg_sys::BlockNumber,
 ) -> bool {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let context = unsafe { ForeignAnalyzeContext::from_raw(relation) };
         let Some(support) = P::analyze(&context)? else {
@@ -38,7 +37,7 @@ pub(crate) unsafe extern "C-unwind" fn analyze_foreign_table<P: FdwAnalyze>(
         Ok(supported) => supported,
         Err(error) => error
             .with_callback_phase::<P>(ForeignTableMaintenancePhase::Analyze)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 
@@ -55,7 +54,6 @@ pub(crate) unsafe extern "C-unwind" fn acquire_sample_rows<P: FdwAnalyze>(
     total_rows: *mut f64,
     total_dead_rows: *mut f64,
 ) -> c_int {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         let mut context = unsafe {
             ForeignSampleContext::from_raw(relation, log_level, rows, target_rows)
@@ -72,7 +70,7 @@ pub(crate) unsafe extern "C-unwind" fn acquire_sample_rows<P: FdwAnalyze>(
         Ok(sampled_rows) => sampled_rows,
         Err(error) => error
             .with_callback_phase::<P>(ForeignTableMaintenancePhase::AcquireSampleRows)
-            .report_after_switch(prior_context),
+            .report(),
     }
 }
 
@@ -86,7 +84,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_truncate<P: FdwTruncate>(
     behavior: pg_sys::DropBehavior::Type,
     restart_sequences: bool,
 ) {
-    let prior_context = unsafe { pg_sys::CurrentMemoryContext };
     let result = {
         let context = unsafe {
             ForeignTruncateContext::from_raw(relations, behavior, restart_sequences)
@@ -97,6 +94,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_truncate<P: FdwTruncate>(
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignTableMaintenancePhase::Truncate)
-            .report_after_switch(prior_context);
+            .report();
     }
 }

@@ -5,7 +5,9 @@ use std::ffi::CStr;
 use std::ops::Range;
 
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::{ColumnDatumTarget, JsonDatumEncoder, JsonDatumKind};
+use lagodb_core::tuple::{
+    ColumnDatumTarget, DatumConversionError, JsonDatumEncoder, JsonDatumKind,
+};
 use pgrx::{PgTryBuilder, pg_sys};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
@@ -97,7 +99,8 @@ impl JsonColumnPlan {
     pub(in crate::format) fn bind<'a>(
         fields: impl IntoIterator<Item = (&'a str, pg_sys::Oid, i32)>,
     ) -> Result<Self, ConnectorError> {
-        ColumnDatumTarget::validate_utf8_server_encoding()?;
+        ColumnDatumTarget::validate_utf8_server_encoding()
+            .map_err(DatumConversionError::from)?;
         let mut columns = Vec::new();
         let mut indexes = HashMap::new();
         for (name, type_oid, type_mod) in fields {

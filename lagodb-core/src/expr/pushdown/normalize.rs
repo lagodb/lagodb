@@ -21,13 +21,19 @@ pub(crate) struct NormalizedFilter {
     pub pushed_expr: *mut pg_sys::Expr,
 }
 
+#[derive(Clone, Copy)]
+enum FilterCombination {
+    And,
+    Or,
+}
+
 impl NormalizedFilter {
     /// # Safety
     ///
     /// Every candidate expression must be live in the current planner memory
     /// context.
     pub(crate) unsafe fn combine_and(items: Vec<Self>) -> Option<Self> {
-        unsafe { Self::combine(items, pg_sys::BoolExprType::AND_EXPR) }
+        unsafe { Self::combine(items, FilterCombination::And) }
     }
 
     /// # Safety
@@ -35,12 +41,12 @@ impl NormalizedFilter {
     /// Every candidate expression must be live in the current planner memory
     /// context.
     pub(crate) unsafe fn combine_or(items: Vec<Self>) -> Option<Self> {
-        unsafe { Self::combine(items, pg_sys::BoolExprType::OR_EXPR) }
+        unsafe { Self::combine(items, FilterCombination::Or) }
     }
 
     unsafe fn combine(
         items: Vec<Self>,
-        boolop: pg_sys::BoolExprType::Type,
+        combination: FilterCombination,
     ) -> Option<Self> {
         if items.is_empty() {
             return None;
@@ -63,12 +69,15 @@ impl NormalizedFilter {
                 pg_sys::lappend(pushed_args, item.pushed_expr.cast::<c_void>())
             };
         }
-        let root = match boolop {
-            pg_sys::BoolExprType::AND_EXPR => {
-                FilterNode::And(nodes.into_boxed_slice())
-            }
-            pg_sys::BoolExprType::OR_EXPR => FilterNode::Or(nodes.into_boxed_slice()),
-            _ => unreachable!("filter candidates combine only AND or OR"),
+        let (root, boolop) = match combination {
+            FilterCombination::And => (
+                FilterNode::And(nodes.into_boxed_slice()),
+                pg_sys::BoolExprType::AND_EXPR,
+            ),
+            FilterCombination::Or => (
+                FilterNode::Or(nodes.into_boxed_slice()),
+                pg_sys::BoolExprType::OR_EXPR,
+            ),
         };
         Some(Self {
             fragment: FilterFragment::new(root, values),

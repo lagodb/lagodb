@@ -45,7 +45,6 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_rel_size<P: FdwScan>(
     baserel: *mut pg_sys::RelOptInfo,
     foreigntableid: pg_sys::Oid,
 ) {
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         if root.is_null() || baserel.is_null() {
             return Err(ForeignScanError::framework(
@@ -103,7 +102,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_rel_size<P: FdwScan>(
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignScanPhase::RelSize)
-            .report_after_switch(prior_ctx);
+            .report();
     }
 }
 
@@ -119,7 +118,6 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
     baserel: *mut pg_sys::RelOptInfo,
     foreigntableid: pg_sys::Oid,
 ) {
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         if root.is_null() || baserel.is_null() {
             return Err(ForeignScanError::framework(
@@ -225,7 +223,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignScanPhase::Paths)
-            .report_after_switch(prior_ctx);
+            .report();
     }
 }
 
@@ -245,7 +243,6 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
     scan_clauses: *mut pg_sys::List,
     outer_plan: *mut pg_sys::Plan,
 ) -> *mut pg_sys::ForeignScan {
-    let prior_ctx = unsafe { pg_sys::CurrentMemoryContext };
     let result = (|| {
         if root.is_null() || baserel.is_null() || best_path.is_null() {
             return Err(ForeignScanError::framework(
@@ -482,7 +479,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
         Ok(scan) => scan,
         Err(error) => error
             .with_callback_phase::<P>(ForeignScanPhase::Plan)
-            .report_after_switch(prior_ctx),
+            .report(),
     }
 }
 

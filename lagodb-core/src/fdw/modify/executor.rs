@@ -179,8 +179,6 @@ pub(super) unsafe fn end_modify<P: FdwModify>(
     unsafe { pg_sys::MemoryContextSwitchTo(prior_context) };
     wrapper.cleanup_payloads();
     if let Err(error) = result {
-        error
-            .with_provider_phase::<P>(phase)
-            .report_after_switch(prior_context);
+        error.with_provider_phase::<P>(phase).report();
     }
 }

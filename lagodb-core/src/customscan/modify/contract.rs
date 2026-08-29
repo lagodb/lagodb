@@ -12,29 +12,19 @@ use super::binding::ModifyBindContext;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModifyCapabilities {
     postgres_indexes: bool,
-    speculative_insert: bool,
 }
 
 impl ModifyCapabilities {
-    pub const NONE: Self = Self::new(false, false);
+    pub const NONE: Self = Self::new(false);
     /// Core maintains PostgreSQL index entries after provider INSERT/UPDATE.
-    pub const POSTGRES_INDEXES: Self = Self::new(true, false);
-    /// PostgreSQL indexes and speculative insertion are supported.
-    pub const POSTGRES_INDEXES_AND_SPECULATIVE_INSERT: Self = Self::new(true, true);
+    pub const POSTGRES_INDEXES: Self = Self::new(true);
 
-    const fn new(postgres_indexes: bool, speculative_insert: bool) -> Self {
-        Self {
-            postgres_indexes,
-            speculative_insert,
-        }
+    const fn new(postgres_indexes: bool) -> Self {
+        Self { postgres_indexes }
     }
 
     pub const fn postgres_indexes(self) -> bool {
         self.postgres_indexes
-    }
-
-    pub const fn speculative_insert(self) -> bool {
-        self.speculative_insert
     }
 }
 
