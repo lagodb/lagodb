@@ -59,7 +59,7 @@ pub(super) extern "C-unwind" fn tuple_insert<A: TableAccessMethod>(
     with_current_relation_session::<A, _>(rel, |session| unsafe {
         let bistate =
             (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
-        session.state.tuple_insert_slot(
+        session.tuple_insert_slot(
             TupleSlotRow::from_raw(slot),
             cid,
             options,
@@ -83,7 +83,7 @@ pub(super) extern "C-unwind" fn multi_insert<A>(
     with_current_relation_session::<A, _>(rel, |session| unsafe {
         let bistate =
             (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
-        session.state.multi_insert_slots(
+        session.multi_insert_slots(
             TupleSlotBatch::from_raw(slots, nslots as usize),
             cid,
             options,

@@ -21,7 +21,6 @@
 
 mod binding;
 mod callbacks;
-mod erased_session;
 mod lifecycle;
 mod modify_query;
 mod session;

@@ -10,31 +10,47 @@ use std::ptr::NonNull;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::api::{AmCopySession, TableAccessMethod};
+use crate::api::{AmCopySession, AmResult, TableAccessMethod};
 use crate::diag::PgReportError;
-use crate::handles::RelationHandle;
+use crate::handles::{BulkInsertStateHandle, RelationHandle};
 use crate::resource::{self, ResourceHandle};
-
-use super::erased_session::{ErasedCopySession, ErasedCopySessionAdapter};
+use crate::tuple::{TupleSlotBatch, TupleSlotRow};
 
 pub(super) struct CopyRelationSession {
-    pub(super) state: Box<dyn ErasedCopySession>,
+    state: Box<dyn AmCopySession>,
     finalized: bool,
 }
 
 impl CopyRelationSession {
     fn new<T: AmCopySession + 'static>(state: T) -> Self {
         Self {
-            state: Box::new(ErasedCopySessionAdapter::new(state)),
+            state: Box::new(state),
             finalized: false,
         }
     }
 
-    pub(super) fn finish_bulk_insert(
-        &mut self,
-        options: i32,
-    ) -> Result<(), PgReportError> {
+    pub(super) fn finish_bulk_insert(&mut self, options: i32) -> AmResult<()> {
         self.state.finish_bulk_insert(options)
+    }
+
+    pub(super) fn tuple_insert_slot(
+        &mut self,
+        row: TupleSlotRow<'_>,
+        cid: pg_sys::CommandId,
+        options: i32,
+        bistate: Option<&BulkInsertStateHandle>,
+    ) -> AmResult<()> {
+        self.state.tuple_insert_slot(row, cid, options, bistate)
+    }
+
+    pub(super) fn multi_insert_slots(
+        &mut self,
+        rows: TupleSlotBatch<'_>,
+        cid: pg_sys::CommandId,
+        options: i32,
+        bistate: Option<&BulkInsertStateHandle>,
+    ) -> AmResult<()> {
+        self.state.multi_insert_slots(rows, cid, options, bistate)
     }
 
     fn finish(&mut self) -> Result<(), PgReportError> {
@@ -137,12 +153,8 @@ pub(super) fn with_current_relation_session<A, R>(
 where
     A: TableAccessMethod,
 {
-    if rel.is_null() {
-        return Err(internal_error(
-            "COPY FROM table-AM callback has NULL relation",
-        ));
-    }
-    // SAFETY: checked non-null above and PostgreSQL keeps the relation open.
+    // SAFETY: PostgreSQL's table-AM callback contract supplies a live relation
+    // and keeps it open for the duration of the callback.
     let rel_oid = unsafe { (*rel).rd_id };
     let existing = COPY_FRAMES.with(|frames| {
         let mut frames = frames.borrow_mut();
