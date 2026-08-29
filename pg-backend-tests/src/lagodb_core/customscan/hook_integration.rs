@@ -35,6 +35,7 @@ const PROVIDER_NAME: &CStr = c"hook-integration-test-provider";
 const PLAIN_REL_PREFIX: &str = "hook_plain_";
 const JOIN_REL_PREFIX: &str = "hook_join_";
 const WIDEN_REL_PREFIX: &str = "hook_widen_";
+const BIND_ERROR_REL_PREFIX: &str = "hook_bind_error_";
 const CODEC_WRONG_TAG_REL_PREFIX: &str = "hook_codec_wrong_tag_";
 const CODEC_TRAILING_REL_PREFIX: &str = "hook_codec_trailing_";
 const INT4EQ_OPNO: u32 = 96;
@@ -44,6 +45,7 @@ enum HookTestMode {
     Plain,
     Join,
     Widening,
+    BindError,
     CodecWrongTag,
     CodecTrailing,
 }
@@ -56,6 +58,8 @@ impl HookTestMode {
             Some(Self::Join)
         } else if name.starts_with(WIDEN_REL_PREFIX) {
             Some(Self::Widening)
+        } else if name.starts_with(BIND_ERROR_REL_PREFIX) {
+            Some(Self::BindError)
         } else if name.starts_with(CODEC_WRONG_TAG_REL_PREFIX) {
             Some(Self::CodecWrongTag)
         } else if name.starts_with(CODEC_TRAILING_REL_PREFIX) {
@@ -70,6 +74,7 @@ impl HookTestMode {
             Self::Join => PathVariantKind::JoinParameterized,
             Self::Plain
             | Self::Widening
+            | Self::BindError
             | Self::CodecWrongTag
             | Self::CodecTrailing => PathVariantKind::Plain,
         }
@@ -79,7 +84,9 @@ impl HookTestMode {
         match self {
             Self::CodecWrongTag => HookCodecMode::WrongTag,
             Self::CodecTrailing => HookCodecMode::Trailing,
-            Self::Plain | Self::Join | Self::Widening => HookCodecMode::Valid,
+            Self::Plain | Self::Join | Self::Widening | Self::BindError => {
+                HookCodecMode::Valid
+            }
         }
     }
 }
@@ -113,6 +120,7 @@ struct HookIntegrationProvider;
 enum HookFilterError {
     Codec(PlanDataError),
     InvalidSlot { index: usize },
+    BindFailure,
 }
 
 impl From<PlanDataError> for HookFilterError {
@@ -129,6 +137,9 @@ impl Display for HookFilterError {
                 formatter,
                 "hook integration planned filter references invalid slot {index}"
             ),
+            Self::BindFailure => {
+                formatter.write_str("hook integration provider bind_filter failed")
+            }
         }
     }
 }
@@ -137,7 +148,7 @@ impl Error for HookFilterError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Codec(error) => Some(error),
-            Self::InvalidSlot { .. } => None,
+            Self::InvalidSlot { .. } | Self::BindFailure => None,
         }
     }
 }
@@ -163,6 +174,7 @@ enum HookCodecMode {
 struct HookPlannedFilter {
     values: Box<[FilterValueSlotId]>,
     codec_mode: HookCodecMode,
+    bind_error: bool,
 }
 
 impl HookFilterPlanner {
@@ -194,6 +206,7 @@ impl HookFilterPlanner {
         HookPlannedFilter {
             values: values.into_boxed_slice(),
             codec_mode: self.mode.codec_mode(),
+            bind_error: matches!(self.mode, HookTestMode::BindError),
         }
     }
 }
@@ -269,6 +282,7 @@ impl FilterPushdown for HookIntegrationProvider {
         for value in &predicate.values {
             writer.append_count(value.index());
         }
+        writer.append_bool(predicate.bind_error);
         if matches!(predicate.codec_mode, HookCodecMode::Trailing) {
             writer.append_i32(99);
         }
@@ -287,9 +301,11 @@ impl FilterPushdown for HookIntegrationProvider {
                 .ok_or(HookFilterError::InvalidSlot { index })?;
             values.push(value);
         }
+        let bind_error = reader.read_bool()?;
         Ok(HookPlannedFilter {
             values: values.into_boxed_slice(),
             codec_mode: HookCodecMode::Valid,
+            bind_error,
         })
     }
 
@@ -297,6 +313,9 @@ impl FilterPushdown for HookIntegrationProvider {
         predicate: &Self::PlannedPredicate,
         values: FilterValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
+        if predicate.bind_error {
+            return Err(HookFilterError::BindFailure);
+        }
         for &value in &predicate.values {
             let _ = values.value(value);
         }

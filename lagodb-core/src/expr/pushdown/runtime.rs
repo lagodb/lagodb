@@ -506,7 +506,11 @@ mod tests {
 
         let error = match bind_values::<TestProvider>(&filters, &[], &[]) {
             Err(error) => error,
-            Ok(_) => panic!("provider binding error did not reach the FFI boundary"),
+            Ok(_) => {
+                panic!(
+                    "provider binding error was not preserved as RuntimeFilterError::Provider"
+                )
+            }
         };
 
         assert!(matches!(error, RuntimeFilterError::Provider(TestError)));

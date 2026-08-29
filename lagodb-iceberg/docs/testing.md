@@ -74,10 +74,21 @@ To verify resilience against crashes, aborts, and network interruptions, tests l
 ## Test Execution Commands
 
 ### Run Host-Side Unit Tests
-Runs all Tier 1 pure unit tests instantly:
-```bash
-cargo test -p lagodb-iceberg --lib
-```
+Runs Tier 1 pure unit tests instantly without starting PostgreSQL:
+
+- **Run `lagodb-iceberg` unit tests**:
+  ```bash
+  cargo test -p lagodb-iceberg --lib
+  ```
+- **Run `lagodb-core` unit tests**:
+  ```bash
+  cargo test -p lagodb-core --lib
+  ```
+- **Run all workspace pure unit tests** (matches `xtask` Phase 1):
+  ```bash
+  cargo test --workspace --exclude pg-backend-tests --exclude lagodb-base --exclude lagodb-iceberg --exclude pg-delta-am --exclude lagodb-connectors --no-default-features --features pg17
+  ```
+
 
 ### Run PostgreSQL Backend Tests
 Runs Tier 2 `#[pg_test]` tests inside an ephemeral PostgreSQL test cluster:

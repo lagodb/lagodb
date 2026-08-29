@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[pg_test(
-        error = "customscan \"hook-integration-test-provider\" BeginCustomScan callback failed: customscan custom_private codec error: plan-data has trailing cells: read 2, length 3"
+        error = "customscan \"hook-integration-test-provider\" BeginCustomScan callback failed: customscan custom_private codec error: plan-data has trailing cells: read 3, length 4"
     )]
     fn provider_payload_trailing_field_is_rejected_at_begin() {
         run_batch(&[
@@ -271,5 +271,19 @@ mod tests {
         Spi::run("SELECT * FROM hook_codec_trailing_t WHERE a = 1").expect(
             "provider payload with a trailing field must raise PostgreSQL ERROR",
         );
+    }
+
+    #[pg_test(
+        error = "customscan \"hook-integration-test-provider\" BeginCustomScan callback failed: customscan provider error: hook integration provider bind_filter failed"
+    )]
+    fn provider_binding_error_is_reported_at_begin() {
+        run_batch(&[
+            "DROP TABLE IF EXISTS hook_bind_error_t",
+            "CREATE TEMP TABLE hook_bind_error_t(a int4)",
+            "SET LOCAL lagodb.customscan_mode = 'force'",
+        ]);
+
+        Spi::run("SELECT * FROM hook_bind_error_t WHERE a = 1")
+            .expect("provider binding error must raise PostgreSQL ERROR");
     }
 }
