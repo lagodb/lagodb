@@ -5,9 +5,11 @@ use lagodb_core::runtime_api::{
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
 use lagodb_core::storage::volume::StorageVolumeId;
-use pgrx::PgMemoryContexts;
+use pgrx::{PgMemoryContexts, pg_guard};
 
-#[pgrx::pg_guard]
+use crate::storage::volume_config::resolve_route;
+
+#[pg_guard]
 pub(super) unsafe extern "C-unwind" fn resolve_storage_volume_route(
     volume_id: u64,
     output: *mut StorageVolumeRouteOutput,
@@ -23,7 +25,7 @@ pub(super) unsafe extern "C-unwind" fn resolve_storage_volume_route(
         };
         return VOLUME_ROUTE_INVALID_REQUEST;
     };
-    match crate::storage::volume_config::resolve_route(volume_id) {
+    match resolve_route(volume_id) {
         Ok(Some(route)) => {
             output.object_namespace = unsafe {
                 PgMemoryContexts::CurrentMemoryContext

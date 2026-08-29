@@ -25,5 +25,12 @@ pub use private_data::{
     CustomScanPrivate, NoPrivateData, PrivateDataReader, PrivateDataWriter,
 };
 pub(crate) use registry::ErasedFilterPlanner;
-pub use registry::register_provider;
 pub(crate) use registry::{ErasedProvider, find_matching_provider};
+
+/// Register a relation CustomScan provider and stage this DSO's typed planner
+/// facet for the runtime registration transaction.
+pub fn register_provider<P: LagodbCustomScanProvider>() {
+    if registry::register_provider::<P>() {
+        super::planning::router::register();
+    }
+}

@@ -212,6 +212,18 @@ impl CustomScanError {
         PgReportError::raise(ErrorReport::from(self))
     }
 
+    /// Preserve the CustomScan-specific message, DETAIL, and HINT mapping for
+    /// a runtime-routed planning callback.
+    pub(crate) fn into_report_error(self) -> PgReportError {
+        let parts = custom_scan_error_report_parts(&self);
+        PgReportError::from_parts(
+            parts.sqlerrcode,
+            parts.message,
+            parts.detail,
+            parts.hint,
+        )
+    }
+
     pub(crate) fn framework(message: impl Display) -> Self {
         Self::new(CustomScanErrorKind::Framework {
             message: message.to_string(),

@@ -6,10 +6,13 @@
 
 mod error;
 pub mod object_access_hook;
+mod planning;
 mod utility_consumer;
 pub mod utility_hook;
 
 use std::cell::Cell;
+use std::mem::size_of;
+use std::ptr;
 
 use crate::runtime_api::{
     MaintenanceProvider, ProviderIdentity, ProviderRegistration, RuntimeApiError,
@@ -37,6 +40,8 @@ pub use utility_hook::{
     CreateUserMappingStmtNode, PostUtilityContext, PreUtilityContext, RenameStmtNode,
     UtilityHook, UtilityNode, UtilityStmtNode, VacuumStmtNode, register_utility_hook,
 };
+
+pub(crate) use planning::{register_modify, register_relation_scan};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FreezeState {
@@ -69,13 +74,14 @@ pub enum HookRegistrationError {
     ProviderAlreadyRegistered,
 }
 
-/// Atomically publish all utility and object-access hooks registered by this provider.
+/// Atomically publish all runtime facets registered by this provider.
 ///
 /// The runtime validates and prepares the complete batch before any descriptor
-/// becomes visible. Within each hook family, callbacks execute in FIFO
-/// registration order, followed by the PostgreSQL hook that preceded LagoDB.
-/// Successfully registered callback contexts intentionally live for the
-/// backend lifetime.
+/// becomes visible. Callbacks within each LagoDB hook family execute in FIFO
+/// registration order. Planning relation/upper hooks first chain PostgreSQL's
+/// preceding hook; planner pre/post callbacks bracket the preceding or standard
+/// planner. Successfully registered callback contexts intentionally live for
+/// the backend lifetime.
 ///
 /// # Errors
 ///
@@ -115,6 +121,7 @@ pub(crate) fn freeze_hooks_with_provider(
     let object_access = object_access_hook::prepare_object_access_hooks(
         object_access_hook::ObjectAccessHookCallbacks::BACKEND,
     );
+    let planning = planning::descriptors();
 
     let counts = (
         u32::try_from(utility.descriptors().len()),
@@ -135,32 +142,32 @@ pub(crate) fn freeze_hooks_with_provider(
         return Err(HookRegistrationError::TooManyHooks);
     };
     let utility_hooks = if utility.descriptors().is_empty() {
-        std::ptr::null()
+        ptr::null()
     } else {
         utility.descriptors().as_ptr()
     };
     let utility_consumers = if consumers.descriptors().is_empty() {
-        std::ptr::null()
+        ptr::null()
     } else {
         consumers.descriptors().as_ptr()
     };
     let object_access_hooks = if object_access.descriptors().is_empty() {
-        std::ptr::null()
+        ptr::null()
     } else {
         object_access.descriptors().as_ptr()
     };
     let object_access_str_hooks = if object_access.str_descriptors().is_empty() {
-        std::ptr::null()
+        ptr::null()
     } else {
         object_access.str_descriptors().as_ptr()
     };
     let registration = ProviderRegistration {
-        struct_size: u32::try_from(std::mem::size_of::<ProviderRegistration>())
+        struct_size: u32::try_from(size_of::<ProviderRegistration>())
             .expect("provider registration size exceeds u32"),
         provider,
         maintenance_provider: maintenance_provider
-            .map(std::ptr::from_ref)
-            .unwrap_or(std::ptr::null()),
+            .map(ptr::from_ref)
+            .unwrap_or(ptr::null()),
         utility_hooks,
         utility_hook_count: utility_count,
         utility_consumers,
@@ -169,6 +176,16 @@ pub(crate) fn freeze_hooks_with_provider(
         object_access_hook_count: object_access_count,
         object_access_str_hooks,
         object_access_str_hook_count: object_access_str_count,
+        relation_scan_planner: planning
+            .relation_scan
+            .as_ref()
+            .map(ptr::from_ref)
+            .unwrap_or(ptr::null()),
+        modify_planner: planning
+            .modify
+            .as_ref()
+            .map(ptr::from_ref)
+            .unwrap_or(ptr::null()),
     };
     // SAFETY: every descriptor and pointer in `registration` was constructed
     // above from the current core ABI types. Their backing vectors remain live

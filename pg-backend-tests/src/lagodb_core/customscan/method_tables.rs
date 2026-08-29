@@ -6,7 +6,6 @@ mod tests {
     use core::ffi::CStr;
 
     use crate::lagodb_core::customscan::support::impl_reject_all_filters;
-    use lagodb_core::customscan::hook::assert_set_rel_pathlist_callback_signature;
     use lagodb_core::customscan::provider::methods::method_tables_for;
     use lagodb_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
@@ -173,11 +172,6 @@ mod tests {
         assert_eq!(name, GlueProviderA::NAME);
         assert!(table.PlanCustomPath.is_some());
         assert!(table.ReparameterizeCustomPathByChild.is_some());
-    }
-
-    #[pg_test]
-    fn hook_callback_matches_set_rel_pathlist_hook_type() {
-        assert_set_rel_pathlist_callback_signature();
     }
 
     /// `emit_custom_path` emptiness uses `bms_membership == BMS_EMPTY_SET`

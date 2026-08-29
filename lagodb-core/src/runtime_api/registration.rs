@@ -5,7 +5,9 @@ use std::mem::size_of;
 
 use pgrx::pg_sys;
 
-use super::MaintenanceProvider;
+use super::{
+    MaintenanceProvider, ModifyPlannerDescriptor, RelationScanPlannerDescriptor,
+};
 
 pub const PROVIDER_KIND_ACCESS_METHOD: u32 = 1;
 pub const PROVIDER_KIND_FOREIGN_DATA_WRAPPER: u32 = 2;
@@ -192,4 +194,8 @@ pub struct ProviderRegistration {
     pub object_access_hook_count: u32,
     pub object_access_str_hooks: *const ObjectAccessStrHookDescriptor,
     pub object_access_str_hook_count: u32,
+    /// Optional relation CustomScan planning facet. Null means none.
+    pub relation_scan_planner: *const RelationScanPlannerDescriptor,
+    /// Optional ModifyTable planning facet. Null means none.
+    pub modify_planner: *const ModifyPlannerDescriptor,
 }

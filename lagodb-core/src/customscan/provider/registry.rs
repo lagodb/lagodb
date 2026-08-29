@@ -133,17 +133,19 @@ thread_local! {
 
 /// Register provider at `_PG_init`; leaks entry for `'static` registry + calls
 /// `RegisterCustomScanMethods`. Duplicate `P::NAME` panics.
-pub fn register_provider<P: LagodbCustomScanProvider>() {
+pub(super) fn register_provider<P: LagodbCustomScanProvider>() -> bool {
     let entry: &'static ProviderEntry<P> =
         Box::leak(Box::new(ProviderEntry::<P>::new()));
-    REGISTRY.with_borrow_mut(|registry| {
+    let first = REGISTRY.with_borrow_mut(|registry| {
         if registry.iter().any(|provider| provider.name() == P::NAME) {
             panic!(
                 "LagodbCustomScanProvider with name {:?} is already registered",
                 P::NAME
             );
         }
+        let first = registry.is_empty();
         registry.push(entry as &'static dyn ErasedProvider);
+        first
     });
 
     let methods: *const pg_sys::CustomScanMethods =
@@ -152,6 +154,7 @@ pub fn register_provider<P: LagodbCustomScanProvider>() {
     unsafe {
         pg_sys::RegisterCustomScanMethods(methods);
     }
+    first
 }
 
 /// Find the unique provider claiming this relation, or `None` / multi-match error.

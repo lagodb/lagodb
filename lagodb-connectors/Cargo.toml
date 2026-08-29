@@ -22,10 +22,10 @@ pg17 = ["pgrx/pg17", "lagodb-core/pg17", "pg-arrow-conv/pg17"]
 
 [dependencies]
 apache-avro = { version = "0.21", default-features = false, features = ["snappy", "zstandard"] }
-arrow-schema = "58"
-arrow-array = "58"
-arrow-arith = "58"
-arrow-ord = "58"
+arrow-schema = { workspace = true }
+arrow-array = { workspace = true }
+arrow-arith = { workspace = true }
+arrow-ord = { workspace = true }
 bytes = "1"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 flate2 = "1"
@@ -33,7 +33,7 @@ pgrx = { workspace = true }
 lagodb-core = { path = "../lagodb-core", default-features = false }
 pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
 lagodb-storage = { workspace = true }
-parquet = { version = "58", default-features = false, features = ["arrow", "snap", "zstd"] }
+parquet = { version = "59.1.0", default-features = false, features = ["arrow", "snap", "zstd"] }
 serde = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 thiserror = "1.0"

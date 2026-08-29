@@ -27,9 +27,11 @@ use crate::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
     TableMaintenanceOptions, TableMaintenanceReport, TableMaintenanceStats,
 };
+mod planning;
 mod registration;
 mod storage_volume;
 
+pub use planning::*;
 pub use registration::*;
 pub use storage_volume::{
     ResolveStorageVolumeRouteCallback, StorageVolumeRouteLookupError,

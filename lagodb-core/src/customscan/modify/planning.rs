@@ -1,20 +1,17 @@
-use std::ffi::{c_char, c_void};
+use std::ffi::{CStr, c_void};
+use std::mem::size_of;
 use std::ptr;
-use std::sync::OnceLock;
 
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::customscan::provider::RelationContext;
-use crate::diag::{PgReportError, ReportableError};
+use crate::diag::PgReportError;
 
 use super::{methods, registry};
 
 pub(super) use crate::customscan::provider::WHOLEROW_NAME;
-
-static PREV_PLANNER: OnceLock<pg_sys::planner_hook_type> = OnceLock::new();
-static PREV_UPPER: OnceLock<pg_sys::create_upper_paths_hook_type> = OnceLock::new();
 
 unsafe extern "C-unwind" {
     fn find_all_inheritors(
@@ -27,23 +24,6 @@ unsafe extern "C-unwind" {
 struct SystemColumnContext {
     target_rti: pg_sys::Index,
     found: bool,
-}
-
-pub(super) fn install_hooks() {
-    // SAFETY: `_PG_init` is single-threaded and each slot is installed once in
-    // this backend. Every callback chains the previously installed hook.
-    unsafe {
-        PREV_PLANNER.get_or_init(|| {
-            let previous = pg_sys::planner_hook;
-            pg_sys::planner_hook = Some(planner);
-            previous
-        });
-        PREV_UPPER.get_or_init(|| {
-            let previous = pg_sys::create_upper_paths_hook;
-            pg_sys::create_upper_paths_hook = Some(create_upper_paths);
-            previous
-        });
-    }
 }
 
 unsafe fn list_ptr(list: *mut pg_sys::List, index: i32) -> *mut c_void {
@@ -90,7 +70,7 @@ impl WholeRowPlanner {
         if tle.is_null()
             || unsafe { !(*tle).resjunk }
             || unsafe { (*tle).resname.is_null() }
-            || unsafe { std::ffi::CStr::from_ptr((*tle).resname) } != WHOLEROW_NAME
+            || unsafe { CStr::from_ptr((*tle).resname) } != WHOLEROW_NAME
         {
             return false;
         }
@@ -222,7 +202,7 @@ mod wholerow_tests {
 
     fn whole_row_tle(
         resjunk: bool,
-        name: &'static std::ffi::CStr,
+        name: &'static CStr,
     ) -> (pg_sys::Var, pg_sys::TargetEntry) {
         let var = pg_sys::Var {
             xpr: pg_sys::Expr {
@@ -237,7 +217,7 @@ mod wholerow_tests {
             xpr: pg_sys::Expr {
                 type_: pg_sys::NodeTag::T_TargetEntry,
             },
-            expr: std::ptr::null_mut(),
+            expr: ptr::null_mut(),
             resjunk,
             resname: name.as_ptr().cast_mut(),
             ..Default::default()
@@ -248,31 +228,31 @@ mod wholerow_tests {
     #[test]
     fn wholerow_dedup_requires_exact_junk_contract() {
         let (mut var, mut exact) = whole_row_tle(true, c"wholerow");
-        exact.expr = std::ptr::from_mut(&mut var).cast();
+        exact.expr = ptr::from_mut(&mut var).cast();
         assert!(unsafe { WholeRowPlanner::is_standard_wholerow_tle(&mut exact, 7) });
 
         let (mut var, mut non_junk) = whole_row_tle(false, c"wholerow");
-        non_junk.expr = std::ptr::from_mut(&mut var).cast();
+        non_junk.expr = ptr::from_mut(&mut var).cast();
         assert!(!unsafe {
             WholeRowPlanner::is_standard_wholerow_tle(&mut non_junk, 7)
         });
 
         let (mut var, mut wrong_name) = whole_row_tle(true, c"other_wholerow");
-        wrong_name.expr = std::ptr::from_mut(&mut var).cast();
+        wrong_name.expr = ptr::from_mut(&mut var).cast();
         assert!(!unsafe {
             WholeRowPlanner::is_standard_wholerow_tle(&mut wrong_name, 7)
         });
 
         let (mut var, mut wrong_relation) = whole_row_tle(true, c"wholerow");
         var.varno = 8;
-        wrong_relation.expr = std::ptr::from_mut(&mut var).cast();
+        wrong_relation.expr = ptr::from_mut(&mut var).cast();
         assert!(!unsafe {
             WholeRowPlanner::is_standard_wholerow_tle(&mut wrong_relation, 7)
         });
 
         let (mut var, mut wrong_level) = whole_row_tle(true, c"wholerow");
         var.varlevelsup = 1;
-        wrong_level.expr = std::ptr::from_mut(&mut var).cast();
+        wrong_level.expr = ptr::from_mut(&mut var).cast();
         assert!(!unsafe {
             WholeRowPlanner::is_standard_wholerow_tle(&mut wrong_level, 7)
         });
@@ -318,14 +298,16 @@ unsafe extern "C-unwind" fn find_target_system_column(
     }
 }
 
-unsafe fn reject_explicit_target_system_columns(parse: *mut pg_sys::Query) {
+unsafe fn reject_explicit_target_system_columns(
+    parse: *mut pg_sys::Query,
+) -> Result<(), PgReportError> {
     if !matches!(
         unsafe { (*parse).commandType },
         pg_sys::CmdType::CMD_UPDATE
             | pg_sys::CmdType::CMD_DELETE
             | pg_sys::CmdType::CMD_MERGE
     ) {
-        return;
+        return Ok(());
     }
     let target_rti = unsafe { (*parse).resultRelation as pg_sys::Index };
     let rte = unsafe {
@@ -335,7 +317,7 @@ unsafe fn reject_explicit_target_system_columns(parse: *mut pg_sys::Query) {
     if unsafe { (*rte).rtekind } != pg_sys::RTEKind::RTE_RELATION
         || unsafe { provider_for_rte(rte) }.is_none()
     {
-        return;
+        return Ok(());
     }
 
     let mut context = SystemColumnContext {
@@ -346,34 +328,45 @@ unsafe fn reject_explicit_target_system_columns(parse: *mut pg_sys::Query) {
         pg_sys::query_tree_walker_impl(
             parse,
             Some(find_target_system_column),
-            std::ptr::from_mut(&mut context).cast(),
+            ptr::from_mut(&mut context).cast(),
             (pg_sys::QTW_IGNORE_RT_SUBQUERIES | pg_sys::QTW_IGNORE_CTE_SUBQUERIES)
                 as i32,
         );
     }
     if context.found {
-        Err::<(), _>(PgReportError::from_message(
+        return Err(PgReportError::from_message(
             PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             "LagoDB row-level mutation cannot reference PostgreSQL heap system row columns",
-        ))
-        .report_unwrap();
+        ));
     }
+    Ok(())
 }
 
 /// # Safety
 ///
 /// `parse` and every nested Query must be live rewrite-complete planner input.
-unsafe fn prepare_query_tree(parse: *mut pg_sys::Query) {
+pub(super) unsafe fn prepare_query_tree(
+    parse: *mut pg_sys::Query,
+) -> Result<(), PgReportError> {
     unsafe {
         inject_wholerow(parse);
-        reject_explicit_target_system_columns(parse);
+        reject_explicit_target_system_columns(parse)?;
+        let mut context = PrepareQueryContext { error: None };
         pg_sys::query_tree_walker_impl(
             parse,
             Some(prepare_query_walker),
-            ptr::null_mut(),
+            ptr::from_mut(&mut context).cast(),
             0,
         );
+        match context.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
+}
+
+struct PrepareQueryContext {
+    error: Option<PgReportError>,
 }
 
 unsafe extern "C-unwind" fn prepare_query_walker(
@@ -384,7 +377,11 @@ unsafe extern "C-unwind" fn prepare_query_walker(
         return false;
     }
     if unsafe { (*node).type_ } == pg_sys::NodeTag::T_Query {
-        unsafe { prepare_query_tree(node.cast()) };
+        let context = unsafe { &mut *context.cast::<PrepareQueryContext>() };
+        if let Err(error) = unsafe { prepare_query_tree(node.cast()) } {
+            context.error = Some(error);
+            return true;
+        }
         return false;
     }
     unsafe {
@@ -470,8 +467,7 @@ pub(super) unsafe extern "C-unwind" fn plan_modify_table<
 ) -> *mut pg_sys::Plan {
     let mt = unsafe { list_ptr(custom_plans, 0).cast::<pg_sys::ModifyTable>() };
     let scan = unsafe {
-        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>())
-            .cast::<pg_sys::CustomScan>()
+        pg_sys::palloc0(size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
     };
     let path = unsafe { &(*best_path).path };
     let mut targetlist = copy_node(unsafe { (*root).processed_tlist });
@@ -506,17 +502,14 @@ pub(super) unsafe extern "C-unwind" fn plan_modify_table<
     scan.cast()
 }
 
-#[pg_guard]
-unsafe extern "C-unwind" fn create_upper_paths(
+pub(super) unsafe fn create_upper_paths(
     root: *mut pg_sys::PlannerInfo,
     stage: pg_sys::UpperRelationKind::Type,
     input_rel: *mut pg_sys::RelOptInfo,
     output_rel: *mut pg_sys::RelOptInfo,
     extra: *mut c_void,
 ) {
-    if let Some(Some(previous)) = PREV_UPPER.get() {
-        unsafe { previous(root, stage, input_rel, output_rel, extra) };
-    }
+    let _ = (input_rel, extra);
     if stage != pg_sys::UpperRelationKind::UPPERREL_FINAL {
         return;
     }
@@ -535,7 +528,7 @@ unsafe extern "C-unwind" fn create_upper_paths(
             continue;
         };
         let custom = unsafe {
-            pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>())
+            pg_sys::palloc0(size_of::<pg_sys::CustomPath>())
                 .cast::<pg_sys::CustomPath>()
         };
         unsafe {
@@ -600,33 +593,10 @@ unsafe fn fixup_plan(plan: *mut pg_sys::Plan) {
     }
 }
 
-#[pg_guard]
-unsafe extern "C-unwind" fn planner(
-    parse: *mut pg_sys::Query,
-    query_string: *const c_char,
-    cursor_options: i32,
-    bound_params: pg_sys::ParamListInfo,
-) -> *mut pg_sys::PlannedStmt {
-    unsafe { prepare_query_tree(parse) };
-    let planned = if let Some(Some(previous)) = PREV_PLANNER.get() {
-        unsafe { previous(parse, query_string, cursor_options, bound_params) }
-    } else {
-        unsafe {
-            pg_sys::standard_planner(
-                parse,
-                query_string,
-                cursor_options,
-                bound_params,
-            )
-        }
-    };
-    if planned.is_null() {
-        return planned;
-    }
+pub(super) unsafe fn fixup_planned_statement(planned: *mut pg_sys::PlannedStmt) {
     unsafe { fixup_plan((*planned).planTree) };
     let subplans = unsafe { (*planned).subplans };
     for index in 0..unsafe { pg_sys::list_length(subplans) } {
         unsafe { fixup_plan(list_ptr(subplans, index).cast()) };
     }
-    planned
 }

@@ -1,5 +1,9 @@
 //! Backend-only probes for the cross-DSO runtime regression suite.
 
+use std::cell::Cell;
+use std::mem::size_of;
+use std::ptr;
+
 use lagodb_core::hooks::{
     OBJECT_ACCESS_DROP, ObjectAccessEvent, ObjectAccessFilter, ObjectAccessHook,
     ObjectAccessHookError, PostUtilityContext, UtilityHook, UtilityHookError,
@@ -12,9 +16,9 @@ use lagodb_core::runtime_api::{
 use pgrx::prelude::*;
 
 thread_local! {
-    static OBJECT_DROP_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static UTILITY_PRE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static UTILITY_POST_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static OBJECT_DROP_COUNT: Cell<u64> = const { Cell::new(0) };
+    static UTILITY_PRE_COUNT: Cell<u64> = const { Cell::new(0) };
+    static UTILITY_POST_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
 struct DeltaObjectAccessTestHook;
@@ -86,7 +90,7 @@ mod delta {
         let runtime =
             RuntimeClient::connect().expect("runtime API must be published");
         let descriptor = MaintenanceProvider {
-            struct_size: u32::try_from(std::mem::size_of::<MaintenanceProvider>())
+            struct_size: u32::try_from(size_of::<MaintenanceProvider>())
                 .expect("maintenance provider descriptor size exceeds u32"),
             name: c"delta-duplicate".as_ptr(),
             access_method_name: c"iceberg".as_ptr(),
@@ -101,18 +105,20 @@ mod delta {
             c"pg_delta_am",
         );
         let registration = ProviderRegistration {
-            struct_size: u32::try_from(std::mem::size_of::<ProviderRegistration>())
+            struct_size: u32::try_from(size_of::<ProviderRegistration>())
                 .expect("provider registration size exceeds u32"),
             provider: &identity,
             maintenance_provider: &descriptor,
-            utility_hooks: std::ptr::null(),
+            utility_hooks: ptr::null(),
             utility_hook_count: 0,
-            utility_consumers: std::ptr::null(),
+            utility_consumers: ptr::null(),
             utility_consumer_count: 0,
-            object_access_hooks: std::ptr::null(),
+            object_access_hooks: ptr::null(),
             object_access_hook_count: 0,
-            object_access_str_hooks: std::ptr::null(),
+            object_access_str_hooks: ptr::null(),
             object_access_str_hook_count: 0,
+            relation_scan_planner: ptr::null(),
+            modify_planner: ptr::null(),
         };
         // SAFETY: this test registration uses current ABI values backed by
         // local descriptors that remain live for the synchronous call. The

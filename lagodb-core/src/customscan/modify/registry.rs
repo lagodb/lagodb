@@ -59,7 +59,7 @@ thread_local! {
     static REGISTRY: RefCell<Vec<&'static dyn ErasedModifyProvider>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(super) fn register<P: LagodbCustomModifyProvider>() {
+pub(super) fn register<P: LagodbCustomModifyProvider>() -> bool {
     let entry: &'static dyn ErasedModifyProvider =
         Box::leak(Box::new(ModifyProviderEntry::<P>::new()));
     assert!(
@@ -67,7 +67,7 @@ pub(super) fn register<P: LagodbCustomModifyProvider>() {
         "Custom ModifyTable name {:?} conflicts with its scan provider name",
         P::MODIFY_NAME,
     );
-    REGISTRY.with_borrow_mut(|registry| {
+    let first = REGISTRY.with_borrow_mut(|registry| {
         assert!(
             registry.iter().all(|existing| {
                 existing.type_id() != TypeId::of::<P>()
@@ -76,9 +76,12 @@ pub(super) fn register<P: LagodbCustomModifyProvider>() {
             "Custom ModifyTable provider/name {:?} is already registered",
             P::MODIFY_NAME,
         );
+        let first = registry.is_empty();
         registry.push(entry);
+        first
     });
     methods::register::<P>();
+    first
 }
 
 pub(super) fn matching(

@@ -21,12 +21,25 @@
 
 use pgrx::prelude::*;
 
+#[cfg(any(test, feature = "pg_test"))]
+use ::lagodb_core::{hooks as core_hooks, runtime_api as core_runtime_api};
+
 pg_module_magic!();
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     #[cfg(any(test, feature = "pg_test"))]
-    lagodb_core::init_pg_test_extension();
+    {
+        lagodb_core::init_pg_test_extension();
+        let identity = core_runtime_api::ProviderIdentity::foreign_data_wrapper(
+            c"pg-backend-tests",
+            c"pg_backend_tests",
+            c"pg_backend_tests",
+        );
+        core_hooks::freeze_hooks(&identity).unwrap_or_else(|error| {
+            panic!("failed to publish backend-test planning hooks: {error}")
+        });
+    }
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -40,6 +53,9 @@ pub mod pg_test {
     pub fn setup(_options: Vec<&str>) {}
 
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["shared_preload_libraries = 'lagodb_base'"]
+        vec![
+            "shared_preload_libraries = 'lagodb_base'",
+            "lagodb.provider_libraries = 'pg_backend_tests'",
+        ]
     }
 }

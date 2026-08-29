@@ -1,7 +1,7 @@
 //! Hook-integration tests for the generic CustomScan framework.
 //!
-//! Unlike `hook.rs`, these tests exercise the real `set_rel_pathlist_hook`
-//! router through SQL planning, using a dummy provider registered from `_PG_init`.
+//! These tests exercise the runtime-owned `set_rel_pathlist_hook` router through
+//! SQL planning, using a dummy provider registered from `_PG_init`.
 //! That provider is installed into the process-global registry for the lifetime
 //! of the `pg-backend-tests` extension. Keep its relation-name prefixes
 //! unique to this module so unrelated tests do not accidentally match it.
@@ -96,7 +96,6 @@ pub(crate) fn install_hook_integration_provider() {
 
     INIT.get_or_init(|| {
         register_provider::<HookIntegrationProvider>();
-        lagodb_core::customscan::init();
     });
 }
 

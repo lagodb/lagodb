@@ -28,9 +28,8 @@ pub(crate) fn initialize_configuration_and_hooks() {
 pub(crate) fn register_providers() {
     local_file_wal::init_wal_rmgr();
 
-    // Register every provider before installing the framework router.
+    // Stage every planner facet before publishing the provider transaction.
     customscan::register();
-    lagodb_core::customscan::init();
     lagodb_core::table_maintenance::register_provider::<
         maintenance::IcebergTableMaintenanceProvider,
     >();

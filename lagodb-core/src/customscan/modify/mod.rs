@@ -8,6 +8,7 @@ mod methods;
 mod modify_table;
 mod planning;
 mod registry;
+mod router;
 
 pub use binding::ModifyBindContext;
 pub use contract::{LagodbCustomModifyProvider, ModifyCapabilities};
@@ -19,8 +20,9 @@ use crate::customscan::provider::RelationContext;
 /// Call this during `_PG_init`, after registering the provider with the scan
 /// framework.
 pub fn register_provider<P: LagodbCustomModifyProvider>() {
-    registry::register::<P>();
-    planning::install_hooks();
+    if registry::register::<P>() {
+        crate::hooks::register_modify(router::descriptor());
+    }
 }
 
 /// Whether a registered ModifyTable provider owns this target relation.

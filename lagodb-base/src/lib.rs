@@ -14,6 +14,7 @@ mod gucs;
 mod hooks;
 mod lifecycle;
 mod object_access;
+mod planning_hooks;
 mod process_utility;
 mod provider_bootstrap;
 mod registry;
@@ -42,6 +43,7 @@ extern "C-unwind" fn _PG_init() {
         storage::init_shared_memory();
         lifecycle::init();
         hooks::init();
+        planning_hooks::init();
         worker::init();
         provider_bootstrap::load_configured();
     }

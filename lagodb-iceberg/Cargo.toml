@@ -29,9 +29,9 @@ pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
 iceberg-lite = { path = "../iceberg-lite" }
 thiserror = "1.0"
 serde_json = "1.0"
-arrow-schema = "58"
-arrow-array = "58"
-parquet = { version = "58", default-features = false, features = ["arrow"] }
+arrow-schema = { workspace = true }
+arrow-array = { workspace = true }
+parquet = { version = "59.1.0", default-features = false, features = ["arrow"] }
 roaring = { workspace = true }
 tempfile = "3.10"
 bytes = "1.10.1"
@@ -52,7 +52,7 @@ rustls = "0.23.27"
 uuid = { version = "1.16.0" }
 
 libc = "0.2.179"
-arrow-buffer = "58"
+arrow-buffer = { workspace = true }
 
 [dev-dependencies]
 pgrx-tests = { workspace = true }
