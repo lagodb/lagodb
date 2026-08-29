@@ -51,9 +51,7 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
         } else {
             unsafe { pg_sys::list_length(binding_exprs) as usize }
         };
-        if expression_count != binding_metadata.len() {
-            return Err(RuntimeFilterError::BindingCountMismatch);
-        }
+        Self::validate_binding_count(expression_count, binding_metadata.len())?;
         let expr_states = unsafe { pg_sys::ExecInitExprList(binding_exprs, parent) };
         let mut param_refs =
             unsafe { RuntimeParamRefs::collect_from_list(binding_exprs) };
@@ -313,6 +311,17 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
     ) -> impl ExactSizeIterator<Item = PushdownContract> + '_ {
         self.planned.iter().map(|filter| filter.contract)
     }
+
+    fn validate_binding_count(
+        expression_count: usize,
+        metadata_count: usize,
+    ) -> Result<(), RuntimeFilterError<P::Error>> {
+        if expression_count == metadata_count {
+            Ok(())
+        } else {
+            Err(RuntimeFilterError::BindingCountMismatch)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +381,7 @@ mod tests {
         Bound(u8),
         Counted(&'static AtomicUsize, u8),
         ValueNotRepresentable,
+        Error,
     }
 
     struct TestPlanner;
@@ -420,19 +430,20 @@ mod tests {
             predicate: &Self::PlannedPredicate,
             values: FilterValueBindings<'_>,
         ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
-            Ok(match predicate {
+            match predicate {
                 BindBehavior::Bound(value) => {
                     assert!(values.is_empty());
-                    FilterBindResult::Bound(*value)
+                    Ok(FilterBindResult::Bound(*value))
                 }
                 BindBehavior::Counted(counter, value) => {
                     counter.fetch_add(1, Ordering::Relaxed);
-                    FilterBindResult::Bound(*value)
+                    Ok(FilterBindResult::Bound(*value))
                 }
                 BindBehavior::ValueNotRepresentable => {
-                    FilterBindResult::ValueNotRepresentable
+                    Ok(FilterBindResult::ValueNotRepresentable)
                 }
-            })
+                BindBehavior::Error => Err(TestError),
+            }
         }
     }
 
@@ -474,6 +485,31 @@ mod tests {
         assert_eq!(bound.iter().filter(|entry| entry.is_some()).count(), 1);
         assert_eq!(bound[0].as_ref().map(|entry| entry.predicate), Some(7));
         assert!(bound[1].is_none());
+    }
+
+    #[test]
+    fn binding_expression_count_must_match_metadata() {
+        RuntimeFilterState::<TestProvider>::validate_binding_count(2, 2)
+            .expect("matching binding counts must be accepted");
+        let error = RuntimeFilterState::<TestProvider>::validate_binding_count(1, 2)
+            .expect_err("mismatched binding counts must be rejected");
+
+        assert!(matches!(error, RuntimeFilterError::BindingCountMismatch));
+    }
+
+    #[test]
+    fn provider_binding_error_is_preserved() {
+        let filters = [planned(
+            BindBehavior::Error,
+            PushdownContract::ExactRowFilter,
+        )];
+
+        let error = match bind_values::<TestProvider>(&filters, &[], &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("provider binding error did not reach the FFI boundary"),
+        };
+
+        assert!(matches!(error, RuntimeFilterError::Provider(TestError)));
     }
 
     #[test]

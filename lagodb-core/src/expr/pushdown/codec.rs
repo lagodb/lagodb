@@ -1,6 +1,7 @@
 //! Shared planned-filter and value-slot records for CustomScan and FDW plans.
 
 use core::marker::PhantomData;
+use core::ops::Range;
 use core::ptr;
 
 use pgrx::pg_sys;
@@ -50,8 +51,6 @@ pub(crate) enum FilterRecordError {
     UnknownContract { record: usize, value: i32 },
     #[error("record {record} has unknown costing tag {value}")]
     UnknownCosting { record: usize, value: i32 },
-    #[error("record {record} binding range overflows usize")]
-    BindingRangeOverflow { record: usize },
     #[error(
         "record {record} binding range {start}..{end} exceeds binding count {binding_count}"
     )]
@@ -67,206 +66,49 @@ pub(crate) enum FilterRecordError {
 
 pub(crate) struct FilterDataCodec<P>(PhantomData<fn() -> P>);
 
-impl<P: FilterPushdown> FilterDataCodec<P> {
-    pub(crate) fn encode(
-        filters: &NegotiatedFilterSet<P::PlannedPredicate>,
-    ) -> Result<EncodedFilterData, FilterDataError<P::Error>> {
-        let mut planned = ptr::null_mut();
-        for filter in &filters.planned {
-            let payload =
-                PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
-                    P::encode_planned(&filter.planned, writer)
-                        .map_err(FilterDataError::Provider)
-                })?;
+struct FilterRecordCodec;
 
-            let record =
-                PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
-                    writer
-                        .append_i32(Self::contract_tag(filter.effective.contract))
-                        .append_i32(Self::costing_tag(filter.effective.costing))
-                        .append_count(filter.binding_start)
-                        .append_count(filter.binding_count);
-                    unsafe { writer.append_list(payload) };
-                    Ok(())
-                })?;
-            planned = unsafe { pg_sys::lappend(planned, record.cast()) };
+impl FilterRecordCodec {
+    fn planned_count(
+        found: usize,
+        expected: usize,
+    ) -> Result<usize, FilterRecordError> {
+        if found == expected {
+            Ok(found)
+        } else {
+            Err(FilterRecordError::RecordCount { found, expected })
         }
-
-        let mut bindings = ptr::null_mut();
-        for binding in &filters.bindings {
-            let record =
-                PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
-                    writer
-                        .append_oid(binding.metadata.value_type.type_oid)
-                        .append_i32(binding.metadata.value_type.typmod)
-                        .append_oid(binding.metadata.value_type.collation)
-                        .append_i32(Self::source_tag(binding.metadata.source_kind));
-                    Ok(())
-                })?;
-            bindings = unsafe { pg_sys::lappend(bindings, record.cast()) };
-        }
-
-        Ok(EncodedFilterData { planned, bindings })
     }
 
-    /// # Safety
-    ///
-    /// Both lists must be plan-owned `T_List` nodes (or NIL) that remain live
-    /// for the duration of provider decoding.
-    pub(crate) unsafe fn decode(
-        planned_raw: *mut pg_sys::List,
-        expected_count: usize,
-        bindings_raw: *mut pg_sys::List,
-        expected_binding_count: usize,
-    ) -> Result<DecodedFilterData<P::PlannedPredicate>, FilterDataError<P::Error>>
-    {
-        let bindings =
-            unsafe { Self::decode_bindings(bindings_raw, expected_binding_count) }?;
-        let planned = unsafe {
-            Self::decode_planned(planned_raw, expected_count, bindings.len())
-        }?;
-        Ok((planned, bindings))
+    fn binding_count(
+        found: usize,
+        expected: usize,
+    ) -> Result<usize, FilterRecordError> {
+        if found == expected {
+            Ok(found)
+        } else {
+            Err(FilterRecordError::BindingRecordCount { found, expected })
+        }
     }
 
-    unsafe fn decode_planned(
-        raw: *mut pg_sys::List,
-        expected_count: usize,
+    fn binding_range(
+        record: usize,
+        start: usize,
+        count: usize,
         binding_count: usize,
-    ) -> Result<
-        Vec<PlannedFilterRecord<P::PlannedPredicate>>,
-        FilterDataError<P::Error>,
-    > {
-        if raw.is_null() {
-            return if expected_count == 0 {
-                Ok(Vec::new())
-            } else {
-                Err(FilterRecordError::RecordCount {
-                    found: 0,
-                    expected: expected_count,
-                }
-                .into())
-            };
-        }
-
-        unsafe {
-            PlanDataReader::decode_checked_list::<_, FilterDataError<P::Error>>(
-                raw,
-                0,
-                |records| {
-                    let found = records.remaining();
-                    if found != expected_count {
-                        return Err(FilterRecordError::RecordCount {
-                            found,
-                            expected: expected_count,
-                        }
-                        .into());
-                    }
-                    let mut filters = Vec::with_capacity(found);
-                    for record_index in 0..found {
-                        filters.push(
-                            records.read_nested::<_, FilterDataError<P::Error>>(
-                                |record| {
-                                    let contract = Self::contract_from_tag(
-                                        record_index,
-                                        record.read_i32()?,
-                                    )?;
-                                    Self::costing_from_tag(
-                                        record_index,
-                                        record.read_i32()?,
-                                    )?;
-                                    let start = record.read_count()?;
-                                    let count = record.read_count()?;
-                                    let end = start.checked_add(count).ok_or(
-                                        FilterRecordError::BindingRangeOverflow {
-                                            record: record_index,
-                                        },
-                                    )?;
-                                    if end > binding_count {
-                                        return Err(
-                                        FilterRecordError::BindingRangeOutOfBounds {
-                                            record: record_index,
-                                            start,
-                                            end,
-                                            binding_count,
-                                        }
-                                        .into(),
-                                    );
-                                    }
-                                    let planned = record.read_nested(|payload| {
-                                        P::decode_planned(payload, count)
-                                            .map_err(FilterDataError::Provider)
-                                    })?;
-                                    Ok(PlannedFilterRecord {
-                                        planned,
-                                        contract,
-                                        binding_range: start..end,
-                                    })
-                                },
-                            )?,
-                        );
-                    }
-                    Ok(filters)
-                },
-            )
-        }
-    }
-
-    unsafe fn decode_bindings(
-        raw: *mut pg_sys::List,
-        expected_count: usize,
-    ) -> Result<Vec<FilterValueSlot>, FilterDataError<P::Error>> {
-        if raw.is_null() {
-            return if expected_count == 0 {
-                Ok(Vec::new())
-            } else {
-                Err(FilterRecordError::BindingRecordCount {
-                    found: 0,
-                    expected: expected_count,
-                }
-                .into())
-            };
-        }
-
-        unsafe {
-            PlanDataReader::decode_checked_list::<_, FilterDataError<P::Error>>(
-                raw,
-                0,
-                |records| {
-                    let count = records.remaining();
-                    if count != expected_count {
-                        return Err(FilterRecordError::BindingRecordCount {
-                            found: count,
-                            expected: expected_count,
-                        }
-                        .into());
-                    }
-                    let mut bindings = Vec::with_capacity(count);
-                    for binding_index in 0..count {
-                        bindings.push(
-                            records.read_nested::<_, FilterDataError<P::Error>>(
-                                |record| {
-                                    let type_oid = record.read_oid()?;
-                                    let typmod = record.read_i32()?;
-                                    let collation = record.read_oid()?;
-                                    let source = Self::source_from_tag(
-                                        binding_index,
-                                        record.read_i32()?,
-                                    )?;
-                                    Ok(FilterValueSlot {
-                                        value_type: super::FilterTypeMetadata {
-                                            type_oid,
-                                            typmod,
-                                            collation,
-                                        },
-                                        source_kind: source,
-                                    })
-                                },
-                            )?,
-                        );
-                    }
-                    Ok(bindings)
-                },
-            )
+    ) -> Result<Range<usize>, FilterRecordError> {
+        // Both operands came from PlanDataReader::read_count(), whose source is
+        // a non-negative i32. Their sum fits usize on every PostgreSQL target.
+        let end = start + count;
+        if end <= binding_count {
+            Ok(start..end)
+        } else {
+            Err(FilterRecordError::BindingRangeOutOfBounds {
+                record,
+                start,
+                end,
+                binding_count,
+            })
         }
     }
 
@@ -328,3 +170,186 @@ impl<P: FilterPushdown> FilterDataCodec<P> {
         }
     }
 }
+
+impl<P: FilterPushdown> FilterDataCodec<P> {
+    pub(crate) fn encode(
+        filters: &NegotiatedFilterSet<P::PlannedPredicate>,
+    ) -> Result<EncodedFilterData, FilterDataError<P::Error>> {
+        let mut planned = ptr::null_mut();
+        for filter in &filters.planned {
+            let payload =
+                PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
+                    P::encode_planned(&filter.planned, writer)
+                        .map_err(FilterDataError::Provider)
+                })?;
+
+            let record =
+                PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
+                    writer
+                        .append_i32(FilterRecordCodec::contract_tag(
+                            filter.effective.contract,
+                        ))
+                        .append_i32(FilterRecordCodec::costing_tag(
+                            filter.effective.costing,
+                        ))
+                        .append_count(filter.binding_start)
+                        .append_count(filter.binding_count);
+                    unsafe { writer.append_list(payload) };
+                    Ok(())
+                })?;
+            planned = unsafe { pg_sys::lappend(planned, record.cast()) };
+        }
+
+        let mut bindings = ptr::null_mut();
+        for binding in &filters.bindings {
+            let record =
+                PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
+                    writer
+                        .append_oid(binding.metadata.value_type.type_oid)
+                        .append_i32(binding.metadata.value_type.typmod)
+                        .append_oid(binding.metadata.value_type.collation)
+                        .append_i32(FilterRecordCodec::source_tag(
+                            binding.metadata.source_kind,
+                        ));
+                    Ok(())
+                })?;
+            bindings = unsafe { pg_sys::lappend(bindings, record.cast()) };
+        }
+
+        Ok(EncodedFilterData { planned, bindings })
+    }
+
+    /// # Safety
+    ///
+    /// Both lists must be plan-owned `T_List` nodes (or NIL) that remain live
+    /// for the duration of provider decoding.
+    pub(crate) unsafe fn decode(
+        planned_raw: *mut pg_sys::List,
+        expected_count: usize,
+        bindings_raw: *mut pg_sys::List,
+        expected_binding_count: usize,
+    ) -> Result<DecodedFilterData<P::PlannedPredicate>, FilterDataError<P::Error>>
+    {
+        let bindings =
+            unsafe { Self::decode_bindings(bindings_raw, expected_binding_count) }?;
+        let planned = unsafe {
+            Self::decode_planned(planned_raw, expected_count, bindings.len())
+        }?;
+        Ok((planned, bindings))
+    }
+
+    unsafe fn decode_planned(
+        raw: *mut pg_sys::List,
+        expected_count: usize,
+        binding_count: usize,
+    ) -> Result<
+        Vec<PlannedFilterRecord<P::PlannedPredicate>>,
+        FilterDataError<P::Error>,
+    > {
+        if raw.is_null() {
+            FilterRecordCodec::planned_count(0, expected_count)?;
+            return Ok(Vec::new());
+        }
+
+        unsafe {
+            PlanDataReader::decode_checked_list::<_, FilterDataError<P::Error>>(
+                raw,
+                0,
+                |records| {
+                    let found = FilterRecordCodec::planned_count(
+                        records.remaining(),
+                        expected_count,
+                    )?;
+                    let mut filters = Vec::with_capacity(found);
+                    for record_index in 0..found {
+                        filters.push(
+                            records.read_nested::<_, FilterDataError<P::Error>>(
+                                |record| {
+                                    let contract =
+                                        FilterRecordCodec::contract_from_tag(
+                                            record_index,
+                                            record.read_i32()?,
+                                        )?;
+                                    FilterRecordCodec::costing_from_tag(
+                                        record_index,
+                                        record.read_i32()?,
+                                    )?;
+                                    let start = record.read_count()?;
+                                    let count = record.read_count()?;
+                                    let binding_range =
+                                        FilterRecordCodec::binding_range(
+                                            record_index,
+                                            start,
+                                            count,
+                                            binding_count,
+                                        )?;
+                                    let planned = record.read_nested(|payload| {
+                                        P::decode_planned(payload, count)
+                                            .map_err(FilterDataError::Provider)
+                                    })?;
+                                    Ok(PlannedFilterRecord {
+                                        planned,
+                                        contract,
+                                        binding_range,
+                                    })
+                                },
+                            )?,
+                        );
+                    }
+                    Ok(filters)
+                },
+            )
+        }
+    }
+
+    unsafe fn decode_bindings(
+        raw: *mut pg_sys::List,
+        expected_count: usize,
+    ) -> Result<Vec<FilterValueSlot>, FilterDataError<P::Error>> {
+        if raw.is_null() {
+            FilterRecordCodec::binding_count(0, expected_count)?;
+            return Ok(Vec::new());
+        }
+
+        unsafe {
+            PlanDataReader::decode_checked_list::<_, FilterDataError<P::Error>>(
+                raw,
+                0,
+                |records| {
+                    let count = FilterRecordCodec::binding_count(
+                        records.remaining(),
+                        expected_count,
+                    )?;
+                    let mut bindings = Vec::with_capacity(count);
+                    for binding_index in 0..count {
+                        bindings.push(
+                            records.read_nested::<_, FilterDataError<P::Error>>(
+                                |record| {
+                                    let type_oid = record.read_oid()?;
+                                    let typmod = record.read_i32()?;
+                                    let collation = record.read_oid()?;
+                                    let source = FilterRecordCodec::source_from_tag(
+                                        binding_index,
+                                        record.read_i32()?,
+                                    )?;
+                                    Ok(FilterValueSlot {
+                                        value_type: super::FilterTypeMetadata {
+                                            type_oid,
+                                            typmod,
+                                            collation,
+                                        },
+                                        source_kind: source,
+                                    })
+                                },
+                            )?,
+                        );
+                    }
+                    Ok(bindings)
+                },
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod test;

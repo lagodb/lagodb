@@ -842,11 +842,11 @@ DROP TABLE customscan_partial_pushdown_t;
 --   * With NO pushable predicate, `create_path` returns `None` — no CustomPath
 --     is emitted at all — so 'auto' can only fall back to the Seq Scan
 --     baseline; the cost model never even gets a CustomScan to weigh.
--- NB: only COSTED-pruning pushes scale the estimate. An UncostedBestEffort push
--- (e.g. a date/timestamp ConservativePruning clause) is still applied for
--- runtime pruning but leaves `fraction = 1.0`, so it would NOT flip 'auto' to a
--- Custom Scan. That is exactly why this block uses an int equality — the case
--- that wins on cost deterministically.
+--   * A date equality is ConservativePruning + UncostedBestEffort. It still
+--     emits a CustomPath and is applied for runtime pruning, but it is excluded
+--     from `costed_pruning_exprs()`, leaving `fraction = 1.0`. Consequently its
+--     CustomPath does not beat the full SeqScan in 'auto'; the matching 'force'
+--     plan below proves that the CustomPath existed and lost solely on cost.
 -- The relation is sized across two data files so the Iceberg snapshot summary
 -- (`total-records` / `total-files-size`, surfaced via `relation_estimate_size`)
 -- gives the planner a real, non-zero (pages, tuples) baseline. EXPLAIN
@@ -855,17 +855,18 @@ DROP TABLE customscan_partial_pushdown_t;
 -- ============================================================================
 CREATE TABLE customscan_auto_cost_t (
     id integer,
-    payload text
+    payload text,
+    event_date date
 ) USING iceberg;
 
 -- File 1: id in [1, 2000]
 INSERT INTO customscan_auto_cost_t
-SELECT g, 'auto_' || g
+SELECT g, 'auto_' || g, DATE '2024-01-01'
 FROM generate_series(1, 2000) AS g;
 
 -- File 2: id in [10000, 11999]
 INSERT INTO customscan_auto_cost_t
-SELECT g, 'auto_' || g
+SELECT g, 'auto_' || g, DATE '2025-01-01'
 FROM generate_series(10000, 11999) AS g;
 
 SELECT COUNT(*) AS auto_cost_rows FROM customscan_auto_cost_t;
@@ -882,21 +883,37 @@ SET lagodb.customscan_mode = 'auto';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500;
 
--- A.2 No predicate under 'auto': `create_path` sees an empty pushed set and
+-- A.2 UncostedBestEffort under 'auto': the date equality emits a CustomPath,
+-- but contributes no pruning selectivity to its cost. The Seq Scan therefore
+-- remains selected.
+EXPLAIN (COSTS OFF)
+SELECT id, payload FROM customscan_auto_cost_t
+WHERE event_date = DATE '2024-01-01';
+
+-- A.3 The same UncostedBestEffort predicate under 'force' selects the
+-- CustomPath and exposes both its Conservative pushed filter and mandatory
+-- residual. Together with A.2 this distinguishes "uncosted" from "unsupported".
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, payload FROM customscan_auto_cost_t
+WHERE event_date = DATE '2024-01-01';
+
+-- A.4 No predicate under 'auto': `create_path` sees an empty pushed set and
 -- returns `None`, so no CustomPath is emitted and the only candidate is the
 -- Seq Scan baseline.
+SET lagodb.customscan_mode = 'auto';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
 
--- A.3 The same predicate-free query under 'force' is STILL a Seq Scan: this
--- proves A.2's Seq Scan is "no CustomPath was emitted" (empty pushed set), not
+-- A.5 The same predicate-free query under 'force' is STILL a Seq Scan: this
+-- proves A.4's Seq Scan is "no CustomPath was emitted" (empty pushed set), not
 -- merely "a CustomPath lost on cost". `force` can only bias CustomPaths the
 -- framework already emitted, and here there is none to bias.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
 
--- A.4 Result-set parity: the cost-selected Custom Scan ('auto') returns the
+-- A.6 Result-set parity: the cost-selected Custom Scan ('auto') returns the
 -- same row as the SeqScan baseline ('off').
 SET lagodb.customscan_mode = 'auto';
 SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;

@@ -195,6 +195,55 @@ mod tests {
         );
     }
 
+    #[pg_test]
+    fn volatile_subtree_is_not_widened_for_pushdown() {
+        run_batch(&[
+            "DROP TABLE IF EXISTS hook_widen_volatile_t",
+            "CREATE TEMP TABLE hook_widen_volatile_t(a int4)",
+            "INSERT INTO hook_widen_volatile_t VALUES (1), (2)",
+        ]);
+
+        let plan = explain_text_with_setup(
+            &["SET LOCAL lagodb.customscan_mode = 'force'"],
+            "SELECT * FROM hook_widen_volatile_t WHERE (a = 1 AND random() < 2.0) OR a = 2",
+        );
+
+        assert!(
+            plan.contains("random()"),
+            "the volatile predicate must remain in the planned expression; got\n{plan}",
+        );
+        assert!(
+            !plan.contains(provider_name()),
+            "a clause containing a volatile function must remain wholly residual instead of pushing a widened OR; got\n{plan}",
+        );
+    }
+
+    #[pg_test]
+    fn subplan_subtree_is_not_widened_for_pushdown() {
+        run_batch(&[
+            "DROP TABLE IF EXISTS hook_widen_subplan_t",
+            "DROP TABLE IF EXISTS widen_subplan_inner",
+            "CREATE TEMP TABLE hook_widen_subplan_t(a int4, b int4)",
+            "CREATE TEMP TABLE widen_subplan_inner(b int4)",
+            "INSERT INTO hook_widen_subplan_t VALUES (1, 10), (2, 20)",
+            "INSERT INTO widen_subplan_inner VALUES (10)",
+        ]);
+
+        let plan = explain_text_with_setup(
+            &["SET LOCAL lagodb.customscan_mode = 'force'"],
+            "SELECT * FROM hook_widen_subplan_t AS t WHERE (t.a = 1 AND EXISTS (SELECT 1 FROM widen_subplan_inner AS i WHERE i.b = t.b)) OR t.a = 2",
+        );
+
+        assert!(
+            plan.contains("SubPlan"),
+            "the correlated EXISTS must remain a SubPlan so the safety gate is exercised; got\n{plan}",
+        );
+        assert!(
+            !plan.contains(provider_name()),
+            "a clause containing a SubPlan must remain wholly residual instead of pushing a widened OR; got\n{plan}",
+        );
+    }
+
     #[pg_test(
         error = "customscan \"hook-integration-test-provider\" BeginCustomScan callback failed: customscan provider error: plan-data cell 0 has node tag T_String, expected T_Integer"
     )]
