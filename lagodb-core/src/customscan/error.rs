@@ -9,9 +9,7 @@ use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
 use crate::customscan::plan_data::EnvelopeError;
-use crate::diag::{
-    PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
-};
+use crate::diag::{PgReportError, PgReportParts, PgReportableError, SqlStateError};
 use crate::plan_data::PlanDataError;
 
 /// Executor callback phase; only trampolines attach this via
@@ -76,13 +74,8 @@ enum CustomScanErrorKind {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[error("{message}")]
-    PgReport {
-        sqlerrcode: PgSqlErrorCode,
-        message: String,
-        detail: Option<String>,
-        hint: Option<String>,
-    },
+    #[error("{report}")]
+    PgReport { report: PgReportParts },
 }
 
 impl std::fmt::Display for CustomScanError {
@@ -207,7 +200,7 @@ impl CustomScanError {
         })
     }
 
-    /// Raise as a PostgreSQL ERROR via [`custom_scan_error_report`].
+    /// Raise as a PostgreSQL ERROR through the shared diagnostic boundary.
     pub(crate) fn report(self) -> ! {
         PgReportError::raise(ErrorReport::from(self))
     }
@@ -215,13 +208,7 @@ impl CustomScanError {
     /// Preserve the CustomScan-specific message, DETAIL, and HINT mapping for
     /// a runtime-routed planning callback.
     pub(crate) fn into_report_error(self) -> PgReportError {
-        let parts = custom_scan_error_report_parts(&self);
-        PgReportError::from_parts(
-            parts.sqlerrcode,
-            parts.message,
-            parts.detail,
-            parts.hint,
-        )
+        self.report_parts().into_pg_report_error()
     }
 
     pub(crate) fn framework(message: impl Display) -> Self {
@@ -246,7 +233,7 @@ impl SqlStateError for CustomScanError {
             | CustomScanErrorKind::Internal { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
-            CustomScanErrorKind::PgReport { sqlerrcode, .. } => *sqlerrcode,
+            CustomScanErrorKind::PgReport { report } => report.sqlerrcode,
         }
     }
 }
@@ -263,105 +250,47 @@ impl From<EnvelopeError> for CustomScanError {
     }
 }
 
+impl PgReportableError for CustomScanError {
+    fn append_nested_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        self.append_nested_pg_report_extras(details, hints);
+    }
+}
+
 impl From<CustomScanError> for ErrorReport {
-    fn from(err: CustomScanError) -> Self {
-        custom_scan_error_report(err)
-    }
-}
-
-struct CustomScanReportParts {
-    sqlerrcode: PgSqlErrorCode,
-    message: String,
-    detail: Option<String>,
-    hint: Option<String>,
-}
-
-fn custom_scan_error_report(err: CustomScanError) -> ErrorReport {
-    let parts = custom_scan_error_report_parts(&err);
-    let mut report = ErrorReport::new(parts.sqlerrcode, parts.message, "");
-    if let Some(detail) = parts.detail {
-        report = report.set_detail(detail);
-    }
-    if let Some(hint) = parts.hint {
-        report = report.set_hint(hint);
-    }
-    report
-}
-
-fn custom_scan_error_report_parts(err: &CustomScanError) -> CustomScanReportParts {
-    let sqlerrcode = err.sql_error_code();
-    let mut detail_parts = Vec::new();
-    if let Some(chain) = error_source_chain_detail(err) {
-        detail_parts.push(chain);
-    }
-
-    let mut nested_pg_details = Vec::new();
-    let mut nested_pg_hints = Vec::new();
-    collect_nested_pg_report_extras(
-        err,
-        &mut nested_pg_details,
-        &mut nested_pg_hints,
-    );
-    detail_parts.extend(nested_pg_details);
-
-    CustomScanReportParts {
-        sqlerrcode,
-        message: report_message(err),
-        detail: join_error_details(detail_parts.into_iter().map(Some)),
-        hint: join_error_details(nested_pg_hints.into_iter().map(Some)),
-    }
-}
-
-fn report_message(err: &CustomScanError) -> String {
-    match &*err.0 {
-        CustomScanErrorKind::PgReport { message, .. } => message.clone(),
-        _ => primary_message(err),
+    fn from(error: CustomScanError) -> Self {
+        error.into_error_report()
     }
 }
 
 /// Walk nested [`CustomScanError`] wrappers and collect [`CustomScanErrorKind::PgReport`] DETAIL/HINT.
-fn collect_nested_pg_report_extras(
-    err: &CustomScanError,
-    details: &mut Vec<String>,
-    hints: &mut Vec<String>,
-) {
-    if let CustomScanErrorKind::Callback { source, .. } = &*err.0 {
-        collect_nested_pg_report_extras(source, details, hints);
-    }
-    if let CustomScanErrorKind::PgReport { detail, hint, .. } = &*err.0 {
-        if let Some(detail) = detail.clone() {
-            details.push(detail);
+impl CustomScanError {
+    fn append_nested_pg_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        if let CustomScanErrorKind::Callback { source, .. } = &*self.0 {
+            source.append_nested_pg_report_extras(details, hints);
         }
-        if let Some(hint) = hint.clone() {
-            hints.push(hint);
+        if let CustomScanErrorKind::PgReport { report } = &*self.0 {
+            if let Some(detail) = report.detail.clone() {
+                details.push(detail);
+            }
+            if let Some(hint) = report.hint.clone() {
+                hints.push(hint);
+            }
         }
-    }
-}
-
-fn primary_message(err: &CustomScanError) -> String {
-    match &*err.0 {
-        CustomScanErrorKind::Callback {
-            provider,
-            phase,
-            source,
-        } => format!(
-            "customscan {:?} {} callback failed: {source}",
-            provider,
-            phase.as_str()
-        ),
-        _ => format!("{err}"),
     }
 }
 
 impl From<PgReportError> for CustomScanError {
     fn from(err: PgReportError) -> Self {
-        let sqlerrcode = err.sql_error_code();
-        let report = err.into_report();
         Self::new(CustomScanErrorKind::PgReport {
-            sqlerrcode,
-            message: report.message().to_string(),
-            detail: report.detail().map(str::to_owned),
-            hint: report.hint().map(str::to_owned),
+            report: PgReportParts::from_pg_report_error(err),
         })
     }
 }
@@ -439,14 +368,16 @@ mod tests {
     #[test]
     fn pg_report_variant_keeps_message() {
         let err = CustomScanError::new(CustomScanErrorKind::PgReport {
-            sqlerrcode: PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            message: "report boom".to_owned(),
-            detail: None,
-            hint: None,
+            report: PgReportParts::new(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                "report boom",
+                None,
+                None,
+            ),
         });
         match err.kind() {
-            CustomScanErrorKind::PgReport { message, .. } => {
-                assert!(message.contains("report boom"));
+            CustomScanErrorKind::PgReport { report } => {
+                assert!(report.message.contains("report boom"));
             }
             other => panic!("expected PgReport variant, got {other:?}"),
         }
@@ -480,7 +411,7 @@ mod tests {
         let err: CustomScanError =
             EnvelopeError::MalformedTupleLayout { reason: "test" }.into();
         assert_eq!(err.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
-        let report = custom_scan_error_report_parts(&err);
+        let report = err.report_parts();
         assert!(
             report.message.contains("custom_private codec error"),
             "got: {}",
@@ -497,10 +428,12 @@ mod tests {
     #[test]
     fn callback_context_preserves_nested_pg_report_detail_and_hint() {
         let inner = CustomScanError::new(CustomScanErrorKind::PgReport {
-            sqlerrcode: PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
-            message: "tuple write failed".to_string(),
-            detail: Some("column 3 out of range".to_string()),
-            hint: Some("check projection list".to_string()),
+            report: PgReportParts::new(
+                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+                "tuple write failed",
+                Some("column 3 out of range".to_owned()),
+                Some("check projection list".to_owned()),
+            ),
         });
         let err = CustomScanError::new(CustomScanErrorKind::Callback {
             provider: c"pg-test",
@@ -508,7 +441,7 @@ mod tests {
             source: Box::new(inner),
         });
         assert_eq!(err.sql_error_code(), PgSqlErrorCode::ERRCODE_DATA_EXCEPTION);
-        let report = custom_scan_error_report_parts(&err);
+        let report = err.report_parts();
         let detail = report
             .detail
             .expect("nested PgReport DETAIL must survive Callback");
@@ -527,7 +460,7 @@ mod tests {
             phase: CustomScanPhase::NextSlot,
             source: Box::new(inner),
         });
-        let report = custom_scan_error_report_parts(&callback);
+        let report = callback.report_parts();
         assert!(
             report.message.contains("inner boom"),
             "message: {}",

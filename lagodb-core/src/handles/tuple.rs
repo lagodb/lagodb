@@ -1,10 +1,15 @@
 use core::mem;
 use core::num::NonZeroU16;
+use core::ptr::NonNull;
 
 use super::borrowed::PgBorrowed;
 use pgrx::pg_sys;
 
-/// Safe wrapper for PostgreSQL TupleTableSlot.
+/// Callback-scoped borrowed handle for a physical PostgreSQL `TupleTableSlot`.
+///
+/// This handle intentionally exposes no datum view. Some table-AM callbacks
+/// require the slot's physical representation, including buffer-backed heap
+/// slots, while datum materialization belongs to [`TupleSlotRow`].
 #[derive(Debug)]
 pub struct TupleTableSlotHandle<'a> {
     inner: PgBorrowed<'a, pg_sys::TupleTableSlot>,
@@ -13,14 +18,23 @@ pub struct TupleTableSlotHandle<'a> {
 impl<'a> TupleTableSlotHandle<'a> {
     /// # Safety
     ///
-    /// `ptr` must be non-null and valid for `'a`.
+    /// PostgreSQL's `tuple_satisfies_snapshot` callback supplies a non-null,
+    /// initialized slot that remains valid for `'a`.
     #[inline]
-    pub unsafe fn from_raw(ptr: *mut pg_sys::TupleTableSlot) -> Self {
+    pub(crate) unsafe fn from_raw(ptr: *mut pg_sys::TupleTableSlot) -> Self {
+        // SAFETY: the caller is the FFI dispatcher for the PostgreSQL callback
+        // whose ABI contract guarantees a non-null slot.
+        let ptr = unsafe { NonNull::new_unchecked(ptr) };
         Self {
-            inner: unsafe { PgBorrowed::from_raw(ptr) },
+            inner: unsafe { PgBorrowed::from_non_null(ptr) },
         }
     }
 
+    /// Return the underlying physical slot pointer for explicit PostgreSQL FFI
+    /// interop.
+    ///
+    /// The raw pointer does not carry `'a`; it is valid only while the active
+    /// table-AM callback keeps the slot alive and must not be used afterward.
     #[inline]
     pub fn as_raw(&self) -> *mut pg_sys::TupleTableSlot {
         self.inner.as_ptr()

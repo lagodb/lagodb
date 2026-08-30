@@ -10,9 +10,7 @@ use thiserror::Error;
 
 use super::super::provider::ForeignDataWrapper;
 use super::super::row_identity::ForeignRowIdentityError;
-use crate::diag::{
-    PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
-};
+use crate::diag::{PgReportError, PgReportParts, PgReportableError, SqlStateError};
 use crate::plan_data::PlanDataError;
 
 /// PostgreSQL callback phase attached by the framework at an FFI boundary.
@@ -75,13 +73,8 @@ enum ForeignScanErrorKind {
         #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("{message}")]
-    PgReport {
-        sqlerrcode: PgSqlErrorCode,
-        message: String,
-        detail: Option<String>,
-        hint: Option<String>,
-    },
+    #[error("{report}")]
+    PgReport { report: PgReportParts },
 }
 
 impl Display for ForeignScanError {
@@ -170,8 +163,8 @@ impl SqlStateError for ForeignScanError {
         match &*self.0 {
             ForeignScanErrorKind::Callback { source, .. } => source.sql_error_code(),
             ForeignScanErrorKind::Provider { sqlerrcode, .. }
-            | ForeignScanErrorKind::Framework { sqlerrcode, .. }
-            | ForeignScanErrorKind::PgReport { sqlerrcode, .. } => *sqlerrcode,
+            | ForeignScanErrorKind::Framework { sqlerrcode, .. } => *sqlerrcode,
+            ForeignScanErrorKind::PgReport { report } => report.sqlerrcode,
             ForeignScanErrorKind::PrivateCodec { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
@@ -181,13 +174,8 @@ impl SqlStateError for ForeignScanError {
 
 impl From<PgReportError> for ForeignScanError {
     fn from(error: PgReportError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let report = error.into_report();
         Self::new(ForeignScanErrorKind::PgReport {
-            sqlerrcode,
-            message: report.message().to_owned(),
-            detail: report.detail().map(str::to_owned),
-            hint: report.hint().map(str::to_owned),
+            report: PgReportParts::from_pg_report_error(error),
         })
     }
 }
@@ -204,59 +192,41 @@ impl From<ForeignRowIdentityError> for ForeignScanError {
     }
 }
 
+impl PgReportableError for ForeignScanError {
+    fn append_nested_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        self.append_pg_report_extras(details, hints);
+    }
+}
+
 impl From<ForeignScanError> for ErrorReport {
     fn from(error: ForeignScanError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let mut details = Vec::new();
-        if let Some(chain) = error_source_chain_detail(&error) {
-            details.push(chain);
-        }
-
-        let mut hints = Vec::new();
-        collect_pg_report_parts(&error, &mut details, &mut hints);
-        let mut report = ErrorReport::new(sqlerrcode, report_message(&error), "");
-        if let Some(detail) = join_error_details(details.into_iter().map(Some)) {
-            report = report.set_detail(detail);
-        }
-        if let Some(hint) = join_error_details(hints.into_iter().map(Some)) {
-            report = report.set_hint(hint);
-        }
-        report
+        error.into_error_report()
     }
 }
 
-fn report_message(error: &ForeignScanError) -> String {
-    match &*error.0 {
-        ForeignScanErrorKind::Callback {
-            provider,
-            phase,
-            source,
-        } => format!(
-            "FDW {provider:?} {} callback failed: {source}",
-            phase.as_str()
-        ),
-        ForeignScanErrorKind::PgReport { message, .. } => message.clone(),
-        _ => error.to_string(),
-    }
-}
-
-fn collect_pg_report_parts(
-    error: &ForeignScanError,
-    details: &mut Vec<String>,
-    hints: &mut Vec<String>,
-) {
-    match &*error.0 {
-        ForeignScanErrorKind::Callback { source, .. } => {
-            collect_pg_report_parts(source, details, hints)
-        }
-        ForeignScanErrorKind::PgReport { detail, hint, .. } => {
-            if let Some(detail) = detail.clone() {
-                details.push(detail);
+impl ForeignScanError {
+    fn append_pg_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        match &*self.0 {
+            ForeignScanErrorKind::Callback { source, .. } => {
+                source.append_pg_report_extras(details, hints)
             }
-            if let Some(hint) = hint.clone() {
-                hints.push(hint);
+            ForeignScanErrorKind::PgReport { report } => {
+                if let Some(detail) = report.detail.clone() {
+                    details.push(detail);
+                }
+                if let Some(hint) = report.hint.clone() {
+                    hints.push(hint);
+                }
             }
+            _ => {}
         }
-        _ => {}
     }
 }

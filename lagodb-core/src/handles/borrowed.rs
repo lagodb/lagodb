@@ -24,6 +24,21 @@ impl<'a, T> PgBorrowed<'a, T> {
         }
     }
 
+    /// Construct a borrowed pointer from a pointer that is already known to be
+    /// non-null.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to an object that is valid for `'a` and owned by
+    /// PostgreSQL or by an owning guard that outlives `'a`.
+    #[inline]
+    pub(crate) unsafe fn from_non_null(ptr: NonNull<T>) -> Self {
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
+    }
+
     #[inline]
     pub(crate) fn as_ptr(&self) -> *mut T {
         self.ptr.as_ptr()

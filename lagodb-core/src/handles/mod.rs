@@ -1,4 +1,4 @@
-//! Safe wrapper types for PostgreSQL FFI types.
+//! Scoped PostgreSQL FFI handles and owning guards.
 //!
 //! PostgreSQL access-method callbacks expose raw C pointers. This module keeps
 //! those raw hook types out of access-method trait implementations by presenting
@@ -7,16 +7,17 @@
 //! The public surface follows these ownership categories:
 //!
 //! - Borrowed PostgreSQL-owned objects use handle structs backed by
-//!   `PgBorrowed` or `PgNullable`. These handles validate nullability and bind a
-//!   Rust lifetime to the PostgreSQL object, but they do not claim Rust-level
-//!   exclusive access. `RelationHandle`, `SnapshotHandle`, and
-//!   `BulkInsertStateHandle` are examples.
+//!   `PgBorrowed` or `PgNullable`. These handles bind a Rust lifetime to the
+//!   PostgreSQL object, but they do not claim Rust-level exclusive access.
+//!   `RelationHandle` and `SnapshotHandle` are examples.
+//!   Explicit `as_raw` interop methods remain escape hatches: once copied out,
+//!   a raw pointer no longer carries the handle's callback-scoped lifetime.
 //! - Opaque pass-through state may expose a raw mutable pointer when PostgreSQL
 //!   APIs require one, but AM trait methods should borrow the handle immutably
 //!   unless the Rust API itself provides mutable access to the object.
-//! - Callable handles wrap PostgreSQL function pointers plus a lifetime marker.
-//!   Function pointers are not object borrows, so `PgBorrowed` does not apply.
-//!   `IndexBuildCallbackHandle` is an example.
+//! - Callback handles bind a PostgreSQL function pointer to its callback-scoped
+//!   relation identity and opaque state. `IndexBuildCallbackHandle` is an
+//!   example.
 //! - Exclusive mutable handles are reserved for callback-owned output or state
 //!   objects that the AM is expected to update directly. These handles store
 //!   `&mut T` or `&mut [T]`, and trait methods receive `&mut Handle`.
@@ -33,10 +34,9 @@ mod scan;
 mod tuple;
 
 pub use index::{
-    CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle,
-    ValidateIndexStateHandle,
+    IndexBuildCallbackHandle, IndexInfoHandle, ValidateIndexStateHandle,
 };
-pub use mutation::{BulkInsertStateHandle, TM_FailureData, TMIndexDeleteOpHandle};
+pub use mutation::{TM_FailureData, TMIndexDeleteOpHandle};
 pub use relation::{
     AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationGuard,
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,

@@ -12,7 +12,7 @@ use pgrx::prelude::PgSqlErrorCode;
 
 use crate::api::{AmCopySession, AmResult, TableAccessMethod};
 use crate::diag::PgReportError;
-use crate::handles::{BulkInsertStateHandle, RelationHandle};
+use crate::handles::RelationHandle;
 use crate::resource::{self, ResourceHandle};
 use crate::tuple::{TupleSlotBatch, TupleSlotRow};
 
@@ -38,9 +38,8 @@ impl CopyRelationSession {
         row: TupleSlotRow<'_>,
         cid: pg_sys::CommandId,
         options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
-        self.state.tuple_insert_slot(row, cid, options, bistate)
+        self.state.tuple_insert_slot(row, cid, options)
     }
 
     pub(super) fn multi_insert_slots(
@@ -48,9 +47,8 @@ impl CopyRelationSession {
         rows: TupleSlotBatch<'_>,
         cid: pg_sys::CommandId,
         options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
-        self.state.multi_insert_slots(rows, cid, options, bistate)
+        self.state.multi_insert_slots(rows, cid, options)
     }
 
     fn finish(&mut self) -> Result<(), PgReportError> {

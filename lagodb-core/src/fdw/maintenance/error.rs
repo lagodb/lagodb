@@ -8,9 +8,7 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-use crate::diag::{
-    PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
-};
+use crate::diag::{PgReportError, PgReportParts, PgReportableError, SqlStateError};
 
 use super::super::provider::ForeignDataWrapper;
 
@@ -55,13 +53,8 @@ enum ForeignTableMaintenanceErrorKind {
         sqlerrcode: PgSqlErrorCode,
         message: String,
     },
-    #[error("{message}")]
-    PgReport {
-        sqlerrcode: PgSqlErrorCode,
-        message: String,
-        detail: Option<String>,
-        hint: Option<String>,
-    },
+    #[error("{report}")]
+    PgReport { report: PgReportParts },
 }
 
 impl ForeignTableMaintenanceError {
@@ -112,20 +105,20 @@ impl ForeignTableMaintenanceError {
         PgReportError::raise(ErrorReport::from(self))
     }
 
-    fn collect_pg_report_parts(
+    fn append_pg_report_extras(
         &self,
         details: &mut Vec<String>,
         hints: &mut Vec<String>,
     ) {
         match &*self.0 {
             ForeignTableMaintenanceErrorKind::Callback { source, .. } => {
-                source.collect_pg_report_parts(details, hints)
+                source.append_pg_report_extras(details, hints)
             }
-            ForeignTableMaintenanceErrorKind::PgReport { detail, hint, .. } => {
-                if let Some(detail) = detail.clone() {
+            ForeignTableMaintenanceErrorKind::PgReport { report } => {
+                if let Some(detail) = report.detail.clone() {
                     details.push(detail);
                 }
-                if let Some(hint) = hint.clone() {
+                if let Some(hint) = report.hint.clone() {
                     hints.push(hint);
                 }
             }
@@ -154,9 +147,11 @@ impl SqlStateError for ForeignTableMaintenanceError {
                 source.sql_error_code()
             }
             ForeignTableMaintenanceErrorKind::Provider { sqlerrcode, .. }
-            | ForeignTableMaintenanceErrorKind::Framework { sqlerrcode, .. }
-            | ForeignTableMaintenanceErrorKind::PgReport { sqlerrcode, .. } => {
+            | ForeignTableMaintenanceErrorKind::Framework { sqlerrcode, .. } => {
                 *sqlerrcode
+            }
+            ForeignTableMaintenanceErrorKind::PgReport { report } => {
+                report.sqlerrcode
             }
         }
     }
@@ -164,34 +159,24 @@ impl SqlStateError for ForeignTableMaintenanceError {
 
 impl From<PgReportError> for ForeignTableMaintenanceError {
     fn from(error: PgReportError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let report = error.into_report();
         Self::new(ForeignTableMaintenanceErrorKind::PgReport {
-            sqlerrcode,
-            message: report.message().to_owned(),
-            detail: report.detail().map(str::to_owned),
-            hint: report.hint().map(str::to_owned),
+            report: PgReportParts::from_pg_report_error(error),
         })
+    }
+}
+
+impl PgReportableError for ForeignTableMaintenanceError {
+    fn append_nested_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        self.append_pg_report_extras(details, hints);
     }
 }
 
 impl From<ForeignTableMaintenanceError> for ErrorReport {
     fn from(error: ForeignTableMaintenanceError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let mut details = Vec::new();
-        if let Some(chain) = error_source_chain_detail(&error) {
-            details.push(chain);
-        }
-        let mut hints = Vec::new();
-        error.collect_pg_report_parts(&mut details, &mut hints);
-
-        let mut report = ErrorReport::new(sqlerrcode, error.to_string(), "");
-        if let Some(detail) = join_error_details(details.into_iter().map(Some)) {
-            report = report.set_detail(detail);
-        }
-        if let Some(hint) = join_error_details(hints.into_iter().map(Some)) {
-            report = report.set_hint(hint);
-        }
-        report
+        error.into_error_report()
     }
 }

@@ -170,7 +170,6 @@ impl AmCopySession for IcebergModifyState {
         row: TupleSlotRow<'_>,
         _cid: pg_sys::CommandId,
         _options: i32,
-        _bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
         self.sinks.insert(row)?;
         Ok(())
@@ -181,7 +180,6 @@ impl AmCopySession for IcebergModifyState {
         rows: TupleSlotBatch<'_>,
         _cid: pg_sys::CommandId,
         _options: i32,
-        _bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
         let sink = self.sinks.data_sink_mut()?;
         for row in rows.iter() {

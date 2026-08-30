@@ -8,12 +8,14 @@ use crate::api::{AmIndexFetchSession, TableAccessMethod};
 use crate::diag::PgReportError;
 use crate::diag::ReportableError;
 use crate::handles::{
-    CallbackStateHandle, IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer,
-    RelationHandle, SnapshotHandle, TMIndexDeleteOpHandle, TableScanDescHandle,
+    IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer, RelationHandle,
+    SnapshotHandle, TMIndexDeleteOpHandle, TableScanDescHandle,
     ValidateIndexStateHandle,
 };
 use crate::tuple::{Row, RowDatumCodec, SlotColumns};
 use pgrx::prelude::*;
+use std::ffi::c_void;
+use std::ptr::NonNull;
 
 struct IndexFetchState<T> {
     am_instance: T,
@@ -188,7 +190,7 @@ pub extern "C-unwind" fn index_build_range_scan<A>(
     start_blockno: pg_sys::BlockNumber,
     numblocks: pg_sys::BlockNumber,
     callback: pg_sys::IndexBuildCallback,
-    callback_state: *mut ::core::ffi::c_void,
+    callback_state: *mut c_void,
     scan: pg_sys::TableScanDesc,
 ) -> f64
 where
@@ -197,10 +199,15 @@ where
     let table_rel_handle = unsafe { RelationHandle::from_raw(table_rel) };
     let index_rel_handle = unsafe { RelationHandle::from_raw(index_rel) };
     let index_info_handle = unsafe { IndexInfoHandle::from_raw(index_info) };
-    let callback_handle = unsafe { IndexBuildCallbackHandle::from_raw(callback) };
-    let callback_state_handle =
-        unsafe { CallbackStateHandle::from_raw(callback_state) };
-    let scan_handle = unsafe { TableScanDescHandle::from_raw(scan) };
+    let mut callback_handle = unsafe {
+        IndexBuildCallbackHandle::from_raw(
+            &index_rel_handle,
+            callback,
+            callback_state,
+        )
+    };
+    let scan_handle = NonNull::new(scan)
+        .map(|scan| unsafe { TableScanDescHandle::from_non_null(scan) });
 
     A::index_build_range_scan(
         &table_rel_handle,
@@ -211,9 +218,8 @@ where
         progress,
         start_blockno,
         numblocks,
-        &callback_handle,
-        &callback_state_handle,
-        &scan_handle,
+        &mut callback_handle,
+        scan_handle.as_ref(),
     )
     .report_unwrap()
 }

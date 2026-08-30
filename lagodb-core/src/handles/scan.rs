@@ -3,6 +3,7 @@ use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use std::fmt;
+use std::ptr::NonNull;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -55,7 +56,7 @@ impl AnalyzeSamplerState {
     }
 }
 
-/// Safe wrapper for PostgreSQL TableScanDesc.
+/// Callback-scoped borrowed handle for PostgreSQL `TableScanDesc`.
 #[derive(Debug)]
 pub struct TableScanDescHandle<'a> {
     inner: PgBorrowed<'a, pg_sys::TableScanDescData>,
@@ -64,14 +65,22 @@ pub struct TableScanDescHandle<'a> {
 impl<'a> TableScanDescHandle<'a> {
     /// # Safety
     ///
-    /// `ptr` must be non-null and valid for `'a`.
+    /// `ptr` must be non-null and valid for `'a`. The caller must have already
+    /// established the PostgreSQL callback contract that makes the pointer
+    /// non-null.
     #[inline]
-    pub unsafe fn from_raw(ptr: pg_sys::TableScanDesc) -> Self {
+    pub(crate) unsafe fn from_non_null(
+        ptr: NonNull<pg_sys::TableScanDescData>,
+    ) -> Self {
         Self {
-            inner: unsafe { PgBorrowed::from_raw(ptr) },
+            inner: unsafe { PgBorrowed::from_non_null(ptr) },
         }
     }
 
+    /// Return the underlying pointer for explicit PostgreSQL FFI interop.
+    ///
+    /// The raw pointer does not carry `'a`; it is valid only while the active
+    /// index-build callback keeps the scan alive and must not be used afterward.
     #[inline]
     pub fn as_raw(&self) -> pg_sys::TableScanDesc {
         self.inner.as_ptr()

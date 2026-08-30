@@ -4,9 +4,7 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-use crate::diag::{
-    PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
-};
+use crate::diag::{PgReportError, PgReportParts, PgReportableError, SqlStateError};
 
 #[derive(Debug)]
 pub struct TableMaintenanceError(Box<TableMaintenanceErrorKind>);
@@ -36,13 +34,8 @@ enum TableMaintenanceErrorKind {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[error("{message}")]
-    PgReport {
-        sqlerrcode: PgSqlErrorCode,
-        message: String,
-        detail: Option<String>,
-        hint: Option<String>,
-    },
+    #[error("{report}")]
+    PgReport { report: PgReportParts },
 }
 
 impl TableMaintenanceError {
@@ -81,6 +74,33 @@ impl TableMaintenanceError {
             source: Box::new(self),
         })
     }
+
+    pub(crate) fn report(self) -> ! {
+        PgReportError::raise(ErrorReport::from(self))
+    }
+
+    fn append_pg_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        match &*self.0 {
+            TableMaintenanceErrorKind::ProviderRuntime { source, .. } => {
+                source.append_pg_report_extras(details, hints);
+            }
+            TableMaintenanceErrorKind::PgReport { report } => {
+                if let Some(detail) = report.detail.clone() {
+                    details.push(detail);
+                }
+                if let Some(hint) = report.hint.clone() {
+                    hints.push(hint);
+                }
+            }
+            TableMaintenanceErrorKind::Provider { .. }
+            | TableMaintenanceErrorKind::Framework { .. }
+            | TableMaintenanceErrorKind::Internal { .. } => {}
+        }
+    }
 }
 
 impl std::fmt::Display for TableMaintenanceError {
@@ -101,8 +121,8 @@ impl SqlStateError for TableMaintenanceError {
             TableMaintenanceErrorKind::ProviderRuntime { source, .. } => {
                 source.sql_error_code()
             }
-            TableMaintenanceErrorKind::Provider { sqlerrcode, .. }
-            | TableMaintenanceErrorKind::PgReport { sqlerrcode, .. } => *sqlerrcode,
+            TableMaintenanceErrorKind::Provider { sqlerrcode, .. } => *sqlerrcode,
+            TableMaintenanceErrorKind::PgReport { report } => report.sqlerrcode,
             TableMaintenanceErrorKind::Framework { .. }
             | TableMaintenanceErrorKind::Internal { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
@@ -113,38 +133,24 @@ impl SqlStateError for TableMaintenanceError {
 
 impl From<PgReportError> for TableMaintenanceError {
     fn from(error: PgReportError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let report = error.into_report();
         Self::new(TableMaintenanceErrorKind::PgReport {
-            sqlerrcode,
-            message: report.message().to_owned(),
-            detail: report.detail().map(str::to_owned),
-            hint: report.hint().map(str::to_owned),
+            report: PgReportParts::from_pg_report_error(error),
         })
+    }
+}
+
+impl PgReportableError for TableMaintenanceError {
+    fn append_nested_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        self.append_pg_report_extras(details, hints);
     }
 }
 
 impl From<TableMaintenanceError> for ErrorReport {
     fn from(error: TableMaintenanceError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let (message, postgres_detail, postgres_hint) = match &*error.0 {
-            TableMaintenanceErrorKind::PgReport {
-                message,
-                detail,
-                hint,
-                ..
-            } => (message.clone(), detail.clone(), hint.clone()),
-            _ => (error.to_string(), None, None),
-        };
-        let detail =
-            join_error_details([postgres_detail, error_source_chain_detail(&error)]);
-        let mut report = ErrorReport::new(sqlerrcode, message, "");
-        if let Some(detail) = detail {
-            report = report.set_detail(detail);
-        }
-        if let Some(hint) = postgres_hint {
-            report = report.set_hint(hint);
-        }
-        report
+        error.into_error_report()
     }
 }

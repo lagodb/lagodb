@@ -1,34 +1,5 @@
-use super::borrowed::PgBorrowed;
 use super::tuple::ItemPointer;
 use pgrx::pg_sys;
-
-/// Borrowed opaque wrapper for PostgreSQL BulkInsertStateData.
-///
-/// PostgreSQL may mutate this object when the raw pointer is passed back into
-/// PostgreSQL insertion APIs. The Rust handle itself does not provide direct
-/// mutable access, so callers do not need an exclusive Rust borrow just to pass
-/// the state through.
-#[derive(Debug)]
-pub struct BulkInsertStateHandle<'a> {
-    inner: PgBorrowed<'a, pg_sys::BulkInsertStateData>,
-}
-
-impl<'a> BulkInsertStateHandle<'a> {
-    /// # Safety
-    ///
-    /// `ptr` must be non-null and valid for `'a`.
-    #[inline]
-    pub unsafe fn from_raw(ptr: *mut pg_sys::BulkInsertStateData) -> Self {
-        Self {
-            inner: unsafe { PgBorrowed::from_raw(ptr) },
-        }
-    }
-
-    #[inline]
-    pub fn as_raw(&self) -> *mut pg_sys::BulkInsertStateData {
-        self.inner.as_ptr()
-    }
-}
 
 /// Safe wrapper for PostgreSQL TM_IndexDeleteOp.
 #[derive(Debug)]

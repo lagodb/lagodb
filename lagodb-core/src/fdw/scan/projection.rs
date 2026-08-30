@@ -3,12 +3,13 @@
 use core::ffi::c_void;
 use core::ptr;
 use core::slice;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
+use crate::expr::relation::RelationVarsByAttno;
 
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::super::system_column::SystemColumnRequirement;
@@ -243,12 +244,12 @@ pub(crate) struct PlannedProjection {
     pub(crate) requirements: ColumnRequirements,
 }
 
-/// Planner-only dependency maps.  No map is retained in executor state or
-/// consulted by the per-row writer; the finalized relation mapping is an
-/// array indexed by attribute number.
+/// Planner-only relation dependency indexes. No index is retained in executor
+/// state or consulted by the per-row writer; the finalized relation mapping is
+/// an array indexed by attribute number.
 struct ProjectionAnalysis {
-    vars_by_attno: BTreeMap<pg_sys::AttrNumber, *mut pg_sys::Var>,
-    executor_vars_by_attno: BTreeMap<pg_sys::AttrNumber, *mut pg_sys::Var>,
+    vars_by_attno: RelationVarsByAttno,
+    executor_vars_by_attno: RelationVarsByAttno,
     direct_outputs: Vec<DirectOutput>,
     can_narrow: bool,
     provider_requires_all_columns: bool,
@@ -265,8 +266,8 @@ enum DependencyScope {
 impl Default for ProjectionAnalysis {
     fn default() -> Self {
         Self {
-            vars_by_attno: BTreeMap::new(),
-            executor_vars_by_attno: BTreeMap::new(),
+            vars_by_attno: RelationVarsByAttno::default(),
+            executor_vars_by_attno: RelationVarsByAttno::default(),
             direct_outputs: Vec::new(),
             can_narrow: true,
             provider_requires_all_columns: false,
@@ -296,10 +297,10 @@ impl ProjectionAnalysis {
             self.can_narrow = false;
         }
         for var in usage.user_vars() {
-            if let Some(existing) = self.vars_by_attno.get(&var.attno) {
+            if let Some(existing) = self.vars_by_attno.get(var.attno) {
                 let same_nullingrels = unsafe {
                     pg_sys::bms_equal(
-                        (*(*existing)).varnullingrels,
+                        existing.as_ref().varnullingrels,
                         var.raw.as_ref().varnullingrels,
                     )
                 };
@@ -307,13 +308,13 @@ impl ProjectionAnalysis {
                     self.can_narrow = false;
                 }
             } else {
-                self.vars_by_attno.insert(var.attno, var.raw.as_ptr());
+                self.vars_by_attno.insert(var.raw);
             }
             if matches!(scope, DependencyScope::Executor) {
-                if let Some(existing) = self.executor_vars_by_attno.get(&var.attno) {
+                if let Some(existing) = self.executor_vars_by_attno.get(var.attno) {
                     let same_nullingrels = unsafe {
                         pg_sys::bms_equal(
-                            (*(*existing)).varnullingrels,
+                            existing.as_ref().varnullingrels,
                             var.raw.as_ref().varnullingrels,
                         )
                     };
@@ -321,8 +322,7 @@ impl ProjectionAnalysis {
                         self.can_narrow = false;
                     }
                 } else {
-                    self.executor_vars_by_attno
-                        .insert(var.attno, var.raw.as_ptr());
+                    self.executor_vars_by_attno.insert(var.raw);
                 }
             }
         }
@@ -409,7 +409,7 @@ pub(crate) unsafe fn plan_projection(
         );
     }
 
-    for &attno in analysis.vars_by_attno.keys() {
+    for attno in analysis.vars_by_attno.attnos() {
         requirements.require_column(attno)?;
     }
     if analysis.provider_requires_all_columns {
@@ -448,9 +448,7 @@ pub(crate) unsafe fn plan_projection(
     let write_plan = if analysis.executor_requires_all_columns {
         SlotWritePlan::complete()
     } else {
-        SlotWritePlan::required_attributes(
-            analysis.executor_vars_by_attno.keys().copied(),
-        )
+        SlotWritePlan::required_attributes(analysis.executor_vars_by_attno.attnos())
     };
 
     if relation_shape {
@@ -476,10 +474,9 @@ pub(crate) unsafe fn plan_projection(
 
     let mut tlist = ptr::null_mut();
     let mut attnos = Vec::with_capacity(analysis.executor_vars_by_attno.len());
-    let mut emitted = BTreeSet::new();
 
     for direct in analysis.direct_outputs {
-        if !emitted.insert(direct.attno) {
+        if analysis.executor_vars_by_attno.take(direct.attno).is_none() {
             continue;
         }
         attnos.push(direct.attno);
@@ -488,12 +485,10 @@ pub(crate) unsafe fn plan_projection(
         };
     }
 
-    for (&attno, &var) in &analysis.executor_vars_by_attno {
-        if !emitted.insert(attno) {
-            continue;
-        }
+    for (attno, var) in analysis.executor_vars_by_attno.iter() {
         attnos.push(attno);
-        tlist = unsafe { append_tlist_entry(tlist, var, attnos.len(), true)? };
+        tlist =
+            unsafe { append_tlist_entry(tlist, var.as_ptr(), attnos.len(), true)? };
     }
 
     if tlist.is_null() {

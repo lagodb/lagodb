@@ -6,13 +6,17 @@
 //! PostgreSQL also invokes delete/update/lock callbacks from independent paths
 //! such as logical replication, triggers, and `LockRows`; those remain normal
 //! unsupported table-AM capabilities.
+//!
+//! The PostgreSQL ABI still supplies `BulkInsertStateData` to the insert
+//! callbacks. It remains at this FFI boundary because the provider owns its
+//! insertion session state and does not consume PostgreSQL's heap-private bulk
+//! buffer state.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use crate::api::{TableAccessMethod, unsupported_callback};
 use crate::diag::{PgReportError, ReportableError, SqlStateError};
-use crate::handles::BulkInsertStateHandle;
 use crate::tuple::{TupleSlotBatch, TupleSlotRow};
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
@@ -54,17 +58,10 @@ pub(super) extern "C-unwind" fn tuple_insert<A: TableAccessMethod>(
     slot: *mut pg_sys::TupleTableSlot,
     cid: pg_sys::CommandId,
     options: i32,
-    bistate: *mut pg_sys::BulkInsertStateData,
+    _bistate: *mut pg_sys::BulkInsertStateData,
 ) {
     with_current_relation_session::<A, _>(rel, |session| unsafe {
-        let bistate =
-            (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
-        session.tuple_insert_slot(
-            TupleSlotRow::from_raw(slot),
-            cid,
-            options,
-            bistate.as_ref(),
-        )
+        session.tuple_insert_slot(TupleSlotRow::from_raw(slot), cid, options)
     })
     .report_unwrap();
 }
@@ -76,18 +73,15 @@ pub(super) extern "C-unwind" fn multi_insert<A>(
     nslots: i32,
     cid: pg_sys::CommandId,
     options: i32,
-    bistate: *mut pg_sys::BulkInsertStateData,
+    _bistate: *mut pg_sys::BulkInsertStateData,
 ) where
     A: TableAccessMethod,
 {
     with_current_relation_session::<A, _>(rel, |session| unsafe {
-        let bistate =
-            (!bistate.is_null()).then(|| BulkInsertStateHandle::from_raw(bistate));
         session.multi_insert_slots(
             TupleSlotBatch::from_raw(slots, nslots as usize),
             cid,
             options,
-            bistate.as_ref(),
         )
     })
     .report_unwrap();

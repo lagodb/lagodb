@@ -32,7 +32,7 @@ pub mod api;
 /// Mutation batch buffering abstractions and default row buffer.
 pub mod batch;
 
-/// Safe wrapper types for PostgreSQL FFI types
+/// Scoped PostgreSQL FFI handles and owning guards
 pub mod handles;
 
 /// PostgreSQL tuple value abstractions (Cell, Row)

@@ -2,7 +2,6 @@ use std::ffi::CStr;
 
 use pgrx::pg_sys;
 
-use crate::diag::PgReportError;
 use crate::handles::RelationHandle;
 
 use super::{
@@ -60,21 +59,17 @@ unsafe extern "C-unwind" fn provider_execute<P>(
     P: LagodbTableMaintenanceProvider,
 {
     let request = unsafe { request.as_ref() }.unwrap_or_else(|| {
-        PgReportError::from_domain_error(TableMaintenanceError::framework(
-            "runtime passed a null maintenance request",
-        ))
-        .report()
+        TableMaintenanceError::framework("runtime passed a null maintenance request")
+            .report()
     });
     let mode = request.mode().unwrap_or_else(|| {
-        PgReportError::from_domain_error(TableMaintenanceError::framework(
-            "runtime passed an unknown maintenance mode",
-        ))
-        .report()
+        TableMaintenanceError::framework("runtime passed an unknown maintenance mode")
+            .report()
     });
     if request.relation.is_null() || report.is_null() {
-        PgReportError::from_domain_error(TableMaintenanceError::framework(
+        TableMaintenanceError::framework(
             "runtime passed a null maintenance ABI pointer",
-        ))
+        )
         .report();
     }
     let relation = unsafe { RelationHandle::from_raw(request.relation) };
@@ -88,7 +83,7 @@ unsafe extern "C-unwind" fn provider_execute<P>(
         ),
     })
     .map_err(|error| error.with_provider(P::NAME))
-    .unwrap_or_else(|error| PgReportError::from_domain_error(error).report());
+    .unwrap_or_else(|error| error.report());
     unsafe { report.write(result.into()) };
 }
 
@@ -100,20 +95,20 @@ unsafe extern "C-unwind" fn provider_inspect<P>(
     P: LagodbTableMaintenanceProvider,
 {
     if relation.is_null() || stats.is_null() {
-        PgReportError::from_domain_error(TableMaintenanceError::framework(
+        TableMaintenanceError::framework(
             "runtime passed a null inspection ABI pointer",
-        ))
+        )
         .report();
     }
     let relation = unsafe { RelationHandle::from_raw(relation) };
     let inspected = P::inspect(&relation)
         .map_err(|error| error.with_provider(P::NAME))
-        .unwrap_or_else(|error| PgReportError::from_domain_error(error).report());
+        .unwrap_or_else(|error| error.report());
     let inspected =
         MaintenanceStats::try_from_stats(inspected).unwrap_or_else(|| {
-            PgReportError::from_domain_error(TableMaintenanceError::framework(
+            TableMaintenanceError::framework(
                 "provider format name exceeds the maintenance ABI bound",
-            ))
+            )
             .report()
         });
     unsafe { stats.write(inspected) };

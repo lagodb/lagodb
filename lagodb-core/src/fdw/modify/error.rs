@@ -9,9 +9,7 @@ use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
 use super::contract::{FdwModify, ForeignModifyOperation};
-use crate::diag::{
-    PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
-};
+use crate::diag::{PgReportError, PgReportParts, PgReportableError, SqlStateError};
 use crate::plan_data::PlanDataError;
 
 /// PostgreSQL modify callback phase attached at the FFI boundary.
@@ -80,13 +78,8 @@ enum ForeignModifyErrorKind {
         #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("{message}")]
-    PgReport {
-        sqlerrcode: PgSqlErrorCode,
-        message: String,
-        detail: Option<String>,
-        hint: Option<String>,
-    },
+    #[error("{report}")]
+    PgReport { report: PgReportParts },
 }
 
 impl Display for ForeignModifyError {
@@ -141,14 +134,16 @@ impl ForeignModifyError {
             }
         };
         Self::new(ForeignModifyErrorKind::PgReport {
-            sqlerrcode: PgSqlErrorCode::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
-            message: format!(
-                "tuple to be {action} was already modified by an operation triggered by the current command"
-            ),
-            detail: None,
-            hint: Some(
-                "Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows."
-                    .to_owned(),
+            report: PgReportParts::new(
+                PgSqlErrorCode::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
+                format!(
+                    "tuple to be {action} was already modified by an operation triggered by the current command"
+                ),
+                None,
+                Some(
+                    "Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows."
+                        .to_owned(),
+                ),
             ),
         })
     }
@@ -177,8 +172,8 @@ impl SqlStateError for ForeignModifyError {
         match &*self.0 {
             ForeignModifyErrorKind::Runtime { source, .. } => source.sql_error_code(),
             ForeignModifyErrorKind::Provider { sqlerrcode, .. }
-            | ForeignModifyErrorKind::Framework { sqlerrcode, .. }
-            | ForeignModifyErrorKind::PgReport { sqlerrcode, .. } => *sqlerrcode,
+            | ForeignModifyErrorKind::Framework { sqlerrcode, .. } => *sqlerrcode,
+            ForeignModifyErrorKind::PgReport { report } => report.sqlerrcode,
             ForeignModifyErrorKind::PrivateCodec { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
@@ -196,69 +191,47 @@ impl From<PlanDataError> for ForeignModifyError {
 
 impl From<PgReportError> for ForeignModifyError {
     fn from(error: PgReportError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let report = error.into_report();
         Self::new(ForeignModifyErrorKind::PgReport {
-            sqlerrcode,
-            message: report.message().to_owned(),
-            detail: report.detail().map(str::to_owned),
-            hint: report.hint().map(str::to_owned),
+            report: PgReportParts::from_pg_report_error(error),
         })
+    }
+}
+
+impl PgReportableError for ForeignModifyError {
+    fn append_nested_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        self.append_pg_report_extras(details, hints);
     }
 }
 
 impl From<ForeignModifyError> for ErrorReport {
     fn from(error: ForeignModifyError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let mut details = Vec::new();
-        if let Some(chain) = error_source_chain_detail(&error) {
-            details.push(chain);
-        }
-        let mut hints = Vec::new();
-        collect_pg_report_parts(&error, &mut details, &mut hints);
-        let mut report = ErrorReport::new(sqlerrcode, report_message(&error), "");
-        if let Some(detail) = join_error_details(details.into_iter().map(Some)) {
-            report = report.set_detail(detail);
-        }
-        if let Some(hint) = join_error_details(hints.into_iter().map(Some)) {
-            report = report.set_hint(hint);
-        }
-        report
+        error.into_error_report()
     }
 }
 
-fn report_message(error: &ForeignModifyError) -> String {
-    match &*error.0 {
-        ForeignModifyErrorKind::Runtime {
-            provider,
-            phase,
-            source,
-        } => format!(
-            "FDW provider {provider:?} callback {} failed: {source}",
-            phase.as_str()
-        ),
-        ForeignModifyErrorKind::PgReport { message, .. } => message.clone(),
-        _ => error.to_string(),
-    }
-}
-
-fn collect_pg_report_parts(
-    error: &ForeignModifyError,
-    details: &mut Vec<String>,
-    hints: &mut Vec<String>,
-) {
-    match &*error.0 {
-        ForeignModifyErrorKind::Runtime { source, .. } => {
-            collect_pg_report_parts(source, details, hints)
-        }
-        ForeignModifyErrorKind::PgReport { detail, hint, .. } => {
-            if let Some(detail) = detail.clone() {
-                details.push(detail);
+impl ForeignModifyError {
+    fn append_pg_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        match &*self.0 {
+            ForeignModifyErrorKind::Runtime { source, .. } => {
+                source.append_pg_report_extras(details, hints)
             }
-            if let Some(hint) = hint.clone() {
-                hints.push(hint);
+            ForeignModifyErrorKind::PgReport { report } => {
+                if let Some(detail) = report.detail.clone() {
+                    details.push(detail);
+                }
+                if let Some(hint) = report.hint.clone() {
+                    hints.push(hint);
+                }
             }
+            _ => {}
         }
-        _ => {}
     }
 }

@@ -144,8 +144,90 @@ impl Display for PgReportError {
 
 impl std::error::Error for PgReportError {}
 
+/// Owned fields that can cross from a domain error into PostgreSQL's report
+/// type.
+///
+/// Domain errors keep their own kind and source chain.  This type only owns
+/// the structured fields that PostgreSQL can receive at the FFI boundary, so
+/// the boundary conversion is shared without creating a global domain-error
+/// enum.
+#[derive(Debug)]
+pub(crate) struct PgReportParts {
+    pub(crate) sqlerrcode: PgSqlErrorCode,
+    pub(crate) message: String,
+    pub(crate) detail: Option<String>,
+    pub(crate) hint: Option<String>,
+}
+
+impl PgReportParts {
+    #[inline]
+    pub(crate) fn new(
+        sqlerrcode: PgSqlErrorCode,
+        message: impl Into<String>,
+        detail: Option<String>,
+        hint: Option<String>,
+    ) -> Self {
+        Self {
+            sqlerrcode,
+            message: message.into(),
+            detail,
+            hint,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn from_pg_report_error(error: PgReportError) -> Self {
+        let sqlerrcode = error.sql_error_code();
+        let report = error.into_report();
+        Self::new(
+            sqlerrcode,
+            report.message().to_owned(),
+            report.detail().map(str::to_owned),
+            report.hint().map(str::to_owned),
+        )
+    }
+
+    #[inline]
+    pub(crate) fn into_error_report(self) -> ErrorReport {
+        let Self {
+            sqlerrcode,
+            message,
+            detail,
+            hint,
+        } = self;
+        let mut report = ErrorReport::new(sqlerrcode, message, "");
+        if let Some(detail) = detail {
+            report = report.set_detail(detail);
+        }
+        if let Some(hint) = hint {
+            report = report.set_hint(hint);
+        }
+        report
+    }
+
+    #[inline]
+    pub(crate) fn into_pg_report_error(self) -> PgReportError {
+        let Self {
+            sqlerrcode,
+            message,
+            detail,
+            hint,
+        } = self;
+        PgReportError::from_parts(sqlerrcode, message, detail, hint)
+    }
+}
+
+impl Display for PgReportParts {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 /// Format the full `std::error::Error::source` chain (excluding the top-level error).
-pub fn error_source_chain_detail(err: &dyn std::error::Error) -> Option<String> {
+pub fn error_source_chain_detail<E>(err: &E) -> Option<String>
+where
+    E: std::error::Error + ?Sized,
+{
     let mut current = err.source();
     let mut lines = Vec::new();
     while let Some(source) = current {
@@ -177,6 +259,51 @@ where
         report = report.set_detail(detail);
     }
     report
+}
+
+/// Shared PostgreSQL-boundary reporting behavior for domain errors.
+///
+/// The default implementation puts the complete `source` chain in DETAIL.
+/// A domain error can append structured nested PostgreSQL DETAIL/HINT fields,
+/// while retaining its own Display message, SQLSTATE, and error hierarchy.
+pub(crate) trait PgReportableError: SqlStateError + Display {
+    fn append_nested_report_extras(
+        &self,
+        _details: &mut Vec<String>,
+        _hints: &mut Vec<String>,
+    ) {
+    }
+
+    fn append_report_details(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        if let Some(chain) = error_source_chain_detail(self) {
+            details.push(chain);
+        }
+        self.append_nested_report_extras(details, hints);
+    }
+
+    fn report_parts(&self) -> PgReportParts {
+        let mut details = Vec::new();
+        let mut hints = Vec::new();
+        self.append_report_details(&mut details, &mut hints);
+
+        PgReportParts::new(
+            self.sql_error_code(),
+            self.to_string(),
+            join_error_details(details.into_iter().map(Some)),
+            join_error_details(hints.into_iter().map(Some)),
+        )
+    }
+
+    fn into_error_report(self) -> ErrorReport
+    where
+        Self: Sized,
+    {
+        self.report_parts().into_error_report()
+    }
 }
 
 /// Error types that can choose the PostgreSQL SQLSTATE used when reporting.

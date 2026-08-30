@@ -72,12 +72,11 @@ use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, SqlStateError};
 use crate::handles::{
     AnalyzeReadStreamHandle, AttrWidthsHandle, BufferAccessStrategyHandle,
-    BulkInsertStateHandle, CallbackStateHandle, IndexBuildCallbackHandle,
-    IndexInfoHandle, ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle,
-    RelFileLocator, RelationHandle, SampleScanStateHandle, ScanDirection,
-    SnapshotHandle, TBMIterateResultHandle, TMIndexDeleteOpHandle,
-    TableScanDescHandle, TupleTableSlotHandle, VacuumParamsHandle,
-    ValidateIndexStateHandle, VarlenaHandle,
+    IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer, OwnedScanKeys,
+    ParallelTableScanDescHandle, RelFileLocator, RelationHandle,
+    SampleScanStateHandle, ScanDirection, SnapshotHandle, TBMIterateResultHandle,
+    TMIndexDeleteOpHandle, TableScanDescHandle, TupleTableSlotHandle,
+    VacuumParamsHandle, ValidateIndexStateHandle, VarlenaHandle,
 };
 use crate::tuple::{Row, SlotColumns, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
@@ -577,7 +576,11 @@ pub trait AmIndexFetchSession {
 ///
 /// These are not callbacks for PostgreSQL index access methods such as B-tree,
 /// GiST, or GIN. Relation arguments may refer to the table relation and, where
-/// present, the index relation.
+/// present, the index relation. The `scan` argument is `None` for serial index
+/// builds, where PostgreSQL expects the table AM to create its own scan.
+/// The callback handle is permanently bound to the matching index relation and
+/// opaque callback state. It is borrowed only for this invocation and must not
+/// be retained by a provider.
 pub trait AmIndexCallbacks {
     fn index_build_range_scan(
         table_rel: &RelationHandle,
@@ -588,9 +591,8 @@ pub trait AmIndexCallbacks {
         progress: bool,
         start_blockno: pg_sys::BlockNumber,
         numblocks: pg_sys::BlockNumber,
-        callback: &IndexBuildCallbackHandle,
-        callback_state: &CallbackStateHandle,
-        scan: &TableScanDescHandle,
+        callback: &mut IndexBuildCallbackHandle,
+        scan: Option<&TableScanDescHandle>,
     ) -> AmResult<f64>
     where
         Self: Sized,
@@ -605,10 +607,9 @@ pub trait AmIndexCallbacks {
             start_blockno,
             numblocks,
             callback,
-            callback_state,
             scan,
         );
-        Ok(0.0)
+        unsupported_callback("index_build_range_scan")
     }
 
     fn index_validate_scan(
@@ -622,7 +623,7 @@ pub trait AmIndexCallbacks {
         Self: Sized,
     {
         let _ = (table_rel, index_rel, index_info, snapshot, state);
-        Ok(())
+        unsupported_callback("index_validate_scan")
     }
 
     fn index_delete_tuples(
@@ -1003,7 +1004,9 @@ pub trait AmModifyState {
 }
 
 /// Relation-local COPY FROM state. COPY bypasses ModifyTable and therefore has
-/// a separate utility-scoped lifecycle and callback surface.
+/// a separate utility-scoped lifecycle and callback surface. PostgreSQL's
+/// heap-specific `BulkInsertStateData` remains at the FFI boundary; providers
+/// own any state needed by their insertion session.
 pub trait AmCopySession {
     /// Begin and construct the complete relation-local COPY session.
     ///
@@ -1023,9 +1026,8 @@ pub trait AmCopySession {
         row: TupleSlotRow<'_>,
         cid: pg_sys::CommandId,
         options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
-        let _ = (row, cid, options, bistate);
+        let _ = (row, cid, options);
         unsupported_callback("copy tuple_insert_slot")
     }
 
@@ -1034,9 +1036,8 @@ pub trait AmCopySession {
         rows: TupleSlotBatch<'_>,
         cid: pg_sys::CommandId,
         options: i32,
-        bistate: Option<&BulkInsertStateHandle>,
     ) -> AmResult<()> {
-        let _ = (rows, cid, options, bistate);
+        let _ = (rows, cid, options);
         unsupported_callback("copy multi_insert_slots")
     }
 

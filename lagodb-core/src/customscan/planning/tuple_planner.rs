@@ -9,6 +9,7 @@ use pgrx::pg_sys;
 use crate::customscan::plan_data::tuple_layout::NeededColumns;
 use crate::customscan::plan_data::tuple_layout::ScanTupleLayout;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
+use crate::expr::relation::RelationVarsByAttno;
 
 /// Output of [`BaseScanTuplePlanner`].
 pub(crate) struct PlannedScanTuple {
@@ -298,70 +299,8 @@ impl BaseScanTuplePlanner {
     }
 }
 
-/// Planner-local attribute map matching PostgreSQL's positive, dense attno
-/// indexing. Empty slots are retained so `iter` stays in attno order.
-#[derive(Default)]
-struct AttributeVars {
-    vars: Vec<Option<NonNull<pg_sys::Var>>>,
-    count: usize,
-}
-
-impl AttributeVars {
-    fn index(attno: pg_sys::AttrNumber) -> Option<usize> {
-        usize::try_from(attno).ok()?.checked_sub(1)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    fn len(&self) -> usize {
-        self.count
-    }
-
-    fn insert(&mut self, var: NonNull<pg_sys::Var>) {
-        let Some(index) = Self::index(unsafe { var.as_ref().varattno }) else {
-            return;
-        };
-        if self.vars.len() <= index {
-            self.vars.resize(index + 1, None);
-        }
-        if self.vars[index].is_none() {
-            self.vars[index] = Some(var);
-            self.count += 1;
-        }
-    }
-
-    fn get(&self, attno: pg_sys::AttrNumber) -> Option<NonNull<pg_sys::Var>> {
-        Self::index(attno).and_then(|index| self.vars.get(index).copied().flatten())
-    }
-
-    fn take(&mut self, attno: pg_sys::AttrNumber) -> Option<NonNull<pg_sys::Var>> {
-        let var = Self::index(attno)
-            .and_then(|index| self.vars.get_mut(index).and_then(Option::take));
-        if var.is_some() {
-            self.count -= 1;
-        }
-        var
-    }
-
-    fn iter(
-        &self,
-    ) -> impl Iterator<Item = (pg_sys::AttrNumber, NonNull<pg_sys::Var>)> + '_ {
-        self.vars.iter().enumerate().filter_map(|(index, var)| {
-            let var = (*var)?;
-            let attno = pg_sys::AttrNumber::try_from(index + 1).ok()?;
-            Some((attno, var))
-        })
-    }
-
-    fn attnos(&self) -> impl Iterator<Item = pg_sys::AttrNumber> + '_ {
-        self.iter().map(|(attno, _)| attno)
-    }
-}
-
 struct LayoutAnalysis {
-    vars_by_attno: AttributeVars,
+    vars_by_attno: RelationVarsByAttno,
     direct_outputs: Vec<DirectOutput>,
     /// The scan slot can be narrowed to a custom_scan_tlist (ProjectedBase).
     can_narrow_tuple: bool,
@@ -374,7 +313,7 @@ struct LayoutAnalysis {
 impl Default for LayoutAnalysis {
     fn default() -> Self {
         Self {
-            vars_by_attno: AttributeVars::default(),
+            vars_by_attno: RelationVarsByAttno::default(),
             direct_outputs: Vec::new(),
             can_narrow_tuple: true,
             can_prune_storage: true,

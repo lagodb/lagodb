@@ -7,9 +7,7 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-use crate::diag::{
-    PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
-};
+use crate::diag::{PgReportError, PgReportParts, PgReportableError, SqlStateError};
 
 /// Error returned by [`super::ForeignDataWrapper::validate`].
 #[derive(Debug)]
@@ -23,13 +21,8 @@ enum ForeignValidationErrorKind {
         #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("{message}")]
-    PgReport {
-        sqlerrcode: PgSqlErrorCode,
-        message: String,
-        detail: Option<String>,
-        hint: Option<String>,
-    },
+    #[error("{report}")]
+    PgReport { report: PgReportParts },
 }
 
 impl ForeignValidationError {
@@ -64,65 +57,49 @@ impl StdError for ForeignValidationError {
 impl SqlStateError for ForeignValidationError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match &*self.0 {
-            ForeignValidationErrorKind::Provider { sqlerrcode, .. }
-            | ForeignValidationErrorKind::PgReport { sqlerrcode, .. } => *sqlerrcode,
+            ForeignValidationErrorKind::Provider { sqlerrcode, .. } => *sqlerrcode,
+            ForeignValidationErrorKind::PgReport { report } => report.sqlerrcode,
         }
     }
 }
 
 impl From<PgReportError> for ForeignValidationError {
     fn from(error: PgReportError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let report = error.into_report();
         Self::new(ForeignValidationErrorKind::PgReport {
-            sqlerrcode,
-            message: report.message().to_owned(),
-            detail: report.detail().map(str::to_owned),
-            hint: report.hint().map(str::to_owned),
+            report: PgReportParts::from_pg_report_error(error),
         })
+    }
+}
+
+impl PgReportableError for ForeignValidationError {
+    fn append_nested_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        self.append_pg_report_extras(details, hints);
     }
 }
 
 impl From<ForeignValidationError> for ErrorReport {
     fn from(error: ForeignValidationError) -> Self {
-        let sqlerrcode = error.sql_error_code();
-        let mut details = Vec::new();
-        if let Some(chain) = error_source_chain_detail(&error) {
-            details.push(chain);
-        }
-
-        let mut hints = Vec::new();
-        collect_pg_report_parts(&error, &mut details, &mut hints);
-
-        let mut report = ErrorReport::new(sqlerrcode, report_message(&error), "");
-        if let Some(detail) = join_error_details(details.into_iter().map(Some)) {
-            report = report.set_detail(detail);
-        }
-        if let Some(hint) = join_error_details(hints.into_iter().map(Some)) {
-            report = report.set_hint(hint);
-        }
-        report
+        error.into_error_report()
     }
 }
 
-fn report_message(error: &ForeignValidationError) -> String {
-    match &*error.0 {
-        ForeignValidationErrorKind::PgReport { message, .. } => message.clone(),
-        _ => error.to_string(),
-    }
-}
-
-fn collect_pg_report_parts(
-    error: &ForeignValidationError,
-    details: &mut Vec<String>,
-    hints: &mut Vec<String>,
-) {
-    if let ForeignValidationErrorKind::PgReport { detail, hint, .. } = &*error.0 {
-        if let Some(detail) = detail.clone() {
-            details.push(detail);
-        }
-        if let Some(hint) = hint.clone() {
-            hints.push(hint);
+impl ForeignValidationError {
+    fn append_pg_report_extras(
+        &self,
+        details: &mut Vec<String>,
+        hints: &mut Vec<String>,
+    ) {
+        if let ForeignValidationErrorKind::PgReport { report } = &*self.0 {
+            if let Some(detail) = report.detail.clone() {
+                details.push(detail);
+            }
+            if let Some(hint) = report.hint.clone() {
+                hints.push(hint);
+            }
         }
     }
 }
