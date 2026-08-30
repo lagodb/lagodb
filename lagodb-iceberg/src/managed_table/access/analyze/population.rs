@@ -33,7 +33,7 @@ impl AnalyzePopulation {
         let mut physical_rows = 0_u64;
 
         for task in tasks {
-            if task.start != 0 || task.length != 0 {
+            if !task.is_whole_file() {
                 return Err(IcebergError::InvariantViolated(
                     "ANALYZE requires one whole-file task per Iceberg data file",
                 ));

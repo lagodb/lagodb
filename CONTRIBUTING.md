@@ -13,7 +13,7 @@ a second implementation.
 | [`lagodb-base`](lagodb-base) | Shared workers, runtime coordination, and storage-volume control plane |
 | [`lagodb-core`](lagodb-core) | PostgreSQL TableAM, CustomScan, and FDW frameworks |
 | [`pg-arrow-conv`](pg-arrow-conv) | Arrow/PostgreSQL value conversion |
-| [`iceberg-lite`](iceberg-lite) | Synchronous PostgreSQL-oriented Iceberg library |
+| [`iceberg-lite`](https://github.com/lagodb/iceberg-lite) | Synchronous Iceberg library |
 | [`lagodb-storage`](https://github.com/lagodb/lagodb-storage) | Local cache and object-storage service maintained in a separate repository |
 | [`pg-delta-am`](pg-delta-am) | Experimental access-method skeleton; not Delta storage |
 | [`xtask`](xtask) | Workspace test orchestration |
@@ -87,11 +87,13 @@ a production injection-point attach/detach API.
 
 ## Iceberg library changes
 
-`iceberg-lite` is derived from
+[`iceberg-lite`](https://github.com/lagodb/iceberg-lite) is maintained as a
+standalone repository and is derived from
 [`apache/iceberg-rust`](https://github.com/apache/iceberg-rust) and adapts its
-execution and IO model for PostgreSQL. Changes to `iceberg-lite` must preserve
-the synchronous PostgreSQL integration and remain straightforward to compare
-and merge with upstream changes.
+execution and IO model for synchronous systems. Changes to the library must
+preserve its standalone dependency boundary and remain straightforward to
+compare and merge with upstream changes; changes to PostgreSQL integration
+belong in `lagodb-iceberg`.
 
 ## Documentation changes
 
