@@ -1,13 +1,15 @@
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, c_char};
 
 use lagodb_core::catalog;
 use pgrx::{IntoDatum, pg_sys};
 
 use crate::catalog::worker::{
-    NewWorkerRegistration, WorkerCatalog, WorkerId, WorkerRegistrationRow,
+    CatalogName, NewWorkerRegistration, WorkerCatalog, WorkerId,
+    WorkerRegistrationRow,
 };
 use crate::error::{
     LagodbError, LagodbResult, WorkerCatalogOperation as CatalogOperation,
+    WorkerCatalogResultExt,
 };
 
 struct WorkerEntrypointContract;
@@ -105,13 +107,13 @@ pub(crate) fn load_one(worker_id: i32) -> LagodbResult<Option<WorkerRegistration
     resolve_registration(row)
 }
 
-pub(crate) fn registration_worker_id(
-    extension_name: &str,
+pub(crate) fn resolve_worker_id(
+    extension_name: &CStr,
     worker_name: &str,
 ) -> LagodbResult<Option<i32>> {
     let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
     catalog
-        .worker_id_by_name(extension_name, worker_name)
+        .worker_id_by_locator(extension_name, worker_name)
         .map(|worker_id| worker_id.map(WorkerId::as_i32))
 }
 
@@ -125,10 +127,8 @@ pub(crate) fn delete_extension_registrations(
 pub(crate) fn extension_has_registrations(
     extension_name: &CStr,
 ) -> LagodbResult<bool> {
-    Ok(WorkerCatalog::open(pg_sys::AccessShareLock as _)?
-        .rows()?
-        .into_iter()
-        .any(|row| row.extension_name.as_bytes() == extension_name.to_bytes()))
+    WorkerCatalog::open(pg_sys::AccessShareLock as _)?
+        .contains_extension_name(extension_name)
 }
 
 pub(crate) fn register(
@@ -147,10 +147,10 @@ pub(crate) fn register(
     let extension_name = current_extension_name(extension_oid)?;
     let catalog = WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?;
     let worker_id = catalog.insert(NewWorkerRegistration {
-        extension_name: &extension_name,
+        extension_name: extension_name.as_c_str(),
         worker_name,
-        entrypoint_schema: &entrypoint_schema,
-        entrypoint_function: &entrypoint_function,
+        entrypoint_schema: entrypoint_schema.as_c_str(),
+        entrypoint_function: entrypoint_function.as_c_str(),
     })?;
     Ok(worker_id.as_i32())
 }
@@ -180,11 +180,14 @@ pub(crate) fn deregister_self(worker_id: i32) -> LagodbResult<()> {
 fn resolve_registration(
     row: WorkerRegistrationRow,
 ) -> LagodbResult<Option<WorkerRegistration>> {
-    let Some(extension_oid) = extension_oid_by_name(&row.extension_name)? else {
+    let Some(extension_oid) = extension_oid_by_name(row.extension_name.as_c_str())?
+    else {
         return Ok(None);
     };
-    let Some(function_oid) =
-        resolve_entrypoint(&row.entrypoint_schema, &row.entrypoint_function)?
+    let Some(function_oid) = resolve_entrypoint(
+        row.entrypoint_schema.as_c_str(),
+        row.entrypoint_function.as_c_str(),
+    )?
     else {
         return Ok(None);
     };
@@ -196,29 +199,22 @@ fn resolve_registration(
     }))
 }
 
-fn extension_oid_by_name(extension_name: &str) -> LagodbResult<Option<pg_sys::Oid>> {
-    let cstring = CString::new(extension_name)
-        .expect("PostgreSQL extension names cannot contain NUL");
-    let oid = unsafe { pg_sys::get_extension_oid(cstring.as_ptr(), true) };
+fn extension_oid_by_name(extension_name: &CStr) -> LagodbResult<Option<pg_sys::Oid>> {
+    // SAFETY: extension_name is a live, NUL-terminated catalog name for this
+    // synchronous lookup; missing_ok prevents an absent extension from ERROR.
+    let oid = unsafe { pg_sys::get_extension_oid(extension_name.as_ptr(), true) };
     Ok((oid != pg_sys::InvalidOid).then_some(oid))
 }
 
 fn resolve_entrypoint(
-    schema_name: &str,
-    function_name: &str,
+    schema_name: &CStr,
+    function_name: &CStr,
 ) -> LagodbResult<Option<pg_sys::Oid>> {
-    let schema_name = CString::new(schema_name)
-        .expect("PostgreSQL schema names cannot contain NUL");
-    let schema_oid = catalog::get_namespace_oid(schema_name.as_c_str(), true)
-        .map_err(|source| LagodbError::WorkerCatalog {
-            operation: CatalogOperation::ResolveEntrypoint,
-            source,
-        })?;
+    let schema_oid = catalog::get_namespace_oid(schema_name, true)
+        .map_worker_catalog_err(CatalogOperation::ResolveEntrypoint)?;
     if schema_oid == pg_sys::InvalidOid {
         return Ok(None);
     }
-    let function_name = CString::new(function_name)
-        .expect("PostgreSQL function names cannot contain NUL");
     let argument_types = [pg_sys::INTERNALOID];
     // SAFETY: buildoidvector copies the single live OID. PROCNAMEARGSNSP uses
     // (proname, proargtypes, pronamespace), exactly matching this lookup.
@@ -237,14 +233,19 @@ fn resolve_entrypoint(
     if tuple.is_null() {
         return Ok(None);
     }
+    // SAFETY: PROCNAMEARGSNSP returned a pinned pg_proc tuple that remains
+    // live until ReleaseSysCache below.
     let procedure = unsafe { &*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc) };
     let matches = WorkerEntrypointContract::accepts(procedure);
     let function_oid = matches.then_some(procedure.oid);
+    // SAFETY: tuple is the pinned syscache tuple returned above.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(function_oid)
 }
 
-fn validate_entrypoint(function_oid: pg_sys::Oid) -> LagodbResult<(String, String)> {
+fn validate_entrypoint(
+    function_oid: pg_sys::Oid,
+) -> LagodbResult<(CatalogName, CatalogName)> {
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::PROCOID as i32,
@@ -256,34 +257,46 @@ fn validate_entrypoint(function_oid: pg_sys::Oid) -> LagodbResult<(String, Strin
     if tuple.is_null() {
         return Err(LagodbError::EntryPointMissing);
     }
-    let result = unsafe {
-        let procedure = &*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc);
-        if !WorkerEntrypointContract::accepts(procedure) {
-            pg_sys::ReleaseSysCache(tuple);
-            return Err(LagodbError::InvalidEntryPointSignature);
-        }
-        let namespace = pg_sys::get_namespace_name(procedure.pronamespace);
-        if namespace.is_null() {
-            pg_sys::ReleaseSysCache(tuple);
-            return Err(LagodbError::EntryPointSchemaMissing);
-        }
-        let schema_name = CStr::from_ptr(namespace).to_string_lossy().into_owned();
-        let function_name = CStr::from_ptr(procedure.proname.data.as_ptr())
-            .to_string_lossy()
-            .into_owned();
-        pg_sys::ReleaseSysCache(tuple);
-        (schema_name, function_name)
-    };
-    Ok(result)
+    // SAFETY: PROCOID returned a pinned pg_proc tuple that remains live until
+    // ReleaseSysCache below.
+    let procedure = unsafe { &*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc) };
+    if !WorkerEntrypointContract::accepts(procedure) {
+        // SAFETY: tuple is the pinned syscache tuple returned above.
+        unsafe { pg_sys::ReleaseSysCache(tuple) };
+        return Err(LagodbError::InvalidEntryPointSignature);
+    }
+    // SAFETY: procedure is a live pg_proc tuple and pronamespace is its valid
+    // namespace OID. PostgreSQL returns a palloc'd copy or NULL.
+    let namespace = unsafe { pg_sys::get_namespace_name(procedure.pronamespace) };
+    if namespace.is_null() {
+        // SAFETY: tuple is the pinned syscache tuple returned above.
+        unsafe { pg_sys::ReleaseSysCache(tuple) };
+        return Err(LagodbError::EntryPointSchemaMissing);
+    }
+    // SAFETY: namespace is the live, NUL-terminated result from
+    // get_namespace_name and is copied before being freed.
+    let schema_name = CatalogName::from_c_str(unsafe { CStr::from_ptr(namespace) });
+    // SAFETY: namespace is the palloc'd result from get_namespace_name.
+    unsafe { pg_sys::pfree(namespace.cast()) };
+    // SAFETY: pg_proc.proname is a PostgreSQL-produced NameData value and is
+    // therefore NUL-terminated within its fixed-width buffer.
+    let function_name = unsafe { CatalogName::from_name_data(procedure.proname) };
+    // SAFETY: tuple is the pinned syscache tuple returned above, and all data
+    // needed after release has been copied into owned values.
+    unsafe { pg_sys::ReleaseSysCache(tuple) };
+    Ok((schema_name, function_name))
 }
 
-fn current_extension_name(extension_oid: pg_sys::Oid) -> LagodbResult<String> {
-    let name = unsafe { pg_sys::get_extension_name(extension_oid) };
-    if name.is_null() {
+fn current_extension_name(extension_oid: pg_sys::Oid) -> LagodbResult<CatalogName> {
+    // SAFETY: extension_oid is CurrentExtensionObject during registration;
+    // PostgreSQL returns a palloc'd copy or NULL.
+    let name_ptr = unsafe { pg_sys::get_extension_name(extension_oid) };
+    if name_ptr.is_null() {
         Err(LagodbError::RegisteringExtensionMissing)
     } else {
-        Ok(unsafe { CStr::from_ptr(name) }
-            .to_string_lossy()
-            .into_owned())
+        // SAFETY: get_extension_name returned a live palloc'd C string.
+        let name = CatalogName::from_c_str(unsafe { CStr::from_ptr(name_ptr) });
+        unsafe { pg_sys::pfree(name_ptr.cast()) };
+        Ok(name)
     }
 }

@@ -11,8 +11,8 @@ mod storage_volume;
 use std::ffi::{CStr, c_char, c_void};
 
 use lagodb_core::runtime_api::{
-    RuntimeApi, STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND,
-    STAGE_WORKER_WAKEUP_INVALID_REQUEST, STAGE_WORKER_WAKEUP_OK,
+    RuntimeApi, STAGE_WORKER_WAKEUP_INVALID_REQUEST,
+    STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND, STAGE_WORKER_WAKEUP_OK,
     STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, rendezvous_slot,
 };
 use pgrx::{pg_guard, pg_sys};
@@ -47,16 +47,13 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
     {
         return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
     }
-    let (Ok(extension_name), Ok(worker_name)) =
-        (extension_name.to_str(), worker_name.to_str())
-    else {
+    let Ok(worker_name) = worker_name.to_str() else {
         return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
     };
-    let Some(worker_id) =
-        registry::registration_worker_id(extension_name, worker_name)
-            .unwrap_or_else(|error| error.report())
+    let Some(worker_id) = registry::resolve_worker_id(extension_name, worker_name)
+        .unwrap_or_else(|error| error.report())
     else {
-        return STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND;
+        return STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND;
     };
     lifecycle::request_wakeup(worker_id);
     STAGE_WORKER_WAKEUP_OK

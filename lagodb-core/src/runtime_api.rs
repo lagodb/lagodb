@@ -46,7 +46,7 @@ pub const RUNTIME_API_RENDEZVOUS: &CStr = c"lagodb.runtime_api";
 pub const FORMAT_NAME_CAPACITY: usize = 32;
 
 pub const STAGE_WORKER_WAKEUP_OK: u32 = 0;
-pub const STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND: u32 = 1;
+pub const STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND: u32 = 1;
 pub const STAGE_WORKER_WAKEUP_INVALID_REQUEST: u32 = 2;
 pub const STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED: u32 = 3;
 
@@ -452,8 +452,8 @@ pub enum RuntimeRegistrationError {
 pub enum WorkerWakeupError {
     #[error("LagoDB runtime is not loaded through shared_preload_libraries")]
     RuntimeNotPreloaded,
-    #[error("worker-owning extension is not installed in the current database")]
-    ExtensionNotInstalled,
+    #[error("worker locator is not registered in the current database")]
+    WorkerLocatorNotFound,
     #[error("invalid LagoDB worker wakeup request")]
     InvalidRequest,
     #[error("LagoDB runtime returned unknown worker wakeup status {0}")]
@@ -570,8 +570,8 @@ impl RuntimeClient {
         };
         match status {
             STAGE_WORKER_WAKEUP_OK => Ok(()),
-            STAGE_WORKER_WAKEUP_EXTENSION_NOT_FOUND => {
-                Err(WorkerWakeupError::ExtensionNotInstalled)
+            STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND => {
+                Err(WorkerWakeupError::WorkerLocatorNotFound)
             }
             STAGE_WORKER_WAKEUP_INVALID_REQUEST => {
                 Err(WorkerWakeupError::InvalidRequest)

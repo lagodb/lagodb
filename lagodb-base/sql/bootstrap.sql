@@ -6,8 +6,13 @@ CREATE SEQUENCE lagodb.worker_id_seq AS integer;
 -- services, such as the storage server, are static bgworkers and are not stored
 -- in this table.
 CREATE TABLE lagodb.workers (
+    -- Stable runtime identity; preserved when an upgrade renames a worker or
+    -- moves its entry point.
     worker_id integer PRIMARY KEY DEFAULT nextval('lagodb.worker_id_seq'),
     extension_name name NOT NULL,
+    -- Database-global external lookup key. extension_name records ownership and
+    -- verifies the expected owner during lookup; it is deliberately not part of
+    -- this key, so cross-extension duplicate worker names are rejected.
     worker_name text NOT NULL,
     entrypoint_schema name NOT NULL,
     entrypoint_function name NOT NULL,

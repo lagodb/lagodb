@@ -1,30 +1,26 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
 use lagodb_core::catalog::{
     self, CatalogRelation, CatalogScanKey, CatalogSnapshot, LAGODB_SCHEMA,
 };
 use lagodb_core::diag::PgError;
-use lagodb_core::handles::HeapTupleGuard;
-use pgrx::{FromDatum, IntoDatum, PgTryBuilder, pg_sys};
+use pgrx::{FromDatum, PgTryBuilder, pg_sys};
 
-use crate::error::{LagodbError, LagodbResult, WorkerCatalogOperation};
+use crate::error::{
+    LagodbError, LagodbResult, WorkerCatalogOperation, WorkerCatalogResultExt,
+};
+
+mod row;
+
+use row::WorkerTuple;
+pub(crate) use row::{CatalogName, NewWorkerRegistration, WorkerRegistrationRow};
 
 const WORKERS_TABLE: &CStr = c"workers";
 const WORKER_ID_SEQUENCE: &CStr = c"worker_id_seq";
 const WORKERS_PRIMARY_KEY: &CStr = c"workers_pkey";
 const WORKERS_NAME_KEY: &CStr = c"workers_worker_name_key";
 
-mod column {
-    pub const WORKER_ID: i16 = 1;
-    pub const EXTENSION_NAME: i16 = 2;
-    pub const WORKER_NAME: i16 = 3;
-    pub const ENTRYPOINT_SCHEMA: i16 = 4;
-    pub const ENTRYPOINT_FUNCTION: i16 = 5;
-    pub const COUNT: usize = 5;
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[repr(transparent)]
 pub(crate) struct WorkerId(i32);
 
 impl WorkerId {
@@ -37,27 +33,9 @@ impl WorkerId {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct WorkerRegistrationRow {
-    pub(crate) worker_id: WorkerId,
-    pub(crate) extension_name: String,
-    pub(crate) worker_name: String,
-    pub(crate) entrypoint_schema: String,
-    pub(crate) entrypoint_function: String,
-}
-
-pub(crate) struct NewWorkerRegistration<'a> {
-    pub(crate) extension_name: &'a str,
-    pub(crate) worker_name: &'a str,
-    pub(crate) entrypoint_schema: &'a str,
-    pub(crate) entrypoint_function: &'a str,
-}
-
 pub(crate) struct WorkerCatalog {
     relation: CatalogRelation,
-    sequence_oid: pg_sys::Oid,
-    primary_key_oid: pg_sys::Oid,
-    name_key_oid: pg_sys::Oid,
+    schema_oid: pg_sys::Oid,
 }
 
 impl WorkerCatalog {
@@ -80,76 +58,29 @@ impl WorkerCatalog {
     /// lookup uses PostgreSQL syscaches and deliberately does not acquire a
     /// relation lock that could overlap the lifecycle lock.
     pub(crate) fn exists() -> LagodbResult<bool> {
-        let schema_oid =
-            catalog::get_namespace_oid(LAGODB_SCHEMA, true).map_err(|source| {
-                LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::ResolveSchema,
-                    source,
-                }
-            })?;
+        let schema_oid = catalog::get_namespace_oid(LAGODB_SCHEMA, true)
+            .map_worker_catalog_err(WorkerCatalogOperation::ResolveSchema)?;
         if schema_oid == pg_sys::InvalidOid {
             return Ok(false);
         }
         catalog::get_relation_oid(WORKERS_TABLE, schema_oid)
             .map(|relation_oid| relation_oid != pg_sys::InvalidOid)
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::ResolveRelation,
-                source,
-            })
+            .map_worker_catalog_err(WorkerCatalogOperation::ResolveRelation)
     }
 
     pub(crate) fn open(lock_mode: pg_sys::LOCKMODE) -> LagodbResult<Self> {
-        let schema_oid =
-            catalog::get_namespace_oid(LAGODB_SCHEMA, false).map_err(|source| {
-                LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::ResolveSchema,
-                    source,
-                }
-            })?;
+        let schema_oid = catalog::get_namespace_oid(LAGODB_SCHEMA, false)
+            .map_worker_catalog_err(WorkerCatalogOperation::ResolveSchema)?;
         let relation_oid = catalog::get_relation_oid(WORKERS_TABLE, schema_oid)
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::ResolveRelation,
-                source,
-            })?;
+            .map_worker_catalog_err(WorkerCatalogOperation::ResolveRelation)?;
         if relation_oid == pg_sys::InvalidOid {
             return Err(LagodbError::WorkersTableMissing);
         }
-        let sequence_oid = catalog::get_relation_oid(WORKER_ID_SEQUENCE, schema_oid)
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::ResolveSequence,
-                source,
-            })?;
-        if sequence_oid == pg_sys::InvalidOid {
-            return Err(LagodbError::WorkerIdSequenceMissing);
-        }
-        let primary_key_oid =
-            catalog::get_relation_oid(WORKERS_PRIMARY_KEY, schema_oid).map_err(
-                |source| LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::ResolveIndex,
-                    source,
-                },
-            )?;
-        if primary_key_oid == pg_sys::InvalidOid {
-            return Err(LagodbError::WorkersPrimaryKeyMissing);
-        }
-        let name_key_oid = catalog::get_relation_oid(WORKERS_NAME_KEY, schema_oid)
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::ResolveIndex,
-                source,
-            })?;
-        if name_key_oid == pg_sys::InvalidOid {
-            return Err(LagodbError::WorkersNameIndexMissing);
-        }
         let relation = CatalogRelation::open_retain_lock(relation_oid, lock_mode)
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Open,
-                source,
-            })?;
+            .map_worker_catalog_err(WorkerCatalogOperation::Open)?;
         Ok(Self {
             relation,
-            sequence_oid,
-            primary_key_oid,
-            name_key_oid,
+            schema_oid,
         })
     }
 
@@ -157,29 +88,16 @@ impl WorkerCatalog {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
-            .begin_scan(
-                pg_sys::InvalidOid,
-                false,
-                CatalogSnapshot::Default,
-                std::iter::empty(),
-            )
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Scan,
-                source,
-            })?;
+            .begin_scan(pg_sys::InvalidOid, false, CatalogSnapshot::Default, [])
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?;
         let mut rows = Vec::new();
-        while let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::Scan,
-                    source,
-                })?
+        while let Some(tuple) = scan
+            .get_next()
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?
         {
-            // SAFETY: `workers` bootstrap defines all five columns NOT NULL;
-            // the tuple descriptor is owned by this catalog relation.
-            rows.push(unsafe {
-                WorkerRegistrationRow::decode(tuple.as_raw(), tuple_desc)
-            });
+            // SAFETY: the tuple comes from lagodb.workers and its descriptor
+            // belongs to this live catalog relation.
+            rows.push(unsafe { WorkerTuple::new(tuple, tuple_desc) }.decode());
         }
         Ok(rows)
     }
@@ -189,26 +107,55 @@ impl WorkerCatalog {
         registration: NewWorkerRegistration<'_>,
     ) -> LagodbResult<WorkerId> {
         let worker_id = self.next_worker_id()?;
-        let tuple =
-            registration.encode(worker_id, self.relation.as_handle().tuple_desc());
-        self.relation.catalog_insert(&tuple).map_err(|source| {
-            LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Insert,
-                source,
-            }
-        })?;
+        // SAFETY: the descriptor belongs to the open lagodb.workers relation.
+        let tuple = unsafe {
+            WorkerTuple::encode(
+                &registration,
+                worker_id,
+                self.relation.as_handle().tuple_desc(),
+            )
+        };
+        self.relation
+            .catalog_insert(&tuple)
+            .map_worker_catalog_err(WorkerCatalogOperation::Insert)?;
         Ok(worker_id)
     }
 
-    pub(crate) fn worker_id_by_name(
+    /// Resolve a database-global worker name and verify its expected owner.
+    ///
+    /// `workers_worker_name_key` deliberately contains only `worker_name`.
+    /// `extension_name` is an ownership guard against a stale or incorrect
+    /// provider locator, not a second lookup key.
+    pub(crate) fn worker_id_by_locator(
         &self,
-        extension_name: &str,
+        extension_name: &CStr,
         worker_name: &str,
     ) -> LagodbResult<Option<WorkerId>> {
-        Ok(self
-            .row_by_name(worker_name)?
-            .filter(|row| row.extension_name == extension_name)
-            .map(|row| row.worker_id))
+        let tuple_desc = self.relation.as_handle().tuple_desc();
+        let mut scan = self
+            .relation
+            .begin_scan(
+                self.name_key_oid()?,
+                true,
+                CatalogSnapshot::Default,
+                [CatalogScanKey::text_eq(
+                    WorkerTuple::worker_name_attno(),
+                    worker_name,
+                )],
+            )
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?;
+        let Some(tuple) = scan
+            .get_next()
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?
+        else {
+            return Ok(None);
+        };
+        // SAFETY: the tuple comes from lagodb.workers and its descriptor
+        // belongs to this live catalog relation.
+        let tuple = unsafe { WorkerTuple::new(tuple, tuple_desc) };
+        Ok(tuple
+            .extension_name_eq(extension_name)
+            .then(|| tuple.worker_id()))
     }
 
     pub(crate) fn row_by_id(
@@ -219,32 +166,32 @@ impl WorkerCatalog {
         let mut scan = self
             .relation
             .begin_scan(
-                self.primary_key_oid,
+                self.primary_key_oid()?,
                 true,
                 CatalogSnapshot::Default,
                 [CatalogScanKey::i32_eq(
-                    column::WORKER_ID as _,
+                    WorkerTuple::worker_id_attno(),
                     worker_id.as_i32(),
                 )],
             )
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Scan,
-                source,
-            })?;
-        let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::Scan,
-                    source,
-                })?
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?;
+        let Some(tuple) = scan
+            .get_next()
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?
         else {
             return Ok(None);
         };
-        Ok(Some(unsafe {
-            WorkerRegistrationRow::decode(tuple.as_raw(), tuple_desc)
-        }))
+        // SAFETY: the tuple comes from lagodb.workers and its descriptor
+        // belongs to this live catalog relation.
+        Ok(Some(
+            unsafe { WorkerTuple::new(tuple, tuple_desc) }.decode(),
+        ))
     }
 
+    /// Delete by database-global worker name.
+    ///
+    /// No extension key is needed because the catalog rejects duplicate worker
+    /// names across extensions.
     pub(crate) fn delete_by_name(
         &self,
         worker_name: &str,
@@ -253,36 +200,27 @@ impl WorkerCatalog {
         let mut scan = self
             .relation
             .begin_scan(
-                self.name_key_oid,
+                self.name_key_oid()?,
                 true,
                 CatalogSnapshot::Default,
                 [CatalogScanKey::text_eq(
-                    column::WORKER_NAME as _,
+                    WorkerTuple::worker_name_attno(),
                     worker_name,
                 )],
             )
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Scan,
-                source,
-            })?;
-        let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::Scan,
-                    source,
-                })?
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?;
+        let Some(tuple) = scan
+            .get_next()
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?
         else {
             return Ok(None);
         };
-        let worker_id = WorkerId(unsafe {
-            required_attr(tuple.as_raw(), tuple_desc, column::WORKER_ID, "worker_id")
-        });
-        self.relation.catalog_delete(tuple).map_err(|source| {
-            LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Delete,
-                source,
-            }
-        })?;
+        // SAFETY: the tuple comes from lagodb.workers and its descriptor
+        // belongs to this live catalog relation.
+        let worker_id = unsafe { WorkerTuple::new(tuple, tuple_desc) }.worker_id();
+        self.relation
+            .catalog_delete(tuple)
+            .map_worker_catalog_err(WorkerCatalogOperation::Delete)?;
         Ok(Some(worker_id))
     }
 
@@ -290,34 +228,49 @@ impl WorkerCatalog {
         let mut scan = self
             .relation
             .begin_scan(
-                self.primary_key_oid,
+                self.primary_key_oid()?,
                 true,
                 CatalogSnapshot::Default,
                 [CatalogScanKey::i32_eq(
-                    column::WORKER_ID as _,
+                    WorkerTuple::worker_id_attno(),
                     worker_id.as_i32(),
                 )],
             )
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Scan,
-                source,
-            })?;
-        let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::Scan,
-                    source,
-                })?
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?;
+        let Some(tuple) = scan
+            .get_next()
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?
         else {
             return Ok(false);
         };
-        self.relation.catalog_delete(tuple).map_err(|source| {
-            LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Delete,
-                source,
-            }
-        })?;
+        self.relation
+            .catalog_delete(tuple)
+            .map_worker_catalog_err(WorkerCatalogOperation::Delete)?;
         Ok(true)
+    }
+
+    pub(crate) fn contains_extension_name(
+        &self,
+        extension_name: &CStr,
+    ) -> LagodbResult<bool> {
+        let tuple_desc = self.relation.as_handle().tuple_desc();
+        let mut scan = self
+            .relation
+            .begin_scan(pg_sys::InvalidOid, false, CatalogSnapshot::Default, [])
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?;
+        while let Some(tuple) = scan
+            .get_next()
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?
+        {
+            // SAFETY: the tuple comes from lagodb.workers and its descriptor
+            // belongs to this live catalog relation.
+            if unsafe { WorkerTuple::new(tuple, tuple_desc) }
+                .extension_name_eq(extension_name)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn delete_by_extension_name(
@@ -327,76 +280,30 @@ impl WorkerCatalog {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
-            .begin_scan(
-                pg_sys::InvalidOid,
-                false,
-                CatalogSnapshot::Default,
-                std::iter::empty(),
-            )
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Scan,
-                source,
-            })?;
-        while let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::Scan,
-                    source,
-                })?
+            .begin_scan(pg_sys::InvalidOid, false, CatalogSnapshot::Default, [])
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?;
+        while let Some(tuple) = scan
+            .get_next()
+            .map_worker_catalog_err(WorkerCatalogOperation::Scan)?
         {
-            let row =
-                unsafe { WorkerRegistrationRow::decode(tuple.as_raw(), tuple_desc) };
-            if row.extension_name.as_bytes() == extension_name.to_bytes() {
-                self.relation.catalog_delete(tuple).map_err(|source| {
-                    LagodbError::WorkerCatalog {
-                        operation: WorkerCatalogOperation::Delete,
-                        source,
-                    }
-                })?;
+            // SAFETY: the tuple comes from lagodb.workers and its descriptor
+            // belongs to this live catalog relation.
+            if unsafe { WorkerTuple::new(tuple, tuple_desc) }
+                .extension_name_eq(extension_name)
+            {
+                self.relation
+                    .catalog_delete(tuple)
+                    .map_worker_catalog_err(WorkerCatalogOperation::Delete)?;
             }
         }
         Ok(())
     }
 
-    fn row_by_name(
-        &self,
-        worker_name: &str,
-    ) -> LagodbResult<Option<WorkerRegistrationRow>> {
-        let tuple_desc = self.relation.as_handle().tuple_desc();
-        let mut scan = self
-            .relation
-            .begin_scan(
-                self.name_key_oid,
-                true,
-                CatalogSnapshot::Default,
-                [CatalogScanKey::text_eq(
-                    column::WORKER_NAME as _,
-                    worker_name,
-                )],
-            )
-            .map_err(|source| LagodbError::WorkerCatalog {
-                operation: WorkerCatalogOperation::Scan,
-                source,
-            })?;
-        let Some(tuple) =
-            scan.get_next()
-                .map_err(|source| LagodbError::WorkerCatalog {
-                    operation: WorkerCatalogOperation::Scan,
-                    source,
-                })?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(unsafe {
-            WorkerRegistrationRow::decode(tuple.as_raw(), tuple_desc)
-        }))
-    }
-
     fn next_worker_id(&self) -> LagodbResult<WorkerId> {
-        // SAFETY: nextval_oid is PostgreSQL's native sequence function. The sequence OID was
-        // resolved from lagodb.worker_id_seq by this catalog domain object, and the Datum is
-        // an OID argument. PostgreSQL raises the authoritative permission/type error if invalid.
-        let sequence_oid = self.sequence_oid;
+        let sequence_oid = self.sequence_oid()?;
+        // SAFETY: nextval_oid is PostgreSQL's native sequence function. The
+        // sequence OID resolves to lagodb.worker_id_seq, which is declared AS
+        // integer. PostgreSQL raises the authoritative permission/type error.
         let datum = unsafe {
             PgTryBuilder::new(move || {
                 Ok(pg_sys::DirectFunctionCall1Coll(
@@ -408,133 +315,53 @@ impl WorkerCatalog {
             .catch_others(|error| Err(PgError::from(error)))
             .execute()
         }
-        .map_err(|source| LagodbError::WorkerCatalog {
-            operation: WorkerCatalogOperation::AllocateId,
-            source,
-        })?;
+        .map_worker_catalog_err(WorkerCatalogOperation::AllocateId)?;
+        // SAFETY: nextval_oid returns an int8 Datum.
         let value = unsafe { i64::from_datum(datum, false) }
             .expect("nextval_oid returns bigint");
         Ok(WorkerId(i32::try_from(value).expect(
             "an integer sequence cannot produce a value outside int4",
         )))
     }
-}
 
-impl NewWorkerRegistration<'_> {
-    fn encode(
+    fn sequence_oid(&self) -> LagodbResult<pg_sys::Oid> {
+        let oid = self.object_oid(
+            WORKER_ID_SEQUENCE,
+            WorkerCatalogOperation::ResolveSequence,
+        )?;
+        if oid == pg_sys::InvalidOid {
+            Err(LagodbError::WorkerIdSequenceMissing)
+        } else {
+            Ok(oid)
+        }
+    }
+
+    fn primary_key_oid(&self) -> LagodbResult<pg_sys::Oid> {
+        let oid = self
+            .object_oid(WORKERS_PRIMARY_KEY, WorkerCatalogOperation::ResolveIndex)?;
+        if oid == pg_sys::InvalidOid {
+            Err(LagodbError::WorkersPrimaryKeyMissing)
+        } else {
+            Ok(oid)
+        }
+    }
+
+    fn name_key_oid(&self) -> LagodbResult<pg_sys::Oid> {
+        let oid =
+            self.object_oid(WORKERS_NAME_KEY, WorkerCatalogOperation::ResolveIndex)?;
+        if oid == pg_sys::InvalidOid {
+            Err(LagodbError::WorkersNameIndexMissing)
+        } else {
+            Ok(oid)
+        }
+    }
+
+    fn object_oid(
         &self,
-        worker_id: WorkerId,
-        tuple_desc: pg_sys::TupleDesc,
-    ) -> HeapTupleGuard {
-        let extension_name = PgName::new(self.extension_name);
-        let entrypoint_schema = PgName::new(self.entrypoint_schema);
-        let entrypoint_function = PgName::new(self.entrypoint_function);
-        let mut values = [pg_sys::Datum::from(0_usize); column::COUNT];
-        let mut nulls = [false; column::COUNT];
-        values[index(column::WORKER_ID)] = pg_sys::Datum::from(worker_id.as_i32());
-        values[index(column::EXTENSION_NAME)] = extension_name.datum();
-        values[index(column::WORKER_NAME)] = self
-            .worker_name
-            .into_datum()
-            .expect("str converts to Datum");
-        values[index(column::ENTRYPOINT_SCHEMA)] = entrypoint_schema.datum();
-        values[index(column::ENTRYPOINT_FUNCTION)] = entrypoint_function.datum();
-        // SAFETY: values and nulls match the five NOT NULL lagodb.workers columns.
-        unsafe {
-            HeapTupleGuard::new(pg_sys::heap_form_tuple(
-                tuple_desc,
-                values.as_mut_ptr(),
-                nulls.as_mut_ptr(),
-            ))
-        }
+        name: &CStr,
+        operation: WorkerCatalogOperation,
+    ) -> LagodbResult<pg_sys::Oid> {
+        catalog::get_relation_oid(name, self.schema_oid)
+            .map_worker_catalog_err(operation)
     }
-}
-
-impl WorkerRegistrationRow {
-    unsafe fn decode(
-        tuple: pg_sys::HeapTuple,
-        tuple_desc: pg_sys::TupleDesc,
-    ) -> Self {
-        Self {
-            worker_id: WorkerId(unsafe {
-                required_attr(tuple, tuple_desc, column::WORKER_ID, "worker_id")
-            }),
-            extension_name: unsafe {
-                name_attr(tuple, tuple_desc, column::EXTENSION_NAME, "extension_name")
-            },
-            worker_name: unsafe {
-                required_attr(tuple, tuple_desc, column::WORKER_NAME, "worker_name")
-            },
-            entrypoint_schema: unsafe {
-                name_attr(
-                    tuple,
-                    tuple_desc,
-                    column::ENTRYPOINT_SCHEMA,
-                    "entrypoint_schema",
-                )
-            },
-            entrypoint_function: unsafe {
-                name_attr(
-                    tuple,
-                    tuple_desc,
-                    column::ENTRYPOINT_FUNCTION,
-                    "entrypoint_function",
-                )
-            },
-        }
-    }
-}
-
-struct PgName {
-    data: pg_sys::NameData,
-}
-
-impl PgName {
-    fn new(value: &str) -> Self {
-        let value = CString::new(value).expect("PostgreSQL names cannot contain NUL");
-        let mut data = pg_sys::NameData::default();
-        unsafe { pg_sys::namestrcpy(&mut data, value.as_ptr()) };
-        Self { data }
-    }
-    fn datum(&self) -> pg_sys::Datum {
-        unsafe { pg_sys::NameGetDatum(&self.data) }
-    }
-}
-
-unsafe fn required_attr<T: FromDatum>(
-    tuple: pg_sys::HeapTuple,
-    tuple_desc: pg_sys::TupleDesc,
-    attno: i16,
-    name: &str,
-) -> T {
-    let mut is_null = false;
-    // SAFETY: tuple and descriptor come from the active catalog scan.
-    let datum =
-        unsafe { pg_sys::heap_getattr(tuple, attno as _, tuple_desc, &mut is_null) };
-    // SAFETY: the catalog column's SQL type is fixed by bootstrap.sql and the
-    // producer guarantees a non-null datum.
-    unsafe { T::from_datum(datum, false) }
-        .unwrap_or_else(|| panic!("workers.{name} has invalid Datum"))
-}
-
-unsafe fn name_attr(
-    tuple: pg_sys::HeapTuple,
-    tuple_desc: pg_sys::TupleDesc,
-    attno: i16,
-    _name: &str,
-) -> String {
-    let mut is_null = false;
-    // SAFETY: tuple and descriptor come from the active catalog scan.
-    let datum =
-        unsafe { pg_sys::heap_getattr(tuple, attno as _, tuple_desc, &mut is_null) };
-    // SAFETY: the datum is the fixed-width PostgreSQL `name` column declared
-    // by the worker catalog schema.
-    let name = datum.cast_mut_ptr::<pg_sys::NameData>();
-    unsafe { CStr::from_ptr((*name).data.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn index(attno: i16) -> usize {
-    usize::try_from(attno - 1).expect("attribute numbers are positive")
 }

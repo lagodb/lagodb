@@ -377,7 +377,7 @@ impl ObjectCleanupRepository {
 fn notify_worker() -> Result<(), ObjectCleanupError> {
     const NOTIFIER: crate::extension_worker::WorkerNotifier =
         crate::extension_worker::WorkerNotifier::new(
-            crate::extension_worker::WorkerIdentity::new(
+            crate::extension_worker::WorkerLocator::new(
                 c"lagodb_base",
                 c"maintenance",
             ),

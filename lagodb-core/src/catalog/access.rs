@@ -307,17 +307,14 @@ impl CatalogRelation {
     }
 
     /// Begin a system catalog scan tied to this relation guard.
-    pub fn begin_scan<'scan, I>(
+    pub fn begin_scan<'scan, const N: usize>(
         &'scan self,
         index_id: pg_sys::Oid,
         index_ok: bool,
         snapshot: CatalogSnapshot<'scan>,
-        keys: I,
-    ) -> Result<CatalogScan<'scan>, PgError>
-    where
-        I: IntoIterator<Item = CatalogScanKey>,
-    {
-        let mut keys = Self::collect_scan_keys(keys);
+        keys: [CatalogScanKey; N],
+    ) -> Result<CatalogScan<'scan>, PgError> {
+        let mut keys = keys.map(CatalogScanKey::into_data);
         let key_ptr = Self::scan_key_ptr(&mut keys);
         let scan = unsafe {
             PgWrapper::systable_beginscan_raw(
@@ -337,19 +334,16 @@ impl CatalogRelation {
     }
 
     /// Begin a scan that explicitly guarantees index order.
-    pub fn begin_ordered_scan<'scan, I>(
+    pub fn begin_ordered_scan<'scan, const N: usize>(
         &'scan self,
         index_id: pg_sys::Oid,
         snapshot: CatalogSnapshot<'scan>,
-        keys: I,
-    ) -> Result<CatalogOrderedScan<'scan>, PgError>
-    where
-        I: IntoIterator<Item = CatalogScanKey>,
-    {
+        keys: [CatalogScanKey; N],
+    ) -> Result<CatalogOrderedScan<'scan>, PgError> {
         let index_relation = unsafe {
             PgWrapper::index_open_raw(index_id, pg_sys::AccessShareLock as _)?
         };
-        let mut keys = Self::collect_scan_keys(keys);
+        let mut keys = keys.map(CatalogScanKey::into_data);
         let key_ptr = Self::scan_key_ptr(&mut keys);
         let scan = unsafe {
             PgWrapper::systable_beginscan_ordered_raw(
@@ -376,14 +370,6 @@ impl CatalogRelation {
                 Err(error)
             }
         }
-    }
-
-    #[inline]
-    fn collect_scan_keys<I>(keys: I) -> Vec<pg_sys::ScanKeyData>
-    where
-        I: IntoIterator<Item = CatalogScanKey>,
-    {
-        keys.into_iter().map(CatalogScanKey::into_data).collect()
     }
 
     #[inline]

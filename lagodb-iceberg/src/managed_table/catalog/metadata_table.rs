@@ -487,7 +487,7 @@ impl IcebergMetadata {
             .begin_ordered_scan(
                 Self::maintenance_due_index_oid()?,
                 CatalogSnapshot::Default,
-                std::iter::empty(),
+                [],
             )
             .map_catalog_err(CatalogOp::Read)?;
         let Some(tuple) = scan.get_next().map_catalog_err(CatalogOp::Read)? else {

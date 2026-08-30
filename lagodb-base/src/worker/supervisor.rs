@@ -168,7 +168,7 @@ impl Supervisor {
             pg_sys::InvalidOid,
             false,
             CatalogSnapshot::Default,
-            std::iter::empty(),
+            [],
         )?;
         let mut live = HashSet::new();
         let mut coordinator_candidates = HashSet::new();

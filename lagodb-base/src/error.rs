@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::fmt;
 
 use lagodb_core::diag::{PgError, PgReportError, SqlStateError};
@@ -6,6 +7,23 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 
 pub(crate) type LagodbResult<T> = Result<T, LagodbError>;
+
+pub(crate) trait WorkerCatalogResultExt<T> {
+    fn map_worker_catalog_err(
+        self,
+        operation: WorkerCatalogOperation,
+    ) -> LagodbResult<T>;
+}
+
+impl<T> WorkerCatalogResultExt<T> for Result<T, PgError> {
+    #[inline]
+    fn map_worker_catalog_err(
+        self,
+        operation: WorkerCatalogOperation,
+    ) -> LagodbResult<T> {
+        self.map_err(|source| LagodbError::WorkerCatalog { operation, source })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkerCatalogOperation {
@@ -77,9 +95,9 @@ pub(crate) enum LagodbError {
     #[error("lagodb.workers name key index does not exist")]
     WorkersNameIndexMissing,
 
-    #[error("worker '{extension_name}.{worker_name}' is not registered")]
+    #[error("worker locator ({extension_name:?}, {worker_name:?}) is not registered")]
     WorkerNotRegistered {
-        extension_name: String,
+        extension_name: CString,
         worker_name: String,
     },
 

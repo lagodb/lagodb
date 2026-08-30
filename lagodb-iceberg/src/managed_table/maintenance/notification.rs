@@ -1,13 +1,13 @@
 //! Notifications owned by Iceberg automatic maintenance.
 
-use lagodb_core::extension_worker::{WorkerIdentity, WorkerNotifier};
+use lagodb_core::extension_worker::{WorkerLocator, WorkerNotifier};
 
 use crate::error::{IcebergError, IcebergResult};
 
 pub(crate) struct AutomaticMaintenanceNotifier;
 
 impl AutomaticMaintenanceNotifier {
-    const NOTIFIER: WorkerNotifier = WorkerNotifier::new(WorkerIdentity::new(
+    const NOTIFIER: WorkerNotifier = WorkerNotifier::new(WorkerLocator::new(
         c"lagodb_iceberg",
         c"iceberg_maintenance",
     ));

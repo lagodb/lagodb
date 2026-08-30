@@ -1,11 +1,13 @@
+use std::ffi::CStr;
+
 use lagodb_core::object_cleanup::{
     ObjectCleanupItemId, ObjectCleanupQueue, ObjectTreeObserver,
     run_object_cleanup_worker,
 };
 use lagodb_core::table_maintenance::TableMaintenanceRouter;
-use pgrx::PgRelation;
 use pgrx::datum::{Internal, Uuid};
 use pgrx::prelude::*;
+use pgrx::{PgRelation, pg_getarg, pg_getarg_datum_raw};
 
 mod catalog;
 mod diag;
@@ -203,18 +205,49 @@ mod lagodb {
         }
     }
 
-    #[pg_extern]
-    fn request_worker_wakeup(extension_name: &str, worker_name: &str) {
+    #[pg_extern(sql = r#"
+CREATE FUNCTION lagodb.request_worker_wakeup(
+    extension_name pg_catalog.text,
+    worker_name pg_catalog.text
+)
+RETURNS void
+STRICT
+VOLATILE
+PARALLEL UNSAFE
+LANGUAGE c
+AS '@MODULE_PATHNAME@', '@FUNCTION_NAME@';
+"#)]
+    fn request_worker_wakeup(fcinfo: pg_sys::FunctionCallInfo) {
         ensure_runtime_preloaded();
-        let worker_id = registry::registration_worker_id(extension_name, worker_name)
-            .unwrap_or_else(|error| error.report())
-            .unwrap_or_else(|| {
+        // SAFETY: the custom SQL declaration makes the second argument a
+        // non-null PostgreSQL text value. Worker names are the UTF-8
+        // application-name domain, so pgrx's &str conversion is intentional.
+        let worker_name = unsafe { pg_getarg::<&str>(fcinfo, 1) }
+            .expect("STRICT request_worker_wakeup receives a non-null worker name");
+        // SAFETY: the custom SQL declaration makes the first argument a
+        // non-null PostgreSQL text Datum. text_to_cstring follows PostgreSQL's
+        // native text-to-name lookup pattern and preserves server-encoding
+        // bytes while producing a palloc'd, NUL-terminated copy.
+        let extension_name_ptr = unsafe {
+            pg_sys::text_to_cstring(
+                pg_getarg_datum_raw(fcinfo, 0).cast_mut_ptr::<pg_sys::text>(),
+            )
+        };
+        // SAFETY: text_to_cstring returned a live, NUL-terminated allocation.
+        let extension_name = unsafe { CStr::from_ptr(extension_name_ptr) };
+        let worker_id = match registry::resolve_worker_id(extension_name, worker_name)
+        {
+            Ok(Some(worker_id)) => worker_id,
+            Ok(None) => {
+                let extension_name = extension_name.to_owned();
                 error::LagodbError::WorkerNotRegistered {
-                    extension_name: extension_name.to_owned(),
+                    extension_name,
                     worker_name: worker_name.to_owned(),
                 }
                 .report()
-            });
+            }
+            Err(error) => error.report(),
+        };
         lifecycle::request_wakeup(worker_id);
     }
 
