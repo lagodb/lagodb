@@ -17,11 +17,10 @@ pub(crate) mod volume_config;
 
 use std::path::PathBuf;
 
+use lagodb_core::diag::{log_info, report_warning};
 use lagodb_core::storage::service::StorageEndpoint;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
-
-use crate::diag;
 
 use state::STORAGE_STATE;
 pub(crate) use state::StorageRuntimeStatus;
@@ -86,11 +85,11 @@ fn cleanup_staging_dir() {
         return;
     }
     match std::fs::remove_dir_all(&staging_dir) {
-        Ok(()) => diag::info(format_args!(
+        Ok(()) => log_info(format_args!(
             "cleaned LagoDB staging directory at postmaster startup: {}",
             staging_dir.display()
         )),
-        Err(error) => diag::warning(format_args!(
+        Err(error) => report_warning(format_args!(
             "failed to clean LagoDB staging directory {} at postmaster startup: {error}",
             staging_dir.display()
         )),

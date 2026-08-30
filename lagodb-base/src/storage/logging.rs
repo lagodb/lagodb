@@ -96,25 +96,14 @@ impl PgLogBridge {
 
 /// Emit a single log line into PostgreSQL's standard log at the given severity.
 ///
-/// # Safety contract (Neon communicator pattern)
-///
-/// We intentionally skip `errfinish()`.  In PostgreSQL's error machinery:
-///
-/// - `errstart_cold` pushes an ErrorData entry and returns true if the level is
-///   interesting.  It does **not** longjmp.
-/// - `errmsg_internal` populates the message text.
-/// - `EmitErrorReport` sends the formatted report to all log destinations.
-/// - `FlushErrorState` pops and frees the ErrorData entry.
-///
-/// `errfinish` is what triggers `longjmp` (for ERROR) or `proc_exit` (for
-/// FATAL/PANIC).  By omitting it we emit the log line, including at ERROR
-/// severity, without disrupting bgworker control flow.
-///
-/// `InterruptHoldoffCount` is incremented around the sequence to prevent a
-/// concurrent `CHECK_FOR_INTERRUPTS` from firing while the error stack is open.
-/// If `EmitErrorReport` itself raises a nested error (e.g., log-destination I/O
-/// failure), PostgreSQL's error recursion will call `proc_exit`, which is
-/// acceptable: the logging subsystem is broken and the bgworker should exit.
+/// Uses PostgreSQL's `errstart_cold` → `errmsg_internal` →
+/// `EmitErrorReport` → `FlushErrorState` sequence without `errfinish`.
+/// `errfinish` returns below `ERROR`; at `ERROR` or higher it instead transfers
+/// control through `longjmp` or terminates the process. This log-only path
+/// emits and clears the error state directly. The sequence is protected by
+/// `InterruptHoldoffCount` while PostgreSQL's error stack is open.
+/// This follows the Neon communicator pattern:
+/// <https://github.com/neondatabase/neon/blob/main/pgxn/neon/communicator/src/worker_process/logging.rs>
 pub(super) fn emit_pg_log(elevel: i32, message: &str) {
     const PREFIX: &str = "[lagodb-storage] ";
 
@@ -216,22 +205,9 @@ impl std::io::Write for EventBuffer<'_> {
 
 impl Drop for EventBuffer<'_> {
     fn drop(&mut self) {
-        // Convert the accumulated bytes into a `String` while reusing the
-        // existing `Vec<u8>` allocation on the common (valid-UTF-8) path:
-        //
-        // 1. Take ownership of `bytes`. `String::from_utf8` consumes the
-        //    vec and reuses its buffer; only validation runs.
-        // 2. Trim trailing whitespace in place via `truncate`. tracing's
-        //    fmt layer writes one event terminated by `\n`, so this is the
-        //    branch every event goes through.
-        // 3. Trim leading whitespace via `drain`, which is a memmove only
-        //    (no heap alloc). tracing's fmt layer does not emit leading
-        //    whitespace today, so this is effectively a no-op fast path.
-        // 4. Invalid UTF-8 falls back to a lossy copy.
-        //
-        // We use `str::trim_*` (Unicode whitespace) to match the original
-        // `from_utf8_lossy(...).trim()` semantics rather than the ASCII-only
-        // `u8::is_ascii_whitespace`.
+        // Reuse the buffer for valid UTF-8 and retain lossy conversion for
+        // malformed event data. Trim using the same Unicode-whitespace
+        // semantics as the original `from_utf8_lossy(...).trim()` path.
         let bytes = std::mem::take(&mut self.bytes);
         if bytes.is_empty() {
             return;

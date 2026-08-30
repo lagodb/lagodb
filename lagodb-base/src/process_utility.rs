@@ -3,10 +3,12 @@
 mod copy_route;
 mod full_router;
 
-use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
+use crate::descriptor_directory::{
+    DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
+};
 use lagodb_core::diag::ReportableError;
 use lagodb_core::runtime_api::UtilityHookDescriptor;
 use pgrx::{pg_guard, pg_sys};
@@ -16,58 +18,7 @@ use crate::hooks;
 static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
     OnceLock::new();
 
-struct UtilityHookNode {
-    descriptor: UtilityHookDescriptor,
-    next: Cell<*const UtilityHookNode>,
-}
-
-struct UtilityHookDirectory {
-    head: Cell<*const UtilityHookNode>,
-    tail: Cell<*const UtilityHookNode>,
-}
-
-impl UtilityHookDirectory {
-    const fn new() -> Self {
-        Self {
-            head: Cell::new(std::ptr::null()),
-            tail: Cell::new(std::ptr::null()),
-        }
-    }
-
-    fn append_node(&self, node: Box<UtilityHookNode>) {
-        let node = Box::into_raw(node);
-        let tail = self.tail.replace(node);
-        if tail.is_null() {
-            self.head.set(node);
-        } else {
-            // SAFETY: tail is a backend-lifetime node previously published by
-            // this single-threaded backend directory.
-            unsafe { (*tail).next.set(node) };
-        }
-    }
-
-    #[cfg(test)]
-    fn append(&self, descriptor: UtilityHookDescriptor) {
-        self.append_node(Box::new(UtilityHookNode {
-            descriptor,
-            next: Cell::new(std::ptr::null()),
-        }));
-    }
-
-    fn commit(&self, prepared: PreparedUtilityHooks) {
-        for node in prepared.nodes {
-            self.append_node(node);
-        }
-    }
-
-    fn snapshot(&self, tag: pg_sys::NodeTag) -> UtilityHookSnapshot {
-        UtilityHookSnapshot {
-            first: self.head.get(),
-            last: self.tail.get(),
-            tag: tag as u32,
-        }
-    }
-}
+type UtilityHookDirectory = DescriptorDirectory<UtilityHookDescriptor>;
 
 pub(crate) struct PreparedUtilityHooks {
     // Each node is allocated before the runtime registration transaction is
@@ -75,17 +26,26 @@ pub(crate) struct PreparedUtilityHooks {
     // a raw backend-lifetime pointer; commit therefore cannot allocate or
     // publish only part of this prepared batch.
     #[allow(clippy::vec_box)]
-    nodes: Vec<Box<UtilityHookNode>>,
+    nodes: Vec<Box<DescriptorNode<UtilityHookDescriptor>>>,
 }
 
 #[derive(Clone, Copy)]
 struct UtilityHookSnapshot {
-    first: *const UtilityHookNode,
-    last: *const UtilityHookNode,
+    descriptors: DescriptorSnapshot<UtilityHookDescriptor>,
     tag: u32,
 }
 
 impl UtilityHookSnapshot {
+    fn new(
+        descriptors: DescriptorSnapshot<UtilityHookDescriptor>,
+        tag: pg_sys::NodeTag,
+    ) -> Self {
+        Self {
+            descriptors,
+            tag: tag as u32,
+        }
+    }
+
     fn has_matching_hooks(self) -> bool {
         let mut matched = false;
         self.for_each(|_| matched = true);
@@ -93,24 +53,16 @@ impl UtilityHookSnapshot {
     }
 
     fn for_each(self, mut callback: impl FnMut(UtilityHookDescriptor)) {
-        let mut current = self.first;
-        while !current.is_null() {
-            // SAFETY: nodes are leaked for the backend lifetime. The copied
-            // tail bounds this walk even if a callback appends another node.
-            let node = unsafe { &*current };
-            if node.descriptor.tag == self.tag {
-                callback(node.descriptor);
+        self.descriptors.for_each(|descriptor| {
+            if descriptor.tag == self.tag {
+                callback(descriptor);
             }
-            if current == self.last {
-                break;
-            }
-            current = node.next.get();
-        }
+        });
     }
 }
 
 thread_local! {
-    static UTILITY_HOOKS: UtilityHookDirectory = const { UtilityHookDirectory::new() };
+    static UTILITY_HOOKS: UtilityHookDirectory = const { DescriptorDirectory::new() };
 }
 
 fn valid_descriptor(descriptor: &UtilityHookDescriptor) -> bool {
@@ -130,29 +82,22 @@ pub(crate) fn prepare_hooks(
         nodes: descriptors
             .iter()
             .copied()
-            .map(|descriptor| {
-                Box::new(UtilityHookNode {
-                    descriptor,
-                    next: Cell::new(std::ptr::null()),
-                })
-            })
+            .map(DescriptorNode::new)
             .collect(),
     })
 }
 
 pub(crate) fn commit_hooks(prepared: PreparedUtilityHooks) {
-    UTILITY_HOOKS.with(|directory| directory.commit(prepared));
+    UTILITY_HOOKS.with(|directory| {
+        let _ = directory.commit(prepared.nodes);
+    });
 }
 
 #[cfg(test)]
 pub(crate) fn registered_hook_count() -> usize {
     UTILITY_HOOKS.with(|directory| {
         let mut count = 0;
-        let mut current = directory.head.get();
-        while !current.is_null() {
-            count += 1;
-            current = unsafe { (*current).next.get() };
-        }
+        directory.snapshot().for_each(|_| count += 1);
         count
     })
 }
@@ -202,7 +147,10 @@ mod tests {
     fn snapshot_excludes_descriptors_appended_later() {
         let directory = UtilityHookDirectory::new();
         directory.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
-        let snapshot = directory.snapshot(pg_sys::NodeTag::T_CommentStmt);
+        let snapshot = UtilityHookSnapshot::new(
+            directory.snapshot(),
+            pg_sys::NodeTag::T_CommentStmt,
+        );
         directory.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
 
         let mut count = 0;
@@ -217,14 +165,18 @@ mod tests {
         directory.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
 
         assert!(
-            directory
-                .snapshot(pg_sys::NodeTag::T_CommentStmt)
-                .has_matching_hooks()
+            UtilityHookSnapshot::new(
+                directory.snapshot(),
+                pg_sys::NodeTag::T_CommentStmt,
+            )
+            .has_matching_hooks()
         );
         assert!(
-            !directory
-                .snapshot(pg_sys::NodeTag::T_CreateStmt)
-                .has_matching_hooks()
+            !UtilityHookSnapshot::new(
+                directory.snapshot(),
+                pg_sys::NodeTag::T_CreateStmt,
+            )
+            .has_matching_hooks()
         );
     }
 
@@ -241,9 +193,11 @@ mod tests {
         directory.append(second);
 
         let mut order = Vec::new();
-        directory
-            .snapshot(pg_sys::NodeTag::T_CommentStmt)
-            .for_each(|descriptor| order.push(descriptor.context));
+        UtilityHookSnapshot::new(
+            directory.snapshot(),
+            pg_sys::NodeTag::T_CommentStmt,
+        )
+        .for_each(|descriptor| order.push(descriptor.context));
 
         assert_eq!(order, vec![first.context, second.context]);
     }
@@ -400,7 +354,8 @@ unsafe extern "C-unwind" fn process_utility_router(
         hooks::preflight(target_node);
 
         let tag = (*target_node).type_;
-        let hooks = UTILITY_HOOKS.with(|directory| directory.snapshot(tag));
+        let hooks = UTILITY_HOOKS
+            .with(|directory| UtilityHookSnapshot::new(directory.snapshot(), tag));
         let has_matching_hooks = hooks.has_matching_hooks();
         let has_matching_consumers =
             crate::utility_consumer::has_registered_consumer(tag);
@@ -480,8 +435,8 @@ unsafe extern "C-unwind" fn process_utility_router(
         }
         if let Some(consumer) = selected_consumer {
             let consumer_args = args.writable_copy();
-            // SAFETY: the selection points to a backend-lifetime directory
-            // node and is consumed within the same ProcessUtility callback.
+            // SAFETY: the selected descriptor was validated at registration,
+            // and the callback arguments remain live for this invocation.
             consumer.consume(consumer_args).report_unwrap();
         }
         let consumed = consumer_consumed

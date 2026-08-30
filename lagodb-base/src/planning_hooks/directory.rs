@@ -1,82 +1,15 @@
 //! Allocation-free snapshots of registered planning descriptor facets.
 
-use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::ptr;
 
-use lagodb_core::diag::PgReportError;
+use crate::descriptor_directory::{
+    DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
+};
 use lagodb_core::runtime_api::{
     ModifyPlannerDescriptor, RelationScanPlannerDescriptor, RoutedModifyPlannerPost,
     RoutedModifyPlannerPre, RoutedModifyUpperPlanner, RoutedRelationScanPlanner,
 };
-
-struct DescriptorNode<T: Copy> {
-    descriptor: T,
-    next: Cell<*const DescriptorNode<T>>,
-}
-
-struct DescriptorDirectory<T: Copy> {
-    head: Cell<*const DescriptorNode<T>>,
-    tail: Cell<*const DescriptorNode<T>>,
-}
-
-impl<T: Copy> DescriptorDirectory<T> {
-    const fn new() -> Self {
-        Self {
-            head: Cell::new(ptr::null()),
-            tail: Cell::new(ptr::null()),
-        }
-    }
-
-    fn commit(&self, node: Option<Box<DescriptorNode<T>>>) {
-        let Some(node) = node else {
-            return;
-        };
-        let node = Box::into_raw(node);
-        let tail = self.tail.replace(node);
-        if tail.is_null() {
-            self.head.set(node);
-        } else {
-            // SAFETY: the tail is a backend-lifetime node published by this
-            // single-threaded directory.
-            unsafe { (*tail).next.set(node) };
-        }
-    }
-
-    fn snapshot(&self) -> DescriptorSnapshot<T> {
-        DescriptorSnapshot {
-            first: self.head.get(),
-            last: self.tail.get(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct DescriptorSnapshot<T: Copy> {
-    first: *const DescriptorNode<T>,
-    last: *const DescriptorNode<T>,
-}
-
-impl<T: Copy> DescriptorSnapshot<T> {
-    pub(super) fn try_for_each(
-        self,
-        mut callback: impl FnMut(T) -> Result<(), PgReportError>,
-    ) -> Result<(), PgReportError> {
-        let mut current = self.first;
-        while !current.is_null() {
-            // SAFETY: nodes remain live for the backend lifetime. The captured
-            // tail keeps recursive registration outside this event snapshot.
-            let node = unsafe { &*current };
-            callback(node.descriptor)?;
-            if current == self.last {
-                break;
-            }
-            current = node.next.get();
-        }
-        Ok(())
-    }
-}
 
 thread_local! {
     static RELATION_SCAN: DescriptorDirectory<StoredRelationScanPlanner> =
@@ -146,37 +79,29 @@ pub(crate) fn prepare(
         None => None,
     };
     Some(PreparedPlanningHooks {
-        relation_scan: relation_scan.map(|descriptor| {
-            Box::new(DescriptorNode {
-                descriptor,
-                next: Cell::new(ptr::null()),
-            })
-        }),
-        modify: modify.map(|descriptor| {
-            Box::new(DescriptorNode {
-                descriptor,
-                next: Cell::new(ptr::null()),
-            })
-        }),
+        relation_scan: relation_scan.map(DescriptorNode::new),
+        modify: modify.map(DescriptorNode::new),
     })
 }
 
 pub(crate) fn commit(prepared: PreparedPlanningHooks) {
-    RELATION_SCAN.with(|directory| directory.commit(prepared.relation_scan));
-    MODIFY.with(|directory| directory.commit(prepared.modify));
+    let _ = RELATION_SCAN.with(|directory| directory.commit(prepared.relation_scan));
+    let _ = MODIFY.with(|directory| directory.commit(prepared.modify));
 }
 
 pub(super) fn relation_scan_snapshot() -> DescriptorSnapshot<StoredRelationScanPlanner>
 {
-    RELATION_SCAN.with(DescriptorDirectory::snapshot)
+    RELATION_SCAN.with(|directory| directory.snapshot())
 }
 
 pub(super) fn modify_snapshot() -> DescriptorSnapshot<StoredModifyPlanner> {
-    MODIFY.with(DescriptorDirectory::snapshot)
+    MODIFY.with(|directory| directory.snapshot())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use lagodb_core::runtime_api::{PLANNING_CALLBACK_OK, PlanErrorRecord};
     use pgrx::pg_sys;
 

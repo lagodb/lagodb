@@ -26,7 +26,7 @@ mod tests;
 pub(crate) use lock::DatabaseLifecycleLock;
 pub(crate) use state::{INVALID_OID, MAX_WORKER_NAME_BYTES, WorkerKey};
 pub(crate) use status::{ProcessStatus, WorkerStatus};
-use store::{COORDINATOR_TABLE, SHARED_STATE, WORKER_TABLE};
+use store::{COORDINATOR_TABLE, SHARED_STATE, Store, WORKER_TABLE};
 
 const SUPERVISOR_FUNCTION: &str = "lagodb_base_supervisor_main";
 pub(super) const COORDINATOR_FUNCTION: &str = "lagodb_base_coordinator_main";
@@ -97,11 +97,11 @@ pub(crate) fn signal_supervisor() {
 }
 
 pub(crate) fn worker_status() -> Vec<WorkerStatus> {
-    status::worker_status()
+    Store::new().worker_status()
 }
 
 pub(crate) fn process_status() -> Vec<ProcessStatus> {
-    status::process_status()
+    Store::new().process_status()
 }
 
 pub(crate) fn prepare_database_drop(database_oid: u32) {

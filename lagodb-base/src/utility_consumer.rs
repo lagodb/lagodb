@@ -5,8 +5,9 @@
 //! selected callback still executes through the descriptor supplied by the
 //! runtime ABI.
 
-use std::cell::Cell;
-
+use crate::descriptor_directory::{
+    DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
+};
 use lagodb_core::hooks::HookError;
 use lagodb_core::runtime_api::{
     UTILITY_ROUTE_CONSUMED, UTILITY_ROUTE_PASS_THROUGH, UtilityConsumerDescriptor,
@@ -15,50 +16,7 @@ use pgrx::pg_sys;
 
 use crate::process_utility::ProcessUtilityArgs;
 
-struct UtilityConsumerNode {
-    descriptor: UtilityConsumerDescriptor,
-    next: Cell<*const UtilityConsumerNode>,
-}
-
-struct UtilityConsumerDirectory {
-    head: Cell<*const UtilityConsumerNode>,
-    tail: Cell<*const UtilityConsumerNode>,
-}
-
-impl UtilityConsumerDirectory {
-    const fn new() -> Self {
-        Self {
-            head: Cell::new(std::ptr::null()),
-            tail: Cell::new(std::ptr::null()),
-        }
-    }
-
-    fn append_node(&self, node: Box<UtilityConsumerNode>) {
-        let node = Box::into_raw(node);
-        let tail = self.tail.replace(node);
-        if tail.is_null() {
-            self.head.set(node);
-        } else {
-            // SAFETY: tail is a backend-lifetime node published by this
-            // single-threaded backend directory.
-            unsafe { (*tail).next.set(node) };
-        }
-    }
-
-    fn commit(&self, prepared: PreparedUtilityConsumers) {
-        for node in prepared.nodes {
-            self.append_node(node);
-        }
-    }
-
-    fn snapshot(&self, tag: pg_sys::NodeTag) -> UtilityConsumerSnapshot {
-        UtilityConsumerSnapshot {
-            first: self.head.get(),
-            last: self.tail.get(),
-            tag: tag as u32,
-        }
-    }
-}
+type UtilityConsumerDirectory = DescriptorDirectory<UtilityConsumerDescriptor>;
 
 pub(crate) struct PreparedUtilityConsumers {
     // Each node is allocated before the runtime registration transaction is
@@ -66,19 +24,28 @@ pub(crate) struct PreparedUtilityConsumers {
     // a raw backend-lifetime pointer; commit therefore cannot allocate or
     // publish only part of this prepared batch.
     #[allow(clippy::vec_box)]
-    nodes: Vec<Box<UtilityConsumerNode>>,
+    nodes: Vec<Box<DescriptorNode<UtilityConsumerDescriptor>>>,
 }
 
 #[derive(Clone, Copy)]
 struct UtilityConsumerSnapshot {
-    first: *const UtilityConsumerNode,
-    last: *const UtilityConsumerNode,
+    descriptors: DescriptorSnapshot<UtilityConsumerDescriptor>,
     tag: u32,
 }
 
-pub(crate) struct SelectedUtilityConsumer(*const UtilityConsumerNode);
+pub(crate) struct SelectedUtilityConsumer(UtilityConsumerDescriptor);
 
 impl UtilityConsumerSnapshot {
+    fn new(
+        descriptors: DescriptorSnapshot<UtilityConsumerDescriptor>,
+        tag: pg_sys::NodeTag,
+    ) -> Self {
+        Self {
+            descriptors,
+            tag: tag as u32,
+        }
+    }
+
     fn has_registered_consumer(self) -> bool {
         let mut matched = false;
         self.for_each(|_| matched = true);
@@ -89,19 +56,14 @@ impl UtilityConsumerSnapshot {
         self,
         args: ProcessUtilityArgs,
     ) -> Result<Option<SelectedUtilityConsumer>, HookError> {
-        let mut selected: *const UtilityConsumerNode = std::ptr::null();
-        let mut current = self.first;
-        while !current.is_null() {
-            // SAFETY: directory nodes are leaked for backend lifetime and the
-            // snapshot's tail bounds this walk.
-            let node = unsafe { &*current };
-            if node.descriptor.tag == self.tag {
+        let mut selected = None;
+        self.descriptors.try_for_each(|descriptor| {
+            if descriptor.tag == self.tag {
                 let route = unsafe {
-                    (node
-                        .descriptor
+                    (descriptor
                         .on_match
                         .expect("validated utility predicate callback"))(
-                        node.descriptor.context,
+                        descriptor.context,
                         args.pstmt,
                         args.query_string,
                         args.read_only_tree,
@@ -115,12 +77,12 @@ impl UtilityConsumerSnapshot {
                 match route {
                     UTILITY_ROUTE_PASS_THROUGH => {}
                     UTILITY_ROUTE_CONSUMED => {
-                        if !selected.is_null() {
+                        if selected.is_some() {
                             return Err(HookError::new(
                                 "multiple COPY consumers claimed the same statement",
                             ));
                         }
-                        selected = current;
+                        selected = Some(descriptor);
                     }
                     other => {
                         return Err(HookError::new(format!(
@@ -129,28 +91,17 @@ impl UtilityConsumerSnapshot {
                     }
                 }
             }
-            if current == self.last {
-                break;
-            }
-            current = node.next.get();
-        }
-        Ok((!selected.is_null()).then_some(SelectedUtilityConsumer(selected)))
+            Ok(())
+        })?;
+        Ok(selected.map(SelectedUtilityConsumer))
     }
 
     fn for_each(self, mut callback: impl FnMut(UtilityConsumerDescriptor)) {
-        let mut current = self.first;
-        while !current.is_null() {
-            // SAFETY: directory nodes are leaked for backend lifetime and the
-            // snapshot's tail bounds this walk.
-            let node = unsafe { &*current };
-            if node.descriptor.tag == self.tag {
-                callback(node.descriptor);
+        self.descriptors.for_each(|descriptor| {
+            if descriptor.tag == self.tag {
+                callback(descriptor);
             }
-            if current == self.last {
-                break;
-            }
-            current = node.next.get();
-        }
+        });
     }
 }
 
@@ -159,9 +110,7 @@ impl SelectedUtilityConsumer {
         self,
         args: ProcessUtilityArgs,
     ) -> Result<(), HookError> {
-        // SAFETY: the selection pointer comes from the backend-lifetime
-        // directory snapshot and is used before that directory can change.
-        let descriptor = unsafe { &(*self.0).descriptor };
+        let descriptor = self.0;
         let route = unsafe {
             (descriptor
                 .on_consume
@@ -191,7 +140,7 @@ impl SelectedUtilityConsumer {
 
 thread_local! {
     static UTILITY_CONSUMERS: UtilityConsumerDirectory =
-        const { UtilityConsumerDirectory::new() };
+        const { DescriptorDirectory::new() };
 }
 
 fn valid_descriptor(descriptor: &UtilityConsumerDescriptor) -> bool {
@@ -203,8 +152,10 @@ fn valid_descriptor(descriptor: &UtilityConsumerDescriptor) -> bool {
 }
 
 pub(crate) fn has_registered_consumer(tag: pg_sys::NodeTag) -> bool {
-    UTILITY_CONSUMERS
-        .with(|directory| directory.snapshot(tag).has_registered_consumer())
+    UTILITY_CONSUMERS.with(|directory| {
+        UtilityConsumerSnapshot::new(directory.snapshot(), tag)
+            .has_registered_consumer()
+    })
 }
 
 pub(crate) fn select(
@@ -214,7 +165,9 @@ pub(crate) fn select(
     // SAFETY: callback arguments are owned by the current ProcessUtility
     // invocation and directory nodes are backend-lifetime allocations.
     unsafe {
-        UTILITY_CONSUMERS.with(|directory| directory.snapshot(tag).select(args))
+        UTILITY_CONSUMERS.with(|directory| {
+            UtilityConsumerSnapshot::new(directory.snapshot(), tag).select(args)
+        })
     }
 }
 
@@ -228,18 +181,15 @@ pub(crate) fn prepare_consumers(
         nodes: descriptors
             .iter()
             .copied()
-            .map(|descriptor| {
-                Box::new(UtilityConsumerNode {
-                    descriptor,
-                    next: Cell::new(std::ptr::null()),
-                })
-            })
+            .map(DescriptorNode::new)
             .collect(),
     })
 }
 
 pub(crate) fn commit_consumers(prepared: PreparedUtilityConsumers) {
-    UTILITY_CONSUMERS.with(|directory| directory.commit(prepared));
+    UTILITY_CONSUMERS.with(|directory| {
+        let _ = directory.commit(prepared.nodes);
+    });
 }
 
 #[cfg(test)]

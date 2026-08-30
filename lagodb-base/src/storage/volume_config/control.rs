@@ -13,11 +13,10 @@ use super::domain::{
 use super::lifecycle::UnixMillis;
 use super::store::StorageVolumeConfigStore;
 
-/// Concrete application service for machine-managed Volume mutations.
+/// Application service for machine-managed volume mutations.
 ///
-/// SQL and ProcessUtility hooks remain adapters: this type owns the shared
-/// read-modify-write and reload-notification orchestration without introducing
-/// a repository trait or a second persistence abstraction.
+/// Shared by SQL and ProcessUtility adapters to centralize read-modify-write
+/// and reload notification orchestration.
 pub(crate) struct StorageVolumeControl {
     store: StorageVolumeConfigStore,
 }

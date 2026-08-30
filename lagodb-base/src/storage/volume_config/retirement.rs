@@ -2,9 +2,8 @@ use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::rc::Rc;
 
-use crate::diag;
 use crate::worker::ensure_preloaded;
-use lagodb_core::diag::{PgReportError, SqlStateError};
+use lagodb_core::diag::{PgReportError, SqlStateError, report_warning};
 use lagodb_core::options::{TablespaceCacheError, get_tablespace};
 use lagodb_core::storage::volume::StorageVolumeId;
 use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
@@ -204,7 +203,7 @@ impl TransactionResource for PendingVolumeRetirementBatch {
                 error.diagnostic_message(),
             );
             state::StorageStatusStore::new().record_error(&message);
-            diag::warning(message);
+            report_warning(message);
         }
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }

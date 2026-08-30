@@ -4,7 +4,6 @@ use std::time::Duration;
 use lagodb_core::extension_worker::WorkerSchedule;
 use pgrx::prelude::*;
 
-use crate::diag;
 use crate::registry::WorkerRegistration;
 use crate::worker::CAPACITY_RETRY;
 use crate::worker::bgworker::{DynamicWorkerRegistration, timestamp_ms};
@@ -12,6 +11,7 @@ use crate::worker::state::{
     CoordinatorStopDisposition, ProcessState, RegistrationState, RestartPolicy,
     WorkerKey, WorkerStopDisposition,
 };
+use lagodb_core::diag::log_info;
 
 use super::{
     COORDINATOR_TABLE, SHARED_STATE, StoppedWorkerProcess, Store, WORKER_TABLE,
@@ -282,7 +282,7 @@ impl Store {
             }
         };
         drop(state);
-        diag::info(format_args!(
+        log_info(format_args!(
             "LagoDB worker published completion schedule: database_oid={}, extension_oid={}, worker_name={}, schedule={schedule:?}",
             identity.database_oid,
             identity.extension_oid,

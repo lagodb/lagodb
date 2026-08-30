@@ -1,5 +1,3 @@
-use super::store::Store;
-
 pub(crate) struct WorkerStatus {
     pub(crate) database_oid: u32,
     pub(crate) worker_id: i32,
@@ -20,12 +18,4 @@ pub(crate) struct ProcessStatus {
     pub(crate) state: &'static str,
     pub(crate) pid: Option<i32>,
     pub(crate) needs_restart: Option<bool>,
-}
-
-pub(super) fn worker_status() -> Vec<WorkerStatus> {
-    Store::new().worker_status()
-}
-
-pub(super) fn process_status() -> Vec<ProcessStatus> {
-    Store::new().process_status()
 }

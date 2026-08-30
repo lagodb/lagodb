@@ -1,11 +1,10 @@
 use std::time::Duration;
 
-use lagodb_core::diag::PgReportError;
+use lagodb_core::diag::{PgReportError, log_info, report_warning};
 use lagodb_core::extension_worker::WorkerTransaction;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
-use crate::diag;
 use crate::registry;
 
 use super::bgworker::{DynamicWorkerRegistration, DynamicWorkerStartResult};
@@ -100,7 +99,7 @@ impl Coordinator {
                         registration,
                     } => match registration.wait_for_startup() {
                         DynamicWorkerStartResult::Started(_) => {
-                            diag::info(format_args!(
+                            log_info(format_args!(
                                 "registered LagoDB extension worker: database_oid={}, extension_oid={}, worker_name={}",
                                 launch.identity.database_oid,
                                 launch.identity.extension_oid,
@@ -115,7 +114,7 @@ impl Coordinator {
                         }
                     },
                     WorkerLaunchRegistration::Failed { launch, error } => {
-                        diag::warning(format_args!(
+                        report_warning(format_args!(
                             "failed to register lagodb extension worker: database_oid={}, extension_oid={}, worker_name={}, error={error}",
                             launch.identity.database_oid,
                             launch.identity.extension_oid,

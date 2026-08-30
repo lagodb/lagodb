@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use lagodb_core::diag::{PgError, PgReportError};
+use lagodb_core::diag::{PgError, PgReportError, report_warning};
 use lagodb_core::extension_worker::WorkerTransaction;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
-use crate::{diag, gucs};
+use crate::gucs;
 
 use super::bgworker::{DynamicWorkerRegistration, DynamicWorkerStartResult};
 use super::lock::DatabaseLifecycleLock;
@@ -94,7 +94,7 @@ impl Supervisor {
             CoordinatorRegistration::AlreadyActive => CoordinatorStart::AlreadyActive,
             CoordinatorRegistration::NoWork => CoordinatorStart::NoWork,
             CoordinatorRegistration::Failed(error) => {
-                diag::warning(format_args!(
+                report_warning(format_args!(
                     "failed to register lagodb coordinator: database_oid={database_oid}, error={error}"
                 ));
                 CoordinatorStart::RetrySoon
@@ -112,7 +112,7 @@ impl Supervisor {
         }) {
             Ok(databases) => databases,
             Err(error) => {
-                diag::warning(format_args!(
+                report_warning(format_args!(
                     "failed to scan pg_database for LagoDB workers: {error}"
                 ));
                 for database_oid in store.all_worker_databases() {
@@ -224,7 +224,7 @@ impl Supervisor {
             }) {
                 Ok(start) => start,
                 Err(error) => {
-                    diag::warning(format_args!(
+                    report_warning(format_args!(
                         "failed to start lagodb coordinator transaction: database_oid={database_oid}, error={error}"
                     ));
                     CoordinatorStart::Failed

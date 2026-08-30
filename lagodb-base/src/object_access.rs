@@ -1,9 +1,9 @@
 //! Runtime-owned object-access hook routers.
 
-use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
+use crate::descriptor_directory::{DescriptorDirectory, DescriptorNode};
 use crate::{hooks, storage::volume_config::on_object_access};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::runtime_api::{
@@ -12,203 +12,13 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::{pg_guard, pg_sys};
 
-struct ObjectAccessHookNode {
-    descriptor: ObjectAccessHookDescriptor,
-    next: Cell<*const ObjectAccessHookNode>,
-}
-
-struct ObjectAccessHookDirectory {
-    head: Cell<*const ObjectAccessHookNode>,
-    tail: Cell<*const ObjectAccessHookNode>,
-}
-
-impl ObjectAccessHookDirectory {
-    const fn new() -> Self {
-        Self {
-            head: Cell::new(std::ptr::null()),
-            tail: Cell::new(std::ptr::null()),
-        }
-    }
-
-    fn append_node(&self, node: Box<ObjectAccessHookNode>) {
-        let node = Box::into_raw(node);
-        let tail = self.tail.replace(node);
-        if tail.is_null() {
-            self.head.set(node);
-        } else {
-            // SAFETY: tail is a leaked node owned by this backend-local directory.
-            unsafe { (*tail).next.set(node) };
-        }
-    }
-
-    #[cfg(test)]
-    fn append(&self, descriptor: ObjectAccessHookDescriptor) {
-        self.append_node(Box::new(ObjectAccessHookNode {
-            descriptor,
-            next: Cell::new(std::ptr::null()),
-        }));
-    }
-
-    #[allow(clippy::vec_box)] // Prepared nodes make commit allocation-free.
-    fn commit(&self, nodes: Vec<Box<ObjectAccessHookNode>>) -> bool {
-        let install = self.head.get().is_null() && !nodes.is_empty();
-        for node in nodes {
-            self.append_node(node);
-        }
-        install
-    }
-
-    #[cfg(test)]
-    fn register(&self, descriptor: ObjectAccessHookDescriptor) -> bool {
-        let first = self.head.get().is_null();
-        self.append(descriptor);
-        first
-    }
-
-    fn snapshot(&self) -> ObjectAccessHookSnapshot {
-        ObjectAccessHookSnapshot {
-            first: self.head.get(),
-            last: self.tail.get(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ObjectAccessHookSnapshot {
-    first: *const ObjectAccessHookNode,
-    last: *const ObjectAccessHookNode,
-}
-
-impl ObjectAccessHookSnapshot {
-    fn for_each_matching(
-        self,
-        access: pg_sys::ObjectAccessType::Type,
-        class_id: pg_sys::Oid,
-        mut callback: impl FnMut(ObjectAccessHookDescriptor),
-    ) {
-        let Some(event) = object_access_event_mask(access) else {
-            return;
-        };
-        let mut current = self.first;
-        while !current.is_null() {
-            // SAFETY: nodes are backend-lifetime allocations and the captured
-            // tail prevents this dispatch from observing recursive appends.
-            let node = unsafe { &*current };
-            let descriptor = node.descriptor;
-            if descriptor.event_mask & event != 0
-                && (descriptor.class_id == pg_sys::InvalidOid
-                    || descriptor.class_id == class_id)
-            {
-                callback(descriptor);
-            }
-            if current == self.last {
-                break;
-            }
-            current = node.next.get();
-        }
-    }
-}
-
-struct ObjectAccessStrHookNode {
-    descriptor: ObjectAccessStrHookDescriptor,
-    next: Cell<*const ObjectAccessStrHookNode>,
-}
-
-struct ObjectAccessStrHookDirectory {
-    head: Cell<*const ObjectAccessStrHookNode>,
-    tail: Cell<*const ObjectAccessStrHookNode>,
-}
-
-impl ObjectAccessStrHookDirectory {
-    const fn new() -> Self {
-        Self {
-            head: Cell::new(std::ptr::null()),
-            tail: Cell::new(std::ptr::null()),
-        }
-    }
-
-    fn append_node(&self, node: Box<ObjectAccessStrHookNode>) {
-        let node = Box::into_raw(node);
-        let tail = self.tail.replace(node);
-        if tail.is_null() {
-            self.head.set(node);
-        } else {
-            // SAFETY: tail is a leaked node owned by this backend-local directory.
-            unsafe { (*tail).next.set(node) };
-        }
-    }
-
-    #[cfg(test)]
-    fn append(&self, descriptor: ObjectAccessStrHookDescriptor) {
-        self.append_node(Box::new(ObjectAccessStrHookNode {
-            descriptor,
-            next: Cell::new(std::ptr::null()),
-        }));
-    }
-
-    #[allow(clippy::vec_box)] // Prepared nodes make commit allocation-free.
-    fn commit(&self, nodes: Vec<Box<ObjectAccessStrHookNode>>) -> bool {
-        let install = self.head.get().is_null() && !nodes.is_empty();
-        for node in nodes {
-            self.append_node(node);
-        }
-        install
-    }
-
-    #[cfg(test)]
-    fn register(&self, descriptor: ObjectAccessStrHookDescriptor) -> bool {
-        let first = self.head.get().is_null();
-        self.append(descriptor);
-        first
-    }
-
-    fn snapshot(&self) -> ObjectAccessStrHookSnapshot {
-        ObjectAccessStrHookSnapshot {
-            first: self.head.get(),
-            last: self.tail.get(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ObjectAccessStrHookSnapshot {
-    first: *const ObjectAccessStrHookNode,
-    last: *const ObjectAccessStrHookNode,
-}
-
-impl ObjectAccessStrHookSnapshot {
-    fn for_each_matching(
-        self,
-        access: pg_sys::ObjectAccessType::Type,
-        class_id: pg_sys::Oid,
-        mut callback: impl FnMut(ObjectAccessStrHookDescriptor),
-    ) {
-        let Some(event) = object_access_event_mask(access) else {
-            return;
-        };
-        let mut current = self.first;
-        while !current.is_null() {
-            // SAFETY: nodes are backend-lifetime allocations and the captured
-            // tail prevents this dispatch from observing recursive appends.
-            let node = unsafe { &*current };
-            let descriptor = node.descriptor;
-            if descriptor.event_mask & event != 0
-                && (descriptor.class_id == pg_sys::InvalidOid
-                    || descriptor.class_id == class_id)
-            {
-                callback(descriptor);
-            }
-            if current == self.last {
-                break;
-            }
-            current = node.next.get();
-        }
-    }
-}
+type ObjectAccessHookDirectory = DescriptorDirectory<ObjectAccessHookDescriptor>;
+type ObjectAccessStrHookDirectory =
+    DescriptorDirectory<ObjectAccessStrHookDescriptor>;
 
 thread_local! {
-    static OBJECT_ACCESS_HOOKS: ObjectAccessHookDirectory = const { ObjectAccessHookDirectory::new() };
-    static OBJECT_ACCESS_STR_HOOKS: ObjectAccessStrHookDirectory = const { ObjectAccessStrHookDirectory::new() };
+    static OBJECT_ACCESS_HOOKS: ObjectAccessHookDirectory = const { DescriptorDirectory::new() };
+    static OBJECT_ACCESS_STR_HOOKS: ObjectAccessStrHookDirectory = const { DescriptorDirectory::new() };
 }
 
 static PREV_OBJECT_ACCESS_HOOK: OnceLock<pg_sys::object_access_hook_type> =
@@ -220,9 +30,9 @@ pub(crate) struct PreparedObjectAccessHooks {
     // Both node families are allocated completely before atomic registration
     // starts publishing stable backend-lifetime addresses.
     #[allow(clippy::vec_box)]
-    nodes: Vec<Box<ObjectAccessHookNode>>,
+    nodes: Vec<Box<DescriptorNode<ObjectAccessHookDescriptor>>>,
     #[allow(clippy::vec_box)]
-    str_nodes: Vec<Box<ObjectAccessStrHookNode>>,
+    str_nodes: Vec<Box<DescriptorNode<ObjectAccessStrHookDescriptor>>>,
 }
 
 pub(crate) fn init() {
@@ -263,22 +73,12 @@ pub(crate) fn prepare_hooks(
         nodes: descriptors
             .iter()
             .copied()
-            .map(|descriptor| {
-                Box::new(ObjectAccessHookNode {
-                    descriptor,
-                    next: Cell::new(std::ptr::null()),
-                })
-            })
+            .map(DescriptorNode::new)
             .collect(),
         str_nodes: str_descriptors
             .iter()
             .copied()
-            .map(|descriptor| {
-                Box::new(ObjectAccessStrHookNode {
-                    descriptor,
-                    next: Cell::new(std::ptr::null()),
-                })
-            })
+            .map(DescriptorNode::new)
             .collect(),
     })
 }
@@ -312,20 +112,12 @@ fn install_router() {
 pub(crate) fn registered_hook_counts() -> (usize, usize) {
     fn ordinary(directory: &ObjectAccessHookDirectory) -> usize {
         let mut count = 0;
-        let mut current = directory.head.get();
-        while !current.is_null() {
-            count += 1;
-            current = unsafe { (*current).next.get() };
-        }
+        directory.snapshot().for_each(|_| count += 1);
         count
     }
     fn string(directory: &ObjectAccessStrHookDirectory) -> usize {
         let mut count = 0;
-        let mut current = directory.head.get();
-        while !current.is_null() {
-            count += 1;
-            current = unsafe { (*current).next.get() };
-        }
+        directory.snapshot().for_each(|_| count += 1);
         count
     }
     (
@@ -381,19 +173,28 @@ unsafe extern "C-unwind" fn object_access_router(
         if let Err(error) = on_object_access(access, class_id, object_id, sub_id) {
             PgReportError::from_domain_error(error).report();
         }
-        let hooks = OBJECT_ACCESS_HOOKS.with(ObjectAccessHookDirectory::snapshot);
-        hooks.for_each_matching(access, class_id, |descriptor| {
-            descriptor.on_access.expect("validated object-access hook")(
-                descriptor.context,
-                access,
-                class_id,
-                object_id,
-                sub_id,
-                arg,
+        if let Some(event) = object_access_event_mask(access) {
+            let hooks = OBJECT_ACCESS_HOOKS.with(|directory| directory.snapshot());
+            hooks.for_each_if(
+                |descriptor| {
+                    descriptor.event_mask & event != 0
+                        && (descriptor.class_id == pg_sys::InvalidOid
+                            || descriptor.class_id == class_id)
+                },
+                |descriptor| {
+                    descriptor.on_access.expect("validated object-access hook")(
+                        descriptor.context,
+                        access,
+                        class_id,
+                        object_id,
+                        sub_id,
+                        arg,
+                    );
+                    preserve_namespace_denial(access, arg, denied);
+                    denied |= namespace_result(access, arg) == Some(false);
+                },
             );
-            preserve_namespace_denial(access, arg, denied);
-            denied |= namespace_result(access, arg) == Some(false);
-        });
+        }
     }
 }
 
@@ -410,22 +211,31 @@ unsafe extern "C-unwind" fn object_access_str_router(
             previous(access, class_id, object_name, sub_id, arg);
         }
         let mut denied = namespace_result(access, arg) == Some(false);
-        let hooks =
-            OBJECT_ACCESS_STR_HOOKS.with(ObjectAccessStrHookDirectory::snapshot);
-        hooks.for_each_matching(access, class_id, |descriptor| {
-            descriptor
-                .on_access
-                .expect("validated object-access-str hook")(
-                descriptor.context,
-                access,
-                class_id,
-                object_name,
-                sub_id,
-                arg,
+        if let Some(event) = object_access_event_mask(access) {
+            let hooks =
+                OBJECT_ACCESS_STR_HOOKS.with(|directory| directory.snapshot());
+            hooks.for_each_if(
+                |descriptor| {
+                    descriptor.event_mask & event != 0
+                        && (descriptor.class_id == pg_sys::InvalidOid
+                            || descriptor.class_id == class_id)
+                },
+                |descriptor| {
+                    descriptor
+                        .on_access
+                        .expect("validated object-access-str hook")(
+                        descriptor.context,
+                        access,
+                        class_id,
+                        object_name,
+                        sub_id,
+                        arg,
+                    );
+                    preserve_namespace_denial(access, arg, denied);
+                    denied |= namespace_result(access, arg) == Some(false);
+                },
             );
-            preserve_namespace_denial(access, arg, denied);
-            denied |= namespace_result(access, arg) == Some(false);
-        });
+        }
     }
 }
 
@@ -533,16 +343,23 @@ mod tests {
         let snapshot = directory.snapshot();
 
         let mut matches = 0;
-        snapshot.for_each_matching(
-            pg_sys::ObjectAccessType::OAT_DROP,
-            relation_class,
+        let event = object_access_event_mask(pg_sys::ObjectAccessType::OAT_DROP)
+            .expect("known object-access event");
+        snapshot.for_each_if(
+            |descriptor| {
+                descriptor.event_mask & event != 0
+                    && (descriptor.class_id == pg_sys::InvalidOid
+                        || descriptor.class_id == relation_class)
+            },
             |_| matches += 1,
         );
-        assert_eq!(matches, 1);
 
-        snapshot.for_each_matching(
-            pg_sys::ObjectAccessType::OAT_DROP,
-            procedure_class,
+        snapshot.for_each_if(
+            |descriptor| {
+                descriptor.event_mask & event != 0
+                    && (descriptor.class_id == pg_sys::InvalidOid
+                        || descriptor.class_id == procedure_class)
+            },
             |_| matches += 1,
         );
         assert_eq!(matches, 1);
@@ -556,9 +373,14 @@ mod tests {
         let snapshot = directory.snapshot();
         directory.append(descriptor(OBJECT_ACCESS_DROP, class_id));
         let mut ordinary = 0;
-        snapshot.for_each_matching(
-            pg_sys::ObjectAccessType::OAT_DROP,
-            class_id,
+        let event = object_access_event_mask(pg_sys::ObjectAccessType::OAT_DROP)
+            .expect("known object-access event");
+        snapshot.for_each_if(
+            |descriptor| {
+                descriptor.event_mask & event != 0
+                    && (descriptor.class_id == pg_sys::InvalidOid
+                        || descriptor.class_id == class_id)
+            },
             |_| ordinary += 1,
         );
         assert_eq!(ordinary, 1);
@@ -568,9 +390,12 @@ mod tests {
         let str_snapshot = str_directory.snapshot();
         str_directory.append(str_descriptor(OBJECT_ACCESS_DROP, class_id));
         let mut string = 0;
-        str_snapshot.for_each_matching(
-            pg_sys::ObjectAccessType::OAT_DROP,
-            class_id,
+        str_snapshot.for_each_if(
+            |descriptor| {
+                descriptor.event_mask & event != 0
+                    && (descriptor.class_id == pg_sys::InvalidOid
+                        || descriptor.class_id == class_id)
+            },
             |_| string += 1,
         );
         assert_eq!(string, 1);
@@ -619,9 +444,14 @@ mod tests {
         directory.append(first);
         directory.append(second);
         let mut ordinary_order = Vec::new();
-        directory.snapshot().for_each_matching(
-            pg_sys::ObjectAccessType::OAT_DROP,
-            class_id,
+        let event = object_access_event_mask(pg_sys::ObjectAccessType::OAT_DROP)
+            .expect("known object-access event");
+        directory.snapshot().for_each_if(
+            |descriptor| {
+                descriptor.event_mask & event != 0
+                    && (descriptor.class_id == pg_sys::InvalidOid
+                        || descriptor.class_id == class_id)
+            },
             |descriptor| ordinary_order.push(descriptor.context),
         );
         assert_eq!(ordinary_order, vec![first.context, second.context]);
@@ -634,9 +464,12 @@ mod tests {
         str_directory.append(first);
         str_directory.append(second);
         let mut string_order = Vec::new();
-        str_directory.snapshot().for_each_matching(
-            pg_sys::ObjectAccessType::OAT_DROP,
-            class_id,
+        str_directory.snapshot().for_each_if(
+            |descriptor| {
+                descriptor.event_mask & event != 0
+                    && (descriptor.class_id == pg_sys::InvalidOid
+                        || descriptor.class_id == class_id)
+            },
             |descriptor| string_order.push(descriptor.context),
         );
         assert_eq!(string_order, vec![first.context, second.context]);

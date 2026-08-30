@@ -3,11 +3,10 @@ use std::ffi::CStr;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
-use crate::diag;
 use crate::error::LagodbError;
 use crate::registry;
 use crate::worker::state::WorkerKey;
-use lagodb_core::diag::PgReportError;
+use lagodb_core::diag::{PgReportError, log_info, report_warning};
 use lagodb_core::extension_worker::{
     WorkerContextRaw, WorkerSchedule, WorkerTransaction,
 };
@@ -113,7 +112,7 @@ impl Worker {
                     database_name,
                 ),
                 Ok(WorkerPreparation::RegistrationMissing) => {
-                    diag::warning(format_args!(
+                    report_warning(format_args!(
                         "LagoDB worker registration disappeared before start: database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}"
                     ));
                     store.worker_registration_missing(key);
@@ -121,7 +120,7 @@ impl Worker {
                 }
                 Ok(WorkerPreparation::Stale) => return,
                 Err(error) => {
-                    diag::warning(format_args!(
+                    report_warning(format_args!(
                         "failed to load LagoDB worker entry point: database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}, error={error}"
                     ));
                     // Entry-point preparation errors must reach the single FFI
@@ -130,7 +129,7 @@ impl Worker {
                 }
             };
 
-        diag::info(format_args!(
+        log_info(format_args!(
             "starting LagoDB extension worker: database={database_name}, database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}"
         ));
 
@@ -171,7 +170,7 @@ impl Worker {
             }
             0 => WorkerSchedule::Idle,
             unsupported => {
-                diag::warning(format_args!(
+                report_warning(format_args!(
                     "LagoDB worker returned an unsupported negative restart delay: database_oid={database_oid}, extension_oid={extension_oid}, worker_name={worker_name}, delay={unsupported}"
                 ));
                 WorkerSchedule::Idle

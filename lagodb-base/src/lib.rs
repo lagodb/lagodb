@@ -10,7 +10,7 @@ use pgrx::prelude::*;
 use pgrx::{PgRelation, pg_getarg, pg_getarg_datum_raw};
 
 mod catalog;
-mod diag;
+mod descriptor_directory;
 mod error;
 mod gucs;
 mod hooks;
