@@ -10,10 +10,10 @@ use crate::error::{
     LagodbError, LagodbResult, WorkerCatalogOperation, WorkerCatalogResultExt,
 };
 
-mod row;
-
-use row::WorkerTuple;
-pub(crate) use row::{CatalogName, NewWorkerRegistration, WorkerRegistrationRow};
+use super::worker_row::WorkerTuple;
+pub(crate) use super::worker_row::{
+    CatalogName, NewWorkerRegistration, WorkerRegistrationRow,
+};
 
 const WORKERS_TABLE: &CStr = c"workers";
 const WORKER_ID_SEQUENCE: &CStr = c"worker_id_seq";

@@ -4,7 +4,7 @@ use std::fmt;
 use lagodb_core::handles::{HeapTupleGuard, HeapTupleRef};
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
-use super::WorkerId;
+use super::worker::WorkerId;
 
 #[derive(Clone, Copy)]
 #[repr(i16)]
@@ -143,7 +143,7 @@ impl<'a> WorkerTuple<'a> {
 
     pub(super) fn worker_id(&self) -> WorkerId {
         // SAFETY: WorkerId is the int4 column fixed by the tuple schema.
-        WorkerId(unsafe { pg_sys::DatumGetInt32(self.datum(Column::WorkerId)) })
+        WorkerId::new(unsafe { pg_sys::DatumGetInt32(self.datum(Column::WorkerId)) })
     }
 
     pub(super) fn extension_name_eq(&self, extension_name: &CStr) -> bool {
