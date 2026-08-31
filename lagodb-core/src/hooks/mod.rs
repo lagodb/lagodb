@@ -7,6 +7,7 @@
 mod error;
 pub mod object_access_hook;
 mod planning;
+mod query_source;
 mod utility_consumer;
 pub mod utility_hook;
 
@@ -15,8 +16,8 @@ use std::mem::size_of;
 use std::ptr;
 
 use crate::runtime_api::{
-    MaintenanceProvider, ProviderIdentity, ProviderRegistration, RuntimeApiError,
-    RuntimeClient, RuntimeRegistrationError,
+    MaintenanceProvider, ProviderIdentity, ProviderRegistration,
+    QuerySourceDescriptor, RuntimeApiError, RuntimeClient, RuntimeRegistrationError,
 };
 
 pub use crate::runtime_api::{
@@ -42,6 +43,21 @@ pub use utility_hook::{
 };
 
 pub(crate) use planning::{register_modify, register_relation_scan};
+
+/// Stage this provider DSO's query-source descriptor for the next atomic
+/// [`freeze_hooks`] transaction.
+///
+/// Providers should use the typed Arrow source adapter's safe registration
+/// method instead of calling this raw entry point.
+///
+/// # Safety
+///
+/// The descriptor must satisfy all callback, lifetime, panic-containment, and
+/// single-backend-thread contracts documented by [`QuerySourceDescriptor::new`].
+#[doc(hidden)]
+pub unsafe fn register_query_source(descriptor: QuerySourceDescriptor) {
+    query_source::register(descriptor);
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FreezeState {
@@ -122,6 +138,7 @@ pub(crate) fn freeze_hooks_with_provider(
         object_access_hook::ObjectAccessHookCallbacks::BACKEND,
     );
     let planning = planning::descriptors();
+    let query_source = query_source::descriptor();
 
     let counts = (
         u32::try_from(utility.descriptors().len()),
@@ -183,6 +200,10 @@ pub(crate) fn freeze_hooks_with_provider(
             .unwrap_or(ptr::null()),
         modify_planner: planning
             .modify
+            .as_ref()
+            .map(ptr::from_ref)
+            .unwrap_or(ptr::null()),
+        query_source: query_source
             .as_ref()
             .map(ptr::from_ref)
             .unwrap_or(ptr::null()),

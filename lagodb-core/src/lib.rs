@@ -90,6 +90,9 @@ pub mod diag;
 /// Shared `copyObject`-safe plan-data primitives.
 pub mod plan_data;
 
+/// Shared contracts for provider-neutral query planning and source execution.
+pub mod query_contract;
+
 /// Internal wrapper for PostgreSQL functions
 mod wrapper;
 
