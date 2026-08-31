@@ -9,12 +9,18 @@ mod execution;
 pub use error::CustomScanError;
 mod filter;
 mod gucs;
+mod methods;
 mod plan_data;
 mod planning;
 pub mod provider;
 
 use provider::RelationContext;
 
+pub use methods::{
+    BeginCustomScan, CreateCustomScanState, CustomScanMethodTables, EndCustomScan,
+    ExecCustomScan, ExplainCustomScan, PlanCustomPath, ReScanCustomScan,
+    ReparameterizeCustomPath, SerialCustomScanCallbacks,
+};
 pub use plan_data::ScanPurpose;
 
 // Backend tests live in `pg-backend-tests`; these are only the production

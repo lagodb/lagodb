@@ -29,7 +29,7 @@ impl PlanDataWriter {
     /// The field encoder and writer finalization form one operation, so plan
     /// sinks cannot publish a partially encoded provider payload or forget to
     /// propagate a deferred writer error.
-    pub(crate) fn encode_list<E>(
+    pub fn encode_list<E>(
         encode: impl FnOnce(&mut Self) -> Result<(), E>,
     ) -> Result<*mut pg_sys::List, E>
     where
@@ -129,6 +129,25 @@ impl PlanDataWriter {
         if self.error.is_none() {
             unsafe { self.push_node(list.cast()) };
         }
+    }
+
+    /// Append an already encoded nested plan-data frame.
+    ///
+    /// This is the composition boundary for independently owned codecs, such
+    /// as the engine envelope and an opaque provider source plan.
+    ///
+    /// # Safety
+    ///
+    /// `list` must be NIL or a live, `copyObject`-safe PostgreSQL `T_List` in
+    /// the current planner memory context.
+    pub unsafe fn append_encoded_list(
+        &mut self,
+        list: *mut pg_sys::List,
+    ) -> &mut Self {
+        if self.error.is_none() {
+            unsafe { self.append_list(list) };
+        }
+        self
     }
 
     pub fn append_nested(

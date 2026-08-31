@@ -4,38 +4,14 @@ use core::any::TypeId;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use pgrx::pg_sys;
-
 use crate::customscan::execution::{exec, explain, state};
 use crate::customscan::planning::{builder, final_plan};
+use crate::customscan::{CustomScanMethodTables, SerialCustomScanCallbacks};
 
 use super::LagodbCustomScanProvider;
 
-/// The three PostgreSQL callback tables owned by one provider type.
-pub struct ProviderMethodTables {
-    path: pg_sys::CustomPathMethods,
-    scan: pg_sys::CustomScanMethods,
-    exec: pg_sys::CustomExecMethods,
-}
-
-// SAFETY: every `CustomName` points to immutable process-lifetime bytes and
-// all remaining fields are function pointers.
-unsafe impl Send for ProviderMethodTables {}
-unsafe impl Sync for ProviderMethodTables {}
-
-impl ProviderMethodTables {
-    pub fn path(&'static self) -> &'static pg_sys::CustomPathMethods {
-        &self.path
-    }
-
-    pub fn scan(&'static self) -> &'static pg_sys::CustomScanMethods {
-        &self.scan
-    }
-
-    pub fn exec(&'static self) -> &'static pg_sys::CustomExecMethods {
-        &self.exec
-    }
-}
+/// Stable method-table type used by the relation provider facade.
+pub type ProviderMethodTables = CustomScanMethodTables;
 
 #[derive(Clone, Copy)]
 struct MethodTablesRef(&'static ProviderMethodTables);
@@ -53,37 +29,21 @@ pub fn method_tables_for<P: LagodbCustomScanProvider>()
         return tables.0;
     }
 
-    let name = P::NAME.as_ptr();
-    let tables = ProviderMethodTables {
-        path: pg_sys::CustomPathMethods {
-            CustomName: name,
-            PlanCustomPath: Some(final_plan::plan_custom_path_trampoline::<P>),
-            ReparameterizeCustomPathByChild: Some(
+    let tables = ProviderMethodTables::serial(
+        P::NAME,
+        SerialCustomScanCallbacks {
+            plan: final_plan::plan_custom_path_trampoline::<P>,
+            reparameterize: Some(
                 builder::reparameterize_custom_path_by_child_trampoline::<P>,
             ),
+            create_state: state::create_custom_scan_state_trampoline::<P>,
+            begin: exec::begin_custom_scan_trampoline::<P>,
+            execute: exec::exec_custom_scan_trampoline::<P>,
+            end: exec::end_custom_scan_trampoline::<P>,
+            rescan: exec::rescan_custom_scan_trampoline::<P>,
+            explain: explain::explain_custom_scan_trampoline::<P>,
         },
-        scan: pg_sys::CustomScanMethods {
-            CustomName: name,
-            CreateCustomScanState: Some(
-                state::create_custom_scan_state_trampoline::<P>,
-            ),
-        },
-        exec: pg_sys::CustomExecMethods {
-            CustomName: name,
-            BeginCustomScan: Some(exec::begin_custom_scan_trampoline::<P>),
-            ReScanCustomScan: Some(exec::rescan_custom_scan_trampoline::<P>),
-            ExecCustomScan: Some(exec::exec_custom_scan_trampoline::<P>),
-            EndCustomScan: Some(exec::end_custom_scan_trampoline::<P>),
-            MarkPosCustomScan: None,
-            RestrPosCustomScan: None,
-            EstimateDSMCustomScan: None,
-            InitializeDSMCustomScan: None,
-            ReInitializeDSMCustomScan: None,
-            InitializeWorkerCustomScan: None,
-            ShutdownCustomScan: None,
-            ExplainCustomScan: Some(explain::explain_custom_scan_trampoline::<P>),
-        },
-    };
+    );
 
     let leaked = Box::leak(Box::new(tables));
     METHOD_TABLES.with_borrow_mut(|cache| {

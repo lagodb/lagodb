@@ -97,6 +97,11 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
             .tuple_layout
             .validate_executor(cscan, scan_slot)
     }?;
+    unsafe {
+        priv_payload
+            .tuple_layout
+            .initialize_executor_slot(scan_slot);
+    }
     let scan_tuple_desc = unsafe { (*scan_slot).tts_tupleDescriptor };
 
     wrapper.decoded_private = Some(provider_private);

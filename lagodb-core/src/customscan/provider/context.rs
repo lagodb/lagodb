@@ -146,6 +146,16 @@ impl<'a> PathContext<'a> {
         unsafe { self.baserel.as_ref().tuples }
     }
 
+    /// Whether the base-relation path target contains no expressions. Such a
+    /// path produces rows for an upper node without exposing a relation
+    /// column, so a provider can offer projection pruning even when it has no
+    /// pushed filter.
+    #[inline]
+    pub fn has_empty_path_target(&self) -> bool {
+        let target = unsafe { self.baserel.as_ref().reltarget };
+        unsafe { pg_sys::list_length((*target).exprs) == 0 }
+    }
+
     /// Whether the base relation PathTarget requests a whole-row value.
     pub fn modify_requests_wholerow(&self) -> bool {
         // SAFETY: `baserel`, `root`, and the nodes reachable from them are live

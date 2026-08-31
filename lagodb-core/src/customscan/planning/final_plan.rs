@@ -99,8 +99,7 @@ unsafe fn plan_custom_path<P: LagodbCustomScanProvider>(
         list
     };
 
-    let tuple_planner =
-        BaseScanTuplePlanner::new(unsafe { (*rel).relid }, relation_oid);
+    let tuple_planner = BaseScanTuplePlanner::new(unsafe { (*rel).relid });
     let scan_tuple = if path_private.requires_wholerow {
         PlannedScanTuple::relation()
     } else if path_private.purpose.is_modify() {

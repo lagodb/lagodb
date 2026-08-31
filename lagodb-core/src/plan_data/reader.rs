@@ -95,7 +95,7 @@ impl<'a> PlanDataReader<'a> {
     ///
     /// A non-NULL `list` must point to a live PostgreSQL node for the duration
     /// of the decoder call.
-    pub(crate) unsafe fn decode_checked_list<T, E>(
+    pub unsafe fn decode_checked_list<T, E>(
         list: *mut pg_sys::List,
         field: usize,
         decode: impl FnOnce(&mut Self) -> Result<T, E>,
@@ -250,6 +250,20 @@ impl<'a> PlanDataReader<'a> {
         let node = cell.cast::<pg_sys::Node>();
         unsafe { Self::expect(node, expected, field)? };
         Ok(node.cast())
+    }
+
+    /// Read an independently encoded nested plan-data frame.
+    ///
+    /// The returned pointer remains owned by PostgreSQL and is valid for the
+    /// same lifetime as this reader's containing plan. The nested codec must
+    /// perform its own complete-field validation.
+    pub fn read_encoded_list(&mut self) -> Result<*mut pg_sys::List, PlanDataError> {
+        let list = self.read_optional_list(pg_sys::NodeTag::T_List)?;
+        if list.is_null() {
+            Err(PlanDataError::NullList)
+        } else {
+            Ok(list)
+        }
     }
 
     #[inline]

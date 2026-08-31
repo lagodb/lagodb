@@ -6,7 +6,7 @@ use std::ptr;
 
 use pgrx::pg_sys;
 
-use crate::runtime_api::{ModifyPlannerDescriptor, PlanErrorRecord};
+use crate::runtime_api::{FfiErrorRecord, ModifyPlannerDescriptor};
 
 use super::planning;
 
@@ -23,7 +23,7 @@ pub(super) fn descriptor() -> ModifyPlannerDescriptor {
 unsafe extern "C-unwind" fn planner_pre(
     _context: *mut c_void,
     parse: *mut pg_sys::Query,
-    error: *mut PlanErrorRecord,
+    error: *mut FfiErrorRecord,
 ) -> u32 {
     let operation = || {
         // SAFETY: `parse` is the live query forwarded by the planner hook.
@@ -37,7 +37,7 @@ unsafe extern "C-unwind" fn planner_pre(
 unsafe extern "C-unwind" fn planner_post(
     _context: *mut c_void,
     planned: *mut pg_sys::PlannedStmt,
-    error: *mut PlanErrorRecord,
+    error: *mut FfiErrorRecord,
 ) -> u32 {
     let operation = || {
         // SAFETY: `planned` is the live non-null planner result forwarded by
@@ -57,7 +57,7 @@ unsafe extern "C-unwind" fn plan_upper_paths(
     input_rel: *mut pg_sys::RelOptInfo,
     output_rel: *mut pg_sys::RelOptInfo,
     extra: *mut c_void,
-    error: *mut PlanErrorRecord,
+    error: *mut FfiErrorRecord,
 ) -> u32 {
     let operation = || {
         // SAFETY: all arguments are forwarded from the live PostgreSQL

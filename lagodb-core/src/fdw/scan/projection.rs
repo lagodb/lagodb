@@ -5,16 +5,16 @@ use core::ptr;
 use core::slice;
 use std::collections::BTreeSet;
 
-use pgrx::pg_guard;
 use pgrx::pg_sys;
-
-use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
-use crate::expr::relation::RelationVarsByAttno;
 
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::super::system_column::SystemColumnRequirement;
 use super::error::ForeignScanError;
 use super::pathkeys::ForeignPathKeys;
+
+mod dependencies;
+
+use dependencies::ProjectionAnalysis;
 
 /// Provider read-set contract, kept separate from the executor scan tuple.
 /// PostgreSQL system columns are intentionally absent: `tableoid` is
@@ -94,9 +94,10 @@ pub enum ScanProjection {
     Projected { attnos: Vec<pg_sys::AttrNumber> },
     /// `fdw_scan_tlist` contains one synthetic NULL slot column.  It carries
     /// no relation attribute and is used when the executor needs no base
-    /// relation column, for example for a constant-only scan.  In PostgreSQL
-    /// 17 ordinary ForeignPaths, aggregate queries such as COUNT(*) use a
-    /// physical targetlist and are represented as `Projected` instead.
+    /// relation column, for example for a constant-only scan whose plan
+    /// targetlist can be rewritten without a base-relation `Var`. PostgreSQL
+    /// 17 ordinary ForeignPaths use a physical targetlist for `COUNT(*)`, so
+    /// those scans retain [`Self::Relation`] while writing no attributes.
     SyntheticNull,
 }
 
@@ -244,102 +245,14 @@ pub(crate) struct PlannedProjection {
     pub(crate) requirements: ColumnRequirements,
 }
 
-/// Planner-only relation dependency indexes. No index is retained in executor
-/// state or consulted by the per-row writer; the finalized relation mapping is
-/// an array indexed by attribute number.
-struct ProjectionAnalysis {
-    vars_by_attno: RelationVarsByAttno,
-    executor_vars_by_attno: RelationVarsByAttno,
-    direct_outputs: Vec<DirectOutput>,
-    can_narrow: bool,
-    provider_requires_all_columns: bool,
-    executor_requires_all_columns: bool,
-    system_columns: Vec<SystemColumnRequirement>,
-}
-
-#[derive(Clone, Copy)]
-enum DependencyScope {
-    Executor,
-    Provider,
-}
-
-impl Default for ProjectionAnalysis {
-    fn default() -> Self {
-        Self {
-            vars_by_attno: RelationVarsByAttno::default(),
-            executor_vars_by_attno: RelationVarsByAttno::default(),
-            direct_outputs: Vec::new(),
-            can_narrow: true,
-            provider_requires_all_columns: false,
-            executor_requires_all_columns: false,
-            system_columns: Vec::new(),
-        }
-    }
-}
-
-impl ProjectionAnalysis {
-    fn absorb(&mut self, usage: RelationExprUsage, scope: DependencyScope) {
-        if usage.has_whole_row() {
-            self.provider_requires_all_columns = true;
-            if matches!(scope, DependencyScope::Executor) {
-                self.executor_requires_all_columns = true;
-                self.can_narrow = false;
-            }
-        }
-        if !usage.system_attnos().is_empty() {
-            self.system_columns.extend(
-                usage
-                    .system_attnos()
-                    .iter()
-                    .copied()
-                    .map(SystemColumnRequirement::from_attno),
-            );
-            self.can_narrow = false;
-        }
-        for var in usage.user_vars() {
-            if let Some(existing) = self.vars_by_attno.get(var.attno) {
-                let same_nullingrels = unsafe {
-                    pg_sys::bms_equal(
-                        existing.as_ref().varnullingrels,
-                        var.raw.as_ref().varnullingrels,
-                    )
-                };
-                if !same_nullingrels {
-                    self.can_narrow = false;
-                }
-            } else {
-                self.vars_by_attno.insert(var.raw);
-            }
-            if matches!(scope, DependencyScope::Executor) {
-                if let Some(existing) = self.executor_vars_by_attno.get(var.attno) {
-                    let same_nullingrels = unsafe {
-                        pg_sys::bms_equal(
-                            existing.as_ref().varnullingrels,
-                            var.raw.as_ref().varnullingrels,
-                        )
-                    };
-                    if !same_nullingrels {
-                        self.can_narrow = false;
-                    }
-                } else {
-                    self.executor_vars_by_attno.insert(var.raw);
-                }
-            }
-        }
-    }
-}
-
-struct DirectOutput {
-    attno: pg_sys::AttrNumber,
-    var: *mut pg_sys::Var,
-    resjunk: bool,
-}
-
 /// Build the relation's executor projection and the provider read set.
 ///
-/// All inputs are pre-setrefs planner nodes.  The returned `fdw_scan_tlist`
-/// is either NIL, a Var-only list, or a one-column synthetic NULL list
-/// allocated in the current planner context;
+/// `targetlist` is PostgreSQL's physical execution carrier and is used only to
+/// prove whether `setrefs.c` can rewrite a narrowed scan tuple. Semantic output
+/// dependencies come from `path_target_exprs`, local residual quals, and the
+/// provider/recheck inputs. The returned `fdw_scan_tlist` is either NIL, a
+/// Var-only list, or a one-column synthetic NULL list allocated in the current
+/// planner context;
 /// `projection_policy` controls whether the provider permits narrowing it.
 ///
 /// # Safety
@@ -361,53 +274,17 @@ pub(crate) unsafe fn plan_projection(
     row_identity_requirement: ForeignRowIdentityRequirement,
     mut requirements: ColumnRequirements,
 ) -> Result<PlannedProjection, ForeignScanError> {
-    let analyzer = RelationExprAnalyzer::new(RelationScope::exact(scan_relid));
-    let mut analysis = ProjectionAnalysis::default();
-
-    unsafe {
-        inspect_targetlist(
+    let mut analysis = unsafe {
+        ProjectionAnalysis::analyze(
+            scan_relid,
             targetlist,
-            &analyzer,
-            &mut analysis,
-            DependencyScope::Executor,
-        );
-        inspect_expr_list(
             path_target_exprs,
-            &analyzer,
-            &mut analysis,
-            DependencyScope::Executor,
-        );
-        for expr in pathkeys.expressions() {
-            inspect_expr(
-                expr,
-                &analyzer,
-                &mut analysis,
-                // PostgreSQL selects the local sort member from the relation
-                // target through the EC.  The provider-selected member is a
-                // remote read dependency and need not be written to the
-                // executor slot unless the target/qual analysis also needs it.
-                DependencyScope::Provider,
-            );
-        }
-        inspect_expr_list(
+            pathkeys,
             residual_quals,
-            &analyzer,
-            &mut analysis,
-            DependencyScope::Executor,
-        );
-        inspect_expr_list(
             fdw_exprs,
-            &analyzer,
-            &mut analysis,
-            DependencyScope::Provider,
-        );
-        inspect_expr_list(
             recheck_quals,
-            &analyzer,
-            &mut analysis,
-            DependencyScope::Executor,
-        );
-    }
+        )
+    };
 
     for attno in analysis.vars_by_attno.attnos() {
         requirements.require_column(attno)?;
@@ -507,104 +384,6 @@ pub(crate) unsafe fn plan_projection(
         write_plan: SlotWritePlan::complete(),
         requirements,
     })
-}
-
-/// # Safety
-///
-/// `targetlist` must be NULL or a live planner targetlist whose cells contain
-/// live `TargetEntry` nodes for the duration of this call.
-unsafe fn inspect_targetlist(
-    targetlist: *mut pg_sys::List,
-    analyzer: &RelationExprAnalyzer,
-    analysis: &mut ProjectionAnalysis,
-    scope: DependencyScope,
-) {
-    if targetlist.is_null() {
-        return;
-    }
-    let length = unsafe { pg_sys::list_length(targetlist) };
-    for index in 0..length {
-        let entry = unsafe { pg_sys::list_nth(targetlist, index) }
-            as *mut pg_sys::TargetEntry;
-        if entry.is_null()
-            || unsafe { (*entry).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
-        {
-            analysis.can_narrow = false;
-            continue;
-        }
-        let expr = unsafe { (*entry).expr };
-        unsafe { inspect_expr(expr, analyzer, analysis, scope) };
-        if !expr.is_null() && unsafe { (*expr).type_ } == pg_sys::NodeTag::T_Var {
-            let var = expr.cast::<pg_sys::Var>();
-            if unsafe { is_local_user_var(var, analyzer) } {
-                analysis.direct_outputs.push(DirectOutput {
-                    attno: unsafe { (*var).varattno },
-                    var,
-                    resjunk: unsafe { (*entry).resjunk },
-                });
-            }
-        }
-    }
-}
-
-/// # Safety
-///
-/// `list` must be NULL or a live planner list of expression nodes whose cells
-/// remain valid for the duration of this call.
-unsafe fn inspect_expr_list(
-    list: *mut pg_sys::List,
-    analyzer: &RelationExprAnalyzer,
-    analysis: &mut ProjectionAnalysis,
-    scope: DependencyScope,
-) {
-    if list.is_null() {
-        return;
-    }
-    let length = unsafe { pg_sys::list_length(list) };
-    for index in 0..length {
-        let expr = unsafe { pg_sys::list_nth(list, index) } as *mut pg_sys::Expr;
-        unsafe { inspect_expr(expr, analyzer, analysis, scope) };
-    }
-}
-
-/// # Safety
-///
-/// `expr` must be NULL or a live planner expression node.  `analyzer` and
-/// `analysis` must remain exclusively borrowed for the duration of the call.
-unsafe fn inspect_expr(
-    expr: *mut pg_sys::Expr,
-    analyzer: &RelationExprAnalyzer,
-    analysis: &mut ProjectionAnalysis,
-    scope: DependencyScope,
-) {
-    if expr.is_null() {
-        analysis.can_narrow = false;
-        return;
-    }
-    if matches!(scope, DependencyScope::Executor)
-        && unsafe { contains_placeholder(expr.cast()) }
-    {
-        analysis.can_narrow = false;
-    }
-    let usage = unsafe { analyzer.collect_expr(expr) };
-    analysis.absorb(usage, scope);
-}
-
-/// # Safety
-///
-/// `var` must be a live PostgreSQL `Var` node from the planner expression tree
-/// represented by `analyzer`.
-unsafe fn is_local_user_var(
-    var: *mut pg_sys::Var,
-    analyzer: &RelationExprAnalyzer,
-) -> bool {
-    // The analyzer already owns the relation-scope rule.  Re-run its tiny
-    // public observation here rather than exposing another raw scope getter.
-    let usage = unsafe { analyzer.collect_expr(var.cast()) };
-    usage.user_vars().len() == 1
-        && usage.system_attnos().is_empty()
-        && !usage.has_whole_row()
-        && usage.user_vars()[0].attno == unsafe { (*var).varattno }
 }
 
 /// # Safety
@@ -738,44 +517,4 @@ unsafe fn append_synthetic_null_tlist() -> Result<*mut pg_sys::List, ForeignScan
         ));
     }
     Ok(unsafe { pg_sys::lappend(ptr::null_mut(), entry.cast()) })
-}
-
-/// Return true when an expression tree contains a PlaceholderVar.  The
-/// framework deliberately falls back to the relation-shaped tuple for this
-/// shape because its executor/setrefs contract is not a plain base-Var map.
-/// # Safety
-///
-/// `node` must be NULL or a live planner expression node whose tree remains
-/// valid while PostgreSQL invokes the walker callback.
-unsafe fn contains_placeholder(node: *mut pg_sys::Node) -> bool {
-    let mut found = false;
-    unsafe {
-        pg_sys::expression_tree_walker(
-            node,
-            Some(placeholder_walker),
-            (&mut found as *mut bool).cast(),
-        );
-    }
-    found
-}
-
-#[pg_guard]
-/// # Safety
-///
-/// PostgreSQL invokes this callback synchronously with a live expression node
-/// and the non-NULL `context` pointer supplied by `contains_placeholder` or a
-/// recursive call from PostgreSQL's expression walker.
-unsafe extern "C-unwind" fn placeholder_walker(
-    node: *mut pg_sys::Node,
-    context: *mut c_void,
-) -> bool {
-    if node.is_null() {
-        return false;
-    }
-    let found = unsafe { &mut *(context.cast::<bool>()) };
-    if unsafe { (*node).type_ } == pg_sys::NodeTag::T_PlaceHolderVar {
-        *found = true;
-        return true;
-    }
-    unsafe { pg_sys::expression_tree_walker(node, Some(placeholder_walker), context) }
 }

@@ -77,6 +77,21 @@ impl PgReportError {
         self.sqlerrcode
     }
 
+    #[inline]
+    pub fn message(&self) -> &str {
+        self.report.message()
+    }
+
+    #[inline]
+    pub fn detail(&self) -> Option<&str> {
+        self.report.detail()
+    }
+
+    #[inline]
+    pub fn hint(&self) -> Option<&str> {
+        self.report.hint()
+    }
+
     /// Rebuild the report using the outer SQLSTATE so reporting and hook conversion stay consistent.
     #[inline]
     pub fn into_report(self) -> ErrorReport {
@@ -89,6 +104,30 @@ impl PgReportError {
             out = out.set_hint(hint.to_string());
         }
         out
+    }
+
+    /// Add an outer operation label and optional cleanup detail without losing
+    /// the structured SQLSTATE, DETAIL, or HINT captured at an inner boundary.
+    pub fn contextualize(
+        self,
+        operation: &'static str,
+        cleanup_detail: Option<String>,
+    ) -> Self {
+        let sqlerrcode = self.sql_error_code();
+        let report = self.into_report();
+        let message = format!("{operation}: {}", report.message());
+        let detail = match (report.detail(), cleanup_detail) {
+            (Some(detail), Some(cleanup)) => Some(format!("{detail}\n{cleanup}")),
+            (Some(detail), None) => Some(detail.to_owned()),
+            (None, Some(cleanup)) => Some(cleanup),
+            (None, None) => None,
+        };
+        Self::from_parts(
+            sqlerrcode,
+            message,
+            detail,
+            report.hint().map(str::to_owned),
+        )
     }
 
     #[inline]

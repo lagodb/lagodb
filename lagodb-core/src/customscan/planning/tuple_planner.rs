@@ -2,7 +2,6 @@
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
-use core::ptr::NonNull;
 
 use pgrx::pg_sys;
 
@@ -31,27 +30,48 @@ impl PlannedScanTuple {
             layout: ScanTupleLayout::relation_with_storage_hint(attnos),
         }
     }
+
+    /// Build a one-column synthetic scan tuple while requesting no provider
+    /// columns. PostgreSQL requires a non-NIL `custom_scan_tlist` to install a
+    /// non-relation scan descriptor, and the single NULL cell gives each
+    /// produced row a valid virtual-slot shape.
+    unsafe fn row_only() -> Self {
+        let expression =
+            unsafe { pg_sys::makeNullConst(pg_sys::INT4OID, -1, pg_sys::InvalidOid) };
+        let entry = unsafe {
+            pg_sys::makeTargetEntry(
+                expression.cast::<pg_sys::Expr>(),
+                1,
+                ptr::null_mut(),
+                true,
+            )
+        };
+        Self {
+            custom_scan_tlist: unsafe {
+                pg_sys::lappend(ptr::null_mut(), entry.cast())
+            },
+            layout: ScanTupleLayout::row_only(),
+        }
+    }
 }
 
 /// Cohesive pre-setrefs planner for a base-relation CustomScan tuple.
 pub(crate) struct BaseScanTuplePlanner {
     scan_relid: pg_sys::Index,
-    relation_oid: pg_sys::Oid,
     analyzer: RelationExprAnalyzer,
 }
 
 impl BaseScanTuplePlanner {
-    pub(crate) fn new(scan_relid: pg_sys::Index, relation_oid: pg_sys::Oid) -> Self {
+    pub(crate) fn new(scan_relid: pg_sys::Index) -> Self {
         Self {
             scan_relid,
-            relation_oid,
             analyzer: RelationExprAnalyzer::new(RelationScope::exact(scan_relid)),
         }
     }
 
     /// Analyze every executor-visible expression before setrefs, then build a
-    /// Var-only custom tlist plus the matching base-attno mapping. Any shape
-    /// that cannot be proven safe falls back atomically to relation layout.
+    /// projected base tuple or a synthetic row-only tuple. Any shape that
+    /// cannot be proven safe falls back atomically to relation layout.
     pub(crate) unsafe fn plan(
         &self,
         targetlist: *mut pg_sys::List,
@@ -76,10 +96,7 @@ impl BaseScanTuplePlanner {
         }
 
         if analysis.vars_by_attno.is_empty() {
-            let Some(dummy) = (unsafe { self.first_live_user_var() }) else {
-                return PlannedScanTuple::relation();
-            };
-            analysis.vars_by_attno.insert(dummy);
+            return unsafe { PlannedScanTuple::row_only() };
         }
 
         let mut custom_scan_tlist = ptr::null_mut();
@@ -248,41 +265,6 @@ impl BaseScanTuplePlanner {
         }
     }
 
-    unsafe fn first_live_user_var(&self) -> Option<NonNull<pg_sys::Var>> {
-        if self.relation_oid == pg_sys::Oid::INVALID {
-            return None;
-        }
-        let relation = unsafe {
-            pg_sys::relation_open(self.relation_oid, pg_sys::NoLock as i32)
-        };
-        let tuple_desc = unsafe { (*relation).rd_att };
-        let natts = unsafe { (*tuple_desc).natts as usize };
-        let attrs = unsafe {
-            std::slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts)
-        };
-        let result = attrs.iter().enumerate().find_map(|(index, attr)| {
-            if attr.attisdropped {
-                return None;
-            }
-            let attno = pg_sys::AttrNumber::try_from(index + 1).ok()?;
-            let var = unsafe {
-                pg_sys::makeVar(
-                    self.scan_relid as c_int,
-                    attno,
-                    attr.atttypid,
-                    attr.atttypmod,
-                    attr.attcollation,
-                    0,
-                )
-            };
-            // PostgreSQL palloc-backed constructors report OOM instead of
-            // returning NULL.
-            Some(unsafe { NonNull::new_unchecked(var) })
-        });
-        unsafe { pg_sys::relation_close(relation, pg_sys::NoLock as i32) };
-        result
-    }
-
     unsafe fn append_tlist_entry(
         list: *mut pg_sys::List,
         source_var: *mut pg_sys::Var,
@@ -373,6 +355,7 @@ pub struct ScanTuplePlanProbe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanTupleShape<'a> {
     Relation,
+    RowOnly,
     ProjectedBase(&'a [pg_sys::AttrNumber]),
 }
 
@@ -382,18 +365,16 @@ impl ScanTuplePlanProbe {
     /// # Safety
     ///
     /// Every pointer must be NULL or a live PostgreSQL planner node of the
-    /// documented list shape. `scan_relid` and `relation_oid` must identify
-    /// the same base relation whenever planning needs a count-only dummy Var.
+    /// documented list shape.
     pub unsafe fn plan_base_scan(
         scan_relid: pg_sys::Index,
-        relation_oid: pg_sys::Oid,
         targetlist: *mut pg_sys::List,
         path_target_exprs: *mut pg_sys::List,
         qual: *mut pg_sys::List,
         custom_exprs: *mut pg_sys::List,
     ) -> Self {
         let planned = unsafe {
-            BaseScanTuplePlanner::new(scan_relid, relation_oid).plan(
+            BaseScanTuplePlanner::new(scan_relid).plan(
                 targetlist,
                 path_target_exprs,
                 qual,
@@ -414,14 +395,13 @@ impl ScanTuplePlanProbe {
     /// documented list shape.
     pub unsafe fn plan_relation_scan(
         scan_relid: pg_sys::Index,
-        relation_oid: pg_sys::Oid,
         targetlist: *mut pg_sys::List,
         path_target_exprs: *mut pg_sys::List,
         qual: *mut pg_sys::List,
         custom_exprs: *mut pg_sys::List,
     ) -> Self {
         let planned = unsafe {
-            BaseScanTuplePlanner::new(scan_relid, relation_oid).plan_relation_scan(
+            BaseScanTuplePlanner::new(scan_relid).plan_relation_scan(
                 targetlist,
                 path_target_exprs,
                 qual,
@@ -437,6 +417,9 @@ impl ScanTuplePlanProbe {
     pub fn shape(&self) -> ScanTupleShape<'_> {
         if self.custom_scan_tlist.is_null() {
             return ScanTupleShape::Relation;
+        }
+        if self.layout.is_row_only() {
+            return ScanTupleShape::RowOnly;
         }
 
         match self.layout.required_columns() {

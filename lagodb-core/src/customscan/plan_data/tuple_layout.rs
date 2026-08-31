@@ -12,6 +12,7 @@ use crate::customscan::plan_data::EnvelopeError;
 const LAYOUT_RELATION: i32 = 0;
 const LAYOUT_PROJECTED_BASE: i32 = 1;
 const LAYOUT_RELATION_PRUNED: i32 = 2;
+const LAYOUT_ROW_ONLY: i32 = 3;
 
 pub const WHOLEROW_NAME: &std::ffi::CStr = c"wholerow";
 
@@ -46,6 +47,7 @@ enum ScanTupleLayoutKind {
     ProjectedBase {
         attnos_by_resno: Box<[pg_sys::AttrNumber]>,
     },
+    RowOnly,
 }
 
 impl ScanTupleLayout {
@@ -75,6 +77,16 @@ impl ScanTupleLayout {
         }
     }
 
+    pub(crate) fn row_only() -> Self {
+        Self {
+            kind: ScanTupleLayoutKind::RowOnly,
+        }
+    }
+
+    pub(crate) fn is_row_only(&self) -> bool {
+        matches!(&self.kind, ScanTupleLayoutKind::RowOnly)
+    }
+
     /// Columns the provider must read, without rebuilding expression usage at
     /// executor start.
     pub fn required_columns(&self) -> NeededColumns<'_> {
@@ -88,6 +100,7 @@ impl ScanTupleLayout {
             ScanTupleLayoutKind::ProjectedBase { attnos_by_resno } => {
                 NeededColumns::Subset(attnos_by_resno)
             }
+            ScanTupleLayoutKind::RowOnly => NeededColumns::Subset(&[]),
         }
     }
 
@@ -103,6 +116,7 @@ impl ScanTupleLayout {
             ScanTupleLayoutKind::ProjectedBase { attnos_by_resno } => {
                 attnos_by_resno.iter().position(|&source| source == attno)
             }
+            ScanTupleLayoutKind::RowOnly => None,
         }
     }
 
@@ -128,6 +142,9 @@ impl ScanTupleLayout {
                     for &attno in attnos_by_resno.iter() {
                         wire = pg_sys::lappend_int(wire, attno as i32);
                     }
+                }
+                ScanTupleLayoutKind::RowOnly => {
+                    wire = pg_sys::lappend_int(wire, LAYOUT_ROW_ONLY);
                 }
             }
             wire
@@ -175,6 +192,10 @@ impl ScanTupleLayout {
                 let attnos = unsafe { decode_attno_tail(wire, len)? };
                 Ok(Self::projected_base(attnos))
             }
+            LAYOUT_ROW_ONLY if len == 1 => Ok(Self::row_only()),
+            LAYOUT_ROW_ONLY => Err(EnvelopeError::MalformedTupleLayout {
+                reason: "row-only layout contains trailing data",
+            }),
             value => Err(EnvelopeError::UnknownTupleLayoutKind { value }),
         }
     }
@@ -244,8 +265,62 @@ impl ScanTupleLayout {
                     }
                 }
             }
+            ScanTupleLayoutKind::RowOnly => {
+                if tlist.is_null()
+                    || unsafe { pg_sys::list_length(tlist) } != 1
+                    || unsafe { (*tuple_desc).natts } != 1
+                {
+                    return Err(CustomScanError::framework(
+                        "customscan tuple-layout invariant violated: row-only layout must have one synthetic scan column",
+                    ));
+                }
+                let tle =
+                    unsafe { pg_sys::list_nth(tlist, 0) } as *mut pg_sys::TargetEntry;
+                if tle.is_null()
+                    || unsafe { (*tle).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
+                    || unsafe { (*tle).resno } != 1
+                    || !unsafe { (*tle).resjunk }
+                {
+                    return Err(CustomScanError::framework(
+                        "customscan tuple-layout invariant violated: row-only scan tlist has an invalid TargetEntry",
+                    ));
+                }
+                let expression = unsafe { (*tle).expr };
+                if expression.is_null()
+                    || unsafe { (*expression).type_ } != pg_sys::NodeTag::T_Const
+                {
+                    return Err(CustomScanError::framework(
+                        "customscan tuple-layout invariant violated: row-only scan tlist is not a Const",
+                    ));
+                }
+                let constant = expression.cast::<pg_sys::Const>();
+                if unsafe { (*constant).consttype } != pg_sys::INT4OID
+                    || unsafe { (*constant).consttypmod } != -1
+                    || unsafe { (*constant).constcollid } != pg_sys::InvalidOid
+                    || !unsafe { (*constant).constisnull }
+                {
+                    return Err(CustomScanError::framework(
+                        "customscan tuple-layout invariant violated: row-only Const does not match its contract",
+                    ));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Initialize the synthetic row-only cell once. `ExecClearTuple` preserves
+    /// the slot arrays, so providers can publish each row without a per-row
+    /// branch or write while still exposing a valid SQL NULL cell.
+    pub(crate) unsafe fn initialize_executor_slot(
+        &self,
+        slot: *mut pg_sys::TupleTableSlot,
+    ) {
+        if self.is_row_only() {
+            unsafe {
+                *(*slot).tts_values = pg_sys::Datum::from(0);
+                *(*slot).tts_isnull = true;
+            }
+        }
     }
 }
 

@@ -13,7 +13,7 @@ use crate::customscan::planning::paths::CustomScanPathPlanner;
 use crate::customscan::provider::find_matching_provider;
 use crate::customscan::{ScanPurpose, has_modify_provider_for};
 use crate::runtime_api::{
-    PlanErrorRecord, RelationScanPlannerDescriptor, RoutedRelationScanPlanner,
+    FfiErrorRecord, RelationScanPlannerDescriptor, RoutedRelationScanPlanner,
 };
 
 pub(crate) fn register() {
@@ -30,7 +30,7 @@ unsafe extern "C-unwind" fn plan_relation(
     rel: *mut pg_sys::RelOptInfo,
     rti: pg_sys::Index,
     rte: *mut pg_sys::RangeTblEntry,
-    error: *mut PlanErrorRecord,
+    error: *mut FfiErrorRecord,
 ) -> u32 {
     let operation = || {
         // SAFETY: PostgreSQL supplies live planner structures for this hook
