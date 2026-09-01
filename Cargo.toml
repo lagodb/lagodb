@@ -3,6 +3,7 @@ members = [
     "lagodb-base",
     "pg-delta-am",
     "lagodb-core",
+    "lagodb-query",
     "lagodb-macros",
     "lagodb-iceberg",
     "pg-arrow-conv",
@@ -30,11 +31,13 @@ arrow-ord = "59.1.0"
 arrow-schema = "59.1.0"
 arrow-select = "59.1.0"
 arrow-string = "59.1.0"
+datafusion = { version = "=55.0.0", default-features = false }
+datafusion-proto = { version = "=55.0.0", default-features = false }
 pgrx = { version = "=0.19.2" }
 pgrx-pg-sys = { version = "=0.19.2" }
 pgrx-tests = { version = "=0.19.2" }
 roaring = { version = "0.11" }
-lagodb-storage = { git = "https://github.com/lagodb/lagodb-storage.git", rev = "1b7428de428725c5a403f45c35532efae427c9c8" }
+lagodb-storage = { git = "https://github.com/lagodb/lagodb-storage.git", rev = "5568ac353191d47dc6911862544be19ddab90352" }
 
 # The 'dev' profile is used when you run `cargo build`.
 [profile.dev]
