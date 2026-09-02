@@ -210,6 +210,22 @@ pub(crate) struct ScanColumns {
 }
 
 impl ScanColumns {
+    /// Zero-column output plan for a row-only scan.
+    ///
+    /// Iceberg still reads every visible row and applies delete/overlay
+    /// semantics; reader-owned predicate/delete dependencies remain internal.
+    /// Only requested output columns and PostgreSQL datum decoding are omitted.
+    /// The empty decoder remains confined to the short-lived
+    /// [`ScanSpec`](crate::engine::scan::ScanSpec) preparation object and is
+    /// not carried into DataFusion state.
+    pub(crate) fn row_only(schema: Arc<IcebergSchema>) -> Self {
+        Self {
+            schema,
+            decoder: ArrowColumnDecoder::new(Vec::new()),
+            project_field_ids: Box::new([]),
+        }
+    }
+
     /// Select-all plan (full-schema plan).
     ///
     /// The relation shape owns the live `(attno, name)` columns and the full
@@ -250,6 +266,10 @@ impl ScanColumns {
         slot_width: usize,
         attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
+        if projection.columns().is_empty() {
+            return Ok(Self::row_only(schema));
+        }
+
         let full_map = RelationFieldMap::from_shape(&schema, shape)?;
         let field_map = full_map.project(
             projection

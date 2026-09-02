@@ -24,11 +24,12 @@ pg17 = ["pgrx/pg17", "lagodb-core/pg17"]
 [dependencies]
 pgrx = { workspace = true }
 lagodb-core = { path = "../lagodb-core", default-features = false }
-arrow-array = { workspace = true }
+arrow-array = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true }
 arrow-buffer = { workspace = true }
 uuid = { version = "1.16.0" }
 thiserror = "1.0"
+libc = "0.2"
 
 [dev-dependencies]
 # The host integration tests in `tests/` construct arrow/pgrx/core types

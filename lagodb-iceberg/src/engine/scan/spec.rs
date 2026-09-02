@@ -91,6 +91,30 @@ pub(crate) struct AnalyzeScanInput {
     pub(crate) storage_bytes: u64,
 }
 
+/// Query-offload preparation output.
+///
+/// This is the private upstream-trait boundary between PostgreSQL-facing
+/// [`ScanSpec`] and the DataFusion source. Slot decoding and mutation state have
+/// already been discarded; the retained scan and tasks are the exact pair from
+/// one captured transaction view. The destination is `Send + Sync` only so it
+/// can enter the private DataFusion adapter; its outer serial execution owner
+/// remains bound to the current PostgreSQL backend thread.
+pub(crate) struct PreparedQueryScanInput {
+    pub(crate) scan: TableScan,
+    pub(crate) tasks: Arc<[FileScanTask]>,
+}
+
+/// Typed zero-column scan preparation. Only the scalar-COUNT constructor can
+/// produce this wrapper, so query-source extraction cannot accidentally drop
+/// a normal scan's row predicate or projected columns.
+pub(crate) struct CountRowsScanSpec(ScanSpec);
+
+impl CountRowsScanSpec {
+    pub(crate) fn prepare(self) -> IcebergResult<PreparedQueryScanInput> {
+        self.0.prepare_count_source()
+    }
+}
+
 /// Shared mutation-scan reader input. The adapter binds it to its executor
 /// identity registry and synthetic-ctid callback surface.
 pub(crate) struct MutationScanInput {
@@ -99,6 +123,16 @@ pub(crate) struct MutationScanInput {
 }
 
 impl ScanSpec {
+    /// Build the zero-column source needed by scalar `COUNT(*)` offload.
+    ///
+    /// This deliberately keeps the normal Iceberg reader path: row visibility
+    /// is still established by file planning, delete descriptors, and the
+    /// transaction overlay rather than manifest record-count shortcuts.
+    pub(crate) fn count_rows(source: ScanSource) -> CountRowsScanSpec {
+        let plan = ScanColumns::row_only(source.schema().clone());
+        CountRowsScanSpec(Self::from_parts(source, plan, None, None))
+    }
+
     pub(crate) fn full(
         source: ScanSource,
         planning_filter: Option<Predicate>,
@@ -288,6 +322,22 @@ impl ScanSpec {
             source,
             decoder: self.plan.decoder(),
         })
+    }
+
+    /// Close PostgreSQL-facing scan preparation and transfer only immutable
+    /// Iceberg/Arrow state into the query-offload lifecycle.
+    ///
+    /// The same [`TableScan`] instance plans and later reads `tasks`, keeping
+    /// schema, projection, snapshot, overlay, reader configuration, and delete
+    /// inventory aligned. Data files remain unopened until the returned source
+    /// stream is polled.
+    fn prepare_count_source(self) -> IcebergResult<PreparedQueryScanInput> {
+        let scan = self.build_scan(RowLocationProjection::Exclude, None)?;
+        let tasks = match self.query_tasks {
+            Some(tasks) => tasks,
+            None => Arc::from(scan.plan_files()?.into_boxed_slice()),
+        };
+        Ok(PreparedQueryScanInput { scan, tasks })
     }
 
     /// Build the Iceberg [`TableScan`] for this spec's projection and optional

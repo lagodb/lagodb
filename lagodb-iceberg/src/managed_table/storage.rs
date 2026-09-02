@@ -1,6 +1,8 @@
 //! AM-owned tablespace and WAL policy for Iceberg FileIO.
 
 use std::ffi::CStr;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
@@ -20,6 +22,7 @@ pub(crate) struct StorageContext {
     file_io: FileIO,
     base_path: String,
     is_distributed: bool,
+    backend_thread: PhantomData<Rc<()>>,
 }
 
 impl StorageContext {
@@ -78,6 +81,7 @@ impl StorageContext {
             file_io: FileIO::new(Arc::new(storage)),
             base_path,
             is_distributed: true,
+            backend_thread: PhantomData,
         })
     }
 
@@ -94,6 +98,7 @@ impl StorageContext {
             ))),
             base_path: data_dir,
             is_distributed: false,
+            backend_thread: PhantomData,
         })
     }
 }

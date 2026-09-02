@@ -79,7 +79,7 @@ impl LoadedScanMetadata {
         })
     }
 
-    fn into_source(self) -> ScanSource {
+    pub(crate) fn into_source(self) -> ScanSource {
         ScanSource::transaction_view(self.table, self.delta, self.storage_bytes)
     }
 }

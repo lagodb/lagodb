@@ -96,15 +96,19 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
         IcebergAccessMethod::matches_oid(ctx.access_method_oid())
     }
 
-    /// Query paths require provider-planned filters. Modify paths remain eligible
-    /// when the planned set is empty so projection pruning can compete with
-    /// the standard TableAM path through normal costing.
+    /// Query paths require either provider-planned filters or an empty path
+    /// target. The latter covers row-only scans such as `COUNT(*)` without
+    /// adding a fake storage-column dependency. Modify paths remain eligible
+    /// with an empty planned set for their existing storage-pruning contract.
     fn create_path(
         ctx: &PathContext<'_>,
         variant: &PathVariant<'_>,
         builder: CustomPathBuilder<Self>,
     ) -> Option<CustomPathPlan<Self>> {
-        if !variant.purpose.is_modify() && !variant.pushdown.has_planned_filters() {
+        if !variant.purpose.is_modify()
+            && !variant.pushdown.has_planned_filters()
+            && !ctx.has_empty_path_target()
+        {
             return None;
         }
 

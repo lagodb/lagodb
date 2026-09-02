@@ -25,6 +25,7 @@
 mod convert;
 mod datum;
 mod error;
+mod query_source;
 mod read;
 mod rule;
 mod types;
@@ -32,6 +33,11 @@ mod write;
 
 pub use datum::DatumCodec;
 pub use error::{ArrowConversionError, ArrowConversionResult};
+pub use query_source::{
+    PlannedSource, QuerySourceAdapter, QuerySourceProvider, QuerySourceStream,
+    SourcePlanningContext, SourceProjection, SourceStreamOptions, SourceSupport,
+    export_query_source_stream,
+};
 pub use read::{
     ArrowBatchSource, ArrowColumnDecoder, BoundBatch, ColumnReader, DecodedColumn,
 };

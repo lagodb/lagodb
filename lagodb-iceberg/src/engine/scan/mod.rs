@@ -6,4 +6,6 @@ mod query_cursor;
 mod spec;
 
 pub(crate) use query_cursor::IcebergQueryCursor;
-pub(crate) use spec::{AnalyzeScanInput, MutationScanInput, ScanSource, ScanSpec};
+pub(crate) use spec::{
+    AnalyzeScanInput, MutationScanInput, PreparedQueryScanInput, ScanSource, ScanSpec,
+};

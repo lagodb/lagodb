@@ -24,11 +24,11 @@ pub(crate) struct PgStorageFactory {
     backend_thread: PhantomData<Rc<()>>,
 }
 
-// SAFETY: this uses the same closed-world execution invariant as
-// BackendStorageService/StorageHandle: the extension constructs, clones,
-// invokes and drops the factory on one PostgreSQL backend main thread.
-// StorageFactory inherits Send + Sync from upstream iceberg-rust, but no
-// extension path moves the value to a worker thread or invokes it concurrently.
+// SAFETY: this private host adapter satisfies the upstream `StorageFactory:
+// Send + Sync` bound. The PostgreSQL-owned catalog lifecycle constructs,
+// clones, invokes, and drops it on one backend thread and never invokes it
+// concurrently. The marker prevents this adaptation from becoming an
+// accidental compiler-derived property.
 unsafe impl Send for PgStorageFactory {}
 unsafe impl Sync for PgStorageFactory {}
 

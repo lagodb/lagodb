@@ -35,8 +35,10 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -69,10 +71,20 @@ use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 /// let storage = LocalStorage::with_wal(true);
 /// ```
 #[derive(Debug, Default)]
-pub struct LocalStorage {
+pub(crate) struct LocalStorage {
     /// Whether Iceberg file WAL is enabled for local write operations.
     needs_wal: bool,
+    backend_thread: PhantomData<Rc<()>>,
 }
+
+// SAFETY: `LocalStorage` is a private host adapter for iceberg-lite's
+// `Storage: Send + Sync` contract. Every method, returned VFD owner, and Drop
+// remains inside a PostgreSQL-owned scan/mutation lifecycle on one backend
+// thread; the adapter is never handed to a parallel Iceberg executor.
+unsafe impl Send for LocalStorage {}
+// SAFETY: the same closed execution boundary prevents concurrent calls; the
+// shared reference capability exists only to satisfy the upstream trait.
+unsafe impl Sync for LocalStorage {}
 
 impl LocalStorage {
     /// Create a new LocalStorage with WAL support configured.
@@ -88,7 +100,10 @@ impl LocalStorage {
     /// let storage = LocalStorage::with_wal(true);
     /// ```
     pub fn with_wal(needs_wal: bool) -> Self {
-        Self { needs_wal }
+        Self {
+            needs_wal,
+            backend_thread: PhantomData,
+        }
     }
 
     /// Check if Iceberg file WAL logging is enabled.
@@ -232,7 +247,7 @@ impl Drop for VfdOwner {
 /// surrounding executor state is responsible for dropping the reader during
 /// normal completion and PostgreSQL error unwinding.
 #[derive(Debug)]
-pub struct PgFileRead {
+struct PgFileRead {
     /// Path to the file (for error reporting)
     path: String,
     /// PostgreSQL virtual file descriptor owner
@@ -241,11 +256,16 @@ pub struct PgFileRead {
     size: i64,
     /// Logical cursor used by the std::io::Read/Seek implementation.
     position: i64,
+    backend_thread: PhantomData<Rc<()>>,
 }
 
-// PgFileRead implements Send/Sync because FileRead requires those bounds.
-// The underlying PostgreSQL VFD is still backend-local in practice; callers
-// must not move it across backend threads.
+// SAFETY: this private adapter implements iceberg-lite `FileRead`, which
+// requires `Send + Sync`, but its VFD is opened, cloned, read, and released only
+// by a PostgreSQL-owned serial scan on the owning backend thread.
+unsafe impl Send for PgFileRead {}
+// SAFETY: the serial iterator never invokes one reader concurrently; shared
+// access exists only for the upstream `FileRead` trait surface.
+unsafe impl Sync for PgFileRead {}
 
 impl PgFileRead {
     /// Open a file for reading using PostgreSQL's VFD system.
@@ -284,6 +304,7 @@ impl PgFileRead {
             file: Arc::new(VfdOwner(file)),
             size: size as i64,
             position: 0,
+            backend_thread: PhantomData,
         })
     }
 
@@ -362,6 +383,7 @@ impl FileRead for PgFileRead {
             file: self.file.clone(),
             size: self.size,
             position: self.position,
+            backend_thread: PhantomData,
         }))
     }
 }
@@ -449,7 +471,7 @@ impl Seek for PgFileRead {
 /// Local crash recovery does not replay `WRITE_FILE` records; successful
 /// explicit close calls `FileSync`. Distributed storage (S3, etc.) provides its
 /// own durability guarantees and does not use this WAL path.
-pub struct PgFileWrite {
+struct PgFileWrite {
     /// Path to the file (for error reporting and WAL logging)
     path: String,
     /// PostgreSQL virtual file descriptor
@@ -458,11 +480,16 @@ pub struct PgFileWrite {
     position: i64,
     /// Whether Iceberg file WAL logging is enabled for this writer.
     needs_wal: bool,
+    backend_thread: PhantomData<Rc<()>>,
 }
 
-// PgFileWrite implements Send/Sync because FileWrite requires those bounds.
-// The underlying PostgreSQL VFD is still backend-local in practice; callers
-// must not move it across backend threads.
+// SAFETY: this private adapter implements iceberg-lite `FileWrite`, which
+// requires `Send + Sync`, but the PostgreSQL VFD and WAL operations remain in
+// the owning backend's serial mutation lifecycle through close and Drop.
+unsafe impl Send for PgFileWrite {}
+// SAFETY: no extension path shares or writes one instance concurrently; this
+// capability is present only for the upstream trait bound.
+unsafe impl Sync for PgFileWrite {}
 
 impl PgFileWrite {
     /// Open a file for writing with optional Iceberg file WAL support.
@@ -502,6 +529,7 @@ impl PgFileWrite {
             file,
             position: 0,
             needs_wal,
+            backend_thread: PhantomData,
         })
     }
 }

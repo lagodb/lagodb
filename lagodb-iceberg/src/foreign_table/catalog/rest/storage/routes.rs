@@ -218,6 +218,15 @@ pub(super) struct CatalogStorage {
     credential_routes: Vec<CatalogRoute>,
 }
 
+// SAFETY: `CatalogStorage` is the private REST-catalog adapter for
+// iceberg-lite's `Storage: Send + Sync` trait. All routes contain naturally
+// thread-bound PostgreSQL storage services and are constructed, invoked, and
+// dropped only by the owning backend's serial execution lifecycle.
+unsafe impl Send for CatalogStorage {}
+// SAFETY: the extension does not access the route cache or its services from
+// concurrent threads; shared access exists only for the upstream trait bound.
+unsafe impl Sync for CatalogStorage {}
+
 impl CatalogStorage {
     pub(super) fn new(
         location: String,

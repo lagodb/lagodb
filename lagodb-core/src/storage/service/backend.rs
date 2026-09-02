@@ -40,14 +40,10 @@ pub struct BackendStorageService {
     context: Rc<BackendAttachedContext>,
 }
 
-// SAFETY: this implementation relies on the extension's closed-world execution
-// invariant: PostgreSQL executes this service, every `StorageClient` operation,
-// and every clone/drop on one backend main thread. The upstream Iceberg storage
-// traits require `Send + Sync`, but the extension never moves or shares these
-// values across threads. Keeping `Rc` here avoids atomic reference counting on
-// the single-threaded database hot path.
-unsafe impl Send for BackendStorageService {}
-unsafe impl Sync for BackendStorageService {}
+// `Rc` intentionally keeps this general PostgreSQL-facing service `!Send +
+// !Sync`. Upstream storage traits must adapt it at their private host boundary;
+// core callers cannot move the service, its clients, or their Drop cleanup away
+// from the owning backend thread.
 
 impl fmt::Debug for BackendStorageService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

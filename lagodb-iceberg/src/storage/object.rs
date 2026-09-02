@@ -8,7 +8,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::SeekFrom;
+use std::marker::PhantomData;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::injection_points::StorageInjectionPoints;
@@ -34,13 +36,22 @@ pub(crate) fn storage_err(e: StorageError) -> Error {
 }
 
 #[derive(Clone)]
-pub struct ObjectStorage {
+pub(crate) struct ObjectStorage {
     effective_base_uri: Arc<str>,
     volume_id: StorageVolumeId,
     bucket: Arc<str>,
     service: BackendStorageService,
     staging_resolver: StagingPathResolver,
 }
+
+// SAFETY: `ObjectStorage` is the private adapter that satisfies
+// iceberg-lite's `Storage: Send + Sync` requirement for a naturally
+// thread-bound `BackendStorageService`. LagoDB opens, invokes, clones, and
+// drops it only from PostgreSQL-owned serial scan/mutation lifecycles.
+unsafe impl Send for ObjectStorage {}
+// SAFETY: no extension executor invokes one storage instance concurrently;
+// upstream shared access is confined by the same backend-thread owner.
+unsafe impl Sync for ObjectStorage {}
 
 impl fmt::Debug for ObjectStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -53,7 +64,7 @@ impl fmt::Debug for ObjectStorage {
 }
 
 impl ObjectStorage {
-    pub fn new(
+    pub(crate) fn new(
         effective_base_uri: impl Into<String>,
         volume_id: StorageVolumeId,
         bucket: impl Into<String>,
@@ -237,13 +248,11 @@ pub(crate) struct ObjectReader {
     file: StorageFile,
 }
 
-// SAFETY: `ObjectReader` is an adapter for `iceberg_lite::io::FileRead`, whose
-// upstream contract requires `Send + Sync`. PostgreSQL constructs, uses,
-// clones, and drops every reader on one backend main thread. Neither the
-// extension nor its synchronous executor transfers a reader to another
-// thread or invokes it concurrently. The contained `StorageFile` deliberately
-// remains `!Send + !Sync`; this unsafe boundary is confined to the host adapter
-// that owns the PostgreSQL execution invariant.
+// SAFETY: `ObjectReader` is the private adapter for
+// `iceberg_lite::io::FileRead`. PostgreSQL constructs, uses, clones, and drops
+// every reader on one backend thread; the serial iterator never transfers or
+// concurrently invokes it. The contained `StorageFile` remains naturally
+// `!Send + !Sync`.
 unsafe impl Send for ObjectReader {}
 unsafe impl Sync for ObjectReader {}
 
@@ -410,12 +419,22 @@ impl FileRead for ObjectReader {
 
 pub(crate) struct ObjectWriter {
     staging: Option<StagingFile>,
+    backend_thread: PhantomData<Rc<()>>,
 }
+
+// SAFETY: this private adapter implements iceberg-lite `FileWrite`, which
+// requires `Send + Sync`. Its PostgreSQL wait-event reporting and external-FD
+// lease remain inside the owning backend's serial mutation lifecycle.
+unsafe impl Send for ObjectWriter {}
+// SAFETY: the writer is uniquely driven until close and is never concurrently
+// accessed by the extension executor.
+unsafe impl Sync for ObjectWriter {}
 
 impl ObjectWriter {
     pub(crate) fn new(staging: StagingFile) -> Self {
         Self {
             staging: Some(staging),
+            backend_thread: PhantomData,
         }
     }
 }
