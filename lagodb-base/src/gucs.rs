@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+use lagodb_query::{
+    DEFAULT_MAXIMUM_BATCH_ROWS, ExecutionProfile, MAXIMUM_BATCH_ROWS_LIMIT,
+};
 use lagodb_storage::{
     DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS, LIST_CURSOR_IDLE_TTL_MS,
     MAX_BULK_DELETE_OBJECT_KEYS, MAX_LIST_PAGE_SIZE,
@@ -30,9 +33,20 @@ static VACUUM_MAX_GROUP_OBJECTS: GucSetting<i32> = GucSetting::<i32>::new(10_000
 static VACUUM_MAX_GROUP_MB: GucSetting<i32> = GucSetting::<i32>::new(4_096);
 static CUSTOMSCAN_MODE: GucSetting<CustomScanMode> =
     GucSetting::<CustomScanMode>::new(CustomScanMode::Auto);
+static QUERY_OFFLOAD_MODE: GucSetting<QueryOffloadMode> =
+    GucSetting::<QueryOffloadMode>::new(QueryOffloadMode::Off);
+static QUERY_BATCH_ROWS: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_MAXIMUM_BATCH_ROWS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PostgresGucEnum)]
 enum CustomScanMode {
+    Off,
+    Auto,
+    Force,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PostgresGucEnum)]
+pub(crate) enum QueryOffloadMode {
     Off,
     Auto,
     Force,
@@ -44,6 +58,17 @@ pub(crate) fn customscan_mode_code() -> u32 {
         CustomScanMode::Auto => 1,
         CustomScanMode::Force => 2,
     }
+}
+
+pub(crate) fn query_offload_mode() -> QueryOffloadMode {
+    QUERY_OFFLOAD_MODE.get()
+}
+
+pub(crate) fn query_execution_profile() -> ExecutionProfile {
+    let maximum_batch_rows = usize::try_from(QUERY_BATCH_ROWS.get())
+        .expect("query_batch_rows GUC enforces a positive i32 value");
+    ExecutionProfile::try_new(maximum_batch_rows)
+        .expect("query_batch_rows GUC range matches ExecutionProfile")
 }
 
 pub(crate) fn maintenance_config()
@@ -124,6 +149,24 @@ fn init_shared_framework_gucs() {
         c"Path-emission mode for the LagoDB CustomScan framework",
         c"off disables paths, auto uses cost, and force biases legal paths for tests.",
         &CUSTOMSCAN_MODE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_enum_guc(
+        c"lagodb.query_offload_mode",
+        c"Path-emission mode for LagoDB query-subtree offload",
+        c"off disables query offload, auto uses cost, and force only biases otherwise legal paths for tests.",
+        &QUERY_OFFLOAD_MODE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"lagodb.query_batch_rows",
+        c"Maximum rows in one LagoDB query-engine batch",
+        c"The value is captured when an offload path is planned and remains fixed for execution of that plan.",
+        &QUERY_BATCH_ROWS,
+        1,
+        MAXIMUM_BATCH_ROWS_LIMIT,
         GucContext::Userset,
         GucFlags::default(),
     );

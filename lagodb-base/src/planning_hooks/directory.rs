@@ -102,7 +102,7 @@ pub(super) fn modify_snapshot() -> DescriptorSnapshot<StoredModifyPlanner> {
 mod tests {
     use std::ptr;
 
-    use lagodb_core::runtime_api::{PLANNING_CALLBACK_OK, PlanErrorRecord};
+    use lagodb_core::runtime_api::{FFI_OPERATION_OK, FfiErrorRecord};
     use pgrx::pg_sys;
 
     use super::*;
@@ -113,25 +113,25 @@ mod tests {
         _rel: *mut pg_sys::RelOptInfo,
         _rti: pg_sys::Index,
         _rte: *mut pg_sys::RangeTblEntry,
-        _error: *mut PlanErrorRecord,
+        _error: *mut FfiErrorRecord,
     ) -> u32 {
-        PLANNING_CALLBACK_OK
+        FFI_OPERATION_OK
     }
 
     unsafe extern "C-unwind" fn planner_pre(
         _context: *mut c_void,
         _parse: *mut pg_sys::Query,
-        _error: *mut PlanErrorRecord,
+        _error: *mut FfiErrorRecord,
     ) -> u32 {
-        PLANNING_CALLBACK_OK
+        FFI_OPERATION_OK
     }
 
     unsafe extern "C-unwind" fn planner_post(
         _context: *mut c_void,
         _planned: *mut pg_sys::PlannedStmt,
-        _error: *mut PlanErrorRecord,
+        _error: *mut FfiErrorRecord,
     ) -> u32 {
-        PLANNING_CALLBACK_OK
+        FFI_OPERATION_OK
     }
 
     unsafe extern "C-unwind" fn upper(
@@ -141,9 +141,9 @@ mod tests {
         _input_rel: *mut pg_sys::RelOptInfo,
         _output_rel: *mut pg_sys::RelOptInfo,
         _extra: *mut c_void,
-        _error: *mut PlanErrorRecord,
+        _error: *mut FfiErrorRecord,
     ) -> u32 {
-        PLANNING_CALLBACK_OK
+        FFI_OPERATION_OK
     }
 
     #[test]

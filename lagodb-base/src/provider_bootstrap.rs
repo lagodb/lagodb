@@ -1,9 +1,10 @@
 //! Postmaster-time loading and identity registry for AM and FDW providers.
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::mem::{size_of, take};
 
+use lagodb_core::query_contract::ProviderId;
 use lagodb_core::runtime_api::{
     PROVIDER_KIND_ACCESS_METHOD, PROVIDER_KIND_FOREIGN_DATA_WRAPPER,
     ProviderIdentity, REGISTER_DUPLICATE_NAME, REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP,
@@ -136,6 +137,24 @@ impl<'a> ValidatedProviderIdentity<'a> {
 
 pub(crate) struct PreparedProviderIdentity {
     identity: Option<StoredProviderIdentity>,
+    provider_id: ProviderId,
+    provider_name: *const c_char,
+}
+
+impl PreparedProviderIdentity {
+    pub(crate) const fn provider_id(&self) -> ProviderId {
+        self.provider_id
+    }
+
+    /// Backend-lifetime provider name owned by the committed identity registry.
+    ///
+    /// A new identity keeps the pointed-to `CString` allocation in `self`
+    /// until commit moves it into `PROVIDERS`; moving a `CString` does not move
+    /// its heap allocation. A repeated identical registration points directly
+    /// at the already committed registry entry.
+    pub(crate) const fn provider_name(&self) -> *const c_char {
+        self.provider_name
+    }
 }
 
 thread_local! {
@@ -197,28 +216,38 @@ pub(crate) fn prepare_identity(
 ) -> Result<PreparedProviderIdentity, u32> {
     BOOTSTRAP_STATE.with_borrow(|state| state.validate(identity.library_name))?;
     PROVIDERS.with_borrow_mut(|providers| {
-        if let Some(existing) = providers
+        if let Some((index, existing)) = providers
             .iter()
-            .find(|existing| existing.name.as_c_str() == identity.name)
+            .enumerate()
+            .find(|(_, existing)| existing.name.as_c_str() == identity.name)
         {
             let identical = existing.extension_name.as_c_str()
                 == identity.extension_name
                 && existing.library_name.as_c_str() == identity.library_name
                 && existing.kind == identity.kind;
             return if identical {
-                Ok(PreparedProviderIdentity { identity: None })
+                Ok(PreparedProviderIdentity {
+                    identity: None,
+                    provider_id: ProviderId::from_index(index),
+                    provider_name: existing.name.as_ptr(),
+                })
             } else {
                 Err(REGISTER_DUPLICATE_NAME)
             };
         }
         providers.reserve(1);
+        let provider_id = ProviderId::from_index(providers.len());
+        let identity = StoredProviderIdentity {
+            name: identity.name.to_owned(),
+            extension_name: identity.extension_name.to_owned(),
+            library_name: identity.library_name.to_owned(),
+            kind: identity.kind,
+        };
+        let provider_name = identity.name.as_ptr();
         Ok(PreparedProviderIdentity {
-            identity: Some(StoredProviderIdentity {
-                name: identity.name.to_owned(),
-                extension_name: identity.extension_name.to_owned(),
-                library_name: identity.library_name.to_owned(),
-                kind: identity.kind,
-            }),
+            identity: Some(identity),
+            provider_id,
+            provider_name,
         })
     })
 }
@@ -228,6 +257,14 @@ pub(crate) fn commit_identity(prepared: PreparedProviderIdentity) {
         PROVIDERS.with_borrow_mut(|providers| providers.push(identity));
     }
     BOOTSTRAP_STATE.with_borrow_mut(BootstrapState::confirm_registration);
+}
+
+pub(crate) fn provider_name(provider: ProviderId) -> Option<CString> {
+    PROVIDERS.with_borrow(|providers| {
+        providers
+            .get(provider.index())
+            .map(|identity| identity.name.clone())
+    })
 }
 
 fn parse_library_names(

@@ -264,6 +264,11 @@ impl FdwScan for FrameworkTestFdw {
             planned_count: state.filters.len(),
             filters: trace_filters(&state.filters),
             projection: projection_name(ctx.projection),
+            output_attnos: state
+                .output_columns
+                .iter()
+                .map(|column| column.attno())
+                .collect(),
         });
         Ok(())
     }

@@ -119,6 +119,7 @@ mod delta {
             object_access_str_hook_count: 0,
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
+            query_source: ptr::null(),
         };
         // SAFETY: this test registration uses current ABI values backed by
         // local descriptors that remain live for the synchronous call. The

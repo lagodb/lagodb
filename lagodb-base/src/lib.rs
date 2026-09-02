@@ -19,6 +19,7 @@ mod object_access;
 mod planning_hooks;
 mod process_utility;
 mod provider_bootstrap;
+mod query_host;
 mod registry;
 mod runtime_api;
 mod storage;
@@ -46,6 +47,7 @@ extern "C-unwind" fn _PG_init() {
         lifecycle::init();
         hooks::init();
         planning_hooks::init();
+        query_host::init();
         worker::init();
         provider_bootstrap::load_configured();
     }

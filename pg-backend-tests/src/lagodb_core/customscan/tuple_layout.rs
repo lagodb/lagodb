@@ -11,7 +11,7 @@ mod tests {
     use lagodb_core::customscan::tuple_planner::{
         ScanTuplePlanProbe, ScanTupleShape,
     };
-    use pgrx::{Spi, pg_sys, pg_test};
+    use pgrx::{pg_sys, pg_test};
 
     const SCAN_RELID: pg_sys::Index = 1;
     const OTHER_RELID: c_int = 2;
@@ -97,7 +97,6 @@ mod tests {
             unsafe {
                 ScanTuplePlanProbe::plan_base_scan(
                     SCAN_RELID,
-                    pg_sys::Oid::INVALID,
                     targetlist,
                     path_target_exprs,
                     qual,
@@ -106,11 +105,10 @@ mod tests {
             }
         }
 
-        unsafe fn count_only_plan(relation_oid: pg_sys::Oid) -> ScanTuplePlanProbe {
+        unsafe fn count_only_plan() -> ScanTuplePlanProbe {
             unsafe {
                 ScanTuplePlanProbe::plan_base_scan(
                     SCAN_RELID,
-                    relation_oid,
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
@@ -126,7 +124,6 @@ mod tests {
             unsafe {
                 ScanTuplePlanProbe::plan_relation_scan(
                     SCAN_RELID,
-                    pg_sys::Oid::INVALID,
                     targetlist,
                     ptr::null_mut(),
                     qual,
@@ -150,6 +147,9 @@ mod tests {
         match plan.shape() {
             ScanTupleShape::ProjectedBase(actual) => assert_eq!(actual, expected),
             ScanTupleShape::Relation => {
+                panic!("expected ProjectedBase({expected:?})")
+            }
+            ScanTupleShape::RowOnly => {
                 panic!("expected ProjectedBase({expected:?})")
             }
         }
@@ -275,19 +275,22 @@ mod tests {
     }
 
     #[pg_test]
-    fn count_only_scan_adds_one_live_dummy_dependency() {
-        Spi::run("CREATE TEMP TABLE tuple_layout_count_only(a int4, b text)")
-            .expect("CREATE TEMP TABLE failed");
-        let relation_oid = Spi::get_one::<i64>(
-            "SELECT 'pg_temp.tuple_layout_count_only'::regclass::oid::int8",
-        )
-        .expect("regclass lookup failed")
-        .map(|oid| pg_sys::Oid::from(oid as u32))
-        .expect("regclass lookup returned NULL");
-
+    fn count_only_scan_uses_row_only_tuple_without_storage_columns() {
         unsafe {
-            let plan = TupleLayoutFixture::count_only_plan(relation_oid);
-            assert_projected(&plan, &[1]);
+            let plan = TupleLayoutFixture::count_only_plan();
+            assert_eq!(plan.shape(), ScanTupleShape::RowOnly);
+            assert_subset(plan.required_columns(), &[]);
+
+            let tlist = plan.custom_scan_tlist();
+            assert!(!tlist.is_null(), "row-only layout requires a scan tlist");
+            assert_eq!(pg_sys::list_length(tlist), 1);
+            let tle = pg_sys::list_nth(tlist, 0).cast::<pg_sys::TargetEntry>();
+            assert_eq!((*tle).resno, 1);
+            assert!((*tle).resjunk);
+            let value = (*tle).expr.cast::<pg_sys::Const>();
+            assert_eq!((*value).xpr.type_, pg_sys::NodeTag::T_Const);
+            assert_eq!((*value).consttype, pg_sys::INT4OID);
+            assert!((*value).constisnull);
         }
     }
 

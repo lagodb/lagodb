@@ -6,6 +6,7 @@
 
 mod maintenance;
 mod registration;
+pub(crate) mod source_directory;
 mod storage_volume;
 
 use std::ffi::{CStr, c_char, c_void};

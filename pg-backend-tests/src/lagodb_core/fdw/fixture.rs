@@ -129,6 +129,7 @@ pub(super) enum TraceEvent {
         planned_count: usize,
         filters: Vec<(pg_sys::AttrNumber, Option<i32>)>,
         projection: &'static str,
+        output_attnos: Vec<pg_sys::AttrNumber>,
     },
     ScanRescan {
         filters_changed: bool,

@@ -109,7 +109,7 @@ mod tests {
         }));
 
         TestTrace::clear();
-        let projected =
+        let filtered_payloads =
             Spi::connect_mut(|client| -> pgrx::spi::Result<Vec<String>> {
                 let rows = client.select(
                     &format!("SELECT payload FROM {table} WHERE id = 2"),
@@ -121,19 +121,24 @@ mod tests {
                 })
                 .collect()
             })
-            .expect("projected FDW query failed");
-        assert_eq!(projected, vec!["alpha"]);
-        assert!(TestTrace::take().iter().any(|event| {
-            matches!(
-                event,
-                TraceEvent::ScanBegin {
-                    planned_count: 1,
-                    filters,
-                    projection: "projected",
-                    ..
-                } if filters == &vec![(1, Some(2))]
-            )
-        }));
+            .expect("filtered payload FDW query failed");
+        assert_eq!(filtered_payloads, vec!["alpha"]);
+        let filtered_payload_trace = TestTrace::take();
+        assert!(
+            filtered_payload_trace.iter().any(|event| {
+                matches!(
+                    event,
+                    TraceEvent::ScanBegin {
+                        planned_count: 1,
+                        filters,
+                        projection: "relation",
+                        output_attnos,
+                        ..
+                    } if filters == &vec![(1, Some(2))] && output_attnos.as_slice() == [3]
+                )
+            }),
+            "filtered payload trace did not preserve the EPQ carrier and selective write plan: {filtered_payload_trace:?}"
+        );
 
         TestTrace::clear();
         let count = Spi::connect_mut(|client| -> pgrx::spi::Result<i64> {
@@ -155,12 +160,13 @@ mod tests {
                     TraceEvent::ScanBegin {
                         planned_count: 0,
                         filters,
-                        projection: "projected",
+                        projection: "relation",
+                        output_attnos,
                         ..
-                    } if filters.is_empty()
+                    } if filters.is_empty() && output_attnos.is_empty()
                 )
             }),
-            "COUNT trace did not use the observed projected shape: {count_trace:?}"
+            "COUNT trace did not use a relation-shaped slot with an empty write plan: {count_trace:?}"
         );
 
         TestTrace::clear();
@@ -355,9 +361,21 @@ mod tests {
         })
         .expect("fallback FDW query failed");
         assert_eq!(fallback, vec!["alpha", "mike", "zulu"]);
-        assert!(TestTrace::take().iter().any(|event| {
-            matches!(event, TraceEvent::ScanBegin { ordered: false, .. })
-        }));
+        let fallback_trace = TestTrace::take();
+        assert!(
+            fallback_trace.iter().any(|event| {
+                matches!(
+                    event,
+                    TraceEvent::ScanBegin {
+                        ordered: false,
+                        projection: "projected",
+                        output_attnos,
+                        ..
+                    } if output_attnos.as_slice() == [3]
+                )
+            }),
+            "provider-rejected pathkeys did not preserve the projected payload layout: {fallback_trace:?}"
+        );
         let fallback_plan = explain(&format!(
             "SELECT payload FROM {table} ORDER BY lower(payload)"
         ));
