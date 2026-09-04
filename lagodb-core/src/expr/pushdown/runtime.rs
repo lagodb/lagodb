@@ -2,16 +2,18 @@
 
 use pgrx::pg_sys;
 
-use crate::expr::contract::PushdownContract;
-use crate::expr::execution::RuntimeParamRefs;
-
 use super::{
-    BoundFilter, BoundFilterSet, FilterBindResult, FilterPushdown, FilterValue,
-    FilterValueBindings, FilterValueSlot, PlannedFilterRecord,
+    BoundFilter, BoundFilterSet, FilterBindResult, FilterPushdown,
+    PlannedFilterRecord,
+};
+use crate::expr::contract::PushdownContract;
+use crate::expr::{
+    RuntimeValue, RuntimeValueBindings, RuntimeValueLayout, RuntimeValueSpec,
+    RuntimeValueState, RuntimeValueStateError,
 };
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RuntimeFilterError<E> {
+pub(crate) enum RelationFilterBindingError<E> {
     #[error("planned filter binding expression count does not match its metadata")]
     BindingCountMismatch,
     #[error("provider failed to bind a planned filter: {0}")]
@@ -22,42 +24,33 @@ pub(crate) enum RuntimeFilterError<E> {
     ExactValueNotRepresentable { filter_index: usize },
 }
 
-pub(crate) struct RuntimeFilterState<P: FilterPushdown> {
+impl<E> From<RuntimeValueStateError> for RelationFilterBindingError<E> {
+    fn from(_: RuntimeValueStateError) -> Self {
+        Self::BindingCountMismatch
+    }
+}
+
+pub(crate) struct RelationFilterBinding<P: FilterPushdown> {
     planned: Vec<PlannedFilterRecord<P::PlannedPredicate>>,
-    binding_metadata: Box<[FilterValueSlot]>,
-    expr_states: *mut pg_sys::List,
-    values: Vec<FilterValue>,
-    pending_values: Vec<FilterValue>,
-    dynamic_slots: Box<[usize]>,
+    values: RuntimeValueState,
     stable_records: Box<[bool]>,
     bound: Vec<Option<BoundFilter<P::BoundPredicate>>>,
     pending_bound: Vec<(usize, Option<BoundFilter<P::BoundPredicate>>)>,
-    param_refs: RuntimeParamRefs,
 }
 
-impl<P: FilterPushdown> RuntimeFilterState<P> {
+impl<P: FilterPushdown> RelationFilterBinding<P> {
     /// # Safety
     ///
     /// `binding_exprs` is a live plan-owned `List<Expr>`, and `parent` is the
     /// CustomScan/ForeignScan PlanState that owns the initialized ExprStates.
     pub(crate) unsafe fn initialize(
         planned: Vec<PlannedFilterRecord<P::PlannedPredicate>>,
-        binding_metadata: Vec<FilterValueSlot>,
+        binding_metadata: Vec<RuntimeValueSpec>,
         binding_exprs: *mut pg_sys::List,
         parent: *mut pg_sys::PlanState,
-    ) -> Result<Self, RuntimeFilterError<P::Error>> {
-        let expression_count = if binding_exprs.is_null() {
-            0
-        } else {
-            unsafe { pg_sys::list_length(binding_exprs) as usize }
-        };
+    ) -> Result<Self, RelationFilterBindingError<P::Error>> {
+        let expression_count = unsafe { pg_sys::list_length(binding_exprs) as usize };
         Self::validate_binding_count(expression_count, binding_metadata.len())?;
-        let expr_states = unsafe { pg_sys::ExecInitExprList(binding_exprs, parent) };
-        let mut param_refs =
-            unsafe { RuntimeParamRefs::collect_from_list(binding_exprs) };
-        let estate = unsafe { (*parent).state };
-        let query_context = unsafe { (*estate).es_query_cxt };
-        unsafe { param_refs.relocate_exec_param_ids_to(query_context) };
         let stable_records = planned
             .iter()
             .map(|filter| {
@@ -67,26 +60,20 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let dynamic_slots = binding_metadata
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| {
-                (!value.source_kind.is_rescan_stable()).then_some(index)
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         let dynamic_count = stable_records.iter().filter(|&&stable| !stable).count();
+        let values = unsafe {
+            RuntimeValueState::initialize(
+                RuntimeValueLayout::new(binding_metadata.into_boxed_slice()),
+                binding_exprs,
+                parent,
+            )
+        }?;
         Ok(Self {
             planned,
-            binding_metadata: binding_metadata.into_boxed_slice(),
-            expr_states,
-            values: Vec::with_capacity(expression_count),
-            pending_values: Vec::with_capacity(expression_count),
-            dynamic_slots,
+            values,
             stable_records,
             bound: Vec::new(),
             pending_bound: Vec::with_capacity(dynamic_count),
-            param_refs,
         })
     }
 
@@ -101,8 +88,8 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
     pub(crate) unsafe fn bind_stable(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
-    ) -> Result<(), RuntimeFilterError<P::Error>> {
-        debug_assert!(self.values.is_empty());
+    ) -> Result<(), RelationFilterBindingError<P::Error>> {
+        debug_assert!(self.values.values().is_empty());
         debug_assert!(self.bound.is_empty());
         self.bound = (0..self.planned.len()).map(|_| None).collect();
         for (filter_index, filter) in self.planned.iter().enumerate() {
@@ -110,18 +97,8 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
                 continue;
             }
             let range = filter.binding_range.clone();
-            let metadata = &self.binding_metadata[range.clone()];
-            let mut values = Vec::with_capacity(range.len());
-            for index in range {
-                values.push(unsafe {
-                    Self::evaluate(
-                        self.expr_states,
-                        index,
-                        self.binding_metadata[index],
-                        econtext,
-                    )
-                });
-            }
+            let metadata = &self.values.layout().values()[range.clone()];
+            let values = unsafe { self.values.evaluate_range(range, econtext) };
             self.bound[filter_index] =
                 Self::bind_record(filter_index, filter, metadata, &values)?;
         }
@@ -133,7 +110,7 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
     pub(crate) unsafe fn bind_initial(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
-    ) -> Result<(), RuntimeFilterError<P::Error>> {
+    ) -> Result<(), RelationFilterBindingError<P::Error>> {
         unsafe { self.bind_stable(econtext) }?;
         unsafe { self.bind_dynamic_initial(econtext) }
     }
@@ -148,23 +125,18 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
     pub(crate) unsafe fn bind_dynamic_initial(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
-    ) -> Result<(), RuntimeFilterError<P::Error>> {
+    ) -> Result<(), RelationFilterBindingError<P::Error>> {
         debug_assert_eq!(self.bound.len(), self.planned.len());
-        debug_assert!(self.values.is_empty());
-        if self.dynamic_slots.is_empty() {
+        debug_assert!(self.values.values().is_empty());
+        if !self.values.has_dynamic_values() {
             return Ok(());
         }
-        for (index, &metadata) in self.binding_metadata.iter().enumerate() {
-            self.values.push(unsafe {
-                Self::evaluate(self.expr_states, index, metadata, econtext)
-            });
-        }
-        self.pending_values.clone_from(&self.values);
+        unsafe { self.values.bind_initial(econtext) };
         Self::bind_dynamic_records(
             &self.planned,
             &self.stable_records,
-            &self.binding_metadata,
-            &self.values,
+            self.values.layout().values(),
+            self.values.values(),
             &mut self.pending_bound,
         )?;
         for (filter_index, replacement) in self.pending_bound.drain(..) {
@@ -182,60 +154,37 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
     pub(crate) unsafe fn rebind_dynamic(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
-    ) -> Result<(), RuntimeFilterError<P::Error>> {
-        if self.dynamic_slots.is_empty() {
+    ) -> Result<(), RelationFilterBindingError<P::Error>> {
+        if !self.values.has_dynamic_values() {
             return Ok(());
         }
-        debug_assert_eq!(self.values.len(), self.binding_metadata.len());
-        debug_assert_eq!(self.pending_values.len(), self.values.len());
-
-        for &index in self.dynamic_slots.iter() {
-            let metadata = self.binding_metadata[index];
-            self.pending_values[index] = unsafe {
-                Self::evaluate(self.expr_states, index, metadata, econtext)
-            };
-        }
-
+        unsafe { self.values.rebind_dynamic(econtext) };
         Self::bind_dynamic_records(
             &self.planned,
             &self.stable_records,
-            &self.binding_metadata,
-            &self.pending_values,
+            self.values.layout().values(),
+            self.values.values(),
             &mut self.pending_bound,
         )?;
 
         for (filter_index, replacement) in self.pending_bound.drain(..) {
             self.bound[filter_index] = replacement;
         }
-        core::mem::swap(&mut self.values, &mut self.pending_values);
         Ok(())
-    }
-
-    unsafe fn evaluate(
-        expr_states: *mut pg_sys::List,
-        index: usize,
-        metadata: FilterValueSlot,
-        econtext: *mut pg_sys::ExprContext,
-    ) -> FilterValue {
-        let state = unsafe { pg_sys::list_nth(expr_states, index as i32) }
-            as *mut pg_sys::ExprState;
-        let mut is_null = false;
-        let datum = unsafe {
-            pg_sys::ExecEvalExprSwitchContext(state, econtext, &mut is_null)
-        };
-        unsafe { FilterValue::from_raw(datum, is_null, metadata) }
     }
 
     fn bind_record(
         filter_index: usize,
         filter: &PlannedFilterRecord<P::PlannedPredicate>,
-        binding_metadata: &[FilterValueSlot],
-        values: &[FilterValue],
-    ) -> Result<Option<BoundFilter<P::BoundPredicate>>, RuntimeFilterError<P::Error>>
-    {
+        binding_metadata: &[RuntimeValueSpec],
+        values: &[RuntimeValue],
+    ) -> Result<
+        Option<BoundFilter<P::BoundPredicate>>,
+        RelationFilterBindingError<P::Error>,
+    > {
         let result =
-            P::bind_filter(&filter.planned, FilterValueBindings::new(values))
-                .map_err(RuntimeFilterError::Provider)?;
+            P::bind_filter(&filter.planned, RuntimeValueBindings::new(values))
+                .map_err(RelationFilterBindingError::Provider)?;
         match result {
             FilterBindResult::Bound(predicate) => Ok(Some(BoundFilter {
                 predicate,
@@ -252,7 +201,9 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
                 Ok(None)
             }
             FilterBindResult::ValueNotRepresentable => {
-                Err(RuntimeFilterError::ExactValueNotRepresentable { filter_index })
+                Err(RelationFilterBindingError::ExactValueNotRepresentable {
+                    filter_index,
+                })
             }
         }
     }
@@ -260,10 +211,10 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
     fn bind_dynamic_records(
         planned: &[PlannedFilterRecord<P::PlannedPredicate>],
         stable_records: &[bool],
-        binding_metadata: &[FilterValueSlot],
-        values: &[FilterValue],
+        binding_metadata: &[RuntimeValueSpec],
+        values: &[RuntimeValue],
         pending: &mut Vec<(usize, Option<BoundFilter<P::BoundPredicate>>)>,
-    ) -> Result<(), RuntimeFilterError<P::Error>> {
+    ) -> Result<(), RelationFilterBindingError<P::Error>> {
         pending.clear();
         for (filter_index, filter) in planned.iter().enumerate() {
             if stable_records[filter_index] {
@@ -293,7 +244,7 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
         &self,
         chg_param: *mut pg_sys::Bitmapset,
     ) -> bool {
-        unsafe { self.param_refs.changed(chg_param) }
+        unsafe { self.values.values_changed(chg_param) }
     }
 
     pub(crate) fn bound(&self) -> BoundFilterSet<'_, P::BoundPredicate> {
@@ -315,11 +266,11 @@ impl<P: FilterPushdown> RuntimeFilterState<P> {
     fn validate_binding_count(
         expression_count: usize,
         metadata_count: usize,
-    ) -> Result<(), RuntimeFilterError<P::Error>> {
+    ) -> Result<(), RelationFilterBindingError<P::Error>> {
         if expression_count == metadata_count {
             Ok(())
         } else {
-            Err(RuntimeFilterError::BindingCountMismatch)
+            Err(RelationFilterBindingError::BindingCountMismatch)
         }
     }
 }
@@ -336,27 +287,27 @@ mod tests {
 
     use super::*;
     use crate::expr::pushdown::{
-        FilterFragment, FilterPlan, FilterPlanningContext, FilterPushdownPlanner,
-        FilterTypeMetadata, FilterValueSourceKind,
+        FilterPlan, FilterPlanningContext, FilterPushdownPlanner, PredicateFragment,
     };
+    use crate::expr::{ExprType, RuntimeValueSource};
 
     type BoundFilterSlots<P> =
         Vec<Option<BoundFilter<<P as FilterPushdown>::BoundPredicate>>>;
 
     type RuntimeFilterResult<P, T> =
-        Result<T, RuntimeFilterError<<P as FilterPushdown>::Error>>;
+        Result<T, RelationFilterBindingError<<P as FilterPushdown>::Error>>;
 
     fn bind_values<P: FilterPushdown>(
         planned: &[PlannedFilterRecord<P::PlannedPredicate>],
-        binding_metadata: &[FilterValueSlot],
-        values: &[FilterValue],
+        binding_metadata: &[RuntimeValueSpec],
+        values: &[RuntimeValue],
     ) -> RuntimeFilterResult<P, BoundFilterSlots<P>> {
         planned
             .iter()
             .enumerate()
             .map(|(filter_index, filter)| {
                 let range = filter.binding_range.clone();
-                RuntimeFilterState::<P>::bind_record(
+                RelationFilterBinding::<P>::bind_record(
                     filter_index,
                     filter,
                     &binding_metadata[range.clone()],
@@ -392,7 +343,7 @@ mod tests {
 
         fn try_plan_filter(
             &mut self,
-            _fragment: &FilterFragment,
+            _fragment: &PredicateFragment,
         ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
             Ok(FilterPlan::Unsupported)
         }
@@ -428,7 +379,7 @@ mod tests {
 
         fn bind_filter(
             predicate: &Self::PlannedPredicate,
-            values: FilterValueBindings<'_>,
+            values: RuntimeValueBindings<'_>,
         ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
             match predicate {
                 BindBehavior::Bound(value) => {
@@ -447,9 +398,9 @@ mod tests {
         }
     }
 
-    fn value_slot(source_kind: FilterValueSourceKind) -> FilterValueSlot {
-        FilterValueSlot {
-            value_type: FilterTypeMetadata {
+    fn value_slot(source_kind: RuntimeValueSource) -> RuntimeValueSpec {
+        RuntimeValueSpec {
+            value_type: ExprType {
                 type_oid: pg_sys::INT4OID,
                 typmod: -1,
                 collation: pg_sys::Oid::INVALID,
@@ -489,12 +440,16 @@ mod tests {
 
     #[test]
     fn binding_expression_count_must_match_metadata() {
-        RuntimeFilterState::<TestProvider>::validate_binding_count(2, 2)
+        RelationFilterBinding::<TestProvider>::validate_binding_count(2, 2)
             .expect("matching binding counts must be accepted");
-        let error = RuntimeFilterState::<TestProvider>::validate_binding_count(1, 2)
-            .expect_err("mismatched binding counts must be rejected");
+        let error =
+            RelationFilterBinding::<TestProvider>::validate_binding_count(1, 2)
+                .expect_err("mismatched binding counts must be rejected");
 
-        assert!(matches!(error, RuntimeFilterError::BindingCountMismatch));
+        assert!(matches!(
+            error,
+            RelationFilterBindingError::BindingCountMismatch
+        ));
     }
 
     #[test]
@@ -508,12 +463,15 @@ mod tests {
             Err(error) => error,
             Ok(_) => {
                 panic!(
-                    "provider binding error was not preserved as RuntimeFilterError::Provider"
+                    "provider binding error was not preserved as RelationFilterBindingError::Provider"
                 )
             }
         };
 
-        assert!(matches!(error, RuntimeFilterError::Provider(TestError)));
+        assert!(matches!(
+            error,
+            RelationFilterBindingError::Provider(TestError)
+        ));
     }
 
     #[test]
@@ -533,7 +491,9 @@ mod tests {
 
         assert!(matches!(
             error,
-            RuntimeFilterError::ExactValueNotRepresentable { filter_index: 1 }
+            RelationFilterBindingError::ExactValueNotRepresentable {
+                filter_index: 1
+            }
         ));
     }
 
@@ -555,15 +515,15 @@ mod tests {
         );
         dynamic.binding_range = 1..2;
         let metadata = [
-            value_slot(FilterValueSourceKind::Constant),
-            value_slot(FilterValueSourceKind::ExecParam),
+            value_slot(RuntimeValueSource::Constant),
+            value_slot(RuntimeValueSource::ExecParam),
         ];
         let values = metadata.map(|metadata| unsafe {
-            FilterValue::from_raw(pg_sys::Datum::from(1usize), false, metadata)
+            RuntimeValue::from_raw(pg_sys::Datum::from(1usize), false, metadata)
         });
         let mut pending = Vec::new();
 
-        RuntimeFilterState::<TestProvider>::bind_dynamic_records(
+        RelationFilterBinding::<TestProvider>::bind_dynamic_records(
             &[stable, dynamic],
             &[true, false],
             &metadata,

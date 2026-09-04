@@ -47,7 +47,7 @@ pub struct PgComparisonIdentity {
 ///
 /// Equality and hashing deliberately live on [`PgComparisonIdentity`]; function
 /// and result OIDs are diagnostic/execution metadata, not capability identity.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PgComparisonOp {
     pub opno: pg_sys::Oid,
     pub opfuncid: pg_sys::Oid,

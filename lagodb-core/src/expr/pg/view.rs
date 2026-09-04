@@ -212,12 +212,7 @@ impl<'a> PgOpExpr<'a> {
 
     #[inline]
     pub fn arity(self) -> usize {
-        let args = self.args_list();
-        if args.is_null() {
-            0
-        } else {
-            unsafe { (*args).length as usize }
-        }
+        unsafe { pg_sys::list_length(self.args_list()) as usize }
     }
 
     #[inline]

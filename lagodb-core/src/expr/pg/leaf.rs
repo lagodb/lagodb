@@ -50,12 +50,12 @@ impl<'a> PgScalarExprRef<'a> {
 pub enum PgPredicateLeafRef<'a> {
     Comparison {
         op: PgComparisonOp,
-        left: PgScalarExprRef<'a>,
-        right: PgScalarExprRef<'a>,
+        left: PgExprRef<'a>,
+        right: PgExprRef<'a>,
     },
     NullTest {
         kind: PgNullTestKind,
-        value: PgScalarExprRef<'a>,
+        value: PgExprRef<'a>,
     },
 }
 
@@ -77,8 +77,8 @@ impl<'a> PgPredicateLeafRef<'a> {
                     .ok_or(PgStructuralError::NonBinaryComparison)?;
                 Ok(Self::Comparison {
                     op: op.comparison_op(),
-                    left: PgScalarExprRef::parse(left)?,
-                    right: PgScalarExprRef::parse(right)?,
+                    left,
+                    right,
                 })
             }
             pg_sys::NodeTag::T_NullTest => {
@@ -95,10 +95,7 @@ impl<'a> PgPredicateLeafRef<'a> {
                         return Err(PgStructuralError::UnsupportedNullTest { kind });
                     }
                 };
-                Ok(Self::NullTest {
-                    kind,
-                    value: PgScalarExprRef::parse(value)?,
-                })
+                Ok(Self::NullTest { kind, value })
             }
             tag => Err(PgStructuralError::UnsupportedNodeTag { tag }),
         }

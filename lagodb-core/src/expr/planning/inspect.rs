@@ -16,7 +16,7 @@ use pgrx::pg_sys;
 ///
 /// `expr` must be a live PostgreSQL expression tree in the current backend
 /// memory context.
-pub(crate) unsafe fn subtree_is_unsafe_to_push(expr: *mut pg_sys::Expr) -> bool {
+pub unsafe fn subtree_is_unsafe_to_push(expr: *mut pg_sys::Expr) -> bool {
     if unsafe { pg_sys::contain_volatile_functions(expr.cast::<pg_sys::Node>()) } {
         return true;
     }

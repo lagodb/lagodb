@@ -3,9 +3,10 @@
 use pgrx::pg_sys;
 use std::ops::Range;
 
+use crate::expr::RuntimeValueExpr;
 use crate::expr::contract::{PushdownContract, PushdownCosting};
 
-use super::{EffectiveFilterContract, FilterBindingExpr, NormalizedFilter};
+use super::{EffectiveFilterContract, NormalizedPredicate};
 
 /// One provider-owned planned predicate and its local binding range.
 pub(crate) struct NegotiatedFilter<P> {
@@ -36,7 +37,7 @@ pub(crate) struct NegotiatedFilterSet<P> {
     pub residual: Vec<*mut pg_sys::Expr>,
     pub planned: Vec<NegotiatedFilter<P>>,
     pub recheck: Vec<*mut pg_sys::Expr>,
-    pub bindings: Vec<FilterBindingExpr>,
+    pub bindings: Vec<RuntimeValueExpr>,
 }
 
 impl<P> NegotiatedFilterSet<P> {
@@ -56,7 +57,7 @@ impl<P> NegotiatedFilterSet<P> {
     pub(crate) fn accept(
         &mut self,
         original_expr: *mut pg_sys::Expr,
-        normalized: NormalizedFilter,
+        normalized: NormalizedPredicate,
         planned: P,
         effective: EffectiveFilterContract,
     ) {
@@ -254,28 +255,27 @@ mod tests {
     use core::mem::MaybeUninit;
 
     use super::*;
-    use crate::expr::pushdown::{
-        FilterColumn, FilterFragment, FilterNode, FilterScalar, FilterTypeMetadata,
-    };
+    use crate::expr::pushdown::{PredicateExpr, PredicateFragment, ScalarExpr};
+    use crate::expr::{ColumnRef, ExprType};
 
-    fn normalized_filter(pushed_expr: *mut pg_sys::Expr) -> NormalizedFilter {
-        let column = FilterColumn {
-            rel_oid: pg_sys::Oid::from(16_384_u32),
+    fn normalized_filter(pushed_expr: *mut pg_sys::Expr) -> NormalizedPredicate {
+        let column = ColumnRef {
+            scan: crate::query_contract::ScanId::from_index(0),
             attno: 1,
-            declared_type: FilterTypeMetadata {
+            declared_type: ExprType {
                 type_oid: pg_sys::INT4OID,
                 typmod: -1,
                 collation: pg_sys::Oid::INVALID,
             },
-            value_type: FilterTypeMetadata {
+            value_type: ExprType {
                 type_oid: pg_sys::INT4OID,
                 typmod: -1,
                 collation: pg_sys::Oid::INVALID,
             },
         };
-        NormalizedFilter {
-            fragment: FilterFragment::new(
-                FilterNode::IsNull(FilterScalar::Column(column)),
+        NormalizedPredicate {
+            fragment: PredicateFragment::new(
+                PredicateExpr::IsNull(ScalarExpr::Column(column)),
                 Vec::new(),
             ),
             bindings: Vec::new(),

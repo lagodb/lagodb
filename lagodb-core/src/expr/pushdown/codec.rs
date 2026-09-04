@@ -7,29 +7,25 @@ use core::ptr;
 use pgrx::pg_sys;
 
 use crate::expr::contract::{PushdownContract, PushdownCosting};
+use crate::expr::{
+    ExpressionCodecError, ExpressionPlanDataDecode, ExpressionPlanDataEncode,
+    RuntimeValueLayout, RuntimeValueSpec,
+};
 use crate::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 
-use super::{
-    FilterPushdown, FilterValueSlot, FilterValueSourceKind, NegotiatedFilterSet,
-    PlannedFilterRecord,
-};
+use super::{FilterPushdown, NegotiatedFilterSet, PlannedFilterRecord};
 
 const CONTRACT_EXACT: i32 = 0;
 const CONTRACT_CONSERVATIVE: i32 = 1;
 const COSTING_COSTED: i32 = 0;
 const COSTING_UNCOSTED: i32 = 1;
 
-const SOURCE_CONSTANT: i32 = 0;
-const SOURCE_EXTERNAL_PARAM: i32 = 1;
-const SOURCE_EXEC_PARAM: i32 = 2;
-const SOURCE_OUTER_VALUE: i32 = 3;
-
 pub(crate) struct EncodedFilterData {
     pub planned: *mut pg_sys::List,
     pub bindings: *mut pg_sys::List,
 }
 
-type DecodedFilterData<P> = (Vec<PlannedFilterRecord<P>>, Vec<FilterValueSlot>);
+type DecodedFilterData<P> = (Vec<PlannedFilterRecord<P>>, Vec<RuntimeValueSpec>);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FilterDataError<E> {
@@ -37,6 +33,8 @@ pub(crate) enum FilterDataError<E> {
     PlanData(#[from] PlanDataError),
     #[error("provider planned-filter codec failed: {0}")]
     Provider(E),
+    #[error("shared expression codec failed: {0}")]
+    Expression(#[from] ExpressionCodecError),
     #[error("invalid planned-filter record: {0}")]
     Invalid(#[from] FilterRecordError),
 }
@@ -60,8 +58,6 @@ pub(crate) enum FilterRecordError {
         end: usize,
         binding_count: usize,
     },
-    #[error("binding {binding} has unknown source tag {value}")]
-    UnknownValueSource { binding: usize, value: i32 },
 }
 
 pub(crate) struct FilterDataCodec<P>(PhantomData<fn() -> P>);
@@ -147,28 +143,6 @@ impl FilterRecordCodec {
             value => Err(FilterRecordError::UnknownCosting { record, value }),
         }
     }
-
-    fn source_tag(source: FilterValueSourceKind) -> i32 {
-        match source {
-            FilterValueSourceKind::Constant => SOURCE_CONSTANT,
-            FilterValueSourceKind::ExternalParam => SOURCE_EXTERNAL_PARAM,
-            FilterValueSourceKind::ExecParam => SOURCE_EXEC_PARAM,
-            FilterValueSourceKind::OuterValue => SOURCE_OUTER_VALUE,
-        }
-    }
-
-    fn source_from_tag(
-        binding: usize,
-        value: i32,
-    ) -> Result<FilterValueSourceKind, FilterRecordError> {
-        match value {
-            SOURCE_CONSTANT => Ok(FilterValueSourceKind::Constant),
-            SOURCE_EXTERNAL_PARAM => Ok(FilterValueSourceKind::ExternalParam),
-            SOURCE_EXEC_PARAM => Ok(FilterValueSourceKind::ExecParam),
-            SOURCE_OUTER_VALUE => Ok(FilterValueSourceKind::OuterValue),
-            value => Err(FilterRecordError::UnknownValueSource { binding, value }),
-        }
-    }
 }
 
 impl<P: FilterPushdown> FilterDataCodec<P> {
@@ -200,29 +174,32 @@ impl<P: FilterPushdown> FilterDataCodec<P> {
             planned = unsafe { pg_sys::lappend(planned, record.cast()) };
         }
 
-        let mut bindings = ptr::null_mut();
-        for binding in &filters.bindings {
-            let record =
-                PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
-                    writer
-                        .append_oid(binding.metadata.value_type.type_oid)
-                        .append_i32(binding.metadata.value_type.typmod)
-                        .append_oid(binding.metadata.value_type.collation)
-                        .append_i32(FilterRecordCodec::source_tag(
-                            binding.metadata.source_kind,
-                        ));
-                    Ok(())
-                })?;
-            bindings = unsafe { pg_sys::lappend(bindings, record.cast()) };
-        }
+        let binding_layout = RuntimeValueLayout::new(
+            filters
+                .bindings
+                .iter()
+                .map(|binding| binding.metadata)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let bindings =
+            PlanDataWriter::encode_list::<FilterDataError<P::Error>>(|writer| {
+                binding_layout.encode_plan_data(writer);
+                Ok(())
+            })?;
 
         Ok(EncodedFilterData { planned, bindings })
     }
 
+    /// `planned_raw` is an unframed record list, so NIL is its canonical empty
+    /// encoding. `bindings_raw` is a counted [`RuntimeValueLayout`] frame; its
+    /// canonical empty encoding contains the zero count and NIL is rejected as
+    /// a missing frame even when `expected_binding_count` is zero.
+    ///
     /// # Safety
     ///
-    /// Both lists must be plan-owned `T_List` nodes (or NIL) that remain live
-    /// for the duration of provider decoding.
+    /// Every non-NIL list must be a plan-owned `T_List` that remains live for
+    /// the duration of provider decoding.
     pub(crate) unsafe fn decode(
         planned_raw: *mut pg_sys::List,
         expected_count: usize,
@@ -305,49 +282,16 @@ impl<P: FilterPushdown> FilterDataCodec<P> {
     unsafe fn decode_bindings(
         raw: *mut pg_sys::List,
         expected_count: usize,
-    ) -> Result<Vec<FilterValueSlot>, FilterDataError<P::Error>> {
-        if raw.is_null() {
-            FilterRecordCodec::binding_count(0, expected_count)?;
-            return Ok(Vec::new());
-        }
-
-        unsafe {
+    ) -> Result<Vec<RuntimeValueSpec>, FilterDataError<P::Error>> {
+        let layout = unsafe {
             PlanDataReader::decode_checked_list::<_, FilterDataError<P::Error>>(
                 raw,
                 0,
-                |records| {
-                    let count = FilterRecordCodec::binding_count(
-                        records.remaining(),
-                        expected_count,
-                    )?;
-                    let mut bindings = Vec::with_capacity(count);
-                    for binding_index in 0..count {
-                        bindings.push(
-                            records.read_nested::<_, FilterDataError<P::Error>>(
-                                |record| {
-                                    let type_oid = record.read_oid()?;
-                                    let typmod = record.read_i32()?;
-                                    let collation = record.read_oid()?;
-                                    let source = FilterRecordCodec::source_from_tag(
-                                        binding_index,
-                                        record.read_i32()?,
-                                    )?;
-                                    Ok(FilterValueSlot {
-                                        value_type: super::FilterTypeMetadata {
-                                            type_oid,
-                                            typmod,
-                                            collation,
-                                        },
-                                        source_kind: source,
-                                    })
-                                },
-                            )?,
-                        );
-                    }
-                    Ok(bindings)
-                },
+                |reader| Ok(RuntimeValueLayout::decode_plan_data(reader, ())?),
             )
-        }
+        }?;
+        FilterRecordCodec::binding_count(layout.len(), expected_count)?;
+        Ok(layout.values().to_vec())
     }
 }
 

@@ -85,29 +85,3 @@ fn costing_tags_round_trip_and_unknown_tag_is_rejected() {
         })
     ));
 }
-
-#[test]
-fn value_source_tags_round_trip_and_unknown_tag_is_rejected() {
-    for source in [
-        FilterValueSourceKind::Constant,
-        FilterValueSourceKind::ExternalParam,
-        FilterValueSourceKind::ExecParam,
-        FilterValueSourceKind::OuterValue,
-    ] {
-        assert_eq!(
-            FilterRecordCodec::source_from_tag(
-                0,
-                FilterRecordCodec::source_tag(source),
-            )
-            .unwrap(),
-            source
-        );
-    }
-    assert!(matches!(
-        FilterRecordCodec::source_from_tag(9, 99),
-        Err(FilterRecordError::UnknownValueSource {
-            binding: 9,
-            value: 99
-        })
-    ));
-}

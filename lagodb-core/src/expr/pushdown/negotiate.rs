@@ -4,11 +4,13 @@ use pgrx::pg_sys;
 
 use crate::expr::contract::{PushdownContract, PushdownCosting};
 use crate::expr::inspect::subtree_is_unsafe_to_push;
-use crate::expr::pg::{PgBoolExpr, PgExprRef};
 
+use super::negotiation::{
+    ConservativeCandidate, bool_children, bool_expr, conservative_candidate,
+};
 use super::{
-    EffectiveFilterContract, FilterNormalizer, FilterPlan, FilterPushdownPlanner,
-    NegotiatedFilterSet, NormalizedFilter,
+    EffectiveFilterContract, FilterPlan, FilterPushdownPlanner, NegotiatedFilterSet,
+    NormalizedPredicate, RelationExpressionNormalizer,
 };
 
 /// Origin of a PostgreSQL planner clause list.
@@ -28,20 +30,16 @@ impl ScanClauseSource {
 /// Single owner of provider negotiation and residual/recheck decisions.
 pub(crate) struct FilterNegotiator<'a, P: FilterPushdownPlanner> {
     planner: &'a mut P,
-    normalizer: FilterNormalizer,
+    normalizer: RelationExpressionNormalizer,
     baserel: *mut pg_sys::RelOptInfo,
 }
 
 impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
-    pub(crate) fn new(
-        planner: &'a mut P,
-        rel_oid: pg_sys::Oid,
-        baserel: *mut pg_sys::RelOptInfo,
-    ) -> Self {
+    pub(crate) fn new(planner: &'a mut P, baserel: *mut pg_sys::RelOptInfo) -> Self {
         let scan_relid = unsafe { (*baserel).relid as core::ffi::c_int };
         Self {
             planner,
-            normalizer: FilterNormalizer::new(rel_oid, scan_relid),
+            normalizer: RelationExpressionNormalizer::new(scan_relid),
             baserel,
         }
     }
@@ -70,11 +68,7 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
         S: FnMut(*mut pg_sys::RestrictInfo) -> ScanClauseSource,
     {
         let mut out = NegotiatedFilterSet::new();
-        let length = if clauses.is_null() {
-            0
-        } else {
-            unsafe { pg_sys::list_length(clauses) }
-        };
+        let length = unsafe { pg_sys::list_length(clauses) };
         for index in 0..length {
             let rinfo = unsafe { pg_sys::list_nth(clauses, index) }
                 as *mut pg_sys::RestrictInfo;
@@ -158,7 +152,7 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
                 let is_widened =
                     candidates.iter().any(|candidate| candidate.is_widened);
                 let Some(candidate) = (unsafe {
-                    NormalizedFilter::combine_or(
+                    NormalizedPredicate::combine_or(
                         candidates
                             .into_iter()
                             .map(|candidate| candidate.filter)
@@ -197,93 +191,15 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
     unsafe fn candidate_for(
         &mut self,
         expr: *mut pg_sys::Expr,
-    ) -> Result<Option<WideningCandidate>, P::Error> {
-        if let Some(normalized) = unsafe { self.normalizer.normalize(expr) }
-            && !matches!(
-                self.planner.try_plan_filter(&normalized.fragment)?,
-                FilterPlan::Unsupported
-            )
-        {
-            return Ok(Some(WideningCandidate {
-                filter: normalized,
-                is_widened: false,
-            }));
-        }
-
-        let Some(boolean) = (unsafe { bool_expr(expr) }) else {
-            return Ok(None);
+    ) -> Result<Option<ConservativeCandidate>, P::Error> {
+        let normalizer = self.normalizer;
+        let mut normalize = |expression| unsafe { normalizer.normalize(expression) };
+        let planner = &mut *self.planner;
+        let mut accepts = |fragment: &_| {
+            planner
+                .try_plan_filter(fragment)
+                .map(|plan| !matches!(plan, FilterPlan::Unsupported))
         };
-        match boolean.boolop() {
-            pg_sys::BoolExprType::AND_EXPR => {
-                let children = bool_children(boolean);
-                let mut candidates = Vec::new();
-                for child in &children {
-                    if let Some(candidate) = unsafe { self.candidate_for(*child) }? {
-                        candidates.push(candidate);
-                    }
-                }
-                let is_widened = candidates.len() != children.len()
-                    || candidates.iter().any(|candidate| candidate.is_widened);
-                Ok((unsafe {
-                    NormalizedFilter::combine_and(
-                        candidates
-                            .into_iter()
-                            .map(|candidate| candidate.filter)
-                            .collect(),
-                    )
-                })
-                .map(|filter| WideningCandidate { filter, is_widened }))
-            }
-            pg_sys::BoolExprType::OR_EXPR => {
-                let mut candidates = Vec::new();
-                for child in bool_children(boolean) {
-                    let Some(candidate) = (unsafe { self.candidate_for(child) })?
-                    else {
-                        return Ok(None);
-                    };
-                    candidates.push(candidate);
-                }
-                let is_widened =
-                    candidates.iter().any(|candidate| candidate.is_widened);
-                Ok((unsafe {
-                    NormalizedFilter::combine_or(
-                        candidates
-                            .into_iter()
-                            .map(|candidate| candidate.filter)
-                            .collect(),
-                    )
-                })
-                .map(|filter| WideningCandidate { filter, is_widened }))
-            }
-            pg_sys::BoolExprType::NOT_EXPR => Ok(None),
-            _ => Ok(None),
-        }
+        unsafe { conservative_candidate(expr, &mut normalize, &mut accepts) }
     }
-}
-
-struct WideningCandidate {
-    filter: NormalizedFilter,
-    is_widened: bool,
-}
-
-/// # Safety
-///
-/// `expr` must remain live for the returned borrowed view.
-unsafe fn bool_expr<'a>(expr: *mut pg_sys::Expr) -> Option<PgBoolExpr<'a>> {
-    let expr = unsafe { PgExprRef::from_raw_opt(expr) }?;
-    PgBoolExpr::try_from_expr(expr.without_relabels())
-}
-
-fn bool_children(boolean: PgBoolExpr<'_>) -> Vec<*mut pg_sys::Expr> {
-    let args = boolean.args_list();
-    let length = if args.is_null() {
-        0
-    } else {
-        unsafe { pg_sys::list_length(args) }
-    };
-    let mut children = Vec::with_capacity(length as usize);
-    for index in 0..length {
-        children.push(unsafe { pg_sys::list_nth(args, index) } as *mut pg_sys::Expr);
-    }
-    children
 }

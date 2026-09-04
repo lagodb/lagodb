@@ -1,52 +1,66 @@
-//! PostgreSQL expression normalization into an owned [`FilterFragment`].
+//! PostgreSQL expression normalization into the shared scalar/predicate IR.
 
 use core::ffi::c_void;
 use core::ptr;
+
 use pgrx::pg_sys;
 
 use crate::expr::pg::{
     PgBoolExpr, PgExprRef, PgNullTestKind, PgPredicateLeafRef, PgScalarExprRef,
 };
-
-use super::{
-    FilterBindingExpr, FilterColumn, FilterFragment, FilterNode, FilterScalar,
-    FilterTypeMetadata, FilterValueSlot, FilterValueSlotId, FilterValueSourceKind,
+use crate::expr::{
+    ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSource,
+    RuntimeValueSpec,
 };
 
-/// A normalized fragment plus the PG expressions backing its local slots.
+use super::scope::{RelationExpressionScope, VarResolution};
+use super::{PredicateExpr, PredicateFragment, QueryExpressionScope, ScalarExpr};
+
+/// A normalized predicate plus the PostgreSQL expressions backing its values.
 #[derive(Debug, Clone)]
-pub(crate) struct NormalizedFilter {
-    pub fragment: FilterFragment,
-    pub bindings: Vec<FilterBindingExpr>,
-    pub pushed_expr: *mut pg_sys::Expr,
+pub struct NormalizedPredicate {
+    pub(crate) fragment: PredicateFragment,
+    pub(crate) bindings: Vec<RuntimeValueExpr>,
+    pub(crate) pushed_expr: *mut pg_sys::Expr,
 }
 
-#[derive(Clone, Copy)]
-enum FilterCombination {
-    And,
-    Or,
-}
-
-impl NormalizedFilter {
-    /// # Safety
-    ///
-    /// Every candidate expression must be live in the current planner memory
-    /// context.
-    pub(crate) unsafe fn combine_and(items: Vec<Self>) -> Option<Self> {
-        unsafe { Self::combine(items, FilterCombination::And) }
+impl NormalizedPredicate {
+    #[inline]
+    pub fn fragment(&self) -> &PredicateFragment {
+        &self.fragment
     }
 
-    /// # Safety
-    ///
-    /// Every candidate expression must be live in the current planner memory
-    /// context.
+    #[inline]
+    pub fn bindings(&self) -> &[RuntimeValueExpr] {
+        &self.bindings
+    }
+
+    #[inline]
+    pub fn pushed_expr(&self) -> *mut pg_sys::Expr {
+        self.pushed_expr
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (PredicateFragment, Vec<RuntimeValueExpr>, *mut pg_sys::Expr) {
+        (self.fragment, self.bindings, self.pushed_expr)
+    }
+
+    /// Combine independently normalized conjuncts, rebasing their value slots.
+    /// Used by both relation filter negotiation and query scan pruning.
+    pub(crate) unsafe fn combine_and(items: Vec<Self>) -> Option<Self> {
+        unsafe { Self::combine(items, PredicateCombination::And) }
+    }
+
+    /// Combine normalized disjuncts only after every branch has supplied a
+    /// safe exact or widened pruning candidate.
     pub(crate) unsafe fn combine_or(items: Vec<Self>) -> Option<Self> {
-        unsafe { Self::combine(items, FilterCombination::Or) }
+        unsafe { Self::combine(items, PredicateCombination::Or) }
     }
 
     unsafe fn combine(
         items: Vec<Self>,
-        combination: FilterCombination,
+        combination: PredicateCombination,
     ) -> Option<Self> {
         if items.is_empty() {
             return None;
@@ -54,7 +68,6 @@ impl NormalizedFilter {
         if items.len() == 1 {
             return items.into_iter().next();
         }
-
         let value_count = items.iter().map(|item| item.bindings.len()).sum();
         let mut values = Vec::with_capacity(value_count);
         let mut bindings = Vec::with_capacity(value_count);
@@ -62,7 +75,7 @@ impl NormalizedFilter {
         let mut pushed_args: *mut pg_sys::List = ptr::null_mut();
         for item in items {
             let offset = values.len();
-            nodes.push(Self::rebase_node(item.fragment.root(), offset));
+            nodes.push(item.fragment.root().rebase_runtime_values(offset));
             values.extend_from_slice(item.fragment.values());
             bindings.extend(item.bindings);
             pushed_args = unsafe {
@@ -70,116 +83,67 @@ impl NormalizedFilter {
             };
         }
         let (root, boolop) = match combination {
-            FilterCombination::And => (
-                FilterNode::And(nodes.into_boxed_slice()),
+            PredicateCombination::And => (
+                PredicateExpr::And(nodes.into_boxed_slice()),
                 pg_sys::BoolExprType::AND_EXPR,
             ),
-            FilterCombination::Or => (
-                FilterNode::Or(nodes.into_boxed_slice()),
+            PredicateCombination::Or => (
+                PredicateExpr::Or(nodes.into_boxed_slice()),
                 pg_sys::BoolExprType::OR_EXPR,
             ),
         };
         Some(Self {
-            fragment: FilterFragment::new(root, values),
+            fragment: PredicateFragment::new(root, values),
             bindings,
             pushed_expr: unsafe { pg_sys::makeBoolExpr(boolop, pushed_args, -1) },
         })
     }
-
-    fn rebase_node(node: &FilterNode, offset: usize) -> FilterNode {
-        match node {
-            FilterNode::Comparison {
-                operator,
-                left,
-                right,
-            } => FilterNode::Comparison {
-                operator: *operator,
-                left: Self::rebase_scalar(left, offset),
-                right: Self::rebase_scalar(right, offset),
-            },
-            FilterNode::IsNull(value) => {
-                FilterNode::IsNull(Self::rebase_scalar(value, offset))
-            }
-            FilterNode::IsNotNull(value) => {
-                FilterNode::IsNotNull(Self::rebase_scalar(value, offset))
-            }
-            FilterNode::And(items) => FilterNode::And(
-                items
-                    .iter()
-                    .map(|item| Self::rebase_node(item, offset))
-                    .collect(),
-            ),
-            FilterNode::Or(items) => FilterNode::Or(
-                items
-                    .iter()
-                    .map(|item| Self::rebase_node(item, offset))
-                    .collect(),
-            ),
-            FilterNode::Not(item) => {
-                FilterNode::Not(Box::new(Self::rebase_node(item, offset)))
-            }
-        }
-    }
-
-    fn rebase_scalar(value: &FilterScalar, offset: usize) -> FilterScalar {
-        match value {
-            FilterScalar::Column(column) => FilterScalar::Column(*column),
-            FilterScalar::Value(id) => {
-                FilterScalar::Value(FilterValueSlotId::new(id.index() + offset))
-            }
-        }
-    }
 }
 
-/// Relation-scoped normalizer. It owns no PostgreSQL pointers.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FilterNormalizer {
-    rel_oid: pg_sys::Oid,
-    scan_relid: core::ffi::c_int,
+#[derive(Clone, Copy)]
+enum PredicateCombination {
+    And,
+    Or,
 }
 
-impl FilterNormalizer {
-    pub(crate) const fn new(
-        rel_oid: pg_sys::Oid,
-        scan_relid: core::ffi::c_int,
-    ) -> Self {
-        Self {
-            rel_oid,
-            scan_relid,
-        }
-    }
+enum ExpressionScope<'a> {
+    Relation(RelationExpressionScope),
+    Query(&'a QueryExpressionScope),
+}
 
-    /// # Safety
-    ///
-    /// `expr` must be a live planner-owned expression tree.
-    pub(crate) unsafe fn normalize(
-        self,
+struct ExpressionNormalizer<'a> {
+    scope: ExpressionScope<'a>,
+}
+
+impl<'a> ExpressionNormalizer<'a> {
+    unsafe fn normalize_predicate(
+        &self,
         expr: *mut pg_sys::Expr,
-    ) -> Option<NormalizedFilter> {
+    ) -> Option<NormalizedPredicate> {
         let expr = unsafe { PgExprRef::from_raw_opt(expr) }?;
         let mut bindings = Vec::new();
         let root = unsafe { self.normalize_node(expr, &mut bindings) }?;
-        let values = bindings.iter().map(|binding| binding.metadata).collect();
-        Some(NormalizedFilter {
-            fragment: FilterFragment::new(root, values),
+        let values = bindings
+            .iter()
+            .copied()
+            .map(RuntimeValueExpr::metadata)
+            .collect();
+        Some(NormalizedPredicate {
+            fragment: PredicateFragment::new(root, values),
             bindings,
             pushed_expr: expr.as_ptr(),
         })
     }
 
     unsafe fn normalize_node(
-        self,
+        &self,
         expr: PgExprRef<'_>,
-        bindings: &mut Vec<FilterBindingExpr>,
-    ) -> Option<FilterNode> {
+        bindings: &mut Vec<RuntimeValueExpr>,
+    ) -> Option<PredicateExpr> {
         let expr = expr.without_relabels();
         if let Some(boolean) = PgBoolExpr::try_from_expr(expr) {
             let args = boolean.args_list();
-            let length = if args.is_null() {
-                0
-            } else {
-                unsafe { pg_sys::list_length(args) }
-            };
+            let length = unsafe { pg_sys::list_length(args) };
             if length == 0 {
                 return None;
             }
@@ -192,13 +156,13 @@ impl FilterNormalizer {
             }
             return match boolean.boolop() {
                 pg_sys::BoolExprType::AND_EXPR => {
-                    Some(FilterNode::And(children.into_boxed_slice()))
+                    Some(PredicateExpr::And(children.into_boxed_slice()))
                 }
                 pg_sys::BoolExprType::OR_EXPR => {
-                    Some(FilterNode::Or(children.into_boxed_slice()))
+                    Some(PredicateExpr::Or(children.into_boxed_slice()))
                 }
                 pg_sys::BoolExprType::NOT_EXPR if children.len() == 1 => {
-                    Some(FilterNode::Not(Box::new(children.remove(0))))
+                    Some(PredicateExpr::Not(Box::new(children.remove(0))))
                 }
                 _ => None,
             };
@@ -206,7 +170,7 @@ impl FilterNormalizer {
 
         match PgPredicateLeafRef::parse(expr).ok()? {
             PgPredicateLeafRef::Comparison { op, left, right } => {
-                Some(FilterNode::Comparison {
+                Some(PredicateExpr::Comparison {
                     operator: op,
                     left: self.normalize_scalar(left, bindings)?,
                     right: self.normalize_scalar(right, bindings)?,
@@ -215,70 +179,92 @@ impl FilterNormalizer {
             PgPredicateLeafRef::NullTest { kind, value } => {
                 let value = self.normalize_scalar(value, bindings)?;
                 match kind {
-                    PgNullTestKind::IsNull => Some(FilterNode::IsNull(value)),
-                    PgNullTestKind::IsNotNull => Some(FilterNode::IsNotNull(value)),
+                    PgNullTestKind::IsNull => Some(PredicateExpr::IsNull(value)),
+                    PgNullTestKind::IsNotNull => {
+                        Some(PredicateExpr::IsNotNull(value))
+                    }
                 }
             }
         }
     }
 
     fn normalize_scalar(
-        self,
-        scalar: PgScalarExprRef<'_>,
-        bindings: &mut Vec<FilterBindingExpr>,
-    ) -> Option<FilterScalar> {
+        &self,
+        expression: PgExprRef<'_>,
+        bindings: &mut Vec<RuntimeValueExpr>,
+    ) -> Option<ScalarExpr> {
+        let scalar = PgScalarExprRef::parse(expression).ok()?;
         match scalar {
             PgScalarExprRef::Var {
                 node: var,
                 expression,
-            } if var.varno() == self.scan_relid => {
-                (var.varattno() > 0).then_some(FilterScalar::Column(FilterColumn {
-                    rel_oid: self.rel_oid,
-                    attno: var.varattno(),
-                    declared_type: FilterTypeMetadata {
-                        type_oid: var.vartype(),
-                        typmod: var.vartypmod(),
-                        collation: var.varcollid(),
-                    },
-                    value_type: Self::type_metadata(expression),
-                }))
-            }
-            PgScalarExprRef::Var {
-                node: var,
-                expression,
-            } => (var.varattno() != 0).then(|| {
-                self.push_binding(
-                    bindings,
-                    expression.as_ptr(),
-                    FilterValueSlot {
+            } if var.varattno() > 0 => match &self.scope {
+                ExpressionScope::Relation(scope) => {
+                    match scope.resolve_var(var.varno()) {
+                        VarResolution::Column(scan) => {
+                            Some(ScalarExpr::Column(ColumnRef {
+                                scan,
+                                attno: var.varattno(),
+                                declared_type: ExprType {
+                                    type_oid: var.vartype(),
+                                    typmod: var.vartypmod(),
+                                    collation: var.varcollid(),
+                                },
+                                value_type: Self::type_metadata(expression),
+                            }))
+                        }
+                        VarResolution::OuterValue => Some(Self::push_binding(
+                            bindings,
+                            expression.as_ptr(),
+                            RuntimeValueSpec {
+                                value_type: Self::type_metadata(expression),
+                                source_kind: RuntimeValueSource::OuterValue,
+                            },
+                        )),
+                    }
+                }
+                ExpressionScope::Query(scope) => {
+                    let scan = scope.resolve_var(var.varno())?;
+                    Some(ScalarExpr::Column(ColumnRef {
+                        scan,
+                        attno: var.varattno(),
+                        declared_type: ExprType {
+                            type_oid: var.vartype(),
+                            typmod: var.vartypmod(),
+                            collation: var.varcollid(),
+                        },
                         value_type: Self::type_metadata(expression),
-                        source_kind: FilterValueSourceKind::OuterValue,
-                    },
-                )
-            }),
-            PgScalarExprRef::Const { expression, .. } => Some(self.push_binding(
+                    }))
+                }
+            },
+            PgScalarExprRef::Var { .. } => None,
+            PgScalarExprRef::Const { expression, .. } => Some(Self::push_binding(
                 bindings,
                 expression.as_ptr(),
-                FilterValueSlot {
+                RuntimeValueSpec {
                     value_type: Self::type_metadata(expression),
-                    source_kind: FilterValueSourceKind::Constant,
+                    source_kind: RuntimeValueSource::Constant,
                 },
             )),
             PgScalarExprRef::Param {
                 node: param,
                 expression,
             } => {
-                let source_kind = match param.paramkind() {
-                    pg_sys::ParamKind::PARAM_EXTERN => {
-                        FilterValueSourceKind::ExternalParam
+                let source_kind = match &self.scope {
+                    ExpressionScope::Relation(scope) => {
+                        scope.resolve_param(param.paramkind())?
                     }
-                    pg_sys::ParamKind::PARAM_EXEC => FilterValueSourceKind::ExecParam,
-                    _ => return None,
+                    ExpressionScope::Query(_) => match param.paramkind() {
+                        pg_sys::ParamKind::PARAM_EXTERN => {
+                            RuntimeValueSource::ExternalParam
+                        }
+                        _ => return None,
+                    },
                 };
-                Some(self.push_binding(
+                Some(Self::push_binding(
                     bindings,
                     expression.as_ptr(),
-                    FilterValueSlot {
+                    RuntimeValueSpec {
                         value_type: Self::type_metadata(expression),
                         source_kind,
                     },
@@ -287,8 +273,8 @@ impl FilterNormalizer {
         }
     }
 
-    fn type_metadata(expression: PgExprRef<'_>) -> FilterTypeMetadata {
-        FilterTypeMetadata {
+    fn type_metadata(expression: PgExprRef<'_>) -> ExprType {
+        ExprType {
             type_oid: expression.type_oid(),
             typmod: expression.typmod(),
             collation: expression.collation(),
@@ -296,13 +282,82 @@ impl FilterNormalizer {
     }
 
     fn push_binding(
-        self,
-        bindings: &mut Vec<FilterBindingExpr>,
+        bindings: &mut Vec<RuntimeValueExpr>,
         expr: *mut pg_sys::Expr,
-        metadata: FilterValueSlot,
-    ) -> FilterScalar {
-        let id = FilterValueSlotId::new(bindings.len());
-        bindings.push(FilterBindingExpr { expr, metadata });
-        FilterScalar::Value(id)
+        metadata: RuntimeValueSpec,
+    ) -> ScalarExpr {
+        let id = RuntimeValueId::new(bindings.len());
+        bindings.push(RuntimeValueExpr::new(expr, metadata));
+        ScalarExpr::Value(id)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RelationExpressionNormalizer {
+    scope: RelationExpressionScope,
+}
+
+impl RelationExpressionNormalizer {
+    pub(crate) const fn new(scan_relid: core::ffi::c_int) -> Self {
+        Self {
+            scope: RelationExpressionScope::new(scan_relid),
+        }
+    }
+
+    pub(crate) unsafe fn normalize(
+        self,
+        expr: *mut pg_sys::Expr,
+    ) -> Option<NormalizedPredicate> {
+        unsafe {
+            ExpressionNormalizer {
+                scope: ExpressionScope::Relation(self.scope),
+            }
+            .normalize_predicate(expr)
+        }
+    }
+}
+
+pub struct QueryExpressionNormalizer {
+    scope: QueryExpressionScope,
+}
+
+impl QueryExpressionNormalizer {
+    pub fn new(scope: QueryExpressionScope) -> Self {
+        Self { scope }
+    }
+
+    /// # Safety
+    /// `qual` must be a live planner-owned expression tree or PostgreSQL's
+    /// implicit-AND `List` representation of a qual.
+    pub unsafe fn normalize_predicate(
+        &self,
+        qual: *mut pg_sys::Node,
+    ) -> Option<NormalizedPredicate> {
+        unsafe { self.normalize_qual(qual) }
+    }
+
+    unsafe fn normalize_qual(
+        &self,
+        qual: *mut pg_sys::Node,
+    ) -> Option<NormalizedPredicate> {
+        if qual.is_null() {
+            return None;
+        }
+        let normalizer = ExpressionNormalizer {
+            scope: ExpressionScope::Query(&self.scope),
+        };
+        if unsafe { (*qual).type_ } != pg_sys::NodeTag::T_List {
+            return unsafe { normalizer.normalize_predicate(qual.cast()) };
+        }
+
+        let list = qual.cast::<pg_sys::List>();
+        let count = unsafe { pg_sys::list_length(list) };
+        let mut predicates = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let expression =
+                unsafe { pg_sys::list_nth(list, index) }.cast::<pg_sys::Expr>();
+            predicates.push(unsafe { normalizer.normalize_predicate(expression) }?);
+        }
+        unsafe { NormalizedPredicate::combine_and(predicates) }
     }
 }

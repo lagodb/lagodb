@@ -5,10 +5,11 @@ use std::error::Error;
 use pgrx::pg_sys;
 
 use crate::diag::SqlStateError;
+use crate::expr::RuntimeValueBindings;
 use crate::expr::contract::{PushdownContract, PushdownCosting};
 use crate::plan_data::{PlanDataReader, PlanDataWriter};
 
-use super::{FilterFragment, FilterValueBindings};
+use super::PredicateFragment;
 
 /// Owned relation identity available when a provider planning session starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub struct FilterPlanningContext {
 }
 
 impl FilterPlanningContext {
-    pub(crate) const fn new(
+    pub const fn new(
         relation_oid: pg_sys::Oid,
         scan_relid: pg_sys::Index,
         tablespace_oid: pg_sys::Oid,
@@ -144,7 +145,7 @@ pub trait FilterPushdownPlanner {
 
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error>;
 }
 
@@ -174,7 +175,7 @@ pub trait FilterPushdown: 'static {
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error>;
 }
 

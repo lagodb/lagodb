@@ -1,33 +1,49 @@
-//! Plan-stage binding expressions and executor-stage value views.
+//! Plan-stage expression bindings and executor-stage runtime value views.
 
 use pgrx::pg_sys;
 
-use super::FilterValueSlot;
+use crate::expr::{RuntimeValueId, RuntimeValueSpec};
 
 /// PostgreSQL expression aligned with one fragment-local value slot.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FilterBindingExpr {
-    pub expr: *mut pg_sys::Expr,
-    pub metadata: FilterValueSlot,
+pub struct RuntimeValueExpr {
+    pub(crate) expr: *mut pg_sys::Expr,
+    pub(crate) metadata: RuntimeValueSpec,
+}
+
+impl RuntimeValueExpr {
+    pub const fn new(expr: *mut pg_sys::Expr, metadata: RuntimeValueSpec) -> Self {
+        Self { expr, metadata }
+    }
+
+    #[inline]
+    pub const fn expr(self) -> *mut pg_sys::Expr {
+        self.expr
+    }
+
+    #[inline]
+    pub const fn metadata(self) -> RuntimeValueSpec {
+        self.metadata
+    }
 }
 
 /// One value evaluated by PostgreSQL for the current Begin/ReScan pass.
 #[derive(Debug, Clone, Copy)]
-pub struct FilterValue {
+pub struct RuntimeValue {
     datum: pg_sys::Datum,
     is_null: bool,
-    metadata: FilterValueSlot,
+    metadata: RuntimeValueSpec,
 }
 
-impl FilterValue {
+impl RuntimeValue {
     /// # Safety
     ///
     /// A non-NULL pass-by-reference `datum` must remain valid for the lifetime
-    /// of every [`FilterValueBindings`] view containing this value.
-    pub(crate) unsafe fn from_raw(
+    /// of every [`RuntimeValueBindings`] view containing this value.
+    pub unsafe fn from_raw(
         datum: pg_sys::Datum,
         is_null: bool,
-        metadata: FilterValueSlot,
+        metadata: RuntimeValueSpec,
     ) -> Self {
         Self {
             datum,
@@ -42,7 +58,7 @@ impl FilterValue {
     }
 
     #[inline]
-    pub fn metadata(self) -> FilterValueSlot {
+    pub fn metadata(self) -> RuntimeValueSpec {
         self.metadata
     }
 
@@ -56,14 +72,14 @@ impl FilterValue {
     }
 }
 
-/// Borrowed values for one planned predicate, indexed by local slot id.
+/// Borrowed values for one planned expression, indexed by its local slot id.
 #[derive(Clone, Copy)]
-pub struct FilterValueBindings<'a> {
-    values: &'a [FilterValue],
+pub struct RuntimeValueBindings<'a> {
+    values: &'a [RuntimeValue],
 }
 
-impl<'a> FilterValueBindings<'a> {
-    pub(crate) fn new(values: &'a [FilterValue]) -> Self {
+impl<'a> RuntimeValueBindings<'a> {
+    pub fn new(values: &'a [RuntimeValue]) -> Self {
         Self { values }
     }
 
@@ -78,7 +94,7 @@ impl<'a> FilterValueBindings<'a> {
     }
 
     #[inline]
-    pub fn value(self, id: super::FilterValueSlotId) -> FilterValue {
+    pub fn value(self, id: RuntimeValueId) -> RuntimeValue {
         self.values[id.index()]
     }
 }
