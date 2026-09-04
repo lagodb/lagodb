@@ -1,8 +1,8 @@
-//! # pg-arrow-conv
+//! # lagodb-arrow
 //!
-//! Format-neutral Arrow⇆PostgreSQL value conversion. Dispatches on the pair
-//! `(arrow_schema::DataType, PgColumnType)` and depends only on `arrow`,
-//! `pgrx`, and `lagodb-core` — never on a table-format crate.
+//! PostgreSQL⇆Arrow interoperability shared by LagoDB runtimes and providers.
+//! It owns format-neutral value conversion and the typed query-source adapter
+//! over LagoDB's Arrow C Stream ABI, but no table-format or DataFusion logic.
 //!
 //! - [`resolve_column_rule`] picks a [`ColumnRule`] for a column once.
 //! - [`ColumnReader::bind`] resolves a semantic batch column's concrete Arrow
@@ -25,19 +25,15 @@
 mod convert;
 mod datum;
 mod error;
-mod query_source;
+pub mod query_source;
 mod read;
 mod rule;
+mod scalar;
 mod types;
 mod write;
 
 pub use datum::DatumCodec;
 pub use error::{ArrowConversionError, ArrowConversionResult};
-pub use query_source::{
-    PlannedSource, QuerySourceAdapter, QuerySourceProvider, QuerySourceStream,
-    SourcePlanningContext, SourceProjection, SourceStreamOptions, SourceSupport,
-    export_query_source_stream,
-};
 pub use read::{
     ArrowBatchSource, ArrowColumnDecoder, BoundBatch, ColumnReader, DecodedColumn,
 };
@@ -45,6 +41,7 @@ pub use rule::{
     ColumnRule, ListElementRule, PgColumnType, resolve_column_rule,
     resolve_list_element_rule, validate_supported,
 };
+pub use scalar::{PgDatumArrayBuilder, PgDatumArrayReader};
 pub use types::{
     ArrowColumnEncoder, pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros,
 };

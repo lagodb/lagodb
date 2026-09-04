@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use pg_arrow_conv::{
+use lagodb_arrow::{
     ArrowConversionError, PgColumnType, resolve_column_rule, validate_supported,
 };
 use pgrx::pg_sys;

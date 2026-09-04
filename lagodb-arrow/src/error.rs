@@ -54,12 +54,12 @@ pub enum ArrowConversionError {
     /// yet encode the invariant — for example an encoder receiving a datum
     /// whose source type does not match the column rule the schema validator
     /// already resolved. Surfacing one of these in production is a bug in
-    /// `pg_arrow_conv`, not a user error.
+    /// `lagodb_arrow`, not a user error.
     ///
     /// Prefer expressing invariants directly in the type system over guarding
     /// with this variant when the unreachable case can be made
     /// unrepresentable.
-    #[error("invariant violation in pg-arrow-conv: {0}")]
+    #[error("invariant violation in lagodb-arrow: {0}")]
     InvariantViolated(&'static str),
 
     /// A NUMERIC codec error. Its SQLSTATE is selected from the structured

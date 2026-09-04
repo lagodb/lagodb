@@ -1,19 +1,21 @@
 [package]
-name = "pg-arrow-conv"
+name = "lagodb-arrow"
 version = { workspace = true }
 publish = false
-homepage = "https://github.com/robertmu/pg-lakebase"
-repository = "https://github.com/robertmu/pg-lakebase"
+license = { workspace = true }
+description = "PostgreSQL-Arrow interoperability shared by LagoDB runtimes and providers."
+homepage = { workspace = true }
+repository = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
 
 [lib]
-# rlib: linked into extension cdylibs (lagodb-iceberg managed and foreign tables
-# today, future Hudi/Delta implementations later). It never produces a cdylib.
+# rlib: linked into extension cdylibs that consume the Arrow conversion or
+# typed table-scan boundary. It never produces a cdylib.
 crate-type = ["rlib"]
 
 [features]
-# Default to pg17 so `cargo test -p pg-arrow-conv` (and any direct dependent)
+# Default to pg17 so `cargo test -p lagodb-arrow` (and any direct dependent)
 # selects a Postgres version without an explicit `--features`, matching
 # lagodb-core / lagodb-iceberg / pg-backend-tests.
 default = ["pg17"]

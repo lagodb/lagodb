@@ -3,7 +3,7 @@
 //! so assertions use `matches!`.
 
 use arrow_schema::DataType;
-use pg_arrow_conv::{
+use lagodb_arrow::{
     ArrowConversionError, ColumnRule, PgColumnType, resolve_column_rule,
 };
 use proptest::prelude::*;

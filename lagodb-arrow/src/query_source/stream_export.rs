@@ -1,4 +1,4 @@
-//! Project-owned Arrow C Stream exporter for provider query sources.
+//! Arrow C Stream exporter for provider query sources.
 
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
@@ -8,14 +8,14 @@ use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_array::{Array, StructArray};
 use arrow_schema::ffi::FFI_ArrowSchema;
 use lagodb_core::diag::PgReportError;
-use lagodb_core::runtime_api::{FFI_OPERATION_FAILED, FfiErrorRecord};
+use lagodb_core::runtime_api::{CALLBACK_FAILED, CallbackErrorReport};
 use pgrx::prelude::PgSqlErrorCode;
 
-use super::QuerySourceStream;
+use super::contract::TableScanStream;
 
 struct StreamState<S> {
     stream: S,
-    error: *mut FfiErrorRecord,
+    error: *mut CallbackErrorReport,
 }
 
 /// Export one provider stream using callbacks that contain both PostgreSQL
@@ -24,9 +24,9 @@ struct StreamState<S> {
 /// # Safety
 ///
 /// `error` must remain writable until the returned Arrow stream is released.
-pub(super) unsafe fn export<S: QuerySourceStream>(
+pub(super) unsafe fn export<S: TableScanStream>(
     stream: S,
-    error: *mut FfiErrorRecord,
+    error: *mut CallbackErrorReport,
 ) -> FFI_ArrowArrayStream {
     let state = Box::new(StreamState { stream, error });
     FFI_ArrowArrayStream {
@@ -38,7 +38,7 @@ pub(super) unsafe fn export<S: QuerySourceStream>(
     }
 }
 
-unsafe extern "C" fn get_schema<S: QuerySourceStream>(
+unsafe extern "C" fn get_schema<S: TableScanStream>(
     stream: *mut FFI_ArrowArrayStream,
     output: *mut FFI_ArrowSchema,
 ) -> c_int {
@@ -56,7 +56,7 @@ unsafe extern "C" fn get_schema<S: QuerySourceStream>(
                 .map_err(|error| {
                     PgReportError::from_message(
                         PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        format!("query source returned an unexportable Arrow schema: {error}"),
+                        format!("table scan returned an unexportable Arrow schema: {error}"),
                     )
                 })?;
             Ok(schema)
@@ -73,7 +73,7 @@ unsafe extern "C" fn get_schema<S: QuerySourceStream>(
     }
 }
 
-unsafe extern "C" fn get_next<S: QuerySourceStream>(
+unsafe extern "C" fn get_next<S: TableScanStream>(
     stream: *mut FFI_ArrowArrayStream,
     output: *mut FFI_ArrowArray,
 ) -> c_int {
@@ -116,12 +116,10 @@ unsafe extern "C" fn get_next<S: QuerySourceStream>(
 unsafe extern "C" fn get_last_error(
     _stream: *mut FFI_ArrowArrayStream,
 ) -> *const c_char {
-    c"query source stream callback failed".as_ptr()
+    c"table scan stream callback failed".as_ptr()
 }
 
-unsafe extern "C" fn release<S: QuerySourceStream>(
-    stream: *mut FFI_ArrowArrayStream,
-) {
+unsafe extern "C" fn release<S: TableScanStream>(stream: *mut FFI_ArrowArrayStream) {
     if stream.is_null() {
         return;
     }
@@ -141,7 +139,7 @@ unsafe extern "C" fn release<S: QuerySourceStream>(
     // release panic is recorded only when release itself is the first failure.
     // SAFETY: `private_data` still owns the live state installed by `export`.
     let error = unsafe { (*private_data).error };
-    let mut cleanup_error = FfiErrorRecord::default();
+    let mut cleanup_error = CallbackErrorReport::default();
     let release_state = || {
         // SAFETY: release took the unique private-data ownership above and
         // cleared the callback before reconstructing the box.
@@ -153,7 +151,7 @@ unsafe extern "C" fn release<S: QuerySourceStream>(
     let status = unsafe { cleanup_error.capture(release_state) };
     // SAFETY: the engine-owned slot outlives stream release by `export`'s
     // contract and callback/consumer access is serialized.
-    if status == FFI_OPERATION_FAILED && !unsafe { (*error).is_set() } {
+    if status == CALLBACK_FAILED && !unsafe { (*error).is_set() } {
         // SAFETY: same live, uniquely written error slot as the condition.
         unsafe { *error = cleanup_error };
     }

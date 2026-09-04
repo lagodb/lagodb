@@ -1,21 +1,20 @@
-# pg-arrow-conv
+# lagodb-arrow
 
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
-**Format-neutral Arrow⇆PostgreSQL value conversion.**
+**PostgreSQL⇆Arrow interoperability for LagoDB runtimes and providers.**
 
-`pg-arrow-conv` is the shared conversion layer between Apache Arrow data and
-PostgreSQL datums. It turns a column of an Arrow `RecordBatch` into the values a
-PostgreSQL tuple slot expects, and turns buffered PostgreSQL values back into an
-Arrow array. It knows about Arrow and PostgreSQL only — it never names a table
-format such as Iceberg, Delta, or Hudi.
+`lagodb-arrow` owns the shared Arrow boundary: format-neutral conversion between
+Arrow arrays and PostgreSQL datums/slots, plus the typed provider adapter that
+exports serial scans through the Arrow C Stream ABI. It contains no DataFusion
+execution logic and never names a table format such as Iceberg, Delta, or Hudi.
 
 The crate is a library (`rlib`) linked into the extension crates that need it.
-Today [lagodb-iceberg](../lagodb-iceberg) uses it for both managed tables and
-Iceberg foreign tables; future Hudi/Delta implementations can reuse the same
-conversion layer. It is not a PostgreSQL extension itself and produces no
+Today [lagodb-iceberg](../lagodb-iceberg) uses both its conversion and typed
+table-scan APIs, while [lagodb-connectors](../lagodb-connectors) uses its
+conversion APIs. It is not a PostgreSQL extension itself and produces no
 `cdylib`.
 
 ## Why this crate exists
@@ -36,8 +35,14 @@ What actually differs between consumers is *not* the value conversion. It is:
 Pulling the value rules into one crate means each consumer implements the
 [lagodb-core](../lagodb-core) framework interfaces once and never
 rewrites the conversion logic. Each consumer keeps its own schema mapping and
-column model; `pg-arrow-conv` takes over the moment an Arrow schema exists and
+column model; `lagodb-arrow` takes over the moment an Arrow schema exists and
 hands back datums (or arrays) with no knowledge of where the Arrow came from.
+
+The public `query_source` module is the provider-facing half of the same Arrow
+boundary. It converts typed provider plans, prepared handles, schemas, and
+streams into `lagodb-core`'s Arrow-independent exact-build descriptor ABI. The
+host registry remains in `lagodb-base`, and the DataFusion consumer remains in
+`lagodb-query`.
 
 ## Principle: dispatch on `(Arrow DataType, PgColumnType)`
 
@@ -62,7 +67,7 @@ format-neutral resolver never infers that representation from `JSONBOID`.
 
 ## Two worlds, one set of rules
 
-`pg-arrow-conv` mirrors the row/column split that `lagodb-core` defines, and
+`lagodb-arrow` mirrors the row/column split that `lagodb-core` defines, and
 keeps both sides driven by the same per-column rule so a value converted one way
 is bit-identical to the same value converted the other.
 
@@ -78,7 +83,7 @@ representation:
 
 The read half implements the `AmScanBatchSource` / `BatchRowDecoder` traits from
 `lagodb-core`; the relation-bound write buffer implements `BatchBuffer`
-while keeping its provider-specific source binding in `pg-arrow-conv`.
+while keeping its provider-specific source binding in `lagodb-arrow`.
 
 **Row world (FDW and row-mode).** A row-at-a-time consumer (an FDW, a row-mode
 access method, or buffering and `EXPLAIN` rendering) works through `lagodb-core`'s
@@ -105,7 +110,7 @@ Errors use the same domain-error machinery as the rest of the workspace.
 `SqlStateError`, so each variant maps to a `PgSqlErrorCode` (datatype mismatch,
 data exception, or internal error). Consumers embed it with a `#[from]` variant
 in their own error type and delegate the SQLSTATE, so a conversion failure
-surfaces the right error at the callback boundary. `pg-arrow-conv` itself only
+surfaces the right error at the callback boundary. `lagodb-arrow` itself only
 ever returns this plain domain error; turning it into a PostgreSQL report
 happens at the consumer's callback boundary, matching how the rest of the
 workspace is layered.
@@ -117,7 +122,8 @@ workspace is layered.
 - pgrx 0.19.2
 
 Dependencies are limited to `pgrx`, `lagodb-core`, the `arrow-*` crates, and
-`uuid`. The crate deliberately does **not** depend on any table-format crate.
+small support crates (`uuid`, `thiserror`, and `libc`). The crate deliberately
+does **not** depend on DataFusion or any table-format crate.
 
 ## Testing
 
@@ -125,7 +131,7 @@ Pure-Rust logic (rule resolution, codec math, validator parity) lives in this
 crate and runs with ordinary `cargo test`:
 
 ```bash
-cargo test -p pg-arrow-conv
+cargo test -p lagodb-arrow
 ```
 
 Paths that require a live PostgreSQL backend — Arrow⇆PG encode/decode into real

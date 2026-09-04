@@ -115,9 +115,9 @@ where
 // ---------------------------------------------------------------------------
 
 /// One mapped column: which Arrow batch column to read, the resolved rule, the
-/// destination slot index, and the provider-selected datum codec. A physical
-/// codec is part of the bound plan so a generic Arrow type or PostgreSQL OID
-/// cannot silently select provider-specific storage semantics.
+/// destination slot index, and the selected datum codec. A physical codec is
+/// part of the bound plan so a generic Arrow type or PostgreSQL OID cannot
+/// silently select storage or query-result semantics.
 pub struct DecodedColumn {
     rule: ColumnRule,
     src_col: usize,
@@ -180,7 +180,7 @@ impl DecodedColumn {
 ///
 /// Private on purpose: the concrete Arrow variants, their split, and the list
 /// special case are implementation detail behind the opaque [`ColumnReader`].
-enum ReaderImpl {
+pub(crate) enum ReaderImpl {
     Bool(BooleanArray),
     I32(Int32Array),
     I64(Int64Array),
@@ -257,6 +257,11 @@ enum BoundDatumReader {
     PrevalidatedLargeJsonText(LargeStringArray),
     PostgresJsonbVarlena(BinaryArray),
     PostgresLargeJsonbVarlena(LargeBinaryArray),
+    PostgresNumericVarlena(BinaryArray),
+    PostgresLargeNumericVarlena(LargeBinaryArray),
+    Float4FromFloat64(Float64Array),
+    NumericFromInt64(Int64Array),
+    NumericFromFloat64(Float64Array),
 }
 
 /// A semantic batch column resolved (validated + downcast) to its concrete
@@ -296,7 +301,7 @@ impl ColumnReader {
     /// check keeps the exact-type strictness the per-scan validation used to
     /// provide (decimal scale, fixed width, timestamp unit/tz), so the
     /// subsequent downcast cannot fail.
-    fn bind_reader(
+    pub(crate) fn bind_reader(
         rule: &ColumnRule,
         array: &dyn Array,
     ) -> ArrowConversionResult<ReaderImpl> {

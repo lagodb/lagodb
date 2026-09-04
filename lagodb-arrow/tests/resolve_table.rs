@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, TimeUnit};
-use pg_arrow_conv::{
+use lagodb_arrow::{
     ArrowConversionError, ColumnRule, ListElementRule, PgColumnType,
     resolve_column_rule,
 };

@@ -47,8 +47,52 @@ impl BoundDatumReader {
             };
         }
 
+        if codec.is_postgres_numeric_varlena() {
+            if !matches!(rule, ColumnRule::Binary) {
+                return Err(ArrowConversionError::InvariantViolated(
+                    "the PostgreSQL NUMERIC varlena codec requires a binary rule",
+                ));
+            }
+            return match reader {
+                ReaderImpl::Binary(array) => Ok(Self::PostgresNumericVarlena(array)),
+                ReaderImpl::LargeBinary(array) => {
+                    Ok(Self::PostgresLargeNumericVarlena(array))
+                }
+                _ => Err(ArrowConversionError::InvariantViolated(
+                    "the PostgreSQL NUMERIC varlena codec requires a binary rule",
+                )),
+            };
+        }
+
+        if codec.is_float4_from_float64() {
+            return match reader {
+                ReaderImpl::F64(array) => Ok(Self::Float4FromFloat64(array)),
+                _ => Err(ArrowConversionError::InvariantViolated(
+                    "the Float64-to-float4 codec requires a Float64 rule",
+                )),
+            };
+        }
+
+        if codec.is_numeric_from_int64() {
+            return match reader {
+                ReaderImpl::I64(array) => Ok(Self::NumericFromInt64(array)),
+                _ => Err(ArrowConversionError::InvariantViolated(
+                    "the Int64-to-NUMERIC codec requires an Int64 rule",
+                )),
+            };
+        }
+
+        if codec.is_numeric_from_float64() {
+            return match reader {
+                ReaderImpl::F64(array) => Ok(Self::NumericFromFloat64(array)),
+                _ => Err(ArrowConversionError::InvariantViolated(
+                    "the Float64-to-NUMERIC codec requires a Float64 rule",
+                )),
+            };
+        }
+
         Err(ArrowConversionError::InvariantViolated(
-            "unknown provider datum codec",
+            "unknown physical datum codec",
         ))
     }
 
@@ -250,6 +294,43 @@ impl BoundDatumReader {
                 }
                 let bytes: &[u8] = unsafe { array.value_unchecked(row_idx) };
                 unsafe { DatumCodec::copy_postgres_jsonb_varlena(bytes) }.map(Some)
+            }
+            Self::PostgresNumericVarlena(array) => {
+                if unsafe { is_null_unchecked(array, row_idx) } {
+                    return Ok(None);
+                }
+                let bytes: &[u8] = unsafe { array.value_unchecked(row_idx) };
+                unsafe { DatumCodec::copy_postgres_numeric_varlena(bytes) }.map(Some)
+            }
+            Self::PostgresLargeNumericVarlena(array) => {
+                if unsafe { is_null_unchecked(array, row_idx) } {
+                    return Ok(None);
+                }
+                let bytes: &[u8] = unsafe { array.value_unchecked(row_idx) };
+                unsafe { DatumCodec::copy_postgres_numeric_varlena(bytes) }.map(Some)
+            }
+            Self::Float4FromFloat64(array) => {
+                if unsafe { is_null_unchecked(array, row_idx) } {
+                    return Ok(None);
+                }
+                DatumCodec::float4_datum_from_float64(unsafe {
+                    array.value_unchecked(row_idx)
+                })
+                .map(Some)
+            }
+            Self::NumericFromInt64(array) => {
+                if unsafe { is_null_unchecked(array, row_idx) } {
+                    return Ok(None);
+                }
+                let value = unsafe { array.value_unchecked(row_idx) };
+                DatumCodec::numeric_datum_from_int64(value).map(Some)
+            }
+            Self::NumericFromFloat64(array) => {
+                if unsafe { is_null_unchecked(array, row_idx) } {
+                    return Ok(None);
+                }
+                let value = unsafe { array.value_unchecked(row_idx) };
+                DatumCodec::numeric_datum_from_float64(value).map(Some)
             }
         }
     }
