@@ -2,15 +2,13 @@
 
 use std::mem::size_of;
 
-use lagodb_core::query_contract::SourceId;
+use lagodb_core::query_contract::ScanId;
 
 use crate::ExecutionProfile;
 
-use super::ir::{
-    AggregateExpression, AggregateNode, ProjectNode, QueryFragment, QueryNode,
-    SourceNode,
-};
-use super::planning::SourceEstimateTable;
+use super::ir::{FilterNode, ProjectNode, QueryFragment, QueryNode, ScanNode};
+use super::scan_catalog::ScanEstimateTable;
+use super::{AggregateNode, DistinctNode};
 
 const ENGINE_SETUP_TUPLE_EQUIVALENTS: f64 = 4_096.0;
 
@@ -38,7 +36,7 @@ impl PlanCost {
         Ok(Self { startup, total })
     }
 
-    /// Planner policy override applied only after every semantic/source gate.
+    /// Planner policy override applied only after every semantic/scan gate.
     #[inline]
     pub const fn forced() -> Self {
         Self {
@@ -154,16 +152,28 @@ impl PlanEstimate {
 /// Concrete recursive estimator for every currently executable IR node.
 pub struct QueryCostEstimator<'a> {
     context: CostingContext,
-    sources: &'a SourceEstimateTable,
+    scans: &'a ScanEstimateTable,
+    scan_output_rows: &'a [f64],
+    aggregate_rows: f64,
+    output_rows: f64,
 }
 
 impl<'a> QueryCostEstimator<'a> {
     #[inline]
     pub const fn new(
         context: CostingContext,
-        sources: &'a SourceEstimateTable,
+        scans: &'a ScanEstimateTable,
+        scan_output_rows: &'a [f64],
+        aggregate_rows: f64,
+        output_rows: f64,
     ) -> Self {
-        Self { context, sources }
+        Self {
+            context,
+            scans,
+            scan_output_rows,
+            aggregate_rows,
+            output_rows,
+        }
     }
 
     pub fn estimate(
@@ -188,31 +198,47 @@ impl<'a> QueryCostEstimator<'a> {
         node: &QueryNode,
     ) -> Result<PlanEstimate, QueryCostError> {
         match node {
-            QueryNode::Source(source) => self.estimate_source(source),
+            QueryNode::Scan(scan) => self.estimate_scan(scan),
             QueryNode::Aggregate(aggregate) => self.estimate_aggregate(aggregate),
+            QueryNode::Distinct(distinct) => self.estimate_distinct(distinct),
+            QueryNode::Filter(filter) => self.estimate_filter(filter),
             QueryNode::Project(project) => self.estimate_project(project),
         }
     }
 
-    fn estimate_source(
-        &self,
-        source: &SourceNode,
-    ) -> Result<PlanEstimate, QueryCostError> {
-        let estimate = self.sources.estimate(source.source()).ok_or(
-            QueryCostError::MissingSource {
-                source_id: source.source(),
+    fn estimate_scan(&self, scan: &ScanNode) -> Result<PlanEstimate, QueryCostError> {
+        let estimate =
+            self.scans
+                .estimate(scan.scan())
+                .ok_or(QueryCostError::MissingScan {
+                    scan_id: scan.scan(),
+                })?;
+        let source_rows = estimate.estimated_rows();
+        let rows = *self.scan_output_rows.get(scan.scan().index()).ok_or(
+            QueryCostError::MissingScan {
+                scan_id: scan.scan(),
             },
         )?;
-        let rows = estimate.estimated_rows();
         let maximum_batch_rows =
             self.context.execution.maximum_batch_rows().get() as f64;
+        let source_batches = if source_rows == 0.0 {
+            0.0
+        } else {
+            (source_rows / maximum_batch_rows).ceil()
+        };
         let batches = if rows == 0.0 {
             0.0
         } else {
             (rows / maximum_batch_rows).ceil()
         };
         let startup = self.context.cpu_tuple_cost;
-        let total = startup + batches * self.context.cpu_tuple_cost;
+        let filter_cost = if scan.filter().is_some() {
+            source_rows * self.context.cpu_operator_cost
+        } else {
+            0.0
+        };
+        let total =
+            startup + source_batches * self.context.cpu_tuple_cost + filter_cost;
         PlanEstimate::try_new(rows, batches, 0.0, PlanCost::try_new(startup, total)?)
     }
 
@@ -221,20 +247,84 @@ impl<'a> QueryCostEstimator<'a> {
         aggregate: &AggregateNode,
     ) -> Result<PlanEstimate, QueryCostError> {
         let input = self.estimate_node(aggregate.input())?;
-        let [expression] = aggregate.aggregates() else {
-            return Err(QueryCostError::InvalidScalarAggregate);
+        let aggregate_work = input.rows
+            * (aggregate.groups().len() + aggregate.aggregates().len()) as f64
+            * self.context.cpu_operator_cost;
+        let distinct_work = input.rows
+            * aggregate
+                .aggregates()
+                .iter()
+                .filter(|aggregate| aggregate.uses_distinct_state())
+                .count() as f64
+            * self.context.cpu_operator_cost;
+        let startup = input.cost.total + aggregate_work + distinct_work;
+        let rows = if aggregate.groups().is_empty() {
+            1.0
+        } else {
+            self.aggregate_rows
         };
-        let count_work = match expression {
-            AggregateExpression::CountStar(_) => {
-                (input.batches + 1.0) * self.context.cpu_operator_cost
-            }
+        let total = startup + rows * self.context.cpu_tuple_cost;
+        let output_columns = aggregate.groups().len() + aggregate.aggregates().len();
+        let output_bytes = rows * (output_columns * size_of::<i64>()) as f64;
+        let batches = if rows == 0.0 {
+            0.0
+        } else {
+            (rows / self.context.execution.maximum_batch_rows().get() as f64).ceil()
         };
-        let startup = input.cost.total + count_work;
         PlanEstimate::try_new(
-            1.0,
-            1.0,
-            size_of::<i64>() as f64,
-            PlanCost::try_new(startup, startup)?,
+            rows,
+            batches,
+            output_bytes,
+            PlanCost::try_new(startup, total)?,
+        )
+    }
+
+    fn estimate_filter(
+        &self,
+        filter: &FilterNode,
+    ) -> Result<PlanEstimate, QueryCostError> {
+        let input = self.estimate_node(filter.input())?;
+        let cost = PlanCost::try_new(
+            input.cost.startup,
+            input.cost.total + input.rows * self.context.cpu_operator_cost,
+        )?;
+        let batches = if self.output_rows == 0.0 {
+            0.0
+        } else {
+            (self.output_rows
+                / self.context.execution.maximum_batch_rows().get() as f64)
+                .ceil()
+        };
+        let output_bytes = if input.rows == 0.0 {
+            0.0
+        } else {
+            input.output_bytes * self.output_rows / input.rows
+        };
+        PlanEstimate::try_new(self.output_rows, batches, output_bytes, cost)
+    }
+
+    fn estimate_distinct(
+        &self,
+        distinct: &DistinctNode,
+    ) -> Result<PlanEstimate, QueryCostError> {
+        let input = self.estimate_node(distinct.input())?;
+        let work = input.rows
+            * distinct.keys().len() as f64
+            * self.context.cpu_operator_cost;
+        let startup = input.cost.total + work;
+        let rows = self.aggregate_rows;
+        let total = startup + rows * self.context.cpu_tuple_cost;
+        let output_bytes = rows * (distinct.keys().len() * size_of::<i64>()) as f64;
+        let batches = if rows == 0.0 {
+            0.0
+        } else {
+            (rows / self.context.execution.maximum_batch_rows().get() as f64).ceil()
+        };
+        PlanEstimate::try_new(
+            rows,
+            batches,
+            output_bytes,
+            PlanCost::try_new(startup, total)?,
         )
     }
 
@@ -245,9 +335,11 @@ impl<'a> QueryCostEstimator<'a> {
         let input = self.estimate_node(project.input())?;
         let cost = PlanCost::try_new(
             input.cost.startup,
-            input.cost.total + self.context.cpu_tuple_cost,
+            input.cost.total + input.rows * self.context.cpu_tuple_cost,
         )?;
-        PlanEstimate::try_new(input.rows, input.batches, input.output_bytes, cost)
+        let output_bytes =
+            input.rows * (project.outputs().len() * size_of::<i64>()) as f64;
+        PlanEstimate::try_new(input.rows, input.batches, output_bytes, cost)
     }
 }
 
@@ -258,10 +350,6 @@ pub enum QueryCostError {
     InvalidCost { field: &'static str, value: f64 },
     #[error("query estimate {field} is invalid: {value}")]
     InvalidEstimate { field: &'static str, value: f64 },
-    #[error(
-        "query cost source {source_id:?} is absent from the source estimate table"
-    )]
-    MissingSource { source_id: SourceId },
-    #[error("the current query cost model requires exactly one CountStar aggregate")]
-    InvalidScalarAggregate,
+    #[error("query cost scan {scan_id:?} is absent from the scan estimate table")]
+    MissingScan { scan_id: ScanId },
 }
