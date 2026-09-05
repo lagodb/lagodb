@@ -1,41 +1,43 @@
-//! Engine-side ownership of provider prepared handles and Arrow C Streams.
+//! Engine-side ownership of prepared table scans and Arrow C Streams.
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use arrow_array::{RecordBatch, RecordBatchReader};
-use arrow_schema::{ArrowError, SchemaRef};
+use arrow_schema::ffi::FFI_ArrowSchema;
+use arrow_schema::{ArrowError, Schema, SchemaRef};
 use lagodb_core::diag::PgReportError;
-use lagodb_core::query_contract::SourceId;
+use lagodb_core::query_contract::ScanId;
 use lagodb_core::runtime_api::{
-    FFI_OPERATION_FAILED, FFI_OPERATION_OK, FfiErrorRecord, OpenQuerySourceStream,
-    PrepareQuerySource, QuerySourcePrepareRequest, QuerySourceStreamRequest,
-    ReleasePreparedQuerySource,
+    CALLBACK_FAILED, CALLBACK_OK, CallbackErrorReport, GetPreparedTableScanSchema,
+    OpenTableScanStream, PrepareTableScan, ReleasePreparedTableScan,
+    TableScanPrepareRequest, TableScanRuntimeValue, TableScanStreamRequest,
 };
 use pgrx::{pg_sys, prelude::PgSqlErrorCode};
 
-/// Backend-thread-bound callbacks for one validated provider source.
+/// Backend-thread-bound callbacks for one validated provider table scan.
 ///
 /// This wrapper can cross the `lagodb-base`/`lagodb-query` crate boundary, but
 /// cannot cross a thread boundary. It exposes no prepared handle or stream;
-/// [`SerialCountExecution`](super::SerialCountExecution) consumes it while
+/// [`SerialQueryExecution`](super::SerialQueryExecution) consumes it while
 /// constructing the sole PostgreSQL-owned execution lifecycle.
 #[derive(Clone, Copy)]
-pub struct SerialSourceCallbacks {
+pub struct SerialTableScanCallbacks {
     context: *mut c_void,
-    prepare_source: PrepareQuerySource,
-    open_serial_stream: OpenQuerySourceStream,
-    release_prepared: ReleasePreparedQuerySource,
+    prepare_scan: PrepareTableScan,
+    get_prepared_schema: GetPreparedTableScanSchema,
+    open_serial_stream: OpenTableScanStream,
+    release_prepared: ReleasePreparedTableScan,
     backend_thread: PhantomData<Rc<()>>,
 }
 
-impl SerialSourceCallbacks {
+impl SerialTableScanCallbacks {
     /// Construct from a descriptor already validated by the runtime directory.
     ///
     /// # Safety
@@ -47,48 +49,51 @@ impl SerialSourceCallbacks {
     /// PostgreSQL backend thread.
     pub unsafe fn from_validated_callbacks(
         context: *mut c_void,
-        prepare_source: PrepareQuerySource,
-        open_serial_stream: OpenQuerySourceStream,
-        release_prepared: ReleasePreparedQuerySource,
+        prepare_scan: PrepareTableScan,
+        get_prepared_schema: GetPreparedTableScanSchema,
+        open_serial_stream: OpenTableScanStream,
+        release_prepared: ReleasePreparedTableScan,
     ) -> Self {
         Self {
             context,
-            prepare_source,
+            prepare_scan,
+            get_prepared_schema,
             open_serial_stream,
             release_prepared,
             backend_thread: PhantomData,
         }
     }
 
-    /// Prepare an immutable source handle on the PostgreSQL backend thread.
+    /// Prepare an immutable scan handle on the PostgreSQL backend thread.
     ///
     /// # Safety
     ///
-    /// `plan_data` must be a live provider plan frame in the active executor
-    /// memory context.
+    /// `plan_data` must be a live, read-only provider plan frame in the active
+    /// executor memory context.
     pub(super) unsafe fn prepare(
         self,
-        source: SourceId,
-        plan_data: *mut pg_sys::List,
-    ) -> Result<PreparedSourceHandle, PgReportError> {
-        let request = QuerySourcePrepareRequest::new(source, plan_data);
-        let mut handle = std::ptr::null_mut();
-        let mut error = FfiErrorRecord::default();
+        scan: ScanId,
+        plan_data: *const pg_sys::List,
+        runtime_values: &[TableScanRuntimeValue],
+    ) -> Result<PreparedTableScanHandle, PgReportError> {
+        let request = TableScanPrepareRequest::new(scan, plan_data, runtime_values);
+        let mut handle = ptr::null_mut();
+        let mut error = CallbackErrorReport::default();
         // SAFETY: this method's contract supplies live plan data; registration
         // guarantees backend-live context/callback pointers and the stack
         // outputs remain writable for the synchronous call.
         let status = unsafe {
-            (self.prepare_source)(self.context, &request, &mut handle, &mut error)
+            (self.prepare_scan)(self.context, &request, &mut handle, &mut error)
         };
-        self.operation_result(status, &error, "query source prepare")?;
+        self.operation_result(status, &error, "table scan prepare")?;
         let handle = NonNull::new(handle).ok_or_else(|| {
             PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "query source prepare returned a null handle",
+                "table scan prepare returned a null handle",
             )
         })?;
-        Ok(PreparedSourceHandle {
-            source: self,
+        Ok(PreparedTableScanHandle {
+            callbacks: self,
             handle: Some(handle),
             stream_error: Mutex::new(None),
         })
@@ -97,12 +102,12 @@ impl SerialSourceCallbacks {
     fn operation_result(
         self,
         status: u32,
-        error: &FfiErrorRecord,
+        error: &CallbackErrorReport,
         operation: &'static str,
     ) -> Result<(), PgReportError> {
         match status {
-            FFI_OPERATION_OK => Ok(()),
-            FFI_OPERATION_FAILED => {
+            CALLBACK_OK => Ok(()),
+            CALLBACK_FAILED => {
                 // SAFETY: callbacks allocate error text in the active backend
                 // context and this method consumes it synchronously.
                 Err(unsafe { error.to_error(operation) })
@@ -115,27 +120,49 @@ impl SerialSourceCallbacks {
     }
 }
 
-/// Engine-owned opaque prepared source.
-pub(super) struct PreparedSourceHandle {
-    source: SerialSourceCallbacks,
+/// Engine-owned opaque prepared table scan.
+pub(super) struct PreparedTableScanHandle {
+    callbacks: SerialTableScanCallbacks,
     handle: Option<NonNull<c_void>>,
     stream_error: Mutex<Option<Arc<StreamErrorSlot>>>,
 }
 
-// SAFETY: this private adapter is reachable only through the thread-bound
-// `SerialCountExecution` owner. Its audited physical plan has one partition and
-// only synchronous Aggregate/Projection/source operators, and its current-thread
-// runtime polls and drops every run-local stream before releasing this handle on
-// the owning PostgreSQL backend thread. The typed `QuerySourceAdapter` proves the
-// opaque handle/callback type pairing; raw registration must uphold the same
-// pairing and backend-lifetime contract.
-unsafe impl Send for PreparedSourceHandle {}
-// SAFETY: DataFusion shares the private handle only inside the same audited
-// single-partition plan. The owner never exposes the plan or handle and cannot
-// itself be sent or shared across threads.
-unsafe impl Sync for PreparedSourceHandle {}
+// SAFETY: the typed `TableScanAdapter` proves the opaque handle/callback type
+// pairing and the concrete provider bounds before the DSO boundary; raw
+// registration must uphold the same pairing and backend-lifetime contract.
+// This private adapter is reachable only through the thread-bound
+// `SerialQueryExecution` owner. The framework supports only current-thread
+// serial execution, does not expose this plan or handle to callers, and polls
+// and drops every run-local stream before releasing the handle on the owning
+// PostgreSQL backend thread.
+unsafe impl Send for PreparedTableScanHandle {}
+// SAFETY: DataFusion may share the private handle inside its plan, but the
+// thread-bound owner and current-thread runtime serialize every callback. The
+// handle also rejects opening a second stream while the first remains live.
+unsafe impl Sync for PreparedTableScanHandle {}
 
-impl PreparedSourceHandle {
+impl PreparedTableScanHandle {
+    pub(super) fn schema(&self) -> Result<SchemaRef, PgReportError> {
+        let mut schema = FFI_ArrowSchema::empty();
+        let mut error = CallbackErrorReport::default();
+        let status = unsafe {
+            (self.callbacks.get_prepared_schema)(
+                self.callbacks.context,
+                self.handle.expect("prepared table scan is open").as_ptr(),
+                (&mut schema as *mut FFI_ArrowSchema).cast(),
+                &mut error,
+            )
+        };
+        self.callbacks
+            .operation_result(status, &error, "table scan schema")?;
+        Schema::try_from(&schema).map(Arc::new).map_err(|error| {
+            PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("table scan returned an invalid Arrow schema: {error}"),
+            )
+        })
+    }
+
     /// Finish the previously dropped serial stream and surface any error its
     /// Arrow release callback recorded before another run is started.
     pub(super) fn finish_serial_stream(&self) -> Result<(), PgReportError> {
@@ -152,7 +179,7 @@ impl PreparedSourceHandle {
         let mut current_error = self.stream_error.lock().map_err(|_| {
             PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "query source stream error state was poisoned",
+                "table scan stream error state was poisoned",
             )
         })?;
         // Keep the installed slot intact until a replacement reader exists.
@@ -160,33 +187,33 @@ impl PreparedSourceHandle {
             if Arc::strong_count(previous) != 1 {
                 return Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "query source opened more than one serial stream",
+                    "table scan opened more than one serial stream",
                 ));
             }
-            if let Some(error) = previous.take_error("query source stream release") {
+            if let Some(error) = previous.take_error("table scan stream release") {
                 return Err(error);
             }
         }
         let stream_error = Arc::new(StreamErrorSlot::new());
-        let request = QuerySourceStreamRequest::new(
+        let request = TableScanStreamRequest::new(
             maximum_batch_rows,
             stream_error.as_mut_ptr(),
         );
         let mut stream = FFI_ArrowArrayStream::empty();
-        let mut error = FfiErrorRecord::default();
+        let mut error = CallbackErrorReport::default();
         // SAFETY: the prepared handle is open, the request/error slot outlive
         // the returned stream, and output storage is a live Arrow stream value.
         let status = unsafe {
-            (self.source.open_serial_stream)(
-                self.source.context,
-                self.handle.expect("prepared source is open").as_ptr(),
+            (self.callbacks.open_serial_stream)(
+                self.callbacks.context,
+                self.handle.expect("prepared table scan is open").as_ptr(),
                 &request,
                 (&mut stream as *mut FFI_ArrowArrayStream).cast(),
                 &mut error,
             )
         };
-        self.source
-            .operation_result(status, &error, "query source stream open")?;
+        self.callbacks
+            .operation_result(status, &error, "table scan stream open")?;
         match ArrowArrayStreamReader::try_new(stream) {
             Ok(reader) => {
                 *current_error = Some(Arc::clone(&stream_error));
@@ -195,14 +222,11 @@ impl PreparedSourceHandle {
                     error: stream_error,
                 })
             }
-            Err(error) => match stream_error.take_error("query source stream schema")
-            {
+            Err(error) => match stream_error.take_error("table scan stream schema") {
                 Some(error) => Err(error),
                 None => Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
-                    format!(
-                        "query source returned an invalid Arrow C Stream: {error}"
-                    ),
+                    format!("table scan returned an invalid Arrow C Stream: {error}"),
                 )),
             },
         }
@@ -218,25 +242,25 @@ impl PreparedSourceHandle {
         };
         let stream_error = self.take_closed_stream_error()?;
         self.handle = None;
-        let mut error = FfiErrorRecord::default();
+        let mut error = CallbackErrorReport::default();
         // SAFETY: `handle` was produced by this registered descriptor and is
         // consumed exactly once; the stack error record is writable.
         let status = unsafe {
-            (self.source.release_prepared)(
-                self.source.context,
+            (self.callbacks.release_prepared)(
+                self.callbacks.context,
                 handle.as_ptr(),
                 &mut error,
             )
         };
         let prepared_result =
-            self.source
-                .operation_result(status, &error, "query source release");
+            self.callbacks
+                .operation_result(status, &error, "table scan release");
         match (stream_error, prepared_result) {
             (Some(stream_error), Err(prepared_error)) => Err(stream_error
                 .contextualize(
-                    "query source stream release failed",
+                    "table scan stream release failed",
                     Some(format!(
-                        "prepared source release also failed: {prepared_error}"
+                        "prepared table scan release also failed: {prepared_error}"
                     )),
                 )),
             (Some(error), Ok(())) | (None, Err(error)) => Err(error),
@@ -256,7 +280,7 @@ impl PreparedSourceHandle {
         let mut current_error = self.stream_error.lock().map_err(|_| {
             PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "query source stream error state was poisoned",
+                "table scan stream error state was poisoned",
             )
         })?;
         let Some(stream_error) = current_error.as_ref() else {
@@ -265,24 +289,24 @@ impl PreparedSourceHandle {
         if Arc::strong_count(stream_error) != 1 {
             return Err(PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "query source stream remained live during prepared source release",
+                "table scan stream remained live during prepared scan release",
             ));
         }
         let stream_error = current_error
             .take()
             .expect("closed stream error slot remains installed");
-        Ok(stream_error.take_error("query source stream release"))
+        Ok(stream_error.take_error("table scan stream release"))
     }
 }
 
-struct StreamErrorSlot(UnsafeCell<FfiErrorRecord>);
+struct StreamErrorSlot(UnsafeCell<CallbackErrorReport>);
 
 impl StreamErrorSlot {
     fn new() -> Self {
-        Self(UnsafeCell::new(FfiErrorRecord::default()))
+        Self(UnsafeCell::new(CallbackErrorReport::default()))
     }
 
-    fn as_mut_ptr(&self) -> *mut FfiErrorRecord {
+    fn as_mut_ptr(&self) -> *mut CallbackErrorReport {
         self.0.get()
     }
 
@@ -302,7 +326,7 @@ impl StreamErrorSlot {
         let error = unsafe { (*self.0.get()).to_error(operation) };
         // SAFETY: the same serialized access permits clearing the consumed
         // record before the next callback.
-        unsafe { *self.0.get() = FfiErrorRecord::default() };
+        unsafe { *self.0.get() = CallbackErrorReport::default() };
         Some(error)
     }
 }
@@ -310,8 +334,8 @@ impl StreamErrorSlot {
 // SAFETY: the slot exists only to satisfy DataFusion's `Send` stream contract.
 // LagoDB invokes its exporter and reads the record on one backend main thread.
 unsafe impl Send for StreamErrorSlot {}
-// SAFETY: the closed-world runtime never performs concurrent callback/read
-// access; synchronization of stream ownership is handled by the parent mutex.
+// SAFETY: the current-thread serial runtime never performs concurrent
+// callback/read access; stream ownership is synchronized by the parent mutex.
 unsafe impl Sync for StreamErrorSlot {}
 
 /// Engine-side Arrow reader retaining the stream's fixed-layout error slot.
@@ -328,7 +352,7 @@ impl Iterator for ProviderStreamReader {
     fn next(&mut self) -> Option<Self::Item> {
         match self.reader.next() {
             Some(Err(arrow_error)) => {
-                match self.error.take_error("query source stream batch") {
+                match self.error.take_error("table scan stream batch") {
                     Some(error) => {
                         Some(Err(ArrowError::from_external_error(Box::new(error))))
                     }
@@ -346,7 +370,7 @@ impl RecordBatchReader for ProviderStreamReader {
     }
 }
 
-impl Drop for PreparedSourceHandle {
+impl Drop for PreparedTableScanHandle {
     fn drop(&mut self) {
         // Normal query lifecycle calls `close` at its PostgreSQL error boundary.
         // This fallback still guarantees exactly-once release during unwinding;
@@ -356,10 +380,10 @@ impl Drop for PreparedSourceHandle {
     }
 }
 
-impl fmt::Debug for PreparedSourceHandle {
+impl fmt::Debug for PreparedTableScanHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PreparedSourceHandle")
+            .debug_struct("PreparedTableScanHandle")
             .field("is_open", &self.handle.is_some())
             .finish()
     }

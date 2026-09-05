@@ -1,4 +1,4 @@
-//! Statement-cumulative S1M metrics collected at batch and scalar boundaries.
+//! Statement-cumulative metrics collected at batch boundaries.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -9,7 +9,6 @@ pub(super) struct ExecutionMetrics {
     input_batches: AtomicU64,
     input_rows: AtomicU64,
     arrow_batch_bytes: AtomicU64,
-    output_rows: AtomicU64,
 }
 
 impl ExecutionMetrics {
@@ -21,19 +20,16 @@ impl ExecutionMetrics {
             .fetch_add(batch.get_array_memory_size() as u64, Ordering::Relaxed);
     }
 
-    pub(super) fn record_output_row(&self) {
-        self.output_rows.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub(super) fn snapshot(
         &self,
         engine_peak_memory_bytes: usize,
+        output_rows: u64,
     ) -> ExecutionMetricsSnapshot {
         ExecutionMetricsSnapshot {
             input_batches: self.input_batches.load(Ordering::Relaxed),
             input_rows: self.input_rows.load(Ordering::Relaxed),
             arrow_batch_bytes: self.arrow_batch_bytes.load(Ordering::Relaxed),
-            output_rows: self.output_rows.load(Ordering::Relaxed),
+            output_rows,
             engine_peak_memory_bytes: engine_peak_memory_bytes as u64,
         }
     }

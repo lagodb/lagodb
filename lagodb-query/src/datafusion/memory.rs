@@ -17,7 +17,12 @@ pub(super) struct RuntimeResources {
     pub(super) memory: Arc<PeakRecordingPool>,
 }
 
-/// Engine memory limit and source batch shape for one serial query participant.
+/// Engine memory limit and scan batch shape for one serial query participant.
+///
+/// The pool rejects growth that reserves before allocation. DataFusion 55's
+/// native DISTINCT accumulators update their state before resizing their
+/// reservation, so this type does not claim a reservation-first hard limit for
+/// that state.
 #[derive(Debug, Clone, Copy)]
 pub struct SerialExecutionLimits {
     engine_memory_bytes: usize,
