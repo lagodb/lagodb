@@ -22,11 +22,7 @@ impl<'a> PlanDataReader<'a> {
     ///
     /// `list` must be NIL or a live PostgreSQL `T_List` for all of `'a`.
     unsafe fn from_list(list: *mut pg_sys::List) -> Self {
-        let length = if list.is_null() {
-            0
-        } else {
-            unsafe { pg_sys::list_length(list) as usize }
-        };
+        let length = unsafe { pg_sys::list_length(list) as usize };
         Self {
             list,
             position: 0,
@@ -70,19 +66,19 @@ impl<'a> PlanDataReader<'a> {
     /// Decode one complete list payload and reject unconsumed fields.
     ///
     /// This is the frame boundary for a list whose node tag was established by
-    /// its containing envelope.  Callers provide only the field decoder; they
+    /// its containing record. Callers provide only the field decoder; they
     /// cannot accidentally omit the trailing-field check.
     ///
     /// # Safety
     ///
-    /// `list` must be NIL or a live PostgreSQL `T_List` for the duration of the
-    /// decoder call.
+    /// `list` must be NIL or a live, read-only PostgreSQL `T_List`, including
+    /// every nested node reached by `decode`, for all of `'a`.
     pub(crate) unsafe fn decode_list<T, E>(
         list: *mut pg_sys::List,
         decode: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E>
     where
-        T: 'static,
+        T: 'a,
         E: From<PlanDataError>,
     {
         unsafe { Self::from_list(list) }.decode_complete(decode)
@@ -107,12 +103,35 @@ impl<'a> PlanDataReader<'a> {
         unsafe { Self::checked_from_list(list, field) }?.decode_complete(decode)
     }
 
+    /// Decode a checked list while allowing the result to borrow from it.
+    ///
+    /// Unlike [`Self::decode_checked_list`], the input reference fixes the
+    /// reader lifetime, so a borrowed result cannot outlive PostgreSQL's plan
+    /// data through a safe Rust API.
+    ///
+    /// # Safety
+    ///
+    /// `list` and every nested node reached by `decode` must remain live and
+    /// read-only for all of `'a`.
+    pub unsafe fn decode_checked_ref<T, E>(
+        list: &'a pg_sys::List,
+        field: usize,
+        decode: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        T: 'a,
+        E: From<PlanDataError>,
+    {
+        let list = ptr::from_ref(list).cast_mut();
+        unsafe { Self::checked_from_list(list, field) }?.decode_complete(decode)
+    }
+
     fn decode_complete<T, E>(
         mut self,
         decode: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E>
     where
-        T: 'static,
+        T: 'a,
         E: From<PlanDataError>,
     {
         let value = decode(&mut self)?;
@@ -216,13 +235,14 @@ impl<'a> PlanDataReader<'a> {
     /// Decode one nested `T_List`; a NULL cell is an empty payload.
     ///
     /// The nested frame is consumed atomically, including its trailing-field
-    /// check, before this method returns.
+    /// check, before this method returns. A decoded value may borrow nested
+    /// storage for the same lifetime as this reader.
     pub fn read_nested<T, E>(
         &mut self,
         decode: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E>
     where
-        T: 'static,
+        T: 'a,
         E: From<PlanDataError>,
     {
         let list = self.read_optional_list(pg_sys::NodeTag::T_List)?;

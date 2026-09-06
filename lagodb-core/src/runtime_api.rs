@@ -29,19 +29,19 @@ use crate::table_maintenance::{
 };
 mod error;
 mod planning;
-mod query_source;
 mod registration;
 mod storage_volume;
+mod table_scan;
 
 pub use error::*;
 pub use planning::*;
-pub use query_source::*;
 pub use registration::*;
 pub use storage_volume::{
     ResolveStorageVolumeRouteCallback, StorageVolumeRouteLookupError,
     StorageVolumeRouteOutput, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
+pub use table_scan::*;
 
 pub const RUNTIME_API_RENDEZVOUS: &CStr = c"lagodb.runtime_api";
 // The provider descriptor includes capability flags so the router can reject

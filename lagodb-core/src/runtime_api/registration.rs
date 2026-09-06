@@ -6,8 +6,8 @@ use std::mem::size_of;
 use pgrx::pg_sys;
 
 use super::{
-    MaintenanceProvider, ModifyPlannerDescriptor, QuerySourceDescriptor,
-    RelationScanPlannerDescriptor,
+    MaintenanceProvider, ModifyPlannerDescriptor, RelationScanPlannerDescriptor,
+    TableScanDescriptor,
 };
 
 pub const PROVIDER_KIND_ACCESS_METHOD: u32 = 1;
@@ -199,6 +199,6 @@ pub struct ProviderRegistration {
     pub relation_scan_planner: *const RelationScanPlannerDescriptor,
     /// Optional ModifyTable planning facet. Null means none.
     pub modify_planner: *const ModifyPlannerDescriptor,
-    /// Optional query source-leaf facet. Null means none.
-    pub query_source: *const QuerySourceDescriptor,
+    /// Optional table-scan facet. Null means none.
+    pub table_scan: *const TableScanDescriptor,
 }

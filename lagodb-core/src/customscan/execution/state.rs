@@ -10,7 +10,7 @@ use pgrx::pg_sys;
 
 use crate::customscan::ScanPurpose;
 use crate::customscan::filter::CustomScanFilters;
-use crate::customscan::plan_data::custom_exprs::CustomExprSections;
+use crate::customscan::plan_data::custom_exprs::PgExpressionSections;
 use crate::customscan::plan_data::tuple_layout::ScanTupleLayout;
 use crate::customscan::provider::{LagodbCustomScanProvider, method_tables_for};
 
@@ -31,7 +31,7 @@ pub struct CustomScanStateWrapper<P: LagodbCustomScanProvider> {
     pub(crate) recheck_state: *mut pg_sys::ExprState,
 
     /// Immutable expression sections validated once during Begin.
-    pub(crate) expr_sections: Option<CustomExprSections>,
+    pub(crate) expr_sections: Option<PgExpressionSections>,
 
     /// Decoded planned predicates, ExprStates, and the current bound set.
     pub(crate) filters: Option<CustomScanFilters<P>>,
@@ -166,7 +166,7 @@ impl<P: LagodbCustomScanProvider> CustomScanStateWrapper<P> {
     ///
     /// `sections` must reference the live `custom_exprs` plan data for this
     /// wrapper and must be set before invoking the ReScan callback.
-    pub unsafe fn test_set_expr_sections(&mut self, sections: CustomExprSections) {
+    pub unsafe fn test_set_expr_sections(&mut self, sections: PgExpressionSections) {
         self.expr_sections = Some(sections);
     }
 }

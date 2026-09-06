@@ -7,7 +7,7 @@ use crate::customscan::ScanPurpose;
 use crate::customscan::error::{CustomScanError, CustomScanPhase};
 use crate::customscan::execution::state::{CachedEnvelope, CustomScanStateWrapper};
 use crate::customscan::filter::CustomScanFilters;
-use crate::customscan::plan_data::custom_exprs::CustomExprSections;
+use crate::customscan::plan_data::custom_exprs::PgExpressionSections;
 use crate::customscan::plan_data::custom_private::{
     EncodedPrivate, assert_provider_name_matches, decode_private,
 };
@@ -114,7 +114,7 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
     }
 
     let expr_sections = unsafe {
-        CustomExprSections::from_custom_exprs(
+        PgExpressionSections::from_custom_exprs(
             (*cscan).custom_exprs,
             priv_payload.binding_count,
             priv_payload.planned_filter_count,
@@ -129,12 +129,13 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
     let econtext = unsafe { (*node).ss.ps.ps_ExprContext };
 
     let parent = unsafe { &mut (*node).ss.ps } as *mut pg_sys::PlanState;
-    let binding_exprs = unsafe { expr_sections.binding_list() };
+    let binding_exprs = unsafe { expr_sections.runtime_binding_list() };
     let mut filters = unsafe {
         CustomScanFilters::<P>::initialize(&priv_payload, binding_exprs, parent)
     }?;
     unsafe { filters.bind_initial(econtext) }?;
-    let recheck_list = unsafe { filters.recheck_list(expr_sections.pushed()) };
+    let recheck_list =
+        unsafe { filters.recheck_list(expr_sections.relation_pushdown_provenance()) };
     wrapper.recheck_state = if recheck_list.is_null() {
         ptr::null_mut()
     } else {

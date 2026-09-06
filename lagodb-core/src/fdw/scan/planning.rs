@@ -514,8 +514,7 @@ unsafe fn negotiate_clauses<P: FdwScan>(
     clauses: *mut pg_sys::List,
     source: ScanClauseSource,
 ) -> Result<PathFilterSet, ForeignScanError> {
-    let mut negotiator =
-        FilterNegotiator::new(planner, relation.relation_oid(), relation.baserel());
+    let mut negotiator = FilterNegotiator::new(planner, relation.baserel());
     unsafe { negotiator.negotiate(clauses, source) }
         .map(NegotiatedFilterSet::into_path_set)
         .map_err(ForeignScanError::provider)
@@ -531,8 +530,7 @@ unsafe fn negotiate_final_clauses<P: FdwScan>(
     relation: &ForeignRelContext<'_>,
     clauses: *mut pg_sys::List,
 ) -> Result<NegotiatedFilterSet<P::PlannedPredicate>, ForeignScanError> {
-    let mut negotiator =
-        FilterNegotiator::new(planner, relation.relation_oid(), relation.baserel());
+    let mut negotiator = FilterNegotiator::new(planner, relation.baserel());
     let baserestrictinfo = relation.baserestrictinfo();
     unsafe {
         negotiator.negotiate_with_source(clauses, |rinfo| {

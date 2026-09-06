@@ -118,11 +118,7 @@ impl ForeignExprs {
         &self,
         mut prefix: *mut pg_sys::List,
     ) -> *mut pg_sys::List {
-        let length = if self.raw.is_null() {
-            0
-        } else {
-            unsafe { pg_sys::list_length(self.raw) }
-        };
+        let length = unsafe { pg_sys::list_length(self.raw) };
         for index in 0..length {
             let expression = unsafe { pg_sys::list_nth(self.raw, index) };
             prefix = unsafe { pg_sys::lappend(prefix, expression.cast::<c_void>()) };

@@ -157,11 +157,7 @@ pub(crate) unsafe fn compile_executor_layout(
 /// If non-null, `list` must point to a live PostgreSQL List owned by the current
 /// plan or executor callback.
 pub(crate) unsafe fn list_len(list: *mut pg_sys::List) -> usize {
-    if list.is_null() {
-        0
-    } else {
-        unsafe { pg_sys::list_length(list) as usize }
-    }
+    unsafe { pg_sys::list_length(list) as usize }
 }
 
 /// # Safety

@@ -3,7 +3,7 @@
 //!
 //! The core crate defines the buffering/transport *contracts* without
 //! committing to a concrete storage layout or naming a columnar library — the
-//! Arrow implementations live in `pg-arrow-conv`. core stays Arrow-agnostic and
+//! Arrow implementations live in `lagodb-arrow`. core stays Arrow-agnostic and
 //! the per-row path stays `dyn`-free (generics + enum dispatch), so the
 //! abstraction is zero-cost.
 //!
@@ -11,12 +11,12 @@
 //!
 //! - **Column world (hot path):** a provider-owned relation-bound writer
 //!   consumes `TupleSlotRow` views *during* the callback and copies what it
-//!   needs straight into its column builders. `pg-arrow-conv` provides the
+//!   needs straight into its column builders. `lagodb-arrow` provides the
 //!   `BoundWriteBuffer` implementation, which validates source codecs during
 //!   planning.
 //! - **Row world:** [`RowBatchBuffer`] owns [`Row`] values that are safe across
 //!   callback boundaries — the buffering half of the row-mode / FDW write path,
-//!   paired with `pg-arrow-conv`'s `ColumnRule::build(&[Row], ..)`. Not on the
+//!   paired with `lagodb-arrow`'s `ColumnRule::build(&[Row], ..)`. Not on the
 //!   columnar hot path (see [`RowBatchBuffer`] for why it is retained).
 //!
 //! Core does not provide a `Cell`-based columnar buffer: on a mutation hot path,
@@ -26,7 +26,7 @@
 //! The read path mirrors this: an [`AmScanBatchSource`] yields AM-defined column
 //! batches and a [`BatchRowDecoder`] writes one batch row into a slot, paired by
 //! the core-provided [`BatchRowCursor`]. Their Arrow implementations
-//! (`ArrowBatchSource` / `ArrowColumnDecoder`) also live in `pg-arrow-conv`.
+//! (`ArrowBatchSource` / `ArrowColumnDecoder`) also live in `lagodb-arrow`.
 
 use std::convert::Infallible;
 
@@ -80,14 +80,14 @@ pub trait BatchBuffer {
 /// # Role: the buffering half of the row-world write path
 ///
 /// This is the **row-world** write buffer, the counterpart to the
-/// `Cell`-based conversion (`pg-arrow-conv`'s `ColumnRule::build(&[Row], ..)`):
+/// `Cell`-based conversion (`lagodb-arrow`'s `ColumnRule::build(&[Row], ..)`):
 /// a row-mode access method or FDW accumulates owned `Row`s here (one slot at a
 /// time, since `ExecForeignInsert` hands over one slot per call) and, on flush,
 /// converts the buffered `&[Row]` to a columnar batch.
 ///
 /// It is deliberately **not** on the columnar hot path. Columnar AMs (the
 /// in-tree Iceberg AM) append tuple slots directly into a provider-owned
-/// relation-bound buffer such as `pg-arrow-conv`'s `BoundWriteBuffer`, which
+/// relation-bound buffer such as `lagodb-arrow`'s `BoundWriteBuffer`, which
 /// skips the owned-`Row` materialization this type does. As a result the in-tree code
 /// base does not drive `RowBatchBuffer` today — it is exercised by unit tests
 /// and retained as the row-world buffering primitive a future row-mode FDW

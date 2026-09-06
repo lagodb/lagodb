@@ -7,7 +7,7 @@
 mod error;
 pub mod object_access_hook;
 mod planning;
-mod query_source;
+mod table_scan;
 mod utility_consumer;
 pub mod utility_hook;
 
@@ -16,8 +16,8 @@ use std::mem::size_of;
 use std::ptr;
 
 use crate::runtime_api::{
-    MaintenanceProvider, ProviderIdentity, ProviderRegistration,
-    QuerySourceDescriptor, RuntimeApiError, RuntimeClient, RuntimeRegistrationError,
+    MaintenanceProvider, ProviderIdentity, ProviderRegistration, RuntimeApiError,
+    RuntimeClient, RuntimeRegistrationError, TableScanDescriptor,
 };
 
 pub use crate::runtime_api::{
@@ -44,19 +44,19 @@ pub use utility_hook::{
 
 pub(crate) use planning::{register_modify, register_relation_scan};
 
-/// Stage this provider DSO's query-source descriptor for the next atomic
+/// Stage this provider DSO's table-scan descriptor for the next atomic
 /// [`freeze_hooks`] transaction.
 ///
-/// Providers should use the typed Arrow source adapter's safe registration
+/// Providers should use the typed Arrow table-scan adapter's safe registration
 /// method instead of calling this raw entry point.
 ///
 /// # Safety
 ///
 /// The descriptor must satisfy all callback, lifetime, panic-containment, and
-/// single-backend-thread contracts documented by [`QuerySourceDescriptor::new`].
+/// single-backend-thread contracts documented by [`TableScanDescriptor::new`].
 #[doc(hidden)]
-pub unsafe fn register_query_source(descriptor: QuerySourceDescriptor) {
-    query_source::register(descriptor);
+pub unsafe fn register_table_scan(descriptor: TableScanDescriptor) {
+    table_scan::register(descriptor);
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -138,7 +138,7 @@ pub(crate) fn freeze_hooks_with_provider(
         object_access_hook::ObjectAccessHookCallbacks::BACKEND,
     );
     let planning = planning::descriptors();
-    let query_source = query_source::descriptor();
+    let table_scan = table_scan::descriptor();
 
     let counts = (
         u32::try_from(utility.descriptors().len()),
@@ -203,7 +203,7 @@ pub(crate) fn freeze_hooks_with_provider(
             .as_ref()
             .map(ptr::from_ref)
             .unwrap_or(ptr::null()),
-        query_source: query_source
+        table_scan: table_scan
             .as_ref()
             .map(ptr::from_ref)
             .unwrap_or(ptr::null()),

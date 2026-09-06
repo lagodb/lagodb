@@ -61,7 +61,6 @@ struct ProviderEntry<P: LagodbCustomScanProvider> {
 
 struct ProviderFilterPlanner<P: LagodbCustomScanProvider> {
     planner: P::Planner,
-    relation_oid: pg_sys::Oid,
     baserel: *mut pg_sys::RelOptInfo,
 }
 
@@ -71,8 +70,7 @@ impl<P: LagodbCustomScanProvider> ErasedFilterPlanner for ProviderFilterPlanner<
         clauses: *mut pg_sys::List,
         source: ScanClauseSource,
     ) -> Result<PathFilterSet, CustomScanError> {
-        let mut negotiator =
-            FilterNegotiator::new(&mut self.planner, self.relation_oid, self.baserel);
+        let mut negotiator = FilterNegotiator::new(&mut self.planner, self.baserel);
         match unsafe { negotiator.negotiate(clauses, source) } {
             Ok(filters) => Ok(filters.into_path_set()),
             Err(error) => Err(CustomScanError::provider(error)),
@@ -109,11 +107,7 @@ impl<P: LagodbCustomScanProvider> ErasedProvider for ProviderEntry<P> {
             Ok(planner) => planner,
             Err(error) => return Err(CustomScanError::provider(error)),
         };
-        Ok(Box::new(ProviderFilterPlanner::<P> {
-            planner,
-            relation_oid: context.relation_oid(),
-            baserel,
-        }))
+        Ok(Box::new(ProviderFilterPlanner::<P> { planner, baserel }))
     }
 
     unsafe fn emit_path(

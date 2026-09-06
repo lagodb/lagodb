@@ -9,23 +9,23 @@ use pgrx::{PgMemoryContexts, PgTryBuilder, pg_sys};
 
 use crate::diag::PgReportError;
 
-pub const FFI_OPERATION_OK: u32 = 0;
-pub const FFI_OPERATION_FAILED: u32 = 1;
+pub const CALLBACK_OK: u32 = 0;
+pub const CALLBACK_FAILED: u32 = 1;
 
 /// Marker returned after an operation error has been copied into an
-/// [`FfiErrorRecord`].
+/// [`CallbackErrorReport`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("FFI operation failed; see the error record for details")]
-pub struct FfiCaptureError;
+#[error("callback failed; see the error report for details")]
+pub struct CallbackFailed;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct FfiErrorText {
+struct ErrorReportText {
     data: *const u8,
     len: usize,
 }
 
-impl Default for FfiErrorText {
+impl Default for ErrorReportText {
     fn default() -> Self {
         Self {
             data: ptr::null(),
@@ -34,7 +34,7 @@ impl Default for FfiErrorText {
     }
 }
 
-impl FfiErrorText {
+impl ErrorReportText {
     unsafe fn copy_from(value: &str, memory_context: pg_sys::MemoryContext) -> Self {
         if value.is_empty() {
             return Self::default();
@@ -74,27 +74,27 @@ impl FfiErrorText {
 /// Rust allocation or error object crosses the DSO boundary.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FfiErrorRecord {
+pub struct CallbackErrorReport {
     struct_size: u32,
     sql_error_code: i32,
-    message: FfiErrorText,
-    detail: FfiErrorText,
-    hint: FfiErrorText,
+    message: ErrorReportText,
+    detail: ErrorReportText,
+    hint: ErrorReportText,
 }
 
-impl Default for FfiErrorRecord {
+impl Default for CallbackErrorReport {
     fn default() -> Self {
         Self {
             struct_size: size_of::<Self>() as u32,
             sql_error_code: 0,
-            message: FfiErrorText::default(),
-            detail: FfiErrorText::default(),
-            hint: FfiErrorText::default(),
+            message: ErrorReportText::default(),
+            detail: ErrorReportText::default(),
+            hint: ErrorReportText::default(),
         }
     }
 }
 
-impl FfiErrorRecord {
+impl CallbackErrorReport {
     /// Run one callback without allowing a PostgreSQL error or Rust panic to
     /// cross the exact-build ABI.
     ///
@@ -109,8 +109,8 @@ impl FfiErrorRecord {
         // SAFETY: the caller upholds the backend-thread and memory-context
         // requirements documented by this method.
         match unsafe { self.capture_result(operation) } {
-            Ok(()) => FFI_OPERATION_OK,
-            Err(FfiCaptureError) => FFI_OPERATION_FAILED,
+            Ok(()) => CALLBACK_OK,
+            Err(CallbackFailed) => CALLBACK_FAILED,
         }
     }
 
@@ -124,7 +124,7 @@ impl FfiErrorRecord {
     pub unsafe fn capture_result<T>(
         &mut self,
         operation: impl FnOnce() -> Result<T, PgReportError>,
-    ) -> Result<T, FfiCaptureError> {
+    ) -> Result<T, CallbackFailed> {
         *self = Self::default();
         // Preserve the caller's context across a caught PostgreSQL ERROR;
         // error handling may temporarily switch CurrentMemoryContext.
@@ -138,7 +138,7 @@ impl FfiErrorRecord {
                 // SAFETY: `memory_context` was captured while live immediately
                 // before the protected operation and this record is writable.
                 unsafe { self.write(error, memory_context) };
-                Err(FfiCaptureError)
+                Err(CallbackFailed)
             }
         }
     }
@@ -165,7 +165,7 @@ impl FfiErrorRecord {
         {
             return PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                format!("{callback} returned an invalid FFI error record"),
+                format!("{callback} returned an invalid callback error report"),
             );
         }
         // SAFETY: all three slices were validated above and are covered by the
@@ -193,18 +193,18 @@ impl FfiErrorRecord {
         // SAFETY: the caller guarantees that `memory_context` is live and this
         // method consumes each borrowed report string synchronously.
         self.message =
-            unsafe { FfiErrorText::copy_from(report.message(), memory_context) };
+            unsafe { ErrorReportText::copy_from(report.message(), memory_context) };
         self.detail = report
             .detail()
             // SAFETY: same live context and synchronous copy as `message`.
-            .map_or_else(FfiErrorText::default, |detail| unsafe {
-                FfiErrorText::copy_from(detail, memory_context)
+            .map_or_else(ErrorReportText::default, |detail| unsafe {
+                ErrorReportText::copy_from(detail, memory_context)
             });
         self.hint = report
             .hint()
             // SAFETY: same live context and synchronous copy as `message`.
-            .map_or_else(FfiErrorText::default, |hint| unsafe {
-                FfiErrorText::copy_from(hint, memory_context)
+            .map_or_else(ErrorReportText::default, |hint| unsafe {
+                ErrorReportText::copy_from(hint, memory_context)
             });
     }
 }

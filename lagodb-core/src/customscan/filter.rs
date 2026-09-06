@@ -11,11 +11,12 @@ use crate::diag::SqlStateError;
 use crate::expr::contract::PushdownContract;
 use crate::expr::pushdown::{
     BoundFilterSet, EncodedFilterData, FilterDataCodec, FilterDataError,
-    FilterPushdown, NegotiatedFilterSet, RuntimeFilterError, RuntimeFilterState,
+    FilterPushdown, NegotiatedFilterSet, RelationFilterBinding,
+    RelationFilterBindingError,
 };
 
 pub(crate) struct CustomScanFilters<P: FilterPushdown> {
-    runtime: RuntimeFilterState<P>,
+    runtime: RelationFilterBinding<P>,
 }
 
 pub(crate) struct FilterExplainContracts {
@@ -102,7 +103,7 @@ impl<P: FilterPushdown> CustomScanFilters<P> {
             )
         }?;
         let runtime = unsafe {
-            RuntimeFilterState::<P>::initialize(
+            RelationFilterBinding::<P>::initialize(
                 planned,
                 bindings,
                 binding_exprs,
@@ -154,20 +155,23 @@ where
         match error {
             FilterDataError::PlanData(error) => error.into(),
             FilterDataError::Provider(error) => CustomScanError::provider(error),
+            FilterDataError::Expression(error) => CustomScanError::framework(error),
             FilterDataError::Invalid(error) => CustomScanError::framework(error),
         }
     }
 }
 
-impl<E> From<RuntimeFilterError<E>> for CustomScanError
+impl<E> From<RelationFilterBindingError<E>> for CustomScanError
 where
     E: SqlStateError + Error + Send + Sync + 'static,
 {
-    fn from(error: RuntimeFilterError<E>) -> Self {
+    fn from(error: RelationFilterBindingError<E>) -> Self {
         match error {
-            RuntimeFilterError::Provider(error) => CustomScanError::provider(error),
-            RuntimeFilterError::BindingCountMismatch
-            | RuntimeFilterError::ExactValueNotRepresentable { .. } => {
+            RelationFilterBindingError::Provider(error) => {
+                CustomScanError::provider(error)
+            }
+            RelationFilterBindingError::BindingCountMismatch
+            | RelationFilterBindingError::ExactValueNotRepresentable { .. } => {
                 CustomScanError::framework(error)
             }
         }

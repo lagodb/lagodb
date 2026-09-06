@@ -8,6 +8,7 @@ use pgrx::{pg_guard, pg_sys};
 
 use crate::customscan::error::CustomScanError;
 use crate::customscan::filter::CustomScanFilters;
+use crate::customscan::plan_data::custom_exprs::PgExpressionSections;
 use crate::customscan::plan_data::custom_private::CustomPrivatePlan;
 use crate::customscan::plan_data::path_private::decode_path_private;
 use crate::customscan::provider::{LagodbCustomScanProvider, method_tables_for};
@@ -73,22 +74,25 @@ unsafe fn plan_custom_path<P: LagodbCustomScanProvider>(
     let mut filter_planner = P::begin_filter_planning(&planning_context)
         .map_err(CustomScanError::provider)?;
     let filters = unsafe {
-        FilterNegotiator::new(&mut filter_planner, relation_oid, rel)
+        FilterNegotiator::new(&mut filter_planner, rel)
             .negotiate_with_source(clauses, |rinfo| {
                 final_clause_sources.source_for(rinfo)
             })
     }
     .map_err(CustomScanError::provider)?;
 
+    let runtime_bindings = filters
+        .bindings
+        .iter()
+        .map(|binding| binding.expr)
+        .collect::<Vec<_>>();
+    let relation_pushdown_provenance = filters
+        .planned
+        .iter()
+        .map(|filter| filter.pushed_expr)
+        .collect::<Vec<_>>();
     let custom_exprs = unsafe {
-        let mut list: *mut pg_sys::List = ptr::null_mut();
-        for binding in &filters.bindings {
-            list = pg_sys::lappend(list, binding.expr.cast::<c_void>());
-        }
-        for filter in &filters.planned {
-            list = pg_sys::lappend(list, filter.pushed_expr.cast::<c_void>());
-        }
-        list
+        PgExpressionSections::encode(&runtime_bindings, &relation_pushdown_provenance)
     };
 
     let plan_qual = unsafe {

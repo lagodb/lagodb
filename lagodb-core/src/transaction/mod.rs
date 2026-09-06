@@ -13,8 +13,9 @@
 //! Use this module for transaction-scoped state, such as metadata updates,
 //! staged publication, or cleanup actions that must react to commit, abort,
 //! pre-commit, or subtransaction promotion/rollback.  Use [`crate::resource`] for
-//! executor, portal, mutation-frame, COPY, or other ResourceOwner-bound cleanup that
-//! must run when PostgreSQL releases the owner even after ERROR/longjmp.
+//! executor, portal, mutation-frame, COPY, or other ResourceOwner-bound cleanup
+//! that must run when PostgreSQL releases the owner after an ERROR has returned
+//! through pgrx's guarded Rust unwind boundary.
 //!
 //! The [`cleanup`] submodule provides higher-level helpers for common
 //! transaction-scoped cleanup patterns.
@@ -206,8 +207,9 @@ unsafe extern "C-unwind" fn xact_callback(
                     if r.nest_level() >= current_nest_level
                         && let Err(error) = r.on_pre_commit()
                     {
-                        // Drop Rust-owned boundary state before raising a
-                        // PostgreSQL ERROR, whose longjmp does not run Drop.
+                        // Release callback-local state before reporting the
+                        // PostgreSQL ERROR at this inbound FFI boundary;
+                        // control does not return after report().
                         drop(active_snapshot);
                         error.report();
                     }

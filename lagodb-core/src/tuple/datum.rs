@@ -7,11 +7,13 @@
 use std::error::Error;
 use std::ffi::CString;
 use std::fmt;
+use std::mem;
+use std::ptr;
 use std::slice;
 
+use pgrx::IntoDatum;
 use pgrx::pg_sys::{self, Datum, Oid};
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{IntoDatum, fcinfo};
 
 use crate::diag::{PgError, SqlStateError};
 use crate::wrapper::PgWrapper;
@@ -163,6 +165,59 @@ impl ColumnDatumCodec {
         cell: Cell,
     ) -> Result<Datum, DatumConversionError> {
         unsafe { cell.into_datum_for_attribute(self.target) }
+    }
+
+    /// Convert an Arrow Int32 value for an already-bound `int2` target.
+    ///
+    /// # Safety
+    ///
+    /// This codec must have been bound from `INT2OID`. PostgreSQL must be
+    /// active on the current backend thread.
+    pub unsafe fn int2_datum_from_i32_unchecked(
+        self,
+        value: i32,
+    ) -> Result<Datum, DatumConversionError> {
+        i16::try_from(value)
+            .map(Datum::from)
+            .map_err(|_| DatumConversionError::out_of_range(self.target.oid))
+    }
+
+    /// Convert UTF-8 text for an already-bound PostgreSQL `name` target.
+    ///
+    /// # Safety
+    ///
+    /// This codec must have been bound from `NAMEOID`. PostgreSQL must be
+    /// active with the destination memory context selected.
+    pub unsafe fn name_datum_from_str_unchecked(
+        self,
+        text: &str,
+    ) -> Result<Datum, DatumConversionError> {
+        let bytes = text.as_bytes();
+        if bytes.contains(&0) {
+            return Err(DatumConversionError::invalid_input(self.target.oid));
+        }
+        let input_len = i32::try_from(bytes.len())
+            .map_err(|_| DatumConversionError::out_of_range(self.target.oid))?;
+        let storage_limit = (pg_sys::NAMEDATALEN - 1) as i32;
+        let copy_len = if input_len > storage_limit {
+            unsafe {
+                pg_sys::pg_mbcliplen(bytes.as_ptr().cast(), input_len, storage_limit)
+            }
+        } else {
+            input_len
+        };
+        let name = unsafe {
+            pg_sys::palloc0(mem::size_of::<pg_sys::NameData>())
+                .cast::<pg_sys::NameData>()
+        };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (*name).data.as_mut_ptr().cast(),
+                copy_len as usize,
+            );
+        }
+        Ok(Datum::from(name))
     }
 
     /// Convert one Datum from this already-bound source column into a semantic
@@ -612,19 +667,16 @@ impl Cell {
         self,
         target: Oid,
     ) -> Result<Datum, DatumConversionError> {
-        let text = match self {
-            Cell::String(value) => CString::new(value),
-            Cell::StringView(view) => CString::new(unsafe { view.as_str() }),
+        let text = match &self {
+            Cell::String(value) => value.as_str(),
+            Cell::StringView(view) => unsafe { view.as_str() },
             _ => return Err(DatumConversionError::incompatible(target)),
-        }
-        .map_err(|_| DatumConversionError::invalid_input(target))?;
+        };
+        let target = ColumnDatumTarget::from_oid(target);
         unsafe {
-            fcinfo::direct_function_call_as_datum(
-                pg_sys::namein,
-                &[Some(Datum::from(text.as_ptr()))],
-            )
+            ColumnDatumCodec::from_validated(target)
+                .name_datum_from_str_unchecked(text)
         }
-        .ok_or(DatumConversionError::invalid_input(target))
     }
 
     unsafe fn into_json_datum(

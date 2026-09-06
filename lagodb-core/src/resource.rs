@@ -10,10 +10,10 @@
 //!
 //! Keep this separate from [`crate::transaction`].  Transaction callbacks are
 //! appropriate for transaction-scoped state that needs pre-commit, commit,
-//! abort, or savepoint event handling.  ResourceOwner callbacks are appropriate
-//! for frame-, portal-, executor-, or other owner-scoped resources that must be
-//! cleaned up if PostgreSQL unwinds past normal Rust control flow, such as
-//! ERROR during mutation or COPY.
+//! abort, or savepoint event handling. ResourceOwner callbacks are appropriate
+//! for frame-, portal-, executor-, or other owner-scoped resources whose normal
+//! completion callback can be omitted after pgrx has unwound Rust and returned
+//! an ERROR to PostgreSQL, such as mutation or COPY state.
 //!
 //! # Example
 //!
@@ -54,16 +54,25 @@ thread_local! {
 
 /// Register a resource release callback.
 ///
-/// The callback will be called when the current `ResourceOwner` is released (e.g. transaction end),
-/// unless `forget_resource` is called first.
+/// The callback will be called when the captured current `ResourceOwner` is
+/// released, unless `forget_resource` is called first.
 ///
-/// This is typically used to cleanup resources (like open files, memory, or external handles)
-/// that must be released if a transaction aborts, but might be handed off or explicitly closed
-/// if the transaction commits.
+/// This is for logical cleanup of owner-scoped resources such as open handles
+/// or in-flight sessions when PostgreSQL cleanup omits their normal completion
+/// callback. Physical allocation lifetime remains a MemoryContext concern.
 ///
 /// Note: If the transaction commits and the resource hasn't been forgotten, the callback
 /// WILL still run, and a warning will be logged, implying a resource leak if explicit
 /// cleanup was expected.
+///
+/// Callbacks registered here run only in PostgreSQL's
+/// `RESOURCE_RELEASE_AFTER_LOCKS` phase. They must therefore be bounded,
+/// best-effort, and idempotent; they must not depend on relation locks, a live
+/// snapshot, executor borrows, or another resource owned by the releasing
+/// owner. A MemoryContext destructor may have consumed shared cleanup state
+/// first, so the callback must also tolerate an already-released resource.
+/// Resources that require commit, abort, or savepoint semantics belong in a
+/// [`crate::transaction::TransactionResource`] instead.
 ///
 /// # Panics
 ///

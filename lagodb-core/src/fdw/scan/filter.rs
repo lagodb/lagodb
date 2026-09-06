@@ -9,14 +9,15 @@ use pgrx::pg_sys;
 use crate::diag::SqlStateError;
 use crate::expr::pushdown::{
     BoundFilterSet, EncodedFilterData, FilterDataCodec, FilterDataError,
-    FilterPushdown, NegotiatedFilterSet, RuntimeFilterError, RuntimeFilterState,
+    FilterPushdown, NegotiatedFilterSet, RelationFilterBinding,
+    RelationFilterBindingError,
 };
 
 use super::error::ForeignScanError;
 use super::private::DecodedScanPrivate;
 
 pub(crate) struct ForeignScanFilters<P: FilterPushdown> {
-    runtime: RuntimeFilterState<P>,
+    runtime: RelationFilterBinding<P>,
 }
 
 pub(crate) struct ForeignFilterExprs {
@@ -34,11 +35,7 @@ impl ForeignFilterExprs {
         expressions: *mut pg_sys::List,
         binding_count: usize,
     ) -> Result<Self, ForeignScanError> {
-        let length = if expressions.is_null() {
-            0
-        } else {
-            unsafe { pg_sys::list_length(expressions) as usize }
-        };
+        let length = unsafe { pg_sys::list_length(expressions) as usize };
         if binding_count > length {
             return Err(ForeignScanError::framework(
                 "FDW filter binding prefix exceeds fdw_exprs length",
@@ -85,7 +82,7 @@ impl<P: FilterPushdown> ForeignScanFilters<P> {
             )
         }?;
         let runtime = unsafe {
-            RuntimeFilterState::<P>::initialize(
+            RelationFilterBinding::<P>::initialize(
                 planned,
                 bindings,
                 binding_exprs,
@@ -143,20 +140,23 @@ where
         match error {
             FilterDataError::PlanData(error) => error.into(),
             FilterDataError::Provider(error) => ForeignScanError::provider(error),
+            FilterDataError::Expression(error) => ForeignScanError::framework(error),
             FilterDataError::Invalid(error) => ForeignScanError::framework(error),
         }
     }
 }
 
-impl<E> From<RuntimeFilterError<E>> for ForeignScanError
+impl<E> From<RelationFilterBindingError<E>> for ForeignScanError
 where
     E: SqlStateError + Error + Send + Sync + 'static,
 {
-    fn from(error: RuntimeFilterError<E>) -> Self {
+    fn from(error: RelationFilterBindingError<E>) -> Self {
         match error {
-            RuntimeFilterError::Provider(error) => ForeignScanError::provider(error),
-            RuntimeFilterError::BindingCountMismatch
-            | RuntimeFilterError::ExactValueNotRepresentable { .. } => {
+            RelationFilterBindingError::Provider(error) => {
+                ForeignScanError::provider(error)
+            }
+            RelationFilterBindingError::BindingCountMismatch
+            | RelationFilterBindingError::ExactValueNotRepresentable { .. } => {
                 ForeignScanError::framework(error)
             }
         }

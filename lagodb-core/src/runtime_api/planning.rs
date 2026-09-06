@@ -4,7 +4,7 @@ use std::ffi::c_void;
 
 use pgrx::pg_sys;
 
-use super::FfiErrorRecord;
+use super::CallbackErrorReport;
 
 pub type RoutedRelationScanPlanner = unsafe extern "C-unwind" fn(
     context: *mut c_void,
@@ -12,7 +12,7 @@ pub type RoutedRelationScanPlanner = unsafe extern "C-unwind" fn(
     rel: *mut pg_sys::RelOptInfo,
     rti: pg_sys::Index,
     rte: *mut pg_sys::RangeTblEntry,
-    error: *mut FfiErrorRecord,
+    error: *mut CallbackErrorReport,
 ) -> u32;
 
 /// Relation CustomScan planning facet owned by one provider DSO.
@@ -27,13 +27,13 @@ pub struct RelationScanPlannerDescriptor {
 pub type RoutedModifyPlannerPre = unsafe extern "C-unwind" fn(
     context: *mut c_void,
     parse: *mut pg_sys::Query,
-    error: *mut FfiErrorRecord,
+    error: *mut CallbackErrorReport,
 ) -> u32;
 
 pub type RoutedModifyPlannerPost = unsafe extern "C-unwind" fn(
     context: *mut c_void,
     planned: *mut pg_sys::PlannedStmt,
-    error: *mut FfiErrorRecord,
+    error: *mut CallbackErrorReport,
 ) -> u32;
 
 pub type RoutedModifyUpperPlanner = unsafe extern "C-unwind" fn(
@@ -43,7 +43,7 @@ pub type RoutedModifyUpperPlanner = unsafe extern "C-unwind" fn(
     input_rel: *mut pg_sys::RelOptInfo,
     output_rel: *mut pg_sys::RelOptInfo,
     extra: *mut c_void,
-    error: *mut FfiErrorRecord,
+    error: *mut CallbackErrorReport,
 ) -> u32;
 
 /// Modify planning facet, kept distinct from relation and query planning.

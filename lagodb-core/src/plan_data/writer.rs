@@ -134,7 +134,7 @@ impl PlanDataWriter {
     /// Append an already encoded nested plan-data frame.
     ///
     /// This is the composition boundary for independently owned codecs, such
-    /// as the engine envelope and an opaque provider source plan.
+    /// as the selected query plan and an opaque provider scan plan.
     ///
     /// # Safety
     ///

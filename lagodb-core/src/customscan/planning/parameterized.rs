@@ -108,11 +108,7 @@ impl ParameterizationCandidates {
     }
 
     unsafe fn collect_joininfo(&mut self, joininfo: *mut pg_sys::List) {
-        let len = if joininfo.is_null() {
-            0
-        } else {
-            unsafe { pg_sys::list_length(joininfo) }
-        };
+        let len = unsafe { pg_sys::list_length(joininfo) };
         for i in 0..len {
             let rinfo =
                 unsafe { pg_sys::list_nth(joininfo, i) } as *mut pg_sys::RestrictInfo;
@@ -130,11 +126,7 @@ impl ParameterizationCandidates {
                 (*self.rel).lateral_referencers,
             )
         };
-        let implied_len = if implied_eqs.is_null() {
-            0
-        } else {
-            unsafe { pg_sys::list_length(implied_eqs) }
-        };
+        let implied_len = unsafe { pg_sys::list_length(implied_eqs) };
         for i in 0..implied_len {
             let rinfo = unsafe { pg_sys::list_nth(implied_eqs, i) }
                 as *mut pg_sys::RestrictInfo;

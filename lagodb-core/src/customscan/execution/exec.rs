@@ -27,7 +27,7 @@ mod tests {
     use pgrx::prelude::PgSqlErrorCode;
     use proptest::prelude::*;
 
-    use crate::customscan::plan_data::custom_exprs::validate_custom_expr_section_counts;
+    use crate::customscan::plan_data::custom_exprs::PgExpressionSections;
     use crate::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, CustomScanPrivate, EndContext, LagodbCustomScanProvider,
@@ -35,9 +35,10 @@ mod tests {
         PrivateDataWriter, ReScanContext, RelationContext,
     };
     use crate::diag::SqlStateError;
+    use crate::expr::RuntimeValueBindings;
     use crate::expr::pushdown::{
-        FilterBindResult, FilterFragment, FilterPlan, FilterPlanningContext,
-        FilterPushdown, FilterPushdownPlanner, FilterValueBindings,
+        FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
+        FilterPushdownPlanner, PredicateFragment,
     };
     use crate::plan_data::{PlanDataReader, PlanDataWriter};
 
@@ -75,7 +76,7 @@ mod tests {
 
         fn try_plan_filter(
             &mut self,
-            _fragment: &FilterFragment,
+            _fragment: &PredicateFragment,
         ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
             Ok(FilterPlan::Unsupported)
         }
@@ -109,7 +110,7 @@ mod tests {
 
         fn bind_filter(
             _predicate: &Self::PlannedPredicate,
-            _values: FilterValueBindings<'_>,
+            _values: RuntimeValueBindings<'_>,
         ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
             Ok(FilterBindResult::ValueNotRepresentable)
         }
@@ -319,7 +320,7 @@ mod tests {
 
     #[test]
     fn custom_expr_section_counts_null_branch_returns_err() {
-        let err = validate_custom_expr_section_counts(None, 1, 0).unwrap_err();
+        let err = PgExpressionSections::validate_counts(None, 1, 0).unwrap_err();
         assert!(
             err.to_string().contains("binding_count=1")
                 && err.to_string().contains("pushed_count=0")
@@ -328,6 +329,9 @@ mod tests {
 
     #[test]
     fn custom_expr_section_counts_zero_counts_returns_zero() {
-        assert_eq!(validate_custom_expr_section_counts(None, 0, 0).unwrap(), 0);
+        assert_eq!(
+            PgExpressionSections::validate_counts(None, 0, 0).unwrap(),
+            0
+        );
     }
 }

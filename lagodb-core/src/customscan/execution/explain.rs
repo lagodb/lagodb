@@ -2,7 +2,6 @@
 
 use core::ffi::CStr;
 use core::ptr;
-use std::ffi::CString;
 
 use pgrx::pg_guard;
 use pgrx::pg_sys;
@@ -10,20 +9,20 @@ use pgrx::pg_sys;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::execution::state::CustomScanStateWrapper;
 use crate::customscan::filter::CustomScanFilters;
-use crate::customscan::plan_data::custom_exprs::CustomExprSections;
+use crate::customscan::plan_data::custom_exprs::PgExpressionSections;
 use crate::customscan::plan_data::custom_private::{
     EncodedPrivate, assert_provider_name_matches, decode_private,
 };
 use crate::customscan::provider::LagodbCustomScanProvider;
 use crate::diag::ReportableError;
+use crate::expr::explain::{
+    PUSHED_FILTER, PUSHED_FILTER_CONSERVATIVE, PUSHED_FILTER_EXACT, RECHECK,
+    deparse_and_join,
+};
 
 const GROUP_LABEL: &CStr = c"LagoDB Pushdown";
 const PROP_PROVIDER: &CStr = c"Provider";
 const PROP_SCAN_PURPOSE: &CStr = c"Scan Purpose";
-const PROP_PUSHED_FILTER: &CStr = c"Pushed Filter";
-const PROP_PUSHED_FILTER_EXACT: &CStr = c"Pushed Filter Exact";
-const PROP_PUSHED_FILTER_CONSERVATIVE: &CStr = c"Pushed Filter Conservative";
-const PROP_RECHECK: &CStr = c"Recheck";
 
 /// `ExplainCustomScan` trampoline (`#[doc(hidden)]` for core-tests).
 ///
@@ -59,7 +58,7 @@ unsafe fn explain_custom_scan<P: LagodbCustomScanProvider>(
     )?;
 
     let expr_sections = unsafe {
-        CustomExprSections::from_custom_exprs(
+        PgExpressionSections::from_custom_exprs(
             (*cscan).custom_exprs,
             priv_payload.binding_count,
             priv_payload.planned_filter_count,
@@ -74,7 +73,11 @@ unsafe fn explain_custom_scan<P: LagodbCustomScanProvider>(
     };
     let mut exact = Vec::new();
     let mut conservative = Vec::new();
-    for (&expr, contract) in expr_sections.pushed().iter().zip(contracts.iter()) {
+    for (&expr, contract) in expr_sections
+        .relation_pushdown_provenance()
+        .iter()
+        .zip(contracts.iter())
+    {
         if contract.requires_recheck() {
             exact.push(expr);
         } else {
@@ -96,7 +99,7 @@ unsafe fn explain_custom_scan<P: LagodbCustomScanProvider>(
         }
     }
 
-    let need_deparse = !expr_sections.pushed().is_empty();
+    let need_deparse = !expr_sections.relation_pushdown_provenance().is_empty();
     let dpcontext: *mut pg_sys::List = if need_deparse {
         unsafe {
             pg_sys::set_deparse_context_plan((*es).deparse_cxt, plan, ancestors)
@@ -118,27 +121,27 @@ unsafe fn explain_custom_scan<P: LagodbCustomScanProvider>(
                 emit_section_exprs(
                     es,
                     is_text,
-                    PROP_PUSHED_FILTER_EXACT,
+                    PUSHED_FILTER_EXACT,
                     dpcontext,
                     &exact,
                 );
                 emit_section_exprs(
                     es,
                     is_text,
-                    PROP_PUSHED_FILTER_CONSERVATIVE,
+                    PUSHED_FILTER_CONSERVATIVE,
                     dpcontext,
                     &conservative,
                 );
-                emit_section_exprs(es, is_text, PROP_RECHECK, dpcontext, &exact);
+                emit_section_exprs(es, is_text, RECHECK, dpcontext, &exact);
             }
         } else {
             unsafe {
                 emit_section_exprs(
                     es,
                     is_text,
-                    PROP_PUSHED_FILTER,
+                    PUSHED_FILTER,
                     dpcontext,
-                    expr_sections.pushed(),
+                    expr_sections.relation_pushdown_provenance(),
                 );
             }
         }
@@ -164,27 +167,27 @@ unsafe fn explain_custom_scan<P: LagodbCustomScanProvider>(
                 emit_section_exprs(
                     es,
                     is_text,
-                    PROP_PUSHED_FILTER_EXACT,
+                    PUSHED_FILTER_EXACT,
                     dpcontext,
                     &exact,
                 );
                 emit_section_exprs(
                     es,
                     is_text,
-                    PROP_PUSHED_FILTER_CONSERVATIVE,
+                    PUSHED_FILTER_CONSERVATIVE,
                     dpcontext,
                     &conservative,
                 );
-                emit_section_exprs(es, is_text, PROP_RECHECK, dpcontext, &exact);
+                emit_section_exprs(es, is_text, RECHECK, dpcontext, &exact);
             }
         } else {
             unsafe {
                 emit_section_exprs(
                     es,
                     is_text,
-                    PROP_PUSHED_FILTER,
+                    PUSHED_FILTER,
                     dpcontext,
-                    expr_sections.pushed(),
+                    expr_sections.relation_pushdown_provenance(),
                 );
             }
         }
@@ -199,50 +202,6 @@ unsafe fn explain_custom_scan<P: LagodbCustomScanProvider>(
         }
     }
     Ok(())
-}
-
-/// Join deparsed exprs with ` AND `; returns `None` if nothing to print.
-///
-/// # Safety
-///
-/// `dpcontext` from `set_deparse_context_plan` when any expr is non-null.
-unsafe fn deparse_and_join<I>(
-    dpcontext: *mut pg_sys::List,
-    exprs: I,
-) -> Option<CString>
-where
-    I: IntoIterator<Item = *mut pg_sys::Expr>,
-{
-    let mut parts: Vec<String> = Vec::new();
-    for expr in exprs {
-        if expr.is_null() {
-            continue;
-        }
-        let exprstr = unsafe {
-            pg_sys::deparse_expression(
-                expr.cast::<pg_sys::Node>(),
-                dpcontext,
-                false,
-                false,
-            )
-        };
-        if exprstr.is_null() {
-            continue;
-        }
-        let part = unsafe { CStr::from_ptr(exprstr) }
-            .to_string_lossy()
-            .into_owned();
-        parts.push(part);
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        Some(
-            CString::new(parts.join(" AND "))
-                .expect("deparsed predicate text contains no interior NUL"),
-        )
-    }
 }
 
 /// Emit one EXPLAIN section (TEXT line or structured list).

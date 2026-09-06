@@ -916,10 +916,12 @@ impl<Q: AmModifyQueryState, C> ModifyStateContext<Q, C> {
 
 /// Relation-local state owned directly by one Custom ModifyTable execution.
 ///
-/// Abort paths are separate.  If PostgreSQL raises ERROR, aborts the
-/// transaction, or rolls back to a savepoint, ResourceOwner cleanup drops the
-/// execution state and unfinalized sessions receive [`abort_modify`](Self::abort_modify)
-/// instead of `end_modify`.
+/// Abort paths are separate. If PostgreSQL raises ERROR, aborts the transaction,
+/// or rolls back to a savepoint, the ResourceOwner callback and owning
+/// MemoryContext are order-independent cleanup anchors for the same execution
+/// state. Whichever consumes it first ensures that unfinalized sessions receive
+/// [`abort_modify`](Self::abort_modify) instead of `end_modify`; the other path
+/// must remain an idempotent no-op.
 pub trait AmModifyState {
     type QueryState: AmModifyQueryState;
 
@@ -960,9 +962,9 @@ pub trait AmModifyState {
 
     /// Cleans up relation-local resources after ERROR/abort/rollback.
     ///
-    /// This may run during ResourceOwner cleanup after PostgreSQL has unwound
-    /// past normal Rust control flow.  Keep it best-effort and idempotent; it
-    /// must not assume `end_modify()` ran.
+    /// This may run during ResourceOwner cleanup after pgrx has completed the
+    /// guarded Rust unwind and returned control to PostgreSQL. Keep it
+    /// best-effort and idempotent; it must not assume `end_modify()` ran.
     fn abort_modify(&mut self) {}
 
     /// Insert the final relation-shaped tuple produced by PostgreSQL.

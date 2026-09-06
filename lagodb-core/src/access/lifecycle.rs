@@ -1,9 +1,10 @@
 //! Memory-context backed ownership for access-method session state.
 //!
-//! PostgreSQL may unwind past the normal `scan_end` / `index_fetch_end`
-//! callbacks after an ERROR.  Session state that lives on the Rust heap must
+//! PostgreSQL error cleanup may omit the normal `scan_end` /
+//! `index_fetch_end` callbacks. Session state that lives on the Rust heap must
 //! therefore be tied to a PostgreSQL memory context cleanup callback, not only
-//! to the normal end callback.
+//! to the normal end callback. pgrx's guarded unwind still runs before control
+//! returns to PostgreSQL; raw longjmp must not cross a non-trivial Rust frame.
 
 use std::ffi::CStr;
 

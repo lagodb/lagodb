@@ -7,9 +7,11 @@ use std::ffi::CString;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use crate::expr::pushdown::{
-    FilterBindingExpr, FilterValueSourceKind, NegotiatedFilterSet,
+use crate::expr::explain::{
+    PUSHED_FILTER, PUSHED_FILTER_CONSERVATIVE, PUSHED_FILTER_EXACT, RECHECK,
 };
+use crate::expr::pushdown::NegotiatedFilterSet;
+use crate::expr::{RuntimeValueExpr, RuntimeValueSource};
 use crate::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 
 use super::contract::FdwScan;
@@ -19,10 +21,6 @@ use super::private::decode_scan_explain_private;
 
 const GROUP_LABEL: &CStr = c"LagoDB Pushdown";
 const PROP_PROVIDER: &CStr = c"Provider";
-const PROP_PUSHED_FILTER: &CStr = c"Pushed Filter";
-const PROP_PUSHED_FILTER_EXACT: &CStr = c"Pushed Filter Exact";
-const PROP_PUSHED_FILTER_CONSERVATIVE: &CStr = c"Pushed Filter Conservative";
-const PROP_RECHECK: &CStr = c"Recheck";
 
 struct ForeignScanExplainEntry {
     requires_recheck: bool,
@@ -155,14 +153,9 @@ impl ForeignScanExplain {
                 .map(|entry| entry.text.as_str())
                 .collect::<Vec<_>>();
             unsafe {
-                emit_section(es, is_text, PROP_PUSHED_FILTER_EXACT, &exact);
-                emit_section(
-                    es,
-                    is_text,
-                    PROP_PUSHED_FILTER_CONSERVATIVE,
-                    &conservative,
-                );
-                emit_section(es, is_text, PROP_RECHECK, &exact);
+                emit_section(es, is_text, PUSHED_FILTER_EXACT, &exact);
+                emit_section(es, is_text, PUSHED_FILTER_CONSERVATIVE, &conservative);
+                emit_section(es, is_text, RECHECK, &exact);
             }
         } else {
             let pushed = self
@@ -170,7 +163,7 @@ impl ForeignScanExplain {
                 .iter()
                 .map(|entry| entry.text.as_str())
                 .collect::<Vec<_>>();
-            unsafe { emit_section(es, is_text, PROP_PUSHED_FILTER, &pushed) };
+            unsafe { emit_section(es, is_text, PUSHED_FILTER, &pushed) };
         }
 
         if !is_text {
@@ -192,11 +185,11 @@ impl ForeignScanExplain {
 /// external parameters are deparsed without a namespace; executor parameters
 /// and outer values use stable slot placeholders and are never deparsed.
 unsafe fn explain_binding(
-    binding: &FilterBindingExpr,
+    binding: &RuntimeValueExpr,
     global_index: usize,
 ) -> Result<String, ForeignScanError> {
     match binding.metadata.source_kind {
-        FilterValueSourceKind::Constant | FilterValueSourceKind::ExternalParam => {
+        RuntimeValueSource::Constant | RuntimeValueSource::ExternalParam => {
             let text = unsafe {
                 pg_sys::deparse_expression(
                     binding.expr.cast::<pg_sys::Node>(),
@@ -217,7 +210,7 @@ unsafe fn explain_binding(
                     ForeignScanError::framework("FDW filter value is not valid UTF-8")
                 })
         }
-        FilterValueSourceKind::ExecParam | FilterValueSourceKind::OuterValue => {
+        RuntimeValueSource::ExecParam | RuntimeValueSource::OuterValue => {
             Ok(format!("${}", global_index + 1))
         }
     }

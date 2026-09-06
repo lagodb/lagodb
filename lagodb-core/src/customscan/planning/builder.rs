@@ -287,9 +287,10 @@ mod tests {
         NextSlotContext, PathContext, ReScanContext, RelationContext,
     };
     use crate::customscan::provider::{CustomScanPrivate, PrivateDataReader};
+    use crate::expr::RuntimeValueBindings;
     use crate::expr::pushdown::{
-        FilterBindResult, FilterFragment, FilterPlan, FilterPlanningContext,
-        FilterPushdown, FilterPushdownPlanner, FilterValueBindings,
+        FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
+        FilterPushdownPlanner, PredicateFragment,
     };
     use crate::plan_data::{PlanDataReader, PlanDataWriter};
 
@@ -320,7 +321,7 @@ mod tests {
 
         fn try_plan_filter(
             &mut self,
-            _fragment: &FilterFragment,
+            _fragment: &PredicateFragment,
         ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
             Ok(FilterPlan::Unsupported)
         }
@@ -356,7 +357,7 @@ mod tests {
 
                 fn bind_filter(
                     _predicate: &Self::PlannedPredicate,
-                    _values: FilterValueBindings<'_>,
+                    _values: RuntimeValueBindings<'_>,
                 ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
                     Ok(FilterBindResult::ValueNotRepresentable)
                 }

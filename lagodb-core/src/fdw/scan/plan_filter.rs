@@ -1,8 +1,9 @@
 //! Read-only finalized filter-plan view for FDW providers.
 
+use crate::expr::RuntimeValueId;
 use crate::expr::pushdown::{
-    FilterPlanSummary, FilterPushdown, FilterQualLocation, FilterValueSlotId,
-    NegotiatedFilter, NegotiatedFilterSet,
+    FilterPlanSummary, FilterPushdown, FilterQualLocation, NegotiatedFilter,
+    NegotiatedFilterSet,
 };
 use crate::expr::{PushdownContract, PushdownCosting};
 
@@ -16,7 +17,7 @@ pub enum ForeignPlanQualLocation {
 }
 
 /// Planning-time text for the PostgreSQL values referenced by one provider
-/// predicate. Indices are the predicate-local [`FilterValueSlotId`] values
+/// predicate. Indices are the predicate-local [`RuntimeValueId`] values
 /// supplied to the provider during filter negotiation.
 #[derive(Clone, Copy)]
 pub struct ForeignFilterExplainValues<'a> {
@@ -29,7 +30,7 @@ impl<'a> ForeignFilterExplainValues<'a> {
     }
 
     #[inline]
-    pub fn value(self, id: FilterValueSlotId) -> &'a str {
+    pub fn value(self, id: RuntimeValueId) -> &'a str {
         &self.values[id.index()]
     }
 

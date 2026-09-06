@@ -146,23 +146,6 @@ impl CustomScanError {
         ))
     }
 
-    pub(crate) fn custom_exprs_missing(
-        binding_count: usize,
-        pushed_count: usize,
-    ) -> Self {
-        Self::framework(format!(
-            "customscan BeginCustomScan: custom_exprs is NULL but \
-             binding_count={binding_count} pushed_count={pushed_count}"
-        ))
-    }
-
-    pub(crate) fn custom_exprs_length_mismatch(got: usize, expected: usize) -> Self {
-        Self::framework(format!(
-            "customscan BeginCustomScan: custom_exprs length mismatch \
-             (got {got}, expected binding_count + pushed_count = {expected})"
-        ))
-    }
-
     pub(crate) fn multi_provider_match(relid: u32) -> Self {
         Self::framework(format!(
             "multiple LagodbCustomScanProviders match relation {relid}"
@@ -250,6 +233,16 @@ impl From<EnvelopeError> for CustomScanError {
     }
 }
 
+impl From<super::plan_data::custom_exprs::PgExpressionSectionsError>
+    for CustomScanError
+{
+    fn from(
+        error: super::plan_data::custom_exprs::PgExpressionSectionsError,
+    ) -> Self {
+        Self::internal(error)
+    }
+}
+
 impl PgReportableError for CustomScanError {
     fn append_nested_report_extras(
         &self,
@@ -298,6 +291,7 @@ impl From<PgReportError> for CustomScanError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::customscan::custom_exprs::PgExpressionSectionsError;
     use proptest::prelude::*;
 
     #[derive(Debug, thiserror::Error)]
@@ -387,9 +381,12 @@ mod tests {
     #[test]
     fn framework_variants_map_to_internal_sqlstate() {
         let cases: Vec<(CustomScanError, &str)> = vec![(
-            CustomScanError::custom_exprs_missing(1, 0),
-            "customscan BeginCustomScan: custom_exprs is NULL but \
-             binding_count=1 pushed_count=0",
+            PgExpressionSectionsError::Missing {
+                binding_count: 1,
+                pushed_count: 0,
+            }
+            .into(),
+            "customscan internal error: custom_exprs is NULL but binding_count=1 pushed_count=0",
         )];
 
         for (err, expected_prefix) in cases {
@@ -476,21 +473,32 @@ mod tests {
             binding_count in any::<usize>(),
             pushed_count in any::<usize>(),
             got in any::<usize>(),
-            expected_len in any::<usize>(),
+            expected_pushed_count in any::<usize>(),
             relid in any::<u32>(),
         ) {
-            let e = CustomScanError::custom_exprs_missing(binding_count, pushed_count);
+            let e: CustomScanError =
+                PgExpressionSectionsError::Missing {
+                    binding_count,
+                    pushed_count,
+                }
+                .into();
             prop_assert_eq!(e.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
             prop_assert_eq!(
                 format!("{e}"),
                 format!(
-                    "customscan BeginCustomScan: custom_exprs is NULL but \
+                    "customscan internal error: custom_exprs is NULL but \
                      binding_count={} pushed_count={}",
                     binding_count, pushed_count
                 )
             );
 
-            let e = CustomScanError::custom_exprs_length_mismatch(got, expected_len);
+            let e: CustomScanError =
+                PgExpressionSectionsError::LengthMismatch {
+                    actual: got,
+                    binding_count,
+                    pushed_count: expected_pushed_count,
+                }
+                .into();
             prop_assert_eq!(e.sql_error_code(), PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
 
             let e = CustomScanError::multi_provider_match(relid);
