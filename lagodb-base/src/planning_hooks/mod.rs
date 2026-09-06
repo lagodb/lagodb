@@ -7,9 +7,7 @@ mod planner;
 use std::sync::OnceLock;
 
 use lagodb_core::diag::PgReportError;
-use lagodb_core::runtime_api::{
-    FFI_OPERATION_FAILED, FFI_OPERATION_OK, FfiErrorRecord,
-};
+use lagodb_core::runtime_api::{CALLBACK_FAILED, CALLBACK_OK, CallbackErrorReport};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -45,12 +43,12 @@ pub(crate) fn init() {
 
 fn callback_result(
     status: u32,
-    error: &FfiErrorRecord,
+    error: &CallbackErrorReport,
     callback: &'static str,
 ) -> Result<(), PgReportError> {
     match status {
-        FFI_OPERATION_OK => Ok(()),
-        FFI_OPERATION_FAILED => {
+        CALLBACK_OK => Ok(()),
+        CALLBACK_FAILED => {
             // SAFETY: registered exact-build callbacks must return text owned
             // by the active PostgreSQL context for this synchronous call.
             Err(unsafe { error.to_error(callback) })

@@ -1,5 +1,6 @@
-//! Process-lifetime AggregateScan method tables owned by `lagodb-base`.
+//! Process-lifetime query-offload method tables owned by `lagodb-base`.
 
+use std::ffi::CStr;
 use std::sync::OnceLock;
 
 use lagodb_core::customscan::{CustomScanMethodTables, SerialCustomScanCallbacks};
@@ -7,7 +8,7 @@ use pgrx::pg_sys;
 
 use super::{execution, planning};
 
-const NAME: &std::ffi::CStr = c"LagoDB Aggregate";
+const NAME: &CStr = c"LagoDB Query Offload";
 
 static TABLES: OnceLock<CustomScanMethodTables> = OnceLock::new();
 

@@ -6,8 +6,8 @@
 
 mod maintenance;
 mod registration;
-pub(crate) mod source_directory;
 mod storage_volume;
+pub(crate) mod table_scan_registry;
 
 use std::ffi::{CStr, c_char, c_void};
 

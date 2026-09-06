@@ -2,8 +2,8 @@
 
 mod error;
 mod execution;
+mod explain;
 mod methods;
-mod metrics;
 mod planning;
 
 use lagodb_core::diag::PgReportError;

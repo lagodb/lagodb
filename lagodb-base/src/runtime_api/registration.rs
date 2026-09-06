@@ -9,8 +9,8 @@ use std::slice;
 
 use lagodb_core::runtime_api::{
     ModifyPlannerDescriptor, ObjectAccessHookDescriptor,
-    ObjectAccessStrHookDescriptor, ProviderRegistration, QuerySourceDescriptor,
-    REGISTER_INVALID_DESCRIPTOR, REGISTER_OK, RelationScanPlannerDescriptor,
+    ObjectAccessStrHookDescriptor, ProviderRegistration, REGISTER_INVALID_DESCRIPTOR,
+    REGISTER_OK, RelationScanPlannerDescriptor, TableScanDescriptor,
     UtilityConsumerDescriptor, UtilityHookDescriptor,
 };
 use pgrx::{pg_guard, pg_sys};
@@ -24,7 +24,7 @@ use crate::provider_bootstrap::{
 use crate::utility_consumer::{self, PreparedUtilityConsumers};
 
 use super::maintenance;
-use super::source_directory::PreparedQuerySource;
+use super::table_scan_registry::PendingTableScanRegistration;
 
 struct ProviderRegistrationRef<'a> {
     provider: ValidatedProviderIdentity<'a>,
@@ -35,7 +35,7 @@ struct ProviderRegistrationRef<'a> {
     object_access_str: &'a [ObjectAccessStrHookDescriptor],
     relation_scan_planner: Option<&'a RelationScanPlannerDescriptor>,
     modify_planner: Option<&'a ModifyPlannerDescriptor>,
-    query_source: Option<&'a QuerySourceDescriptor>,
+    table_scan: Option<&'a TableScanDescriptor>,
 }
 
 impl<'a> ProviderRegistrationRef<'a> {
@@ -116,7 +116,7 @@ impl<'a> ProviderRegistrationRef<'a> {
             // SAFETY: same optional exact-build facet contract as above.
             modify_planner: unsafe { registration.modify_planner.as_ref() },
             // SAFETY: same optional exact-build facet contract as above.
-            query_source: unsafe { registration.query_source.as_ref() },
+            table_scan: unsafe { registration.table_scan.as_ref() },
         })
     }
 }
@@ -128,7 +128,7 @@ struct PreparedProviderRegistration {
     utility_consumers: PreparedUtilityConsumers,
     object_access: PreparedObjectAccessHooks,
     planning: PreparedPlanningHooks,
-    query_source: PreparedQuerySource,
+    table_scan: PendingTableScanRegistration,
 }
 
 impl PreparedProviderRegistration {
@@ -154,17 +154,18 @@ impl PreparedProviderRegistration {
             registration.modify_planner,
         )
         .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
-        let query_source = PreparedQuerySource::validate(registration.query_source)
-            .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
+        let table_scan =
+            PendingTableScanRegistration::validate(registration.table_scan)
+                .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
         // Validate bootstrap ownership only after the complete batch has been
         // validated. This preserves the more specific duplicate-provider and
         // invalid-descriptor results while still preventing every directory
         // from being committed outside the bootstrap window.
         let provider = provider_bootstrap::prepare_identity(registration.provider)?;
-        let query_source = PreparedQuerySource::prepare(
+        let table_scan = PendingTableScanRegistration::prepare(
             provider.provider_id(),
             provider.provider_name(),
-            query_source,
+            table_scan,
         );
         Ok(Self {
             maintenance,
@@ -173,7 +174,7 @@ impl PreparedProviderRegistration {
             utility_consumers,
             object_access,
             planning,
-            query_source,
+            table_scan,
         })
     }
 
@@ -181,7 +182,7 @@ impl PreparedProviderRegistration {
         // Every directory has finished validation and allocation before any
         // registration becomes visible.
         planning_hooks::commit(self.planning);
-        self.query_source.commit();
+        self.table_scan.commit();
         self.maintenance.commit();
         process_utility::commit_hooks(self.utility);
         utility_consumer::commit_consumers(self.utility_consumers);
@@ -219,7 +220,7 @@ mod tests {
     use std::ptr;
 
     use lagodb_core::runtime_api::{
-        FFI_OPERATION_OK, FfiErrorRecord, MaintenanceProvider, MaintenanceReport,
+        CALLBACK_OK, CallbackErrorReport, MaintenanceProvider, MaintenanceReport,
         MaintenanceRequest, MaintenanceStats, OBJECT_ACCESS_DROP,
         ObjectAccessHookDescriptor, ObjectAccessStrHookDescriptor, ProviderIdentity,
         RelationScanPlannerDescriptor, UtilityHookDescriptor,
@@ -282,9 +283,9 @@ mod tests {
         _rel: *mut pg_sys::RelOptInfo,
         _rti: pg_sys::Index,
         _rte: *mut pg_sys::RangeTblEntry,
-        _error: *mut FfiErrorRecord,
+        _error: *mut CallbackErrorReport,
     ) -> u32 {
-        FFI_OPERATION_OK
+        CALLBACK_OK
     }
 
     fn maintenance_descriptor(
@@ -337,7 +338,7 @@ mod tests {
             object_access_str_hook_count: 0,
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
-            query_source: ptr::null(),
+            table_scan: ptr::null(),
         };
 
         // SAFETY: all local descriptors and pointer/count pairs remain live
@@ -411,7 +412,7 @@ mod tests {
             object_access_str_hook_count: 1,
             relation_scan_planner: &invalid_planner,
             modify_planner: ptr::null(),
-            query_source: ptr::null(),
+            table_scan: ptr::null(),
         };
         // SAFETY: every local descriptor remains live for synchronous prepare.
         let registration = unsafe {
@@ -461,7 +462,7 @@ mod tests {
             object_access_str_hook_count: 0,
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
-            query_source: ptr::null(),
+            table_scan: ptr::null(),
         };
 
         // SAFETY: the local identity and registration remain live for this
@@ -488,7 +489,7 @@ mod tests {
             object_access_str_hook_count: 0,
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
-            query_source: ptr::null(),
+            table_scan: ptr::null(),
         };
 
         // SAFETY: the local identity and registration remain live for both

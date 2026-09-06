@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 
 use lagodb_core::diag::{PgReportError, ReportableError};
-use lagodb_core::runtime_api::FfiErrorRecord;
+use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
 use super::{
@@ -24,7 +24,7 @@ pub(super) unsafe extern "C-unwind" fn set_rel_pathlist(
     }
     directory::relation_scan_snapshot()
         .try_for_each(|descriptor| {
-            let mut error = FfiErrorRecord::default();
+            let mut error = CallbackErrorReport::default();
             // SAFETY: registration validated this exact-build callback, and
             // all PostgreSQL pointers are forwarded only synchronously.
             let status = unsafe {
@@ -67,7 +67,7 @@ unsafe fn route_upper_paths(
     extra: *mut c_void,
 ) -> Result<(), PgReportError> {
     directory::modify_snapshot().try_for_each(|descriptor| {
-        let mut error = FfiErrorRecord::default();
+        let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback, and
         // all PostgreSQL pointers are forwarded only synchronously.
         let status = unsafe {

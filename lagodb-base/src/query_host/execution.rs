@@ -1,143 +1,147 @@
-//! Executor lifecycle for the base-owned scalar AggregateScan.
+//! Executor lifecycle for the base-owned serial query-offload scan.
 
+use std::cell::UnsafeCell;
 use std::ffi::c_int;
-use std::mem;
+use std::rc::Rc;
+use std::{mem, ptr};
 
-use lagodb_core::diag::report_warning;
+use lagodb_core::resource::{ResourceHandle, forget_resource, remember_resource};
 use lagodb_query::ExecutionProfile;
-use lagodb_query::datafusion::{SerialCountExecution, SerialExecutionLimits};
-use lagodb_query::plan::{
-    AggregateExpression, QueryNode, QueryPlanData, QueryPlanEnvelope,
+use lagodb_query::datafusion::{
+    QueryExecutionError, SerialExecutionLimits, SerialQueryExecution,
 };
+use lagodb_query::plan::SelectedQueryPlan;
 use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 
-use crate::runtime_api::source_directory;
+use crate::runtime_api::table_scan_registry::TableScanRegistry;
 
 use super::error::QueryHostError;
+use super::explain::QueryOffloadExplain;
 use super::methods;
-use super::metrics::AggregateExplain;
 
-enum AggregatePhase {
+enum QueryPhase {
     Created,
     ExplainOnly,
-    Running(Box<SerialCountExecution>),
+    Running(Rc<QueryExecutionCell>),
     Closed,
 }
 
-#[repr(C)]
-struct AggregateScanState {
-    base: pg_sys::CustomScanState,
-    phase: AggregatePhase,
-    explain: AggregateExplain,
+/// Single-threaded owner shared by the CustomScan state and PostgreSQL's
+/// ResourceOwner cleanup callback.
+///
+/// pgrx converts a PostgreSQL ERROR raised by a protected outbound FFI call
+/// into a Rust unwind before reporting it again at the inbound callback
+/// boundary. After control returns to PostgreSQL, cleanup of a failed portal
+/// may omit `EndCustomScan`, and its ResourceOwner may be released independently
+/// of the executor MemoryContext. Both cleanup paths therefore share this cell:
+/// whichever runs first takes the execution, while the other observes an empty
+/// cell. Normal `EndCustomScan` closes the same value and unregisters the
+/// callback. Executor and cleanup callbacks are serialized on one backend
+/// thread, so accesses cannot overlap.
+struct QueryExecutionCell {
+    execution: UnsafeCell<Option<SerialQueryExecution>>,
 }
 
-impl AggregateScanState {
+impl QueryExecutionCell {
+    fn new(execution: SerialQueryExecution) -> Self {
+        Self {
+            execution: UnsafeCell::new(Some(execution)),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must be the active PostgreSQL backend callback for this
+    /// CustomScan; no ResourceOwner cleanup callback may run concurrently.
+    unsafe fn with_mut<R>(
+        &self,
+        operation: impl FnOnce(&mut SerialQueryExecution) -> R,
+    ) -> Option<R> {
+        unsafe { (&mut *self.execution.get()).as_mut().map(operation) }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must uphold the same serialized callback contract as
+    /// [`Self::with_mut`].
+    unsafe fn with_ref<R>(
+        &self,
+        operation: impl FnOnce(&SerialQueryExecution) -> R,
+    ) -> Option<R> {
+        unsafe { (&*self.execution.get()).as_ref().map(operation) }
+    }
+
+    fn close(&self) -> Result<(), QueryExecutionError> {
+        // SAFETY: normal executor close and ResourceOwner cleanup are
+        // serialized on the PostgreSQL backend thread.
+        unsafe { (&mut *self.execution.get()).take() }
+            .map_or(Ok(()), SerialQueryExecution::close)
+    }
+
+    fn abort(&self) {
+        // PG evaluator objects must not invoke commit-style executor cleanup
+        // after an ERROR unwind. The execution owner still releases Rust and
+        // provider resources; the outer executor's statement context reclaims
+        // its evaluator state.
+        if let Some(execution) = unsafe { (&mut *self.execution.get()).take() } {
+            execution.abort();
+        }
+    }
+}
+
+#[repr(C)]
+struct QueryOffloadScanState {
+    base: pg_sys::CustomScanState,
+    phase: QueryPhase,
+    resource: Option<ResourceHandle>,
+    explain: QueryOffloadExplain,
+}
+
+impl QueryOffloadScanState {
     /// Recover the Rust wrapper allocated by this method table.
     ///
     /// # Safety
     ///
     /// `node` must have been returned by [`create_state`] and remain owned by
     /// its executor memory context.
-    unsafe fn from_node<'a>(node: *mut pg_sys::CustomScanState) -> &'a mut Self {
+    unsafe fn from_node(node: &mut pg_sys::CustomScanState) -> &mut Self {
         // SAFETY: `Self` is repr(C) and `base` is its first field.
-        unsafe { &mut *node.cast::<Self>() }
+        unsafe { &mut *ptr::from_mut(node).cast::<Self>() }
     }
 
-    fn close(&mut self) -> Result<(), lagodb_query::datafusion::QueryExecutionError> {
-        match mem::replace(&mut self.phase, AggregatePhase::Closed) {
-            AggregatePhase::Running(execution) => execution.close(),
-            AggregatePhase::Created
-            | AggregatePhase::ExplainOnly
-            | AggregatePhase::Closed => Ok(()),
+    fn close(&mut self) -> Result<(), QueryExecutionError> {
+        let result = match mem::replace(&mut self.phase, QueryPhase::Closed) {
+            QueryPhase::Running(execution) => execution.close(),
+            QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => {
+                Ok(())
+            }
+        };
+        if let Some(resource) = self.resource.take() {
+            let _ = forget_resource(resource);
+        }
+        result
+    }
+
+    fn abort(&mut self) {
+        if let QueryPhase::Running(execution) =
+            mem::replace(&mut self.phase, QueryPhase::Closed)
+        {
+            execution.abort();
+        }
+        if let Some(resource) = self.resource.take() {
+            let _ = forget_resource(resource);
         }
     }
 }
 
-impl Drop for AggregateScanState {
+impl Drop for QueryOffloadScanState {
     fn drop(&mut self) {
-        if let Err(error) = self.close() {
-            report_warning(format_args!(
-                "LagoDB Aggregate cleanup failed after executor abort: {error}",
-            ));
-        }
-    }
-}
-
-struct CountOutputSlot;
-
-impl CountOutputSlot {
-    unsafe fn validate(
-        scan: *mut pg_sys::CustomScan,
-        slot: *mut pg_sys::TupleTableSlot,
-        query: &QueryPlanData,
-    ) -> Result<Self, QueryHostError> {
-        let layout = query.tuple_layout();
-        let tuple_desc = unsafe { (*slot).tts_tupleDescriptor };
-        if unsafe { (*tuple_desc).natts } as usize != layout.len() {
-            return Err(QueryHostError::ExecutorContract(
-                "scan slot width differs from the encoded output layout",
-            ));
-        }
-        let attribute = unsafe { &*(*tuple_desc).attrs.as_ptr() };
-        let planned = layout.slot();
-        if attribute.attisdropped
-            || attribute.atttypid != planned.type_oid()
-            || attribute.atttypmod != planned.typmod()
-            || attribute.attcollation != planned.collation()
-        {
-            return Err(QueryHostError::ExecutorContract(
-                "scan slot type differs from the encoded COUNT output",
-            ));
-        }
-
-        let target_list = unsafe { (*scan).custom_scan_tlist };
-        if unsafe { pg_sys::list_length(target_list) } != 1 {
-            return Err(QueryHostError::ExecutorContract(
-                "AggregateScan scan target list must contain one output",
-            ));
-        }
-        let target =
-            unsafe { pg_sys::list_nth(target_list, 0) }.cast::<pg_sys::TargetEntry>();
-        if unsafe { (*target).xpr.type_ } != pg_sys::NodeTag::T_TargetEntry
-            || unsafe { (*target).resno } != 1
-            || unsafe { (*target).resjunk }
-            || unsafe { (*(*target).expr).type_ } != pg_sys::NodeTag::T_Aggref
-        {
-            return Err(QueryHostError::ExecutorContract(
-                "AggregateScan scan target list is not the planned COUNT output",
-            ));
-        }
-
-        let QueryNode::Project(project) = query.fragment().root() else {
-            return Err(QueryHostError::ExecutorContract(
-                "query fragment root is not a projection",
-            ));
-        };
-        let QueryNode::Aggregate(aggregate) = project.input() else {
-            return Err(QueryHostError::ExecutorContract(
-                "query fragment projection does not consume an aggregate",
-            ));
-        };
-        let [expression] = aggregate.aggregates() else {
-            return Err(QueryHostError::ExecutorContract(
-                "query fragment aggregate is not the planned scalar COUNT",
-            ));
-        };
-        let AggregateExpression::CountStar(count) = expression;
-        let expression = unsafe { (*target).expr }.cast::<pg_sys::Aggref>();
-        if unsafe { (*expression).aggfnoid } != count.function_oid()
-            || unsafe { (*expression).aggtype } != count.result_type()
-            || !unsafe { (*expression).aggstar }
-            || !unsafe { (*expression).args }.is_null()
-            || !unsafe { (*expression).aggdirectargs }.is_null()
-            || !unsafe { (*expression).aggfilter }.is_null()
-            || unsafe { (*expression).aggsplit } != pg_sys::AggSplit::AGGSPLIT_SIMPLE
-        {
-            return Err(QueryHostError::ExecutorContract(
-                "AggregateScan scan expression differs from the encoded COUNT",
-            ));
-        }
-        Ok(Self)
+        // PostgreSQL deletes descendant contexts before invoking this state
+        // context's pgrx reset callback. A fallback evaluator's EState is one
+        // such descendant, so this callback must only release Rust/provider
+        // ownership and let PostgreSQL reclaim evaluator memory. Normal
+        // EndCustomScan calls `close` while every descendant is still live.
+        self.abort();
     }
 }
 
@@ -165,7 +169,7 @@ impl WorkMemBudget {
 pub(super) unsafe extern "C-unwind" fn create_state(
     _scan: *mut pg_sys::CustomScan,
 ) -> *mut pg_sys::Node {
-    let state = AggregateScanState {
+    let state = QueryOffloadScanState {
         base: pg_sys::CustomScanState {
             ss: pg_sys::ScanState {
                 ps: pg_sys::PlanState {
@@ -177,8 +181,9 @@ pub(super) unsafe extern "C-unwind" fn create_state(
             methods: methods::tables().exec(),
             ..Default::default()
         },
-        phase: AggregatePhase::Created,
-        explain: AggregateExplain::new(),
+        phase: QueryPhase::Created,
+        resource: None,
+        explain: QueryOffloadExplain::new(),
     };
     let state = PgMemoryContexts::CurrentMemoryContext.leak_and_drop_on_delete(state);
     state.cast()
@@ -199,8 +204,11 @@ unsafe fn begin_scan(
     node: *mut pg_sys::CustomScanState,
     eflags: c_int,
 ) -> Result<(), QueryHostError> {
-    let state = unsafe { AggregateScanState::from_node(node) };
-    if !matches!(state.phase, AggregatePhase::Created) {
+    // Read the plan before borrowing the complete Rust state wrapper; both
+    // occupy the same allocation through its leading CustomScanState field.
+    let scan = unsafe { (*node).ss.ps.plan }.cast::<pg_sys::CustomScan>();
+    let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
+    if !matches!(state.phase, QueryPhase::Created) {
         return Err(QueryHostError::ExecutorContract(
             "BeginCustomScan was invoked outside the created phase",
         ));
@@ -209,31 +217,35 @@ unsafe fn begin_scan(
     if !explain_only {
         state.explain.start_execution();
     }
-    let scan = unsafe { (*node).ss.ps.plan }.cast::<pg_sys::CustomScan>();
-    let envelope = unsafe { QueryPlanEnvelope::decode((*scan).custom_private) }
-        .map_err(QueryHostError::invalid_plan)?;
-    let (query, execution_profile, source) = envelope.into_parts();
-    let _output = unsafe {
-        CountOutputSlot::validate(scan, (*node).ss.ss_ScanTupleSlot, &query)
-    }?;
-    state.explain.record_plan(
-        source.provider(),
-        source.source(),
-        source.estimate(),
-        execution_profile,
-    );
+    let selected =
+        unsafe { SelectedQueryPlan::decode_execution(&*(*scan).custom_private) }
+            .map_err(QueryHostError::invalid_plan)?;
+    let (query, execution_profile, scans) = selected.into_parts();
+    state
+        .explain
+        .record_plan(&scans, execution_profile, query.fragment().summary());
 
     if explain_only {
-        state.phase = AggregatePhase::ExplainOnly;
+        state.phase = QueryPhase::ExplainOnly;
         return Ok(());
     }
 
     let limits = WorkMemBudget::execution_limits(execution_profile)?;
-    let callbacks = source_directory::serial_source_callbacks(source.provider())?;
-    let execution = Box::new(SerialCountExecution::try_new(
-        query, source, limits, callbacks,
-    )?);
-    state.phase = AggregatePhase::Running(execution);
+    let callbacks = scans
+        .iter()
+        .map(|scan| TableScanRegistry::callbacks(scan.provider()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let execution = Rc::new(QueryExecutionCell::new(SerialQueryExecution::try_new(
+        query,
+        &scans,
+        limits,
+        &callbacks,
+        unsafe { (*scan).custom_exprs },
+        unsafe { &mut (*node).ss.ps },
+    )?));
+    let cleanup = Rc::clone(&execution);
+    state.resource = Some(remember_resource(move || cleanup.abort()));
+    state.phase = QueryPhase::Running(execution);
     Ok(())
 }
 
@@ -241,35 +253,46 @@ unsafe fn begin_scan(
 pub(super) unsafe extern "C-unwind" fn exec(
     node: *mut pg_sys::CustomScanState,
 ) -> *mut pg_sys::TupleTableSlot {
-    unsafe { pg_sys::ExecScan(&mut (*node).ss, Some(next_count), Some(recheck)) }
+    unsafe { pg_sys::ExecScan(&mut (*node).ss, Some(next_tuple), Some(recheck)) }
 }
 
 #[pg_guard]
-unsafe extern "C-unwind" fn next_count(
+unsafe extern "C-unwind" fn next_tuple(
     scan_state: *mut pg_sys::ScanState,
 ) -> *mut pg_sys::TupleTableSlot {
-    match unsafe { scan_next_count(scan_state) } {
+    match unsafe { scan_next(scan_state) } {
         Ok(slot) => slot,
         Err(error) => error.into_report().report(),
     }
 }
 
-unsafe fn scan_next_count(
+unsafe fn scan_next(
     scan_state: *mut pg_sys::ScanState,
 ) -> Result<*mut pg_sys::TupleTableSlot, QueryHostError> {
-    let state = unsafe {
-        AggregateScanState::from_node(scan_state.cast::<pg_sys::CustomScanState>())
-    };
-    let AggregatePhase::Running(execution) = &mut state.phase else {
-        return Err(QueryHostError::ExecutorContract(
-            "ExecCustomScan was invoked while AggregateScan was not running",
-        ));
-    };
+    // Establish PostgreSQL-owned executor fields before borrowing the complete
+    // Rust wrapper that contains this ScanState.
     let slot = unsafe { (*scan_state).ss_ScanTupleSlot };
-    let _ = unsafe { pg_sys::ExecClearTuple(slot) };
     let per_tuple_context =
         unsafe { (*(*scan_state).ps.ps_ExprContext).ecxt_per_tuple_memory };
-    if !unsafe { execution.next_into_slot(slot, per_tuple_context) }? {
+    let _ = unsafe { pg_sys::ExecClearTuple(slot) };
+    let state = unsafe {
+        QueryOffloadScanState::from_node(
+            &mut *scan_state.cast::<pg_sys::CustomScanState>(),
+        )
+    };
+    let QueryPhase::Running(execution) = &state.phase else {
+        return Err(QueryHostError::ExecutorContract(
+            "ExecCustomScan was invoked while query offload was not running",
+        ));
+    };
+    let produced = unsafe {
+        execution
+            .with_mut(|execution| execution.next_into_slot(slot, per_tuple_context))
+    }
+    .ok_or(QueryHostError::ExecutorContract(
+        "query-offload execution was already released",
+    ))??;
+    if !produced {
         return Ok(slot);
     }
     Ok(slot)
@@ -285,18 +308,22 @@ unsafe extern "C-unwind" fn recheck(
 
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn rescan(node: *mut pg_sys::CustomScanState) {
-    let state = unsafe { AggregateScanState::from_node(node) };
-    let result = match &mut state.phase {
-        AggregatePhase::Running(execution) => {
-            execution.rescan().map_err(QueryHostError::from)
+    let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
+    let result = (|| match &mut state.phase {
+        QueryPhase::Running(execution) => {
+            unsafe { execution.with_mut(SerialQueryExecution::rescan) }
+                .ok_or(QueryHostError::ExecutorContract(
+                    "query-offload execution was already released",
+                ))?
+                .map_err(QueryHostError::from)
         }
-        AggregatePhase::ExplainOnly => Ok(()),
-        AggregatePhase::Created | AggregatePhase::Closed => {
+        QueryPhase::ExplainOnly => Ok(()),
+        QueryPhase::Created | QueryPhase::Closed => {
             Err(QueryHostError::ExecutorContract(
                 "ReScanCustomScan was invoked outside an active phase",
             ))
         }
-    };
+    })();
     if let Err(error) = result {
         error.into_report().report();
     }
@@ -304,7 +331,7 @@ pub(super) unsafe extern "C-unwind" fn rescan(node: *mut pg_sys::CustomScanState
 
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn end(node: *mut pg_sys::CustomScanState) {
-    let state = unsafe { AggregateScanState::from_node(node) };
+    let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
     if let Err(error) = state.close() {
         QueryHostError::from(error).into_report().report();
     }
@@ -316,21 +343,24 @@ pub(super) unsafe extern "C-unwind" fn explain(
     _ancestors: *mut pg_sys::List,
     explain: *mut pg_sys::ExplainState,
 ) {
-    let state = unsafe { AggregateScanState::from_node(node) };
-    let (metrics, physical_operators) = match &state.phase {
-        AggregatePhase::Running(execution) => (
-            Some(execution.metrics()),
-            Some(execution.physical_operators()),
-        ),
-        AggregatePhase::Created
-        | AggregatePhase::ExplainOnly
-        | AggregatePhase::Closed => (None, None),
+    let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
+    let result = match &state.phase {
+        QueryPhase::Running(execution) => unsafe {
+            execution.with_ref(|execution| {
+                let metrics = execution.metrics();
+                state.explain.emit(
+                    Some(&metrics),
+                    Some(execution.physical_operators()),
+                    explain,
+                )
+            })
+        }
+        .unwrap_or_else(|| unsafe { state.explain.emit(None, None, explain) }),
+        QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => unsafe {
+            state.explain.emit(None, None, explain)
+        },
     };
-    if let Err(error) = unsafe {
-        state
-            .explain
-            .emit(metrics.as_ref(), physical_operators, explain)
-    } {
+    if let Err(error) = result {
         error.into_report().report();
     }
 }

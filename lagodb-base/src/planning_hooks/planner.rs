@@ -1,9 +1,15 @@
-//! PlannerPre -> previous/standard planner -> PlannerPost routing.
+//! ModifyTable-only PlannerPre -> previous/standard planner -> PlannerPost routing.
+//!
+//! Query offload does not use this hook. It contributes an upper CustomPath
+//! through `create_upper_paths_hook` and then uses PostgreSQL CustomScan method
+//! tables. The planner hook remains required by the pre-existing custom-modify
+//! contract, which injects whole-row inputs before planning and fixes the
+//! resulting ModifyTable plan afterward.
 
 use std::ffi::c_char;
 
 use lagodb_core::diag::{PgReportError, ReportableError};
-use lagodb_core::runtime_api::FfiErrorRecord;
+use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
 use super::{PREV_PLANNER, callback_result, directory};
@@ -29,7 +35,7 @@ unsafe fn route(
 ) -> Result<*mut pg_sys::PlannedStmt, PgReportError> {
     let snapshot = directory::modify_snapshot();
     snapshot.try_for_each(|descriptor| {
-        let mut error = FfiErrorRecord::default();
+        let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback; `parse`
         // and the stack error record remain live for this synchronous call.
         let status = unsafe {
@@ -54,12 +60,8 @@ unsafe fn route(
             )
         }
     };
-    if planned.is_null() {
-        return Ok(planned);
-    }
-
     snapshot.try_for_each(|descriptor| {
-        let mut error = FfiErrorRecord::default();
+        let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback and the
         // returned `PlannedStmt` remains live in its planner context.
         let status = unsafe {
