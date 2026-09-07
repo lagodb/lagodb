@@ -10,7 +10,7 @@
 //! fails with `undefined symbol: PG_exception_stack` (and friends), so the
 //! tests must run inside a live backend as `#[pg_test]`s. The pure
 //! resolution-table / codec-math tests stay as host tests in
-//! `pg-arrow-conv/tests/`.
+//! `lagodb-arrow/tests/`.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
@@ -24,10 +24,8 @@ mod tests {
     };
     use arrow_array::types::{Int16Type, Int32Type};
     use arrow_array::{Array, ArrayRef, ListArray};
+    use lagodb_arrow::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
     use lagodb_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
-    use pg_arrow_conv::{
-        ColumnReader, ColumnRule, PgColumnType, resolve_column_rule,
-    };
     use pgrx::pg_sys;
     use pgrx::prelude::*;
     use proptest::prelude::*;
@@ -438,7 +436,7 @@ mod tests {
     #[pg_test]
     fn null_append_adds_one_slot_per_call() {
         use arrow_array::Array;
-        use pg_arrow_conv::ArrowColumnEncoder;
+        use lagodb_arrow::ArrowColumnEncoder;
         let mut encoder = ArrowColumnEncoder::new(&ColumnRule::I32, 4)
             .expect("I32 encoder construction is infallible");
         encoder.append_null();

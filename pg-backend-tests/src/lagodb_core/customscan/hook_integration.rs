@@ -23,10 +23,10 @@ use lagodb_core::customscan::provider::{
 use lagodb_core::diag::SqlStateError;
 use lagodb_core::expr::PushdownCosting;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterFragment, FilterNode, FilterPlan, FilterPlanningContext,
-    FilterPushdown, FilterPushdownPlanner, FilterScalar, FilterValueBindings,
-    FilterValueSlotId,
+    FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
+    FilterPushdownPlanner, PredicateExpr, PredicateFragment, ScalarExpr,
 };
+use lagodb_core::expr::{RuntimeValueBindings, RuntimeValueId};
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
@@ -171,16 +171,16 @@ enum HookCodecMode {
 
 #[derive(Debug)]
 struct HookPlannedFilter {
-    values: Box<[FilterValueSlotId]>,
+    values: Box<[RuntimeValueId]>,
     codec_mode: HookCodecMode,
     bind_error: bool,
 }
 
 impl HookFilterPlanner {
     fn equality_value(
-        node: &FilterNode,
-    ) -> Option<(pg_sys::AttrNumber, FilterValueSlotId)> {
-        let FilterNode::Comparison {
+        node: &PredicateExpr,
+    ) -> Option<(pg_sys::AttrNumber, RuntimeValueId)> {
+        let PredicateExpr::Comparison {
             operator,
             left,
             right,
@@ -189,8 +189,8 @@ impl HookFilterPlanner {
             return None;
         };
         let (column, value) = match (left, right) {
-            (FilterScalar::Column(column), FilterScalar::Value(value))
-            | (FilterScalar::Value(value), FilterScalar::Column(column)) => {
+            (ScalarExpr::Column(column), ScalarExpr::Value(value))
+            | (ScalarExpr::Value(value), ScalarExpr::Column(column)) => {
                 (column, *value)
             }
             _ => return None,
@@ -201,7 +201,7 @@ impl HookFilterPlanner {
         .then_some((column.attno, value))
     }
 
-    fn planned(&self, values: Vec<FilterValueSlotId>) -> HookPlannedFilter {
+    fn planned(&self, values: Vec<RuntimeValueId>) -> HookPlannedFilter {
         HookPlannedFilter {
             values: values.into_boxed_slice(),
             codec_mode: self.mode.codec_mode(),
@@ -216,7 +216,7 @@ impl FilterPushdownPlanner for HookFilterPlanner {
 
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
         if let Some((_, value)) = Self::equality_value(fragment.root()) {
             return Ok(FilterPlan::exact(
@@ -228,7 +228,7 @@ impl FilterPushdownPlanner for HookFilterPlanner {
         if !matches!(self.mode, HookTestMode::Widening) {
             return Ok(FilterPlan::Unsupported);
         }
-        let FilterNode::Or(children) = fragment.root() else {
+        let PredicateExpr::Or(children) = fragment.root() else {
             return Ok(FilterPlan::Unsupported);
         };
         let mut attno = None;
@@ -296,7 +296,7 @@ impl FilterPushdown for HookIntegrationProvider {
         let mut values = Vec::with_capacity(value_count);
         for _ in 0..value_count {
             let index = reader.read_count()?;
-            let value = FilterValueSlotId::from_plan_data(index, binding_count)
+            let value = RuntimeValueId::from_plan_data(index, binding_count)
                 .ok_or(HookFilterError::InvalidSlot { index })?;
             values.push(value);
         }
@@ -310,7 +310,7 @@ impl FilterPushdown for HookIntegrationProvider {
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
         if predicate.bind_error {
             return Err(HookFilterError::BindFailure);

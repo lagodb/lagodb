@@ -2,7 +2,7 @@
 //!
 //! These tests use the `AmError` callback boundary and the decoder constructor,
 //! whose validation path can reference PostgreSQL backend symbols. Keep them in
-//! the backend test extension instead of the `pg-arrow-conv` host test binary.
+//! the backend test extension instead of the `lagodb-arrow` host test binary.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
@@ -12,10 +12,10 @@ mod tests {
     use arrow_array::Int32Array;
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
-    use lagodb_core::batch::AmScanBatchSource;
-    use pg_arrow_conv::{
+    use lagodb_arrow::{
         ArrowBatchSource, ArrowConversionError, ColumnRule, DatumCodec, DecodedColumn,
     };
+    use lagodb_core::batch::AmScanBatchSource;
     use pgrx::pg_sys;
     use pgrx::prelude::*;
 

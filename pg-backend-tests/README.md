@@ -10,14 +10,14 @@ round-tripping, `palloc`/memory contexts, slot writes, planner node
 construction, SPI, and PostgreSQL output functions.
 
 It currently aggregates the backend tests for `lagodb-core` and
-`pg-arrow-conv`, one module per crate.
+`lagodb-arrow`, one module per crate.
 
 ## Why this crate exists
 
 The workspace has two kinds of Rust code that look similar but are built very
 differently:
 
-- **Framework library crates** (`lagodb-core`, `pg-arrow-conv`) are plain
+- **Framework library crates** (`lagodb-core`, `lagodb-arrow`) are plain
   Rust libraries (`rlib`). They are *not* PostgreSQL extensions: they have no
   `pg_module_magic!()`, no `.control` file, and are never loaded by PostgreSQL
   on their own. They are consumed by the extension crates.

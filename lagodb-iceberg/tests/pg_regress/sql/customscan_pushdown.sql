@@ -9,6 +9,10 @@
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
+-- This suite validates relation-level CustomScan behavior independently from
+-- upper query offload.
+SET lagodb.query_offload_mode = 'off';
+
 -- ============================================================================
 -- Setup: an Iceberg table whose schema (`a integer, b text`) matches the
 -- Each INSERT opens a fresh DML session and finalizes one
@@ -1542,4 +1546,5 @@ ORDER BY id, label;
 -- Cleanup
 -- ============================================================================
 RESET lagodb.customscan_mode;
+RESET lagodb.query_offload_mode;
 DROP TABLE customscan_unsupported_only_t;

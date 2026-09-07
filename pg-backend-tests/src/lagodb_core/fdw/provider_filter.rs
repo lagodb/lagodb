@@ -6,10 +6,10 @@ use std::fmt::{self, Display, Formatter};
 use lagodb_core::diag::SqlStateError;
 use lagodb_core::expr::PushdownCosting;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterFragment, FilterNode, FilterPlan, FilterPlanningContext,
-    FilterPushdown, FilterPushdownPlanner, FilterScalar, FilterValueBindings,
-    FilterValueSlotId,
+    FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
+    FilterPushdownPlanner, PredicateExpr, PredicateFragment, ScalarExpr,
 };
+use lagodb_core::expr::{RuntimeValueBindings, RuntimeValueId};
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use pgrx::FromDatum;
 use pgrx::pg_sys;
@@ -90,7 +90,7 @@ pub struct TestFilterPlanner;
 #[derive(Debug)]
 pub struct PlannedTestFilter {
     attno: pg_sys::AttrNumber,
-    value: FilterValueSlotId,
+    value: RuntimeValueId,
 }
 
 impl PlannedTestFilter {
@@ -105,9 +105,9 @@ impl FilterPushdownPlanner for TestFilterPlanner {
 
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
-        let FilterNode::Comparison {
+        let PredicateExpr::Comparison {
             operator,
             left,
             right,
@@ -116,8 +116,8 @@ impl FilterPushdownPlanner for TestFilterPlanner {
             return Ok(FilterPlan::Unsupported);
         };
         let (column, value) = match (left, right) {
-            (FilterScalar::Column(column), FilterScalar::Value(value))
-            | (FilterScalar::Value(value), FilterScalar::Column(column)) => {
+            (ScalarExpr::Column(column), ScalarExpr::Value(value))
+            | (ScalarExpr::Value(value), ScalarExpr::Column(column)) => {
                 (column, *value)
             }
             _ => return Ok(FilterPlan::Unsupported),
@@ -177,14 +177,14 @@ impl FilterPushdown for FrameworkTestFdw {
             return Err(TestFilterError::InvalidAttno { value: raw_attno });
         }
         let index = reader.read_count()?;
-        let value = FilterValueSlotId::from_plan_data(index, binding_count)
+        let value = RuntimeValueId::from_plan_data(index, binding_count)
             .ok_or(TestFilterError::InvalidSlot { index })?;
         Ok(PlannedTestFilter { attno, value })
     }
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
         let value = values.value(predicate.value);
         let value = if value.is_null() {

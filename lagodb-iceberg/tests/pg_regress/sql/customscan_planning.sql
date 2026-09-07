@@ -9,6 +9,10 @@
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
+-- This suite validates relation-level CustomScan behavior independently from
+-- upper query offload.
+SET lagodb.query_offload_mode = 'off';
+
 -- ============================================================================
 -- Setup: an Iceberg `lake` table with `int4` `k` and `int4` `v`
 -- columns. The classifier promotes `k = <int4 literal>` (opno 96,
@@ -1361,6 +1365,7 @@ RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
 RESET lagodb.customscan_mode;
+RESET lagodb.query_offload_mode;
 
 DROP TABLE customscan_rto_outer;
 DROP TABLE customscan_rto_lake;

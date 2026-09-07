@@ -4,7 +4,7 @@ version = { workspace = true }
 publish = false
 authors = ["Robert Mu. https://github.com/robertmu"]
 license = { workspace = true }
-description = "Backend (#[pg_test]) integration tests for the LagoDB framework library crates (lagodb-core, pg-arrow-conv) that require a running PostgreSQL instance."
+description = "Backend (#[pg_test]) integration tests for the LagoDB framework library crates (lagodb-core, lagodb-arrow) that require a running PostgreSQL instance."
 homepage = { workspace = true }
 repository = { workspace = true }
 edition = { workspace = true }
@@ -22,20 +22,20 @@ pg16 = [
     "pgrx/pg16",
     "pgrx-tests/pg16",
     "lagodb-core/pg16",
-    "pg-arrow-conv/pg16",
+    "lagodb-arrow/pg16",
 ]
 pg17 = [
     "pgrx/pg17",
     "pgrx-tests/pg17",
     "lagodb-core/pg17",
-    "pg-arrow-conv/pg17",
+    "lagodb-arrow/pg17",
 ]
 pg_test = []
 
 [dependencies]
 pgrx = { workspace = true }
 lagodb-core = { path = "../lagodb-core" }
-pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
+lagodb-arrow = { path = "../lagodb-arrow", default-features = false }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 bytes = "1.10"

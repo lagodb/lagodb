@@ -1400,7 +1400,6 @@ dependencies = [
  "datafusion-physical-expr-adapter",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
- "datafusion-proto-models",
  "datafusion-session",
  "futures",
  "glob",
@@ -1430,7 +1429,6 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
- "datafusion-proto-models",
  "datafusion-session",
  "futures",
  "itertools 0.15.0",
@@ -1454,7 +1452,6 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
- "datafusion-proto-models",
  "datafusion-session",
  "futures",
  "object_store",
@@ -1478,7 +1475,6 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr-common",
  "datafusion-physical-plan",
- "datafusion-proto-models",
  "datafusion-session",
  "futures",
  "object_store",
@@ -1534,8 +1530,6 @@ dependencies = [
  "datafusion-functions-aggregate-common",
  "datafusion-functions-window-common",
  "datafusion-physical-expr-common",
- "datafusion-proto-common",
- "datafusion-proto-models",
  "indexmap 2.14.1",
  "itertools 0.15.0",
  "serde_json",
@@ -1699,7 +1693,6 @@ dependencies = [
  "datafusion-expr-common",
  "datafusion-functions-aggregate-common",
  "datafusion-physical-expr-common",
- "datafusion-proto-models",
  "half 2.7.1",
  "hashbrown 0.17.1",
  "indexmap 2.14.1",
@@ -1734,7 +1727,6 @@ dependencies = [
  "chrono",
  "datafusion-common",
  "datafusion-expr-common",
- "datafusion-proto-models",
  "hashbrown 0.17.1",
  "indexmap 2.14.1",
  "itertools 0.15.0",
@@ -1783,8 +1775,6 @@ dependencies = [
  "datafusion-functions-window-common",
  "datafusion-physical-expr",
  "datafusion-physical-expr-common",
- "datafusion-proto-common",
- "datafusion-proto-models",
  "futures",
  "half 2.7.1",
  "hashbrown 0.17.1",
@@ -1796,54 +1786,6 @@ dependencies = [
  "pin-project-lite",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "datafusion-proto"
-version = "55.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0df0504eb9028d5e01f481af3519cde3f97ab650fd50ce7b787e94b69a7a193c"
-dependencies = [
- "arrow",
- "datafusion-catalog",
- "datafusion-catalog-listing",
- "datafusion-common",
- "datafusion-datasource",
- "datafusion-datasource-arrow",
- "datafusion-datasource-csv",
- "datafusion-datasource-json",
- "datafusion-execution",
- "datafusion-expr",
- "datafusion-functions-table",
- "datafusion-physical-expr",
- "datafusion-physical-expr-common",
- "datafusion-physical-plan",
- "datafusion-proto-common",
- "datafusion-proto-models",
- "object_store",
- "prost",
-]
-
-[[package]]
-name = "datafusion-proto-common"
-version = "55.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b92415a2442964f180d39cdcd8ff1edd99f9260c1499ba80a396499c2154d11"
-dependencies = [
- "arrow",
- "datafusion-common",
- "prost",
-]
-
-[[package]]
-name = "datafusion-proto-models"
-version = "55.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62e4c0bd6af4fcabdbe201ee86fbeef2ac423a44e1d8fda56d994c9e2d1d3ad2"
-dependencies = [
- "datafusion-common",
- "datafusion-proto-common",
- "prost",
 ]
 
 [[package]]
@@ -3112,6 +3054,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lagodb-arrow"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+ "lagodb-core",
+ "libc",
+ "pgrx",
+ "proptest",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "lagodb-base"
 version = "0.1.0"
 dependencies = [
@@ -3144,10 +3101,10 @@ dependencies = [
  "bytes",
  "chrono",
  "flate2",
+ "lagodb-arrow",
  "lagodb-core",
  "lagodb-storage",
  "parquet",
- "pg-arrow-conv",
  "pgrx",
  "serde",
  "serde_json",
@@ -3186,12 +3143,12 @@ dependencies = [
  "bytes",
  "http",
  "iceberg-lite",
+ "lagodb-arrow",
  "lagodb-core",
  "lagodb-storage",
  "libc",
  "md-5 0.10.6",
  "parquet",
- "pg-arrow-conv",
  "pgrx",
  "pgrx-tests",
  "proptest",
@@ -3221,13 +3178,13 @@ name = "lagodb-query"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "async-trait",
  "datafusion",
- "datafusion-proto",
  "futures",
+ "lagodb-arrow",
  "lagodb-core",
- "pg-arrow-conv",
  "pgrx",
  "thiserror 1.0.69",
  "tokio",
@@ -4016,29 +3973,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-arrow-conv"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-schema",
- "lagodb-core",
- "libc",
- "pgrx",
- "proptest",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
 name = "pg-backend-tests"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
  "bytes",
+ "lagodb-arrow",
  "lagodb-core",
- "pg-arrow-conv",
  "pgrx",
  "pgrx-tests",
  "proptest",
@@ -4456,29 +4398,6 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
-]
-
-[[package]]
-name = "prost"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
-dependencies = [
- "bytes",
- "prost-derive",
-]
-
-[[package]]
-name = "prost-derive"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
-dependencies = [
- "anyhow",
- "itertools 0.14.0",
- "proc-macro2",
- "quote",
- "syn 2.0.111",
 ]
 
 [[package]]

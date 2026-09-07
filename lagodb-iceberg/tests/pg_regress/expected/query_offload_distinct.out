@@ -1,0 +1,391 @@
+-- query_offload_distinct.sql
+-- Basic aggregate-DISTINCT and query-level DISTINCT coverage.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+-- Each test case sets both planner modes locally instead of depending on
+-- session state from an earlier case.
+SET lagodb.query_batch_rows = 2;
+SET timezone = 'UTC';
+CREATE TABLE query_offload_distinct_basic (
+    id integer,
+    value_bool boolean,
+    value_i4 integer,
+    value_f8 double precision,
+    value_numeric numeric(12, 2),
+    value_text text COLLATE "C",
+    value_date date,
+    value_time time,
+    value_timestamp timestamp,
+    value_timestamptz timestamptz,
+    value_uuid uuid,
+    value_bytea bytea
+) USING iceberg;
+INSERT INTO query_offload_distinct_basic VALUES
+    (1, true, 10, 1.5, 1.25, 'alpha',
+     DATE '2024-01-01', TIME '10:00:00',
+     TIMESTAMP '2024-01-01 10:00:00',
+     TIMESTAMPTZ '2024-01-01 10:00:00+00',
+     UUID '00000000-0000-0000-0000-000000000001', '\x01'),
+    (2, true, 10, 1.5, 1.25, 'alpha',
+     DATE '2024-01-01', TIME '10:00:00',
+     TIMESTAMP '2024-01-01 10:00:00',
+     TIMESTAMPTZ '2024-01-01 10:00:00+00',
+     UUID '00000000-0000-0000-0000-000000000001', '\x01'),
+    (3, false, 20, 2.5, 2.50, 'beta',
+     DATE '2024-01-02', TIME '11:00:00',
+     TIMESTAMP '2024-01-02 11:00:00',
+     TIMESTAMPTZ '2024-01-02 11:00:00+00',
+     UUID '00000000-0000-0000-0000-000000000002', '\x02'),
+    (4, NULL, NULL, NULL, NULL, NULL,
+     NULL, NULL, NULL, NULL, NULL, NULL),
+    (5, true, NULL, 1.5, 1.25, 'alpha',
+     DATE '2024-01-01', TIME '10:00:00',
+     TIMESTAMP '2024-01-01 10:00:00',
+     TIMESTAMPTZ '2024-01-01 10:00:00+00',
+     UUID '00000000-0000-0000-0000-000000000001', '\x01');
+-- ============================================================================
+-- Aggregate DISTINCT across the current primitive/output families.
+-- The values avoid the documented NaN, signed-zero, collation, and large-int
+-- semantic differences so this block is an exact native/offload comparison.
+-- ============================================================================
+-- Query offload plan and result.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT value_bool) AS bool_values,
+       count(DISTINCT value_i4) AS i4_values,
+       count(DISTINCT value_f8) AS f8_values,
+       count(DISTINCT value_numeric) AS numeric_values,
+       count(DISTINCT value_text) AS text_values,
+       count(DISTINCT value_date) AS date_values,
+       count(DISTINCT value_time) AS time_values,
+       count(DISTINCT value_timestamp) AS timestamp_values,
+       count(DISTINCT value_timestamptz) AS timestamptz_values,
+       count(DISTINCT value_uuid) AS uuid_values,
+       count(DISTINCT value_bytea) AS bytea_values,
+       min(DISTINCT value_i4) AS min_i4,
+       max(DISTINCT value_i4) AS max_i4,
+       sum(DISTINCT value_i4) AS sum_i4,
+       avg(DISTINCT value_i4)::numeric(20, 4) AS avg_i4,
+       round(var_pop(DISTINCT value_i4), 6) AS var_pop_i4,
+       bool_and(DISTINCT value_bool) AS all_true,
+       bool_or(DISTINCT value_bool) AS any_true,
+       array_agg(DISTINCT value_i4 ORDER BY value_i4) AS ordered_i4,
+       array_agg(DISTINCT value_i4 ORDER BY value_i4)
+           FILTER (WHERE id <= 4) AS filtered_ordered_i4,
+       string_agg(DISTINCT value_text, ',' ORDER BY value_text) AS ordered_text
+FROM query_offload_distinct_basic;
+              QUERY PLAN              
+--------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Offload: Serial Query
+   Maximum Batch Rows: 2
+   COUNT(expr) Aggregates: 11
+   MIN Aggregates: 1
+   MAX Aggregates: 1
+   SUM Aggregates: 1
+   AVG Aggregates: 1
+   VARIANCE Aggregates: 1
+   Boolean Aggregates: 2
+   ARRAY_AGG Aggregates: 2
+   STRING_AGG Aggregates: 1
+   DISTINCT Aggregates: 21
+   Ordered Aggregates: 3
+   Aggregate FILTERs: 1
+   PostgreSQL Expression Fallbacks: 0
+   Provider ID: 0
+   Scan ID: 0
+   Estimated Scan Rows: 5
+   Estimated Scan Bytes: 8192
+(21 rows)
+
+SELECT count(DISTINCT value_bool) AS bool_values,
+       count(DISTINCT value_i4) AS i4_values,
+       count(DISTINCT value_f8) AS f8_values,
+       count(DISTINCT value_numeric) AS numeric_values,
+       count(DISTINCT value_text) AS text_values,
+       count(DISTINCT value_date) AS date_values,
+       count(DISTINCT value_time) AS time_values,
+       count(DISTINCT value_timestamp) AS timestamp_values,
+       count(DISTINCT value_timestamptz) AS timestamptz_values,
+       count(DISTINCT value_uuid) AS uuid_values,
+       count(DISTINCT value_bytea) AS bytea_values,
+       min(DISTINCT value_i4) AS min_i4,
+       max(DISTINCT value_i4) AS max_i4,
+       sum(DISTINCT value_i4) AS sum_i4,
+       avg(DISTINCT value_i4)::numeric(20, 4) AS avg_i4,
+       round(var_pop(DISTINCT value_i4), 6) AS var_pop_i4,
+       bool_and(DISTINCT value_bool) AS all_true,
+       bool_or(DISTINCT value_bool) AS any_true,
+       array_agg(DISTINCT value_i4 ORDER BY value_i4) AS ordered_i4,
+       array_agg(DISTINCT value_i4 ORDER BY value_i4)
+           FILTER (WHERE id <= 4) AS filtered_ordered_i4,
+       string_agg(DISTINCT value_text, ',' ORDER BY value_text) AS ordered_text
+FROM query_offload_distinct_basic;
+ bool_values | i4_values | f8_values | numeric_values | text_values | date_values | time_values | timestamp_values | timestamptz_values | uuid_values | bytea_values | min_i4 | max_i4 | sum_i4 | avg_i4  | var_pop_i4 | all_true | any_true |  ordered_i4  | filtered_ordered_i4 | ordered_text 
+-------------+-----------+-----------+----------------+-------------+-------------+-------------+------------------+--------------------+-------------+--------------+--------+--------+--------+---------+------------+----------+----------+--------------+---------------------+--------------
+           2 |         2 |         2 |              2 |           2 |           2 |           2 |                2 |                  2 |           2 |            2 |     10 |     20 |     30 | 15.0000 |  25.000000 | f        | t        | {10,20,NULL} | {10,20,NULL}        | alpha,beta
+(1 row)
+
+-- PostgreSQL native result.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+SELECT count(DISTINCT value_bool) AS bool_values,
+       count(DISTINCT value_i4) AS i4_values,
+       count(DISTINCT value_f8) AS f8_values,
+       count(DISTINCT value_numeric) AS numeric_values,
+       count(DISTINCT value_text) AS text_values,
+       count(DISTINCT value_date) AS date_values,
+       count(DISTINCT value_time) AS time_values,
+       count(DISTINCT value_timestamp) AS timestamp_values,
+       count(DISTINCT value_timestamptz) AS timestamptz_values,
+       count(DISTINCT value_uuid) AS uuid_values,
+       count(DISTINCT value_bytea) AS bytea_values,
+       min(DISTINCT value_i4) AS min_i4,
+       max(DISTINCT value_i4) AS max_i4,
+       sum(DISTINCT value_i4) AS sum_i4,
+       avg(DISTINCT value_i4)::numeric(20, 4) AS avg_i4,
+       round(var_pop(DISTINCT value_i4), 6) AS var_pop_i4,
+       bool_and(DISTINCT value_bool) AS all_true,
+       bool_or(DISTINCT value_bool) AS any_true,
+       array_agg(DISTINCT value_i4 ORDER BY value_i4) AS ordered_i4,
+       array_agg(DISTINCT value_i4 ORDER BY value_i4)
+           FILTER (WHERE id <= 4) AS filtered_ordered_i4,
+       string_agg(DISTINCT value_text, ',' ORDER BY value_text) AS ordered_text
+FROM query_offload_distinct_basic;
+ bool_values | i4_values | f8_values | numeric_values | text_values | date_values | time_values | timestamp_values | timestamptz_values | uuid_values | bytea_values | min_i4 | max_i4 | sum_i4 | avg_i4  | var_pop_i4 | all_true | any_true |  ordered_i4  | filtered_ordered_i4 | ordered_text 
+-------------+-----------+-----------+----------------+-------------+-------------+-------------+------------------+--------------------+-------------+--------------+--------+--------+--------+---------+------------+----------+----------+--------------+---------------------+--------------
+           2 |         2 |         2 |              2 |           2 |           2 |           2 |                2 |                  2 |           2 |            2 |     10 |     20 |     30 | 15.0000 |  25.000000 | f        | t        | {10,20,NULL} | {10,20,NULL}        | alpha,beta
+(1 row)
+
+-- ============================================================================
+-- Query-level DISTINCT over fixed-width, temporal, and varlena keys. The first
+-- case is the unfiltered baseline. The final mixed-filter case covers the
+-- DISTINCT builder's exact residual and provider-pruning path independently
+-- from aggregation.
+-- ============================================================================
+-- Query offload plan and result.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT value_bool,
+                value_i4,
+                value_f8,
+                value_numeric
+FROM query_offload_distinct_basic
+ORDER BY value_bool NULLS LAST,
+         value_i4 NULLS LAST,
+         value_f8 NULLS LAST,
+         value_numeric NULLS LAST;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: value_bool, value_i4, value_f8, value_numeric
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         Offload: Serial Query
+         Maximum Batch Rows: 2
+         DISTINCT Keys: 4
+         PostgreSQL Expression Fallbacks: 0
+         Provider ID: 0
+         Scan ID: 0
+         Estimated Scan Rows: 5
+         Estimated Scan Bytes: 8192
+(12 rows)
+
+SELECT DISTINCT value_bool,
+                value_i4,
+                value_f8,
+                value_numeric
+FROM query_offload_distinct_basic
+ORDER BY value_bool NULLS LAST,
+         value_i4 NULLS LAST,
+         value_f8 NULLS LAST,
+         value_numeric NULLS LAST;
+ value_bool | value_i4 | value_f8 | value_numeric 
+------------+----------+----------+---------------
+ f          |       20 |      2.5 |          2.50
+ t          |       10 |      1.5 |          1.25
+ t          |          |      1.5 |          1.25
+            |          |          |              
+(4 rows)
+
+-- PostgreSQL native result.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+SELECT DISTINCT value_bool,
+                value_i4,
+                value_f8,
+                value_numeric
+FROM query_offload_distinct_basic
+ORDER BY value_bool NULLS LAST,
+         value_i4 NULLS LAST,
+         value_f8 NULLS LAST,
+         value_numeric NULLS LAST;
+ value_bool | value_i4 | value_f8 | value_numeric 
+------------+----------+----------+---------------
+ f          |       20 |      2.5 |          2.50
+ t          |       10 |      1.5 |          1.25
+ t          |          |      1.5 |          1.25
+            |          |          |              
+(4 rows)
+
+-- Query offload plan and result.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT value_text,
+                value_date,
+                value_time,
+                value_timestamp,
+                value_timestamptz,
+                value_uuid,
+                value_bytea
+FROM query_offload_distinct_basic
+ORDER BY value_text NULLS LAST,
+         value_date NULLS LAST,
+         value_time NULLS LAST,
+         value_timestamp NULLS LAST,
+         value_timestamptz NULLS LAST,
+         value_uuid NULLS LAST,
+         value_bytea NULLS LAST;
+                                                       QUERY PLAN                                                        
+-------------------------------------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: value_text COLLATE "C", value_date, value_time, value_timestamp, value_timestamptz, value_uuid, value_bytea
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         Offload: Serial Query
+         Maximum Batch Rows: 2
+         DISTINCT Keys: 7
+         PostgreSQL Expression Fallbacks: 0
+         Provider ID: 0
+         Scan ID: 0
+         Estimated Scan Rows: 5
+         Estimated Scan Bytes: 8192
+(12 rows)
+
+SELECT DISTINCT value_text,
+                value_date,
+                value_time,
+                value_timestamp,
+                value_timestamptz,
+                value_uuid,
+                value_bytea
+FROM query_offload_distinct_basic
+ORDER BY value_text NULLS LAST,
+         value_date NULLS LAST,
+         value_time NULLS LAST,
+         value_timestamp NULLS LAST,
+         value_timestamptz NULLS LAST,
+         value_uuid NULLS LAST,
+         value_bytea NULLS LAST;
+ value_text | value_date | value_time |     value_timestamp      |      value_timestamptz       |              value_uuid              | value_bytea 
+------------+------------+------------+--------------------------+------------------------------+--------------------------------------+-------------
+ alpha      | 01-01-2024 | 10:00:00   | Mon Jan 01 10:00:00 2024 | Mon Jan 01 10:00:00 2024 UTC | 00000000-0000-0000-0000-000000000001 | \x01
+ beta       | 01-02-2024 | 11:00:00   | Tue Jan 02 11:00:00 2024 | Tue Jan 02 11:00:00 2024 UTC | 00000000-0000-0000-0000-000000000002 | \x02
+            |            |            |                          |                              |                                      | 
+(3 rows)
+
+-- PostgreSQL native result.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+SELECT DISTINCT value_text,
+                value_date,
+                value_time,
+                value_timestamp,
+                value_timestamptz,
+                value_uuid,
+                value_bytea
+FROM query_offload_distinct_basic
+ORDER BY value_text NULLS LAST,
+         value_date NULLS LAST,
+         value_time NULLS LAST,
+         value_timestamp NULLS LAST,
+         value_timestamptz NULLS LAST,
+         value_uuid NULLS LAST,
+         value_bytea NULLS LAST;
+ value_text | value_date | value_time |     value_timestamp      |      value_timestamptz       |              value_uuid              | value_bytea 
+------------+------------+------------+--------------------------+------------------------------+--------------------------------------+-------------
+ alpha      | 01-01-2024 | 10:00:00   | Mon Jan 01 10:00:00 2024 | Mon Jan 01 10:00:00 2024 UTC | 00000000-0000-0000-0000-000000000001 | \x01
+ beta       | 01-02-2024 | 11:00:00   | Tue Jan 02 11:00:00 2024 | Tue Jan 02 11:00:00 2024 UTC | 00000000-0000-0000-0000-000000000002 | \x02
+            |            |            |                          |                              |                                      | 
+(3 rows)
+
+-- ============================================================================
+-- DISTINCT uses the same exact residual and pruning negotiation as aggregate.
+-- One mixed predicate is sufficient to verify the DISTINCT-specific wiring.
+-- ============================================================================
+-- The integer conjunct is available for Iceberg pruning; lower(value_text)
+-- remains in the complete DataFusion residual as one PostgreSQL UDF.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT DISTINCT value_i4
+FROM query_offload_distinct_basic
+WHERE id <= 4 AND lower(value_text) = 'alpha'
+ORDER BY value_i4 NULLS LAST;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Sort
+   Output: value_i4
+   Sort Key: query_offload_distinct_basic.value_i4
+   ->  Custom Scan (LagoDB Query Offload)
+         Output: value_i4
+         Engine: DataFusion
+         Offload: Serial Query
+         Maximum Batch Rows: 2
+         DISTINCT Keys: 1
+         PostgreSQL Expression Fallbacks: 1
+         Provider ID: 0
+         Scan ID: 0
+         Estimated Scan Rows: 5
+         Estimated Scan Bytes: 8192
+         Filter: (id <= 4) AND (lower(value_text) = 'alpha'::text)
+         Pushed Filter Conservative: (id <= 4)
+(16 rows)
+
+SELECT DISTINCT value_i4
+FROM query_offload_distinct_basic
+WHERE id <= 4 AND lower(value_text) = 'alpha'
+ORDER BY value_i4 NULLS LAST;
+ value_i4 
+----------
+       10
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+SELECT DISTINCT value_i4
+FROM query_offload_distinct_basic
+WHERE id <= 4 AND lower(value_text) = 'alpha'
+ORDER BY value_i4 NULLS LAST;
+ value_i4 
+----------
+       10
+(1 row)
+
+-- DISTINCT ON remains outside the query-level DISTINCT capability.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (value_i4) value_i4, id
+FROM query_offload_distinct_basic
+ORDER BY value_i4 NULLS LAST, id;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: value_i4, id
+         ->  Seq Scan on query_offload_distinct_basic
+(4 rows)
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+DROP TABLE query_offload_distinct_basic;
+RESET timezone;
+RESET lagodb.query_batch_rows;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;

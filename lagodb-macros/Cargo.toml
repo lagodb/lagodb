@@ -4,8 +4,8 @@ version = { workspace = true }
 authors = ["Robert Mu. https://github.com/robertmu"]
 license = { workspace = true }
 description = "Postgres Table Access Method framework macros for LagoDB core"
-homepage = "https://github.com/robertmu/pg-lakebase"
-repository = "https://github.com/robertmu/pg-lakebase"
+homepage = { workspace = true }
+repository = { workspace = true }
 categories = ["database"]
 keywords = ["database", "postgres", "postgresql", "extension", "access-method"]
 edition = { workspace = true }

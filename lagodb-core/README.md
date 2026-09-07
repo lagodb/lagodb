@@ -55,7 +55,8 @@ It concentrates unsafe C FFI, planner hooks, executor lifecycle management, memo
    - Encapsulates PostgreSQL Foreign Data Wrapper callbacks for external table scans, DML mutations, and schema import (`IMPORT FOREIGN SCHEMA`).
    - Normalizes storage provider options, region endpoints, and credential resolution.
 4. **Lifecycle & Durability Seam**:
-   - **`ResourceOwner` Integration**: Guarantees cleanup of memory contexts, open file handles, and staging states when PostgreSQL throws `ERROR` (via `longjmp`/C-unwind).
+   - **MemoryContext Integration**: Releases Rust heap allocations tied to PostgreSQL-owned execution contexts even when normal end callbacks are omitted.
+   - **`ResourceOwner` Integration**: Performs bounded, idempotent logical abort for owner-scoped handles and sessions after PostgreSQL error cleanup takes over; it does not own physical memory release.
    - **Transaction Callbacks**: Connects post-commit publication and abort rollbacks to PostgreSQL transaction boundaries.
    - **WAL Resource Manager**: Provides custom WAL record registration for crash recovery and replication.
 

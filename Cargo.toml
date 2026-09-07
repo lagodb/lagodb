@@ -6,7 +6,7 @@ members = [
     "lagodb-query",
     "lagodb-macros",
     "lagodb-iceberg",
-    "pg-arrow-conv",
+    "lagodb-arrow",
     "pg-backend-tests",
     "lagodb-connectors",
     "xtask",
@@ -19,8 +19,9 @@ version = "0.1.0"
 license = "Apache-2.0"
 edition = "2024"
 rust-version = "1.97.1"
-homepage = "https://github.com/robertmu/pg-lakebase"
-repository = "https://github.com/robertmu/pg-lakebase"
+description = "LagoDB: Lakehouse database built on PostgreSQL."
+homepage = "https://github.com/lagodb/lagodb"
+repository = "https://github.com/lagodb/lagodb"
 
 [workspace.dependencies]
 arrow-arith = "59.1.0"
@@ -32,7 +33,6 @@ arrow-schema = "59.1.0"
 arrow-select = "59.1.0"
 arrow-string = "59.1.0"
 datafusion = { version = "=55.0.0", default-features = false }
-datafusion-proto = { version = "=55.0.0", default-features = false }
 pgrx = { version = "=0.19.2" }
 pgrx-pg-sys = { version = "=0.19.2" }
 pgrx-tests = { version = "=0.19.2" }

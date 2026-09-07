@@ -14,7 +14,7 @@ DataFusion can provide the desired class of benefit: a columnar, vectorized
 engine for operators that PostgreSQL otherwise executes row-by-row above the
 table access method. The fit is strong for this workspace because
 LagoDB already reads Parquet into Arrow batches, already has
-`pg-arrow-conv` for Arrow to PostgreSQL conversion, and is written in Rust.
+`lagodb-arrow` for Arrow to PostgreSQL conversion, and is written in Rust.
 
 The first implementation should **not** deparse PostgreSQL queries into SQL and
 send them to a standalone process. It should follow the ParadeDB shape:
@@ -26,7 +26,7 @@ send them to a standalone process. It should follow the ParadeDB shape:
 - Execution builds a DataFusion logical plan directly using DataFusion APIs,
   registers lake-table `TableProvider`s, creates a physical plan, and consumes
   `RecordBatch` streams.
-- `pg-arrow-conv` projects the DataFusion result batches into PostgreSQL tuple
+- `lagodb-arrow` projects the DataFusion result batches into PostgreSQL tuple
   slots.
 
 This avoids a SQL dialect bridge, a separate server lifecycle, and an IPC result
@@ -84,7 +84,7 @@ Level 2: DataFusion fragment offload
     -> DataFusion logical plan
     -> DataFusion physical plan
     -> Arrow RecordBatch stream
-    -> pg-arrow-conv writes final PostgreSQL slots
+    -> lagodb-arrow writes final PostgreSQL slots
 ```
 
 Level 2 is optional. If a query fragment fails any gate, the planner falls back
@@ -198,7 +198,7 @@ The v1 execution model should be embedded and single-backend:
 - Size DataFusion memory through a custom memory pool tied to PostgreSQL
   `work_mem` and `hash_mem_multiplier`.
 - Poll `SendableRecordBatchStream` in `ExecCustomScan`.
-- Convert DataFusion batches to slots with `pg-arrow-conv`.
+- Convert DataFusion batches to slots with `lagodb-arrow`.
 - Check PostgreSQL interrupts between batch polls and during long scan work.
 
 Do not call PostgreSQL APIs from DataFusion worker threads. PostgreSQL backend
@@ -253,7 +253,7 @@ Start narrow and fail closed:
 - Expressions: column refs, constants, boolean connectives, comparisons, casts
   with matching semantics, arithmetic where PostgreSQL/DataFusion behavior is
   known to match, and selected stable functions.
-- Types: types already supported by `pg-arrow-conv`; reject unsupported
+- Types: types already supported by `lagodb-arrow`; reject unsupported
   collations, domains needing special coercion, lossy numeric behavior, and
   functions with PostgreSQL-specific semantics.
 
@@ -298,7 +298,7 @@ is more expensive than letting PostgreSQL drive the join.
 ### Phase 0 - Version and API foundation
 
 - Pick a DataFusion version compatible with the workspace Arrow version, or
-  upgrade Arrow across `iceberg-lite`, `pg-arrow-conv`, and `lagodb-iceberg`.
+  upgrade Arrow across `iceberg-lite`, `lagodb-arrow`, and `lagodb-iceberg`.
 - Add a feature-gated DataFusion dependency in `lagodb-core`.
 - Extract shared expression shippability helpers from the existing CustomScan
   filter framework.
@@ -308,7 +308,7 @@ is more expensive than letting PostgreSQL drive the join.
 
 - Implement an Iceberg-backed DataFusion `TableProvider`.
 - Execute a simple projected scan through DataFusion and return slots through
-  `pg-arrow-conv`.
+  `lagodb-arrow`.
 - Preserve existing Iceberg metadata tracker overlay behavior.
 - Keep target partitions at one until thread-safety constraints are proven.
 

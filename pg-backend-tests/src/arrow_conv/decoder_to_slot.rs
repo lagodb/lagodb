@@ -20,13 +20,13 @@ mod tests {
         TimestampMicrosecondArray,
     };
     use arrow_schema::{Field, Schema};
-    use lagodb_core::batch::{BatchRowCursor, BatchRowDecoder};
-    use lagodb_core::handles::ScanDirection;
-    use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget, SlotColumns};
-    use pg_arrow_conv::{
+    use lagodb_arrow::{
         ArrowBatchSource, ArrowColumnDecoder, ArrowConversionError, ColumnReader,
         ColumnRule, DatumCodec, DecodedColumn, PgColumnType, resolve_column_rule,
     };
+    use lagodb_core::batch::{BatchRowCursor, BatchRowDecoder};
+    use lagodb_core::handles::ScanDirection;
+    use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget, SlotColumns};
     use pgrx::prelude::*;
     use pgrx::{FromDatum, datum::Uuid, pg_sys};
 

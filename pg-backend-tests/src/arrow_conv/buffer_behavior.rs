@@ -10,9 +10,9 @@ mod tests {
 
     use arrow_array::{Array, LargeBinaryArray};
     use arrow_schema::{DataType, Field, Schema};
+    use lagodb_arrow::{BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule};
     use lagodb_core::batch::BatchBuffer;
     use lagodb_core::tuple::TupleSlotRow;
-    use pg_arrow_conv::{BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule};
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
 

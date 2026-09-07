@@ -8,7 +8,7 @@ use lagodb_core::customscan::state::{
     CustomScanStateWrapper, create_custom_scan_state_trampoline,
 };
 use lagodb_core::expr::pushdown::{
-    FilterFragment, FilterPlan, FilterPushdownPlanner,
+    FilterPlan, FilterPushdownPlanner, PredicateFragment,
 };
 use pgrx::pg_sys;
 
@@ -20,7 +20,7 @@ impl FilterPushdownPlanner for RejectAllFilterPlanner {
 
     fn try_plan_filter(
         &mut self,
-        _fragment: &FilterFragment,
+        _fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
         Ok(FilterPlan::Unsupported)
     }
@@ -57,7 +57,7 @@ macro_rules! impl_reject_all_filters {
 
             fn bind_filter(
                 _predicate: &Self::PlannedPredicate,
-                _values: lagodb_core::expr::pushdown::FilterValueBindings<'_>,
+                _values: lagodb_core::expr::RuntimeValueBindings<'_>,
             ) -> Result<
                 lagodb_core::expr::pushdown::FilterBindResult<Self::BoundPredicate>,
                 Self::Error,

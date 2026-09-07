@@ -7,14 +7,14 @@ mod tests {
 
     use crate::lagodb_core::customscan::exec::support::ExecExprFixture;
     use lagodb_core::customscan::CustomScanError;
-    use lagodb_core::customscan::custom_exprs::CustomExprSections;
+    use lagodb_core::customscan::custom_exprs::PgExpressionSections;
     use lagodb_core::customscan::exec::check_scan_relation_oid;
     use lagodb_core::diag::ReportableError;
     use pgrx::pg_sys;
     use pgrx::pg_test;
 
     /// Split `custom_exprs` in the backend test crate so the production core
-    /// only exposes the validated `CustomExprSections` abstraction.
+    /// only exposes the validated `PgExpressionSections` abstraction.
     unsafe fn slice_bindings_pushed(
         list: *mut pg_sys::List,
         binding_count: usize,
@@ -22,9 +22,12 @@ mod tests {
     ) -> Result<(Vec<*mut pg_sys::Expr>, Vec<*mut pg_sys::Expr>), CustomScanError>
     {
         let sections = unsafe {
-            CustomExprSections::from_custom_exprs(list, binding_count, pushed_count)
+            PgExpressionSections::from_custom_exprs(list, binding_count, pushed_count)
         }?;
-        Ok((sections.bindings().to_vec(), sections.pushed().to_vec()))
+        Ok((
+            sections.runtime_bindings().to_vec(),
+            sections.relation_pushdown_provenance().to_vec(),
+        ))
     }
 
     /// Split `custom_exprs` into binding and pushed windows without copying cells.
@@ -91,7 +94,7 @@ mod tests {
 
     /// Length mismatch raises ERROR (harness checks message).
     #[pg_test(
-        error = "customscan BeginCustomScan: custom_exprs length mismatch (got 1, expected binding_count + pushed_count = 3)"
+        error = "customscan internal error: custom_exprs length mismatch (got 1, expected 2 binding + 1 pushed expressions)"
     )]
     fn slice_bindings_pushed_rejects_length_mismatch() {
         unsafe {
@@ -107,7 +110,7 @@ mod tests {
 
     /// Non-zero counts with a NULL list raise ERROR.
     #[pg_test(
-        error = "customscan BeginCustomScan: custom_exprs is NULL but binding_count=1 pushed_count=0"
+        error = "customscan internal error: custom_exprs is NULL but binding_count=1 pushed_count=0"
     )]
     fn slice_bindings_pushed_rejects_null_list_with_nonzero_count() {
         unsafe {

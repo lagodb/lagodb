@@ -3,6 +3,9 @@ name = "pg-delta-am"
 version = { workspace = true }
 publish = false
 license = { workspace = true }
+description = "PostgreSQL Table Access Method skeleton for Delta Lake."
+homepage = { workspace = true }
+repository = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
 

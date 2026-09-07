@@ -1,7 +1,11 @@
 [package]
 name = "xtask"
-version = "0.1.0"
+version = { workspace = true }
 publish = false
+license = { workspace = true }
+description = "Internal task runner for LagoDB repository development and maintenance."
+homepage = { workspace = true }
+repository = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
 

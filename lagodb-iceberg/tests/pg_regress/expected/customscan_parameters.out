@@ -6,6 +6,9 @@
 -- Ordinary equijoin parameterized pushdown and EXPLAIN shape.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+-- This suite validates relation-level CustomScan behavior independently from
+-- upper query offload.
+SET lagodb.query_offload_mode = 'off';
 -- ============================================================================
 -- Setup: an Iceberg `lake` table with an `int4` `k` column. The
 -- classifier promotes `k = <int4>` (opno 96, int4eq) to `Exact`
@@ -2011,6 +2014,7 @@ DEALLOCATE customscan_null_param_p_nonnull;
 DEALLOCATE customscan_null_param_p_nonnull_baseline;
 RESET plan_cache_mode;
 RESET lagodb.customscan_mode;
+RESET lagodb.query_offload_mode;
 -- ============================================================================
 -- Cleanup
 -- ============================================================================

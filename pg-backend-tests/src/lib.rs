@@ -1,7 +1,7 @@
 //! Backend (`#[pg_test]`) integration tests for the LagoDB framework
 //! library crates.
 //!
-//! `lagodb-core` and `pg-arrow-conv` are pure library crates (`rlib`, no
+//! `lagodb-core` and `lagodb-arrow` are pure library crates (`rlib`, no
 //! `pg_module_magic!()`, no `.control` file), so backend tests that need a live
 //! PostgreSQL backend (Datum conversions, memory contexts, slot writes, SPI,
 //! catalog access) cannot live in their own crates. This single companion
@@ -9,7 +9,7 @@
 //! per crate under test:
 //!
 //! - `lagodb_core` — backend tests for `lagodb-core`
-//! - `arrow_conv`    — backend tests for `pg-arrow-conv`
+//! - `arrow_conv`    — backend tests for `lagodb-arrow` conversion
 //!
 //! Adding a new framework `rlib` does **not** require a new test crate: add a
 //! sibling module here and depend on the crate. See `README.md`.
