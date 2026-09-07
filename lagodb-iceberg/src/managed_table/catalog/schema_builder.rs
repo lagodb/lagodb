@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn pg_to_iceberg_to_pg_column_type_round_trips() {
         use crate::engine::schema::type_mapping::IcebergTypeExt;
-        use pg_arrow_conv::PgColumnType;
+        use lagodb_arrow::PgColumnType;
 
         let cases = [
             (PgBuiltInOids::BOOLOID, PgColumnType::Bool),

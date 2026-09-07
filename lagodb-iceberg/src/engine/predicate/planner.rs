@@ -1,8 +1,9 @@
-//! Relation-scoped `FilterFragment` to Iceberg planned-predicate conversion.
+//! Relation-scoped `PredicateFragment` to Iceberg planned-predicate conversion.
 
+use lagodb_core::expr::RuntimeValueSource;
 use lagodb_core::expr::pushdown::{
-    FilterFragment, FilterNode, FilterPlan, FilterPlanningContext,
-    FilterPushdownPlanner, FilterScalar, FilterValueSourceKind,
+    FilterPlan, FilterPlanningContext, FilterPushdownPlanner, PredicateExpr,
+    PredicateFragment, ScalarExpr,
 };
 use lagodb_core::expr::{PgComparisonOp, PushdownCosting};
 use lagodb_core::handles::RelationGuard;
@@ -52,24 +53,24 @@ impl IcebergFilterPlanner {
 
     fn plan_node(
         &self,
-        fragment: &FilterFragment,
-        node: &FilterNode,
+        fragment: &PredicateFragment,
+        node: &PredicateExpr,
     ) -> Result<Option<PlannedNode>, IcebergFilterError> {
         match node {
-            FilterNode::Comparison {
+            PredicateExpr::Comparison {
                 operator,
                 left,
                 right,
             } => self.plan_comparison(fragment, *operator, left, right),
-            FilterNode::IsNull(value) => self.plan_null_test(value, false),
-            FilterNode::IsNotNull(value) => self.plan_null_test(value, true),
-            FilterNode::And(children) => {
+            PredicateExpr::IsNull(value) => self.plan_null_test(value, false),
+            PredicateExpr::IsNotNull(value) => self.plan_null_test(value, true),
+            PredicateExpr::And(children) => {
                 self.plan_logical(fragment, children, LogicalKind::And)
             }
-            FilterNode::Or(children) => {
+            PredicateExpr::Or(children) => {
                 self.plan_logical(fragment, children, LogicalKind::Or)
             }
-            FilterNode::Not(child) => {
+            PredicateExpr::Not(child) => {
                 let Some(child) = self.plan_node(fragment, child)? else {
                     return Ok(None);
                 };
@@ -87,16 +88,16 @@ impl IcebergFilterPlanner {
 
     fn plan_comparison(
         &self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
         operator: PgComparisonOp,
-        left: &FilterScalar,
-        right: &FilterScalar,
+        left: &ScalarExpr,
+        right: &ScalarExpr,
     ) -> Result<Option<PlannedNode>, IcebergFilterError> {
         let (column, value, mirrored) = match (left, right) {
-            (FilterScalar::Column(column), FilterScalar::Value(value)) => {
+            (ScalarExpr::Column(column), ScalarExpr::Value(value)) => {
                 (column, *value, false)
             }
-            (FilterScalar::Value(value), FilterScalar::Column(column)) => {
+            (ScalarExpr::Value(value), ScalarExpr::Column(column)) => {
                 (column, *value, true)
             }
             _ => return Ok(None),
@@ -119,7 +120,7 @@ impl IcebergFilterPlanner {
         let source_kind = value_slot.source_kind;
         let costing = if supported.capability
             == SupportedPredicateCapability::Conservative
-            && (source_kind != FilterValueSourceKind::Constant
+            && (source_kind != RuntimeValueSource::Constant
                 || PredicatePushdownPolicy::is_value_sensitive_type(
                     column.declared_type.type_oid,
                 )) {
@@ -147,10 +148,10 @@ impl IcebergFilterPlanner {
 
     fn plan_null_test(
         &self,
-        value: &FilterScalar,
+        value: &ScalarExpr,
         is_not_null: bool,
     ) -> Result<Option<PlannedNode>, IcebergFilterError> {
-        let FilterScalar::Column(column) = value else {
+        let ScalarExpr::Column(column) = value else {
             return Ok(None);
         };
         if !PredicatePushdownPolicy::supports_null_test(column.declared_type.type_oid)
@@ -171,8 +172,8 @@ impl IcebergFilterPlanner {
 
     fn plan_logical(
         &self,
-        fragment: &FilterFragment,
-        children: &[FilterNode],
+        fragment: &PredicateFragment,
+        children: &[PredicateExpr],
         kind: LogicalKind,
     ) -> Result<Option<PlannedNode>, IcebergFilterError> {
         let mut planned = Vec::with_capacity(children.len());
@@ -222,7 +223,7 @@ impl FilterPushdownPlanner for IcebergFilterPlanner {
 
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
         let Some(planned) = self.plan_node(fragment, fragment.root())? else {
             return Ok(FilterPlan::Unsupported);
@@ -249,7 +250,7 @@ enum PlannedContract {
     Conservative,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum LogicalKind {
     And,
     Or,
@@ -258,12 +259,12 @@ enum LogicalKind {
 impl From<ComparisonOpClass> for PlannedComparisonOperator {
     fn from(value: ComparisonOpClass) -> Self {
         match value {
-            ComparisonOpClass::Eq => Self::Eq,
-            ComparisonOpClass::NotEq => Self::NotEq,
-            ComparisonOpClass::Lt => Self::Lt,
-            ComparisonOpClass::Le => Self::Le,
-            ComparisonOpClass::Gt => Self::Gt,
-            ComparisonOpClass::Ge => Self::Ge,
+            ComparisonOpClass::Equal => Self::Eq,
+            ComparisonOpClass::NotEqual => Self::NotEq,
+            ComparisonOpClass::Less => Self::Lt,
+            ComparisonOpClass::LessEqual => Self::Le,
+            ComparisonOpClass::Greater => Self::Gt,
+            ComparisonOpClass::GreaterEqual => Self::Ge,
         }
     }
 }

@@ -1,15 +1,16 @@
-//! Run-local lazy Arrow stream for a prepared Iceberg source.
+//! Run-local lazy Arrow stream for a prepared Iceberg table scan.
 
+use std::mem;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use iceberg_lite::scan::ArrowRecordBatchIterator;
-use pg_arrow_conv::QuerySourceStream;
+use lagodb_arrow::query_source::TableScanStream;
 
 use crate::error::IcebergError;
 
-use super::{IcebergQuerySourceError, prepared::PreparedIcebergScan};
+use super::{IcebergTableScanError, prepared::PreparedIcebergScan};
 
 enum IcebergBatchCursor {
     Pending(Arc<PreparedIcebergScan>, usize),
@@ -30,26 +31,26 @@ impl IcebergArrowStream {
         }
     }
 
-    fn open_if_needed(&mut self) -> Result<(), IcebergQuerySourceError> {
+    fn open_if_needed(&mut self) -> Result<(), IcebergTableScanError> {
         let IcebergBatchCursor::Pending(_, _) = &self.cursor else {
             return Ok(());
         };
         let IcebergBatchCursor::Pending(prepared, batch_size) =
-            std::mem::replace(&mut self.cursor, IcebergBatchCursor::Finished)
+            mem::replace(&mut self.cursor, IcebergBatchCursor::Finished)
         else {
             unreachable!("cursor state was matched immediately above")
         };
         let cursor = prepared
             .open_batches(batch_size)
             .map_err(IcebergError::from)
-            .map_err(IcebergQuerySourceError::from)?;
+            .map_err(IcebergTableScanError::from)?;
         self.cursor = IcebergBatchCursor::Open(cursor);
         Ok(())
     }
 }
 
-impl QuerySourceStream for IcebergArrowStream {
-    type Error = IcebergQuerySourceError;
+impl TableScanStream for IcebergArrowStream {
+    type Error = IcebergTableScanError;
 
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
@@ -69,7 +70,7 @@ impl QuerySourceStream for IcebergArrowStream {
             Some(Ok(batch)) => Ok(Some(batch)),
             Some(Err(error)) => {
                 self.cursor = IcebergBatchCursor::Finished;
-                Err(IcebergQuerySourceError::from(IcebergError::from(error)))
+                Err(IcebergTableScanError::from(IcebergError::from(error)))
             }
             None => {
                 self.cursor = IcebergBatchCursor::Finished;

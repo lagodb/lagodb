@@ -2,103 +2,65 @@
 
 // Shared comparison-operator fixture data for the policy host tests.
 pub(crate) mod host_matrix {
+    use lagodb_core::expr::PgComparisonSignature;
     use pgrx::pg_sys;
 
-    use super::super::pg_operator_oid as op;
     use crate::engine::predicate::policy::ComparisonOpClass;
 
-    // Per-type rows use `[Eq, NotEq, Lt, Le, Gt, Ge]` column order.
-    const INT2: [u32; 6] = [
-        op::INT2_EQ,
-        op::INT2_NE,
-        op::INT2_LT,
-        op::INT2_LE,
-        op::INT2_GT,
-        op::INT2_GE,
-    ];
-    pub(crate) const INT4: [u32; 6] = [
-        op::INT4_EQ,
-        op::INT4_NE,
-        op::INT4_LT,
-        op::INT4_LE,
-        op::INT4_GT,
-        op::INT4_GE,
-    ];
-    pub(crate) const INT8: [u32; 6] = [
-        op::INT8_EQ,
-        op::INT8_NE,
-        op::INT8_LT,
-        op::INT8_LE,
-        op::INT8_GT,
-        op::INT8_GE,
-    ];
-    const DATE: [u32; 6] = [
-        op::DATE_EQ,
-        op::DATE_NE,
-        op::DATE_LT,
-        op::DATE_LE,
-        op::DATE_GT,
-        op::DATE_GE,
-    ];
-    const TIMESTAMP: [u32; 6] = [
-        op::TIMESTAMP_EQ,
-        op::TIMESTAMP_NE,
-        op::TIMESTAMP_LT,
-        op::TIMESTAMP_LE,
-        op::TIMESTAMP_GT,
-        op::TIMESTAMP_GE,
-    ];
-    const TIMESTAMPTZ: [u32; 6] = [
-        op::TIMESTAMPTZ_EQ,
-        op::TIMESTAMPTZ_NE,
-        op::TIMESTAMPTZ_LT,
-        op::TIMESTAMPTZ_LE,
-        op::TIMESTAMPTZ_GT,
-        op::TIMESTAMPTZ_GE,
-    ];
-    pub(crate) const TEXT: [u32; 6] = [
-        op::TEXT_EQ,
-        op::TEXT_NE,
-        op::TEXT_LT,
-        op::TEXT_LE,
-        op::TEXT_GT,
-        op::TEXT_GE,
-    ];
-
     pub(crate) const CLASS_BY_COLUMN: [ComparisonOpClass; 6] = [
-        ComparisonOpClass::Eq,
-        ComparisonOpClass::NotEq,
-        ComparisonOpClass::Lt,
-        ComparisonOpClass::Le,
-        ComparisonOpClass::Gt,
-        ComparisonOpClass::Ge,
+        ComparisonOpClass::Equal,
+        ComparisonOpClass::NotEqual,
+        ComparisonOpClass::Less,
+        ComparisonOpClass::LessEqual,
+        ComparisonOpClass::Greater,
+        ComparisonOpClass::GreaterEqual,
     ];
 
-    /// Complete built-in comparison matrix mirrored from `pg_operator.dat`.
+    pub(crate) fn operator_row(type_oid: pg_sys::Oid) -> [u32; 6] {
+        CLASS_BY_COLUMN.map(|kind| {
+            u32::from(
+                PgComparisonSignature::for_types(type_oid, type_oid, kind)
+                    .expect("host fixture type has a built-in comparison family")
+                    .operator_oid(),
+            )
+        })
+    }
+
+    pub(crate) fn int4() -> [u32; 6] {
+        operator_row(pg_sys::INT4OID)
+    }
+
+    pub(crate) fn int8() -> [u32; 6] {
+        operator_row(pg_sys::INT8OID)
+    }
+
+    pub(crate) fn text() -> [u32; 6] {
+        operator_row(pg_sys::TEXTOID)
+    }
+
+    /// Provider test matrix derived from the core PostgreSQL signature table.
     pub(crate) fn opno_table() -> [(pg_sys::Oid, [u32; 6]); 7] {
         [
-            (pg_sys::INT2OID, INT2),
-            (pg_sys::INT4OID, INT4),
-            (pg_sys::INT8OID, INT8),
-            (pg_sys::DATEOID, DATE),
-            (pg_sys::TIMESTAMPOID, TIMESTAMP),
-            (pg_sys::TIMESTAMPTZOID, TIMESTAMPTZ),
-            (pg_sys::TEXTOID, TEXT),
+            (pg_sys::INT2OID, operator_row(pg_sys::INT2OID)),
+            (pg_sys::INT4OID, int4()),
+            (pg_sys::INT8OID, int8()),
+            (pg_sys::DATEOID, operator_row(pg_sys::DATEOID)),
+            (pg_sys::TIMESTAMPOID, operator_row(pg_sys::TIMESTAMPOID)),
+            (pg_sys::TIMESTAMPTZOID, operator_row(pg_sys::TIMESTAMPTZOID)),
+            (pg_sys::TEXTOID, text()),
         ]
     }
 }
 
-use std::collections::HashSet;
+use std::{array, collections::HashSet};
 
 use lagodb_core::expr::PgComparisonOp;
-use lagodb_core::expr::pushdown::{
-    FilterColumn, FilterTypeMetadata, FilterValueSlot, FilterValueSourceKind,
-};
+use lagodb_core::expr::{ColumnRef, ExprType, RuntimeValueSource, RuntimeValueSpec};
 use pgrx::pg_sys;
 use pgrx::pg_sys::Oid;
 use proptest::prelude::*;
 
-use self::host_matrix::{self as op, CLASS_BY_COLUMN, INT8, opno_table};
+use self::host_matrix::{self as op, CLASS_BY_COLUMN, opno_table};
 use super::{
     CollationSemantics, ComparisonOpClass, PgPredicatePushdownPolicy,
     PredicatePushdownPolicy, SupportedPredicateCapability,
@@ -133,8 +95,8 @@ fn capability(
     )
 }
 
-fn metadata(type_oid: pg_sys::Oid) -> FilterTypeMetadata {
-    FilterTypeMetadata {
+fn metadata(type_oid: pg_sys::Oid) -> ExprType {
+    ExprType {
         type_oid,
         typmod: -1,
         collation: pg_sys::Oid::INVALID,
@@ -147,15 +109,15 @@ fn planned_value_type(
     value_effective: pg_sys::Oid,
 ) -> Option<PlannedValueType> {
     PgPredicatePushdownPolicy::planned_value_type(
-        &FilterColumn {
-            rel_oid: pg_sys::Oid::from(16_384_u32),
+        &ColumnRef {
+            scan: lagodb_core::query_contract::ScanId::from_index(0),
             attno: 1,
             declared_type: metadata(declared),
             value_type: metadata(column_effective),
         },
-        &FilterValueSlot {
+        &RuntimeValueSpec {
             value_type: metadata(value_effective),
-            source_kind: FilterValueSourceKind::OuterValue,
+            source_kind: RuntimeValueSource::OuterValue,
         },
     )
 }
@@ -232,20 +194,17 @@ fn supported_predicate_integers_are_exact_under_zero_collation() {
     }
 }
 
-const INTEGER_EXACT_SET: &[(pg_sys::Oid, u32)] = &[
-    (pg_sys::INT4OID, op::INT4[0]),
-    (pg_sys::INT4OID, op::INT4[1]),
-    (pg_sys::INT4OID, op::INT4[2]),
-    (pg_sys::INT4OID, op::INT4[3]),
-    (pg_sys::INT4OID, op::INT4[4]),
-    (pg_sys::INT4OID, op::INT4[5]),
-    (pg_sys::INT8OID, INT8[0]),
-    (pg_sys::INT8OID, INT8[1]),
-    (pg_sys::INT8OID, INT8[2]),
-    (pg_sys::INT8OID, INT8[3]),
-    (pg_sys::INT8OID, INT8[4]),
-    (pg_sys::INT8OID, INT8[5]),
-];
+fn integer_exact_set() -> [(pg_sys::Oid, u32); 12] {
+    let int4 = op::int4();
+    let int8 = op::int8();
+    array::from_fn(|index| {
+        if index < int4.len() {
+            (pg_sys::INT4OID, int4[index])
+        } else {
+            (pg_sys::INT8OID, int8[index - int4.len()])
+        }
+    })
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -256,11 +215,11 @@ proptest! {
 
     #[test]
     fn supported_predicate_integer_collation_gate_property(
-        idx in 0usize..INTEGER_EXACT_SET.len(),
+        idx in 0usize..12,
         collid in 1u32..=u32::MAX,
         tag_input in any::<bool>(),
     ) {
-        let (type_oid, opno) = INTEGER_EXACT_SET[idx];
+        let (type_oid, opno) = integer_exact_set()[idx];
         let mut tagged = triple(opno);
         if tag_input {
             tagged.inputcollid = Oid::from(collid);
@@ -276,29 +235,28 @@ proptest! {
 
 #[test]
 fn supported_predicate_ignores_diagnostic_fields() {
-    let mut tagged_integer = triple(op::INT4[0]);
+    let int4 = op::int4();
+    let numeric = op::operator_row(pg_sys::NUMERICOID);
+    let text = op::text();
+    let mut tagged_integer = triple(int4[0]);
     tagged_integer.opcollid = Oid::from(50_000u32);
     let cases = [
-        (
-            pg_sys::INT4OID,
-            triple(op::INT4[0]),
-            CollationSemantics::None,
-        ),
-        (
-            pg_sys::INT4OID,
-            triple(op::INT4[2]),
-            CollationSemantics::None,
-        ),
+        (pg_sys::INT4OID, triple(int4[0]), CollationSemantics::None),
+        (pg_sys::INT4OID, triple(int4[2]), CollationSemantics::None),
         (pg_sys::INT4OID, tagged_integer, CollationSemantics::None),
-        (pg_sys::NUMERICOID, triple(1752), CollationSemantics::None),
+        (
+            pg_sys::NUMERICOID,
+            triple(numeric[0]),
+            CollationSemantics::None,
+        ),
         (
             pg_sys::TEXTOID,
-            triple(op::TEXT[0]),
+            triple(text[0]),
             CollationSemantics::COrPosix,
         ),
         (
             pg_sys::TEXTOID,
-            triple(op::TEXT[1]),
+            triple(text[1]),
             CollationSemantics::COrPosix,
         ),
     ];
@@ -329,7 +287,7 @@ fn supported_predicate_ignores_diagnostic_fields() {
 fn supported_predicate_numeric_temporal_float_matrix() {
     for (type_oid, opnos) in opno_table().into_iter().skip(3).take(3) {
         for (column, opno) in opnos.into_iter().enumerate() {
-            let expected = if CLASS_BY_COLUMN[column] == ComparisonOpClass::NotEq {
+            let expected = if CLASS_BY_COLUMN[column] == ComparisonOpClass::NotEqual {
                 None
             } else {
                 Some(SupportedPredicateCapability::Conservative)
@@ -341,7 +299,7 @@ fn supported_predicate_numeric_temporal_float_matrix() {
         }
     }
 
-    for opno in [1752, 1753, 1754, 1755, 1756, 1757] {
+    for opno in op::operator_row(pg_sys::NUMERICOID) {
         assert_eq!(
             capability(pg_sys::NUMERICOID, triple(opno), CollationSemantics::None),
             None,
@@ -379,9 +337,10 @@ fn supported_predicate_only_integers_are_exact() {
 
 #[test]
 fn supported_predicate_unknown_inputs_are_unsupported() {
+    let int4 = op::int4();
     for type_oid in [pg_sys::BOOLOID, pg_sys::BYTEAOID] {
         assert_eq!(
-            capability(type_oid, triple(op::INT4[0]), CollationSemantics::None),
+            capability(type_oid, triple(int4[0]), CollationSemantics::None),
             None,
         );
     }
@@ -393,13 +352,14 @@ fn supported_predicate_unknown_inputs_are_unsupported() {
 
 #[test]
 fn text_capability_depends_only_on_resolved_collation_semantics() {
+    let text = op::text();
     for type_oid in [pg_sys::TEXTOID, pg_sys::VARCHAROID] {
         for semantics in [
             CollationSemantics::COrPosix,
             CollationSemantics::Deterministic,
         ] {
             assert_eq!(
-                capability(type_oid, triple(op::TEXT[0]), semantics),
+                capability(type_oid, triple(text[0]), semantics),
                 Some(SupportedPredicateCapability::Conservative),
             );
         }
@@ -407,9 +367,9 @@ fn text_capability_depends_only_on_resolved_collation_semantics() {
             CollationSemantics::None,
             CollationSemantics::NonDeterministic,
         ] {
-            assert_eq!(capability(type_oid, triple(op::TEXT[0]), semantics), None,);
+            assert_eq!(capability(type_oid, triple(text[0]), semantics), None,);
         }
-        for opno in op::TEXT[2..].iter().copied() {
+        for opno in text[2..].iter().copied() {
             assert_eq!(
                 capability(type_oid, triple(opno), CollationSemantics::COrPosix),
                 Some(SupportedPredicateCapability::Conservative),
@@ -420,7 +380,7 @@ fn text_capability_depends_only_on_resolved_collation_semantics() {
             );
         }
         assert_eq!(
-            capability(type_oid, triple(op::TEXT[1]), CollationSemantics::COrPosix),
+            capability(type_oid, triple(text[1]), CollationSemantics::COrPosix),
             None,
         );
     }

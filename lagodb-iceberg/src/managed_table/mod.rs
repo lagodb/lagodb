@@ -14,8 +14,8 @@ mod hooks;
 mod maintenance;
 mod options;
 mod provider;
-mod query_source;
 pub(crate) mod storage;
+mod table_scan;
 
 pub use provider::{IcebergTableAm, get_iceberg_am_routine_ptr};
 
@@ -31,7 +31,7 @@ pub(crate) fn register_providers() {
 
     // Stage every planner facet before publishing the provider transaction.
     customscan::register();
-    query_source::register();
+    table_scan::register();
     lagodb_core::table_maintenance::register_provider::<
         maintenance::IcebergTableMaintenanceProvider,
     >();

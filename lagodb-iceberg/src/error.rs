@@ -173,7 +173,7 @@ pub enum IcebergError {
     PgError(#[from] PgError),
 
     #[error("Arrow/Datum conversion error: {0}")]
-    ArrowConversion(#[from] pg_arrow_conv::ArrowConversionError),
+    ArrowConversion(#[from] lagodb_arrow::ArrowConversionError),
 
     #[error("tablespace options not found")]
     TablespaceNotFound,
@@ -572,31 +572,31 @@ mod tests {
 
         let representatives = [
             // DATATYPE_MISMATCH group
-            pg_arrow_conv::ArrowConversionError::UnsupportedColumnType(
+            lagodb_arrow::ArrowConversionError::UnsupportedColumnType(
                 "Decimal256(76, 10)".into(),
             ),
-            pg_arrow_conv::ArrowConversionError::IncompatibleColumnType(
+            lagodb_arrow::ArrowConversionError::IncompatibleColumnType(
                 "FixedSizeBinary(16)".into(),
                 "expected uuid".into(),
             ),
-            pg_arrow_conv::ArrowConversionError::ArrowTypeMismatch(
+            lagodb_arrow::ArrowConversionError::ArrowTypeMismatch(
                 "Int32Array".into(),
             ),
             // DATA_EXCEPTION group
-            pg_arrow_conv::ArrowConversionError::ValueOutOfRange(
+            lagodb_arrow::ArrowConversionError::ValueOutOfRange(
                 "value out of range".into(),
             ),
-            pg_arrow_conv::ArrowConversionError::NumericError(
+            lagodb_arrow::ArrowConversionError::NumericError(
                 PgNumericError::Invalid("not a numeric".into()),
             ),
-            pg_arrow_conv::ArrowConversionError::DatetimeConversionError(
+            lagodb_arrow::ArrowConversionError::DatetimeConversionError(
                 DateTimeConversionError::FieldOverflow,
             ),
             // INTERNAL_ERROR group
-            pg_arrow_conv::ArrowConversionError::ArrowError(
+            lagodb_arrow::ArrowConversionError::ArrowError(
                 arrow_schema::ArrowError::SchemaError("bad schema".into()),
             ),
-            pg_arrow_conv::ArrowConversionError::DecimalCodec(
+            lagodb_arrow::ArrowConversionError::DecimalCodec(
                 lagodb_core::tuple::DecimalCodecError::InvalidBinaryRepresentation {
                     message: "malformed numeric bytes".into(),
                 },
@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn conv_error_propagates_into_iceberg_error_via_question_mark() {
         fn boundary() -> IcebergResult<()> {
-            Err(pg_arrow_conv::ArrowConversionError::ValueOutOfRange(
+            Err(lagodb_arrow::ArrowConversionError::ValueOutOfRange(
                 "value out of range".into(),
             ))?;
             Ok(())
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn decode_conv_error_propagates_into_iceberg_error_via_question_mark() {
         fn boundary() -> IcebergResult<()> {
-            Err(pg_arrow_conv::ArrowConversionError::ArrowTypeMismatch(
+            Err(lagodb_arrow::ArrowConversionError::ArrowTypeMismatch(
                 "expected Int32Array".into(),
             ))?;
             Ok(())
@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn conv_uuid_error_sqlstate_survives_iceberg_error_boundary() {
         let uuid_err = uuid::Uuid::parse_str("not-a-uuid").unwrap_err();
-        let conv = pg_arrow_conv::ArrowConversionError::UuidConversionError(uuid_err);
+        let conv = lagodb_arrow::ArrowConversionError::UuidConversionError(uuid_err);
 
         let expected = conv.sql_error_code();
         assert_eq!(expected, PgSqlErrorCode::ERRCODE_DATA_EXCEPTION);
@@ -663,7 +663,7 @@ mod tests {
 
     /// Each `DecimalCodecError` arm, routed through `ArrowConversionError` and wrapped in
     /// `IcebergError`, must land on its expected SQLSTATE class. The codec
-    /// error reaches `IcebergError` only via `pg_arrow_conv::ArrowConversionError` (the
+    /// error reaches `IcebergError` only via `lagodb_arrow::ArrowConversionError` (the
     /// AM no longer routes `DecimalCodecError` directly), so this is the one
     /// routing that must hold.
     #[test]
@@ -700,7 +700,7 @@ mod tests {
 
         for (codec_err, expected_class) in cases {
             // DecimalCodecError -> ArrowConversionError -> IcebergError.
-            let conv: pg_arrow_conv::ArrowConversionError = codec_err.into();
+            let conv: lagodb_arrow::ArrowConversionError = codec_err.into();
             let via_conv = IcebergError::from(conv);
 
             assert_eq!(

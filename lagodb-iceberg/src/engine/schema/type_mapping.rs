@@ -3,7 +3,7 @@
 //! This module owns the **position-agnostic** half of the conversion layer:
 //! given an Iceberg `Type` / `Schema`, it produces the descriptors the data
 //! path needs — the Arrow `DataType` / `Schema`, the target [`PgColumnType`],
-//! and the resolved [`pg_arrow_conv::ColumnRule`] — plus the
+//! and the resolved [`lagodb_arrow::ColumnRule`] — plus the
 //! [`ValidateSupported`] gate that rejects shapes the per-column dispatch
 //! cannot materialize. Binding those per-field rules to slot/attno positions is
 //! the job of [`column_mapping`](super::column_mapping).
@@ -40,10 +40,10 @@
 
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::spec::{NestedField, PrimitiveType, Schema as IcebergSchema, Type};
-use lagodb_core::tuple::numeric_typmod;
-use pg_arrow_conv::{
+use lagodb_arrow::{
     ArrowConversionError, ColumnRule, PgColumnType, resolve_column_rule,
 };
+use lagodb_core::tuple::numeric_typmod;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
@@ -98,7 +98,7 @@ pub(crate) trait IcebergTypeExt {
     /// Target [`PgColumnType`] for this Iceberg type, or `None` for shapes that
     /// have no scalar PG column type (`Struct`/`Map`).
     ///
-    /// `pg-arrow-conv` dispatches on the pair `(Arrow DataType, PgColumnType)`.
+    /// `lagodb-arrow` dispatches on the pair `(Arrow DataType, PgColumnType)`.
     /// The Arrow `DataType` already encodes decimal precision/scale, timestamp
     /// unit/tz, and fixed/binary width, so this is load-bearing for exactly one
     /// distinction the Arrow type alone cannot make: telling a `uuid` column
@@ -229,7 +229,7 @@ impl IcebergTypeExt for Type {
 // Iceberg `NestedField` → ColumnRule
 // ---------------------------------------------------------------------------
 
-/// Resolves the `pg-arrow-conv` [`ColumnRule`] for one Iceberg field.
+/// Resolves the `lagodb-arrow` [`ColumnRule`] for one Iceberg field.
 pub(crate) trait IcebergFieldExt {
     /// Resolve the [`ColumnRule`] for this field against an explicit target
     /// PostgreSQL type, keyed on the pair `(Arrow DataType, PgColumnType)`.
@@ -337,7 +337,7 @@ impl IcebergSchemaExt for IcebergSchema {
 ///
 /// A top-level column is accepted for any primitive type or for a single level
 /// of `List` whose element type is one the format-neutral list dispatch in
-/// `pg-arrow-conv` can materialize. Nested lists, `Struct`, `Map`, and lists of
+/// `lagodb-arrow` can materialize. Nested lists, `Struct`, `Map`, and lists of
 /// unsupported element types are rejected at the boundary so a later "build
 /// first batch" call doesn't surface a generic `UnsupportedColumnType` from
 /// deep inside the per-row dispatch loop.
@@ -351,7 +351,7 @@ impl ValidateSupported for Type {
             Type::Primitive(p) => p.validate_supported(),
             Type::List(list) => match list.element_field.field_type.as_ref() {
                 // Mirrors the element kinds the format-neutral list dispatch in
-                // `pg-arrow-conv` can materialize (bool/int/long/float/double/
+                // `lagodb-arrow` can materialize (bool/int/long/float/double/
                 // string). Anything else (including a nested list) is rejected.
                 Type::Primitive(
                     p @ (PrimitiveType::Boolean
@@ -408,7 +408,7 @@ impl ValidateSupported for PrimitiveType {
 // ============================================================================
 // Tests — Iceberg → Arrow schema mapping (host; no PG backend)
 //
-// pg-arrow-conv is format-neutral and never sees Iceberg types, so it does not
+// lagodb-arrow is format-neutral and never sees Iceberg types, so it does not
 // cover this layer. These pin the Iceberg → Arrow mapping lagodb-iceberg relies
 // on (the module doc records a past regression where a parallel mapping table
 // disagreed with the Parquet writer).

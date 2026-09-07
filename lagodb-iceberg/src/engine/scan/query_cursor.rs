@@ -1,8 +1,8 @@
 //! Query-only Iceberg cursor shared by TableAM, CustomScan, and FDW scans.
 
+use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
 use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
 use lagodb_core::prelude::{AmResult, SlotColumns};
-use pg_arrow_conv::{ArrowColumnDecoder, BoundBatch};
 
 use super::batch::IcebergArrowBatchSource;
 

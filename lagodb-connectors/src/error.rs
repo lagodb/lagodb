@@ -53,7 +53,7 @@ pub(crate) enum ConnectorError {
     Parquet(#[from] parquet::errors::ParquetError),
 
     #[error("Parquet/PostgreSQL column conversion failed: {0}")]
-    ArrowConversion(#[from] pg_arrow_conv::ArrowConversionError),
+    ArrowConversion(#[from] lagodb_arrow::ArrowConversionError),
 
     #[error("Arrow record-batch processing failed: {0}")]
     Arrow(#[from] arrow_schema::ArrowError),

@@ -1,8 +1,9 @@
 //! Core filter-pushdown adapter.
 
+use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterFragment, FilterPlan, FilterPlanningContext,
-    FilterPushdown, FilterPushdownPlanner, FilterValueBindings,
+    FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
+    FilterPushdownPlanner, PredicateFragment,
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
@@ -24,7 +25,7 @@ impl FilterPushdownPlanner for ConnectorFilterPlanner {
 
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
         self.inner.try_plan_filter(fragment)
     }
@@ -72,7 +73,7 @@ impl FilterPushdown for LagodbConnectors {
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
         predicate.bind(values)
     }

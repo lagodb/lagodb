@@ -1,8 +1,9 @@
 //! Lazy FDW adapter over the shared Iceberg predicate implementation.
 
+use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterFragment, FilterPlan, FilterPlanningContext,
-    FilterPushdown, FilterPushdownPlanner, FilterValueBindings,
+    FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
+    FilterPushdownPlanner, PredicateFragment,
 };
 use lagodb_core::fdw::ForeignFilterExplainValues;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
@@ -127,7 +128,7 @@ impl FilterPushdownPlanner for IcebergFdwFilterPlanner {
 
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
         let (source, planner) = self.ready()?;
         let plan = planner.try_plan_filter(fragment)?;
@@ -182,7 +183,7 @@ impl FilterPushdown for LagodbIceberg {
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
         predicate.predicate.bind(values).map_err(Into::into)
     }

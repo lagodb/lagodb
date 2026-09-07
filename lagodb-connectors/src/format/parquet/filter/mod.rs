@@ -6,11 +6,12 @@ mod runtime;
 mod value;
 
 use lagodb_core::diag::PgReportError;
-use lagodb_core::expr::PushdownCosting;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterColumn, FilterFragment, FilterNode, FilterPlan,
-    FilterPlanningContext, FilterScalar, FilterValueBindings, FilterValueSlotId,
+    FilterBindResult, FilterPlan, FilterPlanningContext, PredicateExpr,
+    PredicateFragment, ScalarExpr,
 };
+use lagodb_core::expr::{ColumnRef, RuntimeValueId};
+use lagodb_core::expr::{PushdownCosting, RuntimeValueBindings};
 use lagodb_core::fdw::ForeignFilterExplainValues;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
@@ -71,32 +72,31 @@ impl ParquetFilterPlanner {
 
     fn plan_node(
         &self,
-        fragment: &FilterFragment,
-        node: &FilterNode,
+        fragment: &PredicateFragment,
+        node: &PredicateExpr,
     ) -> Option<PlannedNode> {
         match node {
-            FilterNode::Comparison {
+            PredicateExpr::Comparison {
                 operator,
                 left,
                 right,
             } => {
                 let (column, value, mirrored) = match (left, right) {
-                    (FilterScalar::Column(column), FilterScalar::Value(value)) => {
+                    (ScalarExpr::Column(column), ScalarExpr::Value(value)) => {
                         (column, *value, false)
                     }
-                    (FilterScalar::Value(value), FilterScalar::Column(column)) => {
+                    (ScalarExpr::Value(value), ScalarExpr::Column(column)) => {
                         (column, *value, true)
                     }
                     _ => return None,
                 };
-                let value_type = ValueType::for_comparison(
+                let (value_type, mut operator) = ValueType::for_comparison(
                     column,
                     fragment.value(value),
                     operator.opno,
                     operator.opcollid,
                     operator.inputcollid,
                 )?;
-                let mut operator = ComparisonOperator::from_oid(operator.opno)?;
                 if mirrored {
                     operator = operator.mirrored();
                 }
@@ -107,29 +107,29 @@ impl ParquetFilterPlanner {
                     value_type,
                 })
             }
-            FilterNode::IsNull(FilterScalar::Column(column)) => {
+            PredicateExpr::IsNull(ScalarExpr::Column(column)) => {
                 Some(PlannedNode::IsNull(self.column(column)?))
             }
-            FilterNode::IsNotNull(FilterScalar::Column(column)) => {
+            PredicateExpr::IsNotNull(ScalarExpr::Column(column)) => {
                 Some(PlannedNode::IsNotNull(self.column(column)?))
             }
-            FilterNode::And(children) => {
+            PredicateExpr::And(children) => {
                 self.plan_children(fragment, children).map(PlannedNode::And)
             }
-            FilterNode::Or(children) => {
+            PredicateExpr::Or(children) => {
                 self.plan_children(fragment, children).map(PlannedNode::Or)
             }
-            FilterNode::Not(child) => self
+            PredicateExpr::Not(child) => self
                 .plan_node(fragment, child)
                 .map(|child| PlannedNode::Not(Box::new(child))),
-            FilterNode::IsNull(_) | FilterNode::IsNotNull(_) => None,
+            PredicateExpr::IsNull(_) | PredicateExpr::IsNotNull(_) => None,
         }
     }
 
     fn plan_children(
         &self,
-        fragment: &FilterFragment,
-        children: &[FilterNode],
+        fragment: &PredicateFragment,
+        children: &[PredicateExpr],
     ) -> Option<Box<[PlannedNode]>> {
         let mut planned = Vec::with_capacity(children.len());
         for child in children {
@@ -138,7 +138,7 @@ impl ParquetFilterPlanner {
         (!planned.is_empty()).then(|| planned.into_boxed_slice())
     }
 
-    fn column(&self, column: &FilterColumn) -> Option<PlannedColumn> {
+    fn column(&self, column: &ColumnRef) -> Option<PlannedColumn> {
         let index = usize::try_from(column.attno - 1).ok()?;
         self.columns.get(index)?.clone()
     }
@@ -147,7 +147,7 @@ impl ParquetFilterPlanner {
 impl FormatFilterPlanner for ParquetFilterPlanner {
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<FormatPlannedFilter>, ConnectorError> {
         let Some(root) = self.plan_node(fragment, fragment.root()) else {
             return Ok(FilterPlan::Unsupported);
@@ -196,7 +196,7 @@ impl FormatFilterPlan for ParquetPlannedPredicate {
 
     fn bind(
         &self,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<FormatBoundFilter>, ConnectorError> {
         let root = self.root.bind(values)?;
         Ok(FilterBindResult::Bound(FormatBoundFilter::Parquet(
@@ -232,7 +232,7 @@ enum PlannedNode {
     Comparison {
         operator: ComparisonOperator,
         column: PlannedColumn,
-        value: FilterValueSlotId,
+        value: RuntimeValueId,
         value_type: ValueType,
     },
     IsNull(PlannedColumn),
@@ -293,10 +293,10 @@ impl PlannedNode {
                 let operator = ComparisonOperator::from_tag(reader.read_i32()?)?;
                 let column = PlannedColumn::decode(reader)?;
                 let index = reader.read_count()?;
-                let value = FilterValueSlotId::from_plan_data(index, binding_count)
+                let value = RuntimeValueId::from_plan_data(index, binding_count)
                     .ok_or_else(|| {
-                    ConnectorError::invalid_filter_plan(FormatKind::Parquet)
-                })?;
+                        ConnectorError::invalid_filter_plan(FormatKind::Parquet)
+                    })?;
                 let value_type = ValueType::from_tag(reader.read_i32()?)?;
                 if !value_type.accepts_operator(operator) {
                     return Err(ConnectorError::invalid_filter_plan(
@@ -342,14 +342,14 @@ impl PlannedNode {
 
     fn bind(
         &self,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<BoundNode, ConnectorError> {
         self.bind_negated(values, false)
     }
 
     fn bind_negated(
         &self,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
         negated: bool,
     ) -> Result<BoundNode, ConnectorError> {
         Ok(match self {

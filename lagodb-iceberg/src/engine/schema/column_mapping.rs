@@ -26,13 +26,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
+use arrow_schema::{Field, Schema as ArrowSchema};
 use iceberg_lite::spec::Schema as IcebergSchema;
-use lagodb_core::batch::BatchBuffer;
-use lagodb_core::tuple::TupleSlotRow;
-use pg_arrow_conv::{
+use lagodb_arrow::{
     ArrowColumnDecoder, BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule,
     DatumCodec, DecodedColumn, PgColumnType,
 };
+use lagodb_core::batch::BatchBuffer;
+use lagodb_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
 use super::relation::{RelationFieldBinding, RelationFieldMap, RelationShape};
@@ -64,7 +65,7 @@ pub(crate) struct ProjectedColumn {
     pub(crate) src_col: usize,
     /// Destination cell index in the actual PG scan tuple.
     pub(crate) dest: usize,
-    /// The `pg-arrow-conv` conversion rule for this column, resolved once at
+    /// The `lagodb-arrow` conversion rule for this column, resolved once at
     /// construction from the Iceberg field and the live PostgreSQL target (see
     /// [`IcebergFieldExt::resolve_rule_for_column`]). The hot loops dispatch
     /// through this already-resolved rule rather than re-resolving per row.
@@ -224,6 +225,28 @@ impl ScanColumns {
             decoder: ArrowColumnDecoder::new(Vec::new()),
             project_field_ids: Box::new([]),
         }
+    }
+
+    pub(crate) fn query_arrow_schema(&self) -> IcebergResult<ArrowSchema> {
+        let fields = self
+            .project_field_ids
+            .iter()
+            .map(|field_id| {
+                let field = self
+                    .schema
+                    .as_struct()
+                    .field_by_id(*field_id)
+                    .ok_or_else(|| {
+                        IcebergError::ColumnNotFound(format!("field id {field_id}"))
+                    })?;
+                Ok(Field::new(
+                    &field.name,
+                    field.field_type.arrow_type()?,
+                    !field.required,
+                ))
+            })
+            .collect::<IcebergResult<Vec<_>>>()?;
+        Ok(ArrowSchema::new(fields))
     }
 
     /// Select-all plan (full-schema plan).

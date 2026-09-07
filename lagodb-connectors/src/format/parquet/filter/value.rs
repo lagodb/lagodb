@@ -15,7 +15,10 @@ use arrow_array::{
 };
 use arrow_ord::cmp;
 use arrow_schema::{ArrowError, DataType};
-use lagodb_core::expr::pushdown::{FilterColumn, FilterValue, FilterValueSlot};
+use lagodb_core::expr::{
+    ColumnRef, PgComparisonKind, PgComparisonSignature, RuntimeValue,
+    RuntimeValueSpec,
+};
 use lagodb_core::tuple::ColumnDatumTarget;
 use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
 
@@ -33,37 +36,6 @@ const VALUE_BOOL: i32 = 0;
 const VALUE_I32: i32 = 1;
 const VALUE_I64: i32 = 2;
 const VALUE_STRING: i32 = 3;
-
-mod operator_oid {
-    use pgrx::pg_sys;
-
-    pub const BOOL_EQ: u32 = pg_sys::BooleanEqualOperator;
-    pub const BOOL_NE: u32 = pg_sys::BooleanNotEqualOperator;
-    pub const INT2_EQ: u32 = 94;
-    pub const INT2_NE: u32 = 519;
-    pub const INT2_LT: u32 = 95;
-    pub const INT2_LE: u32 = 522;
-    pub const INT2_GT: u32 = 520;
-    pub const INT2_GE: u32 = 524;
-    pub const INT4_EQ: u32 = pg_sys::Int4EqualOperator;
-    pub const INT4_NE: u32 = 518;
-    pub const INT4_LT: u32 = pg_sys::Int4LessOperator;
-    pub const INT4_LE: u32 = 523;
-    pub const INT4_GT: u32 = 521;
-    pub const INT4_GE: u32 = 525;
-    pub const INT8_EQ: u32 = 410;
-    pub const INT8_NE: u32 = 411;
-    pub const INT8_LT: u32 = pg_sys::Int8LessOperator;
-    pub const INT8_LE: u32 = 414;
-    pub const INT8_GT: u32 = 413;
-    pub const INT8_GE: u32 = 415;
-    pub const TEXT_EQ: u32 = pg_sys::TextEqualOperator;
-    pub const TEXT_NE: u32 = 531;
-    pub const TEXT_LT: u32 = pg_sys::TextLessOperator;
-    pub const TEXT_LE: u32 = 665;
-    pub const TEXT_GT: u32 = 666;
-    pub const TEXT_GE: u32 = pg_sys::TextGreaterEqualOperator;
-}
 
 #[derive(Clone, Copy)]
 pub(super) enum ComparisonOperator {
@@ -88,19 +60,25 @@ impl ComparisonOperator {
     }
 
     pub(super) fn from_oid(oid: pg_sys::Oid) -> Option<Self> {
-        use operator_oid as op;
-        Some(match u32::from(oid) {
-            op::BOOL_EQ | op::INT2_EQ | op::INT4_EQ | op::INT8_EQ | op::TEXT_EQ => {
-                Self::Eq
-            }
-            op::BOOL_NE | op::INT2_NE | op::INT4_NE | op::INT8_NE | op::TEXT_NE => {
-                Self::NotEq
-            }
-            op::INT2_LT | op::INT4_LT | op::INT8_LT | op::TEXT_LT => Self::Lt,
-            op::INT2_LE | op::INT4_LE | op::INT8_LE | op::TEXT_LE => Self::Le,
-            op::INT2_GT | op::INT4_GT | op::INT8_GT | op::TEXT_GT => Self::Gt,
-            op::INT2_GE | op::INT4_GE | op::INT8_GE | op::TEXT_GE => Self::Ge,
+        let signature = PgComparisonSignature::for_operator(oid)?;
+        // This is Parquet's operator-family allowlist. PostgreSQL normalization
+        // already guarantees compatibility between the selected signature and
+        // the comparison operands.
+        match (signature.left_type(), signature.right_type()) {
+            (pg_sys::BOOLOID, pg_sys::BOOLOID)
+            | (pg_sys::INT2OID, pg_sys::INT2OID)
+            | (pg_sys::INT4OID, pg_sys::INT4OID)
+            | (pg_sys::INT8OID, pg_sys::INT8OID)
+            | (pg_sys::TEXTOID, pg_sys::TEXTOID) => {}
             _ => return None,
+        }
+        Some(match signature.kind() {
+            PgComparisonKind::Equal => Self::Eq,
+            PgComparisonKind::NotEqual => Self::NotEq,
+            PgComparisonKind::Less => Self::Lt,
+            PgComparisonKind::LessEqual => Self::Le,
+            PgComparisonKind::Greater => Self::Gt,
+            PgComparisonKind::GreaterEqual => Self::Ge,
         })
     }
 
@@ -179,12 +157,12 @@ impl ValueType {
     }
 
     pub(super) fn for_comparison(
-        column: &FilterColumn,
-        value: &FilterValueSlot,
+        column: &ColumnRef,
+        value: &RuntimeValueSpec,
         opno: pg_sys::Oid,
         opcollid: pg_sys::Oid,
         inputcollid: pg_sys::Oid,
-    ) -> Option<Self> {
+    ) -> Option<(Self, ComparisonOperator)> {
         let declared = PgOid::from(column.declared_type.type_oid);
         let effective = PgOid::from(column.value_type.type_oid);
         let value_oid = PgOid::from(value.value_type.type_oid);
@@ -224,7 +202,7 @@ impl ValueType {
             _ => return None,
         };
 
-        match value_type {
+        let value_type = match value_type {
             Self::Bool | Self::I32 | Self::I64
                 if opcollid == pg_sys::Oid::INVALID
                     && inputcollid == pg_sys::Oid::INVALID =>
@@ -262,7 +240,8 @@ impl ValueType {
                 }
             }
             _ => None,
-        }
+        }?;
+        Some((value_type, operator))
     }
 
     pub(super) const fn tag(self) -> i32 {
@@ -291,7 +270,7 @@ impl ValueType {
     /// datum and copies pass-by-reference strings into Rust-owned storage.
     pub(super) unsafe fn decode(
         self,
-        value: FilterValue,
+        value: RuntimeValue,
     ) -> Result<BoundValue, ConnectorError> {
         let datum = unsafe { value.datum() };
         let type_oid = value.metadata().value_type.type_oid;

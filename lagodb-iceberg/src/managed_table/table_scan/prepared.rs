@@ -1,8 +1,9 @@
-//! Begin-owned immutable managed-Iceberg source metadata.
+//! Begin-owned immutable managed-Iceberg table-scan metadata.
 
 use std::sync::Arc;
 
-use arrow_schema::{Schema, SchemaRef};
+use arrow_schema::SchemaRef;
+use iceberg_lite::expr::Predicate;
 use iceberg_lite::scan::{FileScanTask, TableScan};
 
 use super::IcebergArrowStream;
@@ -15,6 +16,7 @@ pub(super) struct PreparedIcebergScan {
     pub(super) scan: TableScan,
     pub(super) tasks: Arc<[FileScanTask]>,
     pub(super) arrow_schema: SchemaRef,
+    pub(super) row_filter: Option<Predicate>,
 }
 
 impl PreparedIcebergScan {
@@ -25,13 +27,13 @@ impl PreparedIcebergScan {
         self.scan
             .to_arrow_with_shared_tasks_and_filter_and_batch_size(
                 Arc::clone(&self.tasks),
-                None,
+                self.row_filter.clone(),
                 batch_size,
             )
     }
 }
 
-/// Statement-Begin-owned source after snapshot and file-task preparation.
+/// Statement-Begin-owned table scan after snapshot and file-task preparation.
 ///
 /// The retained values contain no direct PostgreSQL plan/executor node,
 /// Relation, MemoryContext, Datum, or borrowed backend pointer. `TableScan`
@@ -41,16 +43,17 @@ impl PreparedIcebergScan {
 /// independently thread-safe capability even though the upstream trait bounds
 /// require it to be `Send + Sync`.
 #[derive(Debug)]
-pub(crate) struct PreparedIcebergSource {
+pub(crate) struct PreparedIcebergTableScan {
     scan: Arc<PreparedIcebergScan>,
 }
 
-impl PreparedIcebergSource {
+impl PreparedIcebergTableScan {
     pub(super) fn new(input: PreparedQueryScanInput) -> Self {
         let scan = PreparedIcebergScan {
             scan: input.scan,
             tasks: input.tasks,
-            arrow_schema: Arc::new(Schema::empty()),
+            arrow_schema: input.arrow_schema,
+            row_filter: input.row_filter,
         };
         Self {
             scan: Arc::new(scan),
@@ -59,5 +62,9 @@ impl PreparedIcebergSource {
 
     pub(super) fn open_stream(&self, batch_size: usize) -> IcebergArrowStream {
         IcebergArrowStream::new(Arc::clone(&self.scan), batch_size)
+    }
+
+    pub(super) fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.scan.arrow_schema)
     }
 }

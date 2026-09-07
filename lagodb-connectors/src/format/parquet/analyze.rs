@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
+use lagodb_arrow::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
 use lagodb_core::fdw::{
     ForeignAnalyzeSupport, ForeignSampleContext, ForeignSampleStatistics,
     ForeignTableMaintenanceError,
@@ -14,7 +15,6 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
 };
-use pg_arrow_conv::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 

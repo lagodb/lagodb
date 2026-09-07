@@ -5,6 +5,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use arrow_schema::Schema;
+use lagodb_arrow::{ColumnReader, PgColumnType, resolve_column_rule};
 use lagodb_core::copy::{CopyColumnLayout, CopyDataSource, CopyError};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
@@ -12,7 +13,6 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
 };
-use pg_arrow_conv::{ColumnReader, PgColumnType, resolve_column_rule};
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::{PgTryBuilder, pg_sys};
 
@@ -27,7 +27,7 @@ const BRIDGE_BUFFER_TARGET: usize = 256 * 1024;
 
 struct CopyColumnPlan {
     source: usize,
-    rule: pg_arrow_conv::ColumnRule,
+    rule: lagodb_arrow::ColumnRule,
     codec: ColumnDatumCodec,
     output_function: pg_sys::Oid,
 }

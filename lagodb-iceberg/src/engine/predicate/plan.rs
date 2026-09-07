@@ -1,6 +1,6 @@
 //! Owned, copyObject-serializable Iceberg predicate plans.
 
-use lagodb_core::expr::pushdown::FilterValueSlotId;
+use lagodb_core::expr::RuntimeValueId;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
 use super::error::IcebergFilterError;
@@ -70,7 +70,7 @@ pub(crate) enum PlannedIcebergNode {
     Comparison {
         operator: PlannedComparisonOperator,
         column: PlannedIcebergColumn,
-        value: FilterValueSlotId,
+        value: RuntimeValueId,
         value_type: PlannedValueType,
     },
     IsNull(PlannedIcebergColumn),
@@ -136,11 +136,11 @@ impl PlannedIcebergNode {
                     PlannedComparisonOperator::from_tag(reader.read_i32()?)?;
                 let column = PlannedIcebergColumn::decode(reader)?;
                 let index = reader.read_count()?;
-                let value = FilterValueSlotId::from_plan_data(index, binding_count)
+                let value = RuntimeValueId::from_plan_data(index, binding_count)
                     .ok_or(IcebergFilterError::BindingSlotOutOfBounds {
-                    index,
-                    binding_count,
-                })?;
+                        index,
+                        binding_count,
+                    })?;
                 let value_type = PlannedValueType::from_tag(reader.read_i32()?)?;
                 Ok(Self::Comparison {
                     operator,

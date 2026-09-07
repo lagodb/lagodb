@@ -9,7 +9,7 @@ use iceberg_lite::overlay::SnapshotDelta;
 use iceberg_lite::scan::{ArrowRecordBatchIterator, FileScanTask, TableScan};
 use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
-use pg_arrow_conv::{ArrowBatchSource, ArrowColumnDecoder};
+use lagodb_arrow::{ArrowBatchSource, ArrowColumnDecoder};
 use pgrx::pg_sys;
 
 use crate::engine::schema::column_mapping::ScanColumns;
@@ -102,16 +102,26 @@ pub(crate) struct AnalyzeScanInput {
 pub(crate) struct PreparedQueryScanInput {
     pub(crate) scan: TableScan,
     pub(crate) tasks: Arc<[FileScanTask]>,
+    pub(crate) arrow_schema: arrow_schema::SchemaRef,
+    pub(crate) row_filter: Option<Predicate>,
 }
 
 /// Typed zero-column scan preparation. Only the scalar-COUNT constructor can
-/// produce this wrapper, so query-source extraction cannot accidentally drop
+/// produce this wrapper, so table-scan extraction cannot accidentally drop
 /// a normal scan's row predicate or projected columns.
 pub(crate) struct CountRowsScanSpec(ScanSpec);
 
 impl CountRowsScanSpec {
+    pub(crate) fn set_predicates(
+        &mut self,
+        planning_filter: Option<Predicate>,
+        row_filter: Option<Predicate>,
+    ) {
+        self.0.set_predicates(planning_filter, row_filter);
+    }
+
     pub(crate) fn prepare(self) -> IcebergResult<PreparedQueryScanInput> {
-        self.0.prepare_count_source()
+        self.0.prepare_query_source()
     }
 }
 
@@ -324,20 +334,24 @@ impl ScanSpec {
         })
     }
 
-    /// Close PostgreSQL-facing scan preparation and transfer only immutable
-    /// Iceberg/Arrow state into the query-offload lifecycle.
-    ///
-    /// The same [`TableScan`] instance plans and later reads `tasks`, keeping
-    /// schema, projection, snapshot, overlay, reader configuration, and delete
-    /// inventory aligned. Data files remain unopened until the returned source
-    /// stream is polled.
-    fn prepare_count_source(self) -> IcebergResult<PreparedQueryScanInput> {
-        let scan = self.build_scan(RowLocationProjection::Exclude, None)?;
+    pub(crate) fn prepare_query_source(
+        self,
+    ) -> IcebergResult<PreparedQueryScanInput> {
+        let arrow_schema = Arc::new(self.plan.query_arrow_schema()?);
+        let scan = self.build_scan(
+            RowLocationProjection::Exclude,
+            self.planning_filter.as_ref(),
+        )?;
         let tasks = match self.query_tasks {
             Some(tasks) => tasks,
             None => Arc::from(scan.plan_files()?.into_boxed_slice()),
         };
-        Ok(PreparedQueryScanInput { scan, tasks })
+        Ok(PreparedQueryScanInput {
+            scan,
+            tasks,
+            arrow_schema,
+            row_filter: self.row_filter,
+        })
     }
 
     /// Build the Iceberg [`TableScan`] for this spec's projection and optional

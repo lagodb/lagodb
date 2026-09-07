@@ -18,7 +18,7 @@ pub fn get_iceberg_am_routine_ptr() -> *const pg_sys::TableAmRoutine {
 #[pg_table_am(
     version = "0.1.0",
     author = "robertmu",
-    website = "https://github.com/robertmu/pg-lakebase"
+    website = "https://github.com/lagodb/lagodb"
 )]
 pub struct IcebergTableAm;
 

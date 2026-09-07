@@ -4,8 +4,8 @@ version = { workspace = true }
 publish = false
 license = { workspace = true }
 description = "LagoDB connector FDW skeleton."
-homepage = "https://github.com/robertmu/pg-lakebase"
-repository = "https://github.com/robertmu/pg-lakebase"
+homepage = { workspace = true }
+repository = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
 
@@ -17,8 +17,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg17"]
-pg16 = ["pgrx/pg16", "lagodb-core/pg16", "pg-arrow-conv/pg16"]
-pg17 = ["pgrx/pg17", "lagodb-core/pg17", "pg-arrow-conv/pg17"]
+pg16 = ["pgrx/pg16", "lagodb-core/pg16", "lagodb-arrow/pg16"]
+pg17 = ["pgrx/pg17", "lagodb-core/pg17", "lagodb-arrow/pg17"]
 
 [dependencies]
 apache-avro = { version = "0.21", default-features = false, features = ["snappy", "zstandard"] }
@@ -31,7 +31,7 @@ chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 flate2 = "1"
 pgrx = { workspace = true }
 lagodb-core = { path = "../lagodb-core", default-features = false }
-pg-arrow-conv = { path = "../pg-arrow-conv", default-features = false }
+lagodb-arrow = { path = "../lagodb-arrow", default-features = false }
 lagodb-storage = { workspace = true }
 parquet = { version = "59.1.0", default-features = false, features = ["arrow", "snap", "zstd"] }
 serde = "1"

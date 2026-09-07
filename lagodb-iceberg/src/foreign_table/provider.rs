@@ -16,7 +16,7 @@ use super::options::IcebergFdwOptions;
 #[pg_fdw(
     version = "0.1.0",
     author = "LagoDB",
-    website = "https://github.com/robertmu/pg-lakebase"
+    website = "https://github.com/lagodb/lagodb"
 )]
 pub(crate) struct LagodbIceberg;
 

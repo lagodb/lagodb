@@ -15,7 +15,7 @@ use super::options::validate_catalog_options;
 #[pg_fdw(
     version = "0.1.0",
     author = "LagoDB",
-    website = "https://github.com/robertmu/pg-lakebase"
+    website = "https://github.com/lagodb/lagodb"
 )]
 pub(crate) struct LagodbConnectors;
 

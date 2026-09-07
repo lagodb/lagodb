@@ -19,7 +19,7 @@ use super::IcebergCustomScanProvider;
 use super::projection::ProjectionResolver;
 
 /// Per-scan runtime state inside the framework's `CustomScanStateWrapper`.
-pub(super) struct IcebergScanState {
+pub(crate) struct IcebergScanState {
     active_scan: Option<ScanSpec>,
     cursor: Option<IcebergBatchCursor>,
     conflict_filter: Predicate,

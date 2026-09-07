@@ -86,7 +86,7 @@ pub(crate) fn parquet_arrow_type(
             | PgBuiltInOids::NAMEOID
             | PgBuiltInOids::JSONOID,
         ) => DataType::Utf8,
-        // Keep the write-side physical type aligned with pg-arrow-conv's
+        // Keep the write-side physical type aligned with lagodb-arrow's
         // canonical bytea builder and Iceberg's binary mapping. The read path
         // accepts both offset widths, but newly produced columns use i64
         // offsets so a batch cannot overflow Arrow Binary's i32 byte limit.
@@ -100,7 +100,7 @@ pub(crate) fn parquet_arrow_type(
             DataType::Timestamp(TimeUnit::Microsecond, None)
         }
         PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
-            // Match pg-arrow-conv and lagodb-iceberg's canonical UTC metadata.
+            // Match lagodb-arrow and lagodb-iceberg's canonical UTC metadata.
             DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
         }
         PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {

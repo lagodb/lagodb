@@ -1,8 +1,7 @@
 //! Reader-owned filter pushdown contracts.
 
-use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterFragment, FilterPlan, FilterValueBindings,
-};
+use lagodb_core::expr::RuntimeValueBindings;
+use lagodb_core::expr::pushdown::{FilterBindResult, FilterPlan, PredicateFragment};
 use lagodb_core::fdw::ForeignFilterExplainValues;
 use lagodb_core::plan_data::PlanDataWriter;
 
@@ -25,7 +24,7 @@ pub(crate) trait FormatFilterPlan: 'static {
 
     fn bind(
         &self,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<FormatBoundFilter>, ConnectorError>;
 }
 
@@ -49,7 +48,7 @@ impl FormatBoundFilter {
 pub(crate) trait FormatFilterPlanner: 'static {
     fn try_plan_filter(
         &mut self,
-        fragment: &FilterFragment,
+        fragment: &PredicateFragment,
     ) -> Result<FilterPlan<FormatPlannedFilter>, ConnectorError>;
 }
 
@@ -59,7 +58,7 @@ pub(super) struct NoPushdownFilterPlanner;
 impl FormatFilterPlanner for NoPushdownFilterPlanner {
     fn try_plan_filter(
         &mut self,
-        _fragment: &FilterFragment,
+        _fragment: &PredicateFragment,
     ) -> Result<FilterPlan<FormatPlannedFilter>, ConnectorError> {
         Ok(FilterPlan::Unsupported)
     }

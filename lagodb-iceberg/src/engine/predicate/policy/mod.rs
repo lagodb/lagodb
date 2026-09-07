@@ -1,28 +1,12 @@
 //! Shared Iceberg capability policy and PostgreSQL operator mapping.
 
-use lagodb_core::expr::PgComparisonIdentity;
-use lagodb_core::expr::pushdown::{FilterColumn, FilterValueSlot};
+use lagodb_core::expr::{ColumnRef, RuntimeValueSpec};
+use lagodb_core::expr::{PgComparisonIdentity, PgComparisonSignature};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
 use super::plan::PlannedValueType;
 
-/// Semantic comparison-operator class from `opno`
-/// ([`PredicatePushdownPolicy::op_class`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ComparisonOpClass {
-    /// `=`
-    Eq,
-    /// `<>`
-    NotEq,
-    /// `<`
-    Lt,
-    /// `<=`
-    Le,
-    /// `>`
-    Gt,
-    /// `>=`
-    Ge,
-}
+pub(crate) use lagodb_core::expr::PgComparisonKind as ComparisonOpClass;
 
 /// One comparison accepted by the PostgreSQL-facing Iceberg policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,125 +37,26 @@ pub(crate) enum CollationSemantics {
     NonDeterministic,
 }
 
-/// Built-in `pg_operator` OIDs supported by the predicate policy.
-///
-/// `PgBuiltInOids` models PostgreSQL type/catalog OIDs. `OpExpr.opno` is a
-/// `pg_operator` OID, and pgrx exposes only the subset generated from
-/// PostgreSQL headers. Keep the missing built-in comparison operators named
-/// here instead of embedding magic numbers in the policy logic.
-mod pg_operator_oid {
-    use pgrx::pg_sys;
-
-    pub const INT2_EQ: u32 = 94;
-    pub const INT2_NE: u32 = 519;
-    pub const INT2_LT: u32 = 95;
-    pub const INT2_LE: u32 = 522;
-    pub const INT2_GT: u32 = 520;
-    pub const INT2_GE: u32 = 524;
-
-    pub const INT4_EQ: u32 = pg_sys::Int4EqualOperator;
-    pub const INT4_NE: u32 = 518;
-    pub const INT4_LT: u32 = pg_sys::Int4LessOperator;
-    pub const INT4_LE: u32 = 523;
-    pub const INT4_GT: u32 = 521;
-    pub const INT4_GE: u32 = 525;
-
-    pub const INT8_EQ: u32 = 410;
-    pub const INT8_NE: u32 = 411;
-    pub const INT8_LT: u32 = pg_sys::Int8LessOperator;
-    pub const INT8_LE: u32 = 414;
-    pub const INT8_GT: u32 = 413;
-    pub const INT8_GE: u32 = 415;
-
-    pub const DATE_EQ: u32 = 1093;
-    pub const DATE_NE: u32 = 1094;
-    pub const DATE_LT: u32 = 1095;
-    pub const DATE_LE: u32 = 1096;
-    pub const DATE_GT: u32 = 1097;
-    pub const DATE_GE: u32 = 1098;
-
-    pub const TIMESTAMP_EQ: u32 = 2060;
-    pub const TIMESTAMP_NE: u32 = 2061;
-    pub const TIMESTAMP_LT: u32 = 2062;
-    pub const TIMESTAMP_LE: u32 = 2063;
-    pub const TIMESTAMP_GT: u32 = 2064;
-    pub const TIMESTAMP_GE: u32 = 2065;
-
-    pub const TIMESTAMPTZ_EQ: u32 = 1320;
-    pub const TIMESTAMPTZ_NE: u32 = 1321;
-    pub const TIMESTAMPTZ_LT: u32 = 1322;
-    pub const TIMESTAMPTZ_LE: u32 = 1323;
-    pub const TIMESTAMPTZ_GT: u32 = 1324;
-    pub const TIMESTAMPTZ_GE: u32 = 1325;
-
-    pub const TEXT_EQ: u32 = pg_sys::TextEqualOperator;
-    pub const TEXT_NE: u32 = 531;
-    pub const TEXT_LT: u32 = pg_sys::TextLessOperator;
-    pub const TEXT_LE: u32 = 665;
-    pub const TEXT_GT: u32 = 666;
-    pub const TEXT_GE: u32 = pg_sys::TextGreaterEqualOperator;
-}
-
 /// Pure Iceberg predicate policy used by planned-predicate construction.
 pub(crate) struct PredicatePushdownPolicy;
 
 impl PredicatePushdownPolicy {
-    /// Map comparison `opno` to [`ComparisonOpClass`], or `None` if unrecognized.
+    /// Map a comparison from an Iceberg-supported operator family.
+    ///
+    /// PostgreSQL normalization already guarantees compatibility between the
+    /// selected signature and the comparison operands.
     pub(crate) fn op_class(opno: pg_sys::Oid) -> Option<ComparisonOpClass> {
-        use pg_operator_oid as op;
-
-        let class = match u32::from(opno) {
-            op::INT2_EQ
-            | op::INT4_EQ
-            | op::INT8_EQ
-            | op::DATE_EQ
-            | op::TIMESTAMP_EQ
-            | op::TIMESTAMPTZ_EQ
-            | op::TEXT_EQ => ComparisonOpClass::Eq,
-
-            op::INT2_NE
-            | op::INT4_NE
-            | op::INT8_NE
-            | op::DATE_NE
-            | op::TIMESTAMP_NE
-            | op::TIMESTAMPTZ_NE
-            | op::TEXT_NE => ComparisonOpClass::NotEq,
-
-            op::INT2_LT
-            | op::INT4_LT
-            | op::INT8_LT
-            | op::DATE_LT
-            | op::TIMESTAMP_LT
-            | op::TIMESTAMPTZ_LT
-            | op::TEXT_LT => ComparisonOpClass::Lt,
-
-            op::INT2_LE
-            | op::INT4_LE
-            | op::INT8_LE
-            | op::DATE_LE
-            | op::TIMESTAMP_LE
-            | op::TIMESTAMPTZ_LE
-            | op::TEXT_LE => ComparisonOpClass::Le,
-
-            op::INT2_GT
-            | op::INT4_GT
-            | op::INT8_GT
-            | op::DATE_GT
-            | op::TIMESTAMP_GT
-            | op::TIMESTAMPTZ_GT
-            | op::TEXT_GT => ComparisonOpClass::Gt,
-
-            op::INT2_GE
-            | op::INT4_GE
-            | op::INT8_GE
-            | op::DATE_GE
-            | op::TIMESTAMP_GE
-            | op::TIMESTAMPTZ_GE
-            | op::TEXT_GE => ComparisonOpClass::Ge,
-
-            _ => return None,
-        };
-        Some(class)
+        let signature = PgComparisonSignature::for_operator(opno)?;
+        match (signature.left_type(), signature.right_type()) {
+            (pg_sys::INT2OID, pg_sys::INT2OID)
+            | (pg_sys::INT4OID, pg_sys::INT4OID)
+            | (pg_sys::INT8OID, pg_sys::INT8OID)
+            | (pg_sys::DATEOID, pg_sys::DATEOID)
+            | (pg_sys::TIMESTAMPOID, pg_sys::TIMESTAMPOID)
+            | (pg_sys::TIMESTAMPTZOID, pg_sys::TIMESTAMPTZOID)
+            | (pg_sys::TEXTOID, pg_sys::TEXTOID) => Some(signature.kind()),
+            _ => None,
+        }
     }
 
     fn capability_for_class(
@@ -203,7 +88,7 @@ impl PredicatePushdownPolicy {
 
             PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
                 match class {
-                    ComparisonOpClass::Eq => {
+                    ComparisonOpClass::Equal => {
                         if matches!(
                             input_collation,
                             CollationSemantics::COrPosix
@@ -214,17 +99,17 @@ impl PredicatePushdownPolicy {
                             None
                         }
                     }
-                    ComparisonOpClass::Lt
-                    | ComparisonOpClass::Le
-                    | ComparisonOpClass::Gt
-                    | ComparisonOpClass::Ge => {
+                    ComparisonOpClass::Less
+                    | ComparisonOpClass::LessEqual
+                    | ComparisonOpClass::Greater
+                    | ComparisonOpClass::GreaterEqual => {
                         if input_collation == CollationSemantics::COrPosix {
                             Some(SupportedPredicateCapability::Conservative)
                         } else {
                             None
                         }
                     }
-                    ComparisonOpClass::NotEq => None,
+                    ComparisonOpClass::NotEqual => None,
                 }
             }
 
@@ -274,12 +159,12 @@ impl PredicatePushdownPolicy {
         class: ComparisonOpClass,
     ) -> Option<SupportedPredicateCapability> {
         match class {
-            ComparisonOpClass::NotEq => None,
-            ComparisonOpClass::Eq
-            | ComparisonOpClass::Lt
-            | ComparisonOpClass::Le
-            | ComparisonOpClass::Gt
-            | ComparisonOpClass::Ge => {
+            ComparisonOpClass::NotEqual => None,
+            ComparisonOpClass::Equal
+            | ComparisonOpClass::Less
+            | ComparisonOpClass::LessEqual
+            | ComparisonOpClass::Greater
+            | ComparisonOpClass::GreaterEqual => {
                 Some(SupportedPredicateCapability::Conservative)
             }
         }
@@ -335,8 +220,8 @@ pub(crate) struct PgPredicatePushdownPolicy;
 
 impl PgPredicatePushdownPolicy {
     pub(crate) fn plan_comparison(
-        column: &FilterColumn,
-        value: &FilterValueSlot,
+        column: &ColumnRef,
+        value: &RuntimeValueSpec,
         op_key: PgComparisonIdentity,
     ) -> Option<(SupportedComparison, PlannedValueType)> {
         let value_type = Self::planned_value_type(column, value)?;
@@ -356,8 +241,8 @@ impl PgPredicatePushdownPolicy {
     }
 
     fn planned_value_type(
-        column: &FilterColumn,
-        value: &FilterValueSlot,
+        column: &ColumnRef,
+        value: &RuntimeValueSpec,
     ) -> Option<PlannedValueType> {
         let declared = PgOid::from(column.declared_type.type_oid);
         let effective = PgOid::from(column.value_type.type_oid);

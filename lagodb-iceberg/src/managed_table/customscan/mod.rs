@@ -18,8 +18,9 @@ use lagodb_core::customscan::provider::{
     NoPrivateData, PathContext, PathVariant, ReScanContext, RelationContext,
     register_provider as register_scan_provider,
 };
+use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterPlanningContext, FilterPushdown, FilterValueBindings,
+    FilterBindResult, FilterPlanningContext, FilterPushdown,
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
@@ -38,7 +39,7 @@ use crate::managed_table::gucs::scan_fraction;
 use scan_state::IcebergScanState;
 
 /// Zero-sized marker for the Iceberg [`LagodbCustomScanProvider`].
-struct IcebergCustomScanProvider;
+pub(crate) struct IcebergCustomScanProvider;
 
 impl FilterPushdown for IcebergCustomScanProvider {
     type Planner = IcebergFilterPlanner;
@@ -73,7 +74,7 @@ impl FilterPushdown for IcebergCustomScanProvider {
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
         predicate.bind(values)
     }

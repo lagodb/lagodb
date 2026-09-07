@@ -4,10 +4,9 @@ use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
 };
 use iceberg_lite::spec::Datum;
-use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterValue, FilterValueBindings,
-};
-use pg_arrow_conv::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
+use lagodb_arrow::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
+use lagodb_core::expr::pushdown::FilterBindResult;
+use lagodb_core::expr::{RuntimeValue, RuntimeValueBindings};
 use pgrx::FromDatum;
 
 use super::error::IcebergFilterError;
@@ -51,7 +50,7 @@ impl BoundIcebergPredicate {
 impl PlannedIcebergPredicate {
     pub(crate) fn bind(
         &self,
-        values: FilterValueBindings<'_>,
+        values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<BoundIcebergPredicate>, IcebergFilterError> {
         let binder = IcebergFilterBinder { values };
         let Some(predicate) = binder.bind_node(self.root(), false)? else {
@@ -65,7 +64,7 @@ impl PlannedIcebergPredicate {
 }
 
 struct IcebergFilterBinder<'a> {
-    values: FilterValueBindings<'a>,
+    values: RuntimeValueBindings<'a>,
 }
 
 impl IcebergFilterBinder<'_> {
@@ -120,7 +119,7 @@ impl IcebergFilterBinder<'_> {
         operator: PlannedComparisonOperator,
         column: &PlannedIcebergColumn,
         value_type: PlannedValueType,
-        value: FilterValue,
+        value: RuntimeValue,
         negated: bool,
     ) -> Result<Option<Predicate>, IcebergFilterError> {
         // A strict SQL comparison with NULL is UNKNOWN. Its truth set remains
@@ -181,7 +180,7 @@ impl IcebergFilterBinder<'_> {
     /// memory remains live for this binding call.
     unsafe fn decode_datum(
         value_type: PlannedValueType,
-        value: FilterValue,
+        value: RuntimeValue,
     ) -> Result<Option<Datum>, IcebergFilterError> {
         let type_oid = value.metadata().value_type.type_oid;
         let datum = unsafe { value.datum() };
