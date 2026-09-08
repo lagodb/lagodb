@@ -17,6 +17,7 @@
 
 mod cell;
 mod datum;
+mod decimal128_semantics;
 mod json;
 mod json_encode;
 mod numeric;
@@ -28,14 +29,16 @@ mod varlena;
 
 pub use cell::{ByteaView, Cell, StringView};
 pub use datum::{
-    ColumnDatumCodec, ColumnDatumTarget, DatumConversionError,
+    ColumnDatumCodec, ColumnDatumTarget, DatumConversionError, Utf8ServerEncoding,
     Utf8ServerEncodingError,
 };
+pub use decimal128_semantics::Decimal128Semantics;
 pub use json::{JsonText, JsonValueError, JsonbValue};
 pub use json_encode::{BoundJsonObjectEncoder, JsonDatumEncoder, JsonDatumKind};
 pub use numeric::{
-    Decimal128NumericCodec, DecimalCodecError, NumericTypmod, PG_EPOCH_DAYS_DIFF,
-    PG_EPOCH_USECS_DIFF, numeric_precision_scale, numeric_typmod,
+    Decimal128ComparisonValue, Decimal128NumericCodec, DecimalCodecError,
+    NumericTypmod, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF, PostgresNumericCodec,
+    numeric_precision_scale, numeric_typmod,
 };
 pub use row::{Row, TupleSlotWriter};
 pub use row_codec::RowDatumCodec;

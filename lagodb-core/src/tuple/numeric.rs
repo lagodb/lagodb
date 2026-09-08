@@ -1,8 +1,14 @@
 //! NUMERIC typmod encoding/decoding, PG/Unix epoch constants, and a fast
 //! `Decimal128 -> AnyNumeric` codec used by columnar read paths.
 
+mod coefficient;
+mod comparison;
+
 use pgrx::pg_sys::{self, POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE};
 use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
+
+pub use coefficient::PostgresNumericCodec;
+pub use comparison::Decimal128ComparisonValue;
 
 unsafe extern "C-unwind" {
     #[link_name = "numeric_send"]
@@ -577,71 +583,104 @@ unsafe fn numeric_recv_external(
     typmod: i32,
     codec: &Decimal128NumericCodec,
 ) -> Result<pgrx::AnyNumeric, DecimalCodecError> {
-    use pgrx::fcinfo::direct_function_call_as_datum;
-    use pgrx::pg_sys::{self, errcodes::PgSqlErrorCode, panic::CaughtError};
-    use pgrx::{AnyNumeric, FromDatum, IntoDatum, PgTryBuilder};
+    use pgrx::PgTryBuilder;
+    use pgrx::pg_sys::{errcodes::PgSqlErrorCode, panic::CaughtError};
 
     let external = *external; // Copy; closure becomes UnwindSafe.
     let precision = codec.precision;
     let scale = codec.scale;
 
-    unsafe {
-        PgTryBuilder::new(move || {
-            // Build StringInfoData on the call stack: numeric_recv only reads
-            // it, and palloc'ing per-row would defeat the optimization.
-            let len = external.wire_byte_len();
-            let mut buf = [0u8; 8 + MAX_NDIGITS * 2];
-            external.write_be_bytes(&mut buf[..len]);
-            let mut string_info = pg_sys::StringInfoData {
-                data: buf.as_mut_ptr().cast(),
-                len: len as i32,
-                maxlen: len as i32,
-                cursor: 0,
+    PgTryBuilder::new(move || {
+        // Build StringInfoData on the call stack: numeric_recv only reads
+        // it, and palloc'ing per-row would defeat the optimization.
+        let len = external.wire_byte_len();
+        let mut buf = [0u8; 8 + MAX_NDIGITS * 2];
+        external.write_be_bytes(&mut buf[..len]);
+        // SAFETY: the buffer contains a complete numeric_recv external value
+        // and the caller guarantees execution on a PostgreSQL backend thread.
+        Ok(unsafe { receive_numeric_wire(&mut buf[..len], typmod) })
+    })
+    .catch_when(
+        PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+        move |e| {
+            // Only Postgres-side ereport(ERROR, ...) is converted; anything
+            // raised by Rust is rethrown so callers see the original cause.
+            let CaughtError::PostgresError(ref ereport) = e else {
+                e.rethrow();
             };
+            Err(DecimalCodecError::ValueOutOfRange {
+                precision,
+                scale,
+                message: ereport.message().to_string(),
+            })
+        },
+    )
+    .catch_when(
+        PgSqlErrorCode::ERRCODE_INVALID_BINARY_REPRESENTATION,
+        move |e| {
+            let CaughtError::PostgresError(ref ereport) = e else {
+                e.rethrow();
+            };
+            Err(DecimalCodecError::InvalidBinaryRepresentation {
+                message: ereport.message().to_string(),
+            })
+        },
+    )
+    .execute()
+}
 
-            let datum = direct_function_call_as_datum(
-                pg_sys::numeric_recv,
-                &[
-                    Some(pg_sys::Datum::from(&mut string_info as *mut _)),
-                    pg_sys::InvalidOid.into_datum(),
-                    typmod.into_datum(),
-                ],
-            )
-            .expect("numeric_recv must not return SQL NULL");
-            let any = AnyNumeric::from_datum(datum, false)
-                .expect("numeric_recv produced a non-NULL datum");
-            // Free the palloc'd numeric now that AnyNumeric copied it.
-            pg_sys::pfree(datum.cast_mut_ptr());
-            Ok(any)
-        })
-        .catch_when(
-            PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-            move |e| {
-                // Only Postgres-side ereport(ERROR, ...) is converted; anything
-                // raised by Rust is rethrown so callers see the original cause.
-                let CaughtError::PostgresError(ref ereport) = e else {
-                    e.rethrow();
-                };
-                Err(DecimalCodecError::ValueOutOfRange {
-                    precision,
-                    scale,
-                    message: ereport.message().to_string(),
-                })
-            },
+/// Invoke PostgreSQL's binary NUMERIC receiver for one complete external wire
+/// value. Error capture belongs to the caller because bounded Decimal128
+/// decoding maps two data errors into [`DecimalCodecError`], while aggregate
+/// finalization preserves every PostgreSQL error as a [`crate::diag::PgReportError`].
+///
+/// # Safety
+///
+/// Must run on a PostgreSQL backend thread. `wire` must contain one valid
+/// `numeric_recv` external representation and remains borrowed for the call.
+pub(super) unsafe fn receive_numeric_wire(
+    wire: &mut [u8],
+    typmod: i32,
+) -> AnyNumeric {
+    use pgrx::FromDatum;
+
+    let datum = unsafe { receive_numeric_wire_datum(wire, typmod) };
+    let numeric = unsafe { AnyNumeric::from_datum(datum, false) }
+        .expect("numeric_recv produced a non-NULL datum");
+    // SAFETY: numeric_recv returned a fresh palloc'd value and AnyNumeric has
+    // copied it into its owned representation.
+    unsafe { pg_sys::pfree(datum.cast_mut_ptr()) };
+    numeric
+}
+
+/// Invoke `numeric_recv` without first copying its result into `AnyNumeric`.
+/// The caller owns the returned palloc'd datum and must release it.
+///
+/// # Safety
+///
+/// Has the same backend-thread and wire-format requirements as
+/// [`receive_numeric_wire`].
+unsafe fn receive_numeric_wire_datum(wire: &mut [u8], typmod: i32) -> pg_sys::Datum {
+    use pgrx::IntoDatum;
+    use pgrx::fcinfo::direct_function_call_as_datum;
+
+    let mut string_info = pg_sys::StringInfoData {
+        data: wire.as_mut_ptr().cast(),
+        len: wire.len() as i32,
+        maxlen: wire.len() as i32,
+        cursor: 0,
+    };
+    unsafe {
+        direct_function_call_as_datum(
+            pg_sys::numeric_recv,
+            &[
+                Some(pg_sys::Datum::from(&mut string_info as *mut _)),
+                pg_sys::InvalidOid.into_datum(),
+                typmod.into_datum(),
+            ],
         )
-        .catch_when(
-            PgSqlErrorCode::ERRCODE_INVALID_BINARY_REPRESENTATION,
-            move |e| {
-                let CaughtError::PostgresError(ref ereport) = e else {
-                    e.rethrow();
-                };
-                Err(DecimalCodecError::InvalidBinaryRepresentation {
-                    message: ereport.message().to_string(),
-                })
-            },
-        )
-        .execute()
     }
+    .expect("numeric_recv must not return SQL NULL")
 }
 
 #[cfg(test)]

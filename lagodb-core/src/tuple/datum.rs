@@ -32,6 +32,25 @@ pub struct ColumnDatumTarget {
     kind: DatumKind,
 }
 
+/// Proof that PostgreSQL text datums can be consumed by UTF-8 Arrow APIs.
+///
+/// The database encoding is fixed for a database. Predicate planners retain
+/// this zero-sized proof while constructing text plans; persisted text plans
+/// therefore authorize binders to call pgrx's UTF-8 `String::from_datum`
+/// without repeating this catalog-independent check on every bind or row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Utf8ServerEncoding(());
+
+impl Utf8ServerEncoding {
+    pub fn resolve() -> Result<Self, Utf8ServerEncodingError> {
+        let encoding = unsafe { pg_sys::GetDatabaseEncoding() };
+        if encoding != pg_sys::pg_enc::PG_UTF8 as i32 {
+            return Err(Utf8ServerEncodingError { encoding });
+        }
+        Ok(Self(()))
+    }
+}
+
 impl ColumnDatumTarget {
     /// Resolve the supported destination representation once.
     #[must_use]
@@ -51,11 +70,7 @@ impl ColumnDatumTarget {
     /// particular target OID. This is used by Arrow rules that have not yet
     /// been paired with a concrete PostgreSQL attribute.
     pub fn validate_utf8_server_encoding() -> Result<(), Utf8ServerEncodingError> {
-        let encoding = unsafe { pg_sys::GetDatabaseEncoding() };
-        if encoding != pg_sys::pg_enc::PG_UTF8 as i32 {
-            return Err(Utf8ServerEncodingError { encoding });
-        }
-        Ok(())
+        Utf8ServerEncoding::resolve().map(|_| ())
     }
 
     pub(crate) fn requires_utf8_server_encoding(self) -> bool {

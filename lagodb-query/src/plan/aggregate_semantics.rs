@@ -1,12 +1,11 @@
 //! PostgreSQL aggregate OID and type allowlist.
 
 use lagodb_core::expr::ExprType;
-use lagodb_core::tuple::numeric_precision_scale;
 use pgrx::pg_sys;
 
 use super::aggregate::{AggCall, AggregateArguments, AggregateKind};
 use super::ir::QueryPlanError;
-use super::semantics::ScalarSemantics;
+use super::semantics::{Decimal128Semantics, ScalarSemantics};
 
 impl AggregateKind {
     pub(super) fn classify(
@@ -333,6 +332,7 @@ impl AggCall {
             AggregateKind::Min | AggregateKind::Max => {
                 ScalarSemantics::Integer.supports_type(argument_type)
                     || Self::supports_float(argument_type)
+                    || Self::bounded_numeric_input(argument_type)
                     || matches!(
                         argument_type.type_oid,
                         pg_sys::DATEOID
@@ -417,12 +417,6 @@ impl AggCall {
     /// bounds used by the fixed i256 aggregate state; unbounded NUMERIC remains
     /// outside the source ABI and must decline at the semantic gate.
     fn bounded_numeric_input(value_type: ExprType) -> bool {
-        value_type.type_oid == pg_sys::NUMERICOID
-            && value_type.collation == pg_sys::InvalidOid
-            && numeric_precision_scale(value_type.typmod).is_some_and(|typmod| {
-                (1..=38).contains(&typmod.precision)
-                    && typmod.scale >= 0
-                    && typmod.scale <= typmod.precision as i32
-            })
+        Decimal128Semantics::for_type(value_type).is_some()
     }
 }

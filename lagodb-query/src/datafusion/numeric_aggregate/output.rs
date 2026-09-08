@@ -5,7 +5,7 @@ use std::panic::AssertUnwindSafe;
 use arrow_buffer::i256;
 use datafusion::common::{DataFusionError, Result};
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::DetoastedVarlena;
+use lagodb_core::tuple::{DetoastedVarlena, PostgresNumericCodec};
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{AnyNumeric, IntoDatum, PgTryBuilder, pg_sys};
 
@@ -23,32 +23,29 @@ impl NumericOutput {
         scale: u32,
         kind: AggregateKind,
     ) -> Result<Vec<u8>> {
-        // This output-boundary conversion keeps accumulation fixed-width and
-        // performs PostgreSQL materialization once per output group. If grouped
-        // benchmarks prove the text conversion material, extend lagodb-core's
-        // shared base-10000 NUMERIC
-        // codec with an unbounded-typmod i256 coefficient encoder. That codec
-        // must independently prove sign, weight, dscale, zero/carry and
-        // numeric_recv error semantics; it must not become a private aggregate
-        // fast path or apply the input typmod to a SUM result.
-        let text = Self::scaled_text(sum, scale);
-        let count = i64::try_from(count).map_err(|_| {
+        if kind == AggregateKind::NumericSum {
+            return PostgresNumericCodec::varlena_from_i256_be_bytes(
+                sum.to_be_bytes(),
+                scale,
+            )
+            .map_err(|error| DataFusionError::External(Box::new(error)));
+        }
+        if kind != AggregateKind::NumericAverage {
+            return Err(Self::invalid_kind());
+        }
+        let average_count = i64::try_from(count).map_err(|_| {
             DataFusionError::External(Box::new(PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
                 "aggregate count is out of range for bigint",
             )))
         })?;
+        let sum = PostgresNumericCodec::numeric_from_i256_be_bytes(
+            sum.to_be_bytes(),
+            scale,
+        )
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
         PgTryBuilder::new(AssertUnwindSafe(move || {
-            let sum = AnyNumeric::try_from(text.as_str()).map_err(|error| {
-                DataFusionError::Internal(format!(
-                    "failed to materialize exact numeric aggregate state: {error}"
-                ))
-            })?;
-            let value = match kind {
-                AggregateKind::NumericSum => sum,
-                AggregateKind::NumericAverage => sum / AnyNumeric::from(count),
-                _ => return Err(Self::invalid_kind()),
-            };
+            let value = sum / AnyNumeric::from(average_count);
             let datum = value.into_datum().ok_or_else(|| {
                 DataFusionError::Internal(
                     "PostgreSQL numeric finalization returned SQL NULL".to_owned(),
@@ -71,35 +68,6 @@ impl NumericOutput {
             )))
         })
         .execute()
-    }
-
-    fn scaled_text(value: i256, scale: u32) -> String {
-        let integer = value.to_string();
-        if scale == 0 {
-            return integer;
-        }
-        let (negative, digits) = integer
-            .strip_prefix('-')
-            .map_or((false, integer.as_str()), |digits| (true, digits));
-        let scale = scale as usize;
-        let leading_zeroes = scale.saturating_sub(digits.len());
-        let mut output = String::with_capacity(
-            usize::from(negative) + digits.len().max(scale + 1) + 1,
-        );
-        if negative {
-            output.push('-');
-        }
-        if digits.len() <= scale {
-            output.push_str("0.");
-            output.extend(std::iter::repeat_n('0', leading_zeroes));
-            output.push_str(digits);
-        } else {
-            let point = digits.len() - scale;
-            output.push_str(&digits[..point]);
-            output.push('.');
-            output.push_str(&digits[point..]);
-        }
-        output
     }
 
     fn invalid_kind() -> DataFusionError {

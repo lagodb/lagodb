@@ -69,9 +69,10 @@ impl NumericAggregate {
             DataType::Decimal128(precision, scale)
                 if (1..=38).contains(precision)
                     && *scale >= 0
-                    && *scale <= *precision as i8 =>
+                    && i16::from(*scale) <= i16::from(*precision) =>
             {
-                Ok(*scale as u32)
+                Ok(u32::try_from(*scale)
+                    .expect("validated Decimal128 scale is non-negative"))
             }
             data_type => {
                 exec_err!("{name} requires bounded Decimal128 input, got {data_type}")
