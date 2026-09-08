@@ -98,6 +98,9 @@ impl RuntimeValueSource {
 /// Plan-time type and lifetime metadata for one value slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RuntimeValueSpec {
+    /// PostgreSQL evaluation type (including a compact array-valued set), or a
+    /// narrower comparison-domain type after the normalizer has proved a
+    /// direct scalar constant is exactly bindable to it.
     pub value_type: ExprType,
     pub source_kind: RuntimeValueSource,
 }

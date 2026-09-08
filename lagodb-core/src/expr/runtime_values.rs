@@ -1,6 +1,6 @@
 //! Executor-owned evaluation state for plan-time runtime value expressions.
 
-use core::ops::Range;
+use core::{mem, ops::Range};
 
 use pgrx::pg_sys;
 
@@ -89,14 +89,47 @@ impl RuntimeValueState {
             .collect()
     }
 
-    /// Evaluate the complete layout once. Query S2 uses only rescan-stable
-    /// values, while relation scans call this after dynamic inputs are valid.
+    /// Evaluate statement-stable values and install typed NULL placeholders
+    /// for dynamic values. A nested-loop outer parameter is not valid during
+    /// `BeginCustomScan`; its placeholder is used only to compile and validate
+    /// the immutable query template's output schema. [`Self::rebind_dynamic`]
+    /// replaces every placeholder before the first run is opened.
     ///
     /// # Safety
     ///
     /// `econtext` must be live and valid for the expression states initialized
     /// by [`Self::initialize`], with every referenced parameter and tuple slot
-    /// populated for the initial evaluation.
+    /// populated for stable expressions. Dynamic expression inputs need not be
+    /// populated until the first execution call.
+    pub unsafe fn bind_initial_template(
+        &mut self,
+        econtext: *mut pg_sys::ExprContext,
+    ) {
+        self.values.clear();
+        for (index, &metadata) in self.layout.values().iter().enumerate() {
+            if metadata.source_kind.is_rescan_stable() {
+                self.values
+                    .push(unsafe { self.evaluate(index, metadata, econtext) });
+            } else {
+                self.values.push(unsafe {
+                    RuntimeValue::from_raw(
+                        pg_sys::Datum::from(0usize),
+                        true,
+                        metadata,
+                    )
+                });
+            }
+        }
+        self.pending.clone_from(&self.values);
+    }
+
+    /// Evaluate the complete layout when every dynamic input is already
+    /// available, as required by relation-scan filter startup.
+    ///
+    /// # Safety
+    ///
+    /// `econtext` must be live for all initialized expression states and have
+    /// every referenced parameter and tuple slot populated.
     pub unsafe fn bind_initial(&mut self, econtext: *mut pg_sys::ExprContext) {
         self.values.clear();
         for (index, &metadata) in self.layout.values().iter().enumerate() {
@@ -110,7 +143,7 @@ impl RuntimeValueState {
     ///
     /// # Safety
     ///
-    /// [`Self::bind_initial`] must have completed, and `econtext` must be live
+    /// [`Self::bind_initial_template`] must have completed, and `econtext` must be live
     /// and valid for the initialized expression states with every referenced
     /// parameter and tuple slot populated for this rescan.
     pub unsafe fn rebind_dynamic(&mut self, econtext: *mut pg_sys::ExprContext) {
@@ -118,7 +151,23 @@ impl RuntimeValueState {
             let metadata = self.layout.values()[index];
             self.pending[index] = unsafe { self.evaluate(index, metadata, econtext) };
         }
-        core::mem::swap(&mut self.values, &mut self.pending);
+        mem::swap(&mut self.values, &mut self.pending);
+    }
+
+    /// Atomically re-evaluate the complete layout for a query-plan rebuild.
+    /// PostgreSQL resets the expression context before `ReScanCustomScan`, so
+    /// even a statement-stable by-reference Datum must be refreshed before a
+    /// newly compiled physical plan reads it.
+    ///
+    /// # Safety
+    ///
+    /// [`Self::bind_initial_template`] must have completed and `econtext` must
+    /// have every referenced parameter and tuple slot populated.
+    pub unsafe fn rebind_complete(&mut self, econtext: *mut pg_sys::ExprContext) {
+        for (index, &metadata) in self.layout.values().iter().enumerate() {
+            self.pending[index] = unsafe { self.evaluate(index, metadata, econtext) };
+        }
+        mem::swap(&mut self.values, &mut self.pending);
     }
 
     unsafe fn evaluate(

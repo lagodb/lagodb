@@ -5,6 +5,7 @@ use core::ptr::NonNull;
 
 use pgrx::pg_sys;
 
+use crate::expr::PgIntegerWidening;
 use crate::expr::contract::{ParamKey, PgComparisonOp};
 
 #[derive(Clone, Copy)]
@@ -111,6 +112,7 @@ pg_node_view!(PgOpExpr, OpExpr, T_OpExpr);
 pg_node_view!(PgBoolExpr, BoolExpr, T_BoolExpr);
 pg_node_view!(PgNullTest, NullTest, T_NullTest);
 pg_node_view!(PgRelabelType, RelabelType, T_RelabelType);
+pg_node_view!(PgFuncExpr, FuncExpr, T_FuncExpr);
 
 impl PgVar<'_> {
     #[inline]
@@ -121,6 +123,11 @@ impl PgVar<'_> {
     #[inline]
     pub fn varattno(self) -> pg_sys::AttrNumber {
         unsafe { (*self.ptr.as_ptr()).varattno }
+    }
+
+    #[inline]
+    pub fn varlevelsup(self) -> pg_sys::Index {
+        unsafe { (*self.ptr.as_ptr()).varlevelsup }
     }
 
     #[inline]
@@ -226,6 +233,75 @@ impl<'a> PgOpExpr<'a> {
         Some((unsafe { PgExprRef::from_raw_opt(left) }?, unsafe {
             PgExprRef::from_raw_opt(right)
         }?))
+    }
+
+    pub fn builtin_starts_with_operands(
+        self,
+    ) -> Option<(PgExprRef<'a>, PgExprRef<'a>, pg_sys::Oid)> {
+        let node = unsafe { self.ptr.as_ref() };
+        if u32::from(node.opno) != pg_sys::TextPrefixOperator
+            || u32::from(node.opfuncid) != pg_sys::F_STARTS_WITH
+            || node.opresulttype != pg_sys::BOOLOID
+            || node.opcollid != pg_sys::Oid::INVALID
+        {
+            return None;
+        }
+        let (value, prefix) = self.binary_operands()?;
+        if value.type_oid() != pg_sys::TEXTOID || prefix.type_oid() != pg_sys::TEXTOID
+        {
+            return None;
+        }
+        Some((value, prefix, node.inputcollid))
+    }
+}
+
+impl<'a> PgFuncExpr<'a> {
+    pub fn builtin_starts_with_operands(
+        self,
+    ) -> Option<(PgExprRef<'a>, PgExprRef<'a>, pg_sys::Oid)> {
+        let node = unsafe { self.ptr.as_ref() };
+        if u32::from(node.funcid) != pg_sys::F_STARTS_WITH
+            || node.funcresulttype != pg_sys::BOOLOID
+            || node.funcretset
+            || node.funcvariadic
+            || node.funccollid != pg_sys::Oid::INVALID
+            || unsafe { pg_sys::list_length(node.args) } != 2
+        {
+            return None;
+        }
+        let value = unsafe { pg_sys::list_nth(node.args, 0) } as *mut pg_sys::Expr;
+        let prefix = unsafe { pg_sys::list_nth(node.args, 1) } as *mut pg_sys::Expr;
+        let value = unsafe { PgExprRef::from_raw_opt(value) }?;
+        let prefix = unsafe { PgExprRef::from_raw_opt(prefix) }?;
+        if value.type_oid() != pg_sys::TEXTOID || prefix.type_oid() != pg_sys::TEXTOID
+        {
+            return None;
+        }
+        Some((value, prefix, node.inputcollid))
+    }
+
+    /// Resolve one of PostgreSQL's three lossless integer widening casts and
+    /// return its direct Var input.
+    pub fn widened_integer_var(self) -> Option<PgVar<'a>> {
+        let node = unsafe { self.ptr.as_ref() };
+        if node.funcretset
+            || node.funcvariadic
+            || node.funccollid != pg_sys::Oid::INVALID
+            || node.inputcollid != pg_sys::Oid::INVALID
+            || unsafe { pg_sys::list_length(node.args) } != 1
+        {
+            return None;
+        }
+        let argument = unsafe { pg_sys::list_nth(node.args, 0) } as *mut pg_sys::Expr;
+        let argument =
+            unsafe { PgExprRef::from_raw_opt(argument) }?.without_relabels();
+        let var = PgVar::try_from_expr(argument)?;
+        PgIntegerWidening::for_function(
+            node.funcid,
+            var.vartype(),
+            node.funcresulttype,
+        )?;
+        Some(var)
     }
 }
 

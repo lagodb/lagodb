@@ -5,7 +5,9 @@ use thiserror::Error;
 
 use crate::expr::contract::PgComparisonOp;
 
-use super::view::{PgConst, PgExprRef, PgNullTest, PgOpExpr, PgParam, PgVar};
+use super::view::{
+    PgConst, PgExprRef, PgFuncExpr, PgNullTest, PgOpExpr, PgParam, PgVar,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum PgScalarExprRef<'a> {
@@ -19,6 +21,10 @@ pub enum PgScalarExprRef<'a> {
     },
     Param {
         node: PgParam<'a>,
+        expression: PgExprRef<'a>,
+    },
+    WidenedIntegerVar {
+        node: PgVar<'a>,
         expression: PgExprRef<'a>,
     },
 }
@@ -41,6 +47,16 @@ impl<'a> PgScalarExprRef<'a> {
                     .expect("NodeTag established a Param"),
                 expression: expr,
             }),
+            pg_sys::NodeTag::T_FuncExpr => {
+                let function = PgFuncExpr::try_from_expr(node)
+                    .expect("NodeTag established a FuncExpr");
+                Ok(Self::WidenedIntegerVar {
+                    node: function
+                        .widened_integer_var()
+                        .ok_or(PgStructuralError::UnsupportedScalar)?,
+                    expression: expr,
+                })
+            }
             _ => Err(PgStructuralError::UnsupportedScalar),
         }
     }
@@ -57,6 +73,11 @@ pub enum PgPredicateLeafRef<'a> {
         kind: PgNullTestKind,
         value: PgExprRef<'a>,
     },
+    StartsWith {
+        value: PgExprRef<'a>,
+        prefix: PgExprRef<'a>,
+        input_collation: pg_sys::Oid,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +93,15 @@ impl<'a> PgPredicateLeafRef<'a> {
             pg_sys::NodeTag::T_OpExpr => {
                 let op = PgOpExpr::try_from_expr(expr)
                     .expect("NodeTag established an OpExpr");
+                if let Some((value, prefix, input_collation)) =
+                    op.builtin_starts_with_operands()
+                {
+                    return Ok(Self::StartsWith {
+                        value,
+                        prefix,
+                        input_collation,
+                    });
+                }
                 let (left, right) = op
                     .binary_operands()
                     .ok_or(PgStructuralError::NonBinaryComparison)?;
@@ -97,6 +127,18 @@ impl<'a> PgPredicateLeafRef<'a> {
                 };
                 Ok(Self::NullTest { kind, value })
             }
+            pg_sys::NodeTag::T_FuncExpr => {
+                let function = PgFuncExpr::try_from_expr(expr)
+                    .expect("NodeTag established a FuncExpr");
+                let (value, prefix, input_collation) = function
+                    .builtin_starts_with_operands()
+                    .ok_or(PgStructuralError::UnsupportedScalarFunction)?;
+                Ok(Self::StartsWith {
+                    value,
+                    prefix,
+                    input_collation,
+                })
+            }
             tag => Err(PgStructuralError::UnsupportedNodeTag { tag }),
         }
     }
@@ -110,6 +152,8 @@ pub enum PgStructuralError {
     NonBinaryComparison,
     #[error("unsupported scalar operand")]
     UnsupportedScalar,
+    #[error("unsupported scalar function predicate")]
+    UnsupportedScalarFunction,
     #[error("row-valued null test is not supported")]
     RowNullTest,
     #[error("null test has a null child")]

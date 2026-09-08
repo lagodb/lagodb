@@ -2,7 +2,7 @@
 
 use pgrx::pg_sys;
 
-use crate::expr::{RuntimeValueId, RuntimeValueSpec};
+use crate::expr::{ExprType, RuntimeValueId, RuntimeValueSpec};
 
 /// PostgreSQL expression aligned with one fragment-local value slot.
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +24,12 @@ impl RuntimeValueExpr {
     #[inline]
     pub const fn metadata(self) -> RuntimeValueSpec {
         self.metadata
+    }
+
+    /// Record a planning-time proof that this expression can be compared
+    /// exactly in a narrower effective scalar domain.
+    pub(crate) fn specialize_value_type(&mut self, value_type: ExprType) {
+        self.metadata.value_type = value_type;
     }
 }
 
