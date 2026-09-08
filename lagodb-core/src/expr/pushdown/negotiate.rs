@@ -125,7 +125,7 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
                     );
                     return Ok(());
                 }
-                FilterPlan::Unsupported => {}
+                FilterPlan::Partial(_) | FilterPlan::Unsupported => {}
             }
         }
 
@@ -179,7 +179,9 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
                             },
                         );
                     }
-                    FilterPlan::Unsupported => out.push_residual(original),
+                    FilterPlan::Partial(_) | FilterPlan::Unsupported => {
+                        out.push_residual(original)
+                    }
                 }
             }
             pg_sys::BoolExprType::NOT_EXPR => out.push_residual(original),
@@ -196,9 +198,9 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
         let mut normalize = |expression| unsafe { normalizer.normalize(expression) };
         let planner = &mut *self.planner;
         let mut accepts = |fragment: &_| {
-            planner
-                .try_plan_filter(fragment)
-                .map(|plan| !matches!(plan, FilterPlan::Unsupported))
+            planner.try_plan_filter(fragment).map(|plan| {
+                !matches!(plan, FilterPlan::Partial(_) | FilterPlan::Unsupported)
+            })
         };
         unsafe { conservative_candidate(expr, &mut normalize, &mut accepts) }
     }

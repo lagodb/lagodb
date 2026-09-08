@@ -10,6 +10,7 @@ mod normalize;
 mod plan_set;
 mod runtime;
 mod scope;
+mod tree;
 
 pub(crate) use codec::{EncodedFilterData, FilterDataCodec, FilterDataError};
 pub(crate) use contract::{BoundFilter, EffectiveFilterContract};
@@ -29,3 +30,4 @@ pub(crate) use plan_set::{
 };
 pub(crate) use runtime::{RelationFilterBinding, RelationFilterBindingError};
 pub use scope::{QueryExpressionScope, SourceEntry};
+pub use tree::{PredicatePlan, PredicatePlanner};

@@ -21,24 +21,68 @@ impl ScalarExpr {
     }
 }
 
-/// Complete provider-neutral predicate tree.
+/// Complete provider-neutral predicate tree. PostgreSQL planning and concrete
+/// query execution use different scalar/operator specializations of this one
+/// logical structure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PredicateExpr {
+pub enum PredicateExpr<S = ScalarExpr, O = PgComparisonOp> {
+    AlwaysTrue,
+    AlwaysFalse,
+    /// TRUE for every non-NULL input and UNKNOWN for NULL.
+    StrictTrue(S),
+    /// FALSE for every non-NULL input and UNKNOWN for NULL.
+    StrictFalse(S),
     Comparison {
-        operator: PgComparisonOp,
-        left: ScalarExpr,
-        right: ScalarExpr,
+        operator: O,
+        left: S,
+        right: S,
     },
-    IsNull(ScalarExpr),
-    IsNotNull(ScalarExpr),
-    And(Box<[PredicateExpr]>),
-    Or(Box<[PredicateExpr]>),
-    Not(Box<PredicateExpr>),
+    IsNull(S),
+    IsNotNull(S),
+    IsNan(S),
+    IsNotNan(S),
+    StartsWith {
+        value: S,
+        prefix: S,
+    },
+    And(Box<[PredicateExpr<S, O>]>),
+    Or(Box<[PredicateExpr<S, O>]>),
+    Not(Box<PredicateExpr<S, O>>),
 }
 
-impl PredicateExpr {
+impl<S, O> PredicateExpr<S, O> {
+    pub fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::AlwaysFalse, _) | (_, Self::AlwaysFalse) => Self::AlwaysFalse,
+            (Self::AlwaysTrue, predicate) | (predicate, Self::AlwaysTrue) => {
+                predicate
+            }
+            (left, right) => Self::And(vec![left, right].into_boxed_slice()),
+        }
+    }
+
+    pub fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::AlwaysTrue, _) | (_, Self::AlwaysTrue) => Self::AlwaysTrue,
+            (Self::AlwaysFalse, predicate) | (predicate, Self::AlwaysFalse) => {
+                predicate
+            }
+            (left, right) => Self::Or(vec![left, right].into_boxed_slice()),
+        }
+    }
+}
+
+impl PredicateExpr<ScalarExpr, PgComparisonOp> {
     pub fn rebase_runtime_values(&self, offset: usize) -> Self {
         match self {
+            Self::AlwaysTrue => Self::AlwaysTrue,
+            Self::AlwaysFalse => Self::AlwaysFalse,
+            Self::StrictTrue(value) => {
+                Self::StrictTrue(value.rebase_runtime_values(offset))
+            }
+            Self::StrictFalse(value) => {
+                Self::StrictFalse(value.rebase_runtime_values(offset))
+            }
             Self::Comparison {
                 operator,
                 left,
@@ -52,6 +96,14 @@ impl PredicateExpr {
             Self::IsNotNull(value) => {
                 Self::IsNotNull(value.rebase_runtime_values(offset))
             }
+            Self::IsNan(value) => Self::IsNan(value.rebase_runtime_values(offset)),
+            Self::IsNotNan(value) => {
+                Self::IsNotNan(value.rebase_runtime_values(offset))
+            }
+            Self::StartsWith { value, prefix } => Self::StartsWith {
+                value: value.rebase_runtime_values(offset),
+                prefix: prefix.rebase_runtime_values(offset),
+            },
             Self::And(children) => Self::And(
                 children
                     .iter()

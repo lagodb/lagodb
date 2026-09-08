@@ -19,6 +19,13 @@ const PREDICATE_IS_NOT_NULL: i32 = 3;
 const PREDICATE_AND: i32 = 4;
 const PREDICATE_OR: i32 = 5;
 const PREDICATE_NOT: i32 = 6;
+const PREDICATE_ALWAYS_TRUE: i32 = 7;
+const PREDICATE_ALWAYS_FALSE: i32 = 8;
+const PREDICATE_IS_NAN: i32 = 10;
+const PREDICATE_IS_NOT_NAN: i32 = 11;
+const PREDICATE_STARTS_WITH: i32 = 12;
+const PREDICATE_STRICT_FALSE: i32 = 13;
+const PREDICATE_STRICT_TRUE: i32 = 14;
 
 impl PredicateFragment {
     pub fn encode_plan_data(
@@ -116,6 +123,22 @@ impl ExpressionPlanDataDecode for ScalarExpr {
 impl ExpressionPlanDataEncode for PredicateExpr {
     fn encode_plan_data(&self, writer: &mut PlanDataWriter) {
         match self {
+            Self::AlwaysTrue => {
+                writer.append_i32(PREDICATE_ALWAYS_TRUE);
+            }
+            Self::AlwaysFalse => {
+                writer.append_i32(PREDICATE_ALWAYS_FALSE);
+            }
+            Self::StrictTrue(value) => {
+                writer
+                    .append_i32(PREDICATE_STRICT_TRUE)
+                    .append_nested(|record| value.encode_plan_data(record));
+            }
+            Self::StrictFalse(value) => {
+                writer
+                    .append_i32(PREDICATE_STRICT_FALSE)
+                    .append_nested(|record| value.encode_plan_data(record));
+            }
             Self::Comparison {
                 operator,
                 left,
@@ -135,6 +158,22 @@ impl ExpressionPlanDataEncode for PredicateExpr {
                 writer
                     .append_i32(PREDICATE_IS_NOT_NULL)
                     .append_nested(|record| value.encode_plan_data(record));
+            }
+            Self::IsNan(value) => {
+                writer
+                    .append_i32(PREDICATE_IS_NAN)
+                    .append_nested(|record| value.encode_plan_data(record));
+            }
+            Self::IsNotNan(value) => {
+                writer
+                    .append_i32(PREDICATE_IS_NOT_NAN)
+                    .append_nested(|record| value.encode_plan_data(record));
+            }
+            Self::StartsWith { value, prefix } => {
+                writer
+                    .append_i32(PREDICATE_STARTS_WITH)
+                    .append_nested(|record| value.encode_plan_data(record))
+                    .append_nested(|record| prefix.encode_plan_data(record));
             }
             Self::And(children) | Self::Or(children) => {
                 writer
@@ -166,6 +205,18 @@ impl ExpressionPlanDataDecode for PredicateExpr {
     ) -> Result<Self, ExpressionCodecError> {
         let tag = reader.read_i32()?;
         match tag {
+            PREDICATE_ALWAYS_TRUE => Ok(Self::AlwaysTrue),
+            PREDICATE_ALWAYS_FALSE => Ok(Self::AlwaysFalse),
+            PREDICATE_STRICT_TRUE => {
+                Ok(Self::StrictTrue(reader.read_nested(|record| {
+                    ScalarExpr::decode_plan_data(record, runtime_value_count)
+                })?))
+            }
+            PREDICATE_STRICT_FALSE => {
+                Ok(Self::StrictFalse(reader.read_nested(|record| {
+                    ScalarExpr::decode_plan_data(record, runtime_value_count)
+                })?))
+            }
             PREDICATE_COMPARISON => Ok(Self::Comparison {
                 operator: PgComparisonOp::decode_plan_data(reader, ())?,
                 left: reader.read_nested(|record| {
@@ -183,6 +234,22 @@ impl ExpressionPlanDataDecode for PredicateExpr {
                     ScalarExpr::decode_plan_data(record, runtime_value_count)
                 })?))
             }
+            PREDICATE_IS_NAN => Ok(Self::IsNan(reader.read_nested(|record| {
+                ScalarExpr::decode_plan_data(record, runtime_value_count)
+            })?)),
+            PREDICATE_IS_NOT_NAN => {
+                Ok(Self::IsNotNan(reader.read_nested(|record| {
+                    ScalarExpr::decode_plan_data(record, runtime_value_count)
+                })?))
+            }
+            PREDICATE_STARTS_WITH => Ok(Self::StartsWith {
+                value: reader.read_nested(|record| {
+                    ScalarExpr::decode_plan_data(record, runtime_value_count)
+                })?,
+                prefix: reader.read_nested(|record| {
+                    ScalarExpr::decode_plan_data(record, runtime_value_count)
+                })?,
+            }),
             PREDICATE_AND | PREDICATE_OR => {
                 let count = reader.read_count()?;
                 let mut children = Vec::with_capacity(count);

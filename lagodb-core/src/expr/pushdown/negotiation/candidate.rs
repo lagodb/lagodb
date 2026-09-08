@@ -6,6 +6,7 @@ use super::super::{
     FilterPlan, FilterPushdownPlanner, NormalizedPredicate, PredicateFragment,
     QueryExpressionNormalizer,
 };
+use crate::expr::PushdownCosting;
 use crate::expr::inspect::subtree_is_unsafe_to_push;
 use crate::expr::pg::{PgBoolExpr, PgExprRef};
 
@@ -15,8 +16,8 @@ pub(crate) struct ConservativeCandidate {
 }
 
 /// Build one safe candidate. `accepts` is the provider capability probe used
-/// by relation negotiation; query planning passes all structurally normalized
-/// leaves and lets the table-scan provider negotiate them independently.
+/// by relation negotiation; query planning additionally rejects lifecycle-
+/// unstable leaves before the table-scan provider negotiates them.
 pub(crate) unsafe fn conservative_candidate<E>(
     expression: *mut pg_sys::Expr,
     normalize: &mut impl FnMut(*mut pg_sys::Expr) -> Option<NormalizedPredicate>,
@@ -95,16 +96,18 @@ unsafe fn candidate_from_boolean<E>(
 pub struct QueryPruningPlan<P> {
     normalized: NormalizedPredicate,
     planned: P,
+    costing: PushdownCosting,
 }
 
 impl<P> QueryPruningPlan<P> {
-    pub fn into_parts(self) -> (NormalizedPredicate, P) {
-        (self.normalized, self.planned)
+    pub fn into_parts(self) -> (NormalizedPredicate, P, PushdownCosting) {
+        (self.normalized, self.planned, self.costing)
     }
 }
 
 /// Query-side façade applying the same provider-aware AND extraction and OR
-/// widening used by relation scans. Query execution always retains the exact
+/// widening used by relation scans. Only statement-stable fragments can enter
+/// the bound-scan task cache. Query execution always retains the exact
 /// predicate, so every accepted result is conservative pruning regardless of
 /// the provider's row-filter contract.
 pub struct QueryPruningPlanner<'a> {
@@ -114,6 +117,13 @@ pub struct QueryPruningPlanner<'a> {
 impl<'a> QueryPruningPlanner<'a> {
     pub fn new(normalizer: &'a QueryExpressionNormalizer) -> Self {
         Self { normalizer }
+    }
+
+    fn is_rescan_stable(fragment: &PredicateFragment) -> bool {
+        fragment
+            .values()
+            .iter()
+            .all(|value| value.source_kind.is_rescan_stable())
     }
 
     /// # Safety
@@ -133,15 +143,17 @@ impl<'a> QueryPruningPlanner<'a> {
         }
         if let Some(normalized) =
             unsafe { self.normalizer.normalize_predicate(expression) }
+            && Self::is_rescan_stable(normalized.fragment())
         {
             match planner.try_plan_filter(normalized.fragment())? {
                 FilterPlan::Exact(planned) | FilterPlan::Conservative(planned) => {
                     return Ok(Some(QueryPruningPlan {
                         normalized,
                         planned: planned.predicate,
+                        costing: planned.costing,
                     }));
                 }
-                FilterPlan::Unsupported => {}
+                FilterPlan::Partial(_) | FilterPlan::Unsupported => {}
             }
         }
 
@@ -150,58 +162,92 @@ impl<'a> QueryPruningPlanner<'a> {
                 self.normalizer.normalize_predicate(node.cast())
             };
             let mut accepts = |fragment: &PredicateFragment| {
-                planner
-                    .try_plan_filter(fragment)
-                    .map(|plan| !matches!(plan, FilterPlan::Unsupported))
-            };
-            if is_implicit_and {
-                let list = expression.cast::<pg_sys::List>();
-                let count = unsafe { pg_sys::list_length(list) };
-                let mut candidates = Vec::new();
-                for index in 0..count {
-                    let child = unsafe { pg_sys::list_nth(list, index) }.cast();
-                    if unsafe { subtree_is_unsafe_to_push(child) } {
-                        continue;
-                    }
-                    if let Some(candidate) = unsafe {
-                        conservative_candidate(child, &mut normalize, &mut accepts)
-                    }? {
-                        candidates.push(candidate);
-                    }
+                if !Self::is_rescan_stable(fragment) {
+                    return Ok(false);
                 }
-                let is_widened = candidates.len() != count as usize
-                    || candidates.iter().any(|candidate| candidate.is_widened);
-                (unsafe {
-                    NormalizedPredicate::combine_and(
-                        candidates
-                            .into_iter()
-                            .map(|candidate| candidate.filter)
-                            .collect(),
-                    )
+                planner.try_plan_filter(fragment).map(|plan| {
+                    !matches!(plan, FilterPlan::Partial(_) | FilterPlan::Unsupported)
                 })
-                .map(|filter| ConservativeCandidate { filter, is_widened })
-            } else {
-                let Some(boolean) = (unsafe { bool_expr(expression.cast()) }) else {
-                    return Ok(None);
-                };
-                unsafe {
-                    candidate_from_boolean(boolean, &mut normalize, &mut accepts)
-                }?
+            };
+            let source_conjuncts = unsafe { Self::source_conjuncts(expression) };
+            let source_conjunct_count = source_conjuncts.len();
+            let mut candidates = Vec::new();
+            for child in source_conjuncts {
+                if unsafe { subtree_is_unsafe_to_push(child) } {
+                    continue;
+                }
+                if let Some(candidate) = unsafe {
+                    conservative_candidate(child, &mut normalize, &mut accepts)
+                }? {
+                    candidates.push(candidate);
+                }
             }
+            let is_widened = candidates.len() != source_conjunct_count
+                || candidates.iter().any(|candidate| candidate.is_widened);
+            (unsafe {
+                NormalizedPredicate::combine_and(
+                    candidates
+                        .into_iter()
+                        .map(|candidate| candidate.filter)
+                        .collect(),
+                )
+            })
+            .map(|filter| ConservativeCandidate { filter, is_widened })
         };
         let Some(candidate) = candidate else {
             return Ok(None);
         };
-        let planned = match planner.try_plan_filter(candidate.filter.fragment())? {
-            FilterPlan::Exact(planned) | FilterPlan::Conservative(planned) => {
-                planned.predicate
-            }
-            FilterPlan::Unsupported => return Ok(None),
-        };
+        let (planned, costing) =
+            match planner.try_plan_filter(candidate.filter.fragment())? {
+                FilterPlan::Exact(planned) | FilterPlan::Conservative(planned) => {
+                    (planned.predicate, planned.costing)
+                }
+                FilterPlan::Partial(_) | FilterPlan::Unsupported => return Ok(None),
+            };
         Ok(Some(QueryPruningPlan {
             normalized: candidate.filter,
             planned,
+            costing,
         }))
+    }
+
+    /// Flatten the same top-level conjunction that DataFusion presents to
+    /// `supports_filters_pushdown`. PostgreSQL normally supplies an implicit-AND
+    /// restriction list, while a direct Boolean AND can occur in nested query
+    /// shapes.
+    unsafe fn source_conjuncts(
+        expression: *mut pg_sys::Node,
+    ) -> Vec<*mut pg_sys::Expr> {
+        if unsafe { (*expression).type_ } == pg_sys::NodeTag::T_List {
+            let list = expression.cast::<pg_sys::List>();
+            let count = unsafe { pg_sys::list_length(list) };
+            let mut conjuncts = Vec::with_capacity(count as usize);
+            for index in 0..count {
+                let child = unsafe { pg_sys::list_nth(list, index) }.cast();
+                unsafe { Self::append_source_conjuncts(child, &mut conjuncts) };
+            }
+            return conjuncts;
+        }
+        let mut conjuncts = Vec::new();
+        unsafe { Self::append_source_conjuncts(expression.cast(), &mut conjuncts) };
+        conjuncts
+    }
+
+    unsafe fn append_source_conjuncts(
+        expression: *mut pg_sys::Expr,
+        conjuncts: &mut Vec<*mut pg_sys::Expr>,
+    ) {
+        let Some(boolean) = (unsafe { bool_expr(expression) }) else {
+            conjuncts.push(expression);
+            return;
+        };
+        if boolean.boolop() != pg_sys::BoolExprType::AND_EXPR {
+            conjuncts.push(expression);
+            return;
+        }
+        for child in bool_children(boolean) {
+            unsafe { Self::append_source_conjuncts(child, conjuncts) };
+        }
     }
 }
 

@@ -61,6 +61,10 @@ impl FilterPlanningContext {
 /// Provider result for one complete fragment.
 pub enum FilterPlan<P> {
     Unsupported,
+    /// The provider safely widened a Boolean tree by omitting children. Core
+    /// negotiation must decompose the source tree before accepting it so only
+    /// the artifact's actual runtime-value dependencies survive.
+    Partial(PlannedFilter<P>),
     Exact(PlannedFilter<P>),
     Conservative(PlannedFilter<P>),
 }
@@ -72,6 +76,10 @@ impl<P> FilterPlan<P> {
 
     pub fn conservative(predicate: P, costing: PushdownCosting) -> Self {
         Self::Conservative(PlannedFilter { predicate, costing })
+    }
+
+    pub fn partial(predicate: P, costing: PushdownCosting) -> Self {
+        Self::Partial(PlannedFilter { predicate, costing })
     }
 }
 

@@ -1,5 +1,7 @@
 //! PostgreSQL expression normalization into the shared scalar/predicate IR.
 
+mod predicate;
+
 use core::ffi::c_void;
 use core::ptr;
 
@@ -12,6 +14,7 @@ use crate::expr::{
     ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSource,
     RuntimeValueSpec,
 };
+use crate::tuple::Decimal128Semantics;
 
 use super::scope::{RelationExpressionScope, VarResolution};
 use super::{PredicateExpr, PredicateFragment, QueryExpressionScope, ScalarExpr};
@@ -170,10 +173,26 @@ impl<'a> ExpressionNormalizer<'a> {
 
         match PgPredicateLeafRef::parse(expr).ok()? {
             PgPredicateLeafRef::Comparison { op, left, right } => {
+                if op.opno == pg_sys::Oid::from(pg_sys::OID_TEXT_LIKE_OP) {
+                    return unsafe {
+                        self.normalize_like_prefix(op, left, right, bindings)
+                    };
+                }
+                if let Some(predicate) = unsafe {
+                    self.normalize_nan_comparison(op, left, right, bindings)
+                } {
+                    return Some(predicate);
+                }
+                let left = self.normalize_scalar(left, bindings)?;
+                let right = self.normalize_scalar(right, bindings)?;
+                unsafe {
+                    Self::specialize_decimal_constant(&left, &right, bindings);
+                    Self::specialize_decimal_constant(&right, &left, bindings);
+                }
                 Some(PredicateExpr::Comparison {
                     operator: op,
-                    left: self.normalize_scalar(left, bindings)?,
-                    right: self.normalize_scalar(right, bindings)?,
+                    left,
+                    right,
                 })
             }
             PgPredicateLeafRef::NullTest { kind, value } => {
@@ -185,6 +204,13 @@ impl<'a> ExpressionNormalizer<'a> {
                     }
                 }
             }
+            PgPredicateLeafRef::StartsWith {
+                value,
+                prefix,
+                input_collation,
+            } => unsafe {
+                self.normalize_starts_with(value, prefix, input_collation, bindings)
+            },
         }
     }
 
@@ -196,6 +222,10 @@ impl<'a> ExpressionNormalizer<'a> {
         let scalar = PgScalarExprRef::parse(expression).ok()?;
         match scalar {
             PgScalarExprRef::Var {
+                node: var,
+                expression,
+            }
+            | PgScalarExprRef::WidenedIntegerVar {
                 node: var,
                 expression,
             } if var.varattno() > 0 => match &self.scope {
@@ -237,7 +267,8 @@ impl<'a> ExpressionNormalizer<'a> {
                     }))
                 }
             },
-            PgScalarExprRef::Var { .. } => None,
+            PgScalarExprRef::Var { .. }
+            | PgScalarExprRef::WidenedIntegerVar { .. } => None,
             PgScalarExprRef::Const { expression, .. } => Some(Self::push_binding(
                 bindings,
                 expression.as_ptr(),
@@ -271,6 +302,58 @@ impl<'a> ExpressionNormalizer<'a> {
                 ))
             }
         }
+    }
+
+    /// If a direct unbounded NUMERIC Const has a total comparison against the
+    /// storage column's Decimal128 shape, retain that proof in the value slot.
+    /// Provider planning can then stay datum-free while its Exact binder remains
+    /// total for every admitted runtime value.
+    ///
+    /// # Safety
+    ///
+    /// Constant expressions and their pass-by-reference datums must remain
+    /// live in the PostgreSQL planner context for this call.
+    unsafe fn specialize_decimal_constant(
+        column: &ScalarExpr,
+        value: &ScalarExpr,
+        bindings: &mut [RuntimeValueExpr],
+    ) {
+        let (ScalarExpr::Column(column), ScalarExpr::Value(value)) = (column, value)
+        else {
+            return;
+        };
+        let binding = &mut bindings[value.index()];
+        let metadata = binding.metadata();
+        if metadata.source_kind != RuntimeValueSource::Constant
+            || metadata.value_type.type_oid != pg_sys::NUMERICOID
+            || metadata.value_type.typmod != -1
+            || metadata.value_type.collation != pg_sys::InvalidOid
+        {
+            return;
+        }
+        let Some(declared) = Decimal128Semantics::for_type(column.declared_type)
+        else {
+            return;
+        };
+        if Decimal128Semantics::for_type(column.value_type) != Some(declared) {
+            return;
+        }
+        let expression = unsafe { PgExprRef::from_raw(binding.expr()) };
+        let Ok(PgScalarExprRef::Const { node, .. }) =
+            PgScalarExprRef::parse(expression)
+        else {
+            return;
+        };
+        let (type_oid, collation, datum, is_null) = node.parts();
+        if type_oid != pg_sys::NUMERICOID
+            || collation != pg_sys::InvalidOid
+            || (!is_null
+                && unsafe { declared.codec().encode_comparison_datum(datum) }
+                    .is_err())
+        {
+            return;
+        }
+        binding.specialize_value_type(declared.value_type());
     }
 
     fn type_metadata(expression: PgExprRef<'_>) -> ExprType {
