@@ -2,11 +2,10 @@
 
 use lagodb_core::expr::ExprType;
 use lagodb_core::query_contract::OutputId;
-use lagodb_core::tuple::numeric_precision_scale;
 use pgrx::pg_sys;
 
-use super::ExecutionExpr;
-use super::ir::{QueryNode, QueryPlanError};
+use super::ir::{QueryNode, QueryPlanError, RowEstimate};
+use super::{Decimal128Semantics, ExecutionExpr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DistinctExpr {
@@ -38,6 +37,11 @@ impl DistinctExpr {
     }
 
     fn supports_type(value_type: ExprType) -> bool {
+        // Query DISTINCT deliberately inherits DataFusion's native grouping
+        // keys. Float keys use bit equality, so -0/+0 and distinct NaN payloads
+        // do not follow PostgreSQL equality. Text-family keys use Arrow byte
+        // equality; nondeterministic collations are rejected below, but this
+        // gate does not provide locale-aware equality normalization.
         match value_type.type_oid {
             pg_sys::BOOLOID
             | pg_sys::INT2OID
@@ -62,16 +66,7 @@ impl DistinctExpr {
                         pg_sys::get_collation_isdeterministic(value_type.collation)
                     }
             }
-            pg_sys::NUMERICOID => {
-                value_type.collation == pg_sys::InvalidOid
-                    && numeric_precision_scale(value_type.typmod).is_some_and(
-                        |typmod| {
-                            (1..=38).contains(&typmod.precision)
-                                && typmod.scale >= 0
-                                && typmod.scale <= typmod.precision as i32
-                        },
-                    )
-            }
+            pg_sys::NUMERICOID => Decimal128Semantics::for_type(value_type).is_some(),
             _ => false,
         }
     }
@@ -96,12 +91,14 @@ impl DistinctExpr {
 pub struct DistinctNode {
     input: Box<QueryNode>,
     keys: Box<[DistinctExpr]>,
+    estimated_rows: RowEstimate,
 }
 
 impl DistinctNode {
     pub fn new(
         input: QueryNode,
         keys: Box<[DistinctExpr]>,
+        estimated_rows: f64,
     ) -> Result<Self, QueryPlanError> {
         if keys.is_empty() {
             return Err(QueryPlanError::EmptyDistinct);
@@ -109,6 +106,7 @@ impl DistinctNode {
         Ok(Self {
             input: Box::new(input),
             keys,
+            estimated_rows: RowEstimate::try_new(estimated_rows)?,
         })
     }
 
@@ -120,5 +118,10 @@ impl DistinctNode {
     #[inline]
     pub fn keys(&self) -> &[DistinctExpr] {
         &self.keys
+    }
+
+    #[inline]
+    pub const fn estimated_rows(&self) -> f64 {
+        self.estimated_rows.get()
     }
 }

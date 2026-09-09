@@ -7,7 +7,7 @@ use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
 use super::ExecutionExpr;
-use super::ir::{QueryNode, QueryPlanError};
+use super::ir::{QueryNode, QueryPlanError, RowEstimate};
 use super::semantics::ScalarSemantics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -228,6 +228,21 @@ impl AggCall {
         self.result_type
     }
 
+    /// Physical type emitted by DataFusion before the PostgreSQL output codec.
+    /// Decimal MIN/MAX preserve their input Decimal128 metadata even though
+    /// PostgreSQL's Aggref result typmod is -1.
+    pub fn execution_result_type(&self) -> ExprType {
+        if matches!(self.kind, AggregateKind::Min | AggregateKind::Max)
+            && self.result_type.type_oid == pg_sys::NUMERICOID
+        {
+            return self
+                .argument()
+                .and_then(ExecutionExpr::result_type_hint)
+                .unwrap_or(self.result_type);
+        }
+        self.result_type
+    }
+
     #[inline]
     pub const fn output(&self) -> OutputId {
         self.output
@@ -245,16 +260,15 @@ impl AggCall {
     /// result is NUMERIC. SUM(int8) is evaluated as Int64 and integer AVG as
     /// Float64, inheriting DataFusion's wrapping/rounding behavior instead of
     /// PostgreSQL's arbitrary-precision transition semantics. NUMERIC-input
-    /// SUM/AVG keep LagoDB's exact Binary result, while Decimal MIN/MAX retain
-    /// Decimal128; neither physical representation has a HAVING comparison
-    /// implementation yet.
+    /// SUM/AVG keep LagoDB's exact Binary result and remain unavailable to
+    /// HAVING; Decimal MIN/MAX retain their input Decimal128 metadata and use
+    /// the native exact comparison path.
     #[inline]
     pub const fn supports_having_result(&self) -> bool {
         !matches!(
             self.kind,
             AggregateKind::NumericSum | AggregateKind::NumericAverage
-        ) && !(matches!(self.kind, AggregateKind::Min | AggregateKind::Max)
-            && matches!(self.result_type.type_oid, pg_sys::NUMERICOID))
+        )
     }
 }
 
@@ -275,8 +289,7 @@ impl GroupExpr {
             .result_type_hint()
             .ok_or(QueryPlanError::UnsupportedGroupKey)?;
         if expression_type != result_type
-            || !matches!(result_type.type_oid, pg_sys::INT4OID | pg_sys::INT8OID)
-            || !ScalarSemantics::Integer.supports_type(result_type)
+            || !ScalarSemantics::Exact.supports_hash_group_key(result_type)
         {
             return Err(QueryPlanError::UnsupportedGroupKey);
         }
@@ -308,6 +321,7 @@ pub struct AggregateNode {
     input: Box<QueryNode>,
     groups: Box<[GroupExpr]>,
     aggregates: Box<[AggCall]>,
+    estimated_rows: RowEstimate,
 }
 
 impl AggregateNode {
@@ -315,6 +329,7 @@ impl AggregateNode {
         input: QueryNode,
         groups: Box<[GroupExpr]>,
         aggregates: Box<[AggCall]>,
+        estimated_rows: f64,
     ) -> Result<Self, QueryPlanError> {
         if groups.is_empty() && aggregates.is_empty() {
             return Err(QueryPlanError::EmptyAggregate);
@@ -323,6 +338,7 @@ impl AggregateNode {
             input: Box::new(input),
             groups,
             aggregates,
+            estimated_rows: RowEstimate::try_new(estimated_rows)?,
         })
     }
 
@@ -339,5 +355,10 @@ impl AggregateNode {
     #[inline]
     pub fn aggregates(&self) -> &[AggCall] {
         &self.aggregates
+    }
+
+    #[inline]
+    pub const fn estimated_rows(&self) -> f64 {
+        self.estimated_rows.get()
     }
 }
