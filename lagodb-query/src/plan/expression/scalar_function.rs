@@ -1,5 +1,7 @@
 //! Native PostgreSQL-to-DataFusion scalar function identities.
 
+use std::fmt;
+
 use lagodb_core::expr::ExprType;
 use pgrx::pg_sys;
 
@@ -145,5 +147,26 @@ impl ScalarFunctionKind {
     fn is_deterministic_collation(collation: pg_sys::Oid) -> bool {
         collation != pg_sys::InvalidOid
             && unsafe { pg_sys::get_collation_isdeterministic(collation) }
+    }
+}
+
+impl fmt::Display for ScalarFunctionKind {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output.write_str(match self {
+            Self::Ascii => "ascii",
+            Self::Repeat => "repeat",
+            Self::StartsWith => "starts_with",
+            Self::Replace => "replace",
+            Self::CharacterLength => "character_length",
+            Self::Substring => "substring",
+            Self::Reverse => "reverse",
+            Self::Abs => "abs",
+            Self::Ceil => "ceil",
+            Self::Floor => "floor",
+            Self::Greatest => "greatest",
+            Self::Least => "least",
+            Self::Coalesce => "coalesce",
+            Self::NullIf => "nullif",
+        })
     }
 }

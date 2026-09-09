@@ -1,5 +1,7 @@
 //! Exhaustive identities for native expression shapes.
 
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BooleanTestKind {
     IsTrue,
@@ -24,6 +26,19 @@ impl BooleanTestKind {
             5 => Self::IsUnknown,
             6 => Self::IsNotUnknown,
             _ => return None,
+        })
+    }
+}
+
+impl fmt::Display for BooleanTestKind {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output.write_str(match self {
+            Self::IsTrue => "TRUE",
+            Self::IsNotTrue => "NOT TRUE",
+            Self::IsFalse => "FALSE",
+            Self::IsNotFalse => "NOT FALSE",
+            Self::IsUnknown => "UNKNOWN",
+            Self::IsNotUnknown => "NOT UNKNOWN",
         })
     }
 }

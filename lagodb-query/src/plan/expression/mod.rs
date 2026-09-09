@@ -24,6 +24,8 @@ use lagodb_core::expr::{ColumnRef, ExprType, PgComparisonOp, RuntimeValueId};
 use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
+use super::semantics::Decimal128Semantics;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseWhen {
     when: ExecutionExpr,
@@ -46,8 +48,16 @@ impl CaseWhen {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionExpr {
+    /// TRUE for non-NULL input and UNKNOWN for NULL input.
+    StrictTrue(Box<ExecutionExpr>),
+    /// FALSE for non-NULL input and UNKNOWN for NULL input.
+    StrictFalse(Box<ExecutionExpr>),
     Column(ColumnRef),
     Value(RuntimeValueId),
+    DecimalValue {
+        value: RuntimeValueId,
+        semantics: Decimal128Semantics,
+    },
     Output(OutputId),
     Comparison {
         operator: PgComparisonOp,
@@ -56,6 +66,8 @@ pub enum ExecutionExpr {
     },
     IsNull(Box<ExecutionExpr>),
     IsNotNull(Box<ExecutionExpr>),
+    IsNan(Box<ExecutionExpr>),
+    IsNotNan(Box<ExecutionExpr>),
     BooleanTest {
         kind: BooleanTestKind,
         value: Box<ExecutionExpr>,
@@ -64,6 +76,10 @@ pub enum ExecutionExpr {
     Or(Box<[ExecutionExpr]>),
     Not(Box<ExecutionExpr>),
     Relabel {
+        value: Box<ExecutionExpr>,
+        result_type: ExprType,
+    },
+    WidenInteger {
         value: Box<ExecutionExpr>,
         result_type: ExprType,
     },
@@ -87,12 +103,87 @@ pub enum ExecutionExpr {
 }
 
 impl ExecutionExpr {
+    /// Fixed Decimal128 representation carried directly by this expression.
+    /// Output references require plan-node facts and are resolved by validation.
+    pub fn decimal128_semantics(&self) -> Option<Decimal128Semantics> {
+        match self {
+            Self::Column(column) => Decimal128Semantics::for_type(column.value_type),
+            Self::DecimalValue { semantics, .. } => Some(*semantics),
+            Self::Relabel { value, result_type } => {
+                let result = Decimal128Semantics::for_type(*result_type)?;
+                (value.decimal128_semantics() == Some(result)).then_some(result)
+            }
+            _ => None,
+        }
+    }
+
+    /// PostgreSQL-style per-tuple operator units used by the central query
+    /// cost estimator. Leaf references are free; calls, comparisons, tests,
+    /// and IN-list comparisons each contribute one operator unit.
+    pub(crate) fn cost_units(&self) -> usize {
+        match self {
+            Self::Column(_)
+            | Self::Value(_)
+            | Self::DecimalValue { .. }
+            | Self::Output(_) => 0,
+            Self::Comparison { left, right, .. } => {
+                1 + left.cost_units() + right.cost_units()
+            }
+            Self::IsNull(value)
+            | Self::IsNotNull(value)
+            | Self::IsNan(value)
+            | Self::IsNotNan(value)
+            | Self::StrictTrue(value)
+            | Self::StrictFalse(value)
+            | Self::Not(value)
+            | Self::BooleanTest { value, .. } => 1 + value.cost_units(),
+            Self::Relabel { value, .. } => value.cost_units(),
+            Self::WidenInteger { value, .. } => 1 + value.cost_units(),
+            Self::And(children) | Self::Or(children) => {
+                children.iter().map(Self::cost_units).sum()
+            }
+            Self::Case {
+                when_then,
+                else_expr,
+                ..
+            } => {
+                when_then
+                    .iter()
+                    .map(|branch| {
+                        branch.when().cost_units() + branch.then().cost_units()
+                    })
+                    .sum::<usize>()
+                    + else_expr.as_deref().map(Self::cost_units).unwrap_or(0)
+            }
+            Self::InList { value, list, .. } => {
+                value.cost_units()
+                    + list.iter().map(Self::cost_units).sum::<usize>()
+                    + list.len()
+            }
+            Self::Function { arguments, .. } => {
+                1 + arguments.iter().map(Self::cost_units).sum::<usize>()
+            }
+            Self::Postgres(expression) => {
+                1 + expression
+                    .inputs()
+                    .iter()
+                    .map(|input| input.expression().cost_units())
+                    .sum::<usize>()
+            }
+        }
+    }
+
     pub fn result_type_hint(&self) -> Option<ExprType> {
         match self {
             Self::Column(column) => Some(column.value_type),
+            Self::DecimalValue { semantics, .. } => Some(semantics.value_type()),
             Self::Comparison { .. }
             | Self::IsNull(_)
             | Self::IsNotNull(_)
+            | Self::IsNan(_)
+            | Self::IsNotNan(_)
+            | Self::StrictTrue(_)
+            | Self::StrictFalse(_)
             | Self::BooleanTest { .. }
             | Self::And(_)
             | Self::Or(_)
@@ -103,6 +194,7 @@ impl ExecutionExpr {
                 collation: pg_sys::InvalidOid,
             }),
             Self::Relabel { result_type, .. }
+            | Self::WidenInteger { result_type, .. }
             | Self::Case { result_type, .. }
             | Self::Function { result_type, .. } => Some(*result_type),
             Self::Postgres(expression) => Some(expression.result_type()),
@@ -121,9 +213,14 @@ impl ExecutionExpr {
             }
             Self::IsNull(value)
             | Self::IsNotNull(value)
+            | Self::IsNan(value)
+            | Self::IsNotNan(value)
+            | Self::StrictTrue(value)
+            | Self::StrictFalse(value)
             | Self::Not(value)
             | Self::BooleanTest { value, .. }
             | Self::Relabel { value, .. } => value.postgres_fallback_count(),
+            Self::WidenInteger { value, .. } => value.postgres_fallback_count(),
             Self::And(children) | Self::Or(children) => {
                 children.iter().map(Self::postgres_fallback_count).sum()
             }
@@ -161,7 +258,10 @@ impl ExecutionExpr {
                     .map(|input| input.expression().postgres_fallback_count())
                     .sum::<usize>()
             }
-            Self::Column(_) | Self::Value(_) | Self::Output(_) => 0,
+            Self::Column(_)
+            | Self::Value(_)
+            | Self::DecimalValue { .. }
+            | Self::Output(_) => 0,
         }
     }
 }

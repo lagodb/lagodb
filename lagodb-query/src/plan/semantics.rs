@@ -1,16 +1,21 @@
 //! Scalar domains admitted by query planning and lowering.
 
 use lagodb_core::expr::ExprType;
-use lagodb_core::expr::{PgComparisonOp, PgComparisonSignature};
+use lagodb_core::expr::{
+    PgComparisonOp, PgComparisonSignature, PgTextComparisonSemantics,
+};
+use lagodb_core::tuple::Utf8ServerEncoding;
 use pgrx::pg_sys;
 
 pub use lagodb_core::expr::PgComparisonKind as ComparisonKind;
+pub use lagodb_core::tuple::Decimal128Semantics;
 
 /// Query-layer scalar domains with distinct representation guarantees.
 ///
 /// Provider pruning keeps its separate, smaller IR. Exact query execution may
-/// additionally use PostgreSQL boolean operators and byte-semantic C/POSIX
-/// text comparisons; HAVING also admits unbounded-typmod NUMERIC values
+/// additionally use PostgreSQL boolean operators, deterministic byte equality,
+/// and byte-ordered C/POSIX text comparisons; HAVING also admits
+/// unbounded-typmod NUMERIC values
 /// produced by integer SUM/AVG aggregates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarSemantics {
@@ -21,7 +26,16 @@ pub enum ScalarSemantics {
 
 impl ScalarSemantics {
     #[inline]
-    pub const fn supports_type(self, value_type: ExprType) -> bool {
+    pub fn supports_type(self, value_type: ExprType) -> bool {
+        if value_type.type_oid == pg_sys::NUMERICOID {
+            return value_type.collation == pg_sys::InvalidOid
+                && if value_type.typmod == -1 {
+                    matches!(self, Self::Having)
+                } else {
+                    !matches!(self, Self::Integer)
+                        && Decimal128Semantics::for_type(value_type).is_some()
+                };
+        }
         if value_type.typmod != -1 {
             return false;
         }
@@ -35,14 +49,52 @@ impl ScalarSemantics {
             }
             pg_sys::TEXTOID => {
                 matches!(self, Self::Exact)
-                    && Self::is_byte_collation(value_type.collation)
-            }
-            pg_sys::NUMERICOID => {
-                matches!(self, Self::Having)
-                    && value_type.collation.to_u32() == pg_sys::InvalidOid.to_u32()
+                    && Utf8ServerEncoding::resolve().is_ok()
+                    && unsafe {
+                        PgTextComparisonSemantics::for_equality_collation(
+                            value_type.collation,
+                        )
+                    }
+                    .is_some()
             }
             _ => false,
         }
+    }
+
+    /// Resolve a PostgreSQL NUMERIC comparison to the single fixed Decimal128
+    /// representation used by both operands. One unbounded-typmod operand is
+    /// admitted here only so the planner can prove that it is a direct Const
+    /// exactly encodable in the bounded operand's representation.
+    pub fn decimal_comparison(
+        self,
+        operator: PgComparisonOp,
+        left: ExprType,
+        right: ExprType,
+    ) -> Option<(ComparisonKind, Decimal128Semantics)> {
+        if matches!(self, Self::Integer)
+            || left.type_oid != pg_sys::NUMERICOID
+            || right.type_oid != pg_sys::NUMERICOID
+            || left.collation != pg_sys::InvalidOid
+            || right.collation != pg_sys::InvalidOid
+            || operator.opcollid != pg_sys::InvalidOid
+            || operator.inputcollid != pg_sys::InvalidOid
+        {
+            return None;
+        }
+        let signature = operator.builtin_signature()?;
+        if signature.left_type() != pg_sys::NUMERICOID
+            || signature.right_type() != pg_sys::NUMERICOID
+        {
+            return None;
+        }
+        let left = Decimal128Semantics::for_type(left);
+        let right = Decimal128Semantics::for_type(right);
+        let decimal = match (left, right) {
+            (Some(left), Some(right)) if left == right => left,
+            (Some(decimal), None) | (None, Some(decimal)) => decimal,
+            _ => return None,
+        };
+        Some((signature.kind(), decimal))
     }
 
     pub fn comparison(
@@ -51,6 +103,9 @@ impl ScalarSemantics {
         left: ExprType,
         right: ExprType,
     ) -> Option<ComparisonKind> {
+        if let Some((kind, _)) = self.decimal_comparison(operator, left, right) {
+            return Some(kind);
+        }
         if !self.supports_type(left) || !self.supports_type(right) {
             return None;
         }
@@ -61,9 +116,13 @@ impl ScalarSemantics {
             return None;
         }
         if left.type_oid == pg_sys::TEXTOID {
-            (operator.opcollid == operator.inputcollid
-                && Self::is_byte_collation(operator.inputcollid))
-            .then_some(signature.kind())
+            unsafe {
+                PgTextComparisonSemantics::for_comparison(
+                    operator.identity(),
+                    signature.kind(),
+                )
+            }
+            .map(|_| signature.kind())
         } else {
             (operator.opcollid == pg_sys::InvalidOid
                 && operator.inputcollid == pg_sys::InvalidOid)
@@ -71,42 +130,61 @@ impl ScalarSemantics {
         }
     }
 
-    /// PostgreSQL resolves GROUP BY equality and its optional sort operator
-    /// through `get_sort_group_operators`. The engine currently implements
-    /// keys only for the exact built-in int4/int8 families below.
+    /// Whether DataFusion's native hash grouping exactly implements this
+    /// PostgreSQL scalar domain.
+    ///
+    /// Deterministic PostgreSQL TEXT/VARCHAR equality uses the same UTF-8 bytes
+    /// stored in Arrow, independently of the collation's ordering. BPCHAR and
+    /// NAME retain PostgreSQL-specific value semantics that the provider-neutral
+    /// query contract does not prove. String ordering remains a separate,
+    /// stricter capability owned by Sort.
+    pub fn supports_hash_group_key(self, value_type: ExprType) -> bool {
+        if self != Self::Exact {
+            return false;
+        }
+        match value_type.type_oid {
+            pg_sys::INT4OID | pg_sys::INT8OID => self.supports_type(value_type),
+            pg_sys::TEXTOID | pg_sys::VARCHAROID => {
+                let typmod_is_normalized = value_type.typmod == -1
+                    || (value_type.type_oid == pg_sys::VARCHAROID
+                        && value_type.typmod >= pg_sys::VARHDRSZ as i32);
+                typmod_is_normalized
+                    && Utf8ServerEncoding::resolve().is_ok()
+                    && unsafe {
+                        PgTextComparisonSemantics::for_equality_collation(
+                            value_type.collation,
+                        )
+                    }
+                    .is_some()
+            }
+            pg_sys::NUMERICOID => Decimal128Semantics::for_type(value_type).is_some(),
+            _ => false,
+        }
+    }
+
+    /// Prove PostgreSQL GROUP BY equality against the engine's native hash
+    /// grouping. The optional GROUP BY sort operator is deliberately not part
+    /// of this proof: it describes ordering, which hash grouping does not use.
     pub fn supports_grouping(
         self,
         value_type: ExprType,
         equality_operator: pg_sys::Oid,
-        sort_operator: pg_sys::Oid,
         hashable: bool,
     ) -> bool {
-        if self != Self::Integer
-            || !hashable
-            || !matches!(value_type.type_oid, pg_sys::INT4OID | pg_sys::INT8OID)
-            || !self.supports_type(value_type)
-        {
-            return false;
-        }
-        let equality = PgComparisonSignature::for_types(
-            value_type.type_oid,
-            value_type.type_oid,
-            ComparisonKind::Equal,
-        );
-        let ordering = PgComparisonSignature::for_types(
-            value_type.type_oid,
-            value_type.type_oid,
-            ComparisonKind::Less,
-        );
-        equality
+        let equality_type = if value_type.type_oid == pg_sys::VARCHAROID {
+            // VARCHAR is binary-coercible to TEXT and uses text_ops for GROUP
+            // BY equality and hashing.
+            pg_sys::TEXTOID
+        } else {
+            value_type.type_oid
+        };
+        hashable
+            && self.supports_hash_group_key(value_type)
+            && PgComparisonSignature::for_types(
+                equality_type,
+                equality_type,
+                ComparisonKind::Equal,
+            )
             .is_some_and(|signature| signature.operator_oid() == equality_operator)
-            && ordering
-                .is_some_and(|signature| signature.operator_oid() == sort_operator)
-    }
-
-    #[inline]
-    const fn is_byte_collation(collation: pg_sys::Oid) -> bool {
-        collation.to_u32() == pg_sys::C_COLLATION_OID.to_u32()
-            || collation.to_u32() == pg_sys::POSIX_COLLATION_OID.to_u32()
     }
 }

@@ -1,11 +1,15 @@
 //! Provider-neutral relational IR for query offload.
 
 use lagodb_core::expr::ColumnRef;
-use lagodb_core::query_contract::{OutputId, ScanId};
+use lagodb_core::query_contract::ScanId;
 
 use super::ExecutionExpr;
-use super::aggregate::{AggCall, AggregateKind, AggregateNode, GroupExpr};
+use super::aggregate::{AggCall, AggregateNode, GroupExpr};
 use super::distinct::{DistinctExpr, DistinctNode};
+use super::join::JoinNode;
+use super::limit::LimitNode;
+use super::project::ProjectNode;
+use super::sort::SortNode;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum QueryPlanError {
@@ -19,14 +23,26 @@ pub enum QueryPlanError {
     OutputOutOfBounds { index: usize },
     #[error("output identity {index} is defined more than once")]
     DuplicateOutput { index: usize },
-    #[error("projection output identity {index} is not produced by its input")]
-    ProjectOutputMismatch { index: usize },
+    #[error("join node must contain an equi key, except for a semi/anti join")]
+    EmptyJoinKeys,
+    #[error("join key is outside the exact DataFusion hash-equality contract")]
+    UnsupportedJoinKey,
+    #[error("join key does not reference one column from each input")]
+    MismatchedJoinKey,
+    #[error("operator row estimate must be finite and non-negative")]
+    InvalidOperatorRows,
     #[error("aggregate node must contain at least one group key or aggregate")]
     EmptyAggregate,
     #[error("distinct node must contain at least one key")]
     EmptyDistinct,
-    #[error("projection node must contain at least one output")]
-    EmptyProjection,
+    #[error("sort node must contain at least one key")]
+    EmptySort,
+    #[error("sort key is outside the exact DataFusion ordering contract")]
+    UnsupportedSortKey,
+    #[error("limit node must contain LIMIT or OFFSET")]
+    EmptyLimit,
+    #[error("limit cost estimate does not match its LIMIT/OFFSET expressions")]
+    InvalidLimitEstimate,
     #[error("scan projection must contain every referenced source column")]
     MissingProjectedColumn,
     #[error("scan projection contains a column belonging to another scan")]
@@ -39,11 +55,9 @@ pub enum QueryPlanError {
     RuntimeValueOutOfBounds,
     #[error("runtime value type has no DataFusion scalar representation")]
     UnsupportedRuntimeValueType,
-    #[error("query runtime layout contains PARAM_EXEC or outer values")]
-    UnsupportedRuntimeValueSource,
     #[error("aggregate OID/type/option combination is not supported")]
     UnsupportedAggregate,
-    #[error("group key must be an uncollated int4 or int8 source column")]
+    #[error("group key is outside the exact hash-grouping contract")]
     UnsupportedGroupKey,
     #[error("DISTINCT key is outside the supported direct-column semantics")]
     UnsupportedDistinctKey,
@@ -99,14 +113,20 @@ impl ScanNode {
 pub struct FilterNode {
     input: Box<QueryNode>,
     predicate: ExecutionExpr,
+    estimated_rows: RowEstimate,
 }
 
 impl FilterNode {
-    pub fn new(input: QueryNode, predicate: ExecutionExpr) -> Self {
-        Self {
+    pub fn new(
+        input: QueryNode,
+        predicate: ExecutionExpr,
+        estimated_rows: f64,
+    ) -> Result<Self, QueryPlanError> {
+        Ok(Self {
             input: Box::new(input),
             predicate,
-        }
+            estimated_rows: RowEstimate::try_new(estimated_rows)?,
+        })
     }
 
     pub fn input(&self) -> &QueryNode {
@@ -116,240 +136,45 @@ impl FilterNode {
     pub const fn predicate(&self) -> &ExecutionExpr {
         &self.predicate
     }
+
+    #[inline]
+    pub const fn estimated_rows(&self) -> f64 {
+        self.estimated_rows.get()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectNode {
-    input: Box<QueryNode>,
-    outputs: Box<[OutputId]>,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RowEstimate(u64);
 
-impl ProjectNode {
-    pub fn new(
-        input: QueryNode,
-        outputs: Box<[OutputId]>,
-    ) -> Result<Self, QueryPlanError> {
-        if outputs.is_empty() {
-            return Err(QueryPlanError::EmptyProjection);
+impl RowEstimate {
+    pub(super) fn try_new(rows: f64) -> Result<Self, QueryPlanError> {
+        if !rows.is_finite() || rows < 0.0 {
+            return Err(QueryPlanError::InvalidOperatorRows);
         }
-        Ok(Self {
-            input: Box::new(input),
-            outputs,
-        })
+        Ok(Self(rows.to_bits()))
     }
 
-    pub fn input(&self) -> &QueryNode {
-        &self.input
-    }
-
-    pub fn outputs(&self) -> &[OutputId] {
-        &self.outputs
+    #[inline]
+    pub(super) const fn get(self) -> f64 {
+        f64::from_bits(self.0)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryNode {
     Scan(ScanNode),
+    Join(JoinNode),
     Aggregate(AggregateNode),
     Distinct(DistinctNode),
     Filter(FilterNode),
     Project(ProjectNode),
+    Sort(SortNode),
+    Limit(LimitNode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryFragment {
     root: QueryNode,
-}
-
-/// Planner-semantic facts exposed to PostgreSQL EXPLAIN without preparing a
-/// source or lowering a DataFusion plan.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct QueryPlanSummary {
-    group_keys: usize,
-    distinct_keys: usize,
-    count_star: usize,
-    count_expr: usize,
-    min: usize,
-    max: usize,
-    sum: usize,
-    avg: usize,
-    variance: usize,
-    stddev: usize,
-    boolean: usize,
-    array_agg: usize,
-    string_agg: usize,
-    distinct_aggregates: usize,
-    ordered_aggregates: usize,
-    aggregate_filters: usize,
-    having_filters: usize,
-    postgres_expression_fallbacks: usize,
-}
-
-impl QueryPlanSummary {
-    fn record(&mut self, node: &QueryNode) {
-        match node {
-            QueryNode::Scan(scan) => {
-                self.postgres_expression_fallbacks += scan
-                    .filter()
-                    .map_or(0, ExecutionExpr::postgres_fallback_count);
-            }
-            QueryNode::Aggregate(aggregate) => {
-                self.group_keys += aggregate.groups().len();
-                self.postgres_expression_fallbacks += aggregate
-                    .groups()
-                    .iter()
-                    .map(|group| group.expression().postgres_fallback_count())
-                    .sum::<usize>();
-                for aggregate in aggregate.aggregates() {
-                    match aggregate.kind() {
-                        AggregateKind::Count if aggregate.argument().is_none() => {
-                            self.count_star += 1;
-                        }
-                        AggregateKind::Count => self.count_expr += 1,
-                        AggregateKind::Min => self.min += 1,
-                        AggregateKind::Max => self.max += 1,
-                        AggregateKind::Sum | AggregateKind::NumericSum => {
-                            self.sum += 1;
-                        }
-                        AggregateKind::Average | AggregateKind::NumericAverage => {
-                            self.avg += 1;
-                        }
-                        AggregateKind::VarianceSample
-                        | AggregateKind::VariancePopulation => {
-                            self.variance += 1;
-                        }
-                        AggregateKind::StddevSample
-                        | AggregateKind::StddevPopulation => {
-                            self.stddev += 1;
-                        }
-                        AggregateKind::BoolAnd | AggregateKind::BoolOr => {
-                            self.boolean += 1;
-                        }
-                        AggregateKind::ArrayAgg => self.array_agg += 1,
-                        AggregateKind::StringAgg => self.string_agg += 1,
-                    }
-                    self.distinct_aggregates += usize::from(aggregate.is_distinct());
-                    self.ordered_aggregates +=
-                        usize::from(!aggregate.order_by().is_empty());
-                    self.aggregate_filters +=
-                        usize::from(aggregate.filter().is_some());
-                    self.postgres_expression_fallbacks += aggregate
-                        .argument()
-                        .map_or(0, ExecutionExpr::postgres_fallback_count)
-                        + aggregate
-                            .filter()
-                            .map_or(0, ExecutionExpr::postgres_fallback_count);
-                }
-                self.record(aggregate.input());
-            }
-            QueryNode::Distinct(distinct) => {
-                self.distinct_keys += distinct.keys().len();
-                self.postgres_expression_fallbacks += distinct
-                    .keys()
-                    .iter()
-                    .map(|key| key.expression().postgres_fallback_count())
-                    .sum::<usize>();
-                self.record(distinct.input());
-            }
-            QueryNode::Filter(filter) => {
-                self.having_filters += 1;
-                self.postgres_expression_fallbacks +=
-                    filter.predicate().postgres_fallback_count();
-                self.record(filter.input());
-            }
-            QueryNode::Project(project) => self.record(project.input()),
-        }
-    }
-
-    #[inline]
-    pub const fn group_keys(self) -> usize {
-        self.group_keys
-    }
-
-    #[inline]
-    pub const fn distinct_keys(self) -> usize {
-        self.distinct_keys
-    }
-
-    #[inline]
-    pub const fn count_star(self) -> usize {
-        self.count_star
-    }
-
-    #[inline]
-    pub const fn count_expr(self) -> usize {
-        self.count_expr
-    }
-
-    #[inline]
-    pub const fn min(self) -> usize {
-        self.min
-    }
-
-    #[inline]
-    pub const fn max(self) -> usize {
-        self.max
-    }
-
-    #[inline]
-    pub const fn sum(self) -> usize {
-        self.sum
-    }
-
-    #[inline]
-    pub const fn avg(self) -> usize {
-        self.avg
-    }
-
-    #[inline]
-    pub const fn variance(self) -> usize {
-        self.variance
-    }
-
-    #[inline]
-    pub const fn stddev(self) -> usize {
-        self.stddev
-    }
-
-    #[inline]
-    pub const fn boolean(self) -> usize {
-        self.boolean
-    }
-
-    #[inline]
-    pub const fn array_agg(self) -> usize {
-        self.array_agg
-    }
-
-    #[inline]
-    pub const fn string_agg(self) -> usize {
-        self.string_agg
-    }
-
-    #[inline]
-    pub const fn distinct_aggregates(self) -> usize {
-        self.distinct_aggregates
-    }
-
-    #[inline]
-    pub const fn ordered_aggregates(self) -> usize {
-        self.ordered_aggregates
-    }
-
-    #[inline]
-    pub const fn aggregate_filters(self) -> usize {
-        self.aggregate_filters
-    }
-
-    #[inline]
-    pub const fn having_filters(self) -> usize {
-        self.having_filters
-    }
-
-    #[inline]
-    pub const fn postgres_expression_fallbacks(self) -> usize {
-        self.postgres_expression_fallbacks
-    }
 }
 
 impl QueryFragment {
@@ -362,22 +187,35 @@ impl QueryFragment {
         &self.root
     }
 
-    /// Whether the validated operator tree contains a post-aggregate filter.
-    ///
-    /// Scan predicates are stored on [`ScanNode`], so every standalone
-    /// [`QueryNode::Filter`] in this IR is a HAVING filter.
-    pub(crate) fn has_having_filter(&self) -> bool {
-        matches!(
-            &self.root,
-            QueryNode::Project(project)
-                if matches!(project.input(), QueryNode::Filter(_))
-        )
+    pub fn into_root(self) -> QueryNode {
+        self.root
     }
 
-    pub fn summary(&self) -> QueryPlanSummary {
-        let mut summary = QueryPlanSummary::default();
-        summary.record(&self.root);
-        summary
+    pub(crate) fn output_project(&self) -> Option<&ProjectNode> {
+        let mut node = &self.root;
+        if let QueryNode::Limit(limit) = node {
+            node = limit.input();
+        }
+        if let QueryNode::Sort(sort) = node {
+            node = sort.input();
+        }
+        match node {
+            QueryNode::Project(project) => Some(project),
+            _ => None,
+        }
+    }
+
+    /// Whether the validated operator tree contains a post-aggregate filter.
+    ///
+    /// Join post-filters are also standalone Filter nodes, so only a Filter
+    /// directly above Aggregate represents HAVING.
+    pub(crate) fn has_having_filter(&self) -> bool {
+        matches!(
+            self.output_project(),
+            Some(project)
+                if matches!(project.input(), QueryNode::Filter(filter)
+                    if matches!(filter.input(), QueryNode::Aggregate(_)))
+        )
     }
 
     pub(crate) fn validate(
@@ -395,22 +233,49 @@ impl QueryFragment {
     }
 
     fn validate_topology(&self) -> Result<(), QueryPlanError> {
-        let QueryNode::Project(project) = &self.root else {
+        let Some(project) = self.output_project() else {
             return Err(QueryPlanError::RootNotProjection);
         };
-        let input = match project.input() {
-            QueryNode::Aggregate(aggregate) => aggregate.input(),
-            QueryNode::Distinct(distinct) => distinct.input(),
+        match project.input() {
+            QueryNode::Aggregate(aggregate) => {
+                Self::validate_aggregate_input(aggregate.input())
+            }
+            QueryNode::Distinct(distinct) => {
+                Self::validate_relation_tree(distinct.input())
+            }
             QueryNode::Filter(filter) => match filter.input() {
-                QueryNode::Aggregate(aggregate) => aggregate.input(),
-                _ => return Err(QueryPlanError::UnsupportedTopology),
+                QueryNode::Aggregate(aggregate) => {
+                    Self::validate_aggregate_input(aggregate.input())
+                }
+                QueryNode::Join(join) => Self::validate_binary_join(join),
+                _ => Err(QueryPlanError::UnsupportedTopology),
             },
-            _ => return Err(QueryPlanError::UnsupportedTopology),
-        };
-        if matches!(input, QueryNode::Scan(_)) {
-            Ok(())
-        } else {
-            Err(QueryPlanError::UnsupportedTopology)
+            QueryNode::Join(join) => Self::validate_binary_join(join),
+            _ => Err(QueryPlanError::UnsupportedTopology),
+        }
+    }
+
+    fn validate_aggregate_input(input: &QueryNode) -> Result<(), QueryPlanError> {
+        // Join-type capability belongs to the shared relation tree. The node
+        // validator below separately proves that aggregate expressions only
+        // reference columns emitted by that tree.
+        Self::validate_relation_tree(input)
+    }
+
+    fn validate_binary_join(join: &JoinNode) -> Result<(), QueryPlanError> {
+        Self::validate_relation_tree(join.left())?;
+        Self::validate_relation_tree(join.right())
+    }
+
+    fn validate_relation_tree(node: &QueryNode) -> Result<(), QueryPlanError> {
+        match node {
+            QueryNode::Scan(_) => Ok(()),
+            QueryNode::Filter(filter) => Self::validate_relation_tree(filter.input()),
+            QueryNode::Join(join) => {
+                Self::validate_relation_tree(join.left())?;
+                Self::validate_relation_tree(join.right())
+            }
+            _ => Err(QueryPlanError::UnsupportedTopology),
         }
     }
 
@@ -429,6 +294,11 @@ impl QueryFragment {
                     return Err(QueryPlanError::DuplicateScanReference { index });
                 }
                 *used = true;
+                Ok(vec![false; output_count])
+            }
+            QueryNode::Join(join) => {
+                let _ = Self::validate_node(join.left(), used_scans, output_count)?;
+                let _ = Self::validate_node(join.right(), used_scans, output_count)?;
                 Ok(vec![false; output_count])
             }
             QueryNode::Aggregate(aggregate) => {
@@ -472,18 +342,45 @@ impl QueryFragment {
                 Self::validate_node(filter.input(), used_scans, output_count)
             }
             QueryNode::Project(project) => {
-                let input =
+                let _ =
                     Self::validate_node(project.input(), used_scans, output_count)?;
                 let mut outputs = vec![false; output_count];
-                for output in project.outputs() {
-                    let index = output.index();
-                    if !input.get(index).copied().unwrap_or(false) {
-                        return Err(QueryPlanError::ProjectOutputMismatch { index });
+                for expression in project.expressions() {
+                    let index = expression.output().index();
+                    let defined = outputs
+                        .get_mut(index)
+                        .ok_or(QueryPlanError::OutputOutOfBounds { index })?;
+                    if *defined {
+                        return Err(QueryPlanError::DuplicateOutput { index });
                     }
-                    outputs[index] = true;
+                    *defined = true;
                 }
                 Ok(outputs)
             }
+            QueryNode::Sort(sort) => {
+                Self::validate_node(sort.input(), used_scans, output_count)
+            }
+            QueryNode::Limit(limit) => {
+                Self::validate_node(limit.input(), used_scans, output_count)
+            }
+        }
+    }
+
+    pub fn scan(&self, scan: ScanId) -> Option<&ScanNode> {
+        Self::find_scan(&self.root, scan)
+    }
+
+    fn find_scan(node: &QueryNode, scan: ScanId) -> Option<&ScanNode> {
+        match node {
+            QueryNode::Scan(node) => (node.scan() == scan).then_some(node),
+            QueryNode::Join(node) => Self::find_scan(node.left(), scan)
+                .or_else(|| Self::find_scan(node.right(), scan)),
+            QueryNode::Aggregate(node) => Self::find_scan(node.input(), scan),
+            QueryNode::Distinct(node) => Self::find_scan(node.input(), scan),
+            QueryNode::Filter(node) => Self::find_scan(node.input(), scan),
+            QueryNode::Project(node) => Self::find_scan(node.input(), scan),
+            QueryNode::Sort(node) => Self::find_scan(node.input(), scan),
+            QueryNode::Limit(node) => Self::find_scan(node.input(), scan),
         }
     }
 }

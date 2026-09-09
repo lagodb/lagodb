@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use lagodb_core::expr::{
-    ColumnRef, ExprType, ExpressionPlanDataDecode, ExpressionPlanDataEncode,
-    PgComparisonOp,
+    ColumnRef, ExprType, ExpressionCodecError, ExpressionPlanDataDecode,
+    ExpressionPlanDataEncode, PgComparisonOp, RuntimeValueId,
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
@@ -13,7 +13,7 @@ use super::{
     BooleanTestKind, CaseWhen, ExecutionExpr, PostgresEvalExpr, PostgresEvalInput,
     PostgresExprVolatility, ScalarFunctionKind,
 };
-use crate::plan::QueryPlanDataError;
+use crate::plan::{Decimal128Semantics, QueryPlanDataError, QueryPlanError};
 
 const SCALAR: i32 = 1;
 const COMPARISON: i32 = 2;
@@ -28,6 +28,12 @@ const BOOLEAN_TEST: i32 = 10;
 const RELABEL: i32 = 11;
 const CASE: i32 = 12;
 const IN_LIST: i32 = 13;
+const DECIMAL_VALUE: i32 = 14;
+const STRICT_FALSE: i32 = 15;
+const IS_NAN: i32 = 16;
+const IS_NOT_NAN: i32 = 17;
+const WIDEN_INTEGER: i32 = 18;
+const STRICT_TRUE: i32 = 19;
 const IMMUTABLE: i32 = 1;
 const STABLE: i32 = 2;
 const VOLATILE: i32 = 3;
@@ -40,6 +46,16 @@ impl ExecutionExprCodec {
         writer: &mut PlanDataWriter,
     ) {
         match expression {
+            ExecutionExpr::StrictTrue(value) => {
+                writer
+                    .append_i32(STRICT_TRUE)
+                    .append_nested(|record| Self::encode(value, record));
+            }
+            ExecutionExpr::StrictFalse(value) => {
+                writer
+                    .append_i32(STRICT_FALSE)
+                    .append_nested(|record| Self::encode(value, record));
+            }
             ExecutionExpr::Column(column) => {
                 writer.append_i32(SCALAR);
                 ExecutionLeafCodec::encode_column(*column, writer);
@@ -47,6 +63,13 @@ impl ExecutionExprCodec {
             ExecutionExpr::Value(value) => {
                 writer.append_i32(SCALAR);
                 ExecutionLeafCodec::encode_value(*value, writer);
+            }
+            ExecutionExpr::DecimalValue { value, semantics } => {
+                writer
+                    .append_i32(DECIMAL_VALUE)
+                    .append_count(value.index())
+                    .append_i32(i32::from(semantics.precision()))
+                    .append_i32(i32::from(semantics.scale()));
             }
             ExecutionExpr::Output(output) => {
                 writer.append_i32(SCALAR);
@@ -69,6 +92,15 @@ impl ExecutionExprCodec {
                         IS_NULL
                     } else {
                         IS_NOT_NULL
+                    })
+                    .append_nested(|record| Self::encode(value, record));
+            }
+            ExecutionExpr::IsNan(value) | ExecutionExpr::IsNotNan(value) => {
+                writer
+                    .append_i32(if matches!(expression, ExecutionExpr::IsNan(_)) {
+                        IS_NAN
+                    } else {
+                        IS_NOT_NAN
                     })
                     .append_nested(|record| Self::encode(value, record));
             }
@@ -97,6 +129,11 @@ impl ExecutionExprCodec {
             }
             ExecutionExpr::Relabel { value, result_type } => {
                 writer.append_i32(RELABEL);
+                result_type.encode_plan_data(writer);
+                writer.append_nested(|record| Self::encode(value, record));
+            }
+            ExecutionExpr::WidenInteger { value, result_type } => {
+                writer.append_i32(WIDEN_INTEGER);
                 result_type.encode_plan_data(writer);
                 writer.append_nested(|record| Self::encode(value, record));
             }
@@ -174,6 +211,16 @@ impl ExecutionExprCodec {
     ) -> Result<ExecutionExpr, QueryPlanDataError> {
         let tag = reader.read_i32()?;
         Ok(match tag {
+            STRICT_TRUE => {
+                ExecutionExpr::StrictTrue(Box::new(reader.read_nested(|record| {
+                    Self::decode(record, runtime_value_count)
+                })?))
+            }
+            STRICT_FALSE => {
+                ExecutionExpr::StrictFalse(Box::new(reader.read_nested(
+                    |record| Self::decode(record, runtime_value_count),
+                )?))
+            }
             SCALAR => ExecutionLeafCodec::decode(reader, runtime_value_count)?,
             COMPARISON => ExecutionExpr::Comparison {
                 operator: PgComparisonOp::decode_plan_data(reader, ())?,
@@ -192,6 +239,16 @@ impl ExecutionExprCodec {
                     ExecutionExpr::IsNull(value)
                 } else {
                     ExecutionExpr::IsNotNull(value)
+                }
+            }
+            IS_NAN | IS_NOT_NAN => {
+                let value = Box::new(reader.read_nested(|record| {
+                    Self::decode(record, runtime_value_count)
+                })?);
+                if tag == IS_NAN {
+                    ExecutionExpr::IsNan(value)
+                } else {
+                    ExecutionExpr::IsNotNan(value)
                 }
             }
             AND | OR => {
@@ -228,6 +285,15 @@ impl ExecutionExprCodec {
             RELABEL => {
                 let result_type = ExprType::decode_plan_data(reader, ())?;
                 ExecutionExpr::Relabel {
+                    value: Box::new(reader.read_nested(|record| {
+                        Self::decode(record, runtime_value_count)
+                    })?),
+                    result_type,
+                }
+            }
+            WIDEN_INTEGER => {
+                let result_type = ExprType::decode_plan_data(reader, ())?;
+                ExecutionExpr::WidenInteger {
                     value: Box::new(reader.read_nested(|record| {
                         Self::decode(record, runtime_value_count)
                     })?),
@@ -276,6 +342,26 @@ impl ExecutionExprCodec {
                     value,
                     list: list.into_boxed_slice(),
                     negated,
+                }
+            }
+            DECIMAL_VALUE => {
+                let index = reader.read_count()?;
+                if index >= runtime_value_count {
+                    return Err(ExpressionCodecError::RuntimeValueOutOfBounds {
+                        index,
+                        count: runtime_value_count,
+                    }
+                    .into());
+                }
+                let precision = u8::try_from(reader.read_i32()?)
+                    .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
+                let scale = i8::try_from(reader.read_i32()?)
+                    .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
+                let semantics = Decimal128Semantics::new(precision, scale)
+                    .ok_or(QueryPlanError::UnsupportedRuntimeValueType)?;
+                ExecutionExpr::DecimalValue {
+                    value: RuntimeValueId::from_index(index),
+                    semantics,
                 }
             }
             FUNCTION => {

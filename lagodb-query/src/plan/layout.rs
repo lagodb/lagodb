@@ -2,7 +2,7 @@
 
 use pgrx::pg_sys;
 
-use super::{OutputId, QueryPlanError};
+use super::OutputId;
 
 /// Metadata for one physical PostgreSQL output slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +76,10 @@ impl QueryTupleLayout {
         }
     }
 
-    pub fn from_slots(slots: Box<[QueryTupleSlot]>) -> Result<Self, QueryPlanError> {
-        let layout = Self { slots };
-        layout.validate()?;
-        Ok(layout)
+    pub fn from_slots(slots: Box<[QueryTupleSlot]>) -> Self {
+        // PostgreSQL permits a zero-width SELECT target. Arrow preserves its
+        // batch row count even when the projection has no physical columns.
+        Self { slots }
     }
 
     #[inline]
@@ -95,12 +95,5 @@ impl QueryTupleLayout {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), QueryPlanError> {
-        if self.slots.is_empty() {
-            return Err(QueryPlanError::TupleLayoutOutputMismatch);
-        }
-        Ok(())
     }
 }

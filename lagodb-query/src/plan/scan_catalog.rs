@@ -1,6 +1,6 @@
 //! Planning-local table-scan identity and estimate tables.
 
-use lagodb_core::query_contract::{ScanEstimate, ScanId};
+use lagodb_core::query_contract::{ScanCost, ScanId};
 use pgrx::pg_sys;
 
 /// Planner scan catalog indexed directly by PostgreSQL RTI.
@@ -31,17 +31,17 @@ impl ScanCatalog {
 
 /// Dense scan estimates indexed directly by fragment-local [`ScanId`].
 #[derive(Debug, Clone, PartialEq)]
-pub struct ScanEstimateTable {
-    by_scan: Box<[ScanEstimate]>,
+pub struct ScanCostTable {
+    by_scan: Box<[ScanCost]>,
 }
 
-impl ScanEstimateTable {
-    pub fn from_dense(estimates: Box<[ScanEstimate]>) -> Self {
-        Self { by_scan: estimates }
+impl ScanCostTable {
+    pub fn from_dense(costs: Box<[ScanCost]>) -> Self {
+        Self { by_scan: costs }
     }
 
     #[inline]
-    pub fn estimate(&self, scan: ScanId) -> Option<ScanEstimate> {
+    pub fn cost(&self, scan: ScanId) -> Option<ScanCost> {
         self.by_scan.get(scan.index()).copied()
     }
 }

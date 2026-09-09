@@ -10,8 +10,9 @@ use pgrx::pg_sys;
 
 use super::validation::PlanExpressionValidator;
 use super::{
-    AggCall, AggregateArguments, AggregateNode, DistinctExpr, GroupExpr, ProjectNode,
-    QueryFragment, QueryNode, QueryPlanError, QueryTupleLayout, ScanNode,
+    AggCall, AggregateArguments, AggregateNode, DistinctExpr, GroupExpr, ProjectExpr,
+    ProjectNode, QueryFragment, QueryNode, QueryPlanError, QueryTupleLayout,
+    ScanNode,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +25,8 @@ pub enum QueryPlanDataError {
     InvalidPlan(#[from] QueryPlanError),
     #[error("query plan contains unknown node kind {found}")]
     UnknownNodeKind { found: i32 },
+    #[error("query plan contains unknown join type {found}")]
+    UnknownJoinType { found: i32 },
     #[error("query plan contains unknown expression kind {found}")]
     UnknownExpressionKind { found: i32 },
     #[error("query plan contains unknown PostgreSQL expression volatility {found}")]
@@ -78,11 +81,17 @@ impl QueryPlanData {
             scan,
             Box::new([]),
             Box::new([aggregate]),
+            1.0,
         )?);
         let fragment = QueryFragment::new(QueryNode::Project(ProjectNode::new(
             aggregate,
-            Box::new([output]),
-        )?));
+            Box::new([ProjectExpr::new(
+                super::ExecutionExpr::Output(output),
+                result,
+                output,
+                false,
+            )]),
+        )));
         Self::new(
             fragment,
             QueryTupleLayout::scalar_count(output, result_type),
@@ -106,8 +115,9 @@ impl QueryPlanData {
         &self.runtime_values
     }
 
-    /// Append provider-negotiated pruning values after exact-expression
-    /// planning has fixed every existing runtime identity.
+    /// Append late-planned runtime values after exact-expression planning has
+    /// fixed every existing identity. Provider pruning and upper operators
+    /// both use this single dense layout contract.
     pub fn try_append_runtime_values(
         &mut self,
         additional: &[RuntimeValueSpec],
@@ -126,20 +136,20 @@ impl QueryPlanData {
     }
 
     pub(crate) fn validate(&self, scan_count: usize) -> Result<(), QueryPlanError> {
-        self.tuple_layout.validate()?;
         let output_count = Self::semantic_output_count(self.fragment.root());
         self.fragment.validate(scan_count, output_count)?;
         PlanExpressionValidator::new(&self.runtime_values, output_count)
             .validate(self.fragment.root())?;
-        let QueryNode::Project(project) = self.fragment.root() else {
-            unreachable!("query topology validation requires a Project root")
-        };
-        if project.outputs().len() != self.tuple_layout.len()
+        let project = self
+            .fragment
+            .output_project()
+            .expect("query topology validation requires an output Project");
+        if project.expressions().len() != self.tuple_layout.len()
             || project
-                .outputs()
+                .expressions()
                 .iter()
                 .zip(self.tuple_layout.slots())
-                .any(|(output, slot)| *output != slot.output())
+                .any(|(expression, slot)| expression.output() != slot.output())
         {
             return Err(QueryPlanError::TupleLayoutOutputMismatch);
         }
@@ -162,7 +172,7 @@ impl QueryPlanData {
 
     fn semantic_output_count(node: &QueryNode) -> usize {
         match node {
-            QueryNode::Scan(_) => 0,
+            QueryNode::Scan(_) | QueryNode::Join(_) => 0,
             QueryNode::Aggregate(aggregate) => aggregate
                 .groups()
                 .iter()
@@ -179,9 +189,17 @@ impl QueryPlanData {
                 .max()
                 .unwrap_or(0),
             QueryNode::Filter(filter) => Self::semantic_output_count(filter.input()),
-            QueryNode::Project(project) => {
-                Self::semantic_output_count(project.input())
-            }
+            QueryNode::Sort(sort) => Self::semantic_output_count(sort.input()),
+            QueryNode::Limit(limit) => Self::semantic_output_count(limit.input()),
+            QueryNode::Project(project) => project
+                .expressions()
+                .iter()
+                .map(|expression| expression.output().index() + 1)
+                .chain(std::iter::once(Self::semantic_output_count(
+                    project.input(),
+                )))
+                .max()
+                .unwrap_or(0),
         }
     }
 
@@ -190,7 +208,7 @@ impl QueryPlanData {
         output: OutputId,
     ) -> Option<(ExprType, bool)> {
         match node {
-            QueryNode::Scan(_) => None,
+            QueryNode::Scan(_) | QueryNode::Join(_) => None,
             QueryNode::Aggregate(aggregate) => aggregate
                 .groups()
                 .iter()
@@ -213,11 +231,13 @@ impl QueryPlanData {
             QueryNode::Filter(filter) => {
                 Self::output_semantics(filter.input(), output)
             }
+            QueryNode::Sort(sort) => Self::output_semantics(sort.input(), output),
+            QueryNode::Limit(limit) => Self::output_semantics(limit.input(), output),
             QueryNode::Project(project) => project
-                .outputs()
-                .contains(&output)
-                .then(|| Self::output_semantics(project.input(), output))
-                .flatten(),
+                .expressions()
+                .iter()
+                .find(|expression| expression.output() == output)
+                .map(|expression| (expression.result_type(), expression.nullable())),
         }
     }
 
