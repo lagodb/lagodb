@@ -7,5 +7,5 @@
 mod estimate;
 mod identity;
 
-pub use estimate::{ScanEstimate, ScanEstimateError};
-pub use identity::{OutputId, ProviderId, ScanId};
+pub use estimate::{ScanCost, ScanCostError};
+pub use identity::{OutputId, ScanId, TableScanRoute, TableScanRouteKind};

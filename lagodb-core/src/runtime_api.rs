@@ -32,6 +32,7 @@ mod planning;
 mod registration;
 mod storage_volume;
 mod table_scan;
+mod table_scan_predicate;
 
 pub use error::*;
 pub use planning::*;
@@ -42,6 +43,7 @@ pub use storage_volume::{
     VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
 };
 pub use table_scan::*;
+pub use table_scan_predicate::*;
 
 pub const RUNTIME_API_RENDEZVOUS: &CStr = c"lagodb.runtime_api";
 // The provider descriptor includes capability flags so the router can reject
@@ -63,6 +65,7 @@ pub const REGISTER_DUPLICATE_NAME: u32 = 2;
 pub const REGISTER_DUPLICATE_ACCESS_METHOD: u32 = 3;
 pub const REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP: u32 = 4;
 pub const REGISTER_PROVIDER_LIBRARY_MISMATCH: u32 = 5;
+pub const REGISTER_DUPLICATE_TABLE_SCAN_ROUTE: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -435,6 +438,8 @@ pub enum RuntimeRegistrationError {
     DuplicateProviderName,
     #[error("runtime already has a maintenance provider for this access method")]
     DuplicateAccessMethod,
+    #[error("runtime already has a table-scan provider for this storage route")]
+    DuplicateTableScanRoute,
     #[error("runtime rejected an invalid provider registration")]
     InvalidProviderRegistration,
     #[error(
@@ -523,6 +528,9 @@ impl RuntimeClient {
             }
             REGISTER_DUPLICATE_ACCESS_METHOD => {
                 Err(RuntimeRegistrationError::DuplicateAccessMethod)
+            }
+            REGISTER_DUPLICATE_TABLE_SCAN_ROUTE => {
+                Err(RuntimeRegistrationError::DuplicateTableScanRoute)
             }
             REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP => {
                 Err(RuntimeRegistrationError::OutsideProviderBootstrap)
