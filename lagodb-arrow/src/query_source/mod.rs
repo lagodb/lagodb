@@ -10,6 +10,7 @@ mod stream_export;
 
 pub use adapter::TableScanAdapter;
 pub use contract::{
-    PlannedScan, ScanPlanningContext, ScanProjection, ScanStreamOptions, ScanSupport,
+    PlannedScan, PlannedScanTasks, RuntimePredicateUpdate, ScanPlanningContext,
+    ScanProjection, ScanStreamOptions, ScanSupport, ScanTaskPlanningOptions,
     TableScanProvider, TableScanStream,
 };
